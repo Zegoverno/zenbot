@@ -1,0 +1,178 @@
+// zen-mind: stateless model worker. Speaks JSON-RPC 2.0 (one JSON object per line) over stdio
+// with the kernel (zend). The kernel owns all state and executes every tool call.
+
+import { createInterface } from "node:readline";
+import { Agent } from "@earendil-works/pi-agent-core";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
+import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import { Type } from "typebox";
+import { FileCredentialStore } from "./credentials.ts";
+
+type Json = any;
+
+const authFile = process.env.ZEN_AUTH_FILE ?? `${process.env.HOME}/.zenbot/auth.json`;
+const models = createModels({ credentials: new FileCredentialStore(authFile) });
+models.setProvider(openaiProvider());
+
+// Scripted test model (ZEN_FAUX=1): runs one bash tool call, then answers. For smoke tests and CI.
+const faux = process.env.ZEN_FAUX === "1" ? fauxProvider() : undefined;
+if (faux) models.setProvider(faux.provider);
+function scriptFaux() {
+  faux?.setResponses([
+    fauxAssistantMessage([fauxToolCall("bash", { command: "echo zen-ok > zen-smoke.txt && cat zen-smoke.txt" })], { stopReason: "toolUse" }),
+    fauxAssistantMessage([fauxText("Smoke test passed: I ran a command and wrote zen-smoke.txt.")]),
+  ]);
+}
+
+// ---- JSON-RPC plumbing ----
+
+let nextId = 1;
+const pending = new Map<number, { resolve: (v: Json) => void; reject: (e: Error) => void }>();
+
+function send(msg: Json) {
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n");
+}
+function notify(method: string, params: Json) {
+  send({ method, params });
+}
+function request(method: string, params: Json): Promise<Json> {
+  const id = nextId++;
+  send({ id, method, params });
+  return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+}
+function log(...args: unknown[]) {
+  process.stderr.write(`[mind] ${args.map(String).join(" ")}\n`);
+}
+
+// ---- Tools: kernel sends JSON Schema; we convert the simple subset we use to TypeBox ----
+
+function toTypeBox(schema: Json): Json {
+  switch (schema.type) {
+    case "object": {
+      const required = new Set<string>(schema.required ?? []);
+      const props: Record<string, Json> = {};
+      for (const [k, v] of Object.entries<Json>(schema.properties ?? {})) {
+        const t = toTypeBox(v);
+        props[k] = required.has(k) ? t : Type.Optional(t);
+      }
+      return Type.Object(props, { description: schema.description });
+    }
+    case "string":
+      return Type.String({ description: schema.description });
+    case "integer":
+      return Type.Integer({ description: schema.description });
+    case "number":
+      return Type.Number({ description: schema.description });
+    case "boolean":
+      return Type.Boolean({ description: schema.description });
+    default:
+      return Type.Any({ description: schema.description });
+  }
+}
+
+function kernelTools(sessionId: string, specs: Json[]): AgentTool<any>[] {
+  return specs.map((spec) => ({
+    name: spec.name,
+    label: spec.name,
+    description: spec.description,
+    parameters: toTypeBox(spec.parameters),
+    async execute(toolCallId: string, params: Json) {
+      const res = await request("tool.call", { session_id: sessionId, call_id: toolCallId, name: spec.name, args: params });
+      if (res.is_error) throw new Error(res.content);
+      return { content: [{ type: "text", text: res.content }], details: res.details ?? null };
+    },
+  }));
+}
+
+// ---- Turns ----
+
+const running = new Map<string, Agent>();
+
+async function turnStart(p: Json) {
+  const { session_id, model: modelRef, system_prompt, history, prompt, tools } = p;
+  const [provider, id] = String(modelRef).split("/");
+  const model = models.getModel(provider as any, id);
+  if (!model) throw new Error(`unknown model ${modelRef}`);
+  if (provider === faux?.provider.id) scriptFaux();
+
+  const agent = new Agent({
+    initialState: { systemPrompt: system_prompt, model, tools: kernelTools(session_id, tools), messages: history },
+    streamFn: models.streamSimple.bind(models),
+    sessionId: session_id,
+  });
+  running.set(session_id, agent);
+
+  agent.subscribe((ev: Json) => {
+    if (ev.type === "message_update") {
+      const e = ev.assistantMessageEvent;
+      if (e?.type === "text_delta") notify("turn.delta", { session_id, delta: e.delta });
+      else if (e?.type === "thinking_delta") notify("turn.thinking", { session_id, delta: e.delta });
+    } else if (ev.type === "message_end") {
+      const role = ev.message?.role;
+      if (role === "assistant" || role === "toolResult") notify("turn.message", { session_id, message: ev.message });
+    }
+  });
+
+  try {
+    await agent.prompt(prompt);
+    const err = agent.state.errorMessage;
+    notify("turn.end", { session_id, error: err ?? null });
+  } catch (e) {
+    notify("turn.end", { session_id, error: e instanceof Error ? e.message : String(e) });
+  } finally {
+    running.delete(session_id);
+  }
+}
+
+async function handle(method: string, params: Json): Promise<Json> {
+  switch (method) {
+    case "models.list": {
+      const creds = await models.getAuth("openai").catch(() => undefined);
+      const list = models.getModels("openai").map((m: Json) => ({ id: `openai/${m.id}`, name: m.name ?? m.id, context: m.contextWindow }));
+      if (faux) {
+        const m: Json = faux.getModel();
+        list.push({ id: `${m.provider}/${m.id}`, name: "Test model (scripted)", context: m.contextWindow });
+      }
+      return { authenticated: { openai: !!creds }, models: list };
+    }
+    case "turn.start":
+      void turnStart(params);
+      return { ok: true };
+    case "turn.abort":
+      running.get(params.session_id)?.abort();
+      return { ok: true };
+    case "ping":
+      return { pong: true };
+    default:
+      throw new Error(`unknown method ${method}`);
+  }
+}
+
+const rl = createInterface({ input: process.stdin });
+rl.on("line", async (line) => {
+  if (!line.trim()) return;
+  let msg: Json;
+  try {
+    msg = JSON.parse(line);
+  } catch {
+    log("bad json from kernel");
+    return;
+  }
+  if (msg.method) {
+    try {
+      const result = await handle(msg.method, msg.params ?? {});
+      if (msg.id !== undefined) send({ id: msg.id, result });
+    } catch (e) {
+      if (msg.id !== undefined) send({ id: msg.id, error: { code: -32000, message: e instanceof Error ? e.message : String(e) } });
+    }
+  } else if (msg.id !== undefined) {
+    const p = pending.get(msg.id);
+    if (!p) return;
+    pending.delete(msg.id);
+    if (msg.error) p.reject(new Error(msg.error.message));
+    else p.resolve(msg.result);
+  }
+});
+rl.on("close", () => process.exit(0));
+log("ready");

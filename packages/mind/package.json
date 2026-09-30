@@ -1,0 +1,17 @@
+{
+  "name": "@zenbot/mind",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "start": "node src/main.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.99.1",
+    "@earendil-works/pi-ai": "0.99.1"
+  },
+  "type": "module",
+  "private": true
+}

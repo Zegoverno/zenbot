@@ -1,0 +1,19 @@
+# Local services for development. zend and zen-mind run on the host for now.
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: zen
+      POSTGRES_PASSWORD: zen
+      POSTGRES_DB: zen
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - zen-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zen"]
+      interval: 5s
+      retries: 10
+volumes:
+  zen-pg:
