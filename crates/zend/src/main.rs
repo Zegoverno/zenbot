@@ -83,7 +83,7 @@ async fn main() -> Result<()> {
     let workspace = PathBuf::from(std::env::var("ZEN_WORKSPACE").unwrap_or_else(|_| format!("{home}/zen-workspace")));
     let mind_cmd = std::env::var("ZEN_MIND_CMD").unwrap_or_else(|_| "node src/main.ts".into());
     let mind_dir = std::env::var("ZEN_MIND_DIR").unwrap_or_else(|_| "packages/mind".into());
-    let default_model = std::env::var("ZEN_DEFAULT_MODEL").unwrap_or_else(|_| "openai/gpt-5.5".into());
+    let default_model = std::env::var("ZEN_DEFAULT_MODEL").unwrap_or_else(|_| "openai/gpt-6.1-sol".into());
 
     tokio::fs::create_dir_all(&workspace).await?;
     let db = PgPoolOptions::new().max_connections(10).connect(&database_url).await?;
@@ -153,8 +153,19 @@ async fn health(State(app): State<AppState>) -> Json<Value> {
     Json(json!({ "ok": db && mind, "db": db, "mind": mind }))
 }
 
+/// Models offered in the UI, in order. Only those verified to work with the configured sign-ins.
+const DEFAULT_MODELS: &str = "openai/gpt-6.1-sol,openai/gpt-6-sol,openai/gpt-6-luna,openai/gpt-6-astra,openai/gpt-5.5";
+
 async fn list_models(State(app): State<AppState>) -> ApiResult<Json<Value>> {
     let mut res = app.mind.request("models.list", json!({})).await?;
+    let wanted = std::env::var("ZEN_MODELS").unwrap_or_else(|_| DEFAULT_MODELS.into());
+    let all = res["models"].as_array().cloned().unwrap_or_default();
+    let mut curated: Vec<Value> = wanted
+        .split(',')
+        .filter_map(|id| all.iter().find(|m| m["id"] == id.trim()).cloned())
+        .collect();
+    curated.extend(all.iter().filter(|m| m["id"].as_str().is_some_and(|id| id.starts_with("faux/"))).cloned());
+    res["models"] = Value::Array(curated);
     res["default"] = json!(app.default_model);
     Ok(Json(res))
 }
@@ -309,6 +320,8 @@ fn system_prompt(workspace: &std::path::Path) -> String {
          You can run shell commands and read, write, edit and move files using your tools.\n\
          The working directory for tools is {} (paths are relative to it unless absolute).\n\
          Be concise and direct. Show file paths clearly. Prefer doing the work over describing it.\n\
+         The user sees every tool call and its full output in the interface, so never repeat raw tool output; \
+         summarize what matters and quote only the relevant lines.\n\
          Read files before editing them. Ask before destructive or outward-facing actions \
          (deleting data, pushing, publishing, sending messages, spending money).\n\
          Today is {}.",
