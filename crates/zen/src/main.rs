@@ -71,6 +71,8 @@ enum Cmd {
     Sessions(SessionsCmd),
     /// List available models
     Models,
+    /// Sign in to ChatGPT (opens a browser link; paste the final redirect URL back here)
+    Login,
     /// Check that the kernel, database, worker and model sign-in are healthy
     Status,
 }
@@ -270,6 +272,43 @@ async fn chat(c: &Client, session: Option<String>, model: Option<String>) -> Res
     Ok(())
 }
 
+/// Values from ~/.zenbot/env (written by the installer).
+fn zen_env() -> std::collections::HashMap<String, String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    std::fs::read_to_string(format!("{home}/.zenbot/env"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once('='))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .collect()
+}
+
+fn login() -> Result<()> {
+    let home = std::env::var("HOME").context("HOME not set")?;
+    let env = zen_env();
+    let mind = std::env::var("ZEN_MIND_DIR").ok().or_else(|| env.get("ZEN_MIND_DIR").cloned()).unwrap_or(format!("{home}/zenbot/packages/mind"));
+    let path = format!("{}:{}", env.get("PATH").cloned().unwrap_or_default(), std::env::var("PATH").unwrap_or_default());
+    let cli = format!("{mind}/node_modules/@earendil-works/pi-ai/dist/cli.js");
+    if !std::path::Path::new(&cli).exists() {
+        bail!("can't find the sign-in tool at {cli}; run the installer first");
+    }
+    let dir = format!("{home}/.zenbot");
+    std::fs::create_dir_all(&dir)?;
+    eprintln!("Signing in to ChatGPT. Open the link below in your browser and approve.");
+    eprintln!("Your browser then lands on a 127.0.0.1 page that won't load; copy that full address and paste it here.\n");
+    let status = std::process::Command::new("node").arg(&cli).args(["login", "openai"]).current_dir(&dir).env("PATH", path).status().context("running node")?;
+    if !status.success() {
+        bail!("sign-in failed");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(format!("{dir}/auth.json"), std::fs::Permissions::from_mode(0o600));
+    }
+    eprintln!("\nSigned in. Run `zen` to start.");
+    Ok(())
+}
+
 fn print_sessions(list: &Value) {
     let rows = list.as_array().cloned().unwrap_or_default();
     if rows.is_empty() {
@@ -317,6 +356,9 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    if matches!(cli.cmd, Some(Cmd::Login)) {
+        return login();
+    }
     let c = Client::new(cli.url, cli.token)?;
     let out = |v: &Value| println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
     let Some(cmd) = cli.cmd else {
@@ -342,6 +384,7 @@ async fn run(cli: Cli) -> Result<()> {
                 chat(&c, session, model).await?
             }
         }
+        Cmd::Login => login()?,
         Cmd::Models => {
             let m = c.get("/api/models").await?;
             if cli.json {

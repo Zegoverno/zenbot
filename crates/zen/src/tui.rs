@@ -90,6 +90,17 @@ struct App {
     quit: bool,
 }
 
+fn banner(version_path: Option<&std::path::Path>) -> Line {
+    let mut suffix = String::from(" · zenbot");
+    if let Some(version) = version_path.and_then(|path| std::fs::read_to_string(path).ok()) {
+        let version = version.trim();
+        if !version.is_empty() {
+            suffix.push_str(&format!(" · {version}"));
+        }
+    }
+    vec![("zen".into(), Sty::Bold), (suffix, Sty::Dim)]
+}
+
 pub async fn run(c: Client, start: Start, model: Option<String>) -> Result<()> {
     let models = c.get("/api/models").await?;
     let default_model = models["default"].as_str().unwrap_or("").to_string();
@@ -143,7 +154,7 @@ pub async fn run(c: Client, start: Start, model: Option<String>) -> Result<()> {
 
     let result = async {
         app.commit(vec![
-            vec![("zen".into(), Sty::Bold), (" · zenbot".into(), Sty::Dim)],
+            banner(std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".zenbot/version")).as_deref()),
             line("type a task · /help for commands · esc interrupts · ctrl-d exits", Sty::Dim),
             Vec::new(),
         ]);
@@ -881,5 +892,26 @@ impl App {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn banner_text(path: Option<&std::path::Path>) -> String {
+        banner(path).into_iter().map(|(text, _)| text).collect()
+    }
+
+    #[test]
+    fn banner_shows_installed_version_when_available() {
+        let path = std::env::temp_dir().join(format!("zen-banner-version-{}", std::process::id()));
+        assert_eq!(banner_text(None), "zen · zenbot");
+        assert_eq!(banner_text(Some(&path.join("missing"))), "zen · zenbot");
+        std::fs::write(&path, "775d408\n").unwrap();
+        assert_eq!(banner_text(Some(&path)), "zen · zenbot · 775d408");
+        std::fs::write(&path, " \n").unwrap();
+        assert_eq!(banner_text(Some(&path)), "zen · zenbot");
+        std::fs::remove_file(&path).unwrap();
     }
 }

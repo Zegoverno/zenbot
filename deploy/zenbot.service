@@ -8,8 +8,9 @@ Type=simple
 User=__USER__
 WorkingDirectory=__REPO__
 EnvironmentFile=__HOME__/.zenbot/env
-ExecStartPre=/usr/bin/docker compose -f __REPO__/deploy/compose.yaml up -d --wait postgres
-ExecStart=__REPO__/target/release/zend
+# "+" runs as root so the user doesn't need to be in the docker group.
+ExecStartPre=+/usr/bin/docker compose -f __REPO__/deploy/compose.yaml up -d --wait postgres
+ExecStart=__HOME__/.zenbot/bin/zend
 Restart=always
 RestartSec=3
 

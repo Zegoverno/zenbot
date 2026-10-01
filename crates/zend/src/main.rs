@@ -31,6 +31,7 @@ struct App {
     mind: Arc<Mind>,
     token: String,
     workspace: PathBuf,
+    repo: String,
     default_model: String,
     hubs: Mutex<HashMap<Uuid, broadcast::Sender<String>>>,
     busy: Mutex<HashSet<Uuid>>,
@@ -80,7 +81,8 @@ async fn main() -> Result<()> {
     let token = std::env::var("ZEN_TOKEN").map_err(|_| anyhow::anyhow!("ZEN_TOKEN must be set"))?;
     let port: u16 = std::env::var("ZEN_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8100);
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    let workspace = PathBuf::from(std::env::var("ZEN_WORKSPACE").unwrap_or_else(|_| format!("{home}/zen-workspace")));
+    let workspace = PathBuf::from(std::env::var("ZEN_WORKSPACE").unwrap_or_else(|_| home.clone()));
+    let repo = std::env::var("ZEN_REPO").unwrap_or_else(|_| format!("{home}/zenbot"));
     let mind_cmd = std::env::var("ZEN_MIND_CMD").unwrap_or_else(|_| "node src/main.ts".into());
     let mind_dir = std::env::var("ZEN_MIND_DIR").unwrap_or_else(|_| "packages/mind".into());
     let default_model = std::env::var("ZEN_DEFAULT_MODEL").unwrap_or_else(|_| "openai/gpt-6.1-sol".into());
@@ -95,6 +97,7 @@ async fn main() -> Result<()> {
         mind,
         token,
         workspace,
+        repo,
         default_model,
         hubs: Mutex::new(HashMap::new()),
         busy: Mutex::new(HashSet::new()),
@@ -150,7 +153,8 @@ async fn index() -> Html<&'static str> {
 async fn health(State(app): State<AppState>) -> Json<Value> {
     let db = sqlx::query("SELECT 1").execute(&app.db).await.is_ok();
     let mind = app.mind.request("ping", json!({})).await.is_ok();
-    Json(json!({ "ok": db && mind, "db": db, "mind": mind }))
+    let busy = app.busy.lock().await.len();
+    Json(json!({ "ok": db && mind, "db": db, "mind": mind, "busy": busy, "version": env!("CARGO_PKG_VERSION") }))
 }
 
 /// Models offered in the UI, in order. Only those verified to work with the configured sign-ins.
@@ -268,6 +272,33 @@ async fn load_messages(db: &PgPool, id: Uuid) -> Result<Vec<Value>, sqlx::Error>
     Ok(rows.into_iter().map(|r| r.get::<Value, _>("payload")).collect())
 }
 
+/// Keep long sessions within the context window: older tool outputs are trimmed
+/// (the full output stays in the tape). Recent messages are sent untouched.
+fn prune_history(mut history: Vec<Value>) -> Vec<Value> {
+    const KEEP_RECENT: usize = 12;
+    const MAX_OLD_OUTPUT: usize = 400;
+    let cutoff = history.len().saturating_sub(KEEP_RECENT);
+    for m in history.iter_mut().take(cutoff) {
+        if m["role"] != "toolResult" {
+            continue;
+        }
+        if let Some(parts) = m["content"].as_array_mut() {
+            for part in parts.iter_mut() {
+                if let Some(text) = part["text"].as_str() {
+                    if text.len() > MAX_OLD_OUTPUT {
+                        let mut end = 300;
+                        while !text.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        part["text"] = json!(format!("{}\n[... {} more bytes trimmed from history ...]", &text[..end], text.len() - end));
+                    }
+                }
+            }
+        }
+    }
+    history
+}
+
 async fn append_tape(db: &PgPool, id: Uuid, kind: &str, payload: &Value) -> Result<(), sqlx::Error> {
     sqlx::query("INSERT INTO tape_events (session_id, kind, payload) VALUES ($1, $2, $3)")
         .bind(id)
@@ -314,7 +345,7 @@ async fn handle_socket(app: AppState, id: Uuid, socket: WebSocket) {
     forward.abort();
 }
 
-fn system_prompt(workspace: &std::path::Path) -> String {
+fn system_prompt(workspace: &std::path::Path, repo: &str) -> String {
     format!(
         "You are zenbot, the owner's personal agent running on their Linux VM.\n\
          You can run shell commands and read, write, edit and move files using your tools.\n\
@@ -324,6 +355,8 @@ fn system_prompt(workspace: &std::path::Path) -> String {
          summarize what matters and quote only the relevant lines.\n\
          Read files before editing them. Ask before destructive or outward-facing actions \
          (deleting data, pushing, publishing, sending messages, spending money).\n\
+         Your own source code (zenbot) is at {repo}. Before changing yourself, read {repo}/AGENTS.md and follow it; \
+         never restart your own service directly, use the upgrade script it describes.\n\
          Today is {}.",
         workspace.display(),
         chrono::Utc::now().format("%Y-%m-%d")
@@ -342,7 +375,7 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
     if !app.busy.lock().await.insert(id) {
         anyhow::bail!("this session is already working; wait or abort");
     }
-    let history = load_messages(&app.db, id).await?;
+    let history = prune_history(load_messages(&app.db, id).await?);
     let user = json!({ "role": "user", "content": text, "timestamp": chrono::Utc::now().timestamp_millis() });
     append_tape(&app.db, id, "message", &user).await?;
     if title.is_empty() {
@@ -358,7 +391,7 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
             json!({
                 "session_id": id,
                 "model": model,
-                "system_prompt": system_prompt(&app.workspace),
+                "system_prompt": system_prompt(&app.workspace, &app.repo),
                 "history": history,
                 "prompt": text,
                 "tools": tools::specs(),
