@@ -5,7 +5,7 @@ These steps are written so a coding agent (or a person) can follow them on a fre
 1. Clone the repository into the home directory and run the installer:
 
    ```bash
-   git clone https://github.com/OWNER/zenbot.git ~/zenbot
+   git clone https://github.com/Zegoverno/zenbot.git ~/zenbot
    ~/zenbot/install.sh
    ```
 
