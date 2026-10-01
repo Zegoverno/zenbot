@@ -1,7 +1,14 @@
 //! zen — command-line interface to a running zenbot kernel (zend).
 //! Designed for agents first: every command supports --json and exits non-zero on failure.
 
+mod client;
+mod editor;
+mod md;
+mod tui;
+
 use std::io::{IsTerminal, Read, Write};
+
+use client::{dim, short, tool_summary, Client, Ws};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -10,7 +17,7 @@ use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::Message;
 
 #[derive(Parser)]
-#[command(name = "zen", version, about = "Talk to zenbot from the terminal (or from other agents).")]
+#[command(name = "zen", version, about = "zenbot in your terminal. Run `zen` for an interactive session, or use the commands below for scripts.")]
 struct Cli {
     /// Kernel URL
     #[arg(long, env = "ZEN_URL", default_value = "http://127.0.0.1:8100", global = true)]
@@ -21,8 +28,17 @@ struct Cli {
     /// Print machine-readable JSON
     #[arg(long, global = true)]
     json: bool,
+    /// Continue the most recent session
+    #[arg(short = 'c', long = "continue")]
+    cont: bool,
+    /// Resume a session (opens a picker when no id is given)
+    #[arg(short = 'r', long, num_args = 0..=1, default_missing_value = "")]
+    resume: Option<String>,
+    /// Model for a new session
+    #[arg(short, long)]
+    model: Option<String>,
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
@@ -41,7 +57,7 @@ enum Cmd {
         #[arg(short, long)]
         quiet: bool,
     },
-    /// Interactive session in the terminal
+    /// Interactive session in the terminal (same as running `zen` with no command)
     Chat {
         /// Continue an existing session (id or unique prefix)
         #[arg(short, long)]
@@ -82,102 +98,6 @@ enum SessionsCmd {
     Restore { id: String },
     /// Rename a session
     Rename { id: String, title: String },
-}
-
-struct Client {
-    http: reqwest::Client,
-    url: String,
-    token: String,
-}
-
-impl Client {
-    fn new(url: String, token: Option<String>) -> Result<Self> {
-        let token = match token {
-            Some(t) => t,
-            None => {
-                let home = std::env::var("HOME").context("HOME not set")?;
-                std::fs::read_to_string(format!("{home}/.zenbot/token"))
-                    .context("no token: set ZEN_TOKEN or create ~/.zenbot/token")?
-                    .trim()
-                    .to_string()
-            }
-        };
-        Ok(Client { http: reqwest::Client::new(), url: url.trim_end_matches('/').to_string(), token })
-    }
-
-    async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value> {
-        let mut req = self.http.request(method, format!("{}{}", self.url, path)).bearer_auth(&self.token);
-        if let Some(b) = body {
-            req = req.json(&b);
-        }
-        let res = req.send().await.with_context(|| format!("cannot reach zenbot at {}", self.url))?;
-        let status = res.status();
-        let data: Value = res.json().await.unwrap_or(Value::Null);
-        if !status.is_success() {
-            bail!("{}: {}", status, data["error"].as_str().unwrap_or("request failed"));
-        }
-        Ok(data)
-    }
-
-    async fn get(&self, path: &str) -> Result<Value> {
-        self.call(reqwest::Method::GET, path, None).await
-    }
-
-    async fn post(&self, path: &str, body: Value) -> Result<Value> {
-        self.call(reqwest::Method::POST, path, Some(body)).await
-    }
-
-    async fn patch(&self, path: &str, body: Value) -> Result<Value> {
-        self.call(reqwest::Method::PATCH, path, Some(body)).await
-    }
-
-    /// Resolve a full id or a unique prefix, searching active and archived sessions.
-    async fn resolve(&self, id: &str) -> Result<String> {
-        let mut all = self.get("/api/sessions?archived=false").await?.as_array().cloned().unwrap_or_default();
-        all.extend(self.get("/api/sessions?archived=true").await?.as_array().cloned().unwrap_or_default());
-        let matches: Vec<&Value> = all.iter().filter(|s| s["id"].as_str().is_some_and(|x| x.starts_with(id))).collect();
-        match matches.len() {
-            1 => Ok(matches[0]["id"].as_str().unwrap().to_string()),
-            0 => bail!("no session matches `{id}`"),
-            n => bail!("`{id}` matches {n} sessions; use more characters"),
-        }
-    }
-
-    async fn new_session(&self, model: Option<String>) -> Result<String> {
-        let s = self.post("/api/sessions", json!({ "model": model })).await?;
-        Ok(s["id"].as_str().context("bad session response")?.to_string())
-    }
-
-    async fn connect(&self, id: &str) -> Result<Ws> {
-        let ws_url = format!("{}/api/sessions/{id}/ws?token={}", self.url.replacen("http", "ws", 1), self.token);
-        let (ws, _) = tokio_tungstenite::connect_async(ws_url).await.context("opening session stream")?;
-        Ok(ws)
-    }
-}
-
-type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
-fn short(id: &str) -> &str {
-    &id[..id.len().min(8)]
-}
-
-fn dim(s: &str) -> String {
-    if std::io::stderr().is_terminal() {
-        format!("\x1b[2m{s}\x1b[0m")
-    } else {
-        s.to_string()
-    }
-}
-
-fn tool_summary(name: &str, args: &Value) -> String {
-    let detail = args["command"]
-        .as_str()
-        .or(args["path"].as_str())
-        .map(str::to_string)
-        .or_else(|| args["from"].as_str().map(|f| format!("{f} → {}", args["to"].as_str().unwrap_or(""))))
-        .unwrap_or_else(|| args.to_string());
-    let detail: String = detail.lines().next().unwrap_or("").chars().take(120).collect();
-    format!("{name} {detail}")
 }
 
 /// Outcome of one turn, collected from the session stream.
@@ -399,9 +319,29 @@ async fn main() {
 async fn run(cli: Cli) -> Result<()> {
     let c = Client::new(cli.url, cli.token)?;
     let out = |v: &Value| println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
-    match cli.cmd {
+    let Some(cmd) = cli.cmd else {
+        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+            // Piped use without a command behaves like `zen ask`.
+            return ask(&c, cli.json, None, None, cli.model, false).await;
+        }
+        let start = match (cli.cont, cli.resume) {
+            (_, Some(id)) if !id.is_empty() => tui::Start::Resume(Some(id)),
+            (_, Some(_)) => tui::Start::Resume(None),
+            (true, None) => tui::Start::Continue,
+            _ => tui::Start::New,
+        };
+        return tui::run(c, start, cli.model).await;
+    };
+    match cmd {
         Cmd::Ask { prompt, session, model, quiet } => ask(&c, cli.json, prompt, session, model, quiet).await?,
-        Cmd::Chat { session, model } => chat(&c, session, model).await?,
+        Cmd::Chat { session, model } => {
+            if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+                let start = session.map(|s| tui::Start::Resume(Some(s))).unwrap_or(tui::Start::New);
+                tui::run(c, start, model).await?
+            } else {
+                chat(&c, session, model).await?
+            }
+        }
         Cmd::Models => {
             let m = c.get("/api/models").await?;
             if cli.json {

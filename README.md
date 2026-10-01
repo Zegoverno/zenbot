@@ -17,15 +17,25 @@ zen status
 
 For development without the service: `./scripts/dev.sh` (`ZEN_FAUX=1` adds a scripted test model).
 
-## CLI
+## Using zen
 
-`zen` talks to the running kernel. Every command accepts `--json` and exits non-zero on failure, so agents and scripts can use it.
+Run `zen` for an interactive session in your terminal (inline, like Claude Code, Codex or Pi):
 
 ```bash
-zen ask "Find large files in ~ and summarize"     # one task: streams the answer, tools shown on stderr
+zen              # new session
+zen -c           # continue the most recent session
+zen -r [id]      # resume a session (picker when no id)
+zen -m openai/gpt-6-sol
+```
+
+Inside: `/new`, `/resume`, `/model`, `/rename <title>`, `/archive`, `/help`, `/exit`. Enter sends, Alt+Enter adds a line, Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
+
+For scripts, every command accepts `--json` and exits non-zero on failure:
+
+```bash
+zen ask "Find large files in ~ and summarize"     # one task: streams the answer, tools on stderr
 echo "notes…" | zen ask "Summarize this" --json   # prompt from stdin, JSON result
 zen ask -s 3f2a "And now fix it"                  # continue a session (id or prefix)
-zen chat                                          # interactive session (Ctrl-C stops a turn, Ctrl-D exits)
 zen sessions ls | show <id> | new | archive <id> | restore <id> | rename <id> <title>
 zen models
 zen status
