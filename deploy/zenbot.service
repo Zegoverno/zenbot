@@ -1,0 +1,17 @@
+[Unit]
+Description=zenbot kernel (zend + zen-mind)
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPO__
+EnvironmentFile=__HOME__/.zenbot/env
+ExecStartPre=/usr/bin/docker compose -f __REPO__/deploy/compose.yaml up -d --wait postgres
+ExecStart=__REPO__/target/release/zend
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
