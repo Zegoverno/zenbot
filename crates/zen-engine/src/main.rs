@@ -36,8 +36,12 @@ async fn serve() -> Result<()> {
     let rpc = Rpc::new();
     let running: Arc<Mutex<HashMap<String, watch::Sender<bool>>>> = Arc::default();
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    // Requests being answered. When stdin closes we still finish these, or a reply (e.g. to a
+    // piped-in `ping`) could be lost as the process exits.
+    let mut answering = tokio::task::JoinSet::new();
     eprintln!("[engine] ready");
     while let Some(line) = lines.next_line().await? {
+        while answering.try_join_next().is_some() {}
         let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
         let Some(method) = msg["method"].as_str().map(String::from) else {
             rpc.resolve(&msg).await;
@@ -47,13 +51,14 @@ async fn serve() -> Result<()> {
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
         let rpc = rpc.clone();
         let running = running.clone();
-        tokio::spawn(async move {
+        answering.spawn(async move {
             let result = handle(&rpc, &running, &method, params).await;
             if let Some(id) = id {
                 rpc.respond(id, result.map_err(|e| e.to_string())).await;
             }
         });
     }
+    while answering.join_next().await.is_some() {}
     Ok(())
 }
 
