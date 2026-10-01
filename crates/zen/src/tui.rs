@@ -1,8 +1,11 @@
-//! Interactive terminal app, inline like Claude Code, Codex and Pi.
-//! The conversation is printed into normal terminal scrollback; a live region at the bottom
-//! holds streaming text, status, the input box and the footer, redrawn in place.
-//! On start the screen is cleared (old contents go to scrollback) and the live region is
-//! padded so it stays pinned to the bottom of the terminal, like a full-screen app.
+//! Interactive terminal app. The conversation is printed into normal terminal scrollback; a
+//! live region at the bottom holds streaming text, status, the input box and the footer,
+//! redrawn in place.
+//!
+//! Full screen (default): on start the screen is cleared (old contents go to scrollback) and
+//! the live region is padded so it stays pinned to the bottom of the terminal.
+//! Inline (`zen --inline` or ZEN_INLINE=1): no clearing or padding; the live region follows
+//! the conversation, like Claude Code, Codex and Pi.
 
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -27,15 +30,26 @@ use crate::md::{self, line, Line, Md, Sty};
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const PLACEHOLDER: &str = "Ask zenbot to do something…";
 
-const COMMANDS: &[(&str, &str)] = &[
-    ("/new", "start a new session"),
-    ("/resume", "switch to another session"),
-    ("/model", "choose the model"),
-    ("/rename", "rename this session: /rename <title>"),
-    ("/archive", "archive this session and start a new one"),
-    ("/upgrade", "update zenbot to the latest version and restart it"),
-    ("/help", "keys and commands"),
-    ("/exit", "quit zen"),
+struct Command {
+    name: &'static str,
+    help: &'static str,
+    /// Needs an argument: choosing it in the menu fills in the name and waits for the rest.
+    takes_arg: bool,
+}
+
+const fn cmd(name: &'static str, help: &'static str, takes_arg: bool) -> Command {
+    Command { name, help, takes_arg }
+}
+
+const COMMANDS: &[Command] = &[
+    cmd("/new", "start a new session", false),
+    cmd("/resume", "switch to another session", false),
+    cmd("/model", "choose the model", false),
+    cmd("/rename", "rename this session: /rename <title>", true),
+    cmd("/archive", "archive this session and start a new one", false),
+    cmd("/upgrade", "update zenbot to the latest version and restart it", false),
+    cmd("/help", "keys and commands", false),
+    cmd("/exit", "quit zen", false),
 ];
 
 pub enum Start {
@@ -56,11 +70,27 @@ struct Picker {
     kind: PickKind,
 }
 
-/// The live region at the bottom of the terminal.
+/// The live region at the bottom of the terminal, as last painted.
 #[derive(Default)]
 struct Region {
     height: usize,
     caret_row: usize,
+    caret_col: usize,
+    /// Display width of each painted line, to work out where the caret ended up after the
+    /// terminal reflows them on resize.
+    widths: Vec<usize>,
+}
+
+impl Region {
+    /// The terminal was resized to `cols` columns and has re-wrapped the painted lines:
+    /// recompute how many rows sit above the caret, so `erase` clears exactly the region.
+    fn reflow(&mut self, cols: usize) {
+        let cols = cols.max(1);
+        let rows = |w: usize| w.div_ceil(cols).max(1);
+        let above: usize = self.widths.iter().take(self.caret_row).map(|&w| rows(w)).sum();
+        self.caret_row = above + self.caret_col / cols;
+        self.height = self.widths.iter().map(|&w| rows(w)).sum();
+    }
 }
 
 struct App {
@@ -78,8 +108,14 @@ struct App {
     /// Highlighted row in the `/` command menu.
     menu_sel: usize,
     region: Region,
+    /// Terminal size (columns, rows), updated on resize.
+    size: (usize, usize),
+    /// Inline mode: don't clear the screen or pin the live region to the bottom.
+    inline: bool,
     /// Rows of committed conversation on screen above the live region (capped at the height).
     filled: usize,
+    /// Tests collect output here instead of writing to the terminal.
+    capture: Option<String>,
     /// The terminal reports modified keys (kitty protocol), so shift+enter is distinct from enter.
     enhanced: bool,
     busy: bool,
@@ -111,7 +147,62 @@ fn banner(version_path: Option<&std::path::Path>) -> Line {
     vec![("zen".into(), Sty::Bold), (suffix, Sty::Dim)]
 }
 
-pub async fn run(c: Client, start: Start, model: Option<String>) -> Result<()> {
+impl App {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        c: Client,
+        tx: mpsc::UnboundedSender<(String, Value)>,
+        model: String,
+        default_model: String,
+        models: Vec<String>,
+        history: Option<std::path::PathBuf>,
+        size: (usize, usize),
+        inline: bool,
+    ) -> App {
+        App {
+            c,
+            tx,
+            sink: None,
+            reader: None,
+            session: None,
+            title: String::new(),
+            model,
+            default_model,
+            models,
+            editor: Editor::new(history),
+            picker: None,
+            menu_sel: 0,
+            region: Region::default(),
+            size,
+            inline,
+            filled: 0,
+            capture: None,
+            enhanced: false,
+            busy: false,
+            status: String::new(),
+            spin: 0,
+            turn_started: Instant::now(),
+            stream: String::new(),
+            committed: 0,
+            md: Md::default(),
+            turn_tokens: 0,
+            turn_model: String::new(),
+            session_tokens: 0,
+            pending_prompt: None,
+            aborting: false,
+            notice: None,
+            ctrl_c_at: None,
+            upgrading: false,
+            quit: false,
+        }
+    }
+}
+
+fn terminal_size() -> (usize, usize) {
+    terminal::size().map(|(w, h)| (w as usize, h as usize)).unwrap_or((80, 24))
+}
+
+pub async fn run(c: Client, start: Start, model: Option<String>, inline: bool) -> Result<()> {
     let models = c.get("/api/models").await?;
     let default_model = models["default"].as_str().unwrap_or("").to_string();
     let model_ids: Vec<String> = models["models"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str().map(String::from)).collect();
@@ -119,39 +210,8 @@ pub async fn run(c: Client, start: Start, model: Option<String>) -> Result<()> {
 
     let history = std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join(".zenbot/history"));
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut app = App {
-        c,
-        tx,
-        sink: None,
-        reader: None,
-        session: None,
-        title: String::new(),
-        model: model.unwrap_or_else(|| default_model.clone()),
-        default_model,
-        models: model_ids,
-        editor: Editor::new(history),
-        picker: None,
-        menu_sel: 0,
-        region: Region::default(),
-        filled: 0,
-        enhanced: false,
-        busy: false,
-        status: String::new(),
-        spin: 0,
-        turn_started: Instant::now(),
-        stream: String::new(),
-        committed: 0,
-        md: Md::default(),
-        turn_tokens: 0,
-        turn_model: String::new(),
-        session_tokens: 0,
-        pending_prompt: None,
-        aborting: false,
-        notice: None,
-        ctrl_c_at: None,
-        upgrading: false,
-        quit: false,
-    };
+    let model = model.unwrap_or_else(|| default_model.clone());
+    let mut app = App::new(c, tx, model, default_model, model_ids, history, terminal_size(), inline);
 
     terminal::enable_raw_mode()?;
     let enhanced = terminal::supports_keyboard_enhancement().unwrap_or(false);
@@ -161,9 +221,11 @@ pub async fn run(c: Client, start: Start, model: Option<String>) -> Result<()> {
         execute!(out, PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))?;
     }
     app.enhanced = enhanced;
-    // Full screen: push what's on screen into scrollback and start from the top.
-    let _ = out.write_all(format!("\x1b[999B{}\x1b[H", "\n".repeat(term_height())).as_bytes());
-    let _ = out.flush();
+    if !inline {
+        // Full screen: push what's on screen into scrollback and start from the top.
+        let _ = out.write_all(format!("\x1b[999B{}\x1b[H", "\n".repeat(app.height())).as_bytes());
+        let _ = out.flush();
+    }
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = terminal::disable_raw_mode();
@@ -250,14 +312,6 @@ pub async fn run(c: Client, start: Start, model: Option<String>) -> Result<()> {
     result
 }
 
-fn term_width() -> usize {
-    terminal::size().map(|(w, _)| w as usize).unwrap_or(80).saturating_sub(1).max(20)
-}
-
-fn term_height() -> usize {
-    terminal::size().map(|(_, h)| h as usize).unwrap_or(24).max(6)
-}
-
 fn fmt_tokens(n: i64) -> String {
     if n >= 10_000 {
         format!("{}k", n / 1000)
@@ -279,6 +333,15 @@ fn text_of(content: &Value) -> String {
 impl App {
     // ---------- drawing ----------
 
+    /// Columns to draw in (one less than the terminal, so lines never trigger an auto-wrap).
+    fn width(&self) -> usize {
+        self.size.0.saturating_sub(1).max(20)
+    }
+
+    fn height(&self) -> usize {
+        self.size.1.max(6)
+    }
+
     fn erase(&mut self, out: &mut String) {
         if self.region.height > 0 {
             if self.region.caret_row > 0 {
@@ -293,15 +356,15 @@ impl App {
 
     fn paint_region(&mut self, out: &mut String) {
         let (mut lines, mut caret_row, caret_col, show_caret) = self.compose();
-        let h = term_height();
+        let h = self.height();
         let max = h.saturating_sub(1);
         if lines.len() > max {
             let cut = lines.len() - max;
             lines.drain(..cut);
             caret_row = caret_row.saturating_sub(cut);
         }
-        // Pad above so the region sits at the bottom of the screen.
-        let pad = h.saturating_sub(self.filled.min(h) + lines.len());
+        // Full screen: pad above so the region sits at the bottom of the screen.
+        let pad = if self.inline { 0 } else { h.saturating_sub(self.filled.min(h) + lines.len()) };
         if pad > 0 {
             lines.splice(0..0, std::iter::repeat_with(Vec::new).take(pad));
             caret_row += pad;
@@ -318,10 +381,15 @@ impl App {
             out.push_str(&format!("\x1b[{caret_col}C"));
         }
         out.push_str(if show_caret { "\x1b[?25h" } else { "\x1b[?25l" });
-        self.region = Region { height: n, caret_row };
+        let widths = lines.iter().map(|l| l.iter().map(|(t, _)| UnicodeWidthStr::width(t.as_str())).sum()).collect();
+        self.region = Region { height: n, caret_row, caret_col, widths };
     }
 
-    fn flush(out: String) {
+    fn flush(&mut self, out: String) {
+        if let Some(c) = &mut self.capture {
+            c.push_str(&out);
+            return;
+        }
         let mut stdout = std::io::stdout();
         let _ = stdout.write_all(out.as_bytes());
         let _ = stdout.flush();
@@ -333,42 +401,54 @@ impl App {
         self.erase(&mut out);
         self.paint_region(&mut out);
         out.push_str("\x1b[?2026l");
-        Self::flush(out);
+        self.flush(out);
     }
 
-    /// Print lines permanently into scrollback above the live region.
+    /// Print lines permanently into scrollback above the live region. Lines wider than the
+    /// screen are wrapped here, so every printed line is exactly one row and `filled` stays true.
     fn commit(&mut self, lines: Vec<Line>) {
         if lines.is_empty() {
             return;
         }
+        let w = self.width();
+        let lines: Vec<Line> = lines
+            .into_iter()
+            .flat_map(|l| {
+                if l.iter().map(|(t, _)| UnicodeWidthStr::width(t.as_str())).sum::<usize>() <= w {
+                    vec![l]
+                } else {
+                    md::wrap(l, w, (String::new(), Sty::Plain), (String::new(), Sty::Plain))
+                }
+            })
+            .collect();
         let mut out = String::from("\x1b[?2026h");
         self.erase(&mut out);
         for l in &lines {
             out.push_str(&md::to_ansi(l));
             out.push_str("\x1b[K\r\n");
         }
-        self.filled = (self.filled + lines.len()).min(term_height());
+        self.filled = (self.filled + lines.len()).min(self.height());
         self.paint_region(&mut out);
         out.push_str("\x1b[?2026l");
-        Self::flush(out);
+        self.flush(out);
     }
 
     fn note(&mut self, text: impl Into<String>, sty: Sty) {
         self.notice = Some((text.into(), sty));
     }
 
-    /// Build the live region: (lines, caret row, caret col, show caret).
     /// Commands matching what's typed, while the input is a bare `/word`.
-    fn menu(&self) -> Vec<(&'static str, &'static str)> {
+    fn menu(&self) -> Vec<&'static Command> {
         let buf = &self.editor.buf;
         if !buf.starts_with('/') || buf.contains(' ') || buf.contains('\n') {
             return Vec::new();
         }
-        COMMANDS.iter().filter(|(n, _)| n.starts_with(buf.as_str())).copied().collect()
+        COMMANDS.iter().filter(|c| c.name.starts_with(buf.as_str())).collect()
     }
 
+    /// Build the live region: (lines, caret row, caret col, show caret).
     fn compose(&self) -> (Vec<Line>, usize, usize, bool) {
-        let w = term_width();
+        let w = self.width();
         let mut lines: Vec<Line> = Vec::new();
 
         if let Some(p) = &self.picker {
@@ -416,17 +496,18 @@ impl App {
         } else {
             "enter send · alt+enter new line"
         };
-        let (input, crow, ccol) = self.editor.render(w, PLACEHOLDER, hint, (term_height() / 2).max(3));
+        let (input, crow, ccol) = self.editor.render(w, PLACEHOLDER, hint, (self.height() / 2).max(3));
         let caret_row = lines.len() + crow;
         lines.extend(input);
 
         let menu = self.menu();
         if !menu.is_empty() {
             let sel = self.menu_sel.min(menu.len() - 1);
-            for (i, (name, help)) in menu.iter().enumerate() {
+            for (i, c) in menu.iter().enumerate() {
                 let mark = if i == sel { "› " } else { "  " };
                 let help_sty = if i == sel { Sty::Plain } else { Sty::Dim };
-                lines.push(vec![(format!("{mark}{name:<10}"), Sty::Accent), (help.to_string(), help_sty)]);
+                let help: String = c.help.chars().take(w.saturating_sub(12)).collect();
+                lines.push(vec![(format!("{mark}{:<10}", c.name), Sty::Accent), (help, help_sty)]);
             }
         } else {
             let model = self.model.split('/').next_back().unwrap_or(&self.model);
@@ -492,7 +573,7 @@ impl App {
         self.model = s["model"].as_str().unwrap_or(&self.default_model).to_string();
         self.connect(&id).await?;
 
-        let w = term_width();
+        let w = self.width();
         let msgs = s["messages"].as_array().cloned().unwrap_or_default();
         let mut out: Vec<Line> = vec![line(format!("── {} ──", if self.title.is_empty() { "session" } else { &self.title }), Sty::Dim), Vec::new()];
         let skip = msgs.len().saturating_sub(40);
@@ -629,7 +710,12 @@ impl App {
         match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => self.on_key(k).await?,
             Event::Paste(s) if self.picker.is_none() => self.editor.insert(&s),
-            Event::Resize(_, h) => self.filled = self.filled.min(h as usize),
+            Event::Resize(cols, rows) => {
+                // The terminal has re-wrapped what was on screen; find the region again before redrawing.
+                self.region.reflow(cols as usize);
+                self.size = (cols as usize, rows as usize);
+                self.filled = self.filled.min(self.height());
+            }
             _ => return Ok(()),
         }
         if !self.quit {
@@ -679,18 +765,17 @@ impl App {
                     return Ok(());
                 }
                 KeyCode::Tab => {
-                    self.editor.set(menu[sel].0);
+                    self.editor.set(menu[sel].name);
                     self.menu_sel = 0;
                     return Ok(());
                 }
                 KeyCode::Enter => {
-                    let name = menu[sel].0;
+                    let c = menu[sel];
                     self.menu_sel = 0;
-                    if name == "/rename" {
-                        // Needs an argument: complete it and let the user type the title.
-                        self.editor.set("/rename ");
+                    if c.takes_arg {
+                        self.editor.set(&format!("{} ", c.name));
                     } else {
-                        self.editor.set(name);
+                        self.editor.set(c.name);
                         self.submit().await?;
                     }
                     return Ok(());
@@ -806,7 +891,7 @@ impl App {
         if self.title.is_empty() {
             self.title = text.chars().take(40).collect::<String>().trim().to_string();
         }
-        let w = term_width();
+        let w = self.width();
         self.commit(self.render_user(&text, w));
         self.pending_prompt = Some(text.clone());
         self.busy = true;
@@ -825,8 +910,8 @@ impl App {
 
     async fn command(&mut self, input: &str) -> Result<()> {
         let (cmd, arg) = input.split_once(' ').map(|(a, b)| (a, b.trim())).unwrap_or((input, ""));
-        let cmd = COMMANDS.iter().map(|(n, _)| *n).find(|n| *n == cmd).or_else(|| {
-            let m: Vec<_> = COMMANDS.iter().map(|(n, _)| *n).filter(|n| n.starts_with(cmd)).collect();
+        let cmd = COMMANDS.iter().map(|c| c.name).find(|n| *n == cmd).or_else(|| {
+            let m: Vec<_> = COMMANDS.iter().map(|c| c.name).filter(|n| n.starts_with(cmd)).collect();
             if m.len() == 1 { Some(m[0]) } else { None }
         });
         match cmd {
@@ -861,7 +946,7 @@ impl App {
             }
             Some("/help") => {
                 let mut out = vec![line("Commands", Sty::Bold)];
-                for (n, h) in COMMANDS {
+                for Command { name: n, help: h, .. } in COMMANDS {
                     out.push(vec![(format!("  {n:<10}"), Sty::Accent), (h.to_string(), Sty::Plain)]);
                 }
                 out.push(line("Keys", Sty::Bold));
@@ -934,7 +1019,7 @@ impl App {
     // ---------- kernel events ----------
 
     fn on_event(&mut self, ev: Value) {
-        let w = term_width();
+        let w = self.width();
         match ev["type"].as_str().unwrap_or("") {
             "message" => {
                 let m = &ev["message"];
@@ -1057,6 +1142,98 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An app on a fake terminal of `cols` x `rows`, capturing output, with no kernel behind it.
+    fn app(cols: usize, rows: usize) -> App {
+        let c = Client::new("http://127.0.0.1:9".into(), Some("test".into())).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut a = App::new(c, tx, "claude/opus".into(), "claude/opus".into(), vec![], None, (cols, rows), false);
+        a.capture = Some(String::new());
+        a
+    }
+
+    fn texts(lines: &[Line]) -> Vec<String> {
+        lines.iter().map(|l| l.iter().map(|(t, _)| t.as_str()).collect()).collect()
+    }
+
+    fn width(s: &str) -> usize {
+        UnicodeWidthStr::width(s)
+    }
+
+    async fn key(a: &mut App, code: KeyCode) {
+        a.on_key(KeyEvent::new(code, KeyModifiers::NONE)).await.unwrap();
+    }
+
+    async fn typed(a: &mut App, text: &str) {
+        for ch in text.chars() {
+            key(a, KeyCode::Char(ch)).await;
+        }
+    }
+
+    #[test]
+    fn region_fits_the_screen_and_shows_the_input_box() {
+        let a = app(40, 12);
+        let (lines, caret_row, _, _) = a.compose();
+        let t = texts(&lines);
+        assert!(t.iter().all(|l| width(l) <= a.width()), "{t:#?}");
+        assert!(t.iter().any(|l| l.starts_with('╭')) && t.iter().any(|l| l.starts_with('╰')));
+        assert!(t[caret_row].contains(PLACEHOLDER.chars().take(10).collect::<String>().as_str()));
+    }
+
+    #[tokio::test]
+    async fn slash_menu_arrows_tab_and_argument_commands() {
+        let mut a = app(60, 20);
+        typed(&mut a, "/").await;
+        let t = texts(&a.compose().0);
+        assert!(t.iter().any(|l| l.starts_with("› /new")), "{t:#?}");
+        key(&mut a, KeyCode::Down).await;
+        key(&mut a, KeyCode::Tab).await;
+        assert_eq!(a.editor.buf, "/resume");
+        a.editor.clear();
+        typed(&mut a, "/ren").await;
+        key(&mut a, KeyCode::Enter).await;
+        assert_eq!(a.editor.buf, "/rename ", "a command that takes an argument waits for it");
+    }
+
+    #[tokio::test]
+    async fn arrows_step_through_history_past_a_recalled_command() {
+        let mut a = app(60, 20);
+        a.editor.set_history(&["first", "/help"]);
+        key(&mut a, KeyCode::Up).await;
+        assert_eq!(a.editor.buf, "/help");
+        key(&mut a, KeyCode::Up).await;
+        assert_eq!(a.editor.buf, "first", "the menu must not swallow ↑ on a recalled command");
+    }
+
+    #[test]
+    fn committed_lines_wider_than_the_screen_are_wrapped_and_counted() {
+        let mut a = app(40, 30);
+        a.commit(vec![line("x".repeat(100), Sty::Err)]);
+        // 39 usable columns: 100 characters take 3 rows, and the pinning must count all 3.
+        assert_eq!(a.filled, 3);
+        let out = a.capture.take().unwrap();
+        assert_eq!(out.matches("\x1b[K\r\n").count(), 3);
+    }
+
+    #[test]
+    fn full_screen_pins_the_region_to_the_bottom_and_inline_does_not() {
+        let mut a = app(40, 20);
+        a.draw();
+        assert_eq!(a.region.height, 20, "padded to fill the screen");
+        let mut b = app(40, 20);
+        b.inline = true;
+        b.draw();
+        assert!(b.region.height < 20);
+    }
+
+    #[test]
+    fn resize_recomputes_where_the_caret_is() {
+        let mut r = Region { height: 3, caret_row: 2, caret_col: 5, widths: vec![39, 39, 10] };
+        r.reflow(20);
+        // Narrowed to 20 columns, each 39-wide line now takes 2 rows.
+        assert_eq!(r.caret_row, 4);
+        assert_eq!(r.height, 5);
+    }
 
     fn banner_text(path: Option<&std::path::Path>) -> String {
         banner(path).into_iter().map(|(text, _)| text).collect()

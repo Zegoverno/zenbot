@@ -31,6 +31,7 @@ zen              # new session
 zen -c           # continue the most recent session
 zen -r [id]      # resume a session (picker when no id)
 zen -m codex/gpt-6-sol     # default is claude/opus
+zen --inline     # no full-screen layout: the input follows the conversation (or ZEN_INLINE=1)
 ```
 
 Inside: `/new`, `/resume`, `/model`, `/rename <title>`, `/archive`, `/upgrade`, `/help`, `/exit`. Enter sends; Shift+Enter (or Alt+Enter, Ctrl+J) starts a new line or paragraph; Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.

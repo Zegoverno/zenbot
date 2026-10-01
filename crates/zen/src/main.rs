@@ -37,6 +37,9 @@ struct Cli {
     /// Model for a new session
     #[arg(short, long)]
     model: Option<String>,
+    /// Inline terminal app (no full-screen clearing; the input follows the conversation)
+    #[arg(long, env = "ZEN_INLINE", global = true)]
+    inline: bool,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -447,14 +450,14 @@ async fn run(cli: Cli) -> Result<()> {
             (true, None) => tui::Start::Continue,
             _ => tui::Start::New,
         };
-        return tui::run(c, start, cli.model).await;
+        return tui::run(c, start, cli.model, cli.inline).await;
     };
     match cmd {
         Cmd::Ask { prompt, session, model, quiet } => ask(&c, cli.json, prompt, session, model, quiet).await?,
         Cmd::Chat { session, model } => {
             if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
                 let start = session.map(|s| tui::Start::Resume(Some(s))).unwrap_or(tui::Start::New);
-                tui::run(c, start, model).await?
+                tui::run(c, start, model, cli.inline).await?
             } else {
                 chat(&c, session, model).await?
             }
