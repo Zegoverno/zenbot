@@ -8,9 +8,13 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO"
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 
+# Prebuilt binaries are downloaded when available (scripts/fetch-release.sh); Rust and a C
+# toolchain are only installed when zenbot has to be compiled here. Set ZEN_BUILD_FROM_SOURCE=1
+# to always compile.
+
 say "System packages"
 NEED=()
-for p in git curl ca-certificates build-essential pkg-config; do dpkg -s "$p" >/dev/null 2>&1 || NEED+=("$p"); done
+for p in git curl ca-certificates jq; do dpkg -s "$p" >/dev/null 2>&1 || NEED+=("$p"); done
 if ! command -v docker >/dev/null; then NEED+=(docker.io); fi
 if ! docker compose version >/dev/null 2>&1 && ! sudo docker compose version >/dev/null 2>&1; then NEED+=(docker-compose-v2); fi
 if [ ${#NEED[@]} -gt 0 ]; then
@@ -18,11 +22,9 @@ if [ ${#NEED[@]} -gt 0 ]; then
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${NEED[@]}"
 fi
 sudo systemctl enable --now docker >/dev/null 2>&1 || true
-
-say "Rust"
-if ! command -v cargo >/dev/null && [ ! -x "$HOME/.cargo/bin/cargo" ]; then
-  curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null
-fi
+# Pull the database image in the background while the rest installs.
+sudo docker compose -f deploy/compose.yaml pull -q >/tmp/zen-install-pull.log 2>&1 &
+PULL_PID=$!
 export PATH="$HOME/.cargo/bin:$PATH"
 
 say "Node.js"
@@ -34,16 +36,30 @@ fi
 export PATH="$NODE_DIR/bin:$PATH"
 grep -q '.local/node/bin' "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="$HOME/.local/bin:$HOME/.local/node/bin:$HOME/.cargo/bin:$PATH"' >> "$HOME/.bashrc"
 
-say "Model engines (Claude Code and Codex CLIs)"
+say "Model engines (Claude Code and Codex CLIs), in the background"
 export PATH="$HOME/.local/bin:$PATH"
-if ! command -v claude >/dev/null; then curl -fsSL https://claude.ai/install.sh | bash >/dev/null; fi
-if ! command -v codex >/dev/null; then npm install -g --no-audit --no-fund --silent @openai/codex; fi
+ENGINE_PIDS=()
+if ! command -v claude >/dev/null; then (curl -fsSL https://claude.ai/install.sh | bash >/tmp/zen-install-claude.log 2>&1) & ENGINE_PIDS+=($!); fi
+if ! command -v codex >/dev/null; then (npm install -g --no-audit --no-fund --silent @openai/codex >/tmp/zen-install-codex.log 2>&1) & ENGINE_PIDS+=($!); fi
 
-say "Building zenbot (first build takes a few minutes)"
 # Workers: `engine` (Claude Code + Codex on your subscriptions) and optionally `pi` (Pi agent loop).
 WORKERS="${ZEN_WORKERS:-engine}"
 if [[ ",$WORKERS," == *",pi,"* ]]; then (cd packages/mind && npm ci --no-audit --no-fund --silent); fi
-cargo build --release -q
+if "$REPO/scripts/fetch-release.sh"; then
+  say "Downloaded prebuilt zenbot $(git rev-parse --short HEAD)"
+else
+  say "Building zenbot from source (no prebuilt binaries for this commit; takes several minutes)"
+  NEED=()
+  for p in build-essential pkg-config; do dpkg -s "$p" >/dev/null 2>&1 || NEED+=("$p"); done
+  if [ ${#NEED[@]} -gt 0 ]; then sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${NEED[@]}"; fi
+  if ! command -v cargo >/dev/null; then curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null; fi
+  cargo build --release -q
+fi
+
+for pid in "${ENGINE_PIDS[@]}"; do
+  wait "$pid" || echo "warning: installing a model engine failed; see /tmp/zen-install-claude.log and /tmp/zen-install-codex.log"
+done
+wait "$PULL_PID" || true
 
 say "Installing"
 mkdir -p "$HOME/.zenbot/bin" "$HOME/.local/bin"

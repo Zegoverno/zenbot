@@ -9,16 +9,32 @@ export PATH="$HOME/.local/node/bin:$HOME/.cargo/bin:$PATH"
 
 echo "== build"
 if grep -qE '^ZEN_WORKERS=.*pi' "$HOME/.zenbot/env" 2>/dev/null; then (cd packages/mind && npm ci --no-audit --no-fund --silent); fi
-BUILD_LOG=$(mktemp)
-if ! cargo build --release >"$BUILD_LOG" 2>&1; then
-  grep -E '^(error|warning)|^\s+-->' -A6 "$BUILD_LOG" | head -80
-  echo "BUILD FAILED: fix the errors above, then run this script again."
-  exit 1
+# Use the binaries CI built for this commit when there are no local code changes;
+# otherwise compile here (installing Rust first on machines that never needed it).
+PREBUILT=
+if ./scripts/fetch-release.sh; then
+  PREBUILT=1
+  echo "using prebuilt binaries for $(git rev-parse --short HEAD)"
+else
+  if ! command -v cargo >/dev/null; then
+    echo "installing Rust to build from source"
+    for p in build-essential pkg-config; do dpkg -s "$p" >/dev/null 2>&1 || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$p"; done
+    curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null
+  fi
+  rm -f target/release/.prebuilt
+  BUILD_LOG=$(mktemp)
+  if ! cargo build --release >"$BUILD_LOG" 2>&1; then
+    grep -E '^(error|warning)|^\s+-->' -A6 "$BUILD_LOG" | head -80
+    echo "BUILD FAILED: fix the errors above, then run this script again."
+    exit 1
+  fi
+  rm -f "$BUILD_LOG"
 fi
-rm -f "$BUILD_LOG"
 
 echo "== check"
-cargo test --release -q 2>&1 | tail -5 || { echo "TESTS FAILED"; exit 1; }
+if [ -z "$PREBUILT" ]; then # CI already tested prebuilt binaries
+  cargo test --release -q 2>&1 | tail -5 || { echo "TESTS FAILED"; exit 1; }
+fi
 PONG=$(echo '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}' | timeout 15 ./target/release/zen-engine 2>/dev/null | head -1 || true)
 echo "$PONG" | grep -q pong || { echo "CHECK FAILED: zen-engine did not answer ping"; exit 1; }
 if grep -qE '^ZEN_WORKERS=.*pi' "$HOME/.zenbot/env" 2>/dev/null; then

@@ -1,0 +1,48 @@
+# Build, test and publish Linux binaries for every commit on main, so installs and upgrades
+# download them instead of compiling (scripts/fetch-release.sh). Assets go to the rolling
+# `edge` release, one tarball per commit; the newest 20 are kept.
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux-x86_64:
+    # Oldest supported Ubuntu runner: binaries built against its glibc run on newer distros too.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked
+      - name: Test
+        run: cargo test --release --locked
+      - name: Package
+        run: |
+          SHA=$(git rev-parse --short=12 HEAD)
+          mkdir -p dist/zenbot
+          cp target/release/zend target/release/zen target/release/zen-engine dist/zenbot/
+          echo "$SHA" > dist/zenbot/VERSION
+          tar -C dist/zenbot -czf "dist/zenbot-x86_64-linux-$SHA.tar.gz" .
+          (cd dist && sha256sum "zenbot-x86_64-linux-$SHA.tar.gz" > "zenbot-x86_64-linux-$SHA.tar.gz.sha256")
+      - name: Publish to the edge release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view edge >/dev/null 2>&1 || \
+            gh release create edge --prerelease --title "edge (latest main)" \
+              --notes "Binaries for recent commits on main, used by install.sh and scripts/upgrade.sh."
+          gh release upload edge dist/zenbot-x86_64-linux-*.tar.gz dist/zenbot-x86_64-linux-*.sha256 --clobber
+          # Keep the 20 newest builds.
+          gh release view edge --json assets --jq '.assets | sort_by(.createdAt) | reverse | .[40:] | .[].name' |
+            while read -r name; do gh release delete-asset edge "$name" --yes; done

@@ -16,6 +16,8 @@ zen login      # signs in to Claude Code (Claude plan) and Codex (ChatGPT plan)
 zen status
 ```
 
+Update with `cd ~/zenbot && git pull && ./scripts/upgrade.sh` (see [INSTALL.md](INSTALL.md#updating)).
+
 For development without the service: `./scripts/dev.sh` (`ZEN_FAUX=1` adds `faux/smoke`, a scripted test model; see [docs/worker-protocol.md](docs/worker-protocol.md#testing-without-a-model)).
 
 zenbot adds instruction files to every session's system prompt: `~/.zenbot/AGENTS.md` (global), then `AGENTS.md` (or `CLAUDE.md`) in each directory from `/` down to the workspace.

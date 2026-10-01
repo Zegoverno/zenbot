@@ -5,3 +5,7 @@ members = ["crates/zend", "crates/zen", "crates/zen-engine"]
 [workspace.package]
 edition = "2021"
 license = "Apache-2.0"
+
+[profile.release]
+# Smaller binaries to download and install; panics still print a message.
+strip = true
