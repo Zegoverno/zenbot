@@ -105,7 +105,7 @@ pub async fn run(c: Client, start: Start, model: Option<String>) -> Result<()> {
     let models = c.get("/api/models").await?;
     let default_model = models["default"].as_str().unwrap_or("").to_string();
     let model_ids: Vec<String> = models["models"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str().map(String::from)).collect();
-    let signed_in = models["authenticated"]["openai"] == true;
+    let signed_in = models["authenticated"].as_object().is_some_and(|a| a.values().any(|v| v == true));
 
     let history = std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join(".zenbot/history"));
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -159,7 +159,7 @@ pub async fn run(c: Client, start: Start, model: Option<String>) -> Result<()> {
             Vec::new(),
         ]);
         if !signed_in {
-            app.commit(vec![line("zenbot isn't signed in to ChatGPT yet; run the sign-in on the VM first.", Sty::Warn), Vec::new()]);
+            app.commit(vec![line("No model engine is signed in yet; run `zen login` first.", Sty::Warn), Vec::new()]);
         }
         match start {
             Start::New => {}
@@ -448,7 +448,7 @@ impl App {
         for m in msgs.iter().skip(skip) {
             out.extend(self.render_message(m, w));
             if m["role"] == "assistant" {
-                self.session_tokens += m["usage"]["input"].as_i64().unwrap_or(0) + m["usage"]["output"].as_i64().unwrap_or(0);
+                self.session_tokens += ["input", "output", "cacheRead", "cacheWrite"].iter().map(|k| m["usage"][*k].as_i64().unwrap_or(0)).sum::<i64>();
             }
         }
         self.commit(out);
@@ -826,7 +826,7 @@ impl App {
                             out.push(line(m["errorMessage"].as_str().unwrap_or("error").to_string(), Sty::Err));
                         }
                         let u = &m["usage"];
-                        self.turn_tokens += u["input"].as_i64().unwrap_or(0) + u["output"].as_i64().unwrap_or(0);
+                        self.turn_tokens += ["input", "output", "cacheRead", "cacheWrite"].iter().map(|k| u[*k].as_i64().unwrap_or(0)).sum::<i64>();
                         self.turn_model = m["model"].as_str().unwrap_or("").to_string();
                         self.commit(out);
                     }
@@ -848,6 +848,9 @@ impl App {
                 } else {
                     self.commit(out);
                 }
+            }
+            "usage" => {
+                self.turn_tokens += ev["input"].as_i64().unwrap_or(0) + ev["output"].as_i64().unwrap_or(0);
             }
             "thinking" => {
                 self.status = "Thinking".into();

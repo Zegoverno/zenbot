@@ -9,7 +9,7 @@ These steps are written so a coding agent (or a person) can follow them on a fre
    ~/zenbot/install.sh
    ```
 
-   The installer is safe to re-run. It installs Docker, Rust and Node.js 22 if they're missing, builds zenbot, starts Postgres in Docker, installs the `zenbot` systemd service (starts on boot, restarts on failure), and links the `zen` command into `~/.local/bin`. The first build takes a few minutes.
+   The installer is safe to re-run. It installs Docker, Rust, Node.js 22, and the Claude Code and Codex CLIs if they're missing, builds zenbot, starts Postgres in Docker, installs the `zenbot` systemd service (starts on boot, restarts on failure), and links the `zen` command into `~/.local/bin`. The first build takes a few minutes.
 
 2. Check that it's healthy:
 
@@ -17,15 +17,15 @@ These steps are written so a coding agent (or a person) can follow them on a fre
    ~/.local/bin/zen status
    ```
 
-   Every line should say `ok`, except `chatgpt`, which says `NOT signed in` until step 3.
+   Every line should say `ok`, except `claude` and `codex`, which say `NOT signed in` until step 3.
 
-3. Sign in to ChatGPT. This step needs the owner, because it opens a browser:
+3. Sign in to the model engines. This step needs the owner, because it opens a browser:
 
    ```bash
    zen login
    ```
 
-   Open the printed link and approve. The browser then lands on a `127.0.0.1` page that won't load: copy that full address and paste it into the terminal.
+   It signs in to Claude Code (your Claude plan) and Codex (your ChatGPT plan) in turn: open each printed link, approve, and paste back any code it asks for.
 
 4. Start zenbot:
 

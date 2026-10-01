@@ -8,7 +8,7 @@ cd "$REPO"
 export PATH="$HOME/.local/node/bin:$HOME/.cargo/bin:$PATH"
 
 echo "== build"
-(cd packages/mind && npm ci --no-audit --no-fund --silent)
+if grep -qE '^ZEN_WORKERS=.*pi' "$HOME/.zenbot/env" 2>/dev/null; then (cd packages/mind && npm ci --no-audit --no-fund --silent); fi
 BUILD_LOG=$(mktemp)
 if ! cargo build --release >"$BUILD_LOG" 2>&1; then
   grep -E '^(error|warning)|^\s+-->' -A6 "$BUILD_LOG" | head -80
@@ -19,8 +19,12 @@ rm -f "$BUILD_LOG"
 
 echo "== check"
 cargo test --release -q 2>&1 | tail -5 || { echo "TESTS FAILED"; exit 1; }
-PONG=$(echo '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}' | timeout 15 node packages/mind/src/main.ts 2>/dev/null | head -1 || true)
-echo "$PONG" | grep -q pong || { echo "CHECK FAILED: zen-mind did not answer ping"; exit 1; }
+PONG=$(echo '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}' | timeout 15 ./target/release/zen-engine 2>/dev/null | head -1 || true)
+echo "$PONG" | grep -q pong || { echo "CHECK FAILED: zen-engine did not answer ping"; exit 1; }
+if grep -qE '^ZEN_WORKERS=.*pi' "$HOME/.zenbot/env" 2>/dev/null; then
+  PONG=$(echo '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}' | timeout 15 node packages/mind/src/main.ts 2>/dev/null | head -1 || true)
+  echo "$PONG" | grep -q pong || { echo "CHECK FAILED: zen-mind (pi) did not answer ping"; exit 1; }
+fi
 ./target/release/zen --version >/dev/null
 
 echo "== schedule"

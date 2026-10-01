@@ -6,12 +6,13 @@ Status: design phase. See [SPEC.md](SPEC.md).
 
 ## Install
 
-Requirements: Linux with systemd, Docker, Rust, Node 22+.
+Requirements: Debian/Ubuntu with systemd and sudo. The installer adds Docker, Rust, Node, and the Claude Code and Codex CLIs. See [INSTALL.md](INSTALL.md).
+
+Models run on your existing subscriptions: Claude (Opus, Sonnet, Haiku) through the Claude Code CLI and GPT through Codex, with zenbot's own prompt, tools and history ([how](docs/worker-protocol.md)). Pi is available as an optional worker (`ZEN_WORKERS=engine,pi`).
 
 ```bash
-cd packages/mind && npm install && cd ../..
-mkdir -p ~/.zenbot && (cd ~/.zenbot && npx --prefix ../zenbot/packages/mind pi-ai login openai)   # Sign in with ChatGPT
-./scripts/install-service.sh   # builds, installs the systemd service (starts on boot), links `zen` into ~/.local/bin
+git clone https://github.com/Zegoverno/zenbot.git ~/zenbot && ~/zenbot/install.sh
+zen login      # signs in to Claude Code (Claude plan) and Codex (ChatGPT plan)
 zen status
 ```
 
@@ -25,7 +26,7 @@ Run `zen` for an interactive session in your terminal (inline, like Claude Code,
 zen              # new session
 zen -c           # continue the most recent session
 zen -r [id]      # resume a session (picker when no id)
-zen -m openai/gpt-6-sol
+zen -m codex/gpt-6-sol     # default is claude/opus
 ```
 
 Inside: `/new`, `/resume`, `/model`, `/rename <title>`, `/archive`, `/help`, `/exit`. Enter sends, Alt+Enter adds a line, Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.

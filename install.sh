@@ -34,14 +34,21 @@ fi
 export PATH="$NODE_DIR/bin:$PATH"
 grep -q '.local/node/bin' "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="$HOME/.local/bin:$HOME/.local/node/bin:$HOME/.cargo/bin:$PATH"' >> "$HOME/.bashrc"
 
+say "Model engines (Claude Code and Codex CLIs)"
+export PATH="$HOME/.local/bin:$PATH"
+if ! command -v claude >/dev/null; then curl -fsSL https://claude.ai/install.sh | bash >/dev/null; fi
+if ! command -v codex >/dev/null; then npm install -g --no-audit --no-fund --silent @openai/codex; fi
+
 say "Building zenbot (first build takes a few minutes)"
-(cd packages/mind && npm ci --no-audit --no-fund --silent)
+# Workers: `engine` (Claude Code + Codex on your subscriptions) and optionally `pi` (Pi agent loop).
+WORKERS="${ZEN_WORKERS:-engine}"
+if [[ ",$WORKERS," == *",pi,"* ]]; then (cd packages/mind && npm ci --no-audit --no-fund --silent); fi
 cargo build --release -q
 
 say "Installing"
 mkdir -p "$HOME/.zenbot/bin" "$HOME/.local/bin"
 chmod 700 "$HOME/.zenbot"
-install -m 755 target/release/zend target/release/zen "$HOME/.zenbot/bin/"
+install -m 755 target/release/zend target/release/zen target/release/zen-engine "$HOME/.zenbot/bin/"
 ln -sf "$HOME/.zenbot/bin/zen" "$HOME/.local/bin/zen"
 [ -f "$HOME/.zenbot/token" ] || head -c 24 /dev/urandom | base64 | tr -d '/+=' > "$HOME/.zenbot/token"
 chmod 600 "$HOME/.zenbot/token"
@@ -49,6 +56,7 @@ cat > "$HOME/.zenbot/env" <<ENV
 ZEN_TOKEN=$(cat "$HOME/.zenbot/token")
 ZEN_PORT=${ZEN_PORT:-8100}
 ZEN_REPO=$REPO
+ZEN_WORKERS=$WORKERS
 ZEN_MIND_DIR=$REPO/packages/mind
 HOME=$HOME
 PATH=$HOME/.local/bin:$NODE_DIR/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin
@@ -69,7 +77,5 @@ done
 curl -fs "http://127.0.0.1:${ZEN_PORT:-8100}/health" | grep -q '"ok":true' || { echo "zenbot did not become healthy; see: journalctl -u zenbot -n 50"; exit 1; }
 
 say "Done"
-if [ ! -f "$HOME/.zenbot/auth.json" ]; then
-  echo "Next: sign in to ChatGPT with   zen login"
-fi
+echo "Next: sign in to Claude and ChatGPT with   zen login"
 echo "Then run:   zen        (open a new shell first, or: export PATH=\$HOME/.local/bin:\$PATH)"

@@ -71,8 +71,11 @@ enum Cmd {
     Sessions(SessionsCmd),
     /// List available models
     Models,
-    /// Sign in to ChatGPT (opens a browser link; paste the final redirect URL back here)
-    Login,
+    /// Sign in to the model engines: Claude Code and Codex (default), or one of: claude, codex, pi
+    Login {
+        /// Which engine to sign in to (default: every engine that isn't signed in yet)
+        which: Option<String>,
+    },
     /// Check that the kernel, database, worker and model sign-in are healthy
     Status,
 }
@@ -143,7 +146,7 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
                                 }
                                 streamed = false;
                                 let u = &m["usage"];
-                                turn.input_tokens += u["input"].as_i64().unwrap_or(0);
+                                turn.input_tokens += u["input"].as_i64().unwrap_or(0) + u["cacheRead"].as_i64().unwrap_or(0) + u["cacheWrite"].as_i64().unwrap_or(0);
                                 turn.output_tokens += u["output"].as_i64().unwrap_or(0);
                                 turn.cost += u["cost"]["total"].as_f64().unwrap_or(0.0);
                                 turn.model = m["model"].as_str().unwrap_or("").to_string();
@@ -169,6 +172,11 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
                             t["ms"] = ev["ms"].clone();
                         }
                         if show_tools && ev["is_error"] == true { eprintln!("{}", dim("    (failed)")); }
+                    }
+                    "usage" if started => {
+                        turn.input_tokens += ev["input"].as_i64().unwrap_or(0);
+                        turn.output_tokens += ev["output"].as_i64().unwrap_or(0);
+                        turn.cost += ev["cost"].as_f64().unwrap_or(0.0);
                     }
                     "end" if started => {
                         if let Some(e) = ev["error"].as_str() { turn.error = Some(e.to_string()); }
@@ -197,14 +205,28 @@ fn turn_json(session: &str, t: &Turn) -> Value {
     })
 }
 
-fn read_prompt(prompt: Option<String>) -> Result<String> {
-    let piped = if !std::io::stdin().is_terminal() {
+/// Read piped stdin. With a prompt argument, stdin is optional: if nothing arrives quickly
+/// (e.g. an open but idle pipe), carry on without it instead of blocking.
+fn read_stdin(optional: bool) -> String {
+    if std::io::stdin().is_terminal() {
+        return String::new();
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut s = String::new();
-        std::io::stdin().read_to_string(&mut s)?;
-        s
+        let _ = std::io::stdin().read_to_string(&mut s);
+        let _ = tx.send(s);
+    });
+    if optional {
+        rx.recv_timeout(std::time::Duration::from_millis(300)).unwrap_or_default()
     } else {
-        String::new()
-    };
+        rx.recv().unwrap_or_default()
+    }
+}
+
+fn read_prompt(prompt: Option<String>) -> Result<String> {
+    let needs_stdin = matches!(prompt.as_deref(), None | Some("-"));
+    let piped = read_stdin(!needs_stdin);
     let text = match prompt.as_deref() {
         None | Some("-") => piped,
         Some(p) if piped.trim().is_empty() => p.to_string(),
@@ -283,27 +305,70 @@ fn zen_env() -> std::collections::HashMap<String, String> {
         .collect()
 }
 
-fn login() -> Result<()> {
-    let home = std::env::var("HOME").context("HOME not set")?;
-    let env = zen_env();
-    let mind = std::env::var("ZEN_MIND_DIR").ok().or_else(|| env.get("ZEN_MIND_DIR").cloned()).unwrap_or(format!("{home}/zenbot/packages/mind"));
-    let path = format!("{}:{}", env.get("PATH").cloned().unwrap_or_default(), std::env::var("PATH").unwrap_or_default());
-    let cli = format!("{mind}/node_modules/@earendil-works/pi-ai/dist/cli.js");
-    if !std::path::Path::new(&cli).exists() {
-        bail!("can't find the sign-in tool at {cli}; run the installer first");
+fn zen_path() -> String {
+    format!("{}:{}", zen_env().get("PATH").cloned().unwrap_or_default(), std::env::var("PATH").unwrap_or_default())
+}
+
+fn signed_in(engine: &str) -> bool {
+    let run = |cmd: &str, args: &[&str]| std::process::Command::new(cmd).args(args).env("PATH", zen_path()).output().ok();
+    match engine {
+        "claude" => run("claude", &["auth", "status"]).is_some_and(|o| String::from_utf8_lossy(&o.stdout).contains("\"loggedIn\": true")),
+        "codex" => run("codex", &["login", "status"]).is_some_and(|o| o.status.success()),
+        _ => false,
     }
-    let dir = format!("{home}/.zenbot");
-    std::fs::create_dir_all(&dir)?;
-    eprintln!("Signing in to ChatGPT. Open the link below in your browser and approve.");
-    eprintln!("Your browser then lands on a 127.0.0.1 page that won't load; copy that full address and paste it here.\n");
-    let status = std::process::Command::new("node").arg(&cli).args(["login", "openai"]).current_dir(&dir).env("PATH", path).status().context("running node")?;
+}
+
+fn run_login(cmd: &str, args: &[&str], dir: Option<&str>) -> Result<()> {
+    let mut c = std::process::Command::new(cmd);
+    c.args(args).env("PATH", zen_path());
+    if let Some(d) = dir {
+        c.current_dir(d);
+    }
+    let status = c.status().with_context(|| format!("running {cmd} (is it installed?)"))?;
     if !status.success() {
-        bail!("sign-in failed");
+        bail!("{cmd} sign-in failed");
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(format!("{dir}/auth.json"), std::fs::Permissions::from_mode(0o600));
+    Ok(())
+}
+
+fn login(which: Option<&str>) -> Result<()> {
+    let home = std::env::var("HOME").context("HOME not set")?;
+    let targets: Vec<&str> = match which {
+        Some(w) => vec![w],
+        None => ["claude", "codex"].into_iter().filter(|e| !signed_in(e)).collect(),
+    };
+    if targets.is_empty() {
+        eprintln!("Claude Code and Codex are both signed in. (Use `zen login pi` for Pi's direct ChatGPT sign-in.)");
+        return Ok(());
+    }
+    for t in targets {
+        match t {
+            "claude" => {
+                eprintln!("\n== Claude (your Claude subscription)\nOpen the link, approve, and paste the code back here if asked.\n");
+                run_login("claude", &["auth", "login", "--claudeai"], None)?;
+            }
+            "codex" => {
+                eprintln!("\n== Codex (your ChatGPT subscription)\nOpen the link and enter the code shown.\n");
+                run_login("codex", &["login", "--device-auth"], None)?;
+            }
+            "pi" => {
+                let mind = std::env::var("ZEN_MIND_DIR").ok().or_else(|| zen_env().get("ZEN_MIND_DIR").cloned()).unwrap_or(format!("{home}/zenbot/packages/mind"));
+                let cli = format!("{mind}/node_modules/@earendil-works/pi-ai/dist/cli.js");
+                if !std::path::Path::new(&cli).exists() {
+                    bail!("Pi isn't installed; install with ZEN_WORKERS=engine,pi ./install.sh");
+                }
+                let dir = format!("{home}/.zenbot");
+                std::fs::create_dir_all(&dir)?;
+                eprintln!("\n== Pi (direct ChatGPT sign-in)\nOpen the link and approve. Your browser then lands on a 127.0.0.1 page that won't load; copy that full address and paste it here.\n");
+                run_login("node", &[&cli, "login", "openai"], Some(&dir))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(format!("{dir}/auth.json"), std::fs::Permissions::from_mode(0o600));
+                }
+            }
+            other => bail!("unknown engine `{other}`; use claude, codex or pi"),
+        }
     }
     eprintln!("\nSigned in. Run `zen` to start.");
     Ok(())
@@ -356,8 +421,8 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    if matches!(cli.cmd, Some(Cmd::Login)) {
-        return login();
+    if let Some(Cmd::Login { which }) = &cli.cmd {
+        return login(which.as_deref());
     }
     let c = Client::new(cli.url, cli.token)?;
     let out = |v: &Value| println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
@@ -384,7 +449,7 @@ async fn run(cli: Cli) -> Result<()> {
                 chat(&c, session, model).await?
             }
         }
-        Cmd::Login => login()?,
+        Cmd::Login { .. } => unreachable!(),
         Cmd::Models => {
             let m = c.get("/api/models").await?;
             if cli.json {
@@ -399,9 +464,11 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Status => {
             let health: Value = reqwest::get(format!("{}/health", c.url)).await.with_context(|| format!("cannot reach zenbot at {}", c.url))?.json().await?;
             let models = c.get("/api/models").await?;
+            let any_signed_in = models["authenticated"].as_object().is_some_and(|a| a.values().any(|v| v == true));
             let status = json!({
                 "url": c.url,
-                "ok": health["ok"] == true && models["authenticated"]["openai"] == true,
+                "ok": health["ok"] == true && any_signed_in,
+                "workers": health["workers"],
                 "kernel": true,
                 "database": health["db"],
                 "worker": health["mind"],
@@ -414,8 +481,12 @@ async fn run(cli: Cli) -> Result<()> {
                 let mark = |b: bool| if b { "ok" } else { "FAIL" };
                 println!("kernel    {}  ({})", mark(true), c.url);
                 println!("database  {}", mark(health["db"] == true));
-                println!("worker    {}", mark(health["mind"] == true));
-                println!("chatgpt   {}", if models["authenticated"]["openai"] == true { "signed in" } else { "NOT signed in" });
+                for (name, ok) in health["workers"].as_object().into_iter().flatten() {
+                    println!("{:<9} {}", format!("worker:{name}"), mark(*ok == true));
+                }
+                for (name, ok) in models["authenticated"].as_object().into_iter().flatten() {
+                    println!("{:<9} {}", name, if *ok == true { "signed in" } else { "NOT signed in" });
+                }
                 println!("model     {}", models["default"].as_str().unwrap_or(""));
             }
             if status["ok"] != true {

@@ -18,9 +18,11 @@ for _ in $(seq 1 900); do
   sleep 2
 done
 
-cp -f "$BIN/zend" "$BIN/zend.prev" && cp -f "$BIN/zen" "$BIN/zen.prev"
-install -m 755 "$REPO/target/release/zend" "$BIN/zend.new" && mv -f "$BIN/zend.new" "$BIN/zend"
-install -m 755 "$REPO/target/release/zen" "$BIN/zen.new" && mv -f "$BIN/zen.new" "$BIN/zen"
+BINS="zend zen zen-engine"
+for b in $BINS; do
+  [ -f "$BIN/$b" ] && cp -f "$BIN/$b" "$BIN/$b.prev"
+  install -m 755 "$REPO/target/release/$b" "$BIN/$b.new" && mv -f "$BIN/$b.new" "$BIN/$b"
+done
 sudo systemctl restart zenbot
 
 if wait_healthy; then
@@ -31,7 +33,7 @@ fi
 
 log "upgrade FAILED health check; rolling back. Last service logs:"
 journalctl -u zenbot -n 30 --no-pager >> "$LOG" 2>&1
-mv -f "$BIN/zend.prev" "$BIN/zend" && mv -f "$BIN/zen.prev" "$BIN/zen"
+for b in $BINS; do [ -f "$BIN/$b.prev" ] && mv -f "$BIN/$b.prev" "$BIN/$b"; done
 sudo systemctl restart zenbot
 if wait_healthy; then log "rolled back to previous version"; else log "ROLLBACK ALSO UNHEALTHY: check journalctl -u zenbot"; fi
 exit 1

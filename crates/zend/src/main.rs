@@ -26,9 +26,19 @@ use uuid::Uuid;
 
 use mind::{Incoming, Mind};
 
+/// A worker process speaking the worker protocol (docs/worker-protocol.md).
+struct Worker {
+    name: String,
+    mind: Arc<Mind>,
+}
+
 struct App {
     db: PgPool,
-    mind: Arc<Mind>,
+    workers: Vec<Worker>,
+    /// model id -> index into `workers`
+    routes: Mutex<HashMap<String, usize>>,
+    /// session -> worker running its current turn
+    turn_worker: Mutex<HashMap<Uuid, usize>>,
     token: String,
     workspace: PathBuf,
     repo: String,
@@ -83,18 +93,40 @@ async fn main() -> Result<()> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     let workspace = PathBuf::from(std::env::var("ZEN_WORKSPACE").unwrap_or_else(|_| home.clone()));
     let repo = std::env::var("ZEN_REPO").unwrap_or_else(|_| format!("{home}/zenbot"));
-    let mind_cmd = std::env::var("ZEN_MIND_CMD").unwrap_or_else(|_| "node src/main.ts".into());
-    let mind_dir = std::env::var("ZEN_MIND_DIR").unwrap_or_else(|_| "packages/mind".into());
-    let default_model = std::env::var("ZEN_DEFAULT_MODEL").unwrap_or_else(|_| "openai/gpt-6.1-sol".into());
+    let default_model = std::env::var("ZEN_DEFAULT_MODEL").unwrap_or_else(|_| "claude/opus".into());
 
     tokio::fs::create_dir_all(&workspace).await?;
     let db = PgPoolOptions::new().max_connections(10).connect(&database_url).await?;
     sqlx::migrate!("./migrations").run(&db).await?;
 
-    let (mind, incoming) = Mind::spawn(&mind_cmd, &mind_dir).await?;
+    let (merged_tx, incoming) = tokio::sync::mpsc::unbounded_channel();
+    let mut workers = Vec::new();
+    for (name, cmd, dir) in worker_configs() {
+        match Mind::spawn(&cmd, &dir).await {
+            Ok((mind, mut rx)) => {
+                let idx = workers.len();
+                let tx = merged_tx.clone();
+                tokio::spawn(async move {
+                    while let Some(msg) = rx.recv().await {
+                        if tx.send((idx, msg)).is_err() {
+                            break;
+                        }
+                    }
+                });
+                tracing::info!("worker `{name}` started: {cmd}");
+                workers.push(Worker { name, mind });
+            }
+            Err(e) => tracing::error!("worker `{name}` failed to start: {e:#}"),
+        }
+    }
+    if workers.is_empty() {
+        anyhow::bail!("no workers could be started; check ZEN_WORKERS");
+    }
     let app: AppState = Arc::new(App {
         db,
-        mind,
+        workers,
+        routes: Mutex::new(HashMap::new()),
+        turn_worker: Mutex::new(HashMap::new()),
         token,
         workspace,
         repo,
@@ -121,6 +153,33 @@ async fn main() -> Result<()> {
     tracing::info!("zend listening on :{port}");
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+/// Workers to run, from ZEN_WORKERS (default: `engine`, plus `pi` when it's installed).
+/// - engine: zen-engine (Claude Code + Codex CLIs on the owner's subscriptions)
+/// - pi:     zen-mind (Pi agent loop; direct ChatGPT sign-in and API providers)
+fn worker_configs() -> Vec<(String, String, String)> {
+    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_default();
+    let mind_dir = std::env::var("ZEN_MIND_DIR").unwrap_or_else(|_| "packages/mind".into());
+    let pi_installed = std::path::Path::new(&mind_dir).join("node_modules").exists();
+    let default = if pi_installed { "engine,pi" } else { "engine" };
+    std::env::var("ZEN_WORKERS")
+        .unwrap_or_else(|_| default.into())
+        .split(',')
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(|name| match name {
+            "engine" => {
+                let cmd = std::env::var("ZEN_ENGINE_CMD").unwrap_or_else(|_| exe_dir.join("zen-engine").display().to_string());
+                (name.to_string(), cmd, ".".to_string())
+            }
+            "pi" => (name.to_string(), std::env::var("ZEN_MIND_CMD").unwrap_or_else(|_| "node src/main.ts".into()), mind_dir.clone()),
+            other => {
+                let var = format!("ZEN_WORKER_{}_CMD", other.to_uppercase());
+                (other.to_string(), std::env::var(&var).unwrap_or_else(|_| other.to_string()), ".".to_string())
+            }
+        })
+        .collect()
 }
 
 // ---------- auth ----------
@@ -152,26 +211,63 @@ async fn index() -> Html<&'static str> {
 
 async fn health(State(app): State<AppState>) -> Json<Value> {
     let db = sqlx::query("SELECT 1").execute(&app.db).await.is_ok();
-    let mind = app.mind.request("ping", json!({})).await.is_ok();
+    let mut workers = serde_json::Map::new();
+    for w in &app.workers {
+        workers.insert(w.name.clone(), json!(w.mind.request("ping", json!({})).await.is_ok()));
+    }
+    let mind = workers.values().all(|v| v == true);
     let busy = app.busy.lock().await.len();
-    Json(json!({ "ok": db && mind, "db": db, "mind": mind, "busy": busy, "version": env!("CARGO_PKG_VERSION") }))
+    Json(json!({ "ok": db && mind, "db": db, "mind": mind, "workers": workers, "busy": busy, "version": env!("CARGO_PKG_VERSION") }))
 }
 
-/// Models offered in the UI, in order. Only those verified to work with the configured sign-ins.
-const DEFAULT_MODELS: &str = "openai/gpt-6.1-sol,openai/gpt-6-sol,openai/gpt-6-luna,openai/gpt-6-astra,openai/gpt-5.5";
+/// Models offered, in order of preference. Engines' models come first; Pi's direct models after.
+const DEFAULT_MODELS: &str = "claude/opus,claude/sonnet,claude/haiku,codex/gpt-6-sol,codex/gpt-6-astra,codex/gpt-6-luna,codex/gpt-5.5,\
+openai/gpt-6.1-sol,openai/gpt-6-sol,openai/gpt-6-luna,openai/gpt-6-astra,openai/gpt-5.5";
 
-async fn list_models(State(app): State<AppState>) -> ApiResult<Json<Value>> {
-    let mut res = app.mind.request("models.list", json!({})).await?;
+/// Ask every worker for its models, refresh routing, and return the curated list.
+async fn collect_models(app: &App) -> Value {
+    let mut all: Vec<(usize, Value)> = Vec::new();
+    let mut authenticated = serde_json::Map::new();
+    for (i, w) in app.workers.iter().enumerate() {
+        let Ok(res) = w.mind.request("models.list", json!({})).await else { continue };
+        if let Some(a) = res["authenticated"].as_object() {
+            authenticated.extend(a.clone());
+        }
+        all.extend(res["models"].as_array().into_iter().flatten().map(|m| (i, m.clone())));
+    }
+    let mut routes = app.routes.lock().await;
+    for (i, m) in &all {
+        if let Some(id) = m["id"].as_str() {
+            routes.entry(id.to_string()).or_insert(*i);
+        }
+    }
+    drop(routes);
     let wanted = std::env::var("ZEN_MODELS").unwrap_or_else(|_| DEFAULT_MODELS.into());
-    let all = res["models"].as_array().cloned().unwrap_or_default();
     let mut curated: Vec<Value> = wanted
         .split(',')
-        .filter_map(|id| all.iter().find(|m| m["id"] == id.trim()).cloned())
+        .filter_map(|id| all.iter().find(|(_, m)| m["id"] == id.trim()).map(|(_, m)| m.clone()))
         .collect();
-    curated.extend(all.iter().filter(|m| m["id"].as_str().is_some_and(|id| id.starts_with("faux/"))).cloned());
-    res["models"] = Value::Array(curated);
-    res["default"] = json!(app.default_model);
-    Ok(Json(res))
+    curated.extend(all.iter().filter(|(_, m)| m["id"].as_str().is_some_and(|id| id.starts_with("faux/"))).map(|(_, m)| m.clone()));
+    let default = if curated.iter().any(|m| m["id"] == app.default_model.as_str()) {
+        app.default_model.clone()
+    } else {
+        curated.first().and_then(|m| m["id"].as_str()).unwrap_or(&app.default_model).to_string()
+    };
+    json!({ "models": curated, "authenticated": authenticated, "default": default,
+            "workers": app.workers.iter().map(|w| w.name.clone()).collect::<Vec<_>>() })
+}
+
+async fn list_models(State(app): State<AppState>) -> ApiResult<Json<Value>> {
+    Ok(Json(collect_models(&app).await))
+}
+
+/// The worker that serves a model (refreshing routes once if it's unknown).
+async fn worker_for(app: &App, model: &str) -> Option<usize> {
+    if let Some(i) = app.routes.lock().await.get(model) {
+        return Some(*i);
+    }
+    collect_models(app).await;
+    app.routes.lock().await.get(model).copied()
 }
 
 #[derive(Deserialize)]
@@ -337,7 +433,10 @@ async fn handle_socket(app: AppState, id: Uuid, socket: WebSocket) {
                 }
             }
             Some("abort") => {
-                let _ = app.mind.request("turn.abort", json!({ "session_id": id })).await;
+                let worker = app.turn_worker.lock().await.get(&id).copied();
+                if let Some(w) = worker.and_then(|i| app.workers.get(i)) {
+                    let _ = w.mind.request("turn.abort", json!({ "session_id": id })).await;
+                }
             }
             _ => {}
         }
@@ -384,7 +483,12 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
     }
     app.emit(id, json!({ "type": "message", "message": user })).await;
 
-    let res = app
+    let Some(widx) = worker_for(app, &model).await else {
+        app.busy.lock().await.remove(&id);
+        anyhow::bail!("no worker serves model `{model}`; pick another with /model");
+    };
+    app.turn_worker.lock().await.insert(id, widx);
+    let res = app.workers[widx]
         .mind
         .request(
             "turn.start",
@@ -408,18 +512,18 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
 
 // ---------- events from the worker ----------
 
-async fn dispatch(app: AppState, mut incoming: tokio::sync::mpsc::UnboundedReceiver<Incoming>) {
+async fn dispatch(app: AppState, mut incoming: tokio::sync::mpsc::UnboundedReceiver<(usize, Incoming)>) {
     // Notifications are handled in arrival order so streams and the tape stay ordered.
     // Tool calls run concurrently; the worker already emitted the assistant message that requested them.
-    while let Some(msg) = incoming.recv().await {
+    while let Some((worker, msg)) = incoming.recv().await {
         if msg.method == "tool.call" {
             let app = app.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle_incoming(&app, msg).await {
+                if let Err(e) = handle_incoming(&app, worker, msg).await {
                     tracing::error!("handling tool call: {e:#}");
                 }
             });
-        } else if let Err(e) = handle_incoming(&app, msg).await {
+        } else if let Err(e) = handle_incoming(&app, worker, msg).await {
             tracing::error!("handling mind message: {e:#}");
         }
     }
@@ -429,7 +533,8 @@ fn session_id(params: &Value) -> Result<Uuid> {
     Ok(params.get("session_id").and_then(Value::as_str).unwrap_or_default().parse()?)
 }
 
-async fn handle_incoming(app: &AppState, msg: Incoming) -> Result<()> {
+async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming) -> Result<()> {
+    let mind = &app.workers[worker].mind;
     let p = &msg.params;
     match msg.method.as_str() {
         "tool.call" => {
@@ -456,7 +561,7 @@ async fn handle_incoming(app: &AppState, msg: Incoming) -> Result<()> {
             .await?;
             app.emit(id, json!({ "type": "tool_end", "call_id": call_id, "is_error": out.is_error, "ms": ms })).await;
             if let Some(req_id) = msg.id {
-                app.mind.respond(req_id, json!({ "content": out.content, "is_error": out.is_error })).await?;
+                mind.respond(req_id, json!({ "content": out.content, "is_error": out.is_error })).await?;
             }
         }
         "turn.delta" | "turn.thinking" => {
@@ -489,9 +594,30 @@ async fn handle_incoming(app: &AppState, msg: Incoming) -> Result<()> {
             }
             app.emit(id, json!({ "type": "message", "message": message })).await;
         }
+        "turn.usage" => {
+            // Turn-level usage from engines that report it per turn (tokens and/or API-equivalent cost).
+            let id = session_id(p)?;
+            let n = |k: &str| p.get(k).and_then(Value::as_i64).unwrap_or(0);
+            sqlx::query(
+                "INSERT INTO model_calls (session_id, provider, model, input_tokens, output_tokens, cache_read, cache_write, cost_usd, stop_reason)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'turn')",
+            )
+            .bind(id)
+            .bind(p["provider"].as_str().unwrap_or(""))
+            .bind(p["model"].as_str().unwrap_or(""))
+            .bind(n("input"))
+            .bind(n("output"))
+            .bind(n("cache_read"))
+            .bind(n("cache_write"))
+            .bind(p["cost_usd"].as_f64().unwrap_or(0.0))
+            .execute(&app.db)
+            .await?;
+            app.emit(id, json!({ "type": "usage", "input": n("input"), "output": n("output"), "cost": p["cost_usd"] })).await;
+        }
         "turn.end" => {
             let id = session_id(p)?;
             app.busy.lock().await.remove(&id);
+            app.turn_worker.lock().await.remove(&id);
             let cost: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(cost_usd), 0) FROM model_calls WHERE session_id = $1")
                 .bind(id)
                 .fetch_one(&app.db)
@@ -501,7 +627,7 @@ async fn handle_incoming(app: &AppState, msg: Incoming) -> Result<()> {
         other => {
             tracing::warn!("unknown method from mind: {other}");
             if let Some(req_id) = msg.id {
-                app.mind.respond(req_id, json!({ "content": format!("unknown method {other}"), "is_error": true })).await?;
+                mind.respond(req_id, json!({ "content": format!("unknown method {other}"), "is_error": true })).await?;
             }
         }
     }

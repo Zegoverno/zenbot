@@ -239,7 +239,8 @@ Threats: prompt injection via web/email/docs, secret exfiltration, destructive c
 | Process | Language | Responsibility |
 |---|---|---|
 | `zend` | Rust (axum, sqlx, tokio) | Always-on kernel; owns state and side effects; single binary |
-| `zen-mind` | TypeScript (Node) | Stateless model worker; Pi loop + providers; every tool call goes back to `zend` |
+| `zen-engine` | Rust | Default worker: runs turns on the Claude Code CLI and `codex app-server` (owner's subscriptions) with their own tools off, zenbot's prompt, tools and replayed history |
+| `zen-mind` | TypeScript (Node) | Optional worker (`pi`): Pi loop, direct ChatGPT sign-in and API providers |
 | `web` | TypeScript | UI, served by `zend` |
 | `postgres` | — | 16+ with pgvector; local in compose, movable via `DATABASE_URL` |
 | sandboxes | — | Where agent commands and code run |
@@ -345,4 +346,6 @@ Rules: each milestone is used on a real side project (the **pilot project**) the
 | 2026-09-30 | Existing Claude and ChatGPT subscriptions via supported paths; small capped API budget for S1 and embeddings. |
 | 2026-09-30 | Channels: web UI first, Matrix later. |
 | 2026-09-30 | Knowledge: our own take, borrowing from LLM Wiki; open-source capture module replaces Readwise later. |
+| 2026-10-01 | Interface: `zen` single Rust binary with a Claude Code/Codex/Pi-style terminal app plus script commands; web UI frozen. zen is used directly, not called from other agents. |
+| 2026-10-01 | Engines: the worker is swappable behind `docs/worker-protocol.md`. Default worker `zen-engine` (Rust) drives the official Claude Code and Codex CLIs on the owner's subscriptions the way qm does: built-in tools off, zenbot's tools over MCP / dynamic tools, zenbot's system prompt, no engine-side sessions (history replayed from the tape). Pi stays available as the optional `pi` worker. The kernel routes models to workers. |
 | 2026-09-30 | **v0.2:** three layers (Engine / Mind / Work); Mind and Work built first as services exposed over MCP; taste as its own module; zen-bench from M4; inbox; taint-based trust model; roadmap reordered. |
