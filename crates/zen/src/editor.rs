@@ -32,6 +32,11 @@ impl Editor {
         self.cursor = self.buf.len();
     }
 
+    /// True while the buffer shows an unedited prompt recalled from history.
+    pub fn browsing_history(&self) -> bool {
+        self.hist_idx.is_some_and(|i| self.history.get(i) == Some(&self.buf))
+    }
+
     pub fn clear(&mut self) {
         self.set("");
         self.hist_idx = None;
@@ -217,5 +222,26 @@ impl Editor {
             offset += logical.len() + 1;
         }
         (lines, caret_row, caret_col.min(width - 1))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browsing_history_until_edited() {
+        let mut e = Editor::new(None);
+        e.history = vec!["hello".into(), "/status".into(), "last".into()];
+        assert!(!e.browsing_history());
+        e.up();
+        e.up();
+        assert_eq!(e.buf, "/status");
+        assert!(e.browsing_history());
+        e.up();
+        assert_eq!(e.buf, "hello");
+        e.down();
+        e.set("/stat");
+        assert!(!e.browsing_history());
     }
 }

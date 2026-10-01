@@ -641,7 +641,10 @@ impl App {
         let menu = self.menu();
         if !menu.is_empty() && !ctrl && !alt && !shift {
             let sel = self.menu_sel.min(menu.len() - 1);
+            // A recalled `/command` from history keeps ↑↓ for history, so you can step past it.
+            let browsing = self.editor.browsing_history();
             match k.code {
+                KeyCode::Up | KeyCode::Down if browsing => {}
                 KeyCode::Up => {
                     self.menu_sel = sel.checked_sub(1).unwrap_or(menu.len() - 1);
                     return Ok(());
