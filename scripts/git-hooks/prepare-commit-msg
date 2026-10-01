@@ -1,0 +1,10 @@
+#!/bin/sh
+# Link commits made by zen to the session that made them. The kernel sets ZEN_SESSION_ID and
+# ZEN_MODEL for every command it runs; commits made by hand are left alone.
+# Enabled by install.sh / upgrade.sh: git config core.hooksPath scripts/git-hooks
+[ -n "$ZEN_SESSION_ID" ] || exit 0
+case "$2" in merge|squash) exit 0 ;; esac
+git interpret-trailers --in-place --if-exists addIfDifferent \
+  --trailer "Zen-Session: $ZEN_SESSION_ID" \
+  --trailer "Co-Authored-By: zen (${ZEN_MODEL:-unknown model}) <zen@localhost>" \
+  "$1"

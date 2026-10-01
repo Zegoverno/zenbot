@@ -322,6 +322,18 @@ fn zen_path() -> String {
     format!("{}:{}", zen_env().get("PATH").cloned().unwrap_or_default(), std::env::var("PATH").unwrap_or_default())
 }
 
+/// "Name <email>" that commits in the zenbot checkout will carry, if git has one configured.
+fn git_identity() -> Option<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let repo = zen_env().get("ZEN_REPO").cloned().unwrap_or(format!("{home}/zenbot"));
+    let get = |key: &str| {
+        let out = std::process::Command::new("git").args(["-C", &repo, "config", key]).output().ok()?;
+        let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!v.is_empty()).then_some(v)
+    };
+    Some(format!("{} <{}>", get("user.name")?, get("user.email")?))
+}
+
 fn signed_in(engine: &str) -> bool {
     let run = |cmd: &str, args: &[&str]| std::process::Command::new(cmd).args(args).env("PATH", zen_path()).output().ok();
     match engine {
@@ -499,7 +511,9 @@ async fn run(cli: Cli) -> Result<()> {
             let models = c.get("/api/models").await?;
             let any_signed_in = models["authenticated"].as_object().is_some_and(|a| a.values().any(|v| v == true));
             let version = c.get("/api/version").await.unwrap_or(Value::Null);
+            let git_identity = git_identity();
             let status = json!({
+                "git_identity": git_identity,
                 "commit": health["commit"],
                 "update": version,
                 "url": c.url,
@@ -524,6 +538,10 @@ async fn run(cli: Cli) -> Result<()> {
                     println!("{:<9} {}", name, if *ok == true { "signed in" } else { "NOT signed in" });
                 }
                 println!("model     {}", models["default"].as_str().unwrap_or(""));
+                match &git_identity {
+                    Some(id) => println!("git       {id}"),
+                    None => println!("git       no identity: zen's commits get a placeholder author (git config --global user.name/user.email)"),
+                }
                 let commit = health["commit"].as_str().filter(|c| !c.is_empty()).unwrap_or("unknown");
                 match (version["available"].as_bool(), version["latest"].as_str()) {
                     (Some(true), Some(latest)) => println!(

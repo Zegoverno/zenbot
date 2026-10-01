@@ -92,6 +92,12 @@ for _ in $(seq 1 60); do
 done
 curl -fs "http://127.0.0.1:${ZEN_PORT:-8100}/health" | grep -q '"ok":true' || { echo "zenbot did not become healthy; see: journalctl -u zenbot -n 50"; exit 1; }
 
+git -C "$REPO" config core.hooksPath scripts/git-hooks # commit trailers linking zen's commits to sessions
+
 say "Done"
+if [ -z "$(git -C "$REPO" config user.name)" ] || [ -z "$(git -C "$REPO" config user.email)" ]; then
+  echo "Note: git has no identity, so commits zen makes will show a placeholder author. Set yours:"
+  echo "  git config --global user.name \"Your Name\" && git config --global user.email you@example.com"
+fi
 echo "Next: sign in to Claude and ChatGPT with   zen login"
 echo "Then run:   zen        (open a new shell first, or: export PATH=\$HOME/.local/bin:\$PATH)"
