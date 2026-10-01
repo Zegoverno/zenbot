@@ -16,7 +16,7 @@ zen login      # signs in to Claude Code (Claude plan) and Codex (ChatGPT plan)
 zen status
 ```
 
-Update with `cd ~/zenbot && git pull && ./scripts/upgrade.sh` (see [INSTALL.md](INSTALL.md#updating)).
+Update with `zen upgrade` (or `/upgrade` inside zen); zen tells you when a new version is on GitHub (see [INSTALL.md](INSTALL.md#updating)).
 
 For development without the service: `./scripts/dev.sh` (`ZEN_FAUX=1` adds `faux/smoke`, a scripted test model; see [docs/worker-protocol.md](docs/worker-protocol.md#testing-without-a-model)).
 
@@ -33,7 +33,7 @@ zen -r [id]      # resume a session (picker when no id)
 zen -m codex/gpt-6-sol     # default is claude/opus
 ```
 
-Inside: `/new`, `/resume`, `/model`, `/rename <title>`, `/archive`, `/help`, `/exit`. Enter sends, Alt+Enter adds a line, Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
+Inside: `/new`, `/resume`, `/model`, `/rename <title>`, `/archive`, `/upgrade`, `/help`, `/exit`. Enter sends, Alt+Enter adds a line, Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
 
 For scripts, every command accepts `--json` and exits non-zero on failure:
 
@@ -44,6 +44,7 @@ zen ask -s 3f2a "And now fix it"                  # continue a session (id or pr
 zen sessions ls | show <id> | new | archive <id> | restore <id> | rename <id> <title>
 zen models
 zen status
+zen upgrade [--check]
 ```
 
 ## Web UI (on hold)

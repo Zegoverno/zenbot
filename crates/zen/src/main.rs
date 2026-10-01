@@ -8,7 +8,7 @@ mod tui;
 
 use std::io::{IsTerminal, Read, Write};
 
-use client::{dim, short, tool_summary, Client, Ws};
+use client::{describe_update, dim, short, tool_summary, Client, Ws};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -78,6 +78,12 @@ enum Cmd {
     },
     /// Check that the kernel, database, worker and model sign-in are healthy
     Status,
+    /// Update zenbot to the latest version on GitHub (main) and restart it
+    Upgrade {
+        /// Only check whether an update is available
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -465,11 +471,34 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
+        Cmd::Upgrade { check } => {
+            if check {
+                let v = c.get("/api/version?refresh=true").await?;
+                if cli.json {
+                    out(&v);
+                } else {
+                    println!("{}", describe_update(&v));
+                    for x in v["commits"].as_array().into_iter().flatten() {
+                        println!("  · {}", x.as_str().unwrap_or(""));
+                    }
+                }
+            } else {
+                let msg = c.upgrade(|l| eprintln!("{}", dim(&l))).await?;
+                if cli.json {
+                    out(&json!({ "ok": true, "message": msg }));
+                } else {
+                    println!("{msg}");
+                }
+            }
+        }
         Cmd::Status => {
             let health: Value = reqwest::get(format!("{}/health", c.url)).await.with_context(|| format!("cannot reach zenbot at {}", c.url))?.json().await?;
             let models = c.get("/api/models").await?;
             let any_signed_in = models["authenticated"].as_object().is_some_and(|a| a.values().any(|v| v == true));
+            let version = c.get("/api/version").await.unwrap_or(Value::Null);
             let status = json!({
+                "commit": health["commit"],
+                "update": version,
                 "url": c.url,
                 "ok": health["ok"] == true && any_signed_in,
                 "workers": health["workers"],
@@ -492,6 +521,16 @@ async fn run(cli: Cli) -> Result<()> {
                     println!("{:<9} {}", name, if *ok == true { "signed in" } else { "NOT signed in" });
                 }
                 println!("model     {}", models["default"].as_str().unwrap_or(""));
+                let commit = health["commit"].as_str().filter(|c| !c.is_empty()).unwrap_or("unknown");
+                match (version["available"].as_bool(), version["latest"].as_str()) {
+                    (Some(true), Some(latest)) => println!(
+                        "version   {commit}  (update available: {latest}, {} new commit{}; run `zen upgrade`)",
+                        version["behind"],
+                        if version["behind"] == 1 { "" } else { "s" }
+                    ),
+                    (Some(false), _) => println!("version   {commit}  (up to date)"),
+                    _ => println!("version   {commit}"),
+                }
             }
             if status["ok"] != true {
                 std::process::exit(1);

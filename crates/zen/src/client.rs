@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::io::IsTerminal;
 
+#[derive(Clone)]
 pub struct Client {
     pub http: reqwest::Client,
     pub url: String,
@@ -72,6 +73,83 @@ impl Client {
         let ws_url = format!("{}/api/sessions/{id}/ws?token={}", self.url.replacen("http", "ws", 1), self.token);
         let (ws, _) = tokio_tungstenite::connect_async(ws_url).await.context("opening session stream")?;
         Ok(ws)
+    }
+}
+
+/// One line summarizing a version check (GET /api/version).
+pub fn describe_update(v: &Value) -> String {
+    if let Some(e) = v["error"].as_str() {
+        return format!("zenbot {} · could not check for updates: {e}", v["running"].as_str().unwrap_or("?"));
+    }
+    if v["available"] == true {
+        let how = if v["prebuilt_ready"] == true { "prebuilt, quick" } else { "will compile on this machine, takes a few minutes" };
+        format!(
+            "zenbot update available: {} → {} ({} new commit{}; {how})",
+            v["running"].as_str().unwrap_or("?"),
+            v["latest"].as_str().unwrap_or("?"),
+            v["behind"],
+            if v["behind"] == 1 { "" } else { "s" }
+        )
+    } else {
+        format!("zenbot {} is up to date", v["running"].as_str().unwrap_or("?"))
+    }
+}
+
+impl Client {
+    /// Update the kernel to the latest main, reporting progress line by line. Returns the final
+    /// message. Survives the kernel restarting underneath it, and reports a rollback as an error.
+    pub async fn upgrade(&self, mut progress: impl FnMut(String)) -> Result<String> {
+        let v = self.get("/api/version?refresh=true").await?;
+        if let Some(e) = v["error"].as_str() {
+            bail!("could not check for updates: {e}");
+        }
+        if v["available"] != true {
+            return Ok(describe_update(&v));
+        }
+        progress(describe_update(&v));
+        for c in v["commits"].as_array().into_iter().flatten() {
+            progress(format!("  · {}", c.as_str().unwrap_or("")));
+        }
+        let target = v["latest"].as_str().unwrap_or("").to_string();
+        let started = self.post("/api/upgrade", json!({})).await?;
+        let started_at = started["started_at"].as_str().unwrap_or("").to_string();
+
+        // 1. Pull, build or download, check, smoke test (scripts/self-update.sh).
+        let mut shown = 0;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let st = self.get("/api/upgrade").await?;
+            let log = st["job"]["log"].as_str().unwrap_or("");
+            for l in log.lines().skip(shown) {
+                progress(l.to_string());
+            }
+            shown = log.lines().count();
+            match st["job"]["status"].as_str() {
+                Some("running") => continue,
+                Some("scheduled") => break,
+                _ => bail!("upgrade failed; nothing was changed"),
+            }
+        }
+
+        // 2. upgrade.sh restarts zenbot once no session is working, then health-checks it.
+        progress("restarting zenbot as soon as no session is working…".into());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30 * 60);
+        while std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let Ok(res) = self.http.get(format!("{}/health", self.url)).send().await else { continue };
+            let Ok(health) = res.json::<Value>().await else { continue };
+            let commit = health["commit"].as_str().unwrap_or("");
+            if !target.is_empty() && commit.starts_with(&target) && health["ok"] == true {
+                return Ok(format!("zenbot upgraded to {target}"));
+            }
+            if let Ok(st) = self.get("/api/upgrade").await {
+                let last = st["last_result"].as_str().unwrap_or("");
+                if last.get(..20).is_some_and(|t| t >= started_at.as_str()) && (last.contains("FAILED") || last.contains("rolled back")) {
+                    bail!("upgrade rolled back: {last} (details in ~/.zenbot/upgrade.log)");
+                }
+            }
+        }
+        bail!("zenbot hasn't restarted after 30 minutes (a session may still be working); check ~/.zenbot/upgrade.log")
     }
 }
 

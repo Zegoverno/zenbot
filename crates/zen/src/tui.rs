@@ -31,6 +31,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/model", "choose the model"),
     ("/rename", "rename this session: /rename <title>"),
     ("/archive", "archive this session and start a new one"),
+    ("/upgrade", "update zenbot to the latest version and restart it"),
     ("/help", "keys and commands"),
     ("/exit", "quit zen"),
 ];
@@ -87,6 +88,7 @@ struct App {
     aborting: bool,
     notice: Option<(String, Sty)>,
     ctrl_c_at: Option<Instant>,
+    upgrading: bool,
     quit: bool,
 }
 
@@ -136,6 +138,7 @@ pub async fn run(c: Client, start: Start, model: Option<String>) -> Result<()> {
         aborting: false,
         notice: None,
         ctrl_c_at: None,
+        upgrading: false,
         quit: false,
     };
 
@@ -161,6 +164,16 @@ pub async fn run(c: Client, start: Start, model: Option<String>) -> Result<()> {
         if !signed_in {
             app.commit(vec![line("No model engine is signed in yet; run `zen login` first.", Sty::Warn), Vec::new()]);
         }
+        // Mention an available update (from the kernel's last background check).
+        let (c, tx) = (app.c.clone(), app.tx.clone());
+        tokio::spawn(async move {
+            if let Ok(v) = c.get("/api/version").await {
+                if v["available"] == true {
+                    let text = format!("{} · /upgrade to install", crate::client::describe_update(&v));
+                    let _ = tx.send((String::new(), json!({ "type": "update_available", "text": text })));
+                }
+            }
+        });
         match start {
             Start::New => {}
             Start::Continue => {
@@ -188,7 +201,9 @@ pub async fn run(c: Client, start: Start, model: Option<String>) -> Result<()> {
                     None => break,
                 },
                 Some((sid, ev)) = rx.recv() => {
-                    if app.session.as_deref() == Some(sid.as_str()) {
+                    if sid.is_empty() {
+                        app.on_app_event(ev).await;
+                    } else if app.session.as_deref() == Some(sid.as_str()) {
                         app.on_event(ev);
                     }
                 },
@@ -780,10 +795,55 @@ impl App {
                 out.push(Vec::new());
                 self.commit(out);
             }
+            Some("/upgrade") => self.start_upgrade(),
             Some("/exit") => self.quit = true,
             _ => self.note(format!("unknown command {input}; try /help"), Sty::Warn),
         }
         Ok(())
+    }
+
+    // ---------- upgrade ----------
+
+    fn start_upgrade(&mut self) {
+        if self.upgrading {
+            self.note("an upgrade is already running", Sty::Warn);
+            return;
+        }
+        self.upgrading = true;
+        self.commit(vec![line("checking for updates…", Sty::Dim)]);
+        let (c, tx) = (self.c.clone(), self.tx.clone());
+        tokio::spawn(async move {
+            let log_tx = tx.clone();
+            let res = c.upgrade(move |l| {
+                let _ = log_tx.send((String::new(), json!({ "type": "upgrade_log", "line": l })));
+            });
+            let ev = match res.await {
+                Ok(msg) => json!({ "type": "upgrade_done", "ok": true, "text": msg }),
+                Err(e) => json!({ "type": "upgrade_done", "ok": false, "text": format!("{e:#}") }),
+            };
+            let _ = tx.send((String::new(), ev));
+        });
+    }
+
+    /// Events that aren't tied to a session (sent with an empty session id).
+    async fn on_app_event(&mut self, ev: Value) {
+        let text = ev["text"].as_str().or(ev["line"].as_str()).unwrap_or("").to_string();
+        match ev["type"].as_str().unwrap_or("") {
+            "update_available" => self.commit(vec![line(text, Sty::Warn), Vec::new()]),
+            "upgrade_log" => self.commit(vec![line(text, Sty::Dim)]),
+            "upgrade_done" => {
+                self.upgrading = false;
+                let ok = ev["ok"] == true;
+                self.commit(vec![line(text, if ok { Sty::Accent } else { Sty::Err }), Vec::new()]);
+                if let Some(id) = self.session.clone() {
+                    if self.sink.is_none() && self.connect(&id).await.is_err() {
+                        self.note("lost connection to zenbot; send a message to reconnect", Sty::Warn);
+                    }
+                }
+                self.draw();
+            }
+            _ => {}
+        }
     }
 
     // ---------- kernel events ----------
@@ -893,6 +953,10 @@ impl App {
             "error" => {
                 self.busy = false;
                 self.commit(vec![line(ev["error"].as_str().unwrap_or("error").to_string(), Sty::Err), Vec::new()]);
+            }
+            "disconnected" if self.upgrading => {
+                self.busy = false;
+                self.sink = None; // expected: zenbot is restarting; we reconnect when it's back
             }
             "disconnected" => {
                 self.busy = false;

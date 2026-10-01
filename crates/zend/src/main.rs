@@ -2,6 +2,7 @@
 
 mod mind;
 mod tools;
+mod update;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -63,6 +64,7 @@ struct App {
     repo: String,
     default_model: String,
     hubs: Mutex<HashMap<Uuid, broadcast::Sender<String>>>,
+    updater: Arc<update::Updater>,
 }
 
 type AppState = Arc<App>;
@@ -115,6 +117,7 @@ async fn main() -> Result<()> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     let workspace = PathBuf::from(std::env::var("ZEN_WORKSPACE").unwrap_or_else(|_| home.clone()));
     let repo = std::env::var("ZEN_REPO").unwrap_or_else(|_| format!("{home}/zenbot"));
+    let repo_dir = repo.clone();
     let default_model = std::env::var("ZEN_DEFAULT_MODEL").unwrap_or_else(|_| "claude/opus".into());
 
     tokio::fs::create_dir_all(&workspace).await?;
@@ -148,7 +151,9 @@ async fn main() -> Result<()> {
         repo,
         default_model,
         hubs: Mutex::new(HashMap::new()),
+        updater: Arc::new(update::Updater::new(PathBuf::from(&repo_dir))),
     });
+    tokio::spawn(app.updater.clone().check_periodically());
     for (idx, exited) in exits.into_iter().enumerate() {
         tokio::spawn(supervise(app.clone(), idx, exited, merged_tx.clone()));
     }
@@ -160,6 +165,8 @@ async fn main() -> Result<()> {
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/sessions/{id}", get(get_session).patch(update_session))
         .route("/sessions/{id}/ws", get(session_ws))
+        .route("/version", get(version))
+        .route("/upgrade", get(upgrade_status).post(upgrade_start))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth));
 
     let router = Router::new()
@@ -327,7 +334,30 @@ async fn health(State(app): State<AppState>) -> Json<Value> {
     }
     let mind = workers.values().all(|v| v == true);
     let busy = app.turns.lock().await.len();
-    Json(json!({ "ok": db && mind, "db": db, "mind": mind, "workers": workers, "busy": busy, "version": env!("CARGO_PKG_VERSION") }))
+    Json(json!({ "ok": db && mind, "db": db, "mind": mind, "workers": workers, "busy": busy,
+                 "version": env!("CARGO_PKG_VERSION"), "commit": app.updater.running() }))
+}
+
+#[derive(Deserialize)]
+struct VersionQuery {
+    refresh: Option<bool>,
+}
+
+/// Running version and whether origin/main has newer commits (`?refresh=true` checks now).
+async fn version(State(app): State<AppState>, Query(q): Query<VersionQuery>) -> Json<Value> {
+    Json(if q.refresh.unwrap_or(false) { app.updater.check().await } else { app.updater.info().await })
+}
+
+/// Pull the latest main and apply it (scripts/self-update.sh); progress via GET /api/upgrade.
+async fn upgrade_start(State(app): State<AppState>) -> ApiResult<Json<Value>> {
+    match app.updater.start().await {
+        Ok(started_at) => Ok(Json(json!({ "started_at": started_at }))),
+        Err(e) => Err(ApiError(StatusCode::CONFLICT, e)),
+    }
+}
+
+async fn upgrade_status(State(app): State<AppState>) -> Json<Value> {
+    Json(app.updater.status().await)
 }
 
 /// Models offered, in order of preference. Engines' models come first; Pi's direct models after.

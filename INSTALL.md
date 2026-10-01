@@ -37,6 +37,14 @@ These steps are written so a coding agent (or a person) can follow them on a fre
 
 ## Updating
 
+zenbot checks GitHub for a newer `main` about once an hour. `zen` mentions it when you start a session, and `zen status` shows it. To update:
+
+```bash
+zen upgrade            # or /upgrade inside zen; `zen upgrade --check` only checks
+```
+
+This runs `scripts/self-update.sh`: it pulls `main` (refusing if the checkout has local changes or is on another branch) and runs `scripts/upgrade.sh`, showing progress until zenbot is back on the new version. Doing it by hand is the same thing:
+
 ```bash
 cd ~/zenbot && git pull && ./scripts/upgrade.sh
 ```
