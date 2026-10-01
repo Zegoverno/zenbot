@@ -73,6 +73,8 @@ struct App {
     models: Vec<String>,
     editor: Editor,
     picker: Option<Picker>,
+    /// Highlighted row in the `/` command menu.
+    menu_sel: usize,
     region: Region,
     busy: bool,
     status: String,
@@ -123,6 +125,7 @@ pub async fn run(c: Client, start: Start, model: Option<String>) -> Result<()> {
         models: model_ids,
         editor: Editor::new(history),
         picker: None,
+        menu_sel: 0,
         region: Region::default(),
         busy: false,
         status: String::new(),
@@ -334,6 +337,15 @@ impl App {
     }
 
     /// Build the live region: (lines, caret row, caret col, show caret).
+    /// Commands matching what's typed, while the input is a bare `/word`.
+    fn menu(&self) -> Vec<(&'static str, &'static str)> {
+        let buf = &self.editor.buf;
+        if !buf.starts_with('/') || buf.contains(' ') || buf.contains('\n') {
+            return Vec::new();
+        }
+        COMMANDS.iter().filter(|(n, _)| n.starts_with(buf.as_str())).copied().collect()
+    }
+
     fn compose(&self) -> (Vec<Line>, usize, usize, bool) {
         let w = term_width();
         let mut lines: Vec<Line> = Vec::new();
@@ -383,10 +395,13 @@ impl App {
         lines.extend(input);
         lines.push(rule);
 
-        let buf = &self.editor.buf;
-        if buf.starts_with('/') && !buf.contains(' ') && !buf.contains('\n') {
-            for (name, help) in COMMANDS.iter().filter(|(n, _)| n.starts_with(buf.as_str())) {
-                lines.push(vec![(format!("  {name:<10}"), Sty::Accent), (format!("{help}"), Sty::Dim)]);
+        let menu = self.menu();
+        if !menu.is_empty() {
+            let sel = self.menu_sel.min(menu.len() - 1);
+            for (i, (name, help)) in menu.iter().enumerate() {
+                let mark = if i == sel { "› " } else { "  " };
+                let help_sty = if i == sel { Sty::Plain } else { Sty::Dim };
+                lines.push(vec![(format!("{mark}{name:<10}"), Sty::Accent), (help.to_string(), help_sty)]);
             }
         } else {
             let model = self.model.split('/').next_back().unwrap_or(&self.model);
@@ -622,6 +637,49 @@ impl App {
             }
         }
 
+        // The `/` menu: ↑↓ move the highlight, Tab completes it, Enter runs it.
+        let menu = self.menu();
+        if !menu.is_empty() && !ctrl && !alt && !shift {
+            let sel = self.menu_sel.min(menu.len() - 1);
+            match k.code {
+                KeyCode::Up => {
+                    self.menu_sel = sel.checked_sub(1).unwrap_or(menu.len() - 1);
+                    return Ok(());
+                }
+                KeyCode::Down => {
+                    self.menu_sel = (sel + 1) % menu.len();
+                    return Ok(());
+                }
+                KeyCode::Tab => {
+                    self.editor.set(menu[sel].0);
+                    self.menu_sel = 0;
+                    return Ok(());
+                }
+                KeyCode::Enter => {
+                    let name = menu[sel].0;
+                    self.menu_sel = 0;
+                    if name == "/rename" {
+                        // Needs an argument: complete it and let the user type the title.
+                        self.editor.set("/rename ");
+                    } else {
+                        self.editor.set(name);
+                        self.submit().await?;
+                    }
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
+        let before = self.editor.buf.clone();
+        self.edit_key(k, ctrl, alt, shift).await?;
+        if self.editor.buf != before {
+            self.menu_sel = 0;
+        }
+        Ok(())
+    }
+
+    async fn edit_key(&mut self, k: KeyEvent, ctrl: bool, alt: bool, shift: bool) -> Result<()> {
         match k.code {
             KeyCode::Char('c') if ctrl => {
                 if self.busy {
@@ -657,14 +715,6 @@ impl App {
                     self.editor.insert("\n");
                 } else {
                     self.submit().await?;
-                }
-            }
-            KeyCode::Tab => {
-                let buf = self.editor.buf.clone();
-                if buf.starts_with('/') && !buf.contains(' ') {
-                    if let Some((name, _)) = COMMANDS.iter().find(|(n, _)| n.starts_with(buf.as_str())) {
-                        self.editor.set(name);
-                    }
                 }
             }
             KeyCode::Backspace if alt || ctrl => self.editor.delete_word(),
@@ -786,7 +836,7 @@ impl App {
                     ("enter", "send"),
                     ("alt+enter", "new line (also shift+enter, ctrl+j, or end a line with \\)"),
                     ("esc", "interrupt zenbot"),
-                    ("↑ ↓", "previous prompts"),
+                    ("↑ ↓", "previous prompts; in the / menu, choose a command (tab completes)"),
                     ("ctrl+c", "clear input; twice to exit"),
                     ("ctrl+d", "exit"),
                 ] {
