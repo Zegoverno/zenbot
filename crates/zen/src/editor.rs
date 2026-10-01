@@ -32,6 +32,11 @@ impl Editor {
         self.cursor = self.buf.len();
     }
 
+    #[cfg(test)]
+    pub fn set_history(&mut self, entries: &[&str]) {
+        self.history = entries.iter().map(|e| e.to_string()).collect();
+    }
+
     /// True while the buffer shows an unedited prompt recalled from history.
     pub fn browsing_history(&self) -> bool {
         self.hist_idx.is_some_and(|i| self.history.get(i) == Some(&self.buf))
@@ -104,17 +109,18 @@ impl Editor {
         self.buf.replace_range(self.cursor..e, "");
     }
 
-    /// Move to the start of the previous word.
+    /// Move to the start of the previous word. Words are separated by ASCII whitespace
+    /// (single bytes, so the index arithmetic stays on char boundaries).
     pub fn word_left(&mut self) {
-        let before = self.buf[..self.cursor].trim_end_matches([' ', '\n']);
-        self.cursor = before.rfind([' ', '\n']).map(|i| i + 1).unwrap_or(0);
+        let before = self.buf[..self.cursor].trim_end_matches(|c: char| c.is_ascii_whitespace());
+        self.cursor = before.rfind(|c: char| c.is_ascii_whitespace()).map(|i| i + 1).unwrap_or(0);
     }
 
     /// Move past the end of the next word.
     pub fn word_right(&mut self) {
         let rest = &self.buf[self.cursor..];
-        let skip = rest.len() - rest.trim_start_matches([' ', '\n']).len();
-        let word = rest[skip..].find([' ', '\n']).unwrap_or(rest.len() - skip);
+        let skip = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_whitespace()).len();
+        let word = rest[skip..].find(|c: char| c.is_ascii_whitespace()).unwrap_or(rest.len() - skip);
         self.cursor += skip + word;
     }
 
@@ -378,5 +384,8 @@ mod tests {
         assert_eq!(e.cursor, 7);
         e.kill_to_end();
         assert_eq!(e.buf, "one two");
+        e.set("a\tb");
+        e.word_left();
+        assert_eq!(e.cursor, 2);
     }
 }
