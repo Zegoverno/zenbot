@@ -115,10 +115,12 @@ impl Client {
         let started_at = started["started_at"].as_str().unwrap_or("").to_string();
 
         // 1. Pull, build or download, check, smoke test (scripts/self-update.sh).
+        // When no session is busy the restart can come within seconds, even before we've read the
+        // job's final status: an unreachable kernel, or a new one with no job, means it's restarting.
         let mut shown = 0;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let st = self.get("/api/upgrade").await?;
+            let Ok(st) = self.get("/api/upgrade").await else { break };
             let log = st["job"]["log"].as_str().unwrap_or("");
             for l in log.lines().skip(shown) {
                 progress(l.to_string());
@@ -126,7 +128,7 @@ impl Client {
             shown = log.lines().count();
             match st["job"]["status"].as_str() {
                 Some("running") => continue,
-                Some("scheduled") => break,
+                Some("scheduled") | None => break,
                 _ => bail!("upgrade failed; nothing was changed"),
             }
         }
