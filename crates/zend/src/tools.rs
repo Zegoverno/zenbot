@@ -102,7 +102,7 @@ fn err(content: impl Into<String>) -> ToolOutput {
 
 /// Resolve a tool path: `~` is the home directory, a leading `@` (as in `@file` mentions) is dropped,
 /// and relative paths are relative to the workspace.
-fn resolve(workspace: &Path, p: &str) -> PathBuf {
+pub fn resolve(workspace: &Path, p: &str) -> PathBuf {
     let p = p.strip_prefix('@').unwrap_or(p);
     let home = || std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"));
     if p == "~" {
@@ -198,9 +198,10 @@ fn save_full_output(text: &str) -> Option<PathBuf> {
     Some(path)
 }
 
-pub async fn execute(workspace: &Path, name: &str, args: &Value) -> ToolOutput {
+/// Run a tool. `env` is added to the environment of commands (bash).
+pub async fn execute(workspace: &Path, name: &str, args: &Value, env: &[(&str, &str)]) -> ToolOutput {
     let result = match name {
-        "bash" => bash(workspace, args).await,
+        "bash" => bash(workspace, args, env).await,
         "read" => read(workspace, args).await,
         "write" => write(workspace, args).await,
         "edit" => edit(workspace, args).await,
@@ -236,13 +237,14 @@ impl Drop for GroupKill {
     }
 }
 
-async fn bash(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> {
+async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)]) -> Result<ToolOutput, ToolOutput> {
     let command = str_arg(args, "command")?;
     let timeout = args.get("timeout_secs").and_then(Value::as_u64).unwrap_or(120).clamp(1, 600);
     let mut child = Command::new("bash")
         .arg("-lc")
         .arg(command)
         .current_dir(workspace)
+        .envs(env.iter().copied())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -537,7 +539,7 @@ mod tests {
     }
 
     async fn run(ws: &Path, name: &str, args: Value) -> ToolOutput {
-        execute(ws, name, &args).await
+        execute(ws, name, &args, &[]).await
     }
 
     #[tokio::test]
@@ -668,7 +670,7 @@ mod tests {
         let ws = scratch("drop");
         let marker = ws.join("done.txt");
         let args = json!({ "command": "sleep 2; touch done.txt" });
-        let fut = execute(&ws, "bash", &args);
+        let fut = execute(&ws, "bash", &args, &[]);
         let _ = tokio::time::timeout(Duration::from_millis(300), fut).await;
         tokio::time::sleep(Duration::from_secs(3)).await;
         assert!(!marker.exists(), "command kept running after its future was dropped");

@@ -1,10 +1,11 @@
 //! zend — the zenbot kernel. Owns all state and all side effects.
 
+mod context;
 mod mind;
 mod tools;
 mod update;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -51,6 +52,9 @@ struct Turn {
     tools_running: usize,
     /// When `turn.abort` was sent (by the user or the watchdog); the turn is ended by force if it lingers.
     abort_sent: Option<Instant>,
+    model: String,
+    /// Instruction files this session has already been given (see context.rs).
+    context: HashSet<PathBuf>,
 }
 
 struct App {
@@ -535,6 +539,23 @@ fn prune_history(mut history: Vec<Value>) -> Vec<Value> {
     history
 }
 
+/// Instruction files recorded for a session (tape kind `context`), oldest first.
+async fn load_context(db: &PgPool, id: Uuid) -> Result<Vec<PathBuf>, sqlx::Error> {
+    let rows = sqlx::query("SELECT payload FROM tape_events WHERE session_id = $1 AND kind = 'context' ORDER BY id")
+        .bind(id)
+        .fetch_all(db)
+        .await?;
+    let mut out: Vec<PathBuf> = Vec::new();
+    for r in rows {
+        if let Some(p) = r.get::<Value, _>("payload")["path"].as_str().map(PathBuf::from) {
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    Ok(out)
+}
+
 async fn append_tape(db: &PgPool, id: Uuid, kind: &str, payload: &Value) -> Result<(), sqlx::Error> {
     sqlx::query("INSERT INTO tape_events (session_id, kind, payload) VALUES ($1, $2, $3)")
         .bind(id)
@@ -599,39 +620,8 @@ async fn handle_socket(app: AppState, id: Uuid, socket: WebSocket) {
     forward.abort();
 }
 
-/// Instruction files the owner keeps for agents: `~/.zenbot/AGENTS.md` (global), then
-/// `AGENTS.md` (or `CLAUDE.md`) in each directory from `/` down to the workspace.
-fn context_files(workspace: &std::path::Path) -> Vec<(PathBuf, String)> {
-    const MAX_FILE: usize = 32 * 1024;
-    let mut candidates = Vec::new();
-    if let Ok(home) = std::env::var("HOME") {
-        candidates.push(vec![PathBuf::from(home).join(".zenbot/AGENTS.md")]);
-    }
-    let mut dirs: Vec<&std::path::Path> = workspace.ancestors().collect();
-    dirs.reverse();
-    for d in dirs {
-        candidates.push(vec![d.join("AGENTS.md"), d.join("CLAUDE.md")]);
-    }
-    let mut out = Vec::new();
-    for group in candidates {
-        if let Some((path, mut text)) = group.into_iter().find_map(|p| std::fs::read_to_string(&p).ok().map(|t| (p, t))) {
-            if text.len() > MAX_FILE {
-                let mut end = MAX_FILE;
-                while !text.is_char_boundary(end) {
-                    end -= 1;
-                }
-                text.truncate(end);
-                text.push_str("\n[... truncated; read the file for the rest ...]");
-            }
-            if !out.iter().any(|(p, _): &(PathBuf, String)| p == &path) {
-                out.push((path, text));
-            }
-        }
-    }
-    out
-}
-
-fn system_prompt(workspace: &std::path::Path, repo: &str) -> String {
+/// The system prompt. `extra` are instruction files this session picked up on demand.
+fn system_prompt(workspace: &std::path::Path, repo: &str, extra: &[PathBuf]) -> String {
     let mut s = format!(
         "You are zenbot, the owner's personal agent running on their Linux VM.\n\
          You can run shell commands and read, write, edit and move files using your tools.\n\
@@ -650,7 +640,8 @@ fn system_prompt(workspace: &std::path::Path, repo: &str) -> String {
          - When output is cut, the result says where the full output was saved or which offset to read next.\n\
          </tool_guidelines>\n"
     );
-    let files = context_files(workspace);
+    let mut files = context::always(workspace);
+    files.extend(extra.iter().filter_map(|p| context::read_capped(p).map(|t| (p.clone(), t))));
     if !files.is_empty() {
         s.push_str("\n<project_context>\nInstructions the owner keeps for agents. Follow them.\n");
         for (path, text) in files {
@@ -685,11 +676,23 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
         }
         turns.insert(
             id,
-            Turn { worker: widx, cancel: watch::channel(false).0, last_activity: Instant::now(), tools_running: 0, abort_sent: None },
+            Turn {
+                worker: widx,
+                cancel: watch::channel(false).0,
+                last_activity: Instant::now(),
+                tools_running: 0,
+                abort_sent: None,
+                model: model.clone(),
+                context: HashSet::new(),
+            },
         );
     }
     let res = async {
         let history = prune_history(load_messages(&app.db, id).await?);
+        let extra = load_context(&app.db, id).await?;
+        if let Some(t) = app.turns.lock().await.get_mut(&id) {
+            t.context = extra.iter().cloned().collect();
+        }
         let user = json!({ "role": "user", "content": text, "timestamp": chrono::Utc::now().timestamp_millis() });
         append_tape(&app.db, id, "message", &user).await?;
         if title.is_empty() {
@@ -704,7 +707,7 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
                 json!({
                     "session_id": id,
                     "model": model,
-                    "system_prompt": system_prompt(&app.workspace, &app.repo),
+                    "system_prompt": system_prompt(&app.workspace, &app.repo, &extra),
                     "history": history,
                     "prompt": text,
                     "tools": tools::specs(),
@@ -776,27 +779,45 @@ async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming) -> Result
             let name = p.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
             let call_id = p.get("call_id").and_then(Value::as_str).unwrap_or_default().to_string();
             let args = p.get("args").cloned().unwrap_or(json!({}));
-            let mut cancel = {
+            let (mut cancel, model) = {
                 let mut turns = app.turns.lock().await;
                 let Some(t) = turns.get_mut(&id) else { return Ok(()) };
                 t.tools_running += 1;
-                t.cancel.subscribe()
+                (t.cancel.subscribe(), t.model.clone())
             };
+            // Commands can tell which session runs them (e.g. the commit-trailer hook in scripts/git-hooks).
+            let session_env = id.to_string();
+            let env = [("ZEN_SESSION_ID", session_env.as_str()), ("ZEN_MODEL", model.as_str())];
             app.emit(id, json!({ "type": "tool_start", "call_id": call_id, "name": name, "args": args })).await;
             let started = Instant::now();
             // Abort (or the turn ending) drops the tool future, which kills a running command.
-            let out = if *cancel.borrow() {
+            let mut out = if *cancel.borrow() {
                 tools::ToolOutput { content: "not run: the turn was interrupted".into(), is_error: true }
             } else {
                 tokio::select! {
-                    out = tools::execute(&app.workspace, &name, &args) => out,
+                    out = tools::execute(&app.workspace, &name, &args, &env) => out,
                     _ = cancel.wait_for(|c| *c) => tools::ToolOutput { content: "interrupted: the turn was stopped before this tool finished".into(), is_error: true },
                 }
             };
             let ms = started.elapsed().as_millis() as i64;
-            if let Some(t) = app.turns.lock().await.get_mut(&id) {
-                t.tools_running = t.tools_running.saturating_sub(1);
-                t.last_activity = Instant::now();
+            // First time this session touches a project with its own instructions: attach them.
+            let new_context: Vec<PathBuf> = {
+                let candidates = context::governing(&app.workspace, &context::paths_in_call(&app.workspace, &name, &args));
+                let mut turns = app.turns.lock().await;
+                match turns.get_mut(&id) {
+                    Some(t) => {
+                        t.tools_running = t.tools_running.saturating_sub(1);
+                        t.last_activity = Instant::now();
+                        candidates.into_iter().filter(|p| t.context.insert(p.clone())).collect()
+                    }
+                    None => Vec::new(),
+                }
+            };
+            for path in new_context {
+                if let Some(text) = context::read_capped(&path) {
+                    append_tape(&app.db, id, "context", &json!({ "path": path })).await?;
+                    out.content.push_str(&context::attachment(&path, &text));
+                }
             }
             sqlx::query(
                 "INSERT INTO tool_calls (session_id, call_id, name, args, is_error, duration_ms, output_bytes)
@@ -892,7 +913,7 @@ mod tests {
         std::fs::write(root.join("CLAUDE.md"), "outer rule").unwrap();
         std::fs::write(ws.join("AGENTS.md"), "inner rule").unwrap();
         std::fs::write(ws.join("CLAUDE.md"), "shadowed by AGENTS.md").unwrap();
-        let prompt = system_prompt(&ws, "/repo");
+        let prompt = system_prompt(&ws, "/repo", &[]);
         let outer = prompt.find("outer rule").expect("parent CLAUDE.md loaded");
         let inner = prompt.find("inner rule").expect("workspace AGENTS.md loaded");
         assert!(outer < inner, "files are ordered from the root down");
