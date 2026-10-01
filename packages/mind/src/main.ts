@@ -88,40 +88,44 @@ function kernelTools(sessionId: string, specs: Json[]): AgentTool<any>[] {
 // ---- Turns ----
 
 const running = new Map<string, Agent>();
+const aborted = new Set<string>();
 
+// Never throws: every failure becomes turn.end with an error, so the kernel frees the session.
 async function turnStart(p: Json) {
   const { session_id, model: modelRef, system_prompt, history, prompt, tools } = p;
-  const [provider, id] = String(modelRef).split("/");
-  const model = models.getModel(provider as any, id);
-  if (!model) throw new Error(`unknown model ${modelRef}`);
-  if (provider === faux?.provider.id) scriptFaux();
-
-  const agent = new Agent({
-    initialState: { systemPrompt: system_prompt, model, tools: kernelTools(session_id, tools), messages: history },
-    streamFn: models.streamSimple.bind(models),
-    sessionId: session_id,
-  });
-  running.set(session_id, agent);
-
-  agent.subscribe((ev: Json) => {
-    if (ev.type === "message_update") {
-      const e = ev.assistantMessageEvent;
-      if (e?.type === "text_delta") notify("turn.delta", { session_id, delta: e.delta });
-      else if (e?.type === "thinking_delta") notify("turn.thinking", { session_id, delta: e.delta });
-    } else if (ev.type === "message_end") {
-      const role = ev.message?.role;
-      if (role === "assistant" || role === "toolResult") notify("turn.message", { session_id, message: ev.message });
-    }
-  });
-
   try {
+    const [provider, id] = String(modelRef).split("/");
+    const model = models.getModel(provider as any, id);
+    if (!model) throw new Error(`unknown model ${modelRef}`);
+    if (provider === faux?.provider.id) scriptFaux();
+
+    const agent = new Agent({
+      initialState: { systemPrompt: system_prompt, model, tools: kernelTools(session_id, tools), messages: history },
+      streamFn: models.streamSimple.bind(models),
+      sessionId: session_id,
+    });
+    running.set(session_id, agent);
+
+    agent.subscribe((ev: Json) => {
+      if (ev.type === "message_update") {
+        const e = ev.assistantMessageEvent;
+        if (e?.type === "text_delta") notify("turn.delta", { session_id, delta: e.delta });
+        else if (e?.type === "thinking_delta") notify("turn.thinking", { session_id, delta: e.delta });
+      } else if (ev.type === "message_end") {
+        const role = ev.message?.role;
+        if (role === "assistant" || role === "toolResult") notify("turn.message", { session_id, message: ev.message });
+      }
+    });
+
     await agent.prompt(prompt);
-    const err = agent.state.errorMessage;
+    const err = aborted.has(session_id) ? "interrupted" : agent.state.errorMessage;
     notify("turn.end", { session_id, error: err ?? null });
   } catch (e) {
-    notify("turn.end", { session_id, error: e instanceof Error ? e.message : String(e) });
+    const err = aborted.has(session_id) ? "interrupted" : e instanceof Error ? e.message : String(e);
+    notify("turn.end", { session_id, error: err });
   } finally {
     running.delete(session_id);
+    aborted.delete(session_id);
   }
 }
 
@@ -140,6 +144,7 @@ async function handle(method: string, params: Json): Promise<Json> {
       void turnStart(params);
       return { ok: true };
     case "turn.abort":
+      if (running.has(params.session_id)) aborted.add(params.session_id);
       running.get(params.session_id)?.abort();
       return { ok: true };
     case "ping":

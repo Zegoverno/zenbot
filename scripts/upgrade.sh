@@ -27,6 +27,33 @@ if grep -qE '^ZEN_WORKERS=.*pi' "$HOME/.zenbot/env" 2>/dev/null; then
 fi
 ./target/release/zen --version >/dev/null
 
+echo "== smoke"
+# Run the new build as a second kernel on a spare port and drive one scripted turn
+# (faux engine -> kernel -> bash tool -> answer) through it. It uses the same database,
+# so pending migrations are applied here, before the restart.
+SMOKE_PORT=${ZEN_SMOKE_PORT:-18199}
+SMOKE_URL="http://127.0.0.1:$SMOKE_PORT"
+SMOKE_LOG=$(mktemp)
+SMOKE_WS=$(mktemp -d)
+(
+  set -a; [ -f "$HOME/.zenbot/env" ] && . "$HOME/.zenbot/env"; set +a
+  ZEN_TOKEN="$(cat "$HOME/.zenbot/token")" ZEN_PORT=$SMOKE_PORT ZEN_WORKERS=engine ZEN_FAUX=1 ZEN_WORKSPACE="$SMOKE_WS" \
+    exec ./target/release/zend
+) >"$SMOKE_LOG" 2>&1 &
+SMOKE_PID=$!
+trap 'kill $SMOKE_PID 2>/dev/null; rm -rf "$SMOKE_WS"' EXIT
+for _ in $(seq 1 30); do curl -fs "$SMOKE_URL/health" | grep -q '"ok":true' && break; sleep 1; done
+RESULT=$(ZEN_URL="$SMOKE_URL" timeout 60 ./target/release/zen ask --json -m faux/smoke "upgrade smoke test" 2>/dev/null || true)
+SID=$(echo "$RESULT" | jq -r '.session_id // empty' 2>/dev/null || true)
+[ -n "$SID" ] && ZEN_URL="$SMOKE_URL" ./target/release/zen sessions archive "$SID" >/dev/null 2>&1
+kill $SMOKE_PID 2>/dev/null; wait $SMOKE_PID 2>/dev/null || true
+if ! echo "$RESULT" | jq -e '.error == null and (.text | contains("Smoke test passed")) and .tools[0].is_error == false' >/dev/null 2>&1; then
+  echo "SMOKE TEST FAILED: the new build could not run a turn. Result: ${RESULT:-none}"
+  tail -20 "$SMOKE_LOG"
+  exit 1
+fi
+rm -f "$SMOKE_LOG"
+
 echo "== schedule"
 sudo systemd-run --quiet --collect --unit "zen-upgrade-$(date +%s)" --uid "$(id -u)" --gid "$(id -g)" \
   --setenv=HOME="$HOME" --setenv=PATH="$PATH" "$REPO/scripts/apply-upgrade.sh"

@@ -8,6 +8,7 @@
 mod bridge;
 mod claude;
 mod codex;
+mod faux;
 mod rpc;
 mod turn;
 
@@ -66,6 +67,9 @@ async fn handle(rpc: &Rpc, running: &Arc<Mutex<HashMap<String, watch::Sender<boo
             if codex {
                 models.extend(codex::models().await);
             }
+            if faux::enabled() {
+                models.extend(faux::models());
+            }
             Ok(json!({ "authenticated": { "claude": claude, "codex": codex }, "models": models }))
         }
         "turn.start" => {
@@ -86,6 +90,7 @@ async fn handle(rpc: &Rpc, running: &Arc<Mutex<HashMap<String, watch::Sender<boo
                 let result = match engine.as_str() {
                     "claude" => claude::run_turn(ctx, &model, system, &history, prompt, abort_rx).await,
                     "codex" => codex::run_turn(ctx, &model, system, &history, prompt, abort_rx).await,
+                    "faux" if faux::enabled() => faux::run_turn(ctx, abort_rx).await,
                     other => Ok(Some(format!("zen-engine has no `{other}` engine"))),
                 };
                 let error = match result {

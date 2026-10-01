@@ -46,6 +46,19 @@ Messages use these shapes (the same as Pi's message format):
 
 A worker emits the assistant message announcing a tool call before calling `tool.call`, and a `toolResult` message after the kernel answers.
 
+## What the kernel guarantees
+
+- **Crashes.** The kernel restarts a worker that exits, with backoff. Turns it was running end with an error (`turn.end` is sent to clients by the kernel), and requests waiting on it fail at once.
+- **Abort.** On `turn.abort` the kernel also stops its own tool calls for that session: a running command is killed (its whole process group), and the pending `tool.call` returns an `is_error` result saying it was interrupted.
+- **Stalled turns.** If a turn sends nothing and runs no tool for `ZEN_TURN_IDLE_SECS` (default 600), the kernel sends `turn.abort`. Any turn still running 30 seconds after an abort is ended by the kernel.
+- **Late messages.** Messages for a session whose turn has already ended (or runs on another worker) are dropped; a late `tool.call` gets an `is_error` result.
+
+So a worker never has to clean up after the kernel, but it must answer `turn.abort` promptly and always finish a turn with `turn.end`.
+
+## Testing without a model
+
+With `ZEN_FAUX=1`, `zen-engine` also lists `faux/smoke`, a scripted model that drives a real turn through the kernel: by default one `bash` call, then an answer. `ZEN_FAUX_SCRIPT` can point to a JSON list of steps (`{"tool": name, "args": {…}}`, `{"text": "…"}`, `{"sleep": secs}`, `{"exit": code}`) to test tools, abort, the watchdog and crash recovery. `scripts/upgrade.sh` runs one such turn against the new build before installing it.
+
 ## Configuration
 
 `ZEN_WORKERS` lists the workers to start (comma-separated, default `engine`):

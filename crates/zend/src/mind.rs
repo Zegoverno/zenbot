@@ -24,7 +24,9 @@ pub struct Mind {
 }
 
 impl Mind {
-    pub async fn spawn(command: &str, dir: &str) -> Result<(Arc<Mind>, mpsc::UnboundedReceiver<Incoming>)> {
+    /// Start a worker. The returned receiver fires when the process has exited; by then every
+    /// request still waiting on it has failed.
+    pub async fn spawn(command: &str, dir: &str) -> Result<(Arc<Mind>, mpsc::UnboundedReceiver<Incoming>, oneshot::Receiver<()>)> {
         let mut child = Command::new("bash")
             .arg("-lc")
             .arg(command)
@@ -35,6 +37,7 @@ impl Mind {
             .kill_on_drop(true)
             .spawn()
             .context("spawning zen-mind")?;
+        let command_owned = command.to_string();
         let stdin = child.stdin.take().context("mind stdin")?;
         let stdout = child.stdout.take().context("mind stdout")?;
         let mind = Arc::new(Mind { stdin: Mutex::new(stdin), pending: Mutex::new(HashMap::new()), next_id: AtomicU64::new(1) });
@@ -64,13 +67,23 @@ impl Mind {
                     }
                 }
             }
-            tracing::error!("zen-mind exited");
+            reader_mind.fail_pending().await;
         });
+        let (exit_tx, exit_rx) = oneshot::channel();
+        let waiter_mind = mind.clone();
         tokio::spawn(async move {
             let status = child.wait().await;
-            tracing::error!("zen-mind process ended: {status:?}");
+            tracing::error!("worker process `{command_owned}` ended: {status:?}");
+            waiter_mind.fail_pending().await;
+            let _ = exit_tx.send(());
         });
-        Ok((mind, rx))
+        Ok((mind, rx, exit_rx))
+    }
+
+    async fn fail_pending(&self) {
+        for (_, waiter) in self.pending.lock().await.drain() {
+            let _ = waiter.send(Err("worker exited".into()));
+        }
     }
 
     async fn write(&self, msg: Value) -> Result<()> {
@@ -86,7 +99,10 @@ impl Mind {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
-        self.write(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })).await?;
+        if let Err(e) = self.write(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })).await {
+            self.pending.lock().await.remove(&id);
+            return Err(e.context("worker is not running"));
+        }
         match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
             Ok(Ok(res)) => res.map_err(|e| anyhow!(e)),
             Ok(Err(_)) => Err(anyhow!("mind dropped request")),

@@ -862,6 +862,13 @@ impl App {
             "tool_end" => {
                 self.status = "Working".into();
             }
+            "end" if !self.busy => {} // already ended (e.g. after a resync)
+            "resync" => {
+                self.note(format!("missed {} updates from zenbot (the terminal fell behind)", ev["skipped"]), Sty::Warn);
+                if ev["busy"] == false && self.busy {
+                    self.on_event(serde_json::json!({ "type": "end", "error": null }));
+                }
+            }
             "end" => {
                 let mut out = Vec::new();
                 if self.aborting {

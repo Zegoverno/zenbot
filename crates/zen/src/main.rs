@@ -182,6 +182,10 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
                         if let Some(e) = ev["error"].as_str() { turn.error = Some(e.to_string()); }
                         return Ok(turn);
                     }
+                    "resync" if started && ev["busy"] == false => {
+                        turn.error.get_or_insert_with(|| "missed the end of the turn (client fell behind); see `zen sessions show`".into());
+                        return Ok(turn);
+                    }
                     "error" => bail!("{}", ev["error"].as_str().unwrap_or("error")),
                     _ => {}
                 }

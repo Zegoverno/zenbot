@@ -3,10 +3,10 @@
 mod mind;
 mod tools;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -21,15 +21,35 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, mpsc, watch, Mutex};
 use uuid::Uuid;
 
 use mind::{Incoming, Mind};
 
 /// A worker process speaking the worker protocol (docs/worker-protocol.md).
+/// The process is restarted by `supervise` when it exits, so `mind` is swapped in place.
 struct Worker {
     name: String,
-    mind: Arc<Mind>,
+    cmd: String,
+    dir: String,
+    mind: std::sync::RwLock<Arc<Mind>>,
+}
+
+impl Worker {
+    fn mind(&self) -> Arc<Mind> {
+        self.mind.read().unwrap().clone()
+    }
+}
+
+/// A turn in progress. A session has at most one.
+struct Turn {
+    worker: usize,
+    /// Set to true to stop the kernel's tool calls for this turn (abort, crash, end).
+    cancel: watch::Sender<bool>,
+    last_activity: Instant,
+    tools_running: usize,
+    /// When `turn.abort` was sent (by the user or the watchdog); the turn is ended by force if it lingers.
+    abort_sent: Option<Instant>,
 }
 
 struct App {
@@ -37,14 +57,12 @@ struct App {
     workers: Vec<Worker>,
     /// model id -> index into `workers`
     routes: Mutex<HashMap<String, usize>>,
-    /// session -> worker running its current turn
-    turn_worker: Mutex<HashMap<Uuid, usize>>,
+    turns: Mutex<HashMap<Uuid, Turn>>,
     token: String,
     workspace: PathBuf,
     repo: String,
     default_model: String,
     hubs: Mutex<HashMap<Uuid, broadcast::Sender<String>>>,
-    busy: Mutex<HashSet<Uuid>>,
 }
 
 type AppState = Arc<App>;
@@ -56,6 +74,10 @@ impl App {
 
     async fn emit(&self, id: Uuid, event: Value) {
         let _ = self.hub(id).await.send(event.to_string());
+    }
+
+    async fn is_busy(&self, id: Uuid) -> bool {
+        self.turns.lock().await.contains_key(&id)
     }
 }
 
@@ -99,22 +121,16 @@ async fn main() -> Result<()> {
     let db = PgPoolOptions::new().max_connections(10).connect(&database_url).await?;
     sqlx::migrate!("./migrations").run(&db).await?;
 
-    let (merged_tx, incoming) = tokio::sync::mpsc::unbounded_channel();
+    let (merged_tx, incoming) = mpsc::unbounded_channel();
     let mut workers = Vec::new();
+    let mut exits = Vec::new();
     for (name, cmd, dir) in worker_configs() {
         match Mind::spawn(&cmd, &dir).await {
-            Ok((mind, mut rx)) => {
-                let idx = workers.len();
-                let tx = merged_tx.clone();
-                tokio::spawn(async move {
-                    while let Some(msg) = rx.recv().await {
-                        if tx.send((idx, msg)).is_err() {
-                            break;
-                        }
-                    }
-                });
+            Ok((mind, rx, exited)) => {
+                forward_worker(workers.len(), rx, merged_tx.clone());
                 tracing::info!("worker `{name}` started: {cmd}");
-                workers.push(Worker { name, mind });
+                exits.push(exited);
+                workers.push(Worker { name, cmd, dir, mind: std::sync::RwLock::new(mind) });
             }
             Err(e) => tracing::error!("worker `{name}` failed to start: {e:#}"),
         }
@@ -126,15 +142,18 @@ async fn main() -> Result<()> {
         db,
         workers,
         routes: Mutex::new(HashMap::new()),
-        turn_worker: Mutex::new(HashMap::new()),
+        turns: Mutex::new(HashMap::new()),
         token,
         workspace,
         repo,
         default_model,
         hubs: Mutex::new(HashMap::new()),
-        busy: Mutex::new(HashSet::new()),
     });
+    for (idx, exited) in exits.into_iter().enumerate() {
+        tokio::spawn(supervise(app.clone(), idx, exited, merged_tx.clone()));
+    }
     tokio::spawn(dispatch(app.clone(), incoming));
+    tokio::spawn(watchdog(app.clone()));
 
     let api = Router::new()
         .route("/models", get(list_models))
@@ -182,6 +201,97 @@ fn worker_configs() -> Vec<(String, String, String)> {
         .collect()
 }
 
+/// Feed a worker's messages into the kernel's single ordered queue, tagged with its index.
+fn forward_worker(idx: usize, mut rx: mpsc::UnboundedReceiver<Incoming>, tx: mpsc::UnboundedSender<(usize, Incoming)>) {
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if tx.send((idx, msg)).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+/// Restart a worker whenever it exits, ending the turns it was running so their sessions
+/// don't stay stuck. Backs off when it keeps crashing.
+async fn supervise(app: AppState, idx: usize, mut exited: tokio::sync::oneshot::Receiver<()>, tx: mpsc::UnboundedSender<(usize, Incoming)>) {
+    let mut backoff = Duration::from_secs(1);
+    let mut started = Instant::now();
+    loop {
+        let _ = (&mut exited).await;
+        let w = &app.workers[idx];
+        tracing::error!("worker `{}` exited; restarting", w.name);
+        let orphans: Vec<Uuid> = app.turns.lock().await.iter().filter(|(_, t)| t.worker == idx).map(|(id, _)| *id).collect();
+        for id in orphans {
+            finish_turn(&app, id, json!(format!("the `{}` worker crashed during this turn; send your message again", w.name))).await;
+        }
+        if started.elapsed() > Duration::from_secs(60) {
+            backoff = Duration::from_secs(1);
+        }
+        loop {
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(60));
+            match Mind::spawn(&w.cmd, &w.dir).await {
+                Ok((mind, rx, ex)) => {
+                    forward_worker(idx, rx, tx.clone());
+                    *w.mind.write().unwrap() = mind;
+                    exited = ex;
+                    started = Instant::now();
+                    tracing::info!("worker `{}` restarted", w.name);
+                    break;
+                }
+                Err(e) => tracing::error!("worker `{}` failed to restart: {e:#}", w.name),
+            }
+        }
+    }
+}
+
+/// Stop turns that have gone quiet: no message from the worker and no tool running for
+/// ZEN_TURN_IDLE_SECS (default 600). First ask the worker to abort; if the turn is still
+/// there 30s after any abort, end it in the kernel.
+async fn watchdog(app: AppState) {
+    let idle_limit = Duration::from_secs(std::env::var("ZEN_TURN_IDLE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(600));
+    let grace = Duration::from_secs(30);
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let mut to_abort = Vec::new();
+        let mut to_end = Vec::new();
+        for (id, t) in app.turns.lock().await.iter_mut() {
+            match t.abort_sent {
+                Some(at) if at.elapsed() > grace => to_end.push(*id),
+                None if t.tools_running == 0 && t.last_activity.elapsed() > idle_limit => {
+                    t.abort_sent = Some(Instant::now());
+                    let _ = t.cancel.send(true);
+                    to_abort.push((*id, t.worker));
+                }
+                _ => {}
+            }
+        }
+        for (id, worker) in to_abort {
+            tracing::warn!("turn in session {id} stalled; aborting");
+            let _ = app.workers[worker].mind().request("turn.abort", json!({ "session_id": id })).await;
+        }
+        for id in to_end {
+            tracing::warn!("turn in session {id} did not stop after abort; ending it");
+            finish_turn(&app, id, json!("the turn stopped responding and was ended")).await;
+        }
+    }
+}
+
+/// End a session's turn in the kernel: cancel its tool calls, free the session, tell clients.
+/// Returns false if no turn was running (e.g. it was already ended).
+async fn finish_turn(app: &App, id: Uuid, error: Value) -> bool {
+    let Some(turn) = app.turns.lock().await.remove(&id) else { return false };
+    let _ = turn.cancel.send(true);
+    let cost: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(cost_usd), 0) FROM model_calls WHERE session_id = $1")
+        .bind(id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap_or(0.0);
+    app.emit(id, json!({ "type": "end", "error": error, "cost": cost })).await;
+    true
+}
+
 // ---------- auth ----------
 
 async fn auth(State(app): State<AppState>, req: Request, next: Next) -> Response {
@@ -213,10 +323,10 @@ async fn health(State(app): State<AppState>) -> Json<Value> {
     let db = sqlx::query("SELECT 1").execute(&app.db).await.is_ok();
     let mut workers = serde_json::Map::new();
     for w in &app.workers {
-        workers.insert(w.name.clone(), json!(w.mind.request("ping", json!({})).await.is_ok()));
+        workers.insert(w.name.clone(), json!(w.mind().request("ping", json!({})).await.is_ok()));
     }
     let mind = workers.values().all(|v| v == true);
-    let busy = app.busy.lock().await.len();
+    let busy = app.turns.lock().await.len();
     Json(json!({ "ok": db && mind, "db": db, "mind": mind, "workers": workers, "busy": busy, "version": env!("CARGO_PKG_VERSION") }))
 }
 
@@ -229,7 +339,7 @@ async fn collect_models(app: &App) -> Value {
     let mut all: Vec<(usize, Value)> = Vec::new();
     let mut authenticated = serde_json::Map::new();
     for (i, w) in app.workers.iter().enumerate() {
-        let Ok(res) = w.mind.request("models.list", json!({})).await else { continue };
+        let Ok(res) = w.mind().request("models.list", json!({})).await else { continue };
         if let Some(a) = res["authenticated"].as_object() {
             authenticated.extend(a.clone());
         }
@@ -356,7 +466,7 @@ async fn get_session(State(app): State<AppState>, Path(id): Path<Uuid>) -> ApiRe
     .ok_or_else(not_found)?;
     let mut session = session_json(&row);
     session["messages"] = Value::Array(load_messages(&app.db, id).await?);
-    session["busy"] = json!(app.busy.lock().await.contains(&id));
+    session["busy"] = json!(app.is_busy(id).await);
     Ok(Json(session))
 }
 
@@ -415,8 +525,18 @@ async fn session_ws(State(app): State<AppState>, Path(id): Path<Uuid>, ws: WebSo
 async fn handle_socket(app: AppState, id: Uuid, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
     let mut rx = app.hub(id).await.subscribe();
+    let fwd_app = app.clone();
     let forward = tokio::spawn(async move {
-        while let Ok(msg) = rx.recv().await {
+        loop {
+            let msg = match rx.recv().await {
+                Ok(msg) => msg,
+                // This client fell behind and missed events: say so and carry on. `busy` lets the
+                // client finish a turn whose `end` it may have missed.
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    json!({ "type": "resync", "skipped": n, "busy": fwd_app.is_busy(id).await }).to_string()
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
             if sink.send(Message::Text(msg.into())).await.is_err() {
                 break;
             }
@@ -433,9 +553,14 @@ async fn handle_socket(app: AppState, id: Uuid, socket: WebSocket) {
                 }
             }
             Some("abort") => {
-                let worker = app.turn_worker.lock().await.get(&id).copied();
+                // Stop the kernel's tools right away, then ask the worker to stop the model.
+                let worker = app.turns.lock().await.get_mut(&id).map(|t| {
+                    let _ = t.cancel.send(true);
+                    t.abort_sent.get_or_insert_with(Instant::now);
+                    t.worker
+                });
                 if let Some(w) = worker.and_then(|i| app.workers.get(i)) {
-                    let _ = w.mind.request("turn.abort", json!({ "session_id": id })).await;
+                    let _ = w.mind().request("turn.abort", json!({ "session_id": id })).await;
                 }
             }
             _ => {}
@@ -444,22 +569,71 @@ async fn handle_socket(app: AppState, id: Uuid, socket: WebSocket) {
     forward.abort();
 }
 
+/// Instruction files the owner keeps for agents: `~/.zenbot/AGENTS.md` (global), then
+/// `AGENTS.md` (or `CLAUDE.md`) in each directory from `/` down to the workspace.
+fn context_files(workspace: &std::path::Path) -> Vec<(PathBuf, String)> {
+    const MAX_FILE: usize = 32 * 1024;
+    let mut candidates = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(vec![PathBuf::from(home).join(".zenbot/AGENTS.md")]);
+    }
+    let mut dirs: Vec<&std::path::Path> = workspace.ancestors().collect();
+    dirs.reverse();
+    for d in dirs {
+        candidates.push(vec![d.join("AGENTS.md"), d.join("CLAUDE.md")]);
+    }
+    let mut out = Vec::new();
+    for group in candidates {
+        if let Some((path, mut text)) = group.into_iter().find_map(|p| std::fs::read_to_string(&p).ok().map(|t| (p, t))) {
+            if text.len() > MAX_FILE {
+                let mut end = MAX_FILE;
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                text.truncate(end);
+                text.push_str("\n[... truncated; read the file for the rest ...]");
+            }
+            if !out.iter().any(|(p, _): &(PathBuf, String)| p == &path) {
+                out.push((path, text));
+            }
+        }
+    }
+    out
+}
+
 fn system_prompt(workspace: &std::path::Path, repo: &str) -> String {
-    format!(
+    let mut s = format!(
         "You are zenbot, the owner's personal agent running on their Linux VM.\n\
          You can run shell commands and read, write, edit and move files using your tools.\n\
-         The working directory for tools is {} (paths are relative to it unless absolute).\n\
          Be concise and direct. Show file paths clearly. Prefer doing the work over describing it.\n\
          The user sees every tool call and its full output in the interface, so never repeat raw tool output; \
          summarize what matters and quote only the relevant lines.\n\
-         Read files before editing them. Ask before destructive or outward-facing actions \
-         (deleting data, pushing, publishing, sending messages, spending money).\n\
+         Ask before destructive or outward-facing actions (deleting data, pushing, publishing, sending messages, spending money).\n\
          Your own source code (zenbot) is at {repo}. Before changing yourself, read {repo}/AGENTS.md and follow it; \
          never restart your own service directly, use the upgrade script it describes.\n\
-         Today is {}.",
+         \n\
+         <tool_guidelines>\n\
+         - Use read to look at files (not cat or sed), and read a file before editing it.\n\
+         - Use edit for changes to existing files and write for new files or complete rewrites. Edits to the same file are applied one at a time, so several in one step are safe.\n\
+         - Use bash for searching (rg, grep, find), git, builds, tests and running programs.\n\
+         - Start servers and other long-running processes in the background with output redirected to a file.\n\
+         - When output is cut, the result says where the full output was saved or which offset to read next.\n\
+         </tool_guidelines>\n"
+    );
+    let files = context_files(workspace);
+    if !files.is_empty() {
+        s.push_str("\n<project_context>\nInstructions the owner keeps for agents. Follow them.\n");
+        for (path, text) in files {
+            s.push_str(&format!("<file path=\"{}\">\n{}\n</file>\n", path.display(), text.trim_end()));
+        }
+        s.push_str("</project_context>\n");
+    }
+    s.push_str(&format!(
+        "\nWorking directory for tools: {} (paths are relative to it unless absolute; ~ is the home directory).\nToday is {}.",
         workspace.display(),
-        chrono::Utc::now().format("%Y-%m-%d")
-    )
+        chrono::Local::now().format("%Y-%m-%d (%A)")
+    ));
+    s
 }
 
 async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
@@ -471,39 +645,46 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
     let model: String = row.get("model");
     let title: String = row.get("title");
 
-    if !app.busy.lock().await.insert(id) {
-        anyhow::bail!("this session is already working; wait or abort");
-    }
-    let history = prune_history(load_messages(&app.db, id).await?);
-    let user = json!({ "role": "user", "content": text, "timestamp": chrono::Utc::now().timestamp_millis() });
-    append_tape(&app.db, id, "message", &user).await?;
-    if title.is_empty() {
-        let t: String = text.chars().take(60).collect();
-        sqlx::query("UPDATE sessions SET title = $2 WHERE id = $1").bind(id).bind(t.trim()).execute(&app.db).await?;
-    }
-    app.emit(id, json!({ "type": "message", "message": user })).await;
-
     let Some(widx) = worker_for(app, &model).await else {
-        app.busy.lock().await.remove(&id);
         anyhow::bail!("no worker serves model `{model}`; pick another with /model");
     };
-    app.turn_worker.lock().await.insert(id, widx);
-    let res = app.workers[widx]
-        .mind
-        .request(
-            "turn.start",
-            json!({
-                "session_id": id,
-                "model": model,
-                "system_prompt": system_prompt(&app.workspace, &app.repo),
-                "history": history,
-                "prompt": text,
-                "tools": tools::specs(),
-            }),
-        )
-        .await;
+    {
+        let mut turns = app.turns.lock().await;
+        if turns.contains_key(&id) {
+            anyhow::bail!("this session is already working; wait or abort");
+        }
+        turns.insert(
+            id,
+            Turn { worker: widx, cancel: watch::channel(false).0, last_activity: Instant::now(), tools_running: 0, abort_sent: None },
+        );
+    }
+    let res = async {
+        let history = prune_history(load_messages(&app.db, id).await?);
+        let user = json!({ "role": "user", "content": text, "timestamp": chrono::Utc::now().timestamp_millis() });
+        append_tape(&app.db, id, "message", &user).await?;
+        if title.is_empty() {
+            let t: String = text.chars().take(60).collect();
+            sqlx::query("UPDATE sessions SET title = $2 WHERE id = $1").bind(id).bind(t.trim()).execute(&app.db).await?;
+        }
+        app.emit(id, json!({ "type": "message", "message": user })).await;
+        app.workers[widx]
+            .mind()
+            .request(
+                "turn.start",
+                json!({
+                    "session_id": id,
+                    "model": model,
+                    "system_prompt": system_prompt(&app.workspace, &app.repo),
+                    "history": history,
+                    "prompt": text,
+                    "tools": tools::specs(),
+                }),
+            )
+            .await
+    }
+    .await;
     if let Err(e) = res {
-        app.busy.lock().await.remove(&id);
+        app.turns.lock().await.remove(&id);
         return Err(e);
     }
     app.emit(id, json!({ "type": "busy", "busy": true })).await;
@@ -533,19 +714,60 @@ fn session_id(params: &Value) -> Result<Uuid> {
     Ok(params.get("session_id").and_then(Value::as_str).unwrap_or_default().parse()?)
 }
 
+/// Note activity on a session's turn. Returns false when the message doesn't belong to the turn
+/// running on that worker (e.g. a late message from a turn that was already ended); such messages
+/// are dropped so they can't leak into the session.
+async fn touch(app: &App, id: Uuid, worker: usize) -> bool {
+    match app.turns.lock().await.get_mut(&id) {
+        Some(t) if t.worker == worker => {
+            t.last_activity = Instant::now();
+            true
+        }
+        _ => false,
+    }
+}
+
 async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming) -> Result<()> {
-    let mind = &app.workers[worker].mind;
+    let mind = app.workers[worker].mind();
     let p = &msg.params;
+    let id = session_id(p);
+    if let Ok(id) = id {
+        if !touch(app, id, worker).await {
+            tracing::warn!("dropping `{}` for session {id}: no turn running on that worker", msg.method);
+            if let Some(req_id) = msg.id {
+                mind.respond(req_id, json!({ "content": "this turn has ended", "is_error": true })).await?;
+            }
+            return Ok(());
+        }
+    }
     match msg.method.as_str() {
         "tool.call" => {
-            let id = session_id(p)?;
+            let id = id?;
             let name = p.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
             let call_id = p.get("call_id").and_then(Value::as_str).unwrap_or_default().to_string();
             let args = p.get("args").cloned().unwrap_or(json!({}));
+            let mut cancel = {
+                let mut turns = app.turns.lock().await;
+                let Some(t) = turns.get_mut(&id) else { return Ok(()) };
+                t.tools_running += 1;
+                t.cancel.subscribe()
+            };
             app.emit(id, json!({ "type": "tool_start", "call_id": call_id, "name": name, "args": args })).await;
             let started = Instant::now();
-            let out = tools::execute(&app.workspace, &name, &args).await;
+            // Abort (or the turn ending) drops the tool future, which kills a running command.
+            let out = if *cancel.borrow() {
+                tools::ToolOutput { content: "not run: the turn was interrupted".into(), is_error: true }
+            } else {
+                tokio::select! {
+                    out = tools::execute(&app.workspace, &name, &args) => out,
+                    _ = cancel.wait_for(|c| *c) => tools::ToolOutput { content: "interrupted: the turn was stopped before this tool finished".into(), is_error: true },
+                }
+            };
             let ms = started.elapsed().as_millis() as i64;
+            if let Some(t) = app.turns.lock().await.get_mut(&id) {
+                t.tools_running = t.tools_running.saturating_sub(1);
+                t.last_activity = Instant::now();
+            }
             sqlx::query(
                 "INSERT INTO tool_calls (session_id, call_id, name, args, is_error, duration_ms, output_bytes)
                  VALUES ($1, $2, $3, $4, $5, $6, $7)",
@@ -565,12 +787,12 @@ async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming) -> Result
             }
         }
         "turn.delta" | "turn.thinking" => {
-            let id = session_id(p)?;
+            let id = id?;
             let kind = if msg.method == "turn.delta" { "delta" } else { "thinking" };
             app.emit(id, json!({ "type": kind, "delta": p.get("delta") })).await;
         }
         "turn.message" => {
-            let id = session_id(p)?;
+            let id = id?;
             let message = p.get("message").cloned().unwrap_or(Value::Null);
             append_tape(&app.db, id, "message", &message).await?;
             if message.get("role").and_then(Value::as_str) == Some("assistant") {
@@ -596,7 +818,7 @@ async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming) -> Result
         }
         "turn.usage" => {
             // Turn-level usage from engines that report it per turn (tokens and/or API-equivalent cost).
-            let id = session_id(p)?;
+            let id = id?;
             let n = |k: &str| p.get(k).and_then(Value::as_i64).unwrap_or(0);
             sqlx::query(
                 "INSERT INTO model_calls (session_id, provider, model, input_tokens, output_tokens, cache_read, cache_write, cost_usd, stop_reason)
@@ -615,21 +837,36 @@ async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming) -> Result
             app.emit(id, json!({ "type": "usage", "input": n("input"), "output": n("output"), "cost": p["cost_usd"] })).await;
         }
         "turn.end" => {
-            let id = session_id(p)?;
-            app.busy.lock().await.remove(&id);
-            app.turn_worker.lock().await.remove(&id);
-            let cost: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(cost_usd), 0) FROM model_calls WHERE session_id = $1")
-                .bind(id)
-                .fetch_one(&app.db)
-                .await?;
-            app.emit(id, json!({ "type": "end", "error": p.get("error"), "cost": cost })).await;
+            finish_turn(app, id?, p.get("error").cloned().unwrap_or(Value::Null)).await;
         }
         other => {
-            tracing::warn!("unknown method from mind: {other}");
+            tracing::warn!("unknown method from worker: {other}");
             if let Some(req_id) = msg.id {
                 mind.respond(req_id, json!({ "content": format!("unknown method {other}"), "is_error": true })).await?;
             }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_prompt_includes_context_files_from_ancestors() {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("zend-ctx-{nanos}"));
+        let ws = root.join("proj");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(root.join("CLAUDE.md"), "outer rule").unwrap();
+        std::fs::write(ws.join("AGENTS.md"), "inner rule").unwrap();
+        std::fs::write(ws.join("CLAUDE.md"), "shadowed by AGENTS.md").unwrap();
+        let prompt = system_prompt(&ws, "/repo");
+        let outer = prompt.find("outer rule").expect("parent CLAUDE.md loaded");
+        let inner = prompt.find("inner rule").expect("workspace AGENTS.md loaded");
+        assert!(outer < inner, "files are ordered from the root down");
+        assert!(!prompt.contains("shadowed"));
+        assert!(prompt.contains(&format!("Working directory for tools: {}", ws.display())));
+    }
 }

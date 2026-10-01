@@ -21,7 +21,7 @@ Config lives in `~/.zenbot/`: `env` (service environment, including `ZEN_WORKERS
 ## Making a change
 
 1. Read the code you're changing first. Keep the existing style. Keep changes small.
-2. Build and check: `cargo build --release` and `cargo test --release`. If you change the Pi worker, `node packages/mind/src/main.ts` must start (Node runs TypeScript directly by stripping types, so don't use TypeScript-only syntax like enums or constructor parameter properties). Changes to the worker protocol must update `docs/worker-protocol.md` and every worker.
+2. Build and check: `cargo build --release` and `cargo test --release`. Test kernel behavior end to end without a subscription using the scripted `faux/smoke` model (`ZEN_FAUX=1`, see `docs/worker-protocol.md`). If you change the Pi worker, `node packages/mind/src/main.ts` must start (Node runs TypeScript directly by stripping types, so don't use TypeScript-only syntax like enums or constructor parameter properties). Changes to the worker protocol must update `docs/worker-protocol.md` and every worker.
 3. Test the changed behavior for real where you can, for example `./target/release/zen ask --json "…"` against the running service.
 4. Apply it with `scripts/upgrade.sh`. It rebuilds, checks, and schedules the restart for when no session is working, so it is safe to run from inside your own session. The restart will end the current turn's connection; the user reconnects by sending the next message.
 5. Afterwards, check `~/.zenbot/upgrade.log`. If the new version wasn't healthy it was rolled back automatically; read the log, fix, and run the script again.
