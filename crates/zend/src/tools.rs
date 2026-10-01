@@ -629,13 +629,16 @@ mod tests {
         let ws = scratch("bash");
         let started = Instant::now();
         // 3s leaves room for a slow login shell (bash -l) to start, e.g. on CI runners.
-        let r = run(&ws, "bash", json!({ "command": "echo before; (sleep 30; echo leaked > leaked.txt) & sleep 30", "timeout_secs": 3 })).await;
+        // A marker unique to this run, so leftovers from other runs can't be mistaken for ours.
+        let marker = ws.file_name().unwrap().to_string_lossy().to_string();
+        let cmd = format!("echo before; (sleep 30; echo {marker} > leaked.txt) & sleep 30");
+        let r = run(&ws, "bash", json!({ "command": cmd, "timeout_secs": 3 })).await;
         assert!(r.is_error);
         assert!(r.content.contains("before"), "{}", r.content);
         assert!(r.content.contains("timed out"));
         assert!(started.elapsed() < Duration::from_secs(10));
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let out = std::process::Command::new("pgrep").args(["-f", "sleep 30; echo leaked"]).output().unwrap();
+        let out = std::process::Command::new("pgrep").args(["-f", &format!("echo {marker} ")]).output().unwrap();
         assert!(out.stdout.is_empty(), "background child survived the timeout");
     }
 
