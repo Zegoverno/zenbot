@@ -1,6 +1,8 @@
 //! Interactive terminal app, inline like Claude Code, Codex and Pi.
 //! The conversation is printed into normal terminal scrollback; a live region at the bottom
 //! holds streaming text, status, the input box and the footer, redrawn in place.
+//! On start the screen is cleared (old contents go to scrollback) and the live region is
+//! padded so it stays pinned to the bottom of the terminal, like a full-screen app.
 
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -76,6 +78,10 @@ struct App {
     /// Highlighted row in the `/` command menu.
     menu_sel: usize,
     region: Region,
+    /// Rows of committed conversation on screen above the live region (capped at the height).
+    filled: usize,
+    /// The terminal reports modified keys (kitty protocol), so shift+enter is distinct from enter.
+    enhanced: bool,
     busy: bool,
     status: String,
     spin: usize,
@@ -127,6 +133,8 @@ pub async fn run(c: Client, start: Start, model: Option<String>) -> Result<()> {
         picker: None,
         menu_sel: 0,
         region: Region::default(),
+        filled: 0,
+        enhanced: false,
         busy: false,
         status: String::new(),
         spin: 0,
@@ -152,6 +160,10 @@ pub async fn run(c: Client, start: Start, model: Option<String>) -> Result<()> {
     if enhanced {
         execute!(out, PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))?;
     }
+    app.enhanced = enhanced;
+    // Full screen: push what's on screen into scrollback and start from the top.
+    let _ = out.write_all(format!("\x1b[999B{}\x1b[H", "\n".repeat(term_height())).as_bytes());
+    let _ = out.flush();
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = terminal::disable_raw_mode();
@@ -281,13 +293,21 @@ impl App {
 
     fn paint_region(&mut self, out: &mut String) {
         let (mut lines, mut caret_row, caret_col, show_caret) = self.compose();
-        let max = term_height().saturating_sub(1);
+        let h = term_height();
+        let max = h.saturating_sub(1);
         if lines.len() > max {
             let cut = lines.len() - max;
             lines.drain(..cut);
             caret_row = caret_row.saturating_sub(cut);
         }
+        // Pad above so the region sits at the bottom of the screen.
+        let pad = h.saturating_sub(self.filled.min(h) + lines.len());
+        if pad > 0 {
+            lines.splice(0..0, std::iter::repeat_with(Vec::new).take(pad));
+            caret_row += pad;
+        }
         let n = lines.len();
+        self.filled = self.filled.min(h - n);
         out.push_str(&lines.iter().map(md::to_ansi).collect::<Vec<_>>().join("\r\n"));
         let up = n.saturating_sub(1).saturating_sub(caret_row);
         if up > 0 {
@@ -327,6 +347,7 @@ impl App {
             out.push_str(&md::to_ansi(l));
             out.push_str("\x1b[K\r\n");
         }
+        self.filled = (self.filled + lines.len()).min(term_height());
         self.paint_region(&mut out);
         out.push_str("\x1b[?2026l");
         Self::flush(out);
@@ -388,12 +409,16 @@ impl App {
             lines.push(line(n.chars().take(w).collect::<String>(), *s));
         }
 
-        let rule = line("─".repeat(w), Sty::Dim);
-        lines.push(rule.clone());
-        let (input, crow, ccol) = self.editor.render(w, PLACEHOLDER);
+        let hint = if self.editor.is_empty() {
+            ""
+        } else if self.enhanced {
+            "enter send · shift+enter new line"
+        } else {
+            "enter send · alt+enter new line"
+        };
+        let (input, crow, ccol) = self.editor.render(w, PLACEHOLDER, hint, (term_height() / 2).max(3));
         let caret_row = lines.len() + crow;
         lines.extend(input);
-        lines.push(rule);
 
         let menu = self.menu();
         if !menu.is_empty() {
@@ -604,7 +629,7 @@ impl App {
         match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => self.on_key(k).await?,
             Event::Paste(s) if self.picker.is_none() => self.editor.insert(&s),
-            Event::Resize(..) => {}
+            Event::Resize(_, h) => self.filled = self.filled.min(h as usize),
             _ => return Ok(()),
         }
         if !self.quit {
@@ -710,7 +735,7 @@ impl App {
                     self.editor.clear();
                 }
             }
-            KeyCode::Enter if alt || shift => self.editor.insert("\n"),
+            KeyCode::Enter if alt || shift || ctrl => self.editor.insert("\n"),
             KeyCode::Char('j') if ctrl => self.editor.insert("\n"),
             KeyCode::Enter => {
                 if self.editor.buf.ends_with('\\') {
@@ -724,6 +749,10 @@ impl App {
             KeyCode::Backspace => self.editor.backspace(),
             KeyCode::Char('h') if ctrl => self.editor.backspace(),
             KeyCode::Delete => self.editor.delete(),
+            KeyCode::Left if ctrl || alt => self.editor.word_left(),
+            KeyCode::Right if ctrl || alt => self.editor.word_right(),
+            KeyCode::Char('b') if alt => self.editor.word_left(),
+            KeyCode::Char('f') if alt => self.editor.word_right(),
             KeyCode::Left => self.editor.left(),
             KeyCode::Right => self.editor.right(),
             KeyCode::Home => self.editor.home(),
@@ -731,6 +760,7 @@ impl App {
             KeyCode::Char('a') if ctrl => self.editor.home(),
             KeyCode::Char('e') if ctrl => self.editor.end(),
             KeyCode::Char('u') if ctrl => self.editor.kill_to_start(),
+            KeyCode::Char('k') if ctrl => self.editor.kill_to_end(),
             KeyCode::Char('w') if ctrl => self.editor.delete_word(),
             KeyCode::Up => self.editor.up(),
             KeyCode::Down => self.editor.down(),
@@ -837,13 +867,15 @@ impl App {
                 out.push(line("Keys", Sty::Bold));
                 for (k, h) in [
                     ("enter", "send"),
-                    ("alt+enter", "new line (also shift+enter, ctrl+j, or end a line with \\)"),
+                    ("shift+enter", "new line (also alt+enter, ctrl+j, or end a line with \\)"),
                     ("esc", "interrupt zenbot"),
                     ("↑ ↓", "previous prompts; in the / menu, choose a command (tab completes)"),
+                    ("ctrl+←/→", "move by word (also alt+b / alt+f); ctrl+a/e line start/end"),
+                    ("ctrl+u/k", "delete to line start / end; ctrl+w deletes a word"),
                     ("ctrl+c", "clear input; twice to exit"),
                     ("ctrl+d", "exit"),
                 ] {
-                    out.push(vec![(format!("  {k:<10}"), Sty::Accent), (h.to_string(), Sty::Plain)]);
+                    out.push(vec![(format!("  {k:<12}"), Sty::Accent), (h.to_string(), Sty::Plain)]);
                 }
                 out.push(Vec::new());
                 self.commit(out);

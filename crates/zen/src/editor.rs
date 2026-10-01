@@ -1,6 +1,6 @@
 //! A small multi-line input editor with prompt history.
 
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::md::{Line, Sty};
 
@@ -99,6 +99,25 @@ impl Editor {
         self.cursor = s;
     }
 
+    pub fn kill_to_end(&mut self) {
+        let e = self.line_end();
+        self.buf.replace_range(self.cursor..e, "");
+    }
+
+    /// Move to the start of the previous word.
+    pub fn word_left(&mut self) {
+        let before = self.buf[..self.cursor].trim_end_matches([' ', '\n']);
+        self.cursor = before.rfind([' ', '\n']).map(|i| i + 1).unwrap_or(0);
+    }
+
+    /// Move past the end of the next word.
+    pub fn word_right(&mut self) {
+        let rest = &self.buf[self.cursor..];
+        let skip = rest.len() - rest.trim_start_matches([' ', '\n']).len();
+        let word = rest[skip..].find([' ', '\n']).unwrap_or(rest.len() - skip);
+        self.cursor += skip + word;
+    }
+
     pub fn delete_word(&mut self) {
         let before = &self.buf[..self.cursor];
         let trimmed = before.trim_end_matches(' ');
@@ -180,49 +199,105 @@ impl Editor {
         text
     }
 
-    /// Render with a "› " prompt, hard-wrapped to `width`. Returns lines and the caret (row, col).
-    pub fn render(&self, width: usize, placeholder: &str) -> (Vec<Line>, usize, usize) {
-        let width = width.max(12);
-        let content = width - 2;
-        if self.buf.is_empty() {
-            return (vec![vec![("› ".into(), Sty::Accent), (placeholder.into(), Sty::Dim)]], 0, 2);
-        }
-        let mut lines: Vec<Line> = Vec::new();
-        let (mut caret_row, mut caret_col) = (0, 2);
-        let mut offset = 0;
-        for (li, logical) in self.buf.split('\n').enumerate() {
-            let prefix = if li == 0 { ("› ".to_string(), Sty::Accent) } else { ("  ".to_string(), Sty::Plain) };
-            let mut cur = String::new();
-            let mut w = 0;
-            let mut first_chunk = true;
-            let start_row = lines.len();
-            let mut row_in_line = 0;
-            let mut found_caret = false;
-            for (bi, ch) in logical.char_indices() {
-                let cw = ch.width().unwrap_or(0);
-                if w + cw > content {
-                    lines.push(vec![if first_chunk { prefix.clone() } else { ("  ".into(), Sty::Plain) }, (std::mem::take(&mut cur), Sty::Plain)]);
-                    first_chunk = false;
-                    row_in_line += 1;
-                    w = 0;
-                }
-                if offset + bi == self.cursor {
-                    caret_row = start_row + row_in_line;
-                    caret_col = 2 + w;
-                    found_caret = true;
-                }
-                cur.push(ch);
-                w += cw;
+    /// Where the caret sits in a logical line's wrapped rows: (row, col).
+    fn caret_in(ranges: &[(usize, usize)], logical: &str, c: usize) -> (usize, usize) {
+        for (ri, &(s, e)) in ranges.iter().enumerate() {
+            if c < e || ri + 1 == ranges.len() {
+                return (ri, UnicodeWidthStr::width(&logical[s..c.max(s)]));
             }
-            if !found_caret && offset + logical.len() == self.cursor {
-                caret_row = start_row + row_in_line;
-                caret_col = 2 + w;
-            }
-            lines.push(vec![if first_chunk { prefix } else { ("  ".into(), Sty::Plain) }, (cur, Sty::Plain)]);
-            offset += logical.len() + 1;
         }
-        (lines, caret_row, caret_col.min(width - 1))
+        (0, 0)
     }
+
+    /// Render as a bordered box `width` columns wide, word-wrapped, showing at most `max_rows`
+    /// rows of text (scrolled to keep the caret visible). Returns lines and the caret (row, col).
+    pub fn render(&self, width: usize, placeholder: &str, hint: &str, max_rows: usize) -> (Vec<Line>, usize, usize) {
+        let width = width.max(16);
+        let inner = width - 6; // "│ › " … " │"
+        let mut rows: Vec<(String, String, usize)> = Vec::new(); // prefix, text, text width
+        let (mut crow, mut ccol) = (0, 0);
+        if self.buf.is_empty() {
+            let p: String = placeholder.chars().take(inner).collect();
+            let w = UnicodeWidthStr::width(p.as_str());
+            rows.push(("› ".into(), p, w));
+        } else {
+            let mut offset = 0;
+            for logical in self.buf.split('\n') {
+                let ranges = wrap_ranges(logical, inner);
+                if self.cursor >= offset && self.cursor <= offset + logical.len() {
+                    let (r, c) = Self::caret_in(&ranges, logical, self.cursor - offset);
+                    crow = rows.len() + r;
+                    ccol = c;
+                }
+                for (s, e) in ranges {
+                    let prefix = if rows.is_empty() { "› " } else { "  " };
+                    let mut text = logical[s..e].to_string();
+                    if UnicodeWidthStr::width(text.as_str()) > inner {
+                        text.pop(); // the hanging space
+                    }
+                    let w = UnicodeWidthStr::width(text.as_str());
+                    rows.push((prefix.into(), text, w));
+                }
+                offset += logical.len() + 1;
+            }
+        }
+
+        let max_rows = max_rows.max(1);
+        let start = (crow + 1).saturating_sub(max_rows).min(rows.len().saturating_sub(max_rows));
+        let below = rows.len().saturating_sub(start + max_rows);
+        let border = |left: &str, right: &str, label: String| -> Line {
+            let label: String = label.chars().take(width.saturating_sub(6)).collect();
+            let fill = width - 2 - UnicodeWidthStr::width(label.as_str());
+            if label.is_empty() {
+                vec![(format!("{left}{}{right}", "─".repeat(width - 2)), Sty::Dim)]
+            } else {
+                vec![(format!("{left}{}", "─".repeat(fill - 1)), Sty::Dim), (label, Sty::Dim), (format!("─{right}"), Sty::Dim)]
+            }
+        };
+        let mut lines = vec![border("╭", "╮", if start > 0 { format!(" ↑ {start} more ") } else { String::new() })];
+        for (prefix, text, w) in rows.iter().skip(start).take(max_rows) {
+            let sty = if self.buf.is_empty() { Sty::Dim } else { Sty::Plain };
+            let psty = if prefix.starts_with('›') { Sty::Accent } else { Sty::Plain };
+            lines.push(vec![
+                ("│ ".into(), Sty::Dim),
+                (prefix.clone(), psty),
+                (text.clone(), sty),
+                (" ".repeat(inner.saturating_sub(*w)), Sty::Plain),
+                (" │".into(), Sty::Dim),
+            ]);
+        }
+        let bottom = if below > 0 { format!(" ↓ {below} more ") } else if hint.is_empty() { String::new() } else { format!(" {hint} ") };
+        lines.push(border("╰", "╯", bottom));
+        (lines, 1 + crow - start, (4 + ccol).min(width - 2))
+    }
+}
+
+/// Word-wrap one line into byte ranges of at most `width` columns, breaking after a space where possible.
+fn wrap_ranges(s: &str, width: usize) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let (mut start, mut w, mut after_space) = (0, 0, None::<usize>);
+    for (i, ch) in s.char_indices() {
+        let cw = ch.width().unwrap_or(0);
+        if w + cw > width && i > start && ch == ' ' {
+            // A space that overflows hangs at the end of the row (not drawn) instead of wrapping.
+            out.push((start, i + 1));
+            (start, w, after_space) = (i + 1, 0, None);
+            continue;
+        }
+        if w + cw > width && i > start {
+            let brk = after_space.filter(|&b| b > start && b <= i).unwrap_or(i);
+            out.push((start, brk));
+            start = brk;
+            w = UnicodeWidthStr::width(&s[start..i]);
+            after_space = None;
+        }
+        w += cw;
+        if ch == ' ' {
+            after_space = Some(i + 1);
+        }
+    }
+    out.push((start, s.len()));
+    out
 }
 
 #[cfg(test)]
@@ -243,5 +318,65 @@ mod tests {
         e.down();
         e.set("/stat");
         assert!(!e.browsing_history());
+    }
+
+    fn text(l: &Line) -> String {
+        l.iter().map(|(t, _)| t.as_str()).collect()
+    }
+
+    #[test]
+    fn wraps_at_words() {
+        assert_eq!(wrap_ranges("hello brave new world", 11), vec![(0, 12), (12, 21)]);
+        assert_eq!(wrap_ranges("hello brave new world", 10), vec![(0, 6), (6, 16), (16, 21)]);
+        assert_eq!(wrap_ranges("abcdefghij", 4), vec![(0, 4), (4, 8), (8, 10)]);
+        assert_eq!(wrap_ranges("", 4), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn renders_a_box_with_paragraphs_and_caret() {
+        let mut e = Editor::new(None);
+        e.insert("first paragraph\n\nsecond");
+        let (lines, row, col) = e.render(30, "", "", 10);
+        let t: Vec<String> = lines.iter().map(text).collect();
+        assert_eq!(t.len(), 5);
+        assert!(t[0].starts_with('╭') && t[4].starts_with('╰'));
+        assert!(t[1].starts_with("│ › first paragraph") && t[1].ends_with(" │"));
+        assert_eq!(t[2].trim_end_matches(" │").trim(), "│");
+        assert!(t.iter().all(|l| UnicodeWidthStr::width(l.as_str()) == 30));
+        assert_eq!((row, col), (3, 4 + 6));
+    }
+
+    #[test]
+    fn long_input_scrolls_to_the_caret() {
+        let mut e = Editor::new(None);
+        e.insert("1\n2\n3\n4\n5\n6");
+        let (lines, row, _) = e.render(30, "", "", 3);
+        assert_eq!(lines.len(), 5);
+        assert!(text(&lines[0]).contains("↑ 3 more"));
+        assert!(text(&lines[3]).contains('6'));
+        assert_eq!(row, 3);
+        e.up();
+        e.up();
+        e.up();
+        e.up();
+        e.up();
+        let (lines, row, _) = e.render(30, "", "", 3);
+        assert!(text(&lines[1]).contains('1'));
+        assert!(text(&lines[4]).contains("↓ 3 more"));
+        assert_eq!(row, 1);
+    }
+
+    #[test]
+    fn word_motion() {
+        let mut e = Editor::new(None);
+        e.insert("one two  three");
+        e.word_left();
+        assert_eq!(e.cursor, 9);
+        e.word_left();
+        assert_eq!(e.cursor, 4);
+        e.word_right();
+        assert_eq!(e.cursor, 7);
+        e.kill_to_end();
+        assert_eq!(e.buf, "one two");
     }
 }

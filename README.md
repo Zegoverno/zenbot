@@ -33,7 +33,7 @@ zen -r [id]      # resume a session (picker when no id)
 zen -m codex/gpt-6-sol     # default is claude/opus
 ```
 
-Inside: `/new`, `/resume`, `/model`, `/rename <title>`, `/archive`, `/upgrade`, `/help`, `/exit`. Enter sends, Alt+Enter adds a line, Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
+Inside: `/new`, `/resume`, `/model`, `/rename <title>`, `/archive`, `/upgrade`, `/help`, `/exit`. Enter sends; Shift+Enter (or Alt+Enter, Ctrl+J) starts a new line or paragraph; Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
 
 For scripts, every command accepts `--json` and exits non-zero on failure:
 
