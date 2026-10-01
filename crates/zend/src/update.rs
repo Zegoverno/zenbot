@@ -14,8 +14,6 @@ use tokio::sync::Mutex;
 
 pub struct Updater {
     repo: PathBuf,
-    /// Commit this kernel was installed from (~/.zenbot/version), read at startup.
-    running: String,
     last_check: Mutex<Value>,
     job: Arc<Mutex<Option<Job>>>,
 }
@@ -40,20 +38,21 @@ async fn git(repo: &Path, args: &[&str]) -> Option<String> {
 
 impl Updater {
     pub fn new(repo: PathBuf) -> Self {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let running = std::fs::read_to_string(format!("{home}/.zenbot/version")).unwrap_or_default().trim().to_string();
-        Updater { repo, running, last_check: Mutex::new(Value::Null), job: Arc::default() }
+        Updater { repo, last_check: Mutex::new(Value::Null), job: Arc::default() }
     }
 
-    pub fn running(&self) -> &str {
-        &self.running
+    /// The installed commit (~/.zenbot/version). Read each time: apply-upgrade.sh writes it only
+    /// after the new kernel has passed its health check, so it can change after startup.
+    pub fn running(&self) -> String {
+        let home = std::env::var("HOME").unwrap_or_default();
+        std::fs::read_to_string(format!("{home}/.zenbot/version")).unwrap_or_default().trim().to_string()
     }
 
     /// The last check's result (without checking again).
     pub async fn info(&self) -> Value {
         let last = self.last_check.lock().await.clone();
         if last.is_null() {
-            json!({ "running": self.running, "checked_at": null })
+            json!({ "running": self.running(), "checked_at": null })
         } else {
             last
         }
@@ -65,7 +64,8 @@ impl Updater {
         let result = async {
             git(repo, &["fetch", "-q", "origin", "main"]).await.ok_or("could not fetch origin/main (offline?)")?;
             let latest = git(repo, &["rev-parse", "origin/main"]).await.ok_or("no origin/main")?;
-            let base = if self.running.is_empty() { "HEAD".to_string() } else { self.running.clone() };
+            let running = self.running();
+            let base = if running.is_empty() { "HEAD".to_string() } else { running };
             let running_full = git(repo, &["rev-parse", &format!("{base}^{{commit}}")]).await.ok_or("running version is not in the repository")?;
             let range = format!("{running_full}..{latest}");
             let behind: u64 = git(repo, &["rev-list", "--count", &range]).await.and_then(|n| n.parse().ok()).unwrap_or(0);
@@ -97,7 +97,7 @@ impl Updater {
         .await;
         let mut info = match result {
             Ok(v) => v,
-            Err(e) => json!({ "running": self.running, "error": e }),
+            Err(e) => json!({ "running": self.running(), "error": e }),
         };
         info["checked_at"] = json!(now());
         *self.last_check.lock().await = info.clone();
@@ -173,7 +173,7 @@ impl Updater {
             .find(|l| l.starts_with("20"))
             .unwrap_or("")
             .to_string();
-        json!({ "running": self.running, "job": job, "last_result": last })
+        json!({ "running": self.running(), "job": job, "last_result": last })
     }
 }
 
