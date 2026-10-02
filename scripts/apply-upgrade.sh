@@ -23,10 +23,12 @@ for b in $BINS; do
   [ -f "$BIN/$b" ] && cp -f "$BIN/$b" "$BIN/$b.prev"
   install -m 755 "$REPO/target/release/$b" "$BIN/$b.new" && mv -f "$BIN/$b.new" "$BIN/$b"
 done
+# The kernel reads the version at start and records it with every turn, so write it first.
+PREV_VERSION=$(cat "$HOME/.zenbot/version" 2>/dev/null || true)
+git -C "$REPO" rev-parse --short HEAD > "$HOME/.zenbot/version" 2>/dev/null
 sudo systemctl restart zenbot
 
 if wait_healthy; then
-  git -C "$REPO" rev-parse --short HEAD > "$HOME/.zenbot/version" 2>/dev/null
   log "upgrade OK: now running $(cat "$HOME/.zenbot/version")"
   exit 0
 fi
@@ -34,6 +36,7 @@ fi
 log "upgrade FAILED health check; rolling back. Last service logs:"
 journalctl -u zenbot -n 30 --no-pager >> "$LOG" 2>&1
 for b in $BINS; do [ -f "$BIN/$b.prev" ] && mv -f "$BIN/$b.prev" "$BIN/$b"; done
+echo "$PREV_VERSION" > "$HOME/.zenbot/version"
 sudo systemctl restart zenbot
 if wait_healthy; then log "rolled back to previous version"; else log "ROLLBACK ALSO UNHEALTHY: check journalctl -u zenbot"; fi
 exit 1
