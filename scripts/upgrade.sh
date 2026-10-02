@@ -56,6 +56,7 @@ SMOKE_WS=$(mktemp -d)
 (
   set -a; [ -f "$HOME/.zenbot/env" ] && . "$HOME/.zenbot/env"; set +a
   ZEN_TOKEN="$(cat "$HOME/.zenbot/token")" ZEN_PORT=$SMOKE_PORT ZEN_WORKERS=engine ZEN_FAUX=1 ZEN_WORKSPACE="$SMOKE_WS" \
+    ZEN_HARNESS="$(git rev-parse --short HEAD)" \
     exec ./target/release/zend
 ) >"$SMOKE_LOG" 2>&1 &
 SMOKE_PID=$!
