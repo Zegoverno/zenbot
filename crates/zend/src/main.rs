@@ -126,7 +126,10 @@ async fn main() -> Result<()> {
 
     tokio::fs::create_dir_all(&workspace).await?;
     let db = PgPoolOptions::new().max_connections(10).connect(&database_url).await?;
-    sqlx::migrate!("./migrations").run(&db).await?;
+    // A rolled-back build must still start on a database a newer build already migrated.
+    let mut migrator = sqlx::migrate!("./migrations");
+    migrator.set_ignore_missing(true);
+    migrator.run(&db).await?;
 
     let (merged_tx, incoming) = mpsc::unbounded_channel();
     let mut workers = Vec::new();
