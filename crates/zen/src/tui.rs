@@ -1174,6 +1174,11 @@ impl App {
                 self.aborting = false;
                 self.stream.clear();
                 self.committed = 0;
+                // The kernel's totals cover the whole turn, including calls the stream never showed.
+                let r = &ev["turn"];
+                if r.is_object() {
+                    self.turn_tokens = ["input_tokens", "output_tokens", "cache_read", "cache_write"].iter().map(|k| r[*k].as_i64().unwrap_or(0)).sum();
+                }
                 let secs = self.turn_started.elapsed().as_secs_f32();
                 let effort = self.turn_effort.take().map(|e| format!(" · {e}")).unwrap_or_default();
                 out.push(line(format!("  {}{effort} · {} tokens · {:.1}s", self.turn_model, fmt_tokens(self.turn_tokens), secs), Sty::Dim));
@@ -1381,8 +1386,11 @@ mod tests {
         let mut a = app_with_models(80, 20);
         a.busy = true;
         a.on_event(json!({ "type": "busy", "busy": true, "model": "claude/claude-opus-5-5", "effort": "xhigh" }));
-        a.on_event(json!({ "type": "end", "error": null }));
+        a.turn_tokens = 50; // from the streamed messages, which miss the engine's side calls
+        let record = json!({ "input_tokens": 1000, "output_tokens": 200, "cache_read": 3000, "cache_write": 0 });
+        a.on_event(json!({ "type": "end", "error": null, "turn": record }));
         let out = a.capture.take().unwrap();
         assert!(out.contains(" · xhigh · "), "{out}");
+        assert_eq!(a.session_tokens, 4200, "the kernel's turn totals replace the streamed estimate");
     }
 }

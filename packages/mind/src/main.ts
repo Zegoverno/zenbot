@@ -1,6 +1,7 @@
 // zen-mind: stateless model worker. Speaks JSON-RPC 2.0 (one JSON object per line) over stdio
 // with the kernel (zend). The kernel owns all state and executes every tool call.
 
+import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { Agent } from "@earendil-works/pi-agent-core";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
@@ -85,6 +86,16 @@ function kernelTools(sessionId: string, specs: Json[]): AgentTool<any>[] {
   }));
 }
 
+// Pi's version, reported with each turn so a Pi update shows up in the traces.
+const piVersion: string = (() => {
+  try {
+    const path = new URL("../node_modules/@earendil-works/pi-ai/package.json", import.meta.url);
+    return JSON.parse(readFileSync(path, "utf-8")).version;
+  } catch {
+    return "unknown";
+  }
+})();
+
 // ---- Thinking level ----
 
 // Pi's agent thinks with level "off" unless told otherwise; reasoning models default to "medium" here.
@@ -123,18 +134,22 @@ async function turnStart(p: Json) {
     });
     running.set(session_id, agent);
 
+    let callStarted = 0;
     agent.subscribe((ev: Json) => {
+      if (ev.type === "message_start" && ev.message?.role === "assistant") callStarted = Date.now();
       if (ev.type === "message_update") {
         const e = ev.assistantMessageEvent;
         if (e?.type === "text_delta") notify("turn.delta", { session_id, delta: e.delta });
         else if (e?.type === "thinking_delta") notify("turn.thinking", { session_id, delta: e.delta });
       } else if (ev.type === "message_end") {
         const role = ev.message?.role;
-        if (role === "assistant" || role === "toolResult") notify("turn.message", { session_id, message: ev.message });
+        if (role === "assistant") notify("turn.message", { session_id, message: { ...ev.message, durationMs: Date.now() - callStarted } });
+        else if (role === "toolResult") notify("turn.message", { session_id, message: ev.message });
       }
     });
 
     await agent.prompt(prompt);
+    notify("turn.usage", { session_id, engine: "pi", engine_version: piVersion });
     const err = aborted.has(session_id) ? "interrupted" : agent.state.errorMessage;
     notify("turn.end", { session_id, error: err ?? null });
   } catch (e) {

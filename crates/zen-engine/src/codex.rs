@@ -17,6 +17,12 @@ pub fn available() -> bool {
     std::process::Command::new("codex").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
+/// The installed Codex CLI version ("codex-cli 0.155.1" -> "0.155.1").
+fn version() -> Option<String> {
+    let out = std::process::Command::new("codex").arg("--version").output().ok()?;
+    String::from_utf8_lossy(&out.stdout).split_whitespace().last().map(String::from)
+}
+
 struct AppServer {
     child: Child,
     stdin: ChildStdin,
@@ -203,8 +209,9 @@ pub async fn run_turn(
         }
         let _ = s.child.start_kill();
         ctx.rpc
-            .notify("turn.usage", json!({ "session_id": ctx.session_id, "provider": "codex", "model": model,
-                "input": usage["input"], "output": usage["output"], "cache_read": usage["cacheRead"], "cost_usd": 0.0 }))
+            .notify("turn.usage", json!({ "session_id": ctx.session_id, "engine": "codex", "engine_version": version(),
+                "provider": "codex", "model": model,
+                "input": usage["input"], "output": usage["output"], "cache_read": usage["cacheRead"], "cost_usd": null }))
             .await;
         Ok(error)
     }

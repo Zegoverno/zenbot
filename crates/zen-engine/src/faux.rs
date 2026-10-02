@@ -67,5 +67,6 @@ pub async fn run_turn(ctx: TurnCtx, mut abort: watch::Receiver<bool>) -> Result<
             _ = abort.changed() => return Ok(Some("interrupted".into())),
         }
     }
+    ctx.rpc.notify("turn.usage", json!({ "session_id": ctx.session_id, "engine": "faux", "engine_version": env!("CARGO_PKG_VERSION") })).await;
     Ok(None)
 }

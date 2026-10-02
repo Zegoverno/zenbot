@@ -29,7 +29,7 @@ JSON-RPC 2.0 over the worker's stdin/stdout, one JSON object per line. The kerne
 | `turn.delta` | notification | `{ session_id, delta }`: streamed answer text |
 | `turn.thinking` | notification | `{ session_id, delta }`: streamed reasoning (optional) |
 | `turn.message` | notification | `{ session_id, message }`: a finished message, appended to the session's tape |
-| `turn.usage` | notification | `{ session_id, provider, model, input, output, cache_read, cache_write, cost_usd }`: usage reported per turn (optional) |
+| `turn.usage` | notification | `{ session_id, engine, engine_version, input?, output?, cache_read?, cache_write?, cost_usd?, … }`: the worker's report for the whole turn, sent before `turn.end` |
 | `turn.end` | notification | `{ session_id, error }`: the turn is over; `error` is null on success, `"interrupted"` after an abort |
 
 ## Messages
@@ -46,7 +46,9 @@ Messages use these shapes (the same as Pi's message format):
   "isError": false, "timestamp": 0 }
 ```
 
-A worker emits the assistant message announcing a tool call before calling `tool.call`, and a `toolResult` message after the kernel answers.
+A worker emits one assistant message per model call, with that call's final usage and, when it can measure it, `durationMs`. It emits the assistant message announcing a tool call before calling `tool.call`, and a `toolResult` message after the kernel answers.
+
+`turn.usage` names the engine that ran the turn and its version (e.g. `claude-code` `2.1.287`), so an engine update shows up in the traces. Totals it gives (tokens, `cost_usd`) are taken for the turn as they are; for the ones it leaves out, the kernel sums the turn's messages. Give totals when the engine knows more than the messages show (Claude Code reports side calls only in its result).
 
 ## What the kernel guarantees
 

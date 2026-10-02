@@ -55,6 +55,13 @@ struct Turn {
     model: String,
     /// Instruction files this session has already been given (see context.rs).
     context: HashSet<PathBuf>,
+    /// The turn's row in `turns`; its model and tool calls are recorded under it.
+    turn_id: Uuid,
+    started: Instant,
+    /// Model id the provider reported for the turn's latest model call.
+    model_resolved: Option<String>,
+    /// The worker's `turn.usage` report, if any (engine, version, turn totals).
+    reported: Value,
 }
 
 struct App {
@@ -69,6 +76,8 @@ struct App {
     workspace: PathBuf,
     repo: String,
     default_model: String,
+    /// What built this kernel, recorded with every turn: ZEN_HARNESS, else the installed commit.
+    harness: String,
     hubs: Mutex<HashMap<Uuid, broadcast::Sender<String>>>,
     updater: Arc<update::Updater>,
 }
@@ -133,6 +142,9 @@ async fn main() -> Result<()> {
     migrator.set_ignore_missing(true);
     migrator.run(&db).await?;
 
+    let updater = Arc::new(update::Updater::new(PathBuf::from(&repo_dir)));
+    let harness = std::env::var("ZEN_HARNESS").ok().filter(|h| !h.is_empty()).unwrap_or_else(|| updater.running());
+    let harness = if harness.is_empty() { "unknown".to_string() } else { harness };
     let (merged_tx, incoming) = mpsc::unbounded_channel();
     let mut workers = Vec::new();
     let mut exits = Vec::new();
@@ -160,8 +172,9 @@ async fn main() -> Result<()> {
         workspace,
         repo,
         default_model,
+        harness,
         hubs: Mutex::new(HashMap::new()),
-        updater: Arc::new(update::Updater::new(PathBuf::from(&repo_dir))),
+        updater,
     });
     tokio::spawn(app.updater.clone().check_periodically());
     for (idx, exited) in exits.into_iter().enumerate() {
@@ -300,13 +313,90 @@ async fn watchdog(app: AppState) {
 async fn finish_turn(app: &App, id: Uuid, error: Value) -> bool {
     let Some(turn) = app.turns.lock().await.remove(&id) else { return false };
     let _ = turn.cancel.send(true);
-    let cost: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(cost_usd), 0) FROM model_calls WHERE session_id = $1")
-        .bind(id)
-        .fetch_one(&app.db)
-        .await
-        .unwrap_or(0.0);
-    app.emit(id, json!({ "type": "end", "error": error, "cost": cost })).await;
+    let summary = match record_turn(app, &turn, &error).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("recording turn {}: {e:#}", turn.turn_id);
+            Value::Null
+        }
+    };
+    let cost: f64 = sqlx::query_scalar(&format!("SELECT {}", session_cost("$1"))).bind(id).fetch_one(&app.db).await.unwrap_or(0.0);
+    app.emit(id, json!({ "type": "end", "error": error, "cost": cost, "turn": summary })).await;
     true
+}
+
+/// A session's cost: its turns, plus calls recorded before turns were (they have no turn_id).
+fn session_cost(session: &str) -> String {
+    format!(
+        "(COALESCE((SELECT SUM(cost_usd) FROM turns t WHERE t.session_id = {session}), 0)
+          + COALESCE((SELECT SUM(cost_usd) FROM model_calls m WHERE m.session_id = {session} AND m.turn_id IS NULL), 0))"
+    )
+}
+
+/// Close a turn's row: outcome, duration, counts and totals. The worker's own turn report wins
+/// where it has a figure (Claude Code's covers side calls the stream never shows); otherwise the
+/// totals are summed from the turn's model calls. Returns the row as JSON.
+async fn record_turn(app: &App, turn: &Turn, error: &Value) -> Result<Value> {
+    let outcome = match error.as_str() {
+        None => "ok",
+        Some("interrupted") => "interrupted",
+        Some(_) => "error",
+    };
+    let r = &turn.reported;
+    let int = |k: &str| r.get(k).and_then(Value::as_i64);
+    let row = sqlx::query(
+        "WITH calls AS (SELECT COUNT(*)::int AS n, SUM(input_tokens) AS i, SUM(output_tokens) AS o, SUM(cache_read) AS cr,
+                               SUM(cache_write) AS cw, SUM(cost_usd) AS c FROM model_calls WHERE turn_id = $1),
+              tools AS (SELECT COUNT(*)::int AS n, (COUNT(*) FILTER (WHERE is_error))::int AS e FROM tool_calls WHERE turn_id = $1)
+         UPDATE turns SET ended_at = now(), duration_ms = $2, outcome = $3, error = $4,
+                engine = $5, engine_version = $6, model_resolved = $7,
+                model_calls = (SELECT n FROM calls), tool_calls = (SELECT n FROM tools), tool_errors = (SELECT e FROM tools),
+                input_tokens = COALESCE($8, (SELECT i FROM calls), 0), output_tokens = COALESCE($9, (SELECT o FROM calls), 0),
+                cache_read = COALESCE($10, (SELECT cr FROM calls), 0), cache_write = COALESCE($11, (SELECT cw FROM calls), 0),
+                cost_usd = COALESCE($12, (SELECT c FROM calls), 0), usage = $13
+         WHERE id = $1
+         RETURNING id, harness, worker, engine, engine_version, model, model_resolved, effort, duration_ms, outcome,
+                   model_calls, tool_calls, tool_errors, input_tokens, output_tokens, cache_read, cache_write, cost_usd",
+    )
+    .bind(turn.turn_id)
+    .bind(turn.started.elapsed().as_millis() as i64)
+    .bind(outcome)
+    .bind(error.as_str())
+    .bind(r["engine"].as_str())
+    .bind(r["engine_version"].as_str())
+    .bind(&turn.model_resolved)
+    .bind(int("input"))
+    .bind(int("output"))
+    .bind(int("cache_read"))
+    .bind(int("cache_write"))
+    .bind(r.get("cost_usd").and_then(Value::as_f64))
+    .bind(if r.is_null() { None } else { Some(r) })
+    .fetch_one(&app.db)
+    .await?;
+    Ok(turn_json(&row))
+}
+
+fn turn_json(r: &sqlx::postgres::PgRow) -> Value {
+    json!({
+        "turn_id": r.get::<Uuid, _>("id"),
+        "harness": r.get::<String, _>("harness"),
+        "worker": r.get::<String, _>("worker"),
+        "engine": r.get::<Option<String>, _>("engine"),
+        "engine_version": r.get::<Option<String>, _>("engine_version"),
+        "model": r.get::<String, _>("model"),
+        "model_resolved": r.get::<Option<String>, _>("model_resolved"),
+        "effort": r.get::<Option<String>, _>("effort"),
+        "duration_ms": r.get::<Option<i64>, _>("duration_ms"),
+        "outcome": r.get::<Option<String>, _>("outcome"),
+        "model_calls": r.get::<Option<i32>, _>("model_calls"),
+        "tool_calls": r.get::<Option<i32>, _>("tool_calls"),
+        "tool_errors": r.get::<Option<i32>, _>("tool_errors"),
+        "input_tokens": r.get::<Option<i64>, _>("input_tokens"),
+        "output_tokens": r.get::<Option<i64>, _>("output_tokens"),
+        "cache_read": r.get::<Option<i64>, _>("cache_read"),
+        "cache_write": r.get::<Option<i64>, _>("cache_write"),
+        "cost_usd": r.get::<Option<f64>, _>("cost_usd"),
+    })
 }
 
 // ---------- auth ----------
@@ -458,11 +548,12 @@ struct ListQuery {
 }
 
 async fn list_sessions(State(app): State<AppState>, Query(q): Query<ListQuery>) -> ApiResult<Json<Value>> {
-    let rows = sqlx::query(
+    let rows = sqlx::query(&format!(
         "SELECT s.id, s.title, s.model, s.effort, s.archived, s.created_at, s.updated_at,
-                COALESCE((SELECT SUM(cost_usd) FROM model_calls m WHERE m.session_id = s.id), 0) AS cost
+                {} AS cost
          FROM sessions s WHERE s.archived = $1 ORDER BY s.updated_at DESC",
-    )
+        session_cost("s.id")
+    ))
     .bind(q.archived.unwrap_or(false))
     .fetch_all(&app.db)
     .await?;
@@ -537,13 +628,13 @@ async fn update_session(State(app): State<AppState>, Path(id): Path<Uuid>, Json(
             }
         }
     };
-    let row = sqlx::query(
+    let row = sqlx::query(&format!(
         "UPDATE sessions SET title = COALESCE($2, title), model = COALESCE($3, model), effort = $5,
                 archived = COALESCE($4, archived), updated_at = now()
          WHERE id = $1
-         RETURNING id, title, model, effort, archived, created_at, updated_at,
-                   COALESCE((SELECT SUM(cost_usd) FROM model_calls m WHERE m.session_id = $1), 0) AS cost",
-    )
+         RETURNING id, title, model, effort, archived, created_at, updated_at, {} AS cost",
+        session_cost("$1")
+    ))
     .bind(id)
     .bind(body.title)
     .bind(body.model)
@@ -556,11 +647,11 @@ async fn update_session(State(app): State<AppState>, Path(id): Path<Uuid>, Json(
 }
 
 async fn get_session(State(app): State<AppState>, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
-    let row = sqlx::query(
-        "SELECT id, title, model, effort, archived, created_at, updated_at,
-                COALESCE((SELECT SUM(cost_usd) FROM model_calls m WHERE m.session_id = $1), 0) AS cost
+    let row = sqlx::query(&format!(
+        "SELECT id, title, model, effort, archived, created_at, updated_at, {} AS cost
          FROM sessions WHERE id = $1",
-    )
+        session_cost("$1")
+    ))
     .bind(id)
     .fetch_optional(&app.db)
     .await?
@@ -744,6 +835,7 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
             anyhow::bail!("model `{model}` doesn't take effort `{e}`; pick another with /effort");
         }
     }
+    let turn_id = Uuid::new_v4();
     {
         let mut turns = app.turns.lock().await;
         if turns.contains_key(&id) {
@@ -759,10 +851,23 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
                 abort_sent: None,
                 model: model.clone(),
                 context: HashSet::new(),
+                turn_id,
+                started: Instant::now(),
+                model_resolved: None,
+                reported: Value::Null,
             },
         );
     }
     let res = async {
+        sqlx::query("INSERT INTO turns (id, session_id, harness, worker, model, effort) VALUES ($1, $2, $3, $4, $5, $6)")
+            .bind(turn_id)
+            .bind(id)
+            .bind(&app.harness)
+            .bind(&app.workers[widx].name)
+            .bind(&model)
+            .bind(&effort)
+            .execute(&app.db)
+            .await?;
         let history = prune_history(load_messages(&app.db, id).await?);
         let extra = load_context(&app.db, id).await?;
         if let Some(t) = app.turns.lock().await.get_mut(&id) {
@@ -793,10 +898,13 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
     }
     .await;
     if let Err(e) = res {
-        app.turns.lock().await.remove(&id);
+        // The turn never started; close its row (if it was written) as an error.
+        if let Some(turn) = app.turns.lock().await.remove(&id) {
+            let _ = record_turn(app, &turn, &json!(e.to_string())).await;
+        }
         return Err(e);
     }
-    app.emit(id, json!({ "type": "busy", "busy": true, "model": model, "effort": effort })).await;
+    app.emit(id, json!({ "type": "busy", "busy": true, "turn_id": turn_id, "harness": app.harness, "model": model, "effort": effort })).await;
     Ok(())
 }
 
@@ -855,11 +963,11 @@ async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming) -> Result
             let name = p.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
             let call_id = p.get("call_id").and_then(Value::as_str).unwrap_or_default().to_string();
             let args = p.get("args").cloned().unwrap_or(json!({}));
-            let (mut cancel, model) = {
+            let (mut cancel, model, turn_id) = {
                 let mut turns = app.turns.lock().await;
                 let Some(t) = turns.get_mut(&id) else { return Ok(()) };
                 t.tools_running += 1;
-                (t.cancel.subscribe(), t.model.clone())
+                (t.cancel.subscribe(), t.model.clone(), t.turn_id)
             };
             // Commands can tell which session runs them (e.g. the commit-trailer hook in scripts/git-hooks).
             let session_env = id.to_string();
@@ -896,8 +1004,8 @@ async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming) -> Result
                 }
             }
             sqlx::query(
-                "INSERT INTO tool_calls (session_id, call_id, name, args, is_error, duration_ms, output_bytes)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                "INSERT INTO tool_calls (session_id, call_id, name, args, is_error, duration_ms, output_bytes, turn_id)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             )
             .bind(id)
             .bind(&call_id)
@@ -906,6 +1014,7 @@ async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming) -> Result
             .bind(out.is_error)
             .bind(ms)
             .bind(out.content.len() as i64)
+            .bind(turn_id)
             .execute(&app.db)
             .await?;
             app.emit(id, json!({ "type": "tool_end", "call_id": call_id, "is_error": out.is_error, "ms": ms })).await;
@@ -925,9 +1034,15 @@ async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming) -> Result
             if message.get("role").and_then(Value::as_str) == Some("assistant") {
                 let u = &message["usage"];
                 let n = |k: &str| u.get(k).and_then(Value::as_i64).unwrap_or(0);
+                let turn_id = app.turns.lock().await.get_mut(&id).map(|t| {
+                    if let Some(m) = message["model"].as_str().filter(|m| !m.is_empty()) {
+                        t.model_resolved = Some(m.to_string());
+                    }
+                    t.turn_id
+                });
                 sqlx::query(
-                    "INSERT INTO model_calls (session_id, provider, model, input_tokens, output_tokens, cache_read, cache_write, cost_usd, stop_reason)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                    "INSERT INTO model_calls (session_id, provider, model, input_tokens, output_tokens, cache_read, cache_write, cost_usd, stop_reason, turn_id, duration_ms)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
                 )
                 .bind(id)
                 .bind(message["provider"].as_str().unwrap_or(""))
@@ -938,30 +1053,19 @@ async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming) -> Result
                 .bind(n("cacheWrite"))
                 .bind(u["cost"]["total"].as_f64().unwrap_or(0.0))
                 .bind(message["stopReason"].as_str())
+                .bind(turn_id)
+                .bind(message["durationMs"].as_i64())
                 .execute(&app.db)
                 .await?;
             }
             app.emit(id, json!({ "type": "message", "message": message })).await;
         }
         "turn.usage" => {
-            // Turn-level usage from engines that report it per turn (tokens and/or API-equivalent cost).
+            // The worker's report for the whole turn (engine, version, totals); recorded when the turn ends.
             let id = id?;
-            let n = |k: &str| p.get(k).and_then(Value::as_i64).unwrap_or(0);
-            sqlx::query(
-                "INSERT INTO model_calls (session_id, provider, model, input_tokens, output_tokens, cache_read, cache_write, cost_usd, stop_reason)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'turn')",
-            )
-            .bind(id)
-            .bind(p["provider"].as_str().unwrap_or(""))
-            .bind(p["model"].as_str().unwrap_or(""))
-            .bind(n("input"))
-            .bind(n("output"))
-            .bind(n("cache_read"))
-            .bind(n("cache_write"))
-            .bind(p["cost_usd"].as_f64().unwrap_or(0.0))
-            .execute(&app.db)
-            .await?;
-            app.emit(id, json!({ "type": "usage", "input": n("input"), "output": n("output"), "cost": p["cost_usd"] })).await;
+            if let Some(t) = app.turns.lock().await.get_mut(&id) {
+                t.reported = p.clone();
+            }
         }
         "turn.end" => {
             finish_turn(app, id?, p.get("error").cloned().unwrap_or(Value::Null)).await;

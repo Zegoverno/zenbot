@@ -135,6 +135,8 @@ struct Turn {
     cost: f64,
     model: String,
     effort: Option<String>,
+    /// The kernel's record of the turn (harness, engine, totals), sent with its end.
+    record: Value,
     error: Option<String>,
 }
 
@@ -202,6 +204,15 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
                     }
                     "end" if started => {
                         if let Some(e) = ev["error"].as_str() { turn.error = Some(e.to_string()); }
+                        let r = &ev["turn"];
+                        if r.is_object() {
+                            // The kernel's totals cover the whole turn, side calls included.
+                            let n = |k: &str| r[k].as_i64().unwrap_or(0);
+                            turn.input_tokens = n("input_tokens") + n("cache_read") + n("cache_write");
+                            turn.output_tokens = n("output_tokens");
+                            turn.cost = r["cost_usd"].as_f64().unwrap_or(turn.cost);
+                            turn.record = r.clone();
+                        }
                         return Ok(turn);
                     }
                     "resync" if started && ev["busy"] == false => {
@@ -239,6 +250,7 @@ fn turn_json(session: &str, t: &Turn) -> Value {
         "text": t.text,
         "model": t.model,
         "effort": t.effort,
+        "turn": t.record,
         "tools": t.tools,
         "usage": { "input_tokens": t.input_tokens, "output_tokens": t.output_tokens, "cost_usd_api_equivalent": t.cost },
         "error": t.error,

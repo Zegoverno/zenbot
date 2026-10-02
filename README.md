@@ -50,6 +50,10 @@ zen status
 zen upgrade [--check]
 ```
 
+## Measuring zenbot
+
+Every turn is recorded in the `turns` table with what produced it: the zenbot build (harness), the engine and its version, the model and the thinking level, plus tokens, cost, time and tool errors.
+
 ## Web UI (on hold)
 
 The kernel still serves a minimal web chat at `http://<host>:8100/?token=$(cat ~/.zenbot/token)`. It works but is frozen while the CLI comes first.
