@@ -8,7 +8,7 @@ mod tui;
 
 use std::io::{IsTerminal, Read, Write};
 
-use client::{describe_update, dim, short, tool_summary, Client, Ws};
+use client::{describe_update, dim, short, tool_summary, Client, NewSession, Ws};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -37,6 +37,9 @@ struct Cli {
     /// Model for a new session
     #[arg(short, long)]
     model: Option<String>,
+    /// Thinking level for a new session, e.g. high (`zen models` lists each model's levels)
+    #[arg(short, long)]
+    effort: Option<String>,
     /// Inline terminal app (no full-screen clearing; the input follows the conversation)
     #[arg(long, env = "ZEN_INLINE", global = true)]
     inline: bool,
@@ -56,6 +59,9 @@ enum Cmd {
         /// Model for a new session, e.g. openai/gpt-6.1-sol
         #[arg(short, long)]
         model: Option<String>,
+        /// Thinking level for a new session, e.g. high
+        #[arg(short, long)]
+        effort: Option<String>,
         /// Don't show tool activity on stderr
         #[arg(short, long)]
         quiet: bool,
@@ -68,6 +74,9 @@ enum Cmd {
         /// Model for a new session
         #[arg(short, long)]
         model: Option<String>,
+        /// Thinking level for a new session
+        #[arg(short, long)]
+        effort: Option<String>,
     },
     /// Manage sessions
     #[command(subcommand)]
@@ -102,6 +111,8 @@ enum SessionsCmd {
         #[arg(short, long)]
         model: Option<String>,
         #[arg(short, long)]
+        effort: Option<String>,
+        #[arg(short, long)]
         title: Option<String>,
     },
     /// Show a session's messages
@@ -123,6 +134,7 @@ struct Turn {
     output_tokens: i64,
     cost: f64,
     model: String,
+    effort: Option<String>,
     error: Option<String>,
 }
 
@@ -182,6 +194,7 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
                         }
                         if show_tools && ev["is_error"] == true { eprintln!("{}", dim("    (failed)")); }
                     }
+                    "busy" if started => turn.effort = ev["effort"].as_str().map(str::to_string),
                     "usage" if started => {
                         turn.input_tokens += ev["input"].as_i64().unwrap_or(0);
                         turn.output_tokens += ev["output"].as_i64().unwrap_or(0);
@@ -207,11 +220,25 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
     }
 }
 
+/// A model's thinking levels for `zen models`, the default in brackets: "  effort: low [high] max".
+fn effort_list(model: &Value) -> String {
+    let default = model["default_effort"].as_str();
+    let levels: Vec<String> = model["efforts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|e| if Some(e) == default { format!("[{e}]") } else { e.to_string() })
+        .collect();
+    if levels.is_empty() { String::new() } else { format!("  effort: {}", levels.join(" ")) }
+}
+
 fn turn_json(session: &str, t: &Turn) -> Value {
     json!({
         "session_id": session,
         "text": t.text,
         "model": t.model,
+        "effort": t.effort,
         "tools": t.tools,
         "usage": { "input_tokens": t.input_tokens, "output_tokens": t.output_tokens, "cost_usd_api_equivalent": t.cost },
         "error": t.error,
@@ -251,18 +278,19 @@ fn read_prompt(prompt: Option<String>) -> Result<String> {
     Ok(text)
 }
 
-async fn ask(c: &Client, json_out: bool, prompt: Option<String>, session: Option<String>, model: Option<String>, quiet: bool) -> Result<()> {
+async fn ask(c: &Client, json_out: bool, prompt: Option<String>, session: Option<String>, new: NewSession, quiet: bool) -> Result<()> {
     let text = read_prompt(prompt)?;
     let id = match session {
         Some(s) => c.resolve(&s).await?,
-        None => c.new_session(model).await?,
+        None => c.new_session(new.model, new.effort).await?,
     };
     let mut ws = c.connect(&id).await?;
     let turn = run_turn(&mut ws, &text, !json_out, !json_out && !quiet).await?;
     if json_out {
         println!("{}", serde_json::to_string_pretty(&turn_json(&id, &turn))?);
     } else if !quiet {
-        eprintln!("{}", dim(&format!("  {} · {} tokens · session {}", turn.model, turn.input_tokens + turn.output_tokens, short(&id))));
+        let effort = turn.effort.as_deref().map(|e| format!(" · {e}")).unwrap_or_default();
+        eprintln!("{}", dim(&format!("  {}{effort} · {} tokens · session {}", turn.model, turn.input_tokens + turn.output_tokens, short(&id))));
     }
     if let Some(e) = turn.error {
         if !json_out {
@@ -273,10 +301,10 @@ async fn ask(c: &Client, json_out: bool, prompt: Option<String>, session: Option
     Ok(())
 }
 
-async fn chat(c: &Client, session: Option<String>, model: Option<String>) -> Result<()> {
+async fn chat(c: &Client, session: Option<String>, new: NewSession) -> Result<()> {
     let id = match session {
         Some(s) => c.resolve(&s).await?,
-        None => c.new_session(model).await?,
+        None => c.new_session(new.model, new.effort).await?,
     };
     let info = c.get(&format!("/api/sessions/{id}")).await?;
     eprintln!("{}", dim(&format!("zenbot · {} · session {} · Ctrl-C stops a turn, Ctrl-D exits", info["model"].as_str().unwrap_or(""), short(&id))));
@@ -454,7 +482,7 @@ async fn run(cli: Cli) -> Result<()> {
     let Some(cmd) = cli.cmd else {
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
             // Piped use without a command behaves like `zen ask`.
-            return ask(&c, cli.json, None, None, cli.model, false).await;
+            return ask(&c, cli.json, None, None, NewSession { model: cli.model, effort: cli.effort }, false).await;
         }
         let start = match (cli.cont, cli.resume) {
             (_, Some(id)) if !id.is_empty() => tui::Start::Resume(Some(id)),
@@ -462,16 +490,17 @@ async fn run(cli: Cli) -> Result<()> {
             (true, None) => tui::Start::Continue,
             _ => tui::Start::New,
         };
-        return tui::run(c, start, cli.model, cli.inline).await;
+        return tui::run(c, start, NewSession { model: cli.model, effort: cli.effort }, cli.inline).await;
     };
     match cmd {
-        Cmd::Ask { prompt, session, model, quiet } => ask(&c, cli.json, prompt, session, model, quiet).await?,
-        Cmd::Chat { session, model } => {
+        Cmd::Ask { prompt, session, model, effort, quiet } => ask(&c, cli.json, prompt, session, NewSession { model, effort }, quiet).await?,
+        Cmd::Chat { session, model, effort } => {
+            let new = NewSession { model, effort };
             if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
                 let start = session.map(|s| tui::Start::Resume(Some(s))).unwrap_or(tui::Start::New);
-                tui::run(c, start, model, cli.inline).await?
+                tui::run(c, start, new, cli.inline).await?
             } else {
-                chat(&c, session, model).await?
+                chat(&c, session, new).await?
             }
         }
         Cmd::Login { .. } => unreachable!(),
@@ -482,7 +511,8 @@ async fn run(cli: Cli) -> Result<()> {
             } else {
                 for x in m["models"].as_array().into_iter().flatten() {
                     let id = x["id"].as_str().unwrap_or("");
-                    println!("{}{}", id, if Some(id) == m["default"].as_str() { "  (default)" } else { "" });
+                    let default = if Some(id) == m["default"].as_str() { "  (default)" } else { "" };
+                    println!("{id}{default}{}", dim(&effort_list(x)));
                 }
             }
         }
@@ -562,8 +592,8 @@ async fn run(cli: Cli) -> Result<()> {
                 let list = c.get(&format!("/api/sessions?archived={archived}")).await?;
                 if cli.json { out(&list) } else { print_sessions(&list) }
             }
-            SessionsCmd::New { model, title } => {
-                let s = c.post("/api/sessions", json!({ "model": model, "title": title })).await?;
+            SessionsCmd::New { model, effort, title } => {
+                let s = c.post("/api/sessions", json!({ "model": model, "effort": effort, "title": title })).await?;
                 if cli.json { out(&s) } else { println!("{}", s["id"].as_str().unwrap_or("")) }
             }
             SessionsCmd::Show { id } => {

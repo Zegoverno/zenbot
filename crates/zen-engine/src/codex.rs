@@ -85,7 +85,9 @@ pub async fn models() -> Vec<Value> {
                 .flatten()
                 .filter_map(|m| {
                     let id = m["id"].as_str().or(m["model"].as_str())?;
-                    Some(json!({ "id": format!("codex/{id}"), "name": format!("Codex {}", m["displayName"].as_str().unwrap_or(id)), "engine": "codex", "default": m["isDefault"] }))
+                    let efforts: Vec<&Value> = m["supportedReasoningEfforts"].as_array().into_iter().flatten().map(|e| &e["reasoningEffort"]).collect();
+                    Some(json!({ "id": format!("codex/{id}"), "name": format!("Codex {}", m["displayName"].as_str().unwrap_or(id)), "engine": "codex", "default": m["isDefault"],
+                                 "efforts": efforts, "default_effort": m["defaultReasoningEffort"] }))
                 })
                 .collect()
         })
@@ -99,7 +101,15 @@ fn error_text(v: &Value) -> String {
     serde_json::from_str::<Value>(raw).ok().and_then(|j| j["error"]["message"].as_str().map(String::from)).unwrap_or_else(|| raw.to_string())
 }
 
-pub async fn run_turn(ctx: TurnCtx, model: &str, system_prompt: &str, history: &[Value], prompt: &str, mut abort: watch::Receiver<bool>) -> Result<Option<String>> {
+pub async fn run_turn(
+    ctx: TurnCtx,
+    model: &str,
+    effort: Option<&str>,
+    system_prompt: &str,
+    history: &[Value],
+    prompt: &str,
+    mut abort: watch::Receiver<bool>,
+) -> Result<Option<String>> {
     let jail = std::env::temp_dir().join(format!("zen-codex-{}", now_ms()));
     std::fs::create_dir_all(&jail)?;
     let result = async {
@@ -128,7 +138,8 @@ pub async fn run_turn(ctx: TurnCtx, model: &str, system_prompt: &str, history: &
             .await?;
         let thread_id = thread["thread"]["id"].as_str().context("codex thread id")?.to_string();
         let mut early = Vec::new();
-        s.call("turn/start", json!({ "threadId": thread_id, "input": [{ "type": "text", "text": prompt_with_history(history, prompt) }] }), Some(&mut early)).await?;
+        let input = json!([{ "type": "text", "text": prompt_with_history(history, prompt) }]);
+        s.call("turn/start", json!({ "threadId": thread_id, "input": input, "effort": effort }), Some(&mut early)).await?;
 
         let mut usage = json!({ "input": 0, "output": 0, "cacheRead": 0 });
         let mut error: Option<String> = None;

@@ -4,7 +4,7 @@
 import { createInterface } from "node:readline";
 import { Agent } from "@earendil-works/pi-agent-core";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { Type } from "typebox";
 import { FileCredentialStore } from "./credentials.ts";
@@ -85,6 +85,17 @@ function kernelTools(sessionId: string, specs: Json[]): AgentTool<any>[] {
   }));
 }
 
+// ---- Thinking level ----
+
+// Pi's agent thinks with level "off" unless told otherwise; reasoning models default to "medium" here.
+function defaultEffort(model: Json): string {
+  return model.reasoning ? clampThinkingLevel(model, "medium") : "off";
+}
+
+function modelInfo(model: Json, id: string, name: string): Json {
+  return { id, name, context: model.contextWindow, efforts: getSupportedThinkingLevels(model), default_effort: defaultEffort(model) };
+}
+
 // ---- Turns ----
 
 const running = new Map<string, Agent>();
@@ -92,7 +103,7 @@ const aborted = new Set<string>();
 
 // Never throws: every failure becomes turn.end with an error, so the kernel frees the session.
 async function turnStart(p: Json) {
-  const { session_id, model: modelRef, system_prompt, history, prompt, tools } = p;
+  const { session_id, model: modelRef, effort, system_prompt, history, prompt, tools } = p;
   try {
     const [provider, id] = String(modelRef).split("/");
     const model = models.getModel(provider as any, id);
@@ -100,7 +111,13 @@ async function turnStart(p: Json) {
     if (provider === faux?.provider.id) scriptFaux();
 
     const agent = new Agent({
-      initialState: { systemPrompt: system_prompt, model, tools: kernelTools(session_id, tools), messages: history },
+      initialState: {
+        systemPrompt: system_prompt,
+        model,
+        thinkingLevel: effort ?? defaultEffort(model),
+        tools: kernelTools(session_id, tools),
+        messages: history,
+      },
       streamFn: models.streamSimple.bind(models),
       sessionId: session_id,
     });
@@ -133,10 +150,10 @@ async function handle(method: string, params: Json): Promise<Json> {
   switch (method) {
     case "models.list": {
       const creds = await models.getAuth("openai").catch(() => undefined);
-      const list = models.getModels("openai").map((m: Json) => ({ id: `openai/${m.id}`, name: m.name ?? m.id, context: m.contextWindow }));
+      const list = models.getModels("openai").map((m: Json) => modelInfo(m, `openai/${m.id}`, m.name ?? m.id));
       if (faux) {
         const m: Json = faux.getModel();
-        list.push({ id: `${m.provider}/${m.id}`, name: "Test model (scripted)", context: m.contextWindow });
+        list.push(modelInfo(m, `${m.provider}/${m.id}`, "Test model (scripted)"));
       }
       return { authenticated: { openai: !!creds }, models: list };
     }

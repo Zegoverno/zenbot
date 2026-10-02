@@ -31,10 +31,11 @@ zen              # new session
 zen -c           # continue the most recent session
 zen -r [id]      # resume a session (picker when no id)
 zen -m codex/gpt-6-sol     # default is claude/claude-opus-5-5
+zen -e xhigh     # thinking level (default: the model's; `zen models` lists them)
 zen --inline     # no full-screen layout: the input follows the conversation (or ZEN_INLINE=1)
 ```
 
-Inside: `/new`, `/resume`, `/model`, `/rename <title>`, `/archive`, `/upgrade`, `/help`, `/exit`. Enter sends; Shift+Enter (or Alt+Enter, Ctrl+J) starts a new line or paragraph; Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
+Inside: `/new`, `/resume`, `/model`, `/effort`, `/rename <title>`, `/archive`, `/upgrade`, `/help`, `/exit`. Enter sends; Shift+Enter (or Alt+Enter, Ctrl+J) starts a new line or paragraph; Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
 
 For scripts, every command accepts `--json` and exits non-zero on failure:
 
@@ -43,7 +44,8 @@ zen ask "Find large files in ~ and summarize"     # one task: streams the answer
 echo "notes…" | zen ask "Summarize this" --json   # prompt from stdin, JSON result
 zen ask -s 3f2a "And now fix it"                  # continue a session (id or prefix)
 zen sessions ls | show <id> | new | archive <id> | restore <id> | rename <id> <title>
-zen models
+zen ask -m claude/claude-sonnet-5-5 -e low "…"    # model and thinking level for a new session
+zen models                                        # models and their thinking levels, [default]
 zen status
 zen upgrade [--check]
 ```

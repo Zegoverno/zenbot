@@ -92,9 +92,10 @@ async fn handle(rpc: &Rpc, running: &Arc<Mutex<HashMap<String, watch::Sender<boo
                 let history = p["history"].as_array().cloned().unwrap_or_default();
                 let system = p["system_prompt"].as_str().unwrap_or("");
                 let prompt = p["prompt"].as_str().unwrap_or("");
+                let effort = p["effort"].as_str();
                 let result = match engine.as_str() {
-                    "claude" => claude::run_turn(ctx, &model, system, &history, prompt, abort_rx).await,
-                    "codex" => codex::run_turn(ctx, &model, system, &history, prompt, abort_rx).await,
+                    "claude" => claude::run_turn(ctx, &model, effort, system, &history, prompt, abort_rx).await,
+                    "codex" => codex::run_turn(ctx, &model, effort, system, &history, prompt, abort_rx).await,
                     "faux" if faux::enabled() => faux::run_turn(ctx, abort_rx).await,
                     other => Ok(Some(format!("zen-engine has no `{other}` engine"))),
                 };

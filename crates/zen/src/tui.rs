@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use unicode_width::UnicodeWidthStr;
 
-use crate::client::{short, tool_summary, Client, Ws};
+use crate::client::{short, tool_summary, Client, NewSession, Ws};
 use crate::editor::Editor;
 use crate::md::{self, line, Line, Md, Sty};
 
@@ -45,6 +45,7 @@ const COMMANDS: &[Command] = &[
     cmd("/new", "start a new session", false),
     cmd("/resume", "switch to another session", false),
     cmd("/model", "choose the model", false),
+    cmd("/effort", "choose the thinking level", false),
     cmd("/rename", "rename this session: /rename <title>", true),
     cmd("/archive", "archive this session and start a new one", false),
     cmd("/upgrade", "update zenbot to the latest version and restart it", false),
@@ -61,6 +62,7 @@ pub enum Start {
 enum PickKind {
     Session,
     Model,
+    Effort,
 }
 
 struct Picker {
@@ -101,8 +103,11 @@ struct App {
     session: Option<String>,
     title: String,
     model: String,
+    /// The session's thinking level; None means the model's default.
+    effort: Option<String>,
     default_model: String,
-    models: Vec<String>,
+    /// The kernel's model list (`/api/models`): id, name, efforts, default_effort.
+    models: Vec<Value>,
     editor: Editor,
     picker: Option<Picker>,
     /// Highlighted row in the `/` command menu.
@@ -127,6 +132,8 @@ struct App {
     md: Md,
     turn_tokens: i64,
     turn_model: String,
+    /// Thinking level the kernel reported for the running turn.
+    turn_effort: Option<String>,
     session_tokens: i64,
     pending_prompt: Option<String>,
     aborting: bool,
@@ -154,7 +161,7 @@ impl App {
         tx: mpsc::UnboundedSender<(String, Value)>,
         model: String,
         default_model: String,
-        models: Vec<String>,
+        models: Vec<Value>,
         history: Option<std::path::PathBuf>,
         size: (usize, usize),
         inline: bool,
@@ -167,6 +174,7 @@ impl App {
             session: None,
             title: String::new(),
             model,
+            effort: None,
             default_model,
             models,
             editor: Editor::new(history),
@@ -187,6 +195,7 @@ impl App {
             md: Md::default(),
             turn_tokens: 0,
             turn_model: String::new(),
+            turn_effort: None,
             session_tokens: 0,
             pending_prompt: None,
             aborting: false,
@@ -202,16 +211,17 @@ fn terminal_size() -> (usize, usize) {
     terminal::size().map(|(w, h)| (w as usize, h as usize)).unwrap_or((80, 24))
 }
 
-pub async fn run(c: Client, start: Start, model: Option<String>, inline: bool) -> Result<()> {
+pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Result<()> {
     let models = c.get("/api/models").await?;
     let default_model = models["default"].as_str().unwrap_or("").to_string();
-    let model_ids: Vec<String> = models["models"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str().map(String::from)).collect();
+    let catalog: Vec<Value> = models["models"].as_array().cloned().unwrap_or_default();
     let signed_in = models["authenticated"].as_object().is_some_and(|a| a.values().any(|v| v == true));
 
     let history = std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join(".zenbot/history"));
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let model = model.unwrap_or_else(|| default_model.clone());
-    let mut app = App::new(c, tx, model, default_model, model_ids, history, terminal_size(), inline);
+    let model = new.model.unwrap_or_else(|| default_model.clone());
+    let mut app = App::new(c, tx, model, default_model, catalog, history, terminal_size(), inline);
+    app.effort = new.effort;
 
     terminal::enable_raw_mode()?;
     let enhanced = terminal::supports_keyboard_enhancement().unwrap_or(false);
@@ -520,7 +530,8 @@ impl App {
                 Some(id) => short(id).to_string(),
                 None => "new session".into(),
             };
-            let footer = format!("  {model} · {session} · {} tokens", fmt_tokens(self.session_tokens));
+            let effort = self.shown_effort().map(|e| format!(" · {e}")).unwrap_or_default();
+            let footer = format!("  {model}{effort} · {session} · {} tokens", fmt_tokens(self.session_tokens));
             lines.push(line(footer.chars().take(w).collect::<String>(), Sty::Dim));
         }
         (lines, caret_row, ccol, true)
@@ -571,6 +582,7 @@ impl App {
         self.session = Some(id.clone());
         self.title = s["title"].as_str().unwrap_or("").to_string();
         self.model = s["model"].as_str().unwrap_or(&self.default_model).to_string();
+        self.effort = s["effort"].as_str().map(String::from);
         self.connect(&id).await?;
 
         let w = self.width();
@@ -679,13 +691,46 @@ impl App {
     }
 
     fn open_model_picker(&mut self) {
-        let items: Vec<(String, String)> = self
-            .models
-            .iter()
-            .map(|m| (format!("{}{}", m, if *m == self.model { "  (current)" } else { "" }), m.clone()))
-            .collect();
-        let selected = self.models.iter().position(|m| *m == self.model).unwrap_or(0);
+        let ids: Vec<String> = self.models.iter().filter_map(|m| m["id"].as_str().map(String::from)).collect();
+        let items: Vec<(String, String)> =
+            ids.iter().map(|m| (format!("{}{}", m, if *m == self.model { "  (current)" } else { "" }), m.clone())).collect();
+        let selected = ids.iter().position(|m| *m == self.model).unwrap_or(0);
         self.picker = Some(Picker { title: "Choose a model".into(), items, selected, kind: PickKind::Model });
+    }
+
+    // ---------- thinking level ----------
+
+    fn model_info(&self, model: &str) -> Option<&Value> {
+        self.models.iter().find(|m| m["id"] == model)
+    }
+
+    /// Thinking levels the current model takes (empty: none to choose).
+    fn effort_levels(&self) -> Vec<String> {
+        let info = self.model_info(&self.model);
+        info.and_then(|m| m["efforts"].as_array()).into_iter().flatten().filter_map(|e| e.as_str().map(String::from)).collect()
+    }
+
+    fn default_effort(&self) -> Option<String> {
+        self.model_info(&self.model).and_then(|m| m["default_effort"].as_str()).map(String::from)
+    }
+
+    /// The level turns run with: the session's choice, else the model's default.
+    fn shown_effort(&self) -> Option<String> {
+        self.effort.clone().or_else(|| self.default_effort())
+    }
+
+    fn open_effort_picker(&mut self) {
+        let levels = self.effort_levels();
+        if levels.is_empty() {
+            self.note(format!("{} has no thinking levels to choose from", self.model), Sty::Dim);
+            return;
+        }
+        let current = |v: Option<&str>| if self.effort.as_deref() == v { "  (current)" } else { "" };
+        let default = self.default_effort().map(|d| format!(" ({d})")).unwrap_or_default();
+        let mut items = vec![(format!("default{default}{}", current(None)), "default".to_string())];
+        items.extend(levels.iter().map(|l| (format!("{l}{}", current(Some(l))), l.clone())));
+        let selected = self.effort.as_ref().and_then(|e| levels.iter().position(|l| l == e)).map(|i| i + 1).unwrap_or(0);
+        self.picker = Some(Picker { title: "Choose a thinking level".into(), items, selected, kind: PickKind::Effort });
     }
 
     async fn pick(&mut self) -> Result<()> {
@@ -698,7 +743,20 @@ impl App {
                 if let Some(id) = &self.session {
                     self.c.patch(&format!("/api/sessions/{id}"), json!({ "model": value })).await?;
                 }
-                self.note(format!("model: {value}"), Sty::Dim);
+                // The kernel drops a level the new model doesn't take; do the same here.
+                let reset = self.effort.as_ref().is_some_and(|e| !self.effort_levels().contains(e));
+                if reset {
+                    self.effort = None;
+                }
+                let effort = self.shown_effort().map(|e| format!(" · effort: {e}{}", if reset { " (default for this model)" } else { "" }));
+                self.note(format!("model: {value}{}", effort.unwrap_or_default()), Sty::Dim);
+            }
+            PickKind::Effort => {
+                self.effort = (value != "default").then(|| value.clone());
+                if let Some(id) = &self.session {
+                    self.c.patch(&format!("/api/sessions/{id}"), json!({ "effort": value })).await?;
+                }
+                self.note(format!("effort: {}", self.shown_effort().unwrap_or(value)), Sty::Dim);
             }
         }
         Ok(())
@@ -881,7 +939,7 @@ impl App {
         }
         self.editor.take();
         if self.session.is_none() {
-            let id = self.c.new_session(Some(self.model.clone())).await?;
+            let id = self.c.new_session(Some(self.model.clone()), self.effort.clone()).await?;
             self.session = Some(id.clone());
             self.connect(&id).await?;
         } else if self.sink.is_none() {
@@ -922,10 +980,12 @@ impl App {
                 }
                 self.reset_session();
                 self.model = self.default_model.clone();
+                self.effort = None;
                 self.commit(vec![line("── new session ──", Sty::Dim), Vec::new()]);
             }
             Some("/resume") => self.open_session_picker().await?,
             Some("/model") => self.open_model_picker(),
+            Some("/effort") => self.open_effort_picker(),
             Some("/rename") => match (&self.session, arg.is_empty()) {
                 (_, true) => self.note("usage: /rename <title>", Sty::Warn),
                 (None, _) => self.note("nothing to rename yet; send a message first", Sty::Warn),
@@ -1079,6 +1139,7 @@ impl App {
                     self.commit(out);
                 }
             }
+            "busy" => self.turn_effort = ev["effort"].as_str().map(String::from),
             "usage" => {
                 self.turn_tokens += ev["input"].as_i64().unwrap_or(0) + ev["output"].as_i64().unwrap_or(0);
             }
@@ -1114,7 +1175,8 @@ impl App {
                 self.stream.clear();
                 self.committed = 0;
                 let secs = self.turn_started.elapsed().as_secs_f32();
-                out.push(line(format!("  {} · {} tokens · {:.1}s", self.turn_model, fmt_tokens(self.turn_tokens), secs), Sty::Dim));
+                let effort = self.turn_effort.take().map(|e| format!(" · {e}")).unwrap_or_default();
+                out.push(line(format!("  {}{effort} · {} tokens · {:.1}s", self.turn_model, fmt_tokens(self.turn_tokens), secs), Sty::Dim));
                 out.push(Vec::new());
                 self.session_tokens += self.turn_tokens;
                 self.busy = false;
@@ -1150,6 +1212,20 @@ mod tests {
         let mut a = App::new(c, tx, "claude/claude-opus-5-5".into(), "claude/claude-opus-5-5".into(), vec![], None, (cols, rows), false);
         a.capture = Some(String::new());
         a
+    }
+
+    /// An app with a model list: one model with thinking levels (default high), one without.
+    fn app_with_models(cols: usize, rows: usize) -> App {
+        let mut a = app(cols, rows);
+        a.models = vec![
+            json!({ "id": "claude/claude-opus-5-5", "efforts": ["low", "medium", "high", "xhigh", "max"], "default_effort": "high" }),
+            json!({ "id": "faux/smoke" }),
+        ];
+        a
+    }
+
+    fn footer(a: &App) -> String {
+        texts(&a.compose().0).last().cloned().unwrap_or_default()
     }
 
     fn texts(lines: &[Line]) -> Vec<String> {
@@ -1249,5 +1325,64 @@ mod tests {
         std::fs::write(&path, " \n").unwrap();
         assert_eq!(banner_text(Some(&path)), "zen · zenbot");
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn footer_shows_the_thinking_level_turns_run_with() {
+        let mut a = app_with_models(80, 20);
+        assert!(footer(&a).contains("claude-opus-5-5 · high · new session"), "{}", footer(&a));
+        a.effort = Some("max".into());
+        assert!(footer(&a).contains("claude-opus-5-5 · max · "), "{}", footer(&a));
+        a.model = "faux/smoke".into();
+        a.effort = None;
+        assert!(footer(&a).contains("smoke · new session"), "a model without levels shows none: {}", footer(&a));
+    }
+
+    #[tokio::test]
+    async fn effort_picker_lists_the_models_levels_and_sets_the_choice() {
+        let mut a = app_with_models(80, 20);
+        typed(&mut a, "/effort").await;
+        key(&mut a, KeyCode::Enter).await;
+        let items: Vec<String> = a.picker.as_ref().expect("picker open").items.iter().map(|(label, _)| label.clone()).collect();
+        assert_eq!(items, ["default (high)  (current)", "low", "medium", "high", "xhigh", "max"]);
+        for _ in 0..5 {
+            key(&mut a, KeyCode::Down).await;
+        }
+        key(&mut a, KeyCode::Enter).await;
+        assert_eq!(a.effort.as_deref(), Some("max"));
+        // Choosing "default" goes back to the model's default.
+        typed(&mut a, "/effort").await;
+        key(&mut a, KeyCode::Enter).await;
+        assert_eq!(a.picker.as_ref().unwrap().selected, 5, "the current level is highlighted");
+        for _ in 0..5 {
+            key(&mut a, KeyCode::Up).await;
+        }
+        key(&mut a, KeyCode::Enter).await;
+        assert_eq!(a.effort, None);
+    }
+
+    #[tokio::test]
+    async fn switching_to_a_model_without_the_level_drops_it() {
+        let mut a = app_with_models(80, 20);
+        a.effort = Some("max".into());
+        typed(&mut a, "/model").await;
+        key(&mut a, KeyCode::Enter).await;
+        key(&mut a, KeyCode::Down).await;
+        key(&mut a, KeyCode::Enter).await;
+        assert_eq!(a.model, "faux/smoke");
+        assert_eq!(a.effort, None);
+        typed(&mut a, "/effort").await;
+        key(&mut a, KeyCode::Enter).await;
+        assert!(a.picker.is_none(), "no levels to choose for this model");
+    }
+
+    #[test]
+    fn end_of_turn_line_shows_the_level_the_turn_ran_with() {
+        let mut a = app_with_models(80, 20);
+        a.busy = true;
+        a.on_event(json!({ "type": "busy", "busy": true, "model": "claude/claude-opus-5-5", "effort": "xhigh" }));
+        a.on_event(json!({ "type": "end", "error": null }));
+        let out = a.capture.take().unwrap();
+        assert!(out.contains(" · xhigh · "), "{out}");
     }
 }

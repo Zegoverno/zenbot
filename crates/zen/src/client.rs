@@ -64,8 +64,8 @@ impl Client {
         }
     }
 
-    pub async fn new_session(&self, model: Option<String>) -> Result<String> {
-        let s = self.post("/api/sessions", json!({ "model": model })).await?;
+    pub async fn new_session(&self, model: Option<String>, effort: Option<String>) -> Result<String> {
+        let s = self.post("/api/sessions", json!({ "model": model, "effort": effort })).await?;
         Ok(s["id"].as_str().context("bad session response")?.to_string())
     }
 
@@ -74,6 +74,13 @@ impl Client {
         let (ws, _) = tokio_tungstenite::connect_async(ws_url).await.context("opening session stream")?;
         Ok(ws)
     }
+}
+
+/// Settings for a session created from the command line; unset means the kernel's default.
+#[derive(Default, Clone)]
+pub struct NewSession {
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 /// One line summarizing a version check (GET /api/version).

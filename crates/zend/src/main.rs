@@ -62,6 +62,8 @@ struct App {
     workers: Vec<Worker>,
     /// model id -> index into `workers`
     routes: Mutex<HashMap<String, usize>>,
+    /// model id -> its entry from `models.list` (name, efforts, default_effort, …)
+    catalog: Mutex<HashMap<String, Value>>,
     turns: Mutex<HashMap<Uuid, Turn>>,
     token: String,
     workspace: PathBuf,
@@ -152,6 +154,7 @@ async fn main() -> Result<()> {
         db,
         workers,
         routes: Mutex::new(HashMap::new()),
+        catalog: Mutex::new(HashMap::new()),
         turns: Mutex::new(HashMap::new()),
         token,
         workspace,
@@ -383,12 +386,14 @@ async fn collect_models(app: &App) -> Value {
         all.extend(res["models"].as_array().into_iter().flatten().map(|m| (i, m.clone())));
     }
     let mut routes = app.routes.lock().await;
+    let mut catalog = app.catalog.lock().await;
     for (i, m) in &all {
         if let Some(id) = m["id"].as_str() {
             routes.entry(id.to_string()).or_insert(*i);
+            catalog.entry(id.to_string()).or_insert_with(|| m.clone());
         }
     }
-    drop(routes);
+    drop((routes, catalog));
     let wanted = std::env::var("ZEN_MODELS").unwrap_or_else(|_| DEFAULT_MODELS.into());
     let mut curated: Vec<Value> = wanted
         .split(',')
@@ -417,6 +422,36 @@ async fn worker_for(app: &App, model: &str) -> Option<usize> {
     app.routes.lock().await.get(model).copied()
 }
 
+/// A model's entry from `models.list` (refreshing once if it's unknown).
+async fn model_info(app: &App, model: &str) -> Option<Value> {
+    if let Some(m) = app.catalog.lock().await.get(model) {
+        return Some(m.clone());
+    }
+    collect_models(app).await;
+    app.catalog.lock().await.get(model).cloned()
+}
+
+/// The thinking levels a model accepts, as listed by its worker (empty: it has none to choose).
+fn efforts(info: &Value) -> Vec<&str> {
+    info["efforts"].as_array().into_iter().flatten().filter_map(Value::as_str).collect()
+}
+
+/// Check a session's effort against its model. `None` (the model's default) is always valid.
+async fn check_effort(app: &App, model: &str, effort: Option<&str>) -> ApiResult<()> {
+    let Some(effort) = effort else { return Ok(()) };
+    let info = model_info(app, model).await.unwrap_or(Value::Null);
+    let allowed = efforts(&info);
+    if allowed.contains(&effort) {
+        return Ok(());
+    }
+    let msg = if allowed.is_empty() {
+        format!("model `{model}` has no thinking levels to choose from")
+    } else {
+        format!("model `{model}` takes effort {}; got `{effort}`", allowed.join(", "))
+    };
+    Err(ApiError(StatusCode::BAD_REQUEST, msg))
+}
+
 #[derive(Deserialize)]
 struct ListQuery {
     archived: Option<bool>,
@@ -424,7 +459,7 @@ struct ListQuery {
 
 async fn list_sessions(State(app): State<AppState>, Query(q): Query<ListQuery>) -> ApiResult<Json<Value>> {
     let rows = sqlx::query(
-        "SELECT s.id, s.title, s.model, s.archived, s.created_at, s.updated_at,
+        "SELECT s.id, s.title, s.model, s.effort, s.archived, s.created_at, s.updated_at,
                 COALESCE((SELECT SUM(cost_usd) FROM model_calls m WHERE m.session_id = s.id), 0) AS cost
          FROM sessions s WHERE s.archived = $1 ORDER BY s.updated_at DESC",
     )
@@ -439,6 +474,7 @@ fn session_json(r: &sqlx::postgres::PgRow) -> Value {
         "id": r.get::<Uuid, _>("id"),
         "title": r.get::<String, _>("title"),
         "model": r.get::<String, _>("model"),
+        "effort": r.get::<Option<String>, _>("effort"),
         "archived": r.get::<bool, _>("archived"),
         "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
         "updated_at": r.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
@@ -450,17 +486,21 @@ fn session_json(r: &sqlx::postgres::PgRow) -> Value {
 struct CreateSession {
     title: Option<String>,
     model: Option<String>,
+    effort: Option<String>,
 }
 
 async fn create_session(State(app): State<AppState>, Json(body): Json<CreateSession>) -> ApiResult<Json<Value>> {
     let id = Uuid::new_v4();
+    let model = body.model.unwrap_or_else(|| app.default_model.clone());
+    check_effort(&app, &model, body.effort.as_deref()).await?;
     let row = sqlx::query(
-        "INSERT INTO sessions (id, title, model) VALUES ($1, $2, $3)
-         RETURNING id, title, model, archived, created_at, updated_at, 0::float8 AS cost",
+        "INSERT INTO sessions (id, title, model, effort) VALUES ($1, $2, $3, $4)
+         RETURNING id, title, model, effort, archived, created_at, updated_at, 0::float8 AS cost",
     )
     .bind(id)
     .bind(body.title.unwrap_or_default())
-    .bind(body.model.unwrap_or_else(|| app.default_model.clone()))
+    .bind(model)
+    .bind(body.effort)
     .fetch_one(&app.db)
     .await?;
     Ok(Json(session_json(&row)))
@@ -470,21 +510,45 @@ async fn create_session(State(app): State<AppState>, Json(body): Json<CreateSess
 struct UpdateSession {
     title: Option<String>,
     model: Option<String>,
+    /// A thinking level, or "default" for the model's default.
+    effort: Option<String>,
     archived: Option<bool>,
 }
 
 async fn update_session(State(app): State<AppState>, Path(id): Path<Uuid>, Json(body): Json<UpdateSession>) -> ApiResult<Json<Value>> {
+    let current = sqlx::query("SELECT model, effort FROM sessions WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&app.db)
+        .await?
+        .ok_or_else(not_found)?;
+    let model = body.model.clone().unwrap_or_else(|| current.get("model"));
+    let effort: Option<String> = match body.effort.as_deref() {
+        Some("default") => None,
+        Some(e) => {
+            check_effort(&app, &model, Some(e)).await?;
+            Some(e.to_string())
+        }
+        // A new model keeps the session's effort only if it supports it.
+        None => {
+            let kept: Option<String> = current.get("effort");
+            match kept {
+                Some(e) if body.model.is_some() && check_effort(&app, &model, Some(&e)).await.is_err() => None,
+                other => other,
+            }
+        }
+    };
     let row = sqlx::query(
-        "UPDATE sessions SET title = COALESCE($2, title), model = COALESCE($3, model),
+        "UPDATE sessions SET title = COALESCE($2, title), model = COALESCE($3, model), effort = $5,
                 archived = COALESCE($4, archived), updated_at = now()
          WHERE id = $1
-         RETURNING id, title, model, archived, created_at, updated_at,
+         RETURNING id, title, model, effort, archived, created_at, updated_at,
                    COALESCE((SELECT SUM(cost_usd) FROM model_calls m WHERE m.session_id = $1), 0) AS cost",
     )
     .bind(id)
     .bind(body.title)
     .bind(body.model)
     .bind(body.archived)
+    .bind(effort)
     .fetch_optional(&app.db)
     .await?
     .ok_or_else(not_found)?;
@@ -493,7 +557,7 @@ async fn update_session(State(app): State<AppState>, Path(id): Path<Uuid>, Json(
 
 async fn get_session(State(app): State<AppState>, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
     let row = sqlx::query(
-        "SELECT id, title, model, archived, created_at, updated_at,
+        "SELECT id, title, model, effort, archived, created_at, updated_at,
                 COALESCE((SELECT SUM(cost_usd) FROM model_calls m WHERE m.session_id = $1), 0) AS cost
          FROM sessions WHERE id = $1",
     )
@@ -664,7 +728,7 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
     if text.trim().is_empty() {
         return Ok(());
     }
-    let row = sqlx::query("SELECT model, title FROM sessions WHERE id = $1").bind(id).fetch_optional(&app.db).await?;
+    let row = sqlx::query("SELECT model, effort, title FROM sessions WHERE id = $1").bind(id).fetch_optional(&app.db).await?;
     let Some(row) = row else { anyhow::bail!("session not found") };
     let model: String = row.get("model");
     let title: String = row.get("title");
@@ -672,6 +736,14 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
     let Some(widx) = worker_for(app, &model).await else {
         anyhow::bail!("no worker serves model `{model}`; pick another with /model");
     };
+    // Always send an explicit level, so what ran is known (engines don't all report their default).
+    let info = model_info(app, &model).await.unwrap_or(Value::Null);
+    let effort: Option<String> = row.get::<Option<String>, _>("effort").or_else(|| info["default_effort"].as_str().map(String::from));
+    if let Some(e) = &effort {
+        if !efforts(&info).contains(&e.as_str()) {
+            anyhow::bail!("model `{model}` doesn't take effort `{e}`; pick another with /effort");
+        }
+    }
     {
         let mut turns = app.turns.lock().await;
         if turns.contains_key(&id) {
@@ -710,6 +782,7 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
                 json!({
                     "session_id": id,
                     "model": model,
+                    "effort": effort,
                     "system_prompt": system_prompt(&app.workspace, &app.repo, &extra),
                     "history": history,
                     "prompt": text,
@@ -723,7 +796,7 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
         app.turns.lock().await.remove(&id);
         return Err(e);
     }
-    app.emit(id, json!({ "type": "busy", "busy": true })).await;
+    app.emit(id, json!({ "type": "busy", "busy": true, "model": model, "effort": effort })).await;
     Ok(())
 }
 

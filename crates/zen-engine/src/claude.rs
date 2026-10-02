@@ -17,8 +17,14 @@ const PREFIX: &str = "mcp__zen__";
 
 /// Full model ids, never the CLI's aliases (`opus`, …): an alias moves to a new model when
 /// Claude Code is updated, so the same session could silently run on a different model.
+///
+/// Effort levels are Claude Code's `--effort` values. The CLI doesn't report the level it uses when
+/// none is given, so zenbot always passes one: `default_effort` unless the session picks another.
 pub fn models() -> Vec<Value> {
-    let model = |id: &str, name: &str| json!({ "id": format!("claude/{id}"), "name": name, "engine": "claude-code" });
+    let model = |id: &str, name: &str| {
+        json!({ "id": format!("claude/{id}"), "name": name, "engine": "claude-code",
+                "efforts": EFFORTS, "default_effort": "medium" })
+    };
     vec![
         model("claude-opus-5-5", "Claude Opus 5.5"),
         model("claude-sonnet-5-5", "Claude Sonnet 5.5"),
@@ -26,11 +32,21 @@ pub fn models() -> Vec<Value> {
     ]
 }
 
+const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
 pub fn available() -> bool {
     std::process::Command::new("claude").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
-pub async fn run_turn(ctx: TurnCtx, model: &str, system_prompt: &str, history: &[Value], prompt: &str, mut abort: watch::Receiver<bool>) -> Result<Option<String>> {
+pub async fn run_turn(
+    ctx: TurnCtx,
+    model: &str,
+    effort: Option<&str>,
+    system_prompt: &str,
+    history: &[Value],
+    prompt: &str,
+    mut abort: watch::Receiver<bool>,
+) -> Result<Option<String>> {
     let socket = format!("{}/zen-engine-{}-{}.sock", std::env::temp_dir().display(), std::process::id(), now_ms());
     let server = ctx.serve_socket(&socket).context("opening tool socket")?;
     let jail = std::env::temp_dir().join(format!("zen-claude-{}", now_ms()));
@@ -39,7 +55,11 @@ pub async fn run_turn(ctx: TurnCtx, model: &str, system_prompt: &str, history: &
     let mcp = json!({ "mcpServers": { "zen": { "command": exe, "args": ["mcp-bridge", socket] } } }).to_string();
     let allowed: Vec<String> = ctx.tools.iter().filter_map(|t| t["name"].as_str()).map(|n| format!("{PREFIX}{n}")).collect();
 
-    let mut child = Command::new("claude")
+    let mut cmd = Command::new("claude");
+    if let Some(e) = effort {
+        cmd.args(["--effort", e]);
+    }
+    let mut child = cmd
         .args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages"])
         .args(["--tools", "", "--strict-mcp-config", "--mcp-config", &mcp, "--setting-sources", ""])
         .args(["--allowedTools", &allowed.join(",")])
