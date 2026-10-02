@@ -15,11 +15,14 @@ use crate::turn::{now_ms, prompt_with_history, TurnCtx};
 
 const PREFIX: &str = "mcp__zen__";
 
+/// Full model ids, never the CLI's aliases (`opus`, …): an alias moves to a new model when
+/// Claude Code is updated, so the same session could silently run on a different model.
 pub fn models() -> Vec<Value> {
+    let model = |id: &str, name: &str| json!({ "id": format!("claude/{id}"), "name": name, "engine": "claude-code" });
     vec![
-        json!({ "id": "claude/opus", "name": "Claude Opus", "engine": "claude-code" }),
-        json!({ "id": "claude/sonnet", "name": "Claude Sonnet", "engine": "claude-code" }),
-        json!({ "id": "claude/haiku", "name": "Claude Haiku", "engine": "claude-code" }),
+        model("claude-opus-5-5", "Claude Opus 5.5"),
+        model("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+        model("claude-haiku-4-5-20251001", "Claude Haiku 4.5"),
     ]
 }
 

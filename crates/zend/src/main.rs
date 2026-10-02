@@ -122,7 +122,7 @@ async fn main() -> Result<()> {
     let workspace = PathBuf::from(std::env::var("ZEN_WORKSPACE").unwrap_or_else(|_| home.clone()));
     let repo = std::env::var("ZEN_REPO").unwrap_or_else(|_| format!("{home}/zenbot"));
     let repo_dir = repo.clone();
-    let default_model = std::env::var("ZEN_DEFAULT_MODEL").unwrap_or_else(|_| "claude/opus".into());
+    let default_model = std::env::var("ZEN_DEFAULT_MODEL").unwrap_or_else(|_| "claude/claude-opus-5-5".into());
 
     tokio::fs::create_dir_all(&workspace).await?;
     let db = PgPoolOptions::new().max_connections(10).connect(&database_url).await?;
@@ -368,7 +368,7 @@ async fn upgrade_status(State(app): State<AppState>) -> Json<Value> {
 }
 
 /// Models offered, in order of preference. Engines' models come first; Pi's direct models after.
-const DEFAULT_MODELS: &str = "claude/opus,claude/sonnet,claude/haiku,codex/gpt-6-sol,codex/gpt-6-astra,codex/gpt-6-luna,codex/gpt-5.5,\
+const DEFAULT_MODELS: &str = "claude/claude-opus-5-5,claude/claude-sonnet-5-5,claude/claude-haiku-4-5-20251001,codex/gpt-6-sol,codex/gpt-6-astra,codex/gpt-6-luna,codex/gpt-5.5,\
 openai/gpt-6.1-sol,openai/gpt-6-sol,openai/gpt-6-luna,openai/gpt-6-astra,openai/gpt-5.5";
 
 /// Ask every worker for its models, refresh routing, and return the curated list.

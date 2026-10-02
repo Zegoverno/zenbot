@@ -1147,7 +1147,7 @@ mod tests {
     fn app(cols: usize, rows: usize) -> App {
         let c = Client::new("http://127.0.0.1:9".into(), Some("test".into())).unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut a = App::new(c, tx, "claude/opus".into(), "claude/opus".into(), vec![], None, (cols, rows), false);
+        let mut a = App::new(c, tx, "claude/claude-opus-5-5".into(), "claude/claude-opus-5-5".into(), vec![], None, (cols, rows), false);
         a.capture = Some(String::new());
         a
     }

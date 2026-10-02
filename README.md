@@ -30,7 +30,7 @@ Run `zen` for an interactive session in your terminal (inline, like Claude Code,
 zen              # new session
 zen -c           # continue the most recent session
 zen -r [id]      # resume a session (picker when no id)
-zen -m codex/gpt-6-sol     # default is claude/opus
+zen -m codex/gpt-6-sol     # default is claude/claude-opus-5-5
 zen --inline     # no full-screen layout: the input follows the conversation (or ZEN_INLINE=1)
 ```
 
