@@ -35,7 +35,7 @@ zen -e xhigh     # thinking level (default: the model's; `zen models` lists them
 zen --inline     # no full-screen layout: the input follows the conversation (or ZEN_INLINE=1)
 ```
 
-Inside: `/new`, `/resume`, `/model`, `/effort`, `/rename <title>`, `/archive`, `/upgrade`, `/help`, `/exit`. Enter sends; Shift+Enter (or Alt+Enter, Ctrl+J) starts a new line or paragraph; Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
+Inside: `/new`, `/resume`, `/model`, `/effort`, `/done`, `/rename <title>`, `/archive`, `/upgrade`, `/help`, `/exit`. Enter sends; Shift+Enter (or Alt+Enter, Ctrl+J) starts a new line or paragraph; Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
 
 For scripts, every command accepts `--json` and exits non-zero on failure:
 
@@ -44,6 +44,7 @@ zen ask "Find large files in ~ and summarize"     # one task: streams the answer
 echo "notes…" | zen ask "Summarize this" --json   # prompt from stdin, JSON result
 zen ask -s 3f2a "And now fix it"                  # continue a session (id or prefix)
 zen sessions ls | show <id> | new | archive <id> | restore <id> | rename <id> <title>
+zen sessions decide <id> accept|more|reshape|drop [-n note]   # same as /done
 zen ask -m claude/claude-sonnet-5-5 -e low "…"    # model and thinking level for a new session
 zen models                                        # models and their thinking levels, [default]
 zen status
@@ -53,6 +54,8 @@ zen upgrade [--check]
 ## Measuring zenbot
 
 Every turn is recorded in the `turns` table with what produced it: the zenbot build (harness), the engine and its version, the model and the thinking level, plus tokens, cost, time and tool errors.
+
+- **`/done`** records your verdict on a session's work so far: *accept* (done and good), *more* (same goal, keep working), *reshape* (the framing was wrong) or *drop*. These are the ground truth for everything else.
 
 ## Web UI (on hold)
 

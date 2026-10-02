@@ -46,6 +46,7 @@ const COMMANDS: &[Command] = &[
     cmd("/resume", "switch to another session", false),
     cmd("/model", "choose the model", false),
     cmd("/effort", "choose the thinking level", false),
+    cmd("/done", "judge the work so far: accept, more, reshape or drop", false),
     cmd("/rename", "rename this session: /rename <title>", true),
     cmd("/archive", "archive this session and start a new one", false),
     cmd("/upgrade", "update zenbot to the latest version and restart it", false),
@@ -63,7 +64,16 @@ enum PickKind {
     Session,
     Model,
     Effort,
+    Decision,
 }
+
+/// Your decisions on a session's work (`/done`), with what each one means.
+const DECISIONS: [(&str, &str); 4] = [
+    ("accept", "done, and good as it is"),
+    ("more", "same goal, keep working"),
+    ("reshape", "the framing was wrong: rethink the approach"),
+    ("drop", "stop: not worth continuing"),
+];
 
 struct Picker {
     title: String,
@@ -719,6 +729,35 @@ impl App {
         self.effort.clone().or_else(|| self.default_effort())
     }
 
+    fn open_decision_picker(&mut self) {
+        let items = DECISIONS.iter().map(|(d, help)| (format!("{d:<8} {help}"), d.to_string())).collect();
+        self.picker = Some(Picker { title: "How did it go?".into(), items, selected: 0, kind: PickKind::Decision });
+    }
+
+    /// `/done [decision] [note]`: record the decision, or open the picker when none is given.
+    async fn done(&mut self, arg: &str) -> Result<()> {
+        if self.session.is_none() {
+            self.note("nothing to judge yet; send a message first", Sty::Warn);
+            return Ok(());
+        }
+        let (decision, note) = arg.split_once(' ').map(|(d, n)| (d, n.trim())).unwrap_or((arg, ""));
+        if decision.is_empty() {
+            self.open_decision_picker();
+        } else if DECISIONS.iter().any(|(d, _)| *d == decision) {
+            self.record_decision(decision, note).await?;
+        } else {
+            self.note("usage: /done accept|more|reshape|drop [note]", Sty::Warn);
+        }
+        Ok(())
+    }
+
+    async fn record_decision(&mut self, decision: &str, note: &str) -> Result<()> {
+        let Some(id) = self.session.clone() else { return Ok(()) };
+        self.c.post(&format!("/api/sessions/{id}/decision"), json!({ "decision": decision, "note": note })).await?;
+        self.note(format!("recorded: {decision}"), Sty::Dim);
+        Ok(())
+    }
+
     fn open_effort_picker(&mut self) {
         let levels = self.effort_levels();
         if levels.is_empty() {
@@ -751,6 +790,7 @@ impl App {
                 let effort = self.shown_effort().map(|e| format!(" · effort: {e}{}", if reset { " (default for this model)" } else { "" }));
                 self.note(format!("model: {value}{}", effort.unwrap_or_default()), Sty::Dim);
             }
+            PickKind::Decision => self.record_decision(&value, "").await?,
             PickKind::Effort => {
                 self.effort = (value != "default").then(|| value.clone());
                 if let Some(id) = &self.session {
@@ -986,6 +1026,7 @@ impl App {
             Some("/resume") => self.open_session_picker().await?,
             Some("/model") => self.open_model_picker(),
             Some("/effort") => self.open_effort_picker(),
+            Some("/done") => self.done(arg).await?,
             Some("/rename") => match (&self.session, arg.is_empty()) {
                 (_, true) => self.note("usage: /rename <title>", Sty::Warn),
                 (None, _) => self.note("nothing to rename yet; send a message first", Sty::Warn),
@@ -1392,5 +1433,21 @@ mod tests {
         let out = a.capture.take().unwrap();
         assert!(out.contains(" · xhigh · "), "{out}");
         assert_eq!(a.session_tokens, 4200, "the kernel's turn totals replace the streamed estimate");
+    }
+
+    #[tokio::test]
+    async fn done_opens_the_decision_picker_or_explains_itself() {
+        let mut a = app(80, 20);
+        typed(&mut a, "/done").await;
+        key(&mut a, KeyCode::Enter).await;
+        assert!(a.picker.is_none(), "no session yet: nothing to judge");
+        a.session = Some("s1".into());
+        typed(&mut a, "/done").await;
+        key(&mut a, KeyCode::Enter).await;
+        let items: Vec<String> = a.picker.as_ref().expect("picker open").items.iter().map(|(_, v)| v.clone()).collect();
+        assert_eq!(items, ["accept", "more", "reshape", "drop"]);
+        key(&mut a, KeyCode::Esc).await;
+        a.command("/done maybe later").await.unwrap();
+        assert!(a.notice.as_ref().is_some_and(|(t, _)| t.starts_with("usage: /done")), "{:?}", a.notice);
     }
 }

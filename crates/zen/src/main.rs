@@ -123,6 +123,14 @@ enum SessionsCmd {
     Restore { id: String },
     /// Rename a session
     Rename { id: String, title: String },
+    /// Record your decision on a session's work so far: accept, more, reshape or drop
+    Decide {
+        id: String,
+        decision: String,
+        /// Why, in a few words
+        #[arg(short, long)]
+        note: Option<String>,
+    },
 }
 
 /// Outcome of one turn, collected from the session stream.
@@ -622,6 +630,11 @@ async fn run(cli: Cli) -> Result<()> {
                 let id = c.resolve(&id).await?;
                 let s = c.patch(&format!("/api/sessions/{id}"), json!({ "archived": false })).await?;
                 if cli.json { out(&s) } else { println!("restored {}", short(&id)) }
+            }
+            SessionsCmd::Decide { id, decision, note } => {
+                let id = c.resolve(&id).await?;
+                let d = c.post(&format!("/api/sessions/{id}/decision"), json!({ "decision": decision, "note": note })).await?;
+                if cli.json { out(&d) } else { println!("recorded {} for {}", d["decision"].as_str().unwrap_or(""), short(&id)) }
             }
             SessionsCmd::Rename { id, title } => {
                 let id = c.resolve(&id).await?;

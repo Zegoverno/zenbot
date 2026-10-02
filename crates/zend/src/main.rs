@@ -188,6 +188,7 @@ async fn main() -> Result<()> {
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/sessions/{id}", get(get_session).patch(update_session))
         .route("/sessions/{id}/ws", get(session_ws))
+        .route("/sessions/{id}/decision", axum::routing::post(decide))
         .route("/version", get(version))
         .route("/upgrade", get(upgrade_status).post(upgrade_start))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth));
@@ -660,6 +661,42 @@ async fn get_session(State(app): State<AppState>, Path(id): Path<Uuid>) -> ApiRe
     session["messages"] = Value::Array(load_messages(&app.db, id).await?);
     session["busy"] = json!(app.is_busy(id).await);
     Ok(Json(session))
+}
+
+/// What the owner decides about the work so far (see migrations/0005).
+const DECISIONS: [&str; 4] = ["accept", "more", "reshape", "drop"];
+
+#[derive(Deserialize)]
+struct Decide {
+    decision: String,
+    note: Option<String>,
+}
+
+/// Record the owner's decision on the session's work up to its latest turn.
+async fn decide(State(app): State<AppState>, Path(id): Path<Uuid>, Json(body): Json<Decide>) -> ApiResult<Json<Value>> {
+    if !DECISIONS.contains(&body.decision.as_str()) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, format!("decision must be one of {}", DECISIONS.join(", "))));
+    }
+    let row = sqlx::query(
+        "INSERT INTO session_decisions (session_id, turn_id, decision, note)
+         SELECT s.id, (SELECT t.id FROM turns t WHERE t.session_id = s.id ORDER BY t.started_at DESC LIMIT 1), $2, $3
+         FROM sessions s WHERE s.id = $1
+         RETURNING id, turn_id, decision, note, created_at",
+    )
+    .bind(id)
+    .bind(&body.decision)
+    .bind(body.note.as_deref().map(str::trim).filter(|n| !n.is_empty()))
+    .fetch_optional(&app.db)
+    .await?
+    .ok_or_else(not_found)?;
+    Ok(Json(json!({
+        "id": row.get::<i64, _>("id"),
+        "session_id": id,
+        "turn_id": row.get::<Option<Uuid>, _>("turn_id"),
+        "decision": row.get::<String, _>("decision"),
+        "note": row.get::<Option<String>, _>("note"),
+        "created_at": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+    })))
 }
 
 async fn load_messages(db: &PgPool, id: Uuid) -> Result<Vec<Value>, sqlx::Error> {
