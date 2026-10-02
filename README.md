@@ -56,6 +56,12 @@ zen upgrade [--check]
 Every turn is recorded in the `turns` table with what produced it: the zenbot build (harness), the engine and its version, the model and the thinking level, plus tokens, cost, time and tool errors.
 
 - **`/done`** records your verdict on a session's work so far: *accept* (done and good), *more* (same goal, keep working), *reshape* (the framing was wrong) or *drop*. These are the ground truth for everything else.
+- **Live scoring** (optional): a System One model answers fixed questions about each session (kind of work, did you have to correct it, did it claim success without checking, outcome, how usable its answers were) once you decide or after two quiet hours, and the answers are stored in `session_scores`. Only your messages and the agent's final answers are sent, never tool output. To turn it on, add to `~/.zenbot/env`:
+  ```
+  ZEN_S1_MODEL=openrouter/typesafe/jev-1.13
+  OPENROUTER_API_KEY=sk-or-…
+  ```
+  It needs the `pi` worker. `ZEN_SCORE_IDLE_SECS` changes the quiet time (default 7200).
 - **Evals** compare two harness versions on fixed tasks with the same model: `scripts/eval.sh` (see [evals/README.md](evals/README.md)). Run them before changing the harness; the report is for you to decide on.
 
 ## Web UI (on hold)

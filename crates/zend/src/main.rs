@@ -2,6 +2,7 @@
 
 mod context;
 mod mind;
+mod score;
 mod tools;
 mod update;
 
@@ -71,6 +72,8 @@ struct App {
     routes: Mutex<HashMap<String, usize>>,
     /// model id -> its entry from `models.list` (name, efforts, default_effort, …)
     catalog: Mutex<HashMap<String, Value>>,
+    /// classifier id (System One model, for live scoring) -> index into `workers`
+    classifiers: Mutex<HashMap<String, usize>>,
     turns: Mutex<HashMap<Uuid, Turn>>,
     token: String,
     workspace: PathBuf,
@@ -167,6 +170,7 @@ async fn main() -> Result<()> {
         workers,
         routes: Mutex::new(HashMap::new()),
         catalog: Mutex::new(HashMap::new()),
+        classifiers: Mutex::new(HashMap::new()),
         turns: Mutex::new(HashMap::new()),
         token,
         workspace,
@@ -182,6 +186,7 @@ async fn main() -> Result<()> {
     }
     tokio::spawn(dispatch(app.clone(), incoming));
     tokio::spawn(watchdog(app.clone()));
+    tokio::spawn(score::idle_loop(app.clone()));
 
     let api = Router::new()
         .route("/models", get(list_models))
@@ -469,11 +474,18 @@ openai/gpt-6.1-sol,openai/gpt-6-sol,openai/gpt-6-luna,openai/gpt-6-astra,openai/
 async fn collect_models(app: &App) -> Value {
     let mut all: Vec<(usize, Value)> = Vec::new();
     let mut authenticated = serde_json::Map::new();
+    let mut classifiers: Vec<String> = Vec::new();
     for (i, w) in app.workers.iter().enumerate() {
         let Ok(res) = w.mind().request("models.list", json!({})).await else { continue };
         if let Some(a) = res["authenticated"].as_object() {
             authenticated.extend(a.clone());
         }
+        let mut routes = app.classifiers.lock().await;
+        for id in res["classifiers"].as_array().into_iter().flatten().filter_map(|c| c["id"].as_str()) {
+            routes.entry(id.to_string()).or_insert(i);
+            classifiers.push(id.to_string());
+        }
+        drop(routes);
         all.extend(res["models"].as_array().into_iter().flatten().map(|m| (i, m.clone())));
     }
     let mut routes = app.routes.lock().await;
@@ -497,6 +509,7 @@ async fn collect_models(app: &App) -> Value {
         curated.first().and_then(|m| m["id"].as_str()).unwrap_or(&app.default_model).to_string()
     };
     json!({ "models": curated, "authenticated": authenticated, "default": default,
+            "scorer": score::scorer(), "classifiers": classifiers,
             "workers": app.workers.iter().map(|w| w.name.clone()).collect::<Vec<_>>() })
 }
 
@@ -511,6 +524,15 @@ async fn worker_for(app: &App, model: &str) -> Option<usize> {
     }
     collect_models(app).await;
     app.routes.lock().await.get(model).copied()
+}
+
+/// The worker that serves a classifier (refreshing routes once if it's unknown).
+async fn worker_for_classifier(app: &App, model: &str) -> Option<usize> {
+    if let Some(i) = app.classifiers.lock().await.get(model) {
+        return Some(*i);
+    }
+    collect_models(app).await;
+    app.classifiers.lock().await.get(model).copied()
 }
 
 /// A model's entry from `models.list` (refreshing once if it's unknown).
@@ -689,6 +711,13 @@ async fn decide(State(app): State<AppState>, Path(id): Path<Uuid>, Json(body): J
     .fetch_optional(&app.db)
     .await?
     .ok_or_else(not_found)?;
+    // Score the work the decision covers, so each decision has a score to compare it with.
+    let scoring = app.clone();
+    tokio::spawn(async move {
+        if let Err(e) = score::score_session(&scoring, id, "decision").await {
+            tracing::warn!("scoring session {id} after a decision: {e:#}");
+        }
+    });
     Ok(Json(json!({
         "id": row.get::<i64, _>("id"),
         "session_id": id,

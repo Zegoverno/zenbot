@@ -7,6 +7,7 @@ import { Agent } from "@earendil-works/pi-agent-core";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { clampThinkingLevel, createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { Type } from "typebox";
 import { FileCredentialStore } from "./credentials.ts";
 
@@ -15,6 +16,8 @@ type Json = any;
 const authFile = process.env.ZEN_AUTH_FILE ?? `${process.env.HOME}/.zenbot/auth.json`;
 const models = createModels({ credentials: new FileCredentialStore(authFile) });
 models.setProvider(openaiProvider());
+// System One classifiers (e.g. TypeSafe's Jev) for live session scoring, keyed by OPENROUTER_API_KEY.
+models.setProvider(openrouterProvider());
 
 // Scripted test model (ZEN_FAUX=1): runs one bash tool call, then answers. For smoke tests and CI.
 const faux = process.env.ZEN_FAUX === "1" ? fauxProvider() : undefined;
@@ -161,6 +164,25 @@ async function turnStart(p: Json) {
   }
 }
 
+// ---- System One ----
+
+// Answer typed questions about a state with a classifier model ("<provider>/<model id>").
+// Errors are returned in the result (the kernel records them with the score), not thrown.
+async function decide(p: Json): Promise<Json> {
+  const ref = String(p.model ?? "");
+  const slash = ref.indexOf("/");
+  const model = slash > 0 ? models.getModelOfType("classifier", ref.slice(0, slash) as any, ref.slice(slash + 1)) : undefined;
+  if (!model) return { error: `unknown classifier ${ref}` };
+  const result: Json = await models.classify(model, { state: p.state, questions: p.questions });
+  return {
+    model: result.model,
+    provider: result.provider,
+    answers: result.answers ?? {},
+    usage: result.usage ?? null,
+    error: result.stopReason === "stop" ? null : (result.errorMessage ?? result.stopReason),
+  };
+}
+
 async function handle(method: string, params: Json): Promise<Json> {
   switch (method) {
     case "models.list": {
@@ -170,8 +192,14 @@ async function handle(method: string, params: Json): Promise<Json> {
         const m: Json = faux.getModel();
         list.push(modelInfo(m, `${m.provider}/${m.id}`, "Test model (scripted)"));
       }
-      return { authenticated: { openai: !!creds }, models: list };
+      const openrouter = await models.getAuth("openrouter").catch(() => undefined);
+      const classifiers = models
+        .getModelsOfType("classifier", "openrouter")
+        .map((m: Json) => ({ id: `openrouter/${m.id}`, name: m.name ?? m.id, context: m.contextWindow }));
+      return { authenticated: { openai: !!creds, openrouter: !!openrouter }, models: list, classifiers };
     }
+    case "s1.decide":
+      return decide(params);
     case "turn.start":
       void turnStart(params);
       return { ok: true };

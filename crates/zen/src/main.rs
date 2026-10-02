@@ -574,6 +574,7 @@ async fn run(cli: Cli) -> Result<()> {
                 "worker": health["mind"],
                 "signed_in": models["authenticated"],
                 "default_model": models["default"],
+                "scorer": models["scorer"],
             });
             if cli.json {
                 out(&status);
@@ -584,10 +585,18 @@ async fn run(cli: Cli) -> Result<()> {
                 for (name, ok) in health["workers"].as_object().into_iter().flatten() {
                     println!("{:<9} {}", format!("worker:{name}"), mark(*ok == true));
                 }
-                for (name, ok) in models["authenticated"].as_object().into_iter().flatten() {
+                // OpenRouter is only used for live scoring; it's shown with the scorer below.
+                for (name, ok) in models["authenticated"].as_object().into_iter().flatten().filter(|(n, _)| *n != "openrouter") {
                     println!("{:<9} {}", name, if *ok == true { "signed in" } else { "NOT signed in" });
                 }
                 println!("model     {}", models["default"].as_str().unwrap_or(""));
+                match models["scorer"].as_str() {
+                    None => println!("scorer    off (set ZEN_S1_MODEL to score sessions)"),
+                    Some(s) if s.starts_with("openrouter/") && models["authenticated"]["openrouter"] != true => {
+                        println!("scorer    {s}  (NO key: set OPENROUTER_API_KEY)")
+                    }
+                    Some(s) => println!("scorer    {s}"),
+                }
                 match &git_identity {
                     Some(id) => println!("git       {id}"),
                     None => println!("git       no identity: zen's commits get a placeholder author (git config --global user.name/user.email)"),
