@@ -1,0 +1,18 @@
+{
+  "description": "Recall a fact from the first turn after several more turns and with the source gone (tests history trimming).",
+  "work": "understand",
+  "steps": [
+    { "prompt": "Look through app.log and tell me the error code and the block number of the checksum error." },
+    { "prompt": "Append the line 'item 1' to todo.txt." },
+    { "prompt": "Append the line 'item 2' to todo.txt." },
+    { "prompt": "Append the line 'item 3' to todo.txt." },
+    { "prompt": "Append the line 'item 4' to todo.txt." },
+    { "shell": "rm app.log" },
+    { "prompt": "app.log is gone now. Which error code and block number did you find in it earlier? Answer in one line." }
+  ],
+  "checks": [
+    { "name": "error code recalled", "answer_contains": "E4127" },
+    { "name": "block recalled", "answer_contains": "88" },
+    { "name": "todo items in order", "run": "printf 'item 1\\nitem 2\\nitem 3\\nitem 4\\n' | diff -q - <(grep -v '^$' todo.txt)" }
+  ]
+}

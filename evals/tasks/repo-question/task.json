@@ -1,0 +1,12 @@
+{
+  "description": "Answer a question about a small codebase: which function decides, and what happens on the error path.",
+  "work": "understand",
+  "steps": [
+    { "prompt": "In this codebase, which function decides whether a refund is allowed, and what happens when the amount is more than was captured? Answer in two sentences, naming the function, its file and the exception." }
+  ],
+  "checks": [
+    { "name": "names the function", "answer_contains": "can_refund" },
+    { "name": "names the file", "answer_contains": "payments.py" },
+    { "name": "names the exception", "answer_contains": "RefundTooLarge" }
+  ]
+}

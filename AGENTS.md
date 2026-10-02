@@ -27,6 +27,8 @@ Config lives in `~/.zenbot/`: `env` (service environment, including `ZEN_WORKERS
 5. Afterwards, check `~/.zenbot/upgrade.log`. If the new version wasn't healthy it was rolled back automatically; read the log, fix, and run the script again.
 6. Commit with a clear message once the change works. Ask the owner before pushing.
 
+Changes to the harness (system prompt, history, tools, workers, model or effort handling) also get an eval before they are committed: run `scripts/eval.sh` (this checkout against the installed version, same model), show the owner the report, and ask whether to commit. The report informs the owner's decision; it is never a pass/fail gate. See `evals/README.md`.
+
 ## Conventions
 
 - One concern per commit. The subject says what changed; the body says why, and what was tested.

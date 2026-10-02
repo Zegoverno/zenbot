@@ -1,0 +1,11 @@
+{
+  "description": "Find and fix a bug that makes a Rust test fail, without touching the tests.",
+  "work": "build",
+  "steps": [
+    { "prompt": "`cargo test` fails in this crate. Find the bug and fix it. Don't change the tests." }
+  ],
+  "checks": [
+    { "name": "tests pass", "run": "cargo test --offline -q" },
+    { "name": "tests unchanged", "run": "cmp tests/count.rs \"$TASK_DIR/files/tests/count.rs\"" }
+  ]
+}

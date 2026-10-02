@@ -1,0 +1,13 @@
+{
+  "description": "An ops chore: archive logs older than a week by modification time and delete the originals, leaving the rest alone.",
+  "work": "maintain",
+  "steps": [
+    { "shell": "cd logs && touch -d '-12 days' app-2026-09-01.log app-2026-09-02.log app-2026-09-03.log && touch -d '-1 day' app-2026-09-22.log app-2026-09-23.log README.txt" },
+    { "prompt": "In logs/, archive every .log file last modified more than 7 days ago into logs/archive.tar.gz, then delete those originals. Leave everything else as it is." }
+  ],
+  "checks": [
+    { "name": "archive has the old logs", "run": "tar -tzf logs/archive.tar.gz | sed 's#.*/##' | sort | tr '\\n' ' ' | grep -qx 'app-2026-09-01.log app-2026-09-02.log app-2026-09-03.log '" },
+    { "name": "old originals deleted", "run": "! ls logs/app-2026-09-0[123].log 2>/dev/null" },
+    { "name": "recent logs and other files kept", "run": "test -f logs/app-2026-09-22.log && test -f logs/app-2026-09-23.log && test -f logs/README.txt" }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "description": "Use what was read in an earlier turn after the file is gone (tests that history survives between turns).",
+  "work": "maintain",
+  "steps": [
+    { "prompt": "What port does config.toml configure? Just answer with the number." },
+    { "prompt": "Create notes.md with a two-line description of this folder." },
+    { "shell": "rm config.toml" },
+    { "prompt": "config.toml was deleted by mistake. Recreate it with exactly the settings it had, from what you saw earlier in this conversation." }
+  ],
+  "checks": [
+    { "name": "notes.md written", "run": "test -s notes.md" },
+    { "name": "name restored", "run": "grep -Eq '^name *= *\"ledger\"' config.toml" },
+    { "name": "port restored", "run": "grep -Eq '^port *= *7342' config.toml" },
+    { "name": "db section restored", "run": "grep -Eq '^\\[db\\]' config.toml && grep -Eq '^path *= *\"data/ledger.sqlite\"' config.toml && grep -Eq '^retries *= *3' config.toml" }
+  ]
+}

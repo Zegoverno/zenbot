@@ -1,0 +1,12 @@
+{
+  "description": "Add a small feature to an existing script and keep its existing data working.",
+  "work": "build",
+  "steps": [
+    { "prompt": "Add a `done N` command to todo.py that marks item N as done. `list` should show done items as `[x]` and open ones as `[ ]`. The existing todo.txt must keep working." }
+  ],
+  "checks": [
+    { "name": "existing items still listed", "run": "python3 todo.py list | grep -q 'buy milk' && python3 todo.py list | grep -q 'call the bank'" },
+    { "name": "done marks an item", "run": "python3 todo.py add water plants && python3 todo.py done 2 && python3 todo.py list | grep -F 'call the bank' | grep -qF '[x]'" },
+    { "name": "others stay open", "run": "python3 todo.py list | grep -F 'buy milk' | grep -qF '[ ]' && python3 todo.py list | grep -F 'water plants' | grep -qF '[ ]'" }
+  ]
+}

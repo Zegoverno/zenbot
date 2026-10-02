@@ -1,0 +1,12 @@
+{
+  "description": "Runner self-test with the scripted faux/smoke model (run with --model faux/smoke --tasks smoke).",
+  "selftest": true,
+  "steps": [
+    { "prompt": "smoke test, turn 1" },
+    { "prompt": "smoke test, turn 2" }
+  ],
+  "checks": [
+    { "name": "scripted answer", "answer_contains": "Smoke test passed" },
+    { "name": "tool ran in the workspace", "run": "true" }
+  ]
+}
