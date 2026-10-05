@@ -35,7 +35,7 @@ zen -e xhigh     # thinking level (default: the model's; `zen models` lists them
 zen --inline     # no full-screen layout: the input follows the conversation (or ZEN_INLINE=1)
 ```
 
-Inside: `/new`, `/resume`, `/model`, `/effort`, `/done`, `/rename <title>`, `/archive`, `/upgrade`, `/help`, `/exit`. Enter sends; Shift+Enter (or Alt+Enter, Ctrl+J) starts a new line or paragraph; Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
+Inside: `/new`, `/resume`, `/model`, `/effort`, `/done`, `/go`, `/brief`, `/quick`, `/verify`, `/rename <title>`, `/archive`, `/upgrade`, `/help`, `/exit`. Enter sends; Shift+Enter (or Alt+Enter, Ctrl+J) starts a new line or paragraph; Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
 
 For scripts, every command accepts `--json` and exits non-zero on failure:
 
@@ -45,11 +45,18 @@ echo "notes…" | zen ask "Summarize this" --json   # prompt from stdin, JSON re
 zen ask -s 3f2a "And now fix it"                  # continue a session (id or prefix)
 zen sessions ls | show <id> | new | archive <id> | restore <id> | rename <id> <title>
 zen sessions decide <id> accept|more|reshape|drop [-n note]   # same as /done
+zen sessions flow <id> go|brief|quick|verify                 # same as /go, /brief, …
 zen ask -m claude/claude-sonnet-5-5 -e low "…"    # model and thinking level for a new session
 zen models                                        # models and their thinking levels, [default]
 zen status
 zen upgrade [--check]
 ```
+
+## How a session works
+
+A request is framed before anything changes ([docs/brief.md](docs/brief.md)). zen first looks around read-only (the shell can't write) and either answers, or asks up to three questions, or proposes a short **brief**: the goal, scope, must-nots, assumptions and success criteria, written as commands where possible. Small briefs are approved automatically; bigger ones wait for you (`/go`, or reply "yes"; reply with changes to reshape it). The work then runs in a fresh context with the brief, and when it's submitted zen runs the criteria's commands itself and a fresh verifier checks the rest. Failures go back to work twice at most, then you get a report: criteria results, the decisions it made on its own, and its assumptions. Where allowed it closes the session with its own verdict; yours (`/done`) always replaces it.
+
+You can take any step yourself: `/brief` (frame the next request), `/quick` (skip the brief), `/go`, `/verify`, `/done`. Settings in `~/.zenbot/env`: `ZEN_AUTO_APPROVE` and `ZEN_AUTO_CLOSE` (routes, default `quick,bounded`; `all`), `ZEN_VERIFY_ROUNDS` (default 2), `ZEN_DECIDE_TOOL=0`, and `ZEN_BRIEFS=0` to work without briefs.
 
 ## Context
 

@@ -131,6 +131,8 @@ enum SessionsCmd {
         #[arg(short, long)]
         note: Option<String>,
     },
+    /// Take a step of the briefed workflow: go (approve the brief), brief, quick or verify
+    Flow { id: String, action: String },
 }
 
 /// Outcome of one turn, collected from the session stream.
@@ -693,6 +695,11 @@ async fn run(cli: Cli) -> Result<()> {
                 let id = c.resolve(&id).await?;
                 let d = c.post(&format!("/api/sessions/{id}/decision"), json!({ "decision": decision, "note": note })).await?;
                 if cli.json { out(&d) } else { println!("recorded {} for {}", d["decision"].as_str().unwrap_or(""), short(&id)) }
+            }
+            SessionsCmd::Flow { id, action } => {
+                let id = c.resolve(&id).await?;
+                let r = c.post(&format!("/api/sessions/{id}/flow"), json!({ "action": action })).await?;
+                if cli.json { out(&r) } else { println!("{} is now {}", short(&id), r["state"].as_str().unwrap_or("")) }
             }
             SessionsCmd::Rename { id, title } => {
                 let id = c.resolve(&id).await?;

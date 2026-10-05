@@ -47,6 +47,10 @@ const COMMANDS: &[Command] = &[
     cmd("/model", "choose the model", false),
     cmd("/effort", "choose the thinking level", false),
     cmd("/done", "judge the work so far: accept, more, reshape or drop", false),
+    cmd("/go", "approve the waiting brief and start the work", false),
+    cmd("/brief", "frame the next request with a brief first", false),
+    cmd("/quick", "skip the brief: work directly with every tool", false),
+    cmd("/verify", "verify the work against the brief now", false),
     cmd("/rename", "rename this session: /rename <title>", true),
     cmd("/archive", "archive this session and start a new one", false),
     cmd("/upgrade", "update zenbot to the latest version and restart it", false),
@@ -751,6 +755,26 @@ impl App {
         Ok(())
     }
 
+    /// Take a step of the briefed workflow (docs/brief.md) in place of the model.
+    async fn flow(&mut self, action: &str) -> Result<()> {
+        let Some(id) = self.session.clone() else {
+            self.note("no session yet: send a message first", Sty::Warn);
+            return Ok(());
+        };
+        match self.c.post(&format!("/api/sessions/{id}/flow"), json!({ "action": action })).await {
+            Ok(v) => {
+                let msg = match action {
+                    "go" => "approved; the work starts".to_string(),
+                    "verify" => "verifying".to_string(),
+                    _ => format!("now {}", v["state"].as_str().unwrap_or("")),
+                };
+                self.note(msg, Sty::Dim);
+            }
+            Err(e) => self.note(e.to_string(), Sty::Warn),
+        }
+        Ok(())
+    }
+
     async fn record_decision(&mut self, decision: &str, note: &str) -> Result<()> {
         let Some(id) = self.session.clone() else { return Ok(()) };
         self.c.post(&format!("/api/sessions/{id}/decision"), json!({ "decision": decision, "note": note })).await?;
@@ -1027,6 +1051,7 @@ impl App {
             Some("/model") => self.open_model_picker(),
             Some("/effort") => self.open_effort_picker(),
             Some("/done") => self.done(arg).await?,
+            Some(c @ ("/go" | "/brief" | "/quick" | "/verify")) => self.flow(&c[1..]).await?,
             Some("/rename") => match (&self.session, arg.is_empty()) {
                 (_, true) => self.note("usage: /rename <title>", Sty::Warn),
                 (None, _) => self.note("nothing to rename yet; send a message first", Sty::Warn),
@@ -1125,6 +1150,13 @@ impl App {
             "message" => {
                 let m = &ev["message"];
                 match m["role"].as_str() {
+                    Some("user") if m["kernel"] == true => {
+                        // The workflow talking to the model (e.g. "the brief is approved"), not the owner.
+                        let text = text_of(&m["content"]);
+                        let mut out: Vec<Line> = text.lines().map(|l| line(format!("  zen › {l}"), Sty::Dim)).collect();
+                        out.push(Vec::new());
+                        self.commit(out);
+                    }
                     Some("user") => {
                         let text = text_of(&m["content"]);
                         if self.pending_prompt.as_deref() == Some(text.as_str()) {
@@ -1180,7 +1212,61 @@ impl App {
                     self.commit(out);
                 }
             }
-            "busy" => self.turn_effort = ev["effort"].as_str().map(String::from),
+            "busy" => {
+                // A turn the kernel started (the work after approval, a fix round) also counts.
+                if !self.busy {
+                    self.busy = true;
+                    self.turn_started = std::time::Instant::now();
+                    self.turn_tokens = 0;
+                }
+                self.turn_effort = ev["effort"].as_str().map(String::from);
+            }
+            "brief" => {
+                let mut out = vec![line(format!("── Brief v{} ──", ev["version"]), Sty::Dim)];
+                out.extend(self.md.render(ev["text"].as_str().unwrap_or(""), w));
+                out.push(Vec::new());
+                self.md = Md::default();
+                self.commit(out);
+            }
+            "questions" => {
+                let mut out = vec![line("── Questions ──", Sty::Dim)];
+                for (i, q) in ev["questions"].as_array().into_iter().flatten().enumerate() {
+                    out.push(line(format!("{}. {}", i + 1, q["question"].as_str().unwrap_or("")), Sty::Plain));
+                    for (j, o) in q["options"].as_array().into_iter().flatten().enumerate() {
+                        let rec = if j == 0 { "  (recommended)" } else { "" };
+                        out.push(line(format!("   {}) {}{rec}", (b'a' + j as u8) as char, o.as_str().unwrap_or("")), Sty::Plain));
+                    }
+                }
+                out.push(Vec::new());
+                self.commit(out);
+            }
+            "report" => {
+                let mut out = vec![line("── Report ──", Sty::Dim)];
+                out.extend(self.md.render(ev["text"].as_str().unwrap_or(""), w));
+                out.push(Vec::new());
+                self.md = Md::default();
+                self.commit(out);
+            }
+            "status" => {
+                self.status = ev["text"].as_str().unwrap_or("Working").to_string();
+                self.draw();
+            }
+            "state" => {
+                if ev["state"] == "working" && ev["by"] != "kernel" {
+                    self.note(format!("work started ({})", ev["reason"].as_str().unwrap_or("")), Sty::Dim);
+                }
+            }
+            "child_end" => {
+                let r = &ev["turn"];
+                self.session_tokens += ["input_tokens", "output_tokens", "cache_read", "cache_write"].iter().map(|k| r[*k].as_i64().unwrap_or(0)).sum::<i64>();
+            }
+            "idle" => {
+                self.busy = false;
+                if ev["waiting"] == "approval" {
+                    self.note("the brief is waiting: /go to approve, or reply with changes", Sty::Dim);
+                }
+                self.draw();
+            }
             "usage" => {
                 self.turn_tokens += ev["input"].as_i64().unwrap_or(0) + ev["output"].as_i64().unwrap_or(0);
             }
@@ -1225,7 +1311,11 @@ impl App {
                 out.push(line(format!("  {}{effort} · {} tokens · {:.1}s", self.turn_model, fmt_tokens(self.turn_tokens), secs), Sty::Dim));
                 out.push(Vec::new());
                 self.session_tokens += self.turn_tokens;
-                self.busy = false;
+                // The workflow may continue on its own (verify, or the work after approval).
+                self.busy = ev["next"] == true;
+                if self.busy {
+                    self.status = "Continuing".into();
+                }
                 self.commit(out);
             }
             "error" => {
@@ -1433,6 +1523,35 @@ mod tests {
         let out = a.capture.take().unwrap();
         assert!(out.contains(" · xhigh · "), "{out}");
         assert_eq!(a.session_tokens, 4200, "the kernel's turn totals replace the streamed estimate");
+    }
+
+    #[test]
+    fn workflow_events_render_and_keep_the_turn_busy_until_idle() {
+        let mut a = app_with_models(80, 30);
+        a.busy = true;
+        a.on_event(json!({ "type": "brief", "version": 1, "text": "Route: bounded · Work: build\nGoal: no flag -> --json flag" }));
+        a.on_event(json!({ "type": "end", "error": null, "turn": {}, "next": true }));
+        assert!(a.busy, "the kernel continues (approval, then the work): still busy");
+        a.on_event(json!({ "type": "message", "message": { "role": "user", "kernel": true, "content": "The brief is approved." } }));
+        a.on_event(json!({ "type": "questions", "questions": [{ "question": "Which flag name?", "options": ["--json", "--format json"] }] }));
+        a.on_event(json!({ "type": "report", "text": "Verification: 1 passed, 0 failed, 0 uncertain." }));
+        a.on_event(json!({ "type": "idle", "state": "closed" }));
+        assert!(!a.busy);
+        let out = a.capture.take().unwrap();
+        for want in ["── Brief v1 ──", "Goal: no flag -> --json flag", "zen › The brief is approved.", "a) --json  (recommended)", "── Report ──", "1 passed"] {
+            assert!(out.contains(want), "missing {want:?} in {out}");
+        }
+    }
+
+    #[test]
+    fn a_kernel_started_turn_shows_as_busy() {
+        let mut a = app_with_models(80, 20);
+        assert!(!a.busy);
+        a.on_event(json!({ "type": "busy", "busy": true, "model": "claude/claude-opus-5-5", "effort": "high" }));
+        assert!(a.busy, "after /go the work runs without a prompt from this terminal");
+        a.on_event(json!({ "type": "idle", "state": "framing", "waiting": "approval" }));
+        assert!(!a.busy);
+        assert!(a.notice.as_ref().is_some_and(|(t, _)| t.contains("/go")), "{:?}", a.notice);
     }
 
     #[tokio::test]
