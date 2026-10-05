@@ -74,7 +74,7 @@
     }
   ],
   "env": {
-    "ZEN_CONTEXT_TOKENS": "12000",
+    "ZEN_CONTEXT_TOKENS": "8000",
     "ZEN_COMPACT_IDLE_SECS": "0"
   }
 }

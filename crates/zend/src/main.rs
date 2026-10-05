@@ -974,7 +974,7 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
         // hard limit; past the hard limit with none prepared, one is made now.
         if let Some(p) = &prev {
             let settings = compact::Settings::from_env(info["context"].as_i64());
-            let paused = p.idle_secs.is_some_and(|s| s > settings.idle_secs);
+            let paused = p.idle_secs.is_some_and(|s| s >= settings.idle_secs);
             let over = settings.over_hard(p.size());
             let ready = match compact::pending(&app.db, id).await? {
                 Some(c) => Some(c),

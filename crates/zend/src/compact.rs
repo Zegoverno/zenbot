@@ -59,7 +59,9 @@ fn est_tokens(v: &Value) -> i64 {
 
 /// Which blocks to summarize: from after the current summary up to the start of the turn where the
 /// kept tail begins. The tail is the longest run of whole turns that fits in `keep_tokens`, and at
-/// least the last turn. None when there is nothing before the tail.
+/// least the last turn. None when what's before the tail is less than half of `keep_tokens`: each
+/// summary restarts the engine's session (one uncached turn), so it must remove a real chunk, not a
+/// turn or two (measured: without this minimum, a session summarized every other turn).
 pub fn plan(blocks: &[Block], keep_tokens: i64) -> Option<(i32, i32)> {
     let after = blocks.iter().rev().find(|b| b.kind == "compaction").and_then(|b| b.payload["covers"][1].as_i64()).unwrap_or(0) as i32;
     let msgs: Vec<&Block> = blocks.iter().filter(|b| b.kind == "message" && b.seq > after).collect();
@@ -73,7 +75,8 @@ pub fn plan(blocks: &[Block], keep_tokens: i64) -> Option<(i32, i32)> {
         }
         cut = i;
     }
-    if cut == 0 {
+    let removed: i64 = msgs[..cut].iter().map(|b| est_tokens(&b.payload)).sum();
+    if cut == 0 || removed < keep_tokens / 2 {
         return None;
     }
     Some((msgs[0].seq, msgs[cut - 1].seq))
@@ -434,6 +437,7 @@ mod tests {
         assert_eq!(plan(&blocks, 3500), Some((1, 14)));
         assert_eq!(plan(&blocks, 100), Some((1, 18)), "always keeps at least the last turn");
         assert_eq!(plan(&blocks, 1_000_000), None, "everything fits: nothing to summarize");
+        assert_eq!(plan(&blocks, 9000), None, "only one turn (~1,000 tokens) could go: not worth a summary");
         blocks.push(Block { seq: 21, kind: "compaction".into(), payload: json!({ "covers": [1, 14] }) });
         assert_eq!(plan(&blocks, 100), Some((15, 18)), "the next summary starts after the current one");
     }
