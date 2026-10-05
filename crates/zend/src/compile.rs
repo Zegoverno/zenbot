@@ -149,7 +149,12 @@ pub fn history(blocks: &[Block]) -> (Vec<Value>, Option<SummaryRef>) {
     });
     // A new work context (an approved brief) starts the history afresh; earlier blocks stay on the
     // tape for the history tool.
-    let fresh = blocks.iter().rev().find(|b| b.kind == "state" && b.payload["fresh"] == true).map(|b| b.seq).unwrap_or(0);
+    // Only while that work lasts: a new request (back to framing) sees the whole session again.
+    let last_state = blocks.iter().rev().find(|b| b.kind == "state");
+    let fresh = match last_state {
+        Some(b) if b.payload["state"] == "framing" => 0,
+        _ => blocks.iter().rev().find(|b| b.kind == "state" && b.payload["fresh"] == true).map(|b| b.seq).unwrap_or(0),
+    };
     let summary = summary.filter(|(r, _, _)| r.seq > fresh);
     let after = summary.as_ref().map(|(r, _, _)| r.to).unwrap_or(0).max(fresh);
     let mut out = Vec::new();
@@ -226,5 +231,8 @@ mod tests {
         blocks.push(msg(83, "user", json!("The brief is approved.")));
         let (h, s) = history(&blocks);
         assert_eq!((h.len(), s), (1, None), "an approved brief starts a fresh work context");
+        blocks.push(Block { seq: 84, kind: "state".into(), payload: json!({ "state": "framing", "fresh": false }) });
+        let (h, _) = history(&blocks);
+        assert_eq!(h.len(), 1 + 20 + 1, "a new request sees the session again (from the summary on)");
     }
 }
