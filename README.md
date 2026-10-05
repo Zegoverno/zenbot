@@ -51,9 +51,15 @@ zen status
 zen upgrade [--check]
 ```
 
+## Context
+
+How zen builds what the model reads each turn is in [docs/context.md](docs/context.md). In short: the instructions are fixed for the session (an edited AGENTS.md applies from the next session), history is only ever appended to, and each session keeps a matching Claude Code or Codex session so earlier turns come from the provider's cache. When a session passes 70% of its context budget, older turns are summarized; the model can still read any of them with its `history` tool. Secrets in tool output are masked.
+
+Settings in `~/.zenbot/env`: `ZEN_CONTEXT_TOKENS` (budget, default 200000), `ZEN_SUMMARY_MODEL` (default `claude/claude-sonnet-5-5`), `ZEN_COMPACT_SOFT` / `ZEN_COMPACT_HARD` / `ZEN_COMPACT_KEEP` / `ZEN_COMPACT_IDLE_SECS`, and `ZEN_CLAUDE_RESUME=0` / `ZEN_CODEX_RESUME=0` to run without engine sessions.
+
 ## Measuring zenbot
 
-Every turn is recorded in the `turns` table with what produced it: the zenbot build (harness), the engine and its version, the model and the thinking level, plus tokens, cost, time and tool errors.
+Every turn is recorded in the `turns` table with what produced it: the zenbot build (harness), the engine and its version, the model and the thinking level, plus tokens, cost, time and tool errors, what was sent (`context`) and whether the prompt cache could be reused (`cache_break`).
 
 - **`/done`** records your verdict on a session's work so far: *accept* (done and good), *more* (same goal, keep working), *reshape* (the framing was wrong) or *drop*. These are the ground truth for everything else.
 - **Live scoring** (optional): a System One model answers fixed questions about each session (kind of work, did you have to correct it, did it claim success without checking, outcome, how usable its answers were) once you decide or after two quiet hours, and the answers are stored in `session_scores`. Only your messages and the agent's final answers are sent, never tool output. To turn it on, add to `~/.zenbot/env`:
