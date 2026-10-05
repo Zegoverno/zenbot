@@ -450,6 +450,10 @@ function onEvent(ev) {
   if (!thread()) return;
   switch (ev.type) {
     case "message":
+      if (ev.message.role === "user" && ev.message.kernel) {
+        // The workflow talking to the model (e.g. "the brief is approved"), not the owner.
+        openTurn().el.append(node(`<p style="opacity:.6">zen › ${esc(String(ev.message.content))}</p>`)); scrollDown(); break;
+      }
       renderMessage(ev.message);
       if (ev.message.role === "user") { S.busy = true; updateSend(); showWorking(); }
       else if (S.busy) showWorking();
@@ -464,9 +468,22 @@ function onEvent(ev) {
     case "tool_end": { const c = S.cards[ev.call_id]; if (c) c.querySelector(".ms").textContent = ev.ms < 1000 ? `${ev.ms}ms` : `${(ev.ms / 1000).toFixed(1)}s`; break; }
     case "end":
       if (ev.error) openTurn().el.append(node(`<p class="error">${esc(ev.error)}</p>`));
-      closeTurn(); S.busy = false; updateSend(); loadSessions(); scrollDown(); break;
+      // With `next` the workflow continues on its own (docs/client-protocol.md): stay busy until `idle`.
+      closeTurn(); if (!ev.next) { S.busy = false; updateSend(); } loadSessions(); scrollDown(); break;
+    case "idle":
+      S.busy = false; updateSend(); hideWorking();
+      if (ev.waiting === "approval") openTurn().el.append(node(`<p style="opacity:.6">The brief is waiting: reply "yes" to approve it, or reply with changes.</p>`));
+      closeTurn(); loadSessions(); scrollDown(); break;
+    case "brief": case "report": {
+      const title = ev.type === "brief" ? `Brief v${ev.version}` : "Report";
+      const t = openTurn(); t.el.append(node(`<div class="label">${title}</div>`), node(`<div class="prose">${md(ev.text || "")}</div>`)); scrollDown(); break;
+    }
+    case "questions": {
+      const qs = (ev.questions || []).map((q, i) => `${i + 1}. ${q.question}\n${(q.options || []).map((o, j) => `   ${String.fromCharCode(97 + j)}) ${o}${j === 0 ? " (recommended)" : ""}`).join("\n")}`).join("\n");
+      openTurn().el.append(node(`<div class="label">Questions</div>`), node(`<pre>${esc(qs)}</pre>`)); scrollDown(); break;
+    }
     case "error":
-      openTurn().el.append(node(`<p class="error">${esc(ev.error)}</p>`)); scrollDown(); break;
+      openTurn().el.append(node(`<p class="error">${esc(ev.error)}</p>`)); S.busy = false; updateSend(); scrollDown(); break;
   }
 }
 

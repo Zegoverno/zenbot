@@ -602,7 +602,10 @@ fn repo_of(app: &App, brief: &Value) -> std::path::PathBuf {
 /// framing chat isn't replayed (the history tool still reads it). The routing policy may pick the
 /// model.
 pub async fn approve(app: AppState, session: Uuid, by: &'static str) {
-    app.background.lock().await.insert(session);
+    // One approval at a time per session ("yes" and /go arriving together start the work once).
+    if !app.background.lock().await.insert(session) {
+        return;
+    }
     let res = approve_inner(&app, session, by).await;
     app.background.lock().await.remove(&session);
     if let Err(e) = res {
