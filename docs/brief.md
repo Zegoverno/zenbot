@@ -1,7 +1,11 @@
 # Briefs, work and verification
 
-How a zenbot session turns a request into verified work: **frame → approve → work → verify →
-report → close**. The model can run every step end to end; the owner can take any step himself.
+How a zenbot session turns a job into verified work: **frame → approve → work → verify → report →
+close**. **A session is one job.** The workflow runs once per session, not once per message: framing
+spans as many turns as it takes to understand the job (clarifying, researching, questions,
+misconceptions), the work spans as many turns as it takes (the owner's messages steer the same job),
+the job is verified once when it should be done, and after the report a reply continues the same job.
+A new job is a new session. The model can run every step end to end; the owner can take any step himself.
 Every step is recorded and measured, so the loop can be improved from real use and evals.
 
 Approaches are taken from the best of the projects studied (Superpowers, Spec Kit, GSD, BMAD,
@@ -17,8 +21,8 @@ files from plan mode). zenbot runs every tool in the kernel, so the gates that m
 | `framing` | read files, run read-only commands, ask questions, propose a brief, answer directly | it answers without changing anything (`quick`), or a brief is approved |
 | `working` | everything; asks only to stop on the four conditions below | it submits the work |
 | `verifying` | (kernel and verifier only) | criteria are checked |
-| `reported` | | a verdict is recorded (`more` goes back to `working`, `reshape` to `framing`) |
-| `closed` | | the owner or model reopens the session |
+| `reported` | | a verdict is recorded (`more` goes back to `working`, `reshape` to `framing`), or the owner replies (back to `working` on the same brief) |
+| `closed` | | the owner replies (back to `working` on the same brief) |
 
 States are blocks on the tape (`state`, with who moved it: `model`, `owner` or `kernel`, and why).
 The owner can move a session himself: `/brief` (frame now), `/quick` (skip the brief), `/go`

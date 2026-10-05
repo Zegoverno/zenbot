@@ -1264,6 +1264,8 @@ impl App {
                 self.busy = false;
                 if ev["waiting"] == "approval" {
                     self.note("the brief is waiting: /go to approve, or reply with changes", Sty::Dim);
+                } else if matches!(ev["state"].as_str(), Some("reported" | "closed")) {
+                    self.note("reply to continue this job, /done to judge it, /new for a new job", Sty::Dim);
                 }
                 self.draw();
             }
@@ -1537,6 +1539,7 @@ mod tests {
         a.on_event(json!({ "type": "report", "text": "Verification: 1 passed, 0 failed, 0 uncertain." }));
         a.on_event(json!({ "type": "idle", "state": "closed" }));
         assert!(!a.busy);
+        assert!(a.notice.as_ref().is_some_and(|(t, _)| t.contains("/new for a new job")), "{:?}", a.notice);
         let out = a.capture.take().unwrap();
         for want in ["── Brief v1 ──", "Goal: no flag -> --json flag", "zen › The brief is approved.", "a) --json  (recommended)", "── Report ──", "1 passed"] {
             assert!(out.contains(want), "missing {want:?} in {out}");

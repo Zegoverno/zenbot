@@ -1,0 +1,14 @@
+{
+  "description": "One job over several messages: a CSV export, then the owner steers it (a header row, then skip empty items). The workflow should run once for the job, not per message.",
+  "work": "build",
+  "steps": [
+    { "prompt": "Add export_csv(items, path) to inventory.py that writes one name,count row per item, with a test." },
+    { "prompt": "Also write a header row: name,count." },
+    { "prompt": "And skip items whose count is 0." }
+  ],
+  "checks": [
+    { "name": "tests pass", "run": "python3 -m unittest -q 2>&1 | tail -1 | grep -q OK" },
+    { "name": "header, rows, zero counts skipped", "run": "python3 -c \"import csv,tempfile,os,inventory as m; p=tempfile.mktemp(); m.export_csv([('a',1),('b',0),('c',2)], p); rows=list(csv.reader(open(p))); os.remove(p); assert rows==[['name','count'],['a','1'],['c','2']], rows\"" },
+    { "name": "existing total still works", "run": "python3 -c 'import inventory as m; assert m.total(m.ITEMS)==55'" }
+  ]
+}

@@ -1022,9 +1022,12 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
                     flow::shadow_request(app, id, &text);
                 }
             }
+            // A session is one job: a message after the report continues that job (more work on
+            // the same brief), it doesn't start a new one. A new job is a new session.
             "reported" | "closed" => {
-                flow::set_state(app, id, "framing", "owner", "new request", false).await?;
-                flow::shadow_request(app, id, &text);
+                let briefed = flow::latest_brief(&app.db, id).await?.is_some_and(|(_, approved)| approved);
+                let (to, why) = if briefed { ("working", "owner continued the job") } else { ("framing", "owner continued") };
+                flow::set_state(app, id, to, "owner", why, false).await?;
             }
             "verifying" => anyhow::bail!("the work is being verified; wait for the report"),
             _ => {}
