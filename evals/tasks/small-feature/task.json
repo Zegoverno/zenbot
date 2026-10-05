@@ -1,0 +1,13 @@
+{
+  "description": "A small feature in a Rust CLI: a --json flag printing the same data, no new dependencies, with tests.",
+  "work": "build",
+  "steps": [
+    { "prompt": "Add a --json flag to the stock CLI that prints the same items as a JSON array of {name, count} objects. Keep the table as the default, add no dependencies, and add a test." }
+  ],
+  "checks": [
+    { "name": "tests pass", "run": "cargo test --offline -q 2>&1 | tail -3 | grep -q 'test result: ok'" },
+    { "name": "--json prints the items", "run": "cargo run --offline -q -- --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert {x[\"name\"]: x[\"count\"] for x in d} == {\"pallets\": 12, \"crates\": 40, \"drums\": 3}'" },
+    { "name": "table is still the default", "run": "cargo run --offline -q | grep -Eq '^pallets +12$'" },
+    { "name": "no dependencies added", "run": "! grep -A50 '^\\[dependencies\\]' Cargo.toml | grep -Eq '^[a-z_-]+ *='" }
+  ]
+}

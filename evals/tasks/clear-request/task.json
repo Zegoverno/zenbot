@@ -1,0 +1,12 @@
+{
+  "description": "A clear, small change: do it without unnecessary questions, with the tests passing.",
+  "work": "build",
+  "steps": [
+    { "prompt": "Add a subtract function to calc.py, with a test." }
+  ],
+  "checks": [
+    { "name": "tests pass, including a subtract test", "run": "python3 -m unittest -v test_calc 2>&1 | grep -q 'test_subtract' && python3 -m unittest -q test_calc" },
+    { "name": "subtract works", "run": "python3 -c 'from calc import subtract; assert subtract(5, 3) == 2 and subtract(2, 7) == -5'" },
+    { "name": "no questions asked", "answer_lacks": "Questions:" }
+  ]
+}

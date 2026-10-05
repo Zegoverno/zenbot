@@ -119,8 +119,10 @@ stop_kernel() {
 trap stop_kernel EXIT
 
 start_kernel() { # bin mind_dir workspace db label model log [task-env…]
-  local workers=engine
-  case "$6" in openai/*) workers=engine,pi ;; esac
+  # The live setup's workers (so System One models are served as in real use), at least the engine;
+  # Pi also for openai/* models.
+  local workers; workers=$(grep -E '^ZEN_WORKERS=' "$HOME/.zenbot/env" 2>/dev/null | cut -d= -f2); workers=${workers:-engine}
+  case "$6" in openai/*) [[ $workers == *pi* ]] || workers=$workers,pi ;; esac
   local task_env=("${@:8}")
   (
     set -a; [ -f "$HOME/.zenbot/env" ] && . "$HOME/.zenbot/env"; set +a
@@ -153,7 +155,7 @@ run_task() { # name bin mind label model effort db task repeat
     for i in $(seq 0 $((n - 1))); do
       local step; step=$(jq -c ".steps[$i]" "$tdir/task.json")
       if echo "$step" | jq -e 'has("shell")' >/dev/null; then
-        (cd "$ws" && bash -c "$(echo "$step" | jq -r .shell)") >>"$WORK/$name/$task-$r.shell.log" 2>&1 || { error="setup step $((i + 1)) failed"; break; }
+        (cd "$ws" && TASK_DIR="$tdir" bash -c "$(echo "$step" | jq -r .shell)") >>"$WORK/$name/$task-$r.shell.log" 2>&1 || { error="setup step $((i + 1)) failed"; break; }
         continue
       fi
       local prompt; prompt=$(echo "$step" | jq -r .prompt)
@@ -181,8 +183,15 @@ run_task() { # name bin mind label model effort db task repeat
       out="not run: $error"
     elif echo "$check" | jq -e 'has("run")' >/dev/null; then
       if out=$(cd "$ws" && TASK_DIR="$tdir" timeout 300 bash -c "$(echo "$check" | jq -r .run)" 2>&1); then ok=true; fi
-    elif echo "$check" | jq -e 'has("answer_contains")' >/dev/null; then
-      grep -qiF -- "$(echo "$check" | jq -r .answer_contains)" <<<"$answer" && ok=true
+    elif echo "$check" | jq -e 'has("answer_contains") or has("answer_lacks")' >/dev/null; then
+      # The answer to one prompt (`step`: 1 = the first prompt), else the last one.
+      local text="$answer" step; step=$(echo "$check" | jq -r '.step // empty')
+      [ -n "$step" ] && text=$(sed -n "${step}p" "$turns" | jq -r '.text // ""')
+      if echo "$check" | jq -e 'has("answer_contains")' >/dev/null; then
+        grep -qiF -- "$(echo "$check" | jq -r .answer_contains)" <<<"$text" && ok=true
+      else
+        grep -qiF -- "$(echo "$check" | jq -r .answer_lacks)" <<<"$text" || ok=true
+      fi
     fi
     checks=$(jq -c --arg n "$cname" --argjson ok "$ok" --arg out "$(echo "$out" | tail -c 400)" '. + [{name: $n, ok: $ok, output: $out}]' <<<"$checks")
   done
