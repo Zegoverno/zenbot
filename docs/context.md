@@ -87,8 +87,10 @@ protocol, with a fallback zenbot owns and a switch to turn it off.
   summary, a turn on another engine, or an interrupted turn, a new Claude Code session is seeded from
   the tape (the old quoted transcript, one cache miss). `ZEN_CLAUDE_RESUME=0` turns this off.
   No studied project does this; qm sends Claude Code a transcript every turn.
-- **Codex** gets the history as native items (`thread/inject_items`), as qm does.
-  `ZEN_CODEX_INJECT=0` falls back to the transcript.
+- **Codex** ties its prompt cache to the thread, so threads are kept the same way (`thread/resume`,
+  measured: 6,016 cached tokens on a resumed turn, none on a new thread per turn). A new thread gets
+  the history as native items (`thread/inject_items`, as qm does). `ZEN_CODEX_RESUME=0` and
+  `ZEN_CODEX_INJECT=0` turn these off.
 - **Pi** gets the messages directly, with long cache retention and the session id.
 
 ## Measurement

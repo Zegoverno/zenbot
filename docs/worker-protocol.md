@@ -34,7 +34,7 @@ JSON-RPC 2.0 over the worker's stdin/stdout, one JSON object per line. The kerne
 | `turn.delta` | notification | `{ session_id, delta }`: streamed answer text |
 | `turn.thinking` | notification | `{ session_id, delta }`: streamed reasoning (optional) |
 | `turn.message` | notification | `{ session_id, message }`: a finished message, appended to the session's tape |
-| `turn.usage` | notification | `{ session_id, engine, engine_version, input?, output?, cache_read?, cache_write?, cost_usd?, … }`: the worker's report for the whole turn, sent before `turn.end` |
+| `turn.usage` | notification | `{ session_id, engine, engine_version, input?, output?, cache_read?, cache_write?, cost_usd?, render?, engine_session?, … }`: the worker's report for the whole turn, sent before `turn.end` |
 | `turn.end` | notification | `{ session_id, error }`: the turn is over; `error` is null on success, `"interrupted"` after an abort |
 
 ## Messages
@@ -55,6 +55,18 @@ A worker emits one assistant message per model call, with that call's final usag
 
 `turn.usage` names the engine that ran the turn and its version (e.g. `claude-code` `2.1.287`), so an engine update shows up in the traces. Totals it gives (tokens, `cost_usd`) are taken for the turn as they are; for the ones it leaves out, the kernel sums the turn's messages. Give totals when the engine knows more than the messages show (Claude Code reports side calls only in its result).
 
+## Engine sessions
+
+Some engines cache earlier turns only inside their own sessions (measured for Claude Code and Codex, see docs/context.md). A worker may keep one engine session per kernel session, as a cache of the tape:
+
+- It reports `engine_session: { id, resumable }` in `turn.usage`; `resumable` is true only when the turn finished cleanly, so the engine's session holds exactly what the tape holds.
+- The kernel records it on the tape. On the next turn, if nothing was written since (no other turn, summary or new instructions) and the model is on the same engine, it sends `resume: { id }`.
+- With `resume`, the worker continues that session and sends only the new prompt and its context. If the engine no longer has the session, or `resume` is null, it starts a new one from `history`.
+- `render` says how the history reached the engine: `resume`, `seed` (new engine session from the history), `inject` (native items), `native` (messages), `transcript` (quoted text, no engine session).
+- An engine that continues its own session may report totals for the whole session; the kernel makes them per turn by subtracting the previous turn's report for the same engine session.
+
+Switches: `ZEN_CLAUDE_RESUME=0` and `ZEN_CODEX_RESUME=0` run every turn without an engine session; `ZEN_CODEX_INJECT=0` replays Codex history as a transcript.
+
 ## What the kernel guarantees
 
 - **Crashes.** The kernel restarts a worker that exits, with backoff. Turns it was running end with an error (`turn.end` is sent to clients by the kernel), and requests waiting on it fail at once.
@@ -74,6 +86,6 @@ With `ZEN_FAUX=1`, `zen-engine` also lists `faux/smoke`, a scripted model that d
 
 | Name | Command | What it serves |
 |---|---|---|
-| `engine` | `zen-engine` next to `zend` (override with `ZEN_ENGINE_CMD`) | `claude/*` via the Claude Code CLI, `codex/*` via `codex app-server`, on the owner's subscriptions |
+| `engine` | `zen-engine` next to `zend` (override with `ZEN_ENGINE_CMD`) | `claude/*` via the Claude Code CLI, `codex/*` via `codex app-server`, on the owner's subscriptions; keeps engine sessions (see above) |
 | `pi` | `node src/main.ts` in `ZEN_MIND_DIR` (override with `ZEN_MIND_CMD`) | `openai/*` via Pi's direct ChatGPT sign-in, and Pi's API providers |
 | any other `name` | `ZEN_WORKER_<NAME>_CMD` | whatever its `models.list` returns |

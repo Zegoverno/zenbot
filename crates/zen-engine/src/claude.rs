@@ -1,6 +1,13 @@
 //! Claude engine: runs each turn with the official `claude` CLI on the owner's Claude plan.
-//! Built-in tools are off; the only tools are zenbot's (via the MCP bridge), zenbot's system
-//! prompt replaces Claude Code's, and no session is kept on disk: zenbot's tape is the history.
+//! Built-in tools are off; the only tools are zenbot's (via the MCP bridge), and zenbot's system
+//! prompt replaces Claude Code's.
+//!
+//! Engine sessions (docs/context.md): Claude Code caches earlier turns only within its own session,
+//! so each zenbot session keeps a matching Claude Code session, run from one fixed directory. When
+//! the kernel says that session is in sync with the tape (`resume`), the turn continues it with only
+//! the new prompt; otherwise a new one is seeded with the replayed history. zenbot's tape stays the
+//! source of truth: Claude Code's session is a cache, and the turn report says whether it can be
+//! resumed. ZEN_CLAUDE_RESUME=0 runs every turn in a fresh, unsaved session instead.
 
 use std::process::Stdio;
 
@@ -10,7 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::watch;
 
-use crate::turn::{now_ms, seed_blocks, TurnCtx, TurnInput};
+use crate::turn::{enabled, new_uuid, now_ms, prompt_blocks, seed_blocks, TurnCtx, TurnInput};
 
 const PREFIX: &str = "mcp__zen__";
 
@@ -33,6 +40,38 @@ pub fn models() -> Vec<Value> {
 
 const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
+/// Claude Code's configuration directory (where it keeps sessions).
+fn config_dir() -> std::path::PathBuf {
+    std::env::var("CLAUDE_CONFIG_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude"))
+}
+
+/// The fixed directory engine sessions run in. Claude Code files sessions by directory and puts the
+/// directory in every request, so it must not change between turns.
+fn session_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())).join(".zenbot/engine/claude")
+}
+
+/// Whether Claude Code still has a session on disk (it may have been cleaned up).
+fn session_exists(id: &str) -> bool {
+    let Ok(dirs) = std::fs::read_dir(config_dir().join("projects")) else { return false };
+    dirs.flatten().any(|d| d.path().join(format!("{id}.jsonl")).is_file())
+}
+
+/// Delete engine sessions not used for 30 days. They are only a cache of zenbot's tape.
+pub fn clean_sessions() {
+    let name = session_dir().display().to_string().replace(['/', '.'], "-");
+    let Ok(files) = std::fs::read_dir(config_dir().join("projects").join(name)) else { return };
+    let month = std::time::Duration::from_secs(30 * 24 * 3600);
+    for f in files.flatten() {
+        let old = f.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > month);
+        if old && f.path().extension().is_some_and(|e| e == "jsonl") {
+            let _ = std::fs::remove_file(f.path());
+        }
+    }
+}
+
 pub fn available() -> bool {
     std::process::Command::new("claude").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
@@ -41,23 +80,37 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
     let model = input.model.as_str();
     let socket = format!("{}/zen-engine-{}-{}.sock", std::env::temp_dir().display(), std::process::id(), now_ms());
     let server = ctx.serve_socket(&socket).context("opening tool socket")?;
-    let jail = std::env::temp_dir().join(format!("zen-claude-{}", now_ms()));
-    std::fs::create_dir_all(&jail)?;
     let exe = std::env::current_exe()?.display().to_string();
     let mcp = json!({ "mcpServers": { "zen": { "command": exe, "args": ["mcp-bridge", socket] } } }).to_string();
     let allowed: Vec<String> = ctx.tools.iter().filter_map(|t| t["name"].as_str()).map(|n| format!("{PREFIX}{n}")).collect();
+
+    // How this turn reaches Claude Code: continue its session, start one seeded from the tape, or
+    // (sessions off) a throwaway session with the replayed history.
+    let sessions = enabled("ZEN_CLAUDE_RESUME");
+    let (render, engine_session, content) = match &input.resume {
+        Some(id) if sessions && session_exists(id) => ("resume", Some(id.clone()), prompt_blocks(&input.prompt, input.context.as_deref())),
+        _ if sessions => ("seed", Some(new_uuid()), seed_blocks(&input.history, &input.prompt, input.context.as_deref())),
+        _ => ("transcript", None, seed_blocks(&input.history, &input.prompt, input.context.as_deref())),
+    };
+    let dir = if sessions { session_dir() } else { std::env::temp_dir().join(format!("zen-claude-{}", now_ms())) };
+    std::fs::create_dir_all(&dir)?;
 
     let mut cmd = Command::new("claude");
     if let Some(e) = &input.effort {
         cmd.args(["--effort", e]);
     }
+    match (render, &engine_session) {
+        ("resume", Some(id)) => cmd.args(["--resume", id]),
+        (_, Some(id)) => cmd.args(["--session-id", id]),
+        _ => cmd.arg("--no-session-persistence"),
+    };
     let mut child = cmd
         .args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages"])
         .args(["--tools", "", "--strict-mcp-config", "--mcp-config", &mcp, "--setting-sources", ""])
         .args(["--allowedTools", &allowed.join(",")])
-        .args(["--permission-mode", "bypassPermissions", "--no-session-persistence"])
+        .args(["--permission-mode", "bypassPermissions"])
         .args(["--system-prompt", &input.system, "--model", model])
-        .current_dir(&jail)
+        .current_dir(&dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -66,7 +119,6 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
         .context("starting the claude CLI (is Claude Code installed and signed in?)")?;
 
     let mut stdin = child.stdin.take().context("claude stdin")?;
-    let content = seed_blocks(&input.history, &input.prompt, input.context.as_deref());
     let user = json!({ "type": "user", "message": { "role": "user", "content": content } });
     stdin.write_all(format!("{user}\n").as_bytes()).await?;
     stdin.flush().await?;
@@ -84,7 +136,7 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
     let mut lines = BufReader::new(child.stdout.take().context("claude stdout")?).lines();
     let mut calls = Calls::default();
     let mut outcome: Option<Result<Option<String>>> = None;
-    let mut usage = json!({ "session_id": ctx.session_id, "engine": "claude-code", "provider": "claude", "model": model });
+    let mut usage = json!({ "session_id": ctx.session_id, "engine": "claude-code", "provider": "claude", "model": model, "render": render });
 
     loop {
         tokio::select! {
@@ -134,8 +186,15 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
     let status = child.wait().await.ok();
     server.abort();
     let _ = std::fs::remove_file(&socket);
-    let _ = std::fs::remove_dir_all(&jail);
+    if !sessions {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     let stderr = stderr_task.await.unwrap_or_default();
+    // Only a turn that finished cleanly leaves the engine session in sync with the tape.
+    let clean = matches!(outcome, Some(Ok(None)));
+    if let Some(id) = engine_session {
+        usage["engine_session"] = json!({ "id": id, "resumable": clean });
+    }
     ctx.rpc.notify("turn.usage", usage).await;
     match outcome {
         Some(o) => o,

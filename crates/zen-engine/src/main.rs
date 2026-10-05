@@ -39,6 +39,7 @@ async fn serve() -> Result<()> {
     // Requests being answered. When stdin closes we still finish these, or a reply (e.g. to a
     // piped-in `ping`) could be lost as the process exits.
     let mut answering = tokio::task::JoinSet::new();
+    claude::clean_sessions();
     eprintln!("[engine] ready");
     while let Some(line) = lines.next_line().await? {
         while answering.try_join_next().is_some() {}

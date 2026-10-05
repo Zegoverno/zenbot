@@ -1,6 +1,9 @@
 //! Codex engine: runs each turn through `codex app-server` on the owner's ChatGPT plan.
 //! Codex's own shell, browser, apps and plugins are switched off; zenbot's tools are given as
-//! dynamic tools and executed by the kernel. Threads are ephemeral: zenbot's tape is the history.
+//! dynamic tools and executed by the kernel. Threads are ephemeral: zenbot's tape is the history,
+//! given to each thread as native items (`thread/inject_items`, as qm does), so the model sees its
+//! own earlier turns as messages and tool calls, not as a quoted transcript. ZEN_CODEX_INJECT=0
+//! (or an app-server that refuses the items) falls back to the transcript.
 
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,7 +14,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{watch, OnceCell};
 
-use crate::turn::{now_ms, seed_blocks, TurnCtx, TurnInput};
+use crate::turn::{enabled, now_ms, prompt_blocks, seed_blocks, TurnCtx, TurnInput};
 
 pub fn available() -> bool {
     std::process::Command::new("codex").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
@@ -111,7 +114,10 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
     let model = input.model.as_str();
     let effort = input.effort.as_deref();
     let system_prompt = input.system.as_str();
-    let jail = std::env::temp_dir().join(format!("zen-codex-{}", now_ms()));
+    // Threads are kept (engine sessions, like Claude Code's) unless ZEN_CODEX_RESUME=0: Codex ties its
+    // prompt cache to the thread, so a new thread per turn never reuses the cache.
+    let sessions = enabled("ZEN_CODEX_RESUME");
+    let jail = std::env::temp_dir().join("zen-codex");
     std::fs::create_dir_all(&jail)?;
     let result = async {
         let mut s = AppServer::start(&jail).await?;
@@ -120,26 +126,49 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
             .iter()
             .map(|t| json!({ "type": "function", "name": t["name"], "description": t["description"], "inputSchema": t["parameters"] }))
             .collect();
-        let thread = s
-            .call(
-                "thread/start",
-                json!({
-                    "model": model, "cwd": jail, "approvalPolicy": "never", "sandbox": "read-only", "ephemeral": true,
-                    "baseInstructions": system_prompt,
-                    "developerInstructions": "Use the supplied dynamic tools for all commands and file operations. Your own working directory is an empty, read-only placeholder, not the user's workspace.",
-                    "dynamicTools": tools,
-                    "config": { "web_search": "disabled", "features": {
-                        "shell_tool": false, "unified_exec": false, "shell_snapshot": false, "apps": false, "plugins": false,
-                        "browser_use": false, "browser_use_external": false, "computer_use": false, "image_generation": false,
-                        "in_app_browser": false, "multi_agent": false, "request_permissions_tool": false, "tool_suggest": false
-                    }}
-                }),
-                None,
-            )
-            .await?;
-        let thread_id = thread["thread"]["id"].as_str().context("codex thread id")?.to_string();
+        let config = json!({ "web_search": "disabled", "features": {
+            "shell_tool": false, "unified_exec": false, "shell_snapshot": false, "apps": false, "plugins": false,
+            "browser_use": false, "browser_use_external": false, "computer_use": false, "image_generation": false,
+            "in_app_browser": false, "multi_agent": false, "request_permissions_tool": false, "tool_suggest": false
+        }});
+        let developer = "Use the supplied dynamic tools for all commands and file operations. Your own working directory is an empty, read-only placeholder, not the user's workspace.";
         let mut early = Vec::new();
-        let items = seed_blocks(&input.history, &input.prompt, input.context.as_deref());
+        // Continue the thread the kernel says is in sync with the tape; if Codex no longer has it,
+        // start a new one.
+        let resumed = match &input.resume {
+            Some(id) if sessions => s
+                .call("thread/resume", json!({ "threadId": id, "model": model, "cwd": jail, "approvalPolicy": "never", "sandbox": "read-only",
+                    "baseInstructions": system_prompt, "developerInstructions": developer, "config": config }), Some(&mut early))
+                .await
+                .ok()
+                .and_then(|r| r["thread"]["id"].as_str().map(String::from)),
+            _ => None,
+        };
+        let (thread_id, render) = match resumed {
+            Some(id) => (id, "resume"),
+            None => {
+                let thread = s
+                    .call(
+                        "thread/start",
+                        json!({
+                            "model": model, "cwd": jail, "approvalPolicy": "never", "sandbox": "read-only", "ephemeral": !sessions,
+                            "baseInstructions": system_prompt, "developerInstructions": developer, "dynamicTools": tools, "config": config
+                        }),
+                        Some(&mut early),
+                    )
+                    .await?;
+                let id = thread["thread"]["id"].as_str().context("codex thread id")?.to_string();
+                let injected = !input.history.is_empty()
+                    && enabled("ZEN_CODEX_INJECT")
+                    && s.call("thread/inject_items", json!({ "threadId": id, "items": history_items(&input.history) }), Some(&mut early)).await.is_ok();
+                (id, if input.history.is_empty() || injected { "inject" } else { "transcript" })
+            }
+        };
+        let items = if render == "transcript" {
+            seed_blocks(&input.history, &input.prompt, input.context.as_deref())
+        } else {
+            prompt_blocks(&input.prompt, input.context.as_deref())
+        };
         s.call("turn/start", json!({ "threadId": thread_id, "input": items, "effort": effort }), Some(&mut early)).await?;
 
         let mut usage = json!({ "input": 0, "output": 0, "cacheRead": 0 });
@@ -205,12 +234,78 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
         let _ = s.child.start_kill();
         ctx.rpc
             .notify("turn.usage", json!({ "session_id": ctx.session_id, "engine": "codex", "engine_version": version(),
-                "provider": "codex", "model": model,
+                "provider": "codex", "model": model, "render": render,
+                "engine_session": if sessions { json!({ "id": thread_id, "resumable": error.is_none() }) } else { Value::Null },
                 "input": usage["input"], "output": usage["output"], "cache_read": usage["cacheRead"], "cost_usd": null }))
             .await;
         Ok(error)
     }
     .await;
-    let _ = std::fs::remove_dir_all(&jail);
     result
+}
+
+/// The kernel's history as Responses API items for `thread/inject_items`: messages as messages,
+/// tool calls and results as function calls and outputs (call ids longer than the API allows are
+/// shortened the same way everywhere). Thinking is left out: it can't be replayed to another model.
+fn history_items(history: &[Value]) -> Vec<Value> {
+    let call_id = |id: &str| if id.len() > 64 { id[id.len() - 64..].to_string() } else { id.to_string() };
+    let text = |t: &str, kind: &str| json!({ "type": kind, "text": t });
+    let mut items = Vec::new();
+    for m in history {
+        match m["role"].as_str() {
+            Some("user") => {
+                let mut content: Vec<Value> = match &m["content"] {
+                    Value::String(s) => vec![text(s, "input_text")],
+                    Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).map(|t| text(t, "input_text")).collect(),
+                    _ => vec![],
+                };
+                if let Some(c) = m["context"].as_str() {
+                    content.push(text(c, "input_text"));
+                }
+                items.push(json!({ "type": "message", "role": "user", "content": content }));
+            }
+            Some("assistant") => {
+                for p in m["content"].as_array().into_iter().flatten() {
+                    match p["type"].as_str() {
+                        Some("text") => items.push(json!({ "type": "message", "role": "assistant",
+                            "content": [text(p["text"].as_str().unwrap_or(""), "output_text")] })),
+                        Some("toolCall") => items.push(json!({ "type": "function_call", "call_id": call_id(p["id"].as_str().unwrap_or("")),
+                            "name": p["name"], "arguments": p["arguments"].to_string() })),
+                        _ => {}
+                    }
+                }
+            }
+            Some("toolResult") => {
+                let out: String = m["content"].as_array().into_iter().flatten().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n");
+                items.push(json!({ "type": "function_call_output", "call_id": call_id(m["toolCallId"].as_str().unwrap_or("")), "output": out }));
+            }
+            _ => {}
+        }
+    }
+    items
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each turn's items start with the previous turn's (the prefix the provider can cache).
+    #[test]
+    fn history_items_are_native_and_append_only() {
+        let mut history = vec![
+            json!({ "role": "user", "content": "<summary/>", "summary": true, "seq": 9 }),
+            json!({ "role": "user", "content": "fix it", "context": "<turn_context/>", "seq": 10 }),
+            json!({ "role": "assistant", "content": [{ "type": "thinking", "thinking": "hm" }, { "type": "toolCall", "id": "toolu_1", "name": "bash", "arguments": { "command": "ls" } }], "seq": 11 }),
+            json!({ "role": "toolResult", "toolCallId": "toolu_1", "toolName": "bash", "content": [{ "type": "text", "text": "a.rs" }], "seq": 12 }),
+        ];
+        let first = history_items(&history);
+        assert_eq!(first.len(), 4, "thinking is dropped");
+        assert_eq!(first[1]["content"][1]["text"], "<turn_context/>");
+        assert_eq!(first[2]["type"], "function_call");
+        assert_eq!(first[2]["arguments"], r#"{"command":"ls"}"#);
+        assert_eq!(first[3]["call_id"], "toolu_1");
+        history.push(json!({ "role": "assistant", "content": [{ "type": "text", "text": "done" }], "seq": 13 }));
+        let second = history_items(&history);
+        assert_eq!(&second[..first.len()], &first[..]);
+    }
 }

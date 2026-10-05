@@ -331,6 +331,14 @@ async fn finish_turn(app: &App, id: Uuid, error: Value) -> bool {
             Value::Null
         }
     };
+    // A cleanly finished turn leaves the engine's own session (if it keeps one) in sync with the tape.
+    let es = &turn.reported["engine_session"];
+    if error.is_null() && es["resumable"] == true {
+        let engine = turn.model.split_once('/').map(|(e, _)| e).unwrap_or("");
+        if let Err(e) = append_tape(&app.db, id, "engine_session", &json!({ "engine": engine, "id": es["id"] })).await {
+            tracing::error!("recording engine session for {id}: {e:#}");
+        }
+    }
     let cost: f64 = sqlx::query_scalar(&format!("SELECT {}", session_cost("$1"))).bind(id).fetch_one(&app.db).await.unwrap_or(0.0);
     app.emit(id, json!({ "type": "end", "error": error, "cost": cost, "turn": summary })).await;
     true
@@ -353,7 +361,7 @@ async fn record_turn(app: &App, turn: &Turn, error: &Value) -> Result<Value> {
         Some("interrupted") => "interrupted",
         Some(_) => "error",
     };
-    let r = &turn.reported;
+    let r = &per_turn_report(app, turn).await?;
     let int = |k: &str| r.get(k).and_then(Value::as_i64);
     let row = sqlx::query(
         "WITH calls AS (SELECT COUNT(*)::int AS n, SUM(input_tokens) AS i, SUM(output_tokens) AS o, SUM(cache_read) AS cr,
@@ -381,10 +389,39 @@ async fn record_turn(app: &App, turn: &Turn, error: &Value) -> Result<Value> {
     .bind(int("cache_read"))
     .bind(int("cache_write"))
     .bind(r.get("cost_usd").and_then(Value::as_f64))
-    .bind(if r.is_null() { None } else { Some(r) })
+    .bind(if turn.reported.is_null() { None } else { Some(&turn.reported) })
     .fetch_one(&app.db)
     .await?;
     Ok(turn_json(&row))
+}
+
+/// The worker's report with its totals made per turn. An engine that continues its own session
+/// (Claude Code with --resume) reports totals for the whole session so far; the previous turn's
+/// report for the same engine session is subtracted. The raw report is stored as it came.
+async fn per_turn_report(app: &App, turn: &Turn) -> Result<Value> {
+    let mut r = turn.reported.clone();
+    if r["render"] != "resume" {
+        return Ok(r);
+    }
+    let previous: Option<Value> = sqlx::query_scalar(
+        "SELECT usage FROM turns WHERE session_id = (SELECT session_id FROM turns WHERE id = $1)
+           AND id <> $1 AND usage->'engine_session'->>'id' = $2 ORDER BY started_at DESC LIMIT 1",
+    )
+    .bind(turn.turn_id)
+    .bind(r["engine_session"]["id"].as_str().unwrap_or(""))
+    .fetch_optional(&app.db)
+    .await?
+    .flatten();
+    let Some(prev) = previous else { return Ok(r) };
+    for k in ["input", "output", "cache_read", "cache_write"] {
+        if let (Some(now), Some(before)) = (r[k].as_i64(), prev[k].as_i64()) {
+            r[k] = json!((now - before).max(0));
+        }
+    }
+    if let (Some(now), Some(before)) = (r["cost_usd"].as_f64(), prev["cost_usd"].as_f64()) {
+        r["cost_usd"] = json!((now - before).max(0.0));
+    }
+    Ok(r)
 }
 
 fn turn_json(r: &sqlx::postgres::PgRow) -> Value {
@@ -869,7 +906,15 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
             .bind(&effort)
             .execute(&app.db)
             .await?;
-        let (envelope, _) = compile::envelope(&app.db, id, &app.workspace, &app.repo, &tools::specs()).await?;
+        // The engine's own session can be resumed only if nothing was written since it last
+        // matched the tape (no other turn, summary or new instructions in between).
+        let engine = model.split_once('/').map(|(e, _)| e).unwrap_or("");
+        let last = tape::last(&app.db, id).await?;
+        let (envelope, new_envelope) = compile::envelope(&app.db, id, &app.workspace, &app.repo, &tools::specs()).await?;
+        let resume = match (&last, new_envelope) {
+            (Some(b), None) if b.kind == "engine_session" && b.payload["engine"] == engine => Some(json!({ "id": b.payload["id"] })),
+            _ => None,
+        };
         let blocks = tape::load(&app.db, id, &["message", "compaction"]).await?;
         let (history, _summary) = compile::history(&blocks);
         let today = chrono::Local::now().format("%Y-%m-%d (%A)").to_string();
@@ -901,6 +946,7 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
                     "prompt": text,
                     "prompt_context": turn_context,
                     "tools": envelope.tools,
+                    "resume": resume,
                 }),
             )
             .await
