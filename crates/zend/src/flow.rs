@@ -491,6 +491,11 @@ pub fn shadow_request(app: &AppState, session: Uuid, text: &str) {
             let p = chosen.and_then(|c| answer["probabilities"][c].as_f64()).or(answer["confidence"].as_f64());
             log_decision(&app.db, session, point, &state, &answer, chosen, p, false, error.as_deref()).await;
         }
+        // The model may have proposed its brief before this answer came back.
+        if let Ok(Some((b, _))) = latest_brief(&app.db, session).await {
+            resolve_shadow(&app.db, session, "route", b["brief"]["route"].as_str(), "model").await;
+            resolve_shadow(&app.db, session, "work", b["brief"]["work"].as_str(), "model").await;
+        }
     });
 }
 
@@ -511,6 +516,14 @@ async fn shadow_claim(app: &AppState, session: Uuid, summary: &str) {
         let p = answer["probability"].as_f64();
         let chosen = p.map(|p| if p >= 0.5 { "unverified" } else { "evidenced" });
         log_decision(&app.db, session, "claim", &state, &answer, chosen, p, false, error.as_deref()).await;
+        // Verification may have finished before this answer came back.
+        if let Ok(blocks) = tape::load(&app.db, session, &["submission", "verification"]).await {
+            let submitted = blocks.iter().rev().find(|b| b.kind == "submission").map(|b| b.seq).unwrap_or(0);
+            if let Some(v) = blocks.iter().rev().find(|b| b.kind == "verification" && b.seq > submitted) {
+                let all = v.payload["results"].as_array().is_some_and(|r| r.iter().all(|x| x["result"] == "pass"));
+                resolve_shadow(&app.db, session, "claim", Some(if all { "evidenced" } else { "unverified" }), "verification").await;
+            }
+        }
     });
 }
 
