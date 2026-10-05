@@ -296,6 +296,65 @@ Rules: each milestone is used on a real side project (the **pilot project**) the
 | **M6** | Research & reach | `web.search`/`web.fetch` with taint rules; agent browser + live view; Matrix; publish skill with approval | I run research from Matrix and publish a devlog post with one approval |
 | **M7** | Ship to agents | Project template exposing the project's own MCP server, skills, API, agent-facing docs and usage metering | A pilot project is usable by other people's agents |
 
+### 8.1 Status and next phases (2026-10-05)
+
+The near-term goal: the bare minimum that lets the owner use zenbot to improve zenbot itself, then
+use it for real. Rules for all of it: every choice follows the best known practice (checked in code,
+not READMEs) and says where it comes from; a step runs only when it measurably adds something;
+harness changes are evaluated against the previous version (`scripts/eval.sh`) and the owner decides;
+day-to-day policy (which model for which work) may change automatically, system-level changes may not.
+
+**Done**
+- M0 walking skeleton, with the `zen` terminal app instead of the web UI.
+- **Phase 1, context v2** (`docs/context.md`), on `main`: fixed instructions per session, per-turn
+  context at the end, an append-only hash-chained tape with block numbers, Claude Code / Codex engine
+  sessions (resume), summaries with block addresses and a `history` tool, per-turn measurement of
+  what was sent and of cache breaks, secret masking. Eval against the previous version: same model,
+  11 tasks, 8/8 → 8/8 passed (two long-session tasks newly passing), cost −78%, cache hit 60% → 95%.
+  Merged and pushed; **not installed** on the running service yet.
+
+**Built, not merged: Phase 2, briefed work** (`docs/brief.md`, branch `phase-2`, local)
+- Frame (read-only, enforced by the kernel and a bubblewrap sandbox) → brief (schema-checked, criteria
+  as commands) → approve (owner or per-route auto) → work → verify (the kernel runs the criteria; a
+  fresh verifier only when it adds) → report → verdict (owner's, or the model's marked as such).
+  System One (Jev) decisions in shadow mode, a `decide` tool, a routing policy table, `/go`,
+  `/brief`, `/quick`, `/verify`, three new eval tasks.
+- Eval against Phase 1 (`~/.zenbot/evals/20261005T194445Z`): 11/11 → 11/11 passed, cost **4.9×**,
+  time 3.2×. On these tasks it added nothing measurable: Phase 1 already asked the right questions
+  on the incomplete request. Its claimed benefits (catching false "done", staying in scope, verified
+  criteria) aren't covered by the current tasks.
+
+**Next, in order**
+1. **Phase 2, opt-in** (proposed, pending the owner's OK): sessions start `open` (the Phase 1 loop);
+   the brief tools are offered there and the model uses them when the work is big, risky or unclear;
+   `/brief` forces it; verification runs only for briefed work. Shadow logging, the policy table and
+   `decide` stay on. Then rerun the evals; merge only on the owner's decision.
+2. **Harder eval tasks**, where the Phase 1 loop may fail: multi-file changes, a tempting
+   out-of-scope fix, a task where it's easy to claim success without checking, a change to a copy of
+   zenbot itself. A brief becomes a default only for the kinds of work where they show it pays.
+3. **Test the paths not yet run with real models**: Codex and Pi through the workflow, the questions
+   path, a model switch mid-session, a failed verification followed by a real fix. Then a cleanup pass
+   on `main.rs` / `flow.rs`.
+4. **Install and use zenbot on zenbot** (dogfooding). Real sessions and `/done` verdicts are the
+   data everything after this learns from.
+5. **Phase 2b, the improvement loop**: model/effort sweeps on the eval tasks per kind of work (the
+   cheapest that passes as often as the best); an improver session (kind `reflect`) that reads
+   metrics from real sessions and sweeps, applies day-to-day policy changes itself (logged with
+   evidence, undoable) and proposes system-level ones; a promotion rule for System One decisions
+   (one question at a time, after enough correct answers above a confidence threshold); eval tasks
+   generated from real sessions; a schedule to run it.
+6. **Phase 3, memory**: `USER.md` and a capped `MEMORY.md` loaded once per session; memories proposed
+   at `/done` only from the owner's words and verified results, checked against the source, approved
+   by the owner; each points to its source, a newer one supersedes an older one, corrections win.
+7. **Phase 4, search**: Postgres full-text, then pgvector, over sessions and memory, merged ranking
+   with exact names and paths first; given to the agent as tools (`history` across sessions,
+   `memory.search`); every search logged.
+8. **Phase 5, wiki and suggestions**: wiki pages (rewritten summary over an append-only timeline, an
+   index page); at most 3 relevant pointers in the turn context, scored by System One above a
+   confidence bar, each logged and measured.
+9. Then the milestones above: M2 build loop (sandboxes, preview), M3 work (board, delegation, inbox),
+   M5 closed loop (crons, distillation, crystallization), M6 research and reach, M7 ship to agents.
+
 ## 9. Success metrics
 - Owner hours saved per week (self-reported weekly in the devlog).
 - Tasks completed by agents per week, and the share accepted without edits (per domain).
