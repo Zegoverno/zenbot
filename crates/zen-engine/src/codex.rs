@@ -11,7 +11,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{watch, OnceCell};
 
-use crate::turn::{now_ms, prompt_with_history, TurnCtx};
+use crate::turn::{now_ms, seed_blocks, TurnCtx, TurnInput};
 
 pub fn available() -> bool {
     std::process::Command::new("codex").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
@@ -107,15 +107,10 @@ fn error_text(v: &Value) -> String {
     serde_json::from_str::<Value>(raw).ok().and_then(|j| j["error"]["message"].as_str().map(String::from)).unwrap_or_else(|| raw.to_string())
 }
 
-pub async fn run_turn(
-    ctx: TurnCtx,
-    model: &str,
-    effort: Option<&str>,
-    system_prompt: &str,
-    history: &[Value],
-    prompt: &str,
-    mut abort: watch::Receiver<bool>,
-) -> Result<Option<String>> {
+pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bool>) -> Result<Option<String>> {
+    let model = input.model.as_str();
+    let effort = input.effort.as_deref();
+    let system_prompt = input.system.as_str();
     let jail = std::env::temp_dir().join(format!("zen-codex-{}", now_ms()));
     std::fs::create_dir_all(&jail)?;
     let result = async {
@@ -144,8 +139,8 @@ pub async fn run_turn(
             .await?;
         let thread_id = thread["thread"]["id"].as_str().context("codex thread id")?.to_string();
         let mut early = Vec::new();
-        let input = json!([{ "type": "text", "text": prompt_with_history(history, prompt) }]);
-        s.call("turn/start", json!({ "threadId": thread_id, "input": input, "effort": effort }), Some(&mut early)).await?;
+        let items = seed_blocks(&input.history, &input.prompt, input.context.as_deref());
+        s.call("turn/start", json!({ "threadId": thread_id, "input": items, "effort": effort }), Some(&mut early)).await?;
 
         let mut usage = json!({ "input": 0, "output": 0, "cacheRead": 0 });
         let mut error: Option<String> = None;

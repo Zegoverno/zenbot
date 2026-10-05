@@ -1,5 +1,6 @@
 //! zend — the zenbot kernel. Owns all state and all side effects.
 
+mod compile;
 mod context;
 mod mind;
 mod score;
@@ -745,33 +746,6 @@ async fn load_messages(db: &PgPool, id: Uuid) -> Result<Vec<Value>, sqlx::Error>
         .collect())
 }
 
-/// Keep long sessions within the context window: older tool outputs are trimmed
-/// (the full output stays in the tape). Recent messages are sent untouched.
-fn prune_history(mut history: Vec<Value>) -> Vec<Value> {
-    const KEEP_RECENT: usize = 12;
-    const MAX_OLD_OUTPUT: usize = 400;
-    let cutoff = history.len().saturating_sub(KEEP_RECENT);
-    for m in history.iter_mut().take(cutoff) {
-        if m["role"] != "toolResult" {
-            continue;
-        }
-        if let Some(parts) = m["content"].as_array_mut() {
-            for part in parts.iter_mut() {
-                if let Some(text) = part["text"].as_str() {
-                    if text.len() > MAX_OLD_OUTPUT {
-                        let mut end = 300;
-                        while !text.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        part["text"] = json!(format!("{}\n[... {} more bytes trimmed from history ...]", &text[..end], text.len() - end));
-                    }
-                }
-            }
-        }
-    }
-    history
-}
-
 /// Instruction files recorded for a session (tape kind `context`), oldest first.
 async fn load_context(db: &PgPool, id: Uuid) -> Result<Vec<PathBuf>, sqlx::Error> {
     let mut out: Vec<PathBuf> = Vec::new();
@@ -842,43 +816,6 @@ async fn handle_socket(app: AppState, id: Uuid, socket: WebSocket) {
     forward.abort();
 }
 
-/// The system prompt. `extra` are instruction files this session picked up on demand.
-fn system_prompt(workspace: &std::path::Path, repo: &str, extra: &[PathBuf]) -> String {
-    let mut s = format!(
-        "You are zenbot, the owner's personal agent running on their Linux VM.\n\
-         You can run shell commands and read, write, edit and move files using your tools.\n\
-         Be concise and direct. Show file paths clearly. Prefer doing the work over describing it.\n\
-         The user sees every tool call and its full output in the interface, so never repeat raw tool output; \
-         summarize what matters and quote only the relevant lines.\n\
-         Ask before destructive or outward-facing actions (deleting data, pushing, publishing, sending messages, spending money).\n\
-         Your own source code (zenbot) is at {repo}. Before changing yourself, read {repo}/AGENTS.md and follow it; \
-         never restart your own service directly, use the upgrade script it describes.\n\
-         \n\
-         <tool_guidelines>\n\
-         - Use read to look at files (not cat or sed), and read a file before editing it.\n\
-         - Use edit for changes to existing files and write for new files or complete rewrites. Edits to the same file are applied one at a time, so several in one step are safe.\n\
-         - Use bash for searching (rg, grep, find), git, builds, tests and running programs.\n\
-         - Start servers and other long-running processes in the background with output redirected to a file.\n\
-         - When output is cut, the result says where the full output was saved or which offset to read next.\n\
-         </tool_guidelines>\n"
-    );
-    let mut files = context::always(workspace);
-    files.extend(extra.iter().filter_map(|p| context::read_capped(p).map(|t| (p.clone(), t))));
-    if !files.is_empty() {
-        s.push_str("\n<project_context>\nInstructions the owner keeps for agents. Follow them.\n");
-        for (path, text) in files {
-            s.push_str(&format!("<file path=\"{}\">\n{}\n</file>\n", path.display(), text.trim_end()));
-        }
-        s.push_str("</project_context>\n");
-    }
-    s.push_str(&format!(
-        "\nWorking directory for tools: {} (paths are relative to it unless absolute; ~ is the home directory).\nToday is {}.",
-        workspace.display(),
-        chrono::Local::now().format("%Y-%m-%d (%A)")
-    ));
-    s
-}
-
 async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
     if text.trim().is_empty() {
         return Ok(());
@@ -932,12 +869,19 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
             .bind(&effort)
             .execute(&app.db)
             .await?;
-        let history = prune_history(load_messages(&app.db, id).await?);
+        let (envelope, _) = compile::envelope(&app.db, id, &app.workspace, &app.repo, &tools::specs()).await?;
+        let blocks = tape::load(&app.db, id, &["message", "compaction"]).await?;
+        let (history, _summary) = compile::history(&blocks);
+        let today = chrono::Local::now().format("%Y-%m-%d (%A)").to_string();
+        let turn_context = compile::turn_context(&blocks, &today);
         let extra = load_context(&app.db, id).await?;
         if let Some(t) = app.turns.lock().await.get_mut(&id) {
             t.context = extra.iter().cloned().collect();
         }
-        let user = json!({ "role": "user", "content": text, "timestamp": chrono::Utc::now().timestamp_millis() });
+        let mut user = json!({ "role": "user", "content": text, "timestamp": chrono::Utc::now().timestamp_millis() });
+        if let Some(c) = &turn_context {
+            user["context"] = json!(c);
+        }
         append_tape(&app.db, id, "message", &user).await?;
         if title.is_empty() {
             let t: String = text.chars().take(60).collect();
@@ -952,10 +896,11 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
                     "session_id": id,
                     "model": model,
                     "effort": effort,
-                    "system_prompt": system_prompt(&app.workspace, &app.repo, &extra),
+                    "system_prompt": envelope.system,
                     "history": history,
                     "prompt": text,
-                    "tools": tools::specs(),
+                    "prompt_context": turn_context,
+                    "tools": envelope.tools,
                 }),
             )
             .await
@@ -1142,26 +1087,4 @@ async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming) -> Result
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn system_prompt_includes_context_files_from_ancestors() {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let root = std::env::temp_dir().join(format!("zend-ctx-{nanos}"));
-        let ws = root.join("proj");
-        std::fs::create_dir_all(&ws).unwrap();
-        std::fs::write(root.join("CLAUDE.md"), "outer rule").unwrap();
-        std::fs::write(ws.join("AGENTS.md"), "inner rule").unwrap();
-        std::fs::write(ws.join("CLAUDE.md"), "shadowed by AGENTS.md").unwrap();
-        let prompt = system_prompt(&ws, "/repo", &[]);
-        let outer = prompt.find("outer rule").expect("parent CLAUDE.md loaded");
-        let inner = prompt.find("inner rule").expect("workspace AGENTS.md loaded");
-        assert!(outer < inner, "files are ordered from the root down");
-        assert!(!prompt.contains("shadowed"));
-        assert!(prompt.contains(&format!("Working directory for tools: {}", ws.display())));
-    }
 }

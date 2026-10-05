@@ -12,14 +12,17 @@ JSON-RPC 2.0 over the worker's stdin/stdout, one JSON object per line. The kerne
 |---|---|---|
 | `ping` | `{}` | `{ "pong": true }` |
 | `models.list` | `{}` | `{ "authenticated": { "<engine>": bool, … }, "models": [{ "id": "<engine>/<model>", "name": "…", "efforts": ["low", …], "default_effort": "medium" }], "classifiers": [{ "id": "<provider>/<model>", "name": "…" }] }` |
-| `turn.start` | `{ session_id, model, effort, system_prompt, history, prompt, tools }` | `{ "ok": true }` immediately; the turn then runs asynchronously |
+| `turn.start` | `{ session_id, model, effort, system_prompt, history, prompt, prompt_context, tools, resume }` | `{ "ok": true }` immediately; the turn then runs asynchronously |
 | `turn.abort` | `{ session_id }` | `{ "ok": true }`; the worker stops the turn and sends `turn.end` |
 | `s1.decide` | `{ model, state, questions }` | `{ model, provider, answers, usage, error }` (optional; only workers that list `classifiers`) |
 
 - `model` is one of the ids from `models.list`, always the model's full id (e.g. `claude/claude-opus-5-5`), never an alias that can move to another model. The kernel routes each model to the worker that listed it.
 - `efforts` are the thinking levels a model accepts, in order, and `default_effort` the one used when a session picks none. Both are optional: a model without them has no level to choose.
 - `effort` is the level for this turn: the session's choice, or the model's `default_effort`. The kernel always sends one for a model that has levels, so the level that ran is known; it is `null` only for models without levels. The worker must apply it, not substitute its own default.
-- `history` is the session so far (already trimmed by the kernel), as messages in the format below.
+- `system_prompt` and `tools` are fixed for the session (docs/context.md): send them as they are, so the provider's cache keeps hitting.
+- `history` is the session so far as the kernel compiled it, in the format below. Each message carries `seq`, its number on the tape (`#12`). A user message may carry `context`, the turn context that was sent after it; send it as a second text block after the message's content, as it was sent. When older turns were summarized, the first message is the summary: a user message with `"summary": true`. Don't drop or rewrite earlier messages: each turn's history starts with the previous turn's.
+- `prompt_context` (string or null) is this turn's context (the date when it changed, …); send it as a text block after `prompt`.
+- `resume` (`{ id }` or null) names an engine session of the worker's own that the kernel considers in sync with the tape up to this turn; the worker may continue it and send only the new prompt instead of the history (see "Engine sessions").
 - `tools` is a list of `{ name, description, parameters }` with JSON Schema parameters. These are the only tools the model may use; the worker must not give the model tools of its own that touch the machine.
 - `classifiers` are System One models (typed decisions, e.g. TypeSafe's Jev) the worker can run with `s1.decide`; the kernel uses one for live session scoring when `ZEN_S1_MODEL` names it. `state` is a JSON object; `questions` maps a key to `{ type: "choice", instructions, criteria: { option: description } }`, `{ type: "score", instructions, criteria: [level, …] }` (low to high) or `{ type: "bool", instructions, criteria: { true, false } }`. Answers are `{ type: "choice", choice, probabilities, confidence }`, `{ type: "score", score, confidence }` or `{ type: "bool", probability }`. A failed call returns `error` instead of failing the request. The Pi worker serves OpenRouter's System One models (with `OPENROUTER_API_KEY`).
 

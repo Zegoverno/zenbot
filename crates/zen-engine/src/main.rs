@@ -21,7 +21,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{watch, Mutex};
 
 use rpc::Rpc;
-use turn::TurnCtx;
+use turn::{TurnCtx, TurnInput};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -79,9 +79,8 @@ async fn handle(rpc: &Rpc, running: &Arc<Mutex<HashMap<String, watch::Sender<boo
         }
         "turn.start" => {
             let session_id = p["session_id"].as_str().unwrap_or("").to_string();
-            let model_ref = p["model"].as_str().unwrap_or("").to_string();
-            let (engine, model) = model_ref.split_once('/').unwrap_or(("", &model_ref));
-            let (engine, model) = (engine.to_string(), model.to_string());
+            let engine = p["model"].as_str().unwrap_or("").split_once('/').map(|(e, _)| e.to_string()).unwrap_or_default();
+            let input = TurnInput::from_params(&p);
             let (abort_tx, abort_rx) = watch::channel(false);
             running.lock().await.insert(session_id.clone(), abort_tx);
             let tools = p["tools"].as_array().cloned().unwrap_or_default();
@@ -89,13 +88,9 @@ async fn handle(rpc: &Rpc, running: &Arc<Mutex<HashMap<String, watch::Sender<boo
             let rpc = rpc.clone();
             let running = running.clone();
             tokio::spawn(async move {
-                let history = p["history"].as_array().cloned().unwrap_or_default();
-                let system = p["system_prompt"].as_str().unwrap_or("");
-                let prompt = p["prompt"].as_str().unwrap_or("");
-                let effort = p["effort"].as_str();
                 let result = match engine.as_str() {
-                    "claude" => claude::run_turn(ctx, &model, effort, system, &history, prompt, abort_rx).await,
-                    "codex" => codex::run_turn(ctx, &model, effort, system, &history, prompt, abort_rx).await,
+                    "claude" => claude::run_turn(ctx, &input, abort_rx).await,
+                    "codex" => codex::run_turn(ctx, &input, abort_rx).await,
                     "faux" if faux::enabled() => faux::run_turn(ctx, abort_rx).await,
                     other => Ok(Some(format!("zen-engine has no `{other}` engine"))),
                 };

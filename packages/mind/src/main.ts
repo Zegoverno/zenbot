@@ -116,8 +116,22 @@ const running = new Map<string, Agent>();
 const aborted = new Set<string>();
 
 // Never throws: every failure becomes turn.end with an error, so the kernel frees the session.
+// The kernel's history as Pi messages: a user message's turn context becomes a second text block
+// (as it was sent), a summary of older turns stays a user message, and kernel-only fields go.
+function piMessages(history: Json[]): Json[] {
+  return history.map((m: Json) => {
+    const { seq, context, summary, ...msg } = m;
+    if (msg.role === "user" && context) return { ...msg, content: userContent(msg.content, context) };
+    return msg;
+  });
+}
+function userContent(content: Json, context?: string): Json {
+  const blocks = typeof content === "string" ? [{ type: "text", text: content }] : content;
+  return context ? [...blocks, { type: "text", text: context }] : blocks;
+}
+
 async function turnStart(p: Json) {
-  const { session_id, model: modelRef, effort, system_prompt, history, prompt, tools } = p;
+  const { session_id, model: modelRef, effort, system_prompt, history, prompt, prompt_context, tools } = p;
   try {
     const [provider, id] = String(modelRef).split("/");
     const model = models.getModel(provider as any, id);
@@ -130,9 +144,11 @@ async function turnStart(p: Json) {
         model,
         thinkingLevel: effort ?? defaultEffort(model),
         tools: kernelTools(session_id, tools),
-        messages: history,
+        messages: piMessages(history ?? []),
       },
-      streamFn: models.streamSimple.bind(models),
+      // Long cache retention where the provider has it; the session id lets providers route a
+      // session's requests to the same cache.
+      streamFn: (model: Json, context: Json, options: Json) => models.streamSimple(model, context, { ...options, cacheRetention: "long" }),
       sessionId: session_id,
     });
     running.set(session_id, agent);
@@ -151,7 +167,7 @@ async function turnStart(p: Json) {
       }
     });
 
-    await agent.prompt(prompt);
+    await agent.prompt({ role: "user", content: userContent(prompt, prompt_context ?? undefined), timestamp: Date.now() } as Json);
     notify("turn.usage", { session_id, engine: "pi", engine_version: piVersion });
     const err = aborted.has(session_id) ? "interrupted" : agent.state.errorMessage;
     notify("turn.end", { session_id, error: err ?? null });

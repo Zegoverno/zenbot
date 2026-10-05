@@ -10,7 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::watch;
 
-use crate::turn::{now_ms, prompt_with_history, TurnCtx};
+use crate::turn::{now_ms, seed_blocks, TurnCtx, TurnInput};
 
 const PREFIX: &str = "mcp__zen__";
 
@@ -37,15 +37,8 @@ pub fn available() -> bool {
     std::process::Command::new("claude").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
-pub async fn run_turn(
-    ctx: TurnCtx,
-    model: &str,
-    effort: Option<&str>,
-    system_prompt: &str,
-    history: &[Value],
-    prompt: &str,
-    mut abort: watch::Receiver<bool>,
-) -> Result<Option<String>> {
+pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bool>) -> Result<Option<String>> {
+    let model = input.model.as_str();
     let socket = format!("{}/zen-engine-{}-{}.sock", std::env::temp_dir().display(), std::process::id(), now_ms());
     let server = ctx.serve_socket(&socket).context("opening tool socket")?;
     let jail = std::env::temp_dir().join(format!("zen-claude-{}", now_ms()));
@@ -55,7 +48,7 @@ pub async fn run_turn(
     let allowed: Vec<String> = ctx.tools.iter().filter_map(|t| t["name"].as_str()).map(|n| format!("{PREFIX}{n}")).collect();
 
     let mut cmd = Command::new("claude");
-    if let Some(e) = effort {
+    if let Some(e) = &input.effort {
         cmd.args(["--effort", e]);
     }
     let mut child = cmd
@@ -63,7 +56,7 @@ pub async fn run_turn(
         .args(["--tools", "", "--strict-mcp-config", "--mcp-config", &mcp, "--setting-sources", ""])
         .args(["--allowedTools", &allowed.join(",")])
         .args(["--permission-mode", "bypassPermissions", "--no-session-persistence"])
-        .args(["--system-prompt", system_prompt, "--model", model])
+        .args(["--system-prompt", &input.system, "--model", model])
         .current_dir(&jail)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -73,7 +66,8 @@ pub async fn run_turn(
         .context("starting the claude CLI (is Claude Code installed and signed in?)")?;
 
     let mut stdin = child.stdin.take().context("claude stdin")?;
-    let user = json!({ "type": "user", "message": { "role": "user", "content": [{ "type": "text", "text": prompt_with_history(history, prompt) }] } });
+    let content = seed_blocks(&input.history, &input.prompt, input.context.as_deref());
+    let user = json!({ "type": "user", "message": { "role": "user", "content": content } });
     stdin.write_all(format!("{user}\n").as_bytes()).await?;
     stdin.flush().await?;
     let mut stdin = Some(stdin);
