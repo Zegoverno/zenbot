@@ -320,15 +320,29 @@ day-to-day policy (which model for which work) may change automatically, system-
   System One (Jev) decisions in shadow mode, a `decide` tool, a routing policy table, `/go`,
   `/brief`, `/quick`, `/verify`, three new eval tasks.
 - Eval against Phase 1 (`~/.zenbot/evals/20261005T194445Z`): 11/11 → 11/11 passed, cost **4.9×**,
-  time 3.2×. On these tasks it added nothing measurable: Phase 1 already asked the right questions
-  on the incomplete request. Its claimed benefits (catching false "done", staying in scope, verified
-  criteria) aren't covered by the current tasks.
+  time 3.2×. Most of that cost was a misreading, since corrected: the workflow ran per *message*
+  (re-framing after every report, the model submitting after each step), while **a session is one
+  job**: framing and work each span many turns, the owner's messages steer the same job, it is
+  verified once when the job should be done, and a reply after the report continues it. Fixed in
+  5ada0ae; small work also continues in one context and the model verifier runs only when it adds
+  (e191022). Its claimed benefits (catching false "done", staying in scope, verified criteria) still
+  need harder eval tasks to show.
+- Technical debt paid on the branch (from a survey): an end-to-end suite (`scripts/e2e.sh`, 7
+  scenarios on the scripted model and a throwaway database) and CI on every push (build, tests,
+  clippy as errors, e2e); tool calls always answered; workflow steps counted as busy and recovered
+  after a restart; the tape read once per turn start and two missing indexes; one copy of the
+  message helpers (`zen-proto`); `main.rs` split into `api`, `turns`, `dispatch`, `workers`; the
+  verifier working in the brief's repository; the client protocol documented
+  (`docs/client-protocol.md`); the web UI following the workflow.
+- Debt still open: the upgrade smoke test runs new migrations on the live database before
+  installing; settings are read from the environment in ~25 places (no single config); client
+  events are untyped JSON; `flow.rs` (~1,000 lines) could split; WebSocket hubs are never freed;
+  a summary made inline at the hard limit might trip the watchdog (unconfirmed).
 
 **Next, in order**
-1. **Phase 2, opt-in** (proposed, pending the owner's OK): sessions start `open` (the Phase 1 loop);
-   the brief tools are offered there and the model uses them when the work is big, risky or unclear;
-   `/brief` forces it; verification runs only for briefed work. Shadow logging, the policy table and
-   `decide` stay on. Then rerun the evals; merge only on the owner's decision.
+1. **Decide Phase 2's default** from the eval of the job-model fix: briefs by default (as now, with
+   quick questions answered directly), or opt-in (sessions start `open`, the model or `/brief`
+   starts a brief). Merge only on the owner's decision.
 2. **Harder eval tasks**, where the Phase 1 loop may fail: multi-file changes, a tempting
    out-of-scope fix, a task where it's easy to claim success without checking, a change to a copy of
    zenbot itself. A brief becomes a default only for the kinds of work where they show it pays.
