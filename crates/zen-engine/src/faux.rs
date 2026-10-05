@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
-use crate::turn::{now_ms, TurnCtx};
+use crate::turn::{now_ms, TurnCtx, TurnInput};
 
 pub fn enabled() -> bool {
     std::env::var("ZEN_FAUX").is_ok_and(|v| v == "1")
@@ -35,26 +35,30 @@ fn script() -> Result<Vec<Value>> {
     }
 }
 
-fn assistant(content: Vec<Value>, stop: &str) -> Value {
+/// An assistant message. `input` is the size of what the model was sent (bytes / 4), so the
+/// kernel's context measurements and summary triggers behave as with a real model.
+fn assistant(content: Vec<Value>, stop: &str, input: i64) -> Value {
     json!({ "role": "assistant", "provider": "faux", "model": "smoke", "content": content, "stopReason": stop,
-            "usage": { "input": 10, "output": 5, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 15, "cost": { "total": 0.0 } },
+            "usage": { "input": input, "output": 5, "cacheRead": 0, "cacheWrite": 0, "totalTokens": input + 5, "cost": { "total": 0.0 } },
             "timestamp": now_ms() })
 }
 
-pub async fn run_turn(ctx: TurnCtx, mut abort: watch::Receiver<bool>) -> Result<Option<String>> {
+pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bool>) -> Result<Option<String>> {
+    let mut sent = (input.system.len() + Value::Array(input.history.clone()).to_string().len() + input.prompt.len()) as i64 / 4;
     for (i, step) in script()?.into_iter().enumerate() {
         let work = async {
             if let Some(name) = step["tool"].as_str() {
                 let call_id = format!("faux-{}-{i}", now_ms());
                 let args = step.get("args").cloned().unwrap_or(json!({}));
                 let call = json!({ "type": "toolCall", "id": call_id, "name": name, "arguments": args });
-                ctx.rpc.notify("turn.message", json!({ "session_id": ctx.session_id, "message": assistant(vec![call], "toolUse") })).await;
-                ctx.call_tool(name, args, Some(call_id)).await;
+                ctx.rpc.notify("turn.message", json!({ "session_id": ctx.session_id, "message": assistant(vec![call], "toolUse", sent) })).await;
+                let (out, _) = ctx.call_tool(name, args, Some(call_id)).await;
+                sent += out.len() as i64 / 4;
             } else if let Some(text) = step["text"].as_str() {
                 for word in text.split_inclusive(' ') {
                     ctx.rpc.notify("turn.delta", json!({ "session_id": ctx.session_id, "delta": word })).await;
                 }
-                let msg = assistant(vec![json!({ "type": "text", "text": text })], "stop");
+                let msg = assistant(vec![json!({ "type": "text", "text": text })], "stop", sent);
                 ctx.rpc.notify("turn.message", json!({ "session_id": ctx.session_id, "message": msg })).await;
             } else if let Some(secs) = step["sleep"].as_f64() {
                 tokio::time::sleep(std::time::Duration::from_secs_f64(secs)).await;
@@ -69,4 +73,15 @@ pub async fn run_turn(ctx: TurnCtx, mut abort: watch::Receiver<bool>) -> Result<
     }
     ctx.rpc.notify("turn.usage", json!({ "session_id": ctx.session_id, "engine": "faux", "engine_version": env!("CARGO_PKG_VERSION") })).await;
     Ok(None)
+}
+
+/// A scripted completion for tests: a valid summary that keeps every line marked `FACT:` from the
+/// prompt, so tests can check what survives summarizing.
+pub fn complete(prompt: &str) -> Value {
+    let facts: Vec<Value> = prompt
+        .lines()
+        .filter_map(|l| l.find("FACT:").map(|i| json!({ "text": l[i..].trim_end_matches(['"', '\\']).to_string(), "refs": [] })))
+        .collect();
+    let summary = json!({ "goal": "(scripted summary)", "state": "", "decisions": [], "files": [], "facts": facts, "open": [], "next": "" });
+    json!({ "text": summary.to_string(), "usage": { "input": prompt.len() / 4, "output": 50 }, "model": "faux/smoke" })
 }

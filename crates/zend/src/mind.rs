@@ -96,6 +96,11 @@ impl Mind {
     }
 
     pub async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        self.request_within(method, params, std::time::Duration::from_secs(30)).await
+    }
+
+    /// A request that may take longer than the default 30 seconds (e.g. `complete`).
+    pub async fn request_within(&self, method: &str, params: Value, limit: std::time::Duration) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
@@ -103,7 +108,7 @@ impl Mind {
             self.pending.lock().await.remove(&id);
             return Err(e.context("worker is not running"));
         }
-        match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+        match tokio::time::timeout(limit, rx).await {
             Ok(Ok(res)) => res.map_err(|e| anyhow!(e)),
             Ok(Err(_)) => Err(anyhow!("mind dropped request")),
             Err(_) => {

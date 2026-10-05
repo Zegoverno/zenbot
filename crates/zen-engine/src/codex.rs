@@ -244,6 +244,49 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
     result
 }
 
+/// One completion without tools, in an ephemeral thread (summaries). Returns `{ text, usage, model }`.
+pub async fn complete(model: &str, system: &str, prompt: &str) -> Result<Value> {
+    let dir = std::env::temp_dir().join("zen-codex");
+    std::fs::create_dir_all(&dir)?;
+    let mut s = AppServer::start(&dir).await?;
+    let thread = s
+        .call("thread/start", json!({ "model": model, "cwd": dir, "approvalPolicy": "never", "sandbox": "read-only", "ephemeral": true,
+            "baseInstructions": system, "config": { "web_search": "disabled", "features": { "shell_tool": false, "unified_exec": false } } }), None)
+        .await?;
+    let thread_id = thread["thread"]["id"].as_str().context("codex thread id")?.to_string();
+    let mut pending = Vec::new();
+    s.call("turn/start", json!({ "threadId": thread_id, "input": [{ "type": "text", "text": prompt }] }), Some(&mut pending)).await?;
+    let (mut text, mut input, mut output) = (String::new(), 0i64, 0i64);
+    let mut pending = pending.into_iter();
+    loop {
+        let msg = match pending.next() {
+            Some(m) => m,
+            None => match s.lines.next_line().await? {
+                Some(l) => match serde_json::from_str::<Value>(&l) { Ok(v) => v, Err(_) => continue },
+                None => anyhow::bail!("codex app-server exited"),
+            },
+        };
+        let p = &msg["params"];
+        match msg["method"].as_str().unwrap_or("") {
+            "item/completed" if p["item"]["type"] == "agentMessage" => text.push_str(p["item"]["text"].as_str().unwrap_or("")),
+            "thread/tokenUsage/updated" => {
+                input += p["tokenUsage"]["last"]["inputTokens"].as_i64().unwrap_or(0);
+                output += p["tokenUsage"]["last"]["outputTokens"].as_i64().unwrap_or(0);
+            }
+            "error" => anyhow::bail!("{}", error_text(&p["error"])),
+            "turn/completed" => {
+                if p["turn"]["status"] == "failed" {
+                    anyhow::bail!("{}", error_text(&p["turn"]["error"]));
+                }
+                break;
+            }
+            _ => {}
+        }
+    }
+    let _ = s.child.start_kill();
+    Ok(json!({ "text": text, "usage": { "input": input, "output": output }, "model": model }))
+}
+
 /// The kernel's history as Responses API items for `thread/inject_items`: messages as messages,
 /// tool calls and results as function calls and outputs (call ids longer than the API allows are
 /// shortened the same way everywhere). Thinking is left out: it can't be replayed to another model.

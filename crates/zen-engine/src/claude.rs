@@ -205,6 +205,35 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
     }
 }
 
+/// One completion without tools, in a throwaway session (summaries). Returns `{ text, usage, model }`.
+pub async fn complete(model: &str, system: &str, prompt: &str) -> Result<Value> {
+    // A fixed, empty directory: Claude Code tells the model its working directory.
+    let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())).join(".zenbot/engine/complete");
+    std::fs::create_dir_all(&dir)?;
+    let mut child = Command::new("claude")
+        .args(["-p", "--output-format", "json", "--tools", "", "--setting-sources", "", "--no-session-persistence"])
+        .args(["--strict-mcp-config", "--system-prompt", system, "--model", model])
+        .current_dir(&dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("starting the claude CLI")?;
+    let mut stdin = child.stdin.take().context("claude stdin")?;
+    stdin.write_all(prompt.as_bytes()).await?;
+    drop(stdin);
+    let out = child.wait_with_output().await?;
+    let res: Value = serde_json::from_slice(&out.stdout)
+        .with_context(|| format!("claude gave no result: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("")))?;
+    if res["is_error"] == true {
+        anyhow::bail!("{}", res["result"].as_str().unwrap_or("claude reported an error"));
+    }
+    let mut usage = json!({});
+    turn_usage(&res, &mut usage);
+    Ok(json!({ "text": res["result"], "usage": usage, "model": model }))
+}
+
 /// Turn totals from the CLI's `result` event. `modelUsage` covers every model call the CLI made,
 /// including the small side calls that never appear in the stream.
 fn turn_usage(result: &Value, usage: &mut Value) {

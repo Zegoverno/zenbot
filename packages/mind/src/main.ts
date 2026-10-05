@@ -199,6 +199,21 @@ async function decide(p: Json): Promise<Json> {
   };
 }
 
+// One completion without tools (summaries). Errors are returned in the result.
+async function complete(p: Json): Promise<Json> {
+  const [provider, id] = String(p.model ?? "").split("/");
+  const model = models.getModel(provider as any, id);
+  if (!model) return { error: `unknown model ${p.model}` };
+  const msg: Json = await models.completeSimple(model, {
+    systemPrompt: p.system,
+    messages: [{ role: "user", content: p.prompt, timestamp: Date.now() }],
+  } as Json);
+  if (msg.stopReason === "error") return { error: msg.errorMessage ?? "completion failed" };
+  const text = (msg.content ?? []).filter((c: Json) => c.type === "text").map((c: Json) => c.text).join("");
+  const u = msg.usage ?? {};
+  return { text, model: msg.model, usage: { input: u.input, output: u.output, cache_read: u.cacheRead, cost_usd: u.cost?.total } };
+}
+
 async function handle(method: string, params: Json): Promise<Json> {
   switch (method) {
     case "models.list": {
@@ -216,6 +231,8 @@ async function handle(method: string, params: Json): Promise<Json> {
     }
     case "s1.decide":
       return decide(params);
+    case "complete":
+      return complete(params).catch((e) => ({ error: e instanceof Error ? e.message : String(e) }));
     case "turn.start":
       void turnStart(params);
       return { ok: true };

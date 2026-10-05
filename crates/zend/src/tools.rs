@@ -15,7 +15,17 @@ const DEFAULT_READ_LINES: usize = 2000;
 /// Most bash output kept in memory; the rest is counted but dropped.
 const MAX_CAPTURE: usize = 16 * 1024 * 1024;
 
+/// The kernel's tools, in a fixed order (they are part of the cached prefix). `history` is executed
+/// by the kernel itself (compact.rs), since it reads the session's tape.
 pub fn specs() -> Value {
+    let mut all = builtin_specs();
+    if let Some(list) = all.as_array_mut() {
+        list.push(crate::compact::tool_spec());
+    }
+    all
+}
+
+fn builtin_specs() -> Value {
     json!([
         {
             "name": "bash",

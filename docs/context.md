@@ -68,7 +68,12 @@ every turn after it is smaller. Rules, from qm unless noted:
 - The summarizer is `ZEN_SUMMARY_MODEL` (default `claude/claude-sonnet-5-5`), run through the
   owner's subscription with no tools.
 
-Settings: `ZEN_CONTEXT_TOKENS` (the limit when the model lists none, default 200000),
+The limit is a budget, not the model's window: long contexts cost more on every turn and models
+read them worse, so a session is summarized when it passes 70% of `ZEN_CONTEXT_TOKENS` (default
+200,000), or of the model's window if that is smaller. Sizes are the provider's reported context for
+the turn's last model call, or the kernel's estimate for engines that report none.
+
+Settings: `ZEN_CONTEXT_TOKENS` (default 200000),
 `ZEN_COMPACT_SOFT` (0.7), `ZEN_COMPACT_HARD` (0.9), `ZEN_COMPACT_KEEP` (0.3),
 `ZEN_COMPACT_IDLE_SECS` (300).
 

@@ -1,5 +1,6 @@
 //! zend — the zenbot kernel. Owns all state and all side effects.
 
+mod compact;
 mod compile;
 mod context;
 mod measure;
@@ -91,6 +92,8 @@ struct App {
     harness: String,
     hubs: Mutex<HashMap<Uuid, broadcast::Sender<String>>>,
     updater: Arc<update::Updater>,
+    /// Sessions whose summary is being prepared in the background.
+    compacting: Mutex<HashSet<Uuid>>,
 }
 
 type AppState = Arc<App>;
@@ -190,6 +193,7 @@ async fn main() -> Result<()> {
         harness,
         hubs: Mutex::new(HashMap::new()),
         updater,
+        compacting: Mutex::new(HashSet::new()),
     });
     tokio::spawn(app.updater.clone().check_periodically());
     for (idx, exited) in exits.into_iter().enumerate() {
@@ -327,7 +331,7 @@ async fn watchdog(app: AppState) {
 
 /// End a session's turn in the kernel: cancel its tool calls, free the session, tell clients.
 /// Returns false if no turn was running (e.g. it was already ended).
-async fn finish_turn(app: &App, id: Uuid, error: Value) -> bool {
+async fn finish_turn(app: &AppState, id: Uuid, error: Value) -> bool {
     let Some(turn) = app.turns.lock().await.remove(&id) else { return false };
     let _ = turn.cancel.send(true);
     let summary = match record_turn(app, &turn, &error).await {
@@ -347,7 +351,49 @@ async fn finish_turn(app: &App, id: Uuid, error: Value) -> bool {
     }
     let cost: f64 = sqlx::query_scalar(&format!("SELECT {}", session_cost("$1"))).bind(id).fetch_one(&app.db).await.unwrap_or(0.0);
     app.emit(id, json!({ "type": "end", "error": error, "cost": cost, "turn": summary })).await;
+    if error.is_null() {
+        let size = summary["context_tokens"].as_i64().or(turn.sent["est_tokens"].as_i64()).unwrap_or(0);
+        prepare_summary_if_needed(app, id, &turn.model, size).await;
+    }
     true
+}
+
+/// Past the soft limit, prepare a summary in the background so the next turn after a pause can
+/// apply it (compact.rs). One at a time per session; none while one is waiting to be applied.
+async fn prepare_summary_if_needed(app: &AppState, id: Uuid, model: &str, size: i64) {
+    let info = model_info(app, model).await.unwrap_or(Value::Null);
+    let settings = compact::Settings::from_env(info["context"].as_i64());
+    if !settings.over_soft(size) || !app.compacting.lock().await.insert(id) {
+        return;
+    }
+    let (app, model) = (app.clone(), model.to_string());
+    tokio::spawn(async move {
+        let res = match compact::pending(&app.db, id).await {
+            Ok(Some(_)) => Ok(None),
+            Ok(None) => compact::prepare(&app, id, (settings.keep * settings.budget as f64) as i64, &model).await,
+            Err(e) => Err(e.into()),
+        };
+        match res {
+            Ok(Some(c)) => tracing::info!("prepared summary {c} for session {id} ({size} tokens)"),
+            Ok(None) => {}
+            Err(e) => tracing::error!("preparing a summary for session {id}: {e:#}"),
+        }
+        app.compacting.lock().await.remove(&id);
+    });
+}
+
+/// Ask the worker that serves `model` for one completion without tools (`complete`, used for
+/// summaries). Returns `{ text, usage, model }`.
+pub(crate) async fn complete(app: &App, model: &str, system: &str, prompt: &str) -> Result<Value> {
+    let Some(w) = worker_for(app, model).await else { anyhow::bail!("no worker serves `{model}`") };
+    let res = app.workers[w]
+        .mind()
+        .request_within("complete", json!({ "model": model, "system": system, "prompt": prompt }), Duration::from_secs(600))
+        .await?;
+    if let Some(e) = res["error"].as_str() {
+        anyhow::bail!("{e}");
+    }
+    Ok(res)
 }
 
 /// A session's cost: its turns, plus calls recorded before turns were (they have no turn_id).
@@ -923,6 +969,25 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
     }
     let res = async {
         let prev = measure::previous(&app.db, id).await?;
+        // A prepared summary is applied after a pause (the cache has expired anyway) or past the
+        // hard limit; past the hard limit with none prepared, one is made now.
+        if let Some(p) = &prev {
+            let settings = compact::Settings::from_env(info["context"].as_i64());
+            let paused = p.idle_secs.is_some_and(|s| s > settings.idle_secs);
+            let over = settings.over_hard(p.size());
+            let ready = match compact::pending(&app.db, id).await? {
+                Some(c) => Some(c),
+                None if over => {
+                    app.emit(id, json!({ "type": "status", "text": "summarizing older turns to make room" })).await;
+                    compact::prepare(app, id, (settings.keep * settings.budget as f64) as i64, &model).await?
+                }
+                None => None,
+            };
+            if let Some(c) = ready.filter(|_| paused || over) {
+                compact::apply(&app.db, id, c).await?;
+                tracing::info!("applied summary {c} to session {id}");
+            }
+        }
         // The engine's own session can be resumed only if nothing was written since it last
         // matched the tape (no other turn, summary or new instructions in between).
         let engine = model.split_once('/').map(|(e, _)| e).unwrap_or("");
@@ -1071,7 +1136,14 @@ async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming) -> Result
                 tools::ToolOutput { content: "not run: the turn was interrupted".into(), is_error: true }
             } else {
                 tokio::select! {
-                    out = tools::execute(&app.workspace, &name, &args, &env) => out,
+                    out = async {
+                        if name == "history" {
+                            let (content, is_error) = compact::history_tool(&app.db, id, &args).await;
+                            tools::ToolOutput { content, is_error }
+                        } else {
+                            tools::execute(&app.workspace, &name, &args, &env).await
+                        }
+                    } => out,
                     _ = cancel.wait_for(|c| *c) => tools::ToolOutput { content: "interrupted: the turn was stopped before this tool finished".into(), is_error: true },
                 }
             };

@@ -14,6 +14,7 @@ JSON-RPC 2.0 over the worker's stdin/stdout, one JSON object per line. The kerne
 | `models.list` | `{}` | `{ "authenticated": { "<engine>": bool, … }, "models": [{ "id": "<engine>/<model>", "name": "…", "efforts": ["low", …], "default_effort": "medium" }], "classifiers": [{ "id": "<provider>/<model>", "name": "…" }] }` |
 | `turn.start` | `{ session_id, model, effort, system_prompt, history, prompt, prompt_context, tools, resume }` | `{ "ok": true }` immediately; the turn then runs asynchronously |
 | `turn.abort` | `{ session_id }` | `{ "ok": true }`; the worker stops the turn and sends `turn.end` |
+| `complete` | `{ model, system, prompt }` | `{ text, usage, model }` or `{ error }`: one completion without tools (the kernel uses it for summaries; may take minutes) |
 | `s1.decide` | `{ model, state, questions }` | `{ model, provider, answers, usage, error }` (optional; only workers that list `classifiers`) |
 
 - `model` is one of the ids from `models.list`, always the model's full id (e.g. `claude/claude-opus-5-5`), never an alias that can move to another model. The kernel routes each model to the worker that listed it.

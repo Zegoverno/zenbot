@@ -39,6 +39,7 @@ pub fn system_prompt(workspace: &Path, repo: &str) -> String {
          - Use bash for searching (rg, grep, find), git, builds, tests and running programs.\n\
          - Start servers and other long-running processes in the background with output redirected to a file.\n\
          - When output is cut, the result says where the full output was saved or which offset to read next.\n\
+         - Messages in this session are numbered (#n). In a long session, older turns are replaced by a summary; the history tool reads any earlier message back by number or searches them.\n\
          </tool_guidelines>\n"
     );
     let files = context::always(workspace);

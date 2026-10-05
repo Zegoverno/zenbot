@@ -24,6 +24,15 @@ pub struct Previous {
     pub history_from: Option<i64>,
     pub idle_secs: Option<i64>,
     pub context_tokens: Option<i64>,
+    /// Kernel's estimate of what it sent, for engines that report no context size.
+    pub est_tokens: Option<i64>,
+}
+
+impl Previous {
+    /// The previous turn's context size: as the provider reported it, else the kernel's estimate.
+    pub fn size(&self) -> i64 {
+        self.context_tokens.or(self.est_tokens).unwrap_or(0)
+    }
 }
 
 pub async fn previous(db: &PgPool, session: Uuid) -> Result<Option<Previous>, sqlx::Error> {
@@ -44,6 +53,7 @@ pub async fn previous(db: &PgPool, session: Uuid) -> Result<Option<Previous>, sq
             history_from: c["history"]["from"].as_i64(),
             idle_secs: r.get("idle"),
             context_tokens: r.get("context_tokens"),
+            est_tokens: c["est_tokens"].as_i64(),
         }
     }))
 }
