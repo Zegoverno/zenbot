@@ -118,11 +118,14 @@ stop_kernel() {
 }
 trap stop_kernel EXIT
 
-start_kernel() { # bin mind_dir workspace db label model log
+start_kernel() { # bin mind_dir workspace db label model log [task-env…]
   local workers=engine
   case "$6" in openai/*) workers=engine,pi ;; esac
+  local task_env=("${@:8}")
   (
     set -a; [ -f "$HOME/.zenbot/env" ] && . "$HOME/.zenbot/env"; set +a
+    # Settings the task asks for (e.g. a small context budget); a build that doesn't know one ignores it.
+    for kv in "${task_env[@]}"; do export "$kv"; done
     ZEN_TOKEN="$TOKEN" ZEN_PORT=$PORT ZEN_WORKSPACE="$3" ZEN_HARNESS="$5" ZEN_WORKERS=$workers ZEN_FAUX=1 \
       ZEN_ENGINE_CMD="$1/zen-engine" ZEN_MIND_DIR="$2" DATABASE_URL="postgres://zen:zen@127.0.0.1:5432/$4" \
       exec "$1/zend"
@@ -144,7 +147,8 @@ run_task() { # name bin mind label model effort db task repeat
   [ -d "$tdir/files" ] && cp -a "$tdir/files/." "$ws/"
   local started; started=$(date +%s%3N)
   local error="" sid=""
-  if start_kernel "$bin" "$mind" "$ws" "$db" "$label" "$model" "$WORK/$name/$task-$r.kernel.log"; then
+  local task_env=(); mapfile -t task_env < <(jq -r '.env // {} | to_entries[] | "\(.key)=\(.value)"' "$tdir/task.json")
+  if start_kernel "$bin" "$mind" "$ws" "$db" "$label" "$model" "$WORK/$name/$task-$r.kernel.log" "${task_env[@]}"; then
     local n; n=$(jq '.steps | length' "$tdir/task.json")
     for i in $(seq 0 $((n - 1))); do
       local step; step=$(jq -c ".steps[$i]" "$tdir/task.json")

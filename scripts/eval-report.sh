@@ -79,7 +79,7 @@ cat "$OUT"/base.jsonl "$OUT"/new.jsonl 2>/dev/null | jq -rs '
         ($total | if $mode == "new" then .new else .base end) as $t |
         "| task | passed | cost | tokens | cache hit | time | tool errors | cache breaks |",
         "|---|---|---|---|---|---|---|---|",
-        ($rows[] | .value | (if $mode == "new" then .new else .base end) as $v | "| \(.key // "") | \($v.passed)/\($v.runs) | \($v.cost | money) | \($v.tokens | kilo) | \($v.cache | pct) | \($v.secs | secs) | \($v.tool_errors | kilo) | \($v.breaks | kilo) |"),
+        ($rows[] | .key as $k | .value | (if $mode == "new" then .new else .base end) as $v | "| \($k) | \($v.passed)/\($v.runs) | \($v.cost | money) | \($v.tokens | kilo) | \($v.cache | pct) | \($v.secs | secs) | \($v.tool_errors | kilo) | \($v.breaks | kilo) |"),
         "| **total** | \($t.passed)/\($t.runs) | \($t.cost | money) | \($t.tokens | kilo) | \($t.cache | pct) | \($t.secs | secs) | \($t.tool_errors | kilo) | \($t.breaks | kilo) |"
       end),
       "",

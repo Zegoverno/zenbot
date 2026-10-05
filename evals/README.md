@@ -47,6 +47,8 @@ the comparison isn't clean.
   (`$TASK_DIR` is the task's directory, for comparing with the original files). `answer_contains`
   looks for text in the last answer, ignoring case.
 - `work` is the kind of work (understand, shape, bet, build, verify, maintain, reflect, reach).
+- `env` sets kernel settings for the task's runs on both sides (e.g. `{"ZEN_CONTEXT_TOKENS": "12000"}`
+  to make summaries happen in a short task); a build that doesn't know a setting ignores it.
 - `"selftest": true` keeps a task out of normal runs; it runs only when named with `--tasks`.
 
 A good task is something the owner really asks for, with checks that can't pass without the work

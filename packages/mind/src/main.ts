@@ -168,7 +168,7 @@ async function turnStart(p: Json) {
     });
 
     await agent.prompt({ role: "user", content: userContent(prompt, prompt_context ?? undefined), timestamp: Date.now() } as Json);
-    notify("turn.usage", { session_id, engine: "pi", engine_version: piVersion });
+    notify("turn.usage", { session_id, engine: "pi", engine_version: piVersion, render: "native" });
     const err = aborted.has(session_id) ? "interrupted" : agent.state.errorMessage;
     notify("turn.end", { session_id, error: err ?? null });
   } catch (e) {

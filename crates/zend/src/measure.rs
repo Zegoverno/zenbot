@@ -123,8 +123,9 @@ pub fn break_at_end(at_start: Option<&str>, render: Option<&str>, resume_offered
     if render == Some("seed") || (resume_offered && render == Some("inject")) {
         return Some("engine_session".into());
     }
-    match (first_cache_read, prev_context) {
-        (Some(read), Some(prev)) if prev > 0 && read * 2 < prev => Some("miss".into()),
+    // Only engines that say how they sent the history (and so use a prompt cache) get a verdict.
+    match (render, first_cache_read, prev_context) {
+        (Some(_), Some(read), Some(prev)) if prev > 0 && read * 2 < prev => Some("miss".into()),
         _ => None,
     }
 }
@@ -170,5 +171,6 @@ mod tests {
         assert_eq!(break_at_end(None, Some("resume"), true, Some(8800), Some(9000)), None);
         assert_eq!(break_at_end(None, Some("resume"), true, Some(100), Some(9000)).as_deref(), Some("miss"));
         assert_eq!(break_at_end(None, Some("native"), false, None, Some(9000)), None, "no provider numbers: no verdict");
+        assert_eq!(break_at_end(None, None, false, Some(0), Some(9000)), None, "an engine without a cache (faux): no verdict");
     }
 }

@@ -1,0 +1,80 @@
+{
+  "description": "The long session with a small context budget, so older turns are summarized mid-session; the first note's detail must survive the summaries (summary + history tool).",
+  "work": "understand",
+  "steps": [
+    {
+      "prompt": "Read notes/n01.txt and append its code word as a new line to codes.txt (create it if needed). Reply with just the code word."
+    },
+    {
+      "prompt": "Read notes/n02.txt and append its code word as a new line to codes.txt (create it if needed). Reply with just the code word."
+    },
+    {
+      "prompt": "Read notes/n03.txt and append its code word as a new line to codes.txt (create it if needed). Reply with just the code word."
+    },
+    {
+      "prompt": "Read notes/n04.txt and append its code word as a new line to codes.txt (create it if needed). Reply with just the code word."
+    },
+    {
+      "prompt": "Read notes/n05.txt and append its code word as a new line to codes.txt (create it if needed). Reply with just the code word."
+    },
+    {
+      "prompt": "Read notes/n06.txt and append its code word as a new line to codes.txt (create it if needed). Reply with just the code word."
+    },
+    {
+      "prompt": "Read notes/n07.txt and append its code word as a new line to codes.txt (create it if needed). Reply with just the code word."
+    },
+    {
+      "prompt": "Read notes/n08.txt and append its code word as a new line to codes.txt (create it if needed). Reply with just the code word."
+    },
+    {
+      "prompt": "Read notes/n09.txt and append its code word as a new line to codes.txt (create it if needed). Reply with just the code word."
+    },
+    {
+      "prompt": "Read notes/n10.txt and append its code word as a new line to codes.txt (create it if needed). Reply with just the code word."
+    },
+    {
+      "prompt": "Read notes/n11.txt and append its code word as a new line to codes.txt (create it if needed). Reply with just the code word."
+    },
+    {
+      "prompt": "Read notes/n12.txt and append its code word as a new line to codes.txt (create it if needed). Reply with just the code word."
+    },
+    {
+      "prompt": "Read notes/n13.txt and append its code word as a new line to codes.txt (create it if needed). Reply with just the code word."
+    },
+    {
+      "prompt": "Read notes/n14.txt and append its code word as a new line to codes.txt (create it if needed). Reply with just the code word."
+    },
+    {
+      "prompt": "Read notes/n15.txt and append its code word as a new line to codes.txt (create it if needed). Reply with just the code word."
+    },
+    {
+      "prompt": "Read notes/n16.txt and append its code word as a new line to codes.txt (create it if needed). Reply with just the code word."
+    },
+    {
+      "prompt": "Read notes/n17.txt and append its code word as a new line to codes.txt (create it if needed). Reply with just the code word."
+    },
+    {
+      "prompt": "Read notes/n18.txt and append its code word as a new line to codes.txt (create it if needed). Reply with just the code word."
+    },
+    {
+      "shell": "rm notes/n01.txt"
+    },
+    {
+      "prompt": "notes/n01.txt has been deleted. Which city was its shipment routed through? Answer with just the city."
+    }
+  ],
+  "checks": [
+    {
+      "name": "city of the first note recalled",
+      "answer_contains": "Lisbon"
+    },
+    {
+      "name": "code words appended in order",
+      "run": "printf '%s\\n' amber basalt cobalt dune ember fjord garnet harbor indigo juniper kelp lantern meadow nectar onyx pebble quartz rivet | diff -q - <(grep -v '^$' codes.txt)"
+    }
+  ],
+  "env": {
+    "ZEN_CONTEXT_TOKENS": "12000",
+    "ZEN_COMPACT_IDLE_SECS": "0"
+  }
+}
