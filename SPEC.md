@@ -85,7 +85,7 @@ Each module lists what it does, its contract, the default implementation and pos
 ### ENGINE
 
 #### 5.1 Sessions
-- Create, list, rename, archive, restore, fork. Append-only **tape** per session: `message`, `tool_call`, `tool_result`, `model_change`, `compaction`, `context_edit`, `attachment`, `system_delta`, `taint`.
+- Create, list, rename, archive, restore, fork. Append-only **tape** per session: a chain of blocks, each with a per-session number (`seq`, its address), a link to its parent block and a hash over the parent's hash and its content (as git does). Kinds today: `message`, `context`, `envelope`, `compaction`, `engine_session`; later `model_change`, `attachment`, `taint`. See `docs/context.md`.
 - Invariant (from qm): *the model reads only what the tape contains, and the tape contains everything the model read.*
 - Borrow: Pi session tree, qm tape.
 
@@ -110,13 +110,13 @@ Each module lists what it does, its contract, the default implementation and pos
 - Alternatives: LiteLLM, ngrok AI Gateway, OpenRouter.
 
 #### 5.4 Context manager
-1. **Tiered prompt:** stable (identity, rules, tool index) → project (memory index, principles, skills index) → volatile (retrieved snippets, state). The stable prefix doesn't change mid-session, so the prompt cache keeps hitting.
+1. **Tiered prompt:** stable (identity, rules, tool index) → project (memory index, principles, skills index) → history (append-only) → volatile turn context at the end of the user's message (date, retrieved snippets, state). Instructions are fixed per session, so the prompt cache keeps hitting. See `docs/context.md`.
 2. **Progressive disclosure:** short indexes for skills and MCP tools; full content on demand (tool search / code-mode for large servers).
 3. **Retrieval per turn:** hybrid search over memory, wiki, taste and past sessions; S1 scores candidates; only the top items are injected.
-4. **Pruning:** old tool outputs become stubs pointing into the tape.
-5. **Compaction:** structured summary (goal · constraints · done/in progress/blocked · decisions · files · next steps), updated iteratively; recent turns stay verbatim; tool call/result pairs are never split.
+4. **No pruning of sent history:** tool output is cut once, when the tool runs, so what the model saw is what is replayed; full outputs stay readable.
+5. **Compaction:** structured summary (goal · state · decisions · files · facts · open · next), each item citing the blocks it came from, updated iteratively; recent turns stay verbatim; tool call/result pairs are never split; prepared in the background and applied after a pause; a `history` tool reads any summarized block back.
 6. **Fresh contexts for subtasks** via delegation.
-- Every change here must show a `zen-bench` improvement before becoming the default.
+- Every change here is measured per turn (what was sent, cache breaks) and compared with evals before it becomes the default; the owner decides.
 
 #### 5.5 MCP & skills
 - MCP client: servers registered globally or per project; credentials resolved by the kernel at call time; tools namespaced `<server>_<tool>`; calls audited.
@@ -355,3 +355,4 @@ Rules: each milestone is used on a real side project (the **pilot project**) the
 | 2026-10-02 | Tracing: one `turns` row per turn with what produced it (harness = zenbot build, engine and its version, model requested and resolved, effort) and its tokens, cost, time and tool errors. Workers send one message per model call and a turn report. |
 | 2026-10-02 | Evals (zen-bench v0, §5.15): fixed tasks in `evals/`; `scripts/eval.sh` runs the previous and the new harness with the same model on isolated kernels and databases. Before a harness change is committed, the owner sees the comparison and decides; it is never an automatic gate. |
 | 2026-10-02 | Live scoring: the owner's `/done` decision (accept, more, reshape, drop) is the ground-truth label. A System One model (Jev via OpenRouter, through Pi's classifier API: `s1.decide`, §6.1) answers a versioned question set per session, from the user's messages and final answers only, never tool output; answers are stored, not acted on. Open models (Laya, CLM) can take over through the same API once there are enough labels to calibrate them. Reports on scores come later (V2). |
+| 2026-10-05 | Context v2 (`docs/context.md`): instructions fixed per session and stored once (`envelopes`); per-turn context at the end of the user's message; append-only history; the tape becomes a hash-linked chain of numbered blocks; summaries with block addresses and a `history` tool; every turn records what was sent and any cache break. Engines may take over a step when that measurably gives better results, behind the worker protocol with a zenbot-owned fallback: Claude Code keeps its own session per zenbot session (`--resume`), as a cache rebuilt from the tape when needed (supersedes "no engine-side sessions" of 2026-10-01: measured, a fresh Claude Code session per turn never caches earlier turns); Codex gets native history items. |
