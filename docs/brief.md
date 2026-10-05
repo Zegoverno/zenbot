@@ -39,8 +39,11 @@ Every session starts in `framing`. The procedure (`steps/frame.md`, loaded only 
    Everything else becomes an **assumption** written in the brief, which the owner can veto.
 4. **Propose the brief** with `propose_brief`, which ends the turn.
 
-Read-only is enforced, not requested: in `framing` the kernel offers no write tools, and `bash` runs
-in a read-only sandbox (bubblewrap: the filesystem is mounted read-only, `/tmp` is private).
+Read-only is enforced, not requested: in `framing` the kernel refuses write tools when they're
+called, and `bash` runs in a read-only sandbox (bubblewrap: the filesystem is mounted read-only,
+`/tmp` is private). The model is offered the same tools and instructions in every phase (both
+procedures are in them; the turn context says which phase applies), so a session's prompt cache
+holds from framing into the work.
 
 ## The brief
 
@@ -74,10 +77,18 @@ reshape). The work can't redefine success.
   and continues at once.
 
 On approval the kernel records the git state of each repo in `context` (the baseline for the diff),
-picks the model for the work (the routing policy, below), and starts the work in a **fresh engine
-session** whose fixed instructions include the brief: "Treat the brief as the source of intent;
-re-read files as needed" (Codex's clear-context handoff, Aider's editor). The framing chat isn't
-replayed; the `history` tool still reads it.
+picks the model for the work (the routing policy, below), and starts the work:
+
+- **quick and bounded**: in the same context, so the files framing read stay cached; the brief
+  arrives as a message ("treat it as the source of intent").
+- **architectural** (`ZEN_FRESH_CONTEXT`): in a **fresh context** whose instructions include the
+  brief (Codex's clear-context handoff, Aider's editor). The framing chat isn't replayed; the
+  `history` tool still reads it.
+
+Measured on a small change (Opus, add a function and a test): a fresh context and an always-on
+verifier cost 3.8× a session without briefs ($0.181 vs $0.048, 36s vs 8s); continuing the context and
+running the verifier only when needed brought it to 2.2× ($0.104, 18s), with the work turn reading
+21k tokens from the cache.
 
 ## Working
 
@@ -94,8 +105,11 @@ The model ends the work with `submit_work { summary }`, which ends the turn and 
 
 1. **The kernel runs every criterion that has a command**, in the brief's repo, and records pass or
    fail from the exit code and output. Nobody studied does this mechanically; GSD comes closest.
-2. **A fresh verifier** (same model, new engine session, no history) gets only the brief, the diff
-   since the baseline, the command results and the rulings, plus read-only tools to inspect files.
+2. **A fresh verifier**, when it adds something: when a criterion has no command, for architectural
+   work, or for a sample (`ZEN_VERIFY_SAMPLE`, default 0.2) so its value keeps being measured; not
+   when every criterion is a passing command, and not when a command failed (the work goes back
+   with its output). It is the same model in a new engine session with no history, and gets only the
+   brief, the diff since the baseline, the command results and the rulings, plus read-only tools.
    It answers each criterion `pass`, `fail` or `uncertain` with evidence, through a tool with a
    fixed schema (Codex's completion audit: weak or indirect evidence is not a pass). It never grades
    its own work, and it can't override a failed command. GSD measured why: a verifier asked to judge

@@ -1128,15 +1128,17 @@ async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: Origin) -> R
         }
         // The engine's own session can be resumed only if nothing was written since it last
         // matched the tape (no other turn, summary or new instructions in between).
+        // Workflow bookkeeping (state, brief, approval, rulings, …) doesn't touch what the engine saw.
         let engine = model.split_once('/').map(|(e, _)| e).unwrap_or("");
-        let last = tape::last(&app.db, id).await?;
+        let last = tape::load(&app.db, id, &["message", "compaction", "envelope", "base", "engine_session"]).await?.pop();
         // What the model is told and can use depends on the session's state (flow.rs).
         let state = flow::state(&app.db, id).await?;
         let base = compile::base_prompt(&app.db, id, &app.workspace, &app.repo).await?;
         let brief = match state.as_str() {
-            "working" | "verifying" | "reported" => flow::latest_brief(&app.db, id).await?.filter(|(_, approved)| *approved).map(|(b, _)| b),
+            "working" | "verifying" | "reported" => flow::fresh_brief(&app.db, id).await?,
             _ => None,
         };
+        let brief_version = flow::latest_brief(&app.db, id).await?.and_then(|(b, _)| b["version"].as_i64());
         let tools = if state == "open" { tools::specs() } else { flow::tools_for(&state) };
         let system = flow::system_for(&base, &state, brief.as_ref());
         let (envelope, new_envelope) = compile::envelope(&app.db, id, &system, &tools).await?;
@@ -1147,7 +1149,8 @@ async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: Origin) -> R
         let blocks = tape::load(&app.db, id, &["message", "compaction", "state"]).await?;
         let (history, summary) = compile::history(&blocks);
         let today = chrono::Local::now().format("%Y-%m-%d (%A)").to_string();
-        let turn_context = compile::turn_context(&blocks, &today);
+        let phase = flow::phase_line(&state, brief_version);
+        let turn_context = compile::turn_context(&blocks, &today, phase.as_deref());
         let sent = measure::record(&envelope.system, &envelope.tools, &history, &summary, &text, &turn_context, resume.is_some(), new_envelope);
         let cache_break = measure::break_at_start(prev.as_ref(), &model, &envelope.hash, &sent);
         sqlx::query(

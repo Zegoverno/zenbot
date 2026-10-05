@@ -52,15 +52,6 @@ pub async fn load(db: &PgPool, session: Uuid, kinds: &[&str]) -> Result<Vec<Bloc
         .collect())
 }
 
-/// A session's last block, if any.
-pub async fn last(db: &PgPool, session: Uuid) -> Result<Option<Block>, sqlx::Error> {
-    let row = sqlx::query("SELECT seq, kind, payload FROM tape_events WHERE session_id = $1 AND seq IS NOT NULL ORDER BY seq DESC LIMIT 1")
-        .bind(session)
-        .fetch_optional(db)
-        .await?;
-    Ok(row.map(|r| Block { seq: r.get("seq"), kind: r.get("kind"), payload: r.get("payload") }))
-}
-
 /// Number and link blocks written without a number (by an older build after a rollback).
 pub async fn repair(db: &PgPool) -> Result<u64, sqlx::Error> {
     let r = sqlx::query("SELECT zen_rechain(session_id) FROM (SELECT DISTINCT session_id FROM tape_events WHERE seq IS NULL) s")

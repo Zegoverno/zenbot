@@ -24,19 +24,24 @@ pub fn models() -> Vec<Value> {
 }
 
 /// The steps for this turn. The script is a list of steps, or an object of lists keyed by the
-/// workflow phase the instructions show (`frame`, `work`, `verify`, else `default`), so one script
-/// can drive a whole briefed session.
-fn script(system: &str) -> Result<Vec<Value>> {
+/// workflow phase (`frame`, `work`, `verify`, else `default`, from the turn context or the
+/// verifier's instructions), so one script can drive a whole briefed session.
+fn script(input: &TurnInput) -> Result<Vec<Value>> {
     match std::env::var("ZEN_FAUX_SCRIPT") {
         Ok(path) => {
             let text = std::fs::read_to_string(&path).with_context(|| format!("reading ZEN_FAUX_SCRIPT {path}"))?;
             let v: Value = serde_json::from_str(&text).context("ZEN_FAUX_SCRIPT must be JSON")?;
-            let phase = if system.contains("<framing>") {
-                "frame"
-            } else if system.contains("<work>") {
-                "work"
-            } else if system.starts_with("You are a verifier") {
+            // The phase is in the latest turn context (the prompt's, else the history's).
+            let phase_text = std::iter::once(input.context.clone().unwrap_or_default())
+                .chain(input.history.iter().rev().filter_map(|m| m["context"].as_str().map(String::from)))
+                .find(|c| c.contains("Phase:"))
+                .unwrap_or_default();
+            let phase = if input.system.starts_with("You are a verifier") {
                 "verify"
+            } else if phase_text.contains("Phase: framing") {
+                "frame"
+            } else if phase_text.contains("Phase: working") {
+                "work"
             } else {
                 "default"
             };
@@ -60,7 +65,7 @@ fn assistant(content: Vec<Value>, stop: &str, input: i64) -> Value {
 
 pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bool>) -> Result<Option<String>> {
     let mut sent = (input.system.len() + Value::Array(input.history.clone()).to_string().len() + input.prompt.len()) as i64 / 4;
-    for (i, step) in script(&input.system)?.into_iter().enumerate() {
+    for (i, step) in script(input)?.into_iter().enumerate() {
         let work = async {
             if let Some(name) = step["tool"].as_str() {
                 let call_id = format!("faux-{}-{i}", now_ms());

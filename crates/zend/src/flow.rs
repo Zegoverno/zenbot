@@ -48,6 +48,19 @@ pub fn auto_close(route: &str) -> bool {
     l.iter().any(|r| r == route || r == "all")
 }
 
+/// Routes whose work starts in a fresh context with the brief in the instructions
+/// (ZEN_FRESH_CONTEXT, default architectural). Others continue in the framing context: the files
+/// already read stay cached, and the brief arrives as a message.
+pub fn fresh_context(route: &str) -> bool {
+    list_setting("ZEN_FRESH_CONTEXT", "architectural").iter().any(|r| r == route || r == "all")
+}
+
+/// Share of verifications where the model verifier runs even though every criterion is a passing
+/// command (ZEN_VERIFY_SAMPLE, default 0.2), so its value keeps being measured.
+fn verify_sample() -> f64 {
+    std::env::var("ZEN_VERIFY_SAMPLE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.2)
+}
+
 fn verify_rounds() -> i64 {
     std::env::var("ZEN_VERIFY_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(2)
 }
@@ -175,53 +188,76 @@ pub fn read_only(state: &str) -> bool {
     matches!(state, "framing" | "verifier")
 }
 
-/// The tools the model has in a state, in a fixed order (they are part of the cached prefix).
+/// The tools the model is offered: one list for every phase (so a session's instructions and tools
+/// never change, and its prompt cache holds across phases), the verifier's own small list. What may
+/// run in each phase is enforced when a tool runs (`refuse`).
 pub fn tools_for(state: &str) -> Value {
     let base = tools::specs();
-    let mut picked: Vec<Value> = match state {
-        "framing" | "verifier" => base
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|t| matches!(t["name"].as_str(), Some("read" | "bash" | "history")) && !(state == "verifier" && t["name"] == "history"))
-            .cloned()
-            .map(|mut t| {
-                if t["name"] == "bash" {
-                    t["description"] = json!(
-                        "Run a shell command for looking around: the filesystem is read-only in this phase (writes fail) and /tmp is private. \
-Returns combined stdout/stderr and the exit code. Use it for searching (rg, grep, find), git log/diff/show, and running read-only checks."
-                    );
-                }
-                t
-            })
-            .collect(),
-        _ => base.as_array().cloned().unwrap_or_default(),
+    let mut picked: Vec<Value> = if state == "verifier" {
+        base.as_array().into_iter().flatten().filter(|t| matches!(t["name"].as_str(), Some("read" | "bash"))).cloned().collect()
+    } else {
+        base.as_array().cloned().unwrap_or_default()
     };
-    match state {
-        "framing" => picked.extend([ask_spec(), brief_spec()]),
-        "working" => picked.extend([ask_spec(), ruling_spec(), submit_spec()]),
-        "verifier" => picked.push(verdict_spec()),
-        _ => {}
+    for t in picked.iter_mut().filter(|t| t["name"] == "bash") {
+        let d = t["description"].as_str().unwrap_or("").to_string();
+        t["description"] = json!(format!("{d} While framing (and for a verifier) the filesystem is read-only: writes fail."));
     }
-    if decide_tool_on() && state != "verifier" {
-        picked.push(decide_spec());
+    if state == "verifier" {
+        picked.push(verdict_spec());
+    } else {
+        picked.extend([ask_spec(), brief_spec(), ruling_spec(), submit_spec()]);
+        if decide_tool_on() {
+            picked.push(decide_spec());
+        }
     }
     Value::Array(picked)
 }
 
-/// The instructions for a state: the session's base prompt plus the state's procedure.
-pub fn system_for(base: &str, state: &str, brief: Option<&Value>) -> String {
-    match (state, brief) {
-        ("framing", _) => format!("{base}\n\n{}", FRAME.trim_end()),
+/// The tools that may run in a state.
+fn allowed(state: &str, name: &str) -> bool {
+    match state {
+        "framing" => matches!(name, "read" | "bash" | "history" | "ask" | "propose_brief" | "decide"),
+        "working" => !matches!(name, "propose_brief" | "submit_verdict"),
+        "verifier" => matches!(name, "read" | "bash" | "submit_verdict"),
+        _ => !matches!(name, "propose_brief" | "submit_work" | "submit_verdict"),
+    }
+}
+
+/// The instructions: the session's base prompt plus both procedures (the turn context says which
+/// phase applies), the same in every phase so the cache holds. Work in a fresh context
+/// (`fresh_context`) also carries its brief here; the verifier has its own.
+pub fn system_for(base: &str, state: &str, fresh_brief: Option<&Value>) -> String {
+    match (state, fresh_brief) {
+        ("open", _) => base.to_string(),
+        ("verifier", _) => VERIFY.trim_end().to_string(),
         ("working" | "verifying" | "reported", Some(b)) => format!(
-            "{base}\n\n{}\n\n<brief version=\"{}\">\n{}\n</brief>",
+            "{base}\n\n{}\n\n{}\n\n<brief version=\"{}\">\n{}\n</brief>",
+            FRAME.trim_end(),
             WORK.trim_end(),
             b["version"],
             render_brief(&b["brief"])
         ),
-        ("verifier", _) => VERIFY.trim_end().to_string(),
-        _ => base.to_string(),
+        _ => format!("{base}\n\n{}\n\n{}", FRAME.trim_end(), WORK.trim_end()),
     }
+}
+
+/// The phase line of the turn context (compile::turn_context), so the model knows what applies.
+pub fn phase_line(state: &str, brief_version: Option<i64>) -> Option<String> {
+    match state {
+        "framing" => Some("Phase: framing. Nothing can be changed: answer, ask, or propose a brief.".into()),
+        "working" => Some(format!("Phase: working on brief v{}.", brief_version.unwrap_or(0))),
+        _ => None,
+    }
+}
+
+/// The approved brief when its work runs in a fresh context (it is then in the instructions).
+pub async fn fresh_brief(db: &PgPool, session: Uuid) -> Result<Option<Value>> {
+    let blocks = tape::load(db, session, &["brief", "approval"]).await?;
+    let Some(a) = blocks.iter().rev().find(|b| b.kind == "approval") else { return Ok(None) };
+    if a.payload["fresh"] != true {
+        return Ok(None);
+    }
+    Ok(blocks.iter().rev().find(|b| b.kind == "brief" && b.payload["version"] == a.payload["version"]).map(|b| b.payload.clone()))
 }
 
 /// Why a tool call is refused in this state, if it is.
@@ -229,8 +265,7 @@ pub fn refuse(state: &str, name: &str, ending: Option<&str>) -> Option<String> {
     if let Some(e) = ending {
         return Some(format!("You already ended this step ({e}). End your turn now, without further tool calls."));
     }
-    let allowed = tools_for(state);
-    if allowed.as_array().into_iter().flatten().any(|t| t["name"] == name) {
+    if allowed(state, name) {
         return None;
     }
     Some(match state {
@@ -572,7 +607,8 @@ async fn approve_inner(app: &AppState, session: Uuid, by: &str) -> Result<()> {
     anyhow::ensure!(!approved, "the latest brief is already approved");
     let repo = repo_of(app, &brief["brief"]);
     let head = git_head(&repo);
-    tape::append(&app.db, session, "approval", &json!({ "version": brief["version"], "by": by, "repo": repo, "head": head })).await?;
+    let fresh = fresh_context(brief["brief"]["route"].as_str().unwrap_or(""));
+    tape::append(&app.db, session, "approval", &json!({ "version": brief["version"], "by": by, "repo": repo, "head": head, "fresh": fresh })).await?;
     if by == "owner" {
         resolve_shadow(&app.db, session, "route", brief["brief"]["route"].as_str(), "model").await;
     }
@@ -584,8 +620,16 @@ async fn approve_inner(app: &AppState, session: Uuid, by: &str) -> Result<()> {
             log_decision(&app.db, session, "model", &json!({ "work": work, "policy": version }), &json!({ "model": model, "effort": effort }), Some(&model), None, true, None).await;
         }
     }
-    set_state(app, session, "working", by, &format!("brief v{} approved", brief["version"]), true).await?;
-    crate::start_kernel_turn(app, session, "The brief is approved. Do the work it describes; when its criteria should pass, call submit_work.".into()).await
+    set_state(app, session, "working", by, &format!("brief v{} approved", brief["version"]), fresh).await?;
+    let message = if fresh {
+        "The brief is approved. Do the work it describes; when its criteria should pass, call submit_work.".to_string()
+    } else {
+        format!(
+            "Brief v{} is approved:\n<brief version=\"{}\">\n{}\n</brief>\nTreat it as the source of intent: its intent, goal, scope and must-nots are fixed. Do the work; when its criteria should pass, call submit_work.",
+            brief["version"], brief["version"], render_brief(&brief["brief"])
+        )
+    };
+    crate::start_kernel_turn(app, session, message).await
 }
 
 // ---------- verification ----------
@@ -661,12 +705,41 @@ async fn verify_inner(app: &AppState, session: Uuid) -> Result<()> {
             checks.insert(c["id"].as_str().unwrap_or("").to_string(), run_check(&repo, run, c["expect"].as_str()).await);
         }
     }
+    if criteria.is_empty() {
+        tape::append(&app.db, session, "verification", &json!({ "round": 1, "results": [], "verifier": "skipped: no criteria" })).await?;
+        return report(app, session, &json!([]), None, None).await;
+    }
     let rulings: Vec<Value> = blocks.iter().filter(|b| b.kind == "ruling" && b.seq > since).map(|b| b.payload.clone()).collect();
     let summary = blocks.iter().rev().find(|b| b.kind == "submission").map(|b| b.payload["summary"].clone()).unwrap_or(Value::Null);
     let diff = diff_since(&repo, approval.payload["head"].as_str());
 
+    // The model verifier runs when it adds something: criteria only judgment can check,
+    // architectural work, or a sample (to keep measuring it). A failed command needs no verifier:
+    // the work goes back with the command's output.
+    let route = brief["brief"]["route"].as_str().unwrap_or("");
+    let any_failed = checks.values().any(|c| c["ok"] != true);
+    let judgment = criteria.iter().any(|c| !c["run"].is_string());
+    let sampled = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0) % 1000) as f64 / 1000.0 < verify_sample();
+    let why = if any_failed {
+        None
+    } else if judgment {
+        Some("criteria that need judgment")
+    } else if route == "architectural" {
+        Some("architectural work")
+    } else if sampled {
+        Some("sample")
+    } else {
+        None
+    };
+    let verifier = match why {
+        Some(w) => format!("ran: {w}"),
+        None if any_failed => "skipped: a command failed".into(),
+        None => "skipped: every criterion is a passing command".into(),
+    };
     // A fresh verifier: a child session that sees none of the work's history.
-    app.emit(session, json!({ "type": "status", "text": "verifying: a fresh verifier is reviewing the work" })).await;
+    if why.is_some() {
+        app.emit(session, json!({ "type": "status", "text": "verifying: a fresh verifier is reviewing the work" })).await;
+    }
     let prompt = format!(
         "Brief (v{}):\n{}\n\nCommand checks run by the kernel (criterion id -> result):\n{}\n\nWorker's summary (a claim, not evidence):\n{}\n\nRulings the worker made:\n{}\n\nDiff since the brief was approved, in {}:\n{}",
         brief["version"],
@@ -677,10 +750,14 @@ async fn verify_inner(app: &AppState, session: Uuid) -> Result<()> {
         repo.display(),
         diff
     );
-    let verdict = crate::run_child(app, session, "verifier", &prompt, &repo).await.unwrap_or_else(|e| {
-        tracing::warn!("verifier for {session}: {e:#}");
+    let verdict = if why.is_some() {
+        crate::run_child(app, session, "verifier", &prompt, &repo).await.unwrap_or_else(|e| {
+            tracing::warn!("verifier for {session}: {e:#}");
+            Value::Null
+        })
+    } else {
         Value::Null
-    });
+    };
 
     // A failed command can't be overridden; otherwise the verifier's judgment, or uncertain.
     let judged = |id: &str| verdict["criteria"].as_array().into_iter().flatten().find(|v| v["id"] == id).cloned().unwrap_or(Value::Null);
@@ -702,7 +779,7 @@ async fn verify_inner(app: &AppState, session: Uuid) -> Result<()> {
         })
         .collect();
     let round = blocks.iter().filter(|b| b.kind == "verification" && b.seq > since).count() as i64 + 1;
-    tape::append(&app.db, session, "verification", &json!({ "round": round, "results": results, "notes": verdict["notes"], "verifier_ran": !verdict.is_null() })).await?;
+    tape::append(&app.db, session, "verification", &json!({ "round": round, "results": results, "notes": verdict["notes"], "verifier": verifier })).await?;
     resolve_shadow(&app.db, session, "claim", Some(if results.iter().all(|r| r["result"] == "pass") { "evidenced" } else { "unverified" }), "verification").await;
 
     let failed: Vec<&Value> = results.iter().filter(|r| r["result"] == "fail").collect();
@@ -870,18 +947,20 @@ mod tests {
     }
 
     #[test]
-    fn framing_has_no_way_to_write() {
-        let names = |s: &str| -> Vec<String> { tools_for(s).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect() };
-        let framing = names("framing");
-        for w in ["write", "edit", "move", "submit_work"] {
-            assert!(!framing.contains(&w.to_string()), "{w} offered while framing");
+    fn framing_can_not_write_and_the_tools_never_change() {
+        assert_eq!(tools_for("framing"), tools_for("working"), "one tool list across phases keeps the cache");
+        for w in ["write", "edit", "move", "submit_work", "note_ruling"] {
+            assert!(refuse("framing", w, None).is_some(), "{w} allowed while framing");
         }
-        assert!(framing.contains(&"propose_brief".to_string()) && framing.contains(&"ask".to_string()));
-        assert!(names("working").contains(&"submit_work".to_string()));
-        assert_eq!(names("verifier").last().map(String::as_str), Some("submit_verdict"));
+        for r in ["read", "bash", "history", "ask", "propose_brief"] {
+            assert!(refuse("framing", r, None).is_none(), "{r} refused while framing");
+        }
         assert!(refuse("framing", "write", None).unwrap().contains("Propose a brief"));
         assert!(refuse("working", "write", None).is_none());
+        assert!(refuse("working", "propose_brief", None).is_some());
         assert!(refuse("working", "write", Some("work submitted")).is_some(), "nothing more once the step has ended");
+        let verifier: Vec<String> = tools_for("verifier").as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        assert_eq!(verifier, ["bash", "read", "submit_verdict"]);
     }
 
     #[test]
@@ -893,6 +972,7 @@ mod tests {
         assert!(text.contains("run: `cargo test -q`"));
         let sys = system_for("BASE", "working", Some(&json!({ "version": 2, "brief": brief() })));
         assert!(sys.starts_with("BASE") && sys.contains("<brief version=\"2\">") && sys.contains("source of intent"));
-        assert!(system_for("BASE", "framing", None).contains("<framing>"));
+        assert_eq!(system_for("BASE", "framing", None), system_for("BASE", "working", None), "same instructions across phases");
+        assert_eq!(system_for("BASE", "open", None), "BASE");
     }
 }

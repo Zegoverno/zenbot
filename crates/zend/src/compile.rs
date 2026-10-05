@@ -108,10 +108,12 @@ async fn load_envelope(db: &PgPool, hash: &str) -> Result<Option<Envelope>, sqlx
     Ok(row.map(|r| Envelope { hash: r.get("hash"), system: r.get("system"), tools: r.get("tools") }))
 }
 
-/// The turn context sent after the prompt: the date, only when it differs from the last one this
-/// session was given (goose's turn-context message, deduplicated). None when nothing changed.
-pub fn turn_context(blocks: &[Block], today: &str) -> Option<String> {
-    let text = format!("<turn_context>\nToday is {today}.\n</turn_context>");
+/// The turn context sent after the prompt: the date and the workflow phase, only when they differ
+/// from the last ones this session was given (goose's turn-context message, deduplicated). None when
+/// nothing changed.
+pub fn turn_context(blocks: &[Block], today: &str, phase: Option<&str>) -> Option<String> {
+    let phase = phase.map(|p| format!("{p}\n")).unwrap_or_default();
+    let text = format!("<turn_context>\nToday is {today}.\n{phase}</turn_context>");
     let last = blocks
         .iter()
         .rev()
@@ -198,10 +200,11 @@ mod tests {
     #[test]
     fn turn_context_only_when_it_changed() {
         let mut blocks = vec![msg(1, "user", json!("hi"))];
-        let first = turn_context(&blocks, "2026-10-05 (Monday)").expect("first turn gets the date");
+        let first = turn_context(&blocks, "2026-10-05 (Monday)", Some("Phase: framing.")).expect("first turn gets the date");
         blocks[0].payload["context"] = json!(first);
-        assert_eq!(turn_context(&blocks, "2026-10-05 (Monday)"), None, "same day: nothing to add");
-        assert!(turn_context(&blocks, "2026-10-06 (Tuesday)").unwrap().contains("2026-10-06"));
+        assert_eq!(turn_context(&blocks, "2026-10-05 (Monday)", Some("Phase: framing.")), None, "nothing changed: nothing to add");
+        assert!(turn_context(&blocks, "2026-10-06 (Tuesday)", Some("Phase: framing.")).unwrap().contains("2026-10-06"));
+        assert!(turn_context(&blocks, "2026-10-05 (Monday)", Some("Phase: working on brief v1.")).unwrap().contains("working"));
     }
 
     /// The prefix-invariance property (goose's test): as a session grows, each turn's history

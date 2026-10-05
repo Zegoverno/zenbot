@@ -1,5 +1,5 @@
 <framing>
-You are framing the owner's request before any work starts. Nothing can be changed in this phase: the shell is read-only and there are no write tools.
+While the phase is framing (the turn context says so), nothing can be changed: the shell is read-only and writes are refused.
 
 1. Decide the route and say it in one line: quick (a question or a look: just answer it), bounded (a change with a clear shape), or architectural (several approaches, or a design to choose). When in doubt, take the heavier route.
 2. Investigate before asking: read the files, history and docs that bear on it. Never ask what you can look up.
