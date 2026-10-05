@@ -1,0 +1,349 @@
+//! The HTTP API and the WebSocket for clients (docs/client-protocol.md).
+
+use super::*;
+
+pub(crate) struct ApiError(pub(crate) StatusCode, pub(crate) String);
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.0, Json(json!({ "error": self.1 }))).into_response()
+    }
+}
+
+impl<E: std::fmt::Display> From<E> for ApiError {
+    fn from(e: E) -> Self {
+        ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    }
+}
+
+pub(crate) type ApiResult<T> = std::result::Result<T, ApiError>;
+
+pub(crate) fn not_found() -> ApiError {
+    ApiError(StatusCode::NOT_FOUND, "session not found".into())
+}
+
+pub(crate) async fn auth(State(app): State<AppState>, req: Request, next: Next) -> Response {
+    let header_ok = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.strip_prefix("Bearer ").unwrap_or(v) == app.token)
+        .unwrap_or(false);
+    let query_ok = req
+        .uri()
+        .query()
+        .map(|q| q.split('&').any(|kv| kv == format!("token={}", app.token)))
+        .unwrap_or(false);
+    if header_ok || query_ok {
+        next.run(req).await
+    } else {
+        ApiError(StatusCode::UNAUTHORIZED, "unauthorized".into()).into_response()
+    }
+}
+
+pub(crate) async fn index() -> Html<&'static str> {
+    Html(include_str!("../web/index.html"))
+}
+
+pub(crate) async fn health(State(app): State<AppState>) -> Json<Value> {
+    let db = sqlx::query("SELECT 1").execute(&app.db).await.is_ok();
+    let mut workers = serde_json::Map::new();
+    for w in &app.workers {
+        workers.insert(w.name.clone(), json!(w.mind().request("ping", json!({})).await.is_ok()));
+    }
+    let mind = workers.values().all(|v| v == true);
+    let busy = app.turns.lock().await.len() + app.background.lock().await.len();
+    Json(json!({ "ok": db && mind, "db": db, "mind": mind, "workers": workers, "busy": busy,
+                 "version": env!("CARGO_PKG_VERSION"), "commit": app.updater.running() }))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct VersionQuery {
+    refresh: Option<bool>,
+}
+
+/// Running version and whether origin/main has newer commits (`?refresh=true` checks now).
+pub(crate) async fn version(State(app): State<AppState>, Query(q): Query<VersionQuery>) -> Json<Value> {
+    Json(if q.refresh.unwrap_or(false) { app.updater.check().await } else { app.updater.info().await })
+}
+
+/// Pull the latest main and apply it (scripts/self-update.sh); progress via GET /api/upgrade.
+pub(crate) async fn upgrade_start(State(app): State<AppState>) -> ApiResult<Json<Value>> {
+    match app.updater.start().await {
+        Ok(started_at) => Ok(Json(json!({ "started_at": started_at }))),
+        Err(e) => Err(ApiError(StatusCode::CONFLICT, e)),
+    }
+}
+
+pub(crate) async fn upgrade_status(State(app): State<AppState>) -> Json<Value> {
+    Json(app.updater.status().await)
+}
+
+pub(crate) async fn list_models(State(app): State<AppState>) -> ApiResult<Json<Value>> {
+    Ok(Json(collect_models(&app).await))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ListQuery {
+    archived: Option<bool>,
+}
+
+pub(crate) async fn list_sessions(State(app): State<AppState>, Query(q): Query<ListQuery>) -> ApiResult<Json<Value>> {
+    let rows = sqlx::query(&format!(
+        "SELECT s.id, s.title, s.model, s.effort, s.archived, s.created_at, s.updated_at, s.state,
+                {} AS cost
+         FROM sessions s WHERE s.archived = $1 AND s.kind IS NULL ORDER BY s.updated_at DESC",
+        session_cost("s.id")
+    ))
+    .bind(q.archived.unwrap_or(false))
+    .fetch_all(&app.db)
+    .await?;
+    Ok(Json(Value::Array(rows.iter().map(session_json).collect())))
+}
+
+pub(crate) fn session_json(r: &sqlx::postgres::PgRow) -> Value {
+    json!({
+        "id": r.get::<Uuid, _>("id"),
+        "title": r.get::<String, _>("title"),
+        "model": r.get::<String, _>("model"),
+        "effort": r.get::<Option<String>, _>("effort"),
+        "archived": r.get::<bool, _>("archived"),
+        "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+        "updated_at": r.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
+        "cost": r.try_get::<f64, _>("cost").unwrap_or(0.0),
+        "state": r.try_get::<Option<String>, _>("state").ok().flatten().unwrap_or_else(|| "open".into()),
+    })
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CreateSession {
+    title: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+pub(crate) async fn create_session(State(app): State<AppState>, Json(body): Json<CreateSession>) -> ApiResult<Json<Value>> {
+    let id = Uuid::new_v4();
+    let model = body.model.unwrap_or_else(|| app.default_model.clone());
+    check_effort(&app, &model, body.effort.as_deref()).await?;
+    let row = sqlx::query(
+        "INSERT INTO sessions (id, title, model, effort, state) VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, title, model, effort, archived, created_at, updated_at, state, 0::float8 AS cost",
+    )
+    .bind(id)
+    .bind(body.title.unwrap_or_default())
+    .bind(model)
+    .bind(body.effort)
+    .bind(flow::initial_state())
+    .fetch_one(&app.db)
+    .await?;
+    Ok(Json(session_json(&row)))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct UpdateSession {
+    title: Option<String>,
+    model: Option<String>,
+    /// A thinking level, or "default" for the model's default.
+    effort: Option<String>,
+    archived: Option<bool>,
+}
+
+pub(crate) async fn update_session(State(app): State<AppState>, Path(id): Path<Uuid>, Json(body): Json<UpdateSession>) -> ApiResult<Json<Value>> {
+    let current = sqlx::query("SELECT model, effort FROM sessions WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&app.db)
+        .await?
+        .ok_or_else(not_found)?;
+    let model = body.model.clone().unwrap_or_else(|| current.get("model"));
+    let effort: Option<String> = match body.effort.as_deref() {
+        Some("default") => None,
+        Some(e) => {
+            check_effort(&app, &model, Some(e)).await?;
+            Some(e.to_string())
+        }
+        // A new model keeps the session's effort only if it supports it.
+        None => {
+            let kept: Option<String> = current.get("effort");
+            match kept {
+                Some(e) if body.model.is_some() && check_effort(&app, &model, Some(&e)).await.is_err() => None,
+                other => other,
+            }
+        }
+    };
+    let row = sqlx::query(&format!(
+        "UPDATE sessions SET title = COALESCE($2, title), model = COALESCE($3, model), effort = $5,
+                archived = COALESCE($4, archived), updated_at = now()
+         WHERE id = $1
+         RETURNING id, title, model, effort, archived, created_at, updated_at, state, {} AS cost",
+        session_cost("$1")
+    ))
+    .bind(id)
+    .bind(body.title)
+    .bind(body.model)
+    .bind(body.archived)
+    .bind(effort)
+    .fetch_optional(&app.db)
+    .await?
+    .ok_or_else(not_found)?;
+    Ok(Json(session_json(&row)))
+}
+
+pub(crate) async fn get_session(State(app): State<AppState>, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
+    let row = sqlx::query(&format!(
+        "SELECT id, title, model, effort, archived, created_at, updated_at, state, {} AS cost
+         FROM sessions WHERE id = $1",
+        session_cost("$1")
+    ))
+    .bind(id)
+    .fetch_optional(&app.db)
+    .await?
+    .ok_or_else(not_found)?;
+    let mut session = session_json(&row);
+    session["messages"] = Value::Array(load_messages(&app.db, id).await?);
+    session["busy"] = json!(app.is_busy(id).await);
+    Ok(Json(session))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct FlowAction {
+    action: String,
+}
+
+/// The owner takes a step of the workflow himself (docs/brief.md): `brief` (frame the next request),
+/// `quick` (skip the brief: one open loop with every tool), `go` (approve the waiting brief),
+/// `verify` (verify the work now).
+pub(crate) async fn flow_action(State(app): State<AppState>, Path(id): Path<Uuid>, Json(body): Json<FlowAction>) -> ApiResult<Json<Value>> {
+    if app.is_busy(id).await {
+        return Err(ApiError(StatusCode::CONFLICT, "the session is working; wait or abort first".into()));
+    }
+    let state = flow::state(&app.db, id).await?;
+    let conflict = |m: &str| Err(ApiError(StatusCode::CONFLICT, m.to_string()));
+    match body.action.as_str() {
+        "brief" => {
+            flow::set_state(&app, id, "framing", "owner", "owner asked for a brief", false).await?;
+            flow::resolve_shadow(&app.db, id, "route", Some("bounded"), "owner").await;
+        }
+        "quick" => {
+            flow::set_state(&app, id, "open", "owner", "owner skipped the brief", false).await?;
+            flow::resolve_shadow(&app.db, id, "route", Some("quick"), "owner").await;
+        }
+        "go" => match flow::latest_brief(&app.db, id).await? {
+            Some((_, false)) => {
+                tokio::spawn(flow::approve(app.clone(), id, "owner"));
+            }
+            _ => return conflict("there is no brief waiting for approval"),
+        },
+        "verify" => {
+            if state != "working" || !flow::latest_brief(&app.db, id).await?.is_some_and(|(_, a)| a) {
+                return conflict("verify needs approved work in progress");
+            }
+            tokio::spawn(flow::verify(app.clone(), id));
+        }
+        other => return Err(ApiError(StatusCode::BAD_REQUEST, format!("unknown action `{other}`: brief, quick, go or verify"))),
+    }
+    Ok(Json(json!({ "state": flow::state(&app.db, id).await? })))
+}
+
+/// What the owner decides about the work so far (see migrations/0005).
+pub(crate) const DECISIONS: [&str; 4] = ["accept", "more", "reshape", "drop"];
+
+#[derive(Deserialize)]
+pub(crate) struct Decide {
+    decision: String,
+    note: Option<String>,
+}
+
+/// Record the owner's decision on the session's work up to its latest turn.
+pub(crate) async fn decide(State(app): State<AppState>, Path(id): Path<Uuid>, Json(body): Json<Decide>) -> ApiResult<Json<Value>> {
+    if !DECISIONS.contains(&body.decision.as_str()) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, format!("decision must be one of {}", DECISIONS.join(", "))));
+    }
+    let row = sqlx::query(
+        "INSERT INTO session_decisions (session_id, turn_id, decision, note)
+         SELECT s.id, (SELECT t.id FROM turns t WHERE t.session_id = s.id ORDER BY t.started_at DESC LIMIT 1), $2, $3
+         FROM sessions s WHERE s.id = $1
+         RETURNING id, turn_id, decision, note, created_at",
+    )
+    .bind(id)
+    .bind(&body.decision)
+    .bind(body.note.as_deref().map(str::trim).filter(|n| !n.is_empty()))
+    .fetch_optional(&app.db)
+    .await?
+    .ok_or_else(not_found)?;
+    // The verdict moves briefed work on: more work, a new brief, or done.
+    if flow::enabled() && flow::state(&app.db, id).await? != "open" {
+        let to = match body.decision.as_str() {
+            "more" => "working",
+            "reshape" => "framing",
+            _ => "closed",
+        };
+        flow::set_state(&app, id, to, "owner", &format!("owner: {}", body.decision), false).await?;
+    }
+    // Score the work the decision covers, so each decision has a score to compare it with.
+    let scoring = app.clone();
+    tokio::spawn(async move {
+        if let Err(e) = score::score_session(&scoring, id, "decision").await {
+            tracing::warn!("scoring session {id} after a decision: {e:#}");
+        }
+    });
+    Ok(Json(json!({
+        "id": row.get::<i64, _>("id"),
+        "session_id": id,
+        "turn_id": row.get::<Option<Uuid>, _>("turn_id"),
+        "decision": row.get::<String, _>("decision"),
+        "note": row.get::<Option<String>, _>("note"),
+        "created_at": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+    })))
+}
+
+pub(crate) async fn session_ws(State(app): State<AppState>, Path(id): Path<Uuid>, ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(move |socket| handle_socket(app, id, socket))
+}
+
+pub(crate) async fn handle_socket(app: AppState, id: Uuid, socket: WebSocket) {
+    let (mut sink, mut stream) = socket.split();
+    let mut rx = app.hub(id).await.subscribe();
+    let fwd_app = app.clone();
+    let forward = tokio::spawn(async move {
+        loop {
+            let msg = match rx.recv().await {
+                Ok(msg) => msg,
+                // This client fell behind and missed events: say so and carry on. `busy` lets the
+                // client finish a turn whose `end` it may have missed.
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    json!({ "type": "resync", "skipped": n, "busy": fwd_app.is_busy(id).await }).to_string()
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+            if sink.send(Message::Text(msg.into())).await.is_err() {
+                break;
+            }
+        }
+    });
+    while let Some(Ok(msg)) = stream.next().await {
+        let Message::Text(text) = msg else { continue };
+        let Ok(cmd) = serde_json::from_str::<Value>(&text) else { continue };
+        match cmd.get("type").and_then(Value::as_str) {
+            Some("prompt") => {
+                let text = cmd.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+                if let Err(e) = start_turn(&app, id, text).await {
+                    app.emit(id, json!({ "type": "error", "error": e.to_string() })).await;
+                }
+            }
+            Some("abort") => {
+                // Stop the kernel's tools right away, then ask the worker to stop the model.
+                let worker = app.turns.lock().await.get_mut(&id).map(|t| {
+                    let _ = t.cancel.send(true);
+                    t.abort_sent.get_or_insert_with(Instant::now);
+                    t.worker
+                });
+                if let Some(w) = worker.and_then(|i| app.workers.get(i)) {
+                    let _ = w.mind().request("turn.abort", json!({ "session_id": id })).await;
+                }
+            }
+            _ => {}
+        }
+    }
+    forward.abort();
+}
