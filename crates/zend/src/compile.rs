@@ -59,8 +59,7 @@ pub fn system_prompt(workspace: &Path, repo: &str) -> String {
 
 /// The session's base instructions, fixed for the session: written on its first turn (a `base`
 /// block), or, for a session from before briefed work, the instructions it was already using.
-pub async fn base_prompt(db: &PgPool, session: Uuid, workspace: &Path, repo: &str) -> Result<String> {
-    let blocks = tape::load(db, session, &["base", "envelope"]).await?;
+pub async fn base_prompt(db: &PgPool, session: Uuid, blocks: &[Block], workspace: &Path, repo: &str) -> Result<String> {
     if let Some(b) = blocks.iter().find(|b| b.kind == "base") {
         return Ok(b.payload["text"].as_str().unwrap_or("").to_string());
     }
@@ -77,8 +76,8 @@ pub async fn base_prompt(db: &PgPool, session: Uuid, workspace: &Path, repo: &st
 /// The envelope for this turn: the session's latest one if it has exactly these instructions and
 /// tools, else a new one (stored once per distinct pair). Returns it and, when new, why
 /// (`new`, `instructions`: the session's state changed what the model is told, `tools`).
-pub async fn envelope(db: &PgPool, session: Uuid, system: &str, tools: &Value) -> Result<(Envelope, Option<&'static str>)> {
-    let current = match tape::load(db, session, &["envelope"]).await?.last() {
+pub async fn envelope(db: &PgPool, session: Uuid, blocks: &[Block], system: &str, tools: &Value) -> Result<(Envelope, Option<&'static str>)> {
+    let current = match blocks.iter().rev().find(|b| b.kind == "envelope") {
         Some(b) => load_envelope(db, b.payload["hash"].as_str().unwrap_or("")).await?,
         None => None,
     };

@@ -252,13 +252,12 @@ pub fn phase_line(state: &str, brief_version: Option<i64>) -> Option<String> {
 }
 
 /// The approved brief when its work runs in a fresh context (it is then in the instructions).
-pub async fn fresh_brief(db: &PgPool, session: Uuid) -> Result<Option<Value>> {
-    let blocks = tape::load(db, session, &["brief", "approval"]).await?;
-    let Some(a) = blocks.iter().rev().find(|b| b.kind == "approval") else { return Ok(None) };
+pub fn fresh_brief_in(blocks: &[tape::Block]) -> Option<Value> {
+    let a = blocks.iter().rev().find(|b| b.kind == "approval")?;
     if a.payload["fresh"] != true {
-        return Ok(None);
+        return None;
     }
-    Ok(blocks.iter().rev().find(|b| b.kind == "brief" && b.payload["version"] == a.payload["version"]).map(|b| b.payload.clone()))
+    blocks.iter().rev().find(|b| b.kind == "brief" && b.payload["version"] == a.payload["version"]).map(|b| b.payload.clone())
 }
 
 /// Why a tool call is refused in this state, if it is.
@@ -367,10 +366,14 @@ pub fn render_brief(b: &Value) -> String {
 
 /// The newest brief block, and whether it has been approved since.
 pub async fn latest_brief(db: &PgPool, session: Uuid) -> Result<Option<(Value, bool)>> {
-    let blocks = tape::load(db, session, &["brief", "approval"]).await?;
-    let Some(brief) = blocks.iter().rev().find(|b| b.kind == "brief") else { return Ok(None) };
+    Ok(brief_in(&tape::load(db, session, &["brief", "approval"]).await?))
+}
+
+/// The newest brief among a session's blocks, and whether it has been approved since.
+pub fn brief_in(blocks: &[tape::Block]) -> Option<(Value, bool)> {
+    let brief = blocks.iter().rev().find(|b| b.kind == "brief")?;
     let approved = blocks.iter().any(|b| b.kind == "approval" && b.seq > brief.seq);
-    Ok(Some((brief.payload.clone(), approved)))
+    Some((brief.payload.clone(), approved))
 }
 
 // ---------- the workflow's tools ----------

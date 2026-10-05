@@ -52,6 +52,15 @@ pub async fn load(db: &PgPool, session: Uuid, kinds: &[&str]) -> Result<Vec<Bloc
         .collect())
 }
 
+/// All of a session's blocks, in order: read once per turn start and derived from (compile.rs, flow.rs).
+pub async fn load_all(db: &PgPool, session: Uuid) -> Result<Vec<Block>, sqlx::Error> {
+    let rows = sqlx::query("SELECT seq, kind, payload FROM tape_events WHERE session_id = $1 AND seq IS NOT NULL ORDER BY seq")
+        .bind(session)
+        .fetch_all(db)
+        .await?;
+    Ok(rows.into_iter().map(|r| Block { seq: r.get("seq"), kind: r.get("kind"), payload: r.get("payload") }).collect())
+}
+
 /// Number and link blocks written without a number (by an older build after a rollback).
 pub async fn repair(db: &PgPool) -> Result<u64, sqlx::Error> {
     let r = sqlx::query("SELECT zen_rechain(session_id) FROM (SELECT DISTINCT session_id FROM tape_events WHERE seq IS NULL) s")

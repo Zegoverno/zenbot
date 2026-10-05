@@ -933,16 +933,16 @@ async fn load_messages(db: &PgPool, id: Uuid) -> Result<Vec<Value>, sqlx::Error>
 }
 
 /// Instruction files recorded for a session (tape kind `context`), oldest first.
-async fn load_context(db: &PgPool, id: Uuid) -> Result<Vec<PathBuf>, sqlx::Error> {
+fn context_in(blocks: &[tape::Block]) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
-    for b in tape::load(db, id, &["context"]).await? {
+    for b in blocks.iter().filter(|b| b.kind == "context") {
         if let Some(p) = b.payload["path"].as_str().map(PathBuf::from) {
             if !out.contains(&p) {
                 out.push(p);
             }
         }
     }
-    Ok(out)
+    out
 }
 
 async fn append_tape(db: &PgPool, id: Uuid, kind: &str, payload: &Value) -> Result<(), sqlx::Error> {
@@ -1026,7 +1026,11 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
                     tokio::spawn(flow::approve(app.clone(), id, "owner"));
                     return Ok(());
                 }
-                if !tape::load(&app.db, id, &["message"]).await?.iter().any(|b| b.payload["role"] == "user") {
+                let first: bool = sqlx::query_scalar("SELECT NOT EXISTS (SELECT 1 FROM tape_events WHERE session_id = $1 AND kind = 'message')")
+                    .bind(id)
+                    .fetch_one(&app.db)
+                    .await?;
+                if first {
                     flow::shadow_request(app, id, &text);
                 }
             }
@@ -1154,24 +1158,25 @@ async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: Origin) -> R
         // The engine's own session can be resumed only if nothing was written since it last
         // matched the tape (no other turn, summary or new instructions in between).
         // Workflow bookkeeping (state, brief, approval, rulings, …) doesn't touch what the engine saw.
+        // The tape is read once; everything below is derived from it.
+        let blocks = tape::load_all(&app.db, id).await?;
         let engine = model.split_once('/').map(|(e, _)| e).unwrap_or("");
-        let last = tape::load(&app.db, id, &["message", "compaction", "envelope", "base", "engine_session"]).await?.pop();
+        let last = blocks.iter().rev().find(|b| matches!(b.kind.as_str(), "message" | "compaction" | "envelope" | "base" | "engine_session")).cloned();
         // What the model is told and can use depends on the session's state (flow.rs).
         let state = flow::state(&app.db, id).await?;
-        let base = compile::base_prompt(&app.db, id, &app.workspace, &app.repo).await?;
+        let base = compile::base_prompt(&app.db, id, &blocks, &app.workspace, &app.repo).await?;
         let brief = match state.as_str() {
-            "working" | "verifying" | "reported" => flow::fresh_brief(&app.db, id).await?,
+            "working" | "verifying" | "reported" => flow::fresh_brief_in(&blocks),
             _ => None,
         };
-        let brief_version = flow::latest_brief(&app.db, id).await?.and_then(|(b, _)| b["version"].as_i64());
+        let brief_version = flow::brief_in(&blocks).and_then(|(b, _)| b["version"].as_i64());
         let tools = if state == "open" { tools::specs() } else { flow::tools_for(&state) };
         let system = flow::system_for(&base, &state, brief.as_ref());
-        let (envelope, new_envelope) = compile::envelope(&app.db, id, &system, &tools).await?;
+        let (envelope, new_envelope) = compile::envelope(&app.db, id, &blocks, &system, &tools).await?;
         let resume = match (&last, new_envelope) {
             (Some(b), None) if b.kind == "engine_session" && b.payload["engine"] == engine => Some(json!({ "id": b.payload["id"] })),
             _ => None,
         };
-        let blocks = tape::load(&app.db, id, &["message", "compaction", "state"]).await?;
         let (history, summary) = compile::history(&blocks);
         let today = chrono::Local::now().format("%Y-%m-%d (%A)").to_string();
         let phase = flow::phase_line(&state, brief_version);
@@ -1193,7 +1198,7 @@ async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: Origin) -> R
         .bind(cache_break)
         .execute(&app.db)
         .await?;
-        let extra = load_context(&app.db, id).await?;
+        let extra = context_in(&blocks);
         if let Some(t) = app.turns.lock().await.get_mut(&id) {
             t.context = extra.iter().cloned().collect();
             t.sent = sent;
