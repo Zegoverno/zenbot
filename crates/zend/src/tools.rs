@@ -213,10 +213,14 @@ fn save_full_output(text: &str) -> Option<PathBuf> {
     Some(path)
 }
 
-/// Run a tool. `env` is added to the environment of commands (bash).
-pub async fn execute(workspace: &Path, name: &str, args: &Value, env: &[(&str, &str)]) -> ToolOutput {
+/// Run a tool. `env` is added to the environment of commands (bash). With `read_only`, bash runs in
+/// a sandbox where the filesystem is mounted read-only (bubblewrap) and only `read` may run besides.
+pub async fn execute(workspace: &Path, name: &str, args: &Value, env: &[(&str, &str)], read_only: bool) -> ToolOutput {
+    if read_only && !matches!(name, "bash" | "read") {
+        return err(format!("`{name}` can't run in a read-only phase"));
+    }
     let result = match name {
-        "bash" => bash(workspace, args, env).await,
+        "bash" => bash(workspace, args, env, read_only).await,
         "read" => read(workspace, args).await,
         "write" => write(workspace, args).await,
         "edit" => edit(workspace, args).await,
@@ -254,11 +258,24 @@ impl Drop for GroupKill {
     }
 }
 
-async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)]) -> Result<ToolOutput, ToolOutput> {
+/// bubblewrap's arguments for a read-only view of the machine: everything mounted read-only, a
+/// private /tmp, the network left as it is (looking things up is allowed).
+const READ_ONLY_SANDBOX: [&str; 10] = ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--die-with-parent"];
+
+async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], read_only: bool) -> Result<ToolOutput, ToolOutput> {
     let command = str_arg(args, "command")?;
     let timeout = args.get("timeout_secs").and_then(Value::as_u64).unwrap_or(120).clamp(1, 600);
-    let mut child = Command::new("bash")
-        .arg("-lc")
+    let mut cmd = if read_only {
+        let mut c = Command::new("bwrap");
+        // The workspace is bound again after the private /tmp, in case it lives under /tmp.
+        c.args(READ_ONLY_SANDBOX).arg("--ro-bind").arg(workspace).arg(workspace).arg("--chdir").arg(workspace).args(["bash", "-lc"]);
+        c
+    } else {
+        let mut c = Command::new("bash");
+        c.arg("-lc");
+        c
+    };
+    let mut child = cmd
         .arg(command)
         .current_dir(workspace)
         .envs(env.iter().copied())
@@ -268,7 +285,7 @@ async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)]) -> Result<To
         .process_group(0)
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| err(format!("failed to start bash: {e}")))?;
+        .map_err(|e| err(if read_only { format!("the read-only shell (bubblewrap) couldn't start: {e}; use read instead") } else { format!("failed to start bash: {e}") }))?;
     let mut group = GroupKill(child.id().map(|p| p as i32));
 
     // Stream both pipes into one buffer as data arrives, so a timeout still returns what was printed.
@@ -556,7 +573,7 @@ mod tests {
     }
 
     async fn run(ws: &Path, name: &str, args: Value) -> ToolOutput {
-        execute(ws, name, &args, &[]).await
+        execute(ws, name, &args, &[], false).await
     }
 
     #[tokio::test]
@@ -687,7 +704,7 @@ mod tests {
         let ws = scratch("drop");
         let marker = ws.join("done.txt");
         let args = json!({ "command": "sleep 2; touch done.txt" });
-        let fut = execute(&ws, "bash", &args, &[]);
+        let fut = execute(&ws, "bash", &args, &[], false);
         let _ = tokio::time::timeout(Duration::from_millis(300), fut).await;
         tokio::time::sleep(Duration::from_secs(3)).await;
         assert!(!marker.exists(), "command kept running after its future was dropped");

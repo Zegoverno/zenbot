@@ -2,7 +2,8 @@
 //! through the kernel (tool calls included) without any subscription.
 //!
 //! Listed as `faux/smoke` when ZEN_FAUX=1. The script is read from the JSON file in
-//! ZEN_FAUX_SCRIPT if set: a list of steps, each one of
+//! ZEN_FAUX_SCRIPT if set: a list of steps (or an object of lists by workflow phase, see `script`),
+//! each one of
 //!   {"tool": "<name>", "args": {...}}   call a kernel tool
 //!   {"text": "..."}                    answer (streamed as deltas, then a message)
 //!   {"sleep": <seconds>}               do nothing for a while (to test abort and the watchdog)
@@ -22,11 +23,25 @@ pub fn models() -> Vec<Value> {
     vec![json!({ "id": "faux/smoke", "name": "Test model (scripted)", "engine": "faux" })]
 }
 
-fn script() -> Result<Vec<Value>> {
+/// The steps for this turn. The script is a list of steps, or an object of lists keyed by the
+/// workflow phase the instructions show (`frame`, `work`, `verify`, else `default`), so one script
+/// can drive a whole briefed session.
+fn script(system: &str) -> Result<Vec<Value>> {
     match std::env::var("ZEN_FAUX_SCRIPT") {
         Ok(path) => {
             let text = std::fs::read_to_string(&path).with_context(|| format!("reading ZEN_FAUX_SCRIPT {path}"))?;
-            serde_json::from_str(&text).context("ZEN_FAUX_SCRIPT must be a JSON list of steps")
+            let v: Value = serde_json::from_str(&text).context("ZEN_FAUX_SCRIPT must be JSON")?;
+            let phase = if system.contains("<framing>") {
+                "frame"
+            } else if system.contains("<work>") {
+                "work"
+            } else if system.starts_with("You are a verifier") {
+                "verify"
+            } else {
+                "default"
+            };
+            let steps = if v.is_object() { v.get(phase).or_else(|| v.get("default")).cloned().unwrap_or(json!([])) } else { v };
+            serde_json::from_value(steps).context("ZEN_FAUX_SCRIPT must be a list of steps, or an object of them")
         }
         Err(_) => Ok(vec![
             json!({ "tool": "bash", "args": { "command": "echo zen-ok" } }),
@@ -45,7 +60,7 @@ fn assistant(content: Vec<Value>, stop: &str, input: i64) -> Value {
 
 pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bool>) -> Result<Option<String>> {
     let mut sent = (input.system.len() + Value::Array(input.history.clone()).to_string().len() + input.prompt.len()) as i64 / 4;
-    for (i, step) in script()?.into_iter().enumerate() {
+    for (i, step) in script(&input.system)?.into_iter().enumerate() {
         let work = async {
             if let Some(name) = step["tool"].as_str() {
                 let call_id = format!("faux-{}-{i}", now_ms());

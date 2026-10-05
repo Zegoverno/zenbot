@@ -79,7 +79,7 @@ So a worker never has to clean up after the kernel, but it must answer `turn.abo
 
 ## Testing without a model
 
-With `ZEN_FAUX=1`, `zen-engine` also lists `faux/smoke`, a scripted model that drives a real turn through the kernel: by default one `bash` call, then an answer. `ZEN_FAUX_SCRIPT` can point to a JSON list of steps (`{"tool": name, "args": {…}}`, `{"text": "…"}`, `{"sleep": secs}`, `{"exit": code}`) to test tools, abort, the watchdog and crash recovery. `scripts/upgrade.sh` runs one such turn against the new build before installing it.
+With `ZEN_FAUX=1`, `zen-engine` also lists `faux/smoke`, a scripted model that drives a real turn through the kernel: by default one `bash` call, then an answer. `ZEN_FAUX_SCRIPT` can point to a JSON list of steps (or an object of lists keyed by workflow phase, `frame`, `work`, `verify`, `default`, to drive a whole briefed session) (`{"tool": name, "args": {…}}`, `{"text": "…"}`, `{"sleep": secs}`, `{"exit": code}`) to test tools, abort, the watchdog and crash recovery. `scripts/upgrade.sh` runs one such turn against the new build before installing it.
 
 ## Configuration
 

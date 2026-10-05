@@ -3,6 +3,7 @@
 mod compact;
 mod compile;
 mod context;
+mod flow;
 mod measure;
 mod mind;
 mod score;
@@ -73,6 +74,8 @@ struct Turn {
     cache_break: Option<&'static str>,
     /// The previous turn's context size, to check the provider really reused its cache.
     prev_context: Option<i64>,
+    /// Set when a workflow tool ended the model's step (flow.rs); later tool calls are refused.
+    ending: Option<&'static str>,
 }
 
 struct App {
@@ -95,6 +98,8 @@ struct App {
     updater: Arc<update::Updater>,
     /// Sessions whose summary is being prepared in the background.
     compacting: Mutex<HashSet<Uuid>>,
+    /// Kernel-started turns being waited for (verifier sessions), by session.
+    waiters: Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<()>>>,
 }
 
 type AppState = Arc<App>;
@@ -195,6 +200,7 @@ async fn main() -> Result<()> {
         hubs: Mutex::new(HashMap::new()),
         updater,
         compacting: Mutex::new(HashSet::new()),
+        waiters: Mutex::new(HashMap::new()),
     });
     tokio::spawn(app.updater.clone().check_periodically());
     for (idx, exited) in exits.into_iter().enumerate() {
@@ -210,6 +216,7 @@ async fn main() -> Result<()> {
         .route("/sessions/{id}", get(get_session).patch(update_session))
         .route("/sessions/{id}/ws", get(session_ws))
         .route("/sessions/{id}/decision", axum::routing::post(decide))
+        .route("/sessions/{id}/flow", axum::routing::post(flow_action))
         .route("/version", get(version))
         .route("/upgrade", get(upgrade_status).post(upgrade_start))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth));
@@ -351,7 +358,21 @@ async fn finish_turn(app: &AppState, id: Uuid, error: Value) -> bool {
         }
     }
     let cost: f64 = sqlx::query_scalar(&format!("SELECT {}", session_cost("$1"))).bind(id).fetch_one(&app.db).await.unwrap_or(0.0);
-    app.emit(id, json!({ "type": "end", "error": error, "cost": cost, "turn": summary })).await;
+    // The workflow may continue on its own (approve and work, verify); clients wait for `idle` then.
+    let after = flow::after_turn(app, id, turn.ending, error.is_null()).await;
+    app.emit(id, json!({ "type": "end", "error": error, "cost": cost, "turn": summary, "next": after.next })).await;
+    if let Some(w) = after.waiting {
+        let state = flow::state(&app.db, id).await.unwrap_or_default();
+        app.emit(id, json!({ "type": "idle", "state": state, "waiting": w })).await;
+    }
+    if let Some(waiter) = app.waiters.lock().await.remove(&id) {
+        let _ = waiter.send(());
+    }
+    // A child session's turn (a verifier) counts toward its parent's work: tell the parent's clients.
+    let parent: Option<Uuid> = sqlx::query_scalar("SELECT parent FROM sessions WHERE id = $1").bind(id).fetch_optional(&app.db).await.ok().flatten().flatten();
+    if let Some(parent) = parent {
+        app.emit(parent, json!({ "type": "child_end", "turn": summary })).await;
+    }
     if error.is_null() {
         let size = summary["context_tokens"].as_i64().or(turn.sent["est_tokens"].as_i64()).unwrap_or(0);
         prepare_summary_if_needed(app, id, &turn.model, size).await;
@@ -683,9 +704,9 @@ struct ListQuery {
 
 async fn list_sessions(State(app): State<AppState>, Query(q): Query<ListQuery>) -> ApiResult<Json<Value>> {
     let rows = sqlx::query(&format!(
-        "SELECT s.id, s.title, s.model, s.effort, s.archived, s.created_at, s.updated_at,
+        "SELECT s.id, s.title, s.model, s.effort, s.archived, s.created_at, s.updated_at, s.state,
                 {} AS cost
-         FROM sessions s WHERE s.archived = $1 ORDER BY s.updated_at DESC",
+         FROM sessions s WHERE s.archived = $1 AND s.kind IS NULL ORDER BY s.updated_at DESC",
         session_cost("s.id")
     ))
     .bind(q.archived.unwrap_or(false))
@@ -704,6 +725,7 @@ fn session_json(r: &sqlx::postgres::PgRow) -> Value {
         "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
         "updated_at": r.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
         "cost": r.try_get::<f64, _>("cost").unwrap_or(0.0),
+        "state": r.try_get::<Option<String>, _>("state").ok().flatten().unwrap_or_else(|| "open".into()),
     })
 }
 
@@ -719,13 +741,14 @@ async fn create_session(State(app): State<AppState>, Json(body): Json<CreateSess
     let model = body.model.unwrap_or_else(|| app.default_model.clone());
     check_effort(&app, &model, body.effort.as_deref()).await?;
     let row = sqlx::query(
-        "INSERT INTO sessions (id, title, model, effort) VALUES ($1, $2, $3, $4)
-         RETURNING id, title, model, effort, archived, created_at, updated_at, 0::float8 AS cost",
+        "INSERT INTO sessions (id, title, model, effort, state) VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, title, model, effort, archived, created_at, updated_at, state, 0::float8 AS cost",
     )
     .bind(id)
     .bind(body.title.unwrap_or_default())
     .bind(model)
     .bind(body.effort)
+    .bind(flow::initial_state())
     .fetch_one(&app.db)
     .await?;
     Ok(Json(session_json(&row)))
@@ -766,7 +789,7 @@ async fn update_session(State(app): State<AppState>, Path(id): Path<Uuid>, Json(
         "UPDATE sessions SET title = COALESCE($2, title), model = COALESCE($3, model), effort = $5,
                 archived = COALESCE($4, archived), updated_at = now()
          WHERE id = $1
-         RETURNING id, title, model, effort, archived, created_at, updated_at, {} AS cost",
+         RETURNING id, title, model, effort, archived, created_at, updated_at, state, {} AS cost",
         session_cost("$1")
     ))
     .bind(id)
@@ -782,7 +805,7 @@ async fn update_session(State(app): State<AppState>, Path(id): Path<Uuid>, Json(
 
 async fn get_session(State(app): State<AppState>, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
     let row = sqlx::query(&format!(
-        "SELECT id, title, model, effort, archived, created_at, updated_at, {} AS cost
+        "SELECT id, title, model, effort, archived, created_at, updated_at, state, {} AS cost
          FROM sessions WHERE id = $1",
         session_cost("$1")
     ))
@@ -794,6 +817,46 @@ async fn get_session(State(app): State<AppState>, Path(id): Path<Uuid>) -> ApiRe
     session["messages"] = Value::Array(load_messages(&app.db, id).await?);
     session["busy"] = json!(app.is_busy(id).await);
     Ok(Json(session))
+}
+
+#[derive(Deserialize)]
+struct FlowAction {
+    action: String,
+}
+
+/// The owner takes a step of the workflow himself (docs/brief.md): `brief` (frame the next request),
+/// `quick` (skip the brief: one open loop with every tool), `go` (approve the waiting brief),
+/// `verify` (verify the work now).
+async fn flow_action(State(app): State<AppState>, Path(id): Path<Uuid>, Json(body): Json<FlowAction>) -> ApiResult<Json<Value>> {
+    if app.is_busy(id).await {
+        return Err(ApiError(StatusCode::CONFLICT, "the session is working; wait or abort first".into()));
+    }
+    let state = flow::state(&app.db, id).await?;
+    let conflict = |m: &str| Err(ApiError(StatusCode::CONFLICT, m.to_string()));
+    match body.action.as_str() {
+        "brief" => {
+            flow::set_state(&app, id, "framing", "owner", "owner asked for a brief", false).await?;
+            flow::resolve_shadow(&app.db, id, "route", Some("bounded"), "owner").await;
+        }
+        "quick" => {
+            flow::set_state(&app, id, "open", "owner", "owner skipped the brief", false).await?;
+            flow::resolve_shadow(&app.db, id, "route", Some("quick"), "owner").await;
+        }
+        "go" => match flow::latest_brief(&app.db, id).await? {
+            Some((_, false)) => {
+                tokio::spawn(flow::approve(app.clone(), id, "owner"));
+            }
+            _ => return conflict("there is no brief waiting for approval"),
+        },
+        "verify" => {
+            if state != "working" || !flow::latest_brief(&app.db, id).await?.is_some_and(|(_, a)| a) {
+                return conflict("verify needs approved work in progress");
+            }
+            tokio::spawn(flow::verify(app.clone(), id));
+        }
+        other => return Err(ApiError(StatusCode::BAD_REQUEST, format!("unknown action `{other}`: brief, quick, go or verify"))),
+    }
+    Ok(Json(json!({ "state": flow::state(&app.db, id).await? })))
 }
 
 /// What the owner decides about the work so far (see migrations/0005).
@@ -822,6 +885,15 @@ async fn decide(State(app): State<AppState>, Path(id): Path<Uuid>, Json(body): J
     .fetch_optional(&app.db)
     .await?
     .ok_or_else(not_found)?;
+    // The verdict moves briefed work on: more work, a new brief, or done.
+    if flow::enabled() && flow::state(&app.db, id).await? != "open" {
+        let to = match body.decision.as_str() {
+            "more" => "working",
+            "reshape" => "framing",
+            _ => "closed",
+        };
+        flow::set_state(&app, id, to, "owner", &format!("owner: {}", body.decision), false).await?;
+    }
     // Score the work the decision covers, so each decision has a score to compare it with.
     let scoring = app.clone();
     tokio::spawn(async move {
@@ -922,10 +994,74 @@ async fn handle_socket(app: AppState, id: Uuid, socket: WebSocket) {
     forward.abort();
 }
 
+/// Who started a turn: the owner (a prompt), or the kernel continuing the workflow (flow.rs).
+#[derive(Clone, Copy, PartialEq)]
+enum Origin {
+    Owner,
+    Kernel,
+}
+
+/// The owner's prompt. With briefed work, it may approve a waiting brief instead of starting a
+/// turn, or start a new request after a report.
 async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
     if text.trim().is_empty() {
         return Ok(());
     }
+    if flow::enabled() {
+        match flow::state(&app.db, id).await?.as_str() {
+            "framing" => {
+                let waiting = flow::latest_brief(&app.db, id).await?.is_some_and(|(_, approved)| !approved);
+                if waiting && flow::is_approval(&text) && !app.is_busy(id).await {
+                    let user = json!({ "role": "user", "content": text, "timestamp": chrono::Utc::now().timestamp_millis() });
+                    append_tape(&app.db, id, "message", &user).await?;
+                    app.emit(id, json!({ "type": "message", "message": user })).await;
+                    tokio::spawn(flow::approve(app.clone(), id, "owner"));
+                    return Ok(());
+                }
+                if !tape::load(&app.db, id, &["message"]).await?.iter().any(|b| b.payload["role"] == "user") {
+                    flow::shadow_request(app, id, &text);
+                }
+            }
+            "reported" | "closed" => {
+                flow::set_state(app, id, "framing", "owner", "new request", false).await?;
+                flow::shadow_request(app, id, &text);
+            }
+            "verifying" => anyhow::bail!("the work is being verified; wait for the report"),
+            _ => {}
+        }
+    }
+    begin_turn(app, id, text, Origin::Owner).await
+}
+
+/// Start a turn the kernel asks for (the work after approval, fixes after a failed verification,
+/// a verifier's review).
+pub(crate) async fn start_kernel_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
+    begin_turn(app, id, text, Origin::Kernel).await
+}
+
+/// Run a child session of `kind` (e.g. a verifier) with one kernel prompt and wait for it to end.
+/// Returns the verdict it recorded (its latest `verdict` block), or null.
+pub(crate) async fn run_child(app: &AppState, parent: Uuid, kind: &str, prompt: &str, _dir: &std::path::Path) -> Result<Value> {
+    let child = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO sessions (id, title, model, effort, state, parent, kind)
+         SELECT $1, $2 || ': ' || title, model, effort, $3, id, $3 FROM sessions WHERE id = $4",
+    )
+    .bind(child)
+    .bind(kind)
+    .bind(kind)
+    .bind(parent)
+    .execute(&app.db)
+    .await?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.waiters.lock().await.insert(child, tx);
+    start_kernel_turn(app, child, prompt.to_string()).await?;
+    let _ = tokio::time::timeout(Duration::from_secs(1800), rx).await;
+    app.waiters.lock().await.remove(&child);
+    Ok(tape::load(&app.db, child, &["verdict"]).await?.last().map(|b| b.payload.clone()).unwrap_or(Value::Null))
+}
+
+async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: Origin) -> Result<()> {
     let row = sqlx::query("SELECT model, effort, title FROM sessions WHERE id = $1").bind(id).fetch_optional(&app.db).await?;
     let Some(row) = row else { anyhow::bail!("session not found") };
     let model: String = row.get("model");
@@ -965,6 +1101,7 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
                 sent: Value::Null,
                 cache_break: None,
                 prev_context: None,
+                ending: None,
             },
         );
     }
@@ -993,12 +1130,21 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
         // matched the tape (no other turn, summary or new instructions in between).
         let engine = model.split_once('/').map(|(e, _)| e).unwrap_or("");
         let last = tape::last(&app.db, id).await?;
-        let (envelope, new_envelope) = compile::envelope(&app.db, id, &app.workspace, &app.repo, &tools::specs()).await?;
+        // What the model is told and can use depends on the session's state (flow.rs).
+        let state = flow::state(&app.db, id).await?;
+        let base = compile::base_prompt(&app.db, id, &app.workspace, &app.repo).await?;
+        let brief = match state.as_str() {
+            "working" | "verifying" | "reported" => flow::latest_brief(&app.db, id).await?.filter(|(_, approved)| *approved).map(|(b, _)| b),
+            _ => None,
+        };
+        let tools = if state == "open" { tools::specs() } else { flow::tools_for(&state) };
+        let system = flow::system_for(&base, &state, brief.as_ref());
+        let (envelope, new_envelope) = compile::envelope(&app.db, id, &system, &tools).await?;
         let resume = match (&last, new_envelope) {
             (Some(b), None) if b.kind == "engine_session" && b.payload["engine"] == engine => Some(json!({ "id": b.payload["id"] })),
             _ => None,
         };
-        let blocks = tape::load(&app.db, id, &["message", "compaction"]).await?;
+        let blocks = tape::load(&app.db, id, &["message", "compaction", "state"]).await?;
         let (history, summary) = compile::history(&blocks);
         let today = chrono::Local::now().format("%Y-%m-%d (%A)").to_string();
         let turn_context = compile::turn_context(&blocks, &today);
@@ -1030,8 +1176,11 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
         if let Some(c) = &turn_context {
             user["context"] = json!(c);
         }
+        if origin == Origin::Kernel {
+            user["kernel"] = json!(true);
+        }
         append_tape(&app.db, id, "message", &user).await?;
-        if title.is_empty() {
+        if title.is_empty() && origin == Origin::Owner {
             let t: String = text.chars().take(60).collect();
             sqlx::query("UPDATE sessions SET title = $2 WHERE id = $1").bind(id).bind(t.trim()).execute(&app.db).await?;
         }
@@ -1121,12 +1270,13 @@ async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming) -> Result
             let name = p.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
             let call_id = p.get("call_id").and_then(Value::as_str).unwrap_or_default().to_string();
             let args = p.get("args").cloned().unwrap_or(json!({}));
-            let (mut cancel, model, turn_id) = {
+            let (mut cancel, model, turn_id, mut ending) = {
                 let mut turns = app.turns.lock().await;
                 let Some(t) = turns.get_mut(&id) else { return Ok(()) };
                 t.tools_running += 1;
-                (t.cancel.subscribe(), t.model.clone(), t.turn_id)
+                (t.cancel.subscribe(), t.model.clone(), t.turn_id, t.ending)
             };
+            let state = flow::state(&app.db, id).await.unwrap_or_else(|_| "open".into());
             // Commands can tell which session runs them (e.g. the commit-trailer hook in scripts/git-hooks).
             let session_env = id.to_string();
             let env = [("ZEN_SESSION_ID", session_env.as_str()), ("ZEN_MODEL", model.as_str())];
@@ -1138,11 +1288,18 @@ async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming) -> Result
             } else {
                 tokio::select! {
                     out = async {
-                        if name == "history" {
+                        // The workflow decides what may run in this state (flow.rs); then its own
+                        // tools, the history tool, or the kernel's built-ins.
+                        let refused = if state == "open" { None } else { flow::refuse(&state, &name, ending) };
+                        if let Some(why) = refused {
+                            tools::ToolOutput { content: why, is_error: true }
+                        } else if let Some(out) = flow::run_tool(app, id, &name, &args, &mut ending).await {
+                            out
+                        } else if name == "history" {
                             let (content, is_error) = compact::history_tool(&app.db, id, &args).await;
                             tools::ToolOutput { content, is_error }
                         } else {
-                            tools::execute(&app.workspace, &name, &args, &env).await
+                            tools::execute(&app.workspace, &name, &args, &env, flow::read_only(&state)).await
                         }
                     } => out,
                     _ = cancel.wait_for(|c| *c) => tools::ToolOutput { content: "interrupted: the turn was stopped before this tool finished".into(), is_error: true },
@@ -1156,6 +1313,9 @@ async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming) -> Result
                 match turns.get_mut(&id) {
                     Some(t) => {
                         t.tools_running = t.tools_running.saturating_sub(1);
+                        if ending.is_some() {
+                            t.ending = ending;
+                        }
                         t.last_activity = Instant::now();
                         candidates.into_iter().filter(|p| t.context.insert(p.clone())).collect()
                     }

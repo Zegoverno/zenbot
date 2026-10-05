@@ -143,9 +143,30 @@ struct Turn {
     cost: f64,
     model: String,
     effort: Option<String>,
-    /// The kernel's record of the turn (harness, engine, totals), sent with its end.
+    /// The kernel's record of the turn (harness, engine, totals), sent with its end. When the
+    /// workflow chains several turns (frame, work, verify), the totals of all of them.
     record: Value,
+    /// Each turn's record, in order (verifier turns included).
+    records: Vec<Value>,
     error: Option<String>,
+}
+
+/// Add a turn's record to the totals of a chain of turns. A cache break counts if any turn had an
+/// unexpected one (`history`, `miss`).
+fn add_record(total: &mut Value, r: &Value) {
+    if total.is_null() {
+        *total = r.clone();
+        return;
+    }
+    for k in ["duration_ms", "model_calls", "tool_calls", "tool_errors", "input_tokens", "output_tokens", "cache_read", "cache_write"] {
+        total[k] = json!(total[k].as_i64().unwrap_or(0) + r[k].as_i64().unwrap_or(0));
+    }
+    total["cost_usd"] = json!(total["cost_usd"].as_f64().unwrap_or(0.0) + r["cost_usd"].as_f64().unwrap_or(0.0));
+    let unexpected = |v: &Value| matches!(v.as_str(), Some("history" | "miss"));
+    if !unexpected(&total["cache_break"]) && unexpected(&r["cache_break"]) {
+        total["cache_break"] = r["cache_break"].clone();
+    }
+    total["context_tokens"] = r["context_tokens"].clone();
 }
 
 /// Send a prompt and stream the turn. `show` prints live text to stdout and tools to stderr.
@@ -210,18 +231,45 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
                         turn.output_tokens += ev["output"].as_i64().unwrap_or(0);
                         turn.cost += ev["cost"].as_f64().unwrap_or(0.0);
                     }
-                    "end" if started => {
+                    "end" | "child_end" if started => {
                         if let Some(e) = ev["error"].as_str() { turn.error = Some(e.to_string()); }
                         let r = &ev["turn"];
                         if r.is_object() {
                             // The kernel's totals cover the whole turn, side calls included.
-                            let n = |k: &str| r[k].as_i64().unwrap_or(0);
+                            turn.records.push(r.clone());
+                            add_record(&mut turn.record, r);
+                            let t = &turn.record;
+                            let n = |k: &str| t[k].as_i64().unwrap_or(0);
                             turn.input_tokens = n("input_tokens") + n("cache_read") + n("cache_write");
                             turn.output_tokens = n("output_tokens");
-                            turn.cost = r["cost_usd"].as_f64().unwrap_or(turn.cost);
-                            turn.record = r.clone();
+                            turn.cost = t["cost_usd"].as_f64().unwrap_or(turn.cost);
                         }
-                        return Ok(turn);
+                        // The workflow may continue on its own (approve and work, verify): wait for `idle`.
+                        if ev["type"] == "end" && ev["next"] != true {
+                            return Ok(turn);
+                        }
+                    }
+                    "idle" if started => return Ok(turn),
+                    "brief" | "report" if started => {
+                        let text = ev["text"].as_str().unwrap_or("");
+                        let title = if ev["type"] == "brief" { format!("Brief v{}", ev["version"]) } else { "Report".to_string() };
+                        if show { println!("\n── {title}\n{text}\n"); }
+                        if !turn.text.is_empty() { turn.text.push_str("\n\n"); }
+                        turn.text.push_str(&format!("{title}:\n{text}"));
+                    }
+                    "questions" if started => {
+                        let qs: Vec<String> = ev["questions"].as_array().into_iter().flatten().map(|q| {
+                            let opts: Vec<&str> = q["options"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                            format!("{}\n  {}", q["question"].as_str().unwrap_or(""), opts.join(" / "))
+                        }).collect();
+                        let text = qs.join("\n");
+                        if show { println!("\n── Questions\n{text}\n"); }
+                        if !turn.text.is_empty() { turn.text.push_str("\n\n"); }
+                        turn.text.push_str(&format!("Questions:\n{text}"));
+                    }
+                    "status" | "state" if started && show_tools => {
+                        let t = ev["text"].as_str().map(String::from).unwrap_or_else(|| format!("state: {}", ev["state"].as_str().unwrap_or("")));
+                        eprintln!("{}", dim(&format!("  · {t}")));
                     }
                     "resync" if started && ev["busy"] == false => {
                         turn.error.get_or_insert_with(|| "missed the end of the turn (client fell behind); see `zen sessions show`".into());
@@ -259,6 +307,7 @@ fn turn_json(session: &str, t: &Turn) -> Value {
         "model": t.model,
         "effort": t.effort,
         "turn": t.record,
+        "turns": t.records,
         "tools": t.tools,
         "usage": { "input_tokens": t.input_tokens, "output_tokens": t.output_tokens, "cost_usd_api_equivalent": t.cost },
         "error": t.error,

@@ -57,18 +57,36 @@ pub fn system_prompt(workspace: &Path, repo: &str) -> String {
     s
 }
 
-/// The session's envelope. The first turn writes one; later turns reuse it unchanged, unless the
-/// kernel's tools changed (an upgrade), which writes a new one with the same instructions.
-/// Returns it and, when a new one was written this turn, why (`new`, `tools`).
-pub async fn envelope(db: &PgPool, session: Uuid, workspace: &Path, repo: &str, tools: &Value) -> Result<(Envelope, Option<&'static str>)> {
+/// The session's base instructions, fixed for the session: written on its first turn (a `base`
+/// block), or, for a session from before briefed work, the instructions it was already using.
+pub async fn base_prompt(db: &PgPool, session: Uuid, workspace: &Path, repo: &str) -> Result<String> {
+    let blocks = tape::load(db, session, &["base", "envelope"]).await?;
+    if let Some(b) = blocks.iter().find(|b| b.kind == "base") {
+        return Ok(b.payload["text"].as_str().unwrap_or("").to_string());
+    }
+    if let Some(e) = blocks.iter().rev().find(|b| b.kind == "envelope") {
+        if let Some(env) = load_envelope(db, e.payload["hash"].as_str().unwrap_or("")).await? {
+            return Ok(env.system);
+        }
+    }
+    let text = system_prompt(workspace, repo);
+    tape::append(db, session, "base", &json!({ "text": text })).await?;
+    Ok(text)
+}
+
+/// The envelope for this turn: the session's latest one if it has exactly these instructions and
+/// tools, else a new one (stored once per distinct pair). Returns it and, when new, why
+/// (`new`, `instructions`: the session's state changed what the model is told, `tools`).
+pub async fn envelope(db: &PgPool, session: Uuid, system: &str, tools: &Value) -> Result<(Envelope, Option<&'static str>)> {
     let current = match tape::load(db, session, &["envelope"]).await?.last() {
         Some(b) => load_envelope(db, b.payload["hash"].as_str().unwrap_or("")).await?,
         None => None,
     };
-    let (system, reason) = match current {
-        Some(e) if &e.tools == tools => return Ok((e, None)),
-        Some(e) => (e.system, "tools"),
-        None => (system_prompt(workspace, repo), "new"),
+    let reason = match &current {
+        Some(e) if e.system == system && &e.tools == tools => return Ok((current.unwrap(), None)),
+        Some(e) if e.system == system => "tools",
+        Some(_) => "instructions",
+        None => "new",
     };
     let row = sqlx::query(
         "WITH h AS (SELECT encode(sha256(convert_to($1 || $2::jsonb::text, 'UTF8')), 'hex') AS hash)
@@ -76,13 +94,13 @@ pub async fn envelope(db: &PgPool, session: Uuid, workspace: &Path, repo: &str, 
          ON CONFLICT (hash) DO UPDATE SET hash = EXCLUDED.hash
          RETURNING hash",
     )
-    .bind(&system)
+    .bind(system)
     .bind(tools)
     .fetch_one(db)
     .await?;
     let hash: String = row.get("hash");
     tape::append(db, session, "envelope", &json!({ "hash": hash, "reason": reason })).await?;
-    Ok((Envelope { hash, system, tools: tools.clone() }, Some(reason)))
+    Ok((Envelope { hash, system: system.to_string(), tools: tools.clone() }, Some(reason)))
 }
 
 async fn load_envelope(db: &PgPool, hash: &str) -> Result<Option<Envelope>, sqlx::Error> {
@@ -117,7 +135,8 @@ pub struct SummaryRef {
 }
 
 /// The history to send: the latest summary (if any) as the first message, then every message after
-/// the blocks it covers, word for word and each with its number. Nothing already sent is rewritten,
+/// the blocks it covers (or after the start of the current work context), word for word and each
+/// with its number. Nothing already sent is rewritten,
 /// so each turn's history starts with the previous turn's (until the next summary).
 pub fn history(blocks: &[Block]) -> (Vec<Value>, Option<SummaryRef>) {
     let summary = blocks.iter().rev().find(|b| b.kind == "compaction").map(|b| {
@@ -128,7 +147,11 @@ pub fn history(blocks: &[Block]) -> (Vec<Value>, Option<SummaryRef>) {
         };
         (r, b.payload["text"].as_str().unwrap_or("").to_string(), b.payload["timestamp"].clone())
     });
-    let after = summary.as_ref().map(|(r, _, _)| r.to).unwrap_or(0);
+    // A new work context (an approved brief) starts the history afresh; earlier blocks stay on the
+    // tape for the history tool.
+    let fresh = blocks.iter().rev().find(|b| b.kind == "state" && b.payload["fresh"] == true).map(|b| b.seq).unwrap_or(0);
+    let summary = summary.filter(|(r, _, _)| r.seq > fresh);
+    let after = summary.as_ref().map(|(r, _, _)| r.to).unwrap_or(0).max(fresh);
     let mut out = Vec::new();
     if let Some((r, text, ts)) = &summary {
         out.push(json!({ "role": "user", "content": text, "summary": true, "seq": r.seq, "timestamp": ts }));
@@ -199,5 +222,9 @@ mod tests {
         assert_eq!(h[0]["summary"], true);
         assert_eq!(h[1]["seq"], 61, "messages after the covered blocks follow the summary");
         assert_eq!(h.len(), 1 + 20);
+        blocks.push(Block { seq: 82, kind: "state".into(), payload: json!({ "state": "working", "fresh": true }) });
+        blocks.push(msg(83, "user", json!("The brief is approved.")));
+        let (h, s) = history(&blocks);
+        assert_eq!((h.len(), s), (1, None), "an approved brief starts a fresh work context");
     }
 }
