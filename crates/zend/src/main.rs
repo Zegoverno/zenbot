@@ -2,6 +2,7 @@
 
 mod compile;
 mod context;
+mod measure;
 mod mind;
 mod score;
 mod tape;
@@ -65,6 +66,11 @@ struct Turn {
     model_resolved: Option<String>,
     /// The worker's `turn.usage` report, if any (engine, version, turn totals).
     reported: Value,
+    /// What the turn sent (measure::record) and why it can't reuse the cache, judged at the start.
+    sent: Value,
+    cache_break: Option<&'static str>,
+    /// The previous turn's context size, to check the provider really reused its cache.
+    prev_context: Option<i64>,
 }
 
 struct App {
@@ -363,6 +369,14 @@ async fn record_turn(app: &App, turn: &Turn, error: &Value) -> Result<Value> {
     };
     let r = &per_turn_report(app, turn).await?;
     let int = |k: &str| r.get(k).and_then(Value::as_i64);
+    let (first_read, context_tokens) = measure::provider_numbers(&app.db, turn.turn_id).await?;
+    let render = turn.reported["render"].as_str();
+    let cache_break = measure::break_at_end(turn.cache_break, render, turn.sent["resume_offered"] == true, first_read, turn.prev_context);
+    let mut sent = turn.sent.clone();
+    if !sent.is_null() {
+        sent["render"] = json!(render);
+        sent["first_cache_read"] = json!(first_read);
+    }
     let row = sqlx::query(
         "WITH calls AS (SELECT COUNT(*)::int AS n, SUM(input_tokens) AS i, SUM(output_tokens) AS o, SUM(cache_read) AS cr,
                                SUM(cache_write) AS cw, SUM(cost_usd) AS c FROM model_calls WHERE turn_id = $1),
@@ -372,10 +386,12 @@ async fn record_turn(app: &App, turn: &Turn, error: &Value) -> Result<Value> {
                 model_calls = (SELECT n FROM calls), tool_calls = (SELECT n FROM tools), tool_errors = (SELECT e FROM tools),
                 input_tokens = COALESCE($8, (SELECT i FROM calls), 0), output_tokens = COALESCE($9, (SELECT o FROM calls), 0),
                 cache_read = COALESCE($10, (SELECT cr FROM calls), 0), cache_write = COALESCE($11, (SELECT cw FROM calls), 0),
-                cost_usd = COALESCE($12, (SELECT c FROM calls), 0), usage = $13
+                cost_usd = COALESCE($12, (SELECT c FROM calls), 0), usage = $13,
+                cache_break = $14, context_tokens = $15, context = COALESCE($16, context)
          WHERE id = $1
          RETURNING id, harness, worker, engine, engine_version, model, model_resolved, effort, duration_ms, outcome,
-                   model_calls, tool_calls, tool_errors, input_tokens, output_tokens, cache_read, cache_write, cost_usd",
+                   model_calls, tool_calls, tool_errors, input_tokens, output_tokens, cache_read, cache_write, cost_usd,
+                   cache_break, context_tokens, context->>'render' AS render",
     )
     .bind(turn.turn_id)
     .bind(turn.started.elapsed().as_millis() as i64)
@@ -390,6 +406,9 @@ async fn record_turn(app: &App, turn: &Turn, error: &Value) -> Result<Value> {
     .bind(int("cache_write"))
     .bind(r.get("cost_usd").and_then(Value::as_f64))
     .bind(if turn.reported.is_null() { None } else { Some(&turn.reported) })
+    .bind(&cache_break)
+    .bind(context_tokens)
+    .bind(if sent.is_null() { None } else { Some(&sent) })
     .fetch_one(&app.db)
     .await?;
     Ok(turn_json(&row))
@@ -444,6 +463,9 @@ fn turn_json(r: &sqlx::postgres::PgRow) -> Value {
         "cache_read": r.get::<Option<i64>, _>("cache_read"),
         "cache_write": r.get::<Option<i64>, _>("cache_write"),
         "cost_usd": r.get::<Option<f64>, _>("cost_usd"),
+        "cache_break": r.get::<Option<String>, _>("cache_break"),
+        "context_tokens": r.get::<Option<i64>, _>("context_tokens"),
+        "render": r.get::<Option<String>, _>("render"),
     })
 }
 
@@ -893,19 +915,14 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
                 started: Instant::now(),
                 model_resolved: None,
                 reported: Value::Null,
+                sent: Value::Null,
+                cache_break: None,
+                prev_context: None,
             },
         );
     }
     let res = async {
-        sqlx::query("INSERT INTO turns (id, session_id, harness, worker, model, effort) VALUES ($1, $2, $3, $4, $5, $6)")
-            .bind(turn_id)
-            .bind(id)
-            .bind(&app.harness)
-            .bind(&app.workers[widx].name)
-            .bind(&model)
-            .bind(&effort)
-            .execute(&app.db)
-            .await?;
+        let prev = measure::previous(&app.db, id).await?;
         // The engine's own session can be resumed only if nothing was written since it last
         // matched the tape (no other turn, summary or new instructions in between).
         let engine = model.split_once('/').map(|(e, _)| e).unwrap_or("");
@@ -916,12 +933,32 @@ async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
             _ => None,
         };
         let blocks = tape::load(&app.db, id, &["message", "compaction"]).await?;
-        let (history, _summary) = compile::history(&blocks);
+        let (history, summary) = compile::history(&blocks);
         let today = chrono::Local::now().format("%Y-%m-%d (%A)").to_string();
         let turn_context = compile::turn_context(&blocks, &today);
+        let sent = measure::record(&envelope.system, &envelope.tools, &history, &summary, &text, &turn_context, resume.is_some(), new_envelope);
+        let cache_break = measure::break_at_start(prev.as_ref(), &model, &envelope.hash, &sent);
+        sqlx::query(
+            "INSERT INTO turns (id, session_id, harness, worker, model, effort, envelope, context, cache_break)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(turn_id)
+        .bind(id)
+        .bind(&app.harness)
+        .bind(&app.workers[widx].name)
+        .bind(&model)
+        .bind(&effort)
+        .bind(&envelope.hash)
+        .bind(&sent)
+        .bind(cache_break)
+        .execute(&app.db)
+        .await?;
         let extra = load_context(&app.db, id).await?;
         if let Some(t) = app.turns.lock().await.get_mut(&id) {
             t.context = extra.iter().cloned().collect();
+            t.sent = sent;
+            t.cache_break = cache_break;
+            t.prev_context = prev.as_ref().and_then(|p| p.context_tokens);
         }
         let mut user = json!({ "role": "user", "content": text, "timestamp": chrono::Utc::now().timestamp_millis() });
         if let Some(c) = &turn_context {

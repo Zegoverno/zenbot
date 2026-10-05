@@ -14,6 +14,8 @@ cat "$OUT"/base.jsonl "$OUT"/new.jsonl 2>/dev/null | jq -rs '
     cache_in: ([.turns[] | .turn | select(.) | .input_tokens + .cache_read + .cache_write] | add),
     secs: (([.turns[] | .client_ms // 0] | add // 0) / 1000),
     tool_errors: ([.turns[] | .turn.tool_errors // 0] | add // 0),
+    # Unexpected cache breaks (measure.rs): history rewritten, or a miss nothing explains. Older kernels record none.
+    breaks: (if any(.turns[]; .turn | has("cache_break")) then ([.turns[] | .turn.cache_break // empty | select(. == "history" or . == "miss")] | length) else null end),
     turns: (.turns | length)
   };
   def mean(f): if length == 0 then null else (map(f) | add) / length end;
@@ -21,6 +23,7 @@ cat "$OUT"/base.jsonl "$OUT"/new.jsonl 2>/dev/null | jq -rs '
     runs: length,
     passed: (map(select(.passed)) | length),
     cost: mean(.cost), tokens: mean(.tokens), secs: mean(.secs), tool_errors: mean(.tool_errors),
+    breaks: (if any(.breaks != null) then mean(.breaks // 0) else null end),
     cache: (if any(.cache_in != null) then ((map(.cache_read // 0) | add) / ([map(.cache_in // 0) | add, 1] | max)) else null end)
   };
   def money: if . == null then "–" else "$" + ((. * 1000 | round) / 1000 | tostring) end;
@@ -60,24 +63,24 @@ cat "$OUT"/base.jsonl "$OUT"/new.jsonl 2>/dev/null | jq -rs '
         + (if ($engines_all | map(split(" ")[0]) | unique | length) < ($engines_all | length) then "  ⚠ engine versions differ between runs; the comparison is not clean" else "" end),
       "",
       (if $mode == "both" then
-        "| task | passed | cost | tokens | cache hit | time | tool errors |",
-        "|---|---|---|---|---|---|---|",
+        "| task | passed | cost | tokens | cache hit | time | tool errors | cache breaks |",
+        "|---|---|---|---|---|---|---|---|",
         ($rows[] | .value as $v | "| \(if .regressed then "⚠ " else "" end)\(.key) | \($v.base.passed)/\($v.base.runs) → \($v.new.passed)/\($v.new.runs) | "
           + ($v | pair(.cost; money)) + " | " + ($v | pair(.tokens; kilo)) + " | " + ($v | pair(.cache; pct)) + " | "
-          + ($v | pair(.secs; secs)) + " | " + ($v | pair(.tool_errors; kilo)) + " |"),
+          + ($v | pair(.secs; secs)) + " | " + ($v | pair(.tool_errors; kilo)) + " | " + ($v | pair(.breaks; kilo)) + " |"),
         "| **total** | \($total.base.passed)/\($total.base.runs) → \($total.new.passed)/\($total.new.runs) | "
           + ($total | pair(.cost; money)) + " | " + ($total | pair(.tokens; kilo)) + " | " + ($total | pair(.cache; pct)) + " | "
-          + ($total | pair(.secs; secs)) + " | " + ($total | pair(.tool_errors; kilo)) + " |",
+          + ($total | pair(.secs; secs)) + " | " + ($total | pair(.tool_errors; kilo)) + " | " + ($total | pair(.breaks; kilo)) + " |",
         "",
         (if ([$all[] | select(.harness == "base") | .turns[] | .turn | select(.)] | length) == 0 then
           "Base has no turn records (built before tracing): its tokens are the counts its stream showed, which miss output and side calls, so compare cost instead; its cache hit is unknown.\n" else empty end),
-        "Cost, tokens, cache hit, time (summed over the turns, as the client saw them) and tool errors are means per run. ⚠ marks a task that passed less often, or got over 20% slower or more expensive."
+        "Cost, tokens, cache hit, time (summed over the turns, as the client saw them), tool errors and unexpected cache breaks (history rewritten, or a cache miss nothing explains; – when the build records none) are means per run. ⚠ marks a task that passed less often, or got over 20% slower or more expensive."
       else
         ($total | if $mode == "new" then .new else .base end) as $t |
-        "| task | passed | cost | tokens | cache hit | time | tool errors |",
-        "|---|---|---|---|---|---|---|",
-        ($rows[] | .value | (if $mode == "new" then .new else .base end) as $v | "| \(.key // "") | \($v.passed)/\($v.runs) | \($v.cost | money) | \($v.tokens | kilo) | \($v.cache | pct) | \($v.secs | secs) | \($v.tool_errors | kilo) |"),
-        "| **total** | \($t.passed)/\($t.runs) | \($t.cost | money) | \($t.tokens | kilo) | \($t.cache | pct) | \($t.secs | secs) | \($t.tool_errors | kilo) |"
+        "| task | passed | cost | tokens | cache hit | time | tool errors | cache breaks |",
+        "|---|---|---|---|---|---|---|---|",
+        ($rows[] | .value | (if $mode == "new" then .new else .base end) as $v | "| \(.key // "") | \($v.passed)/\($v.runs) | \($v.cost | money) | \($v.tokens | kilo) | \($v.cache | pct) | \($v.secs | secs) | \($v.tool_errors | kilo) | \($v.breaks | kilo) |"),
+        "| **total** | \($t.passed)/\($t.runs) | \($t.cost | money) | \($t.tokens | kilo) | \($t.cache | pct) | \($t.secs | secs) | \($t.tool_errors | kilo) | \($t.breaks | kilo) |"
       end),
       "",
       "Failed checks:",
