@@ -3,6 +3,7 @@
 mod context;
 mod mind;
 mod score;
+mod tape;
 mod tools;
 mod update;
 
@@ -144,6 +145,9 @@ async fn main() -> Result<()> {
     let mut migrator = sqlx::migrate!("./migrations");
     migrator.set_ignore_missing(true);
     migrator.run(&db).await?;
+    if tape::repair(&db).await? > 0 {
+        tracing::warn!("numbered tape blocks an older build wrote");
+    }
 
     let updater = Arc::new(update::Updater::new(PathBuf::from(&repo_dir)));
     let harness = std::env::var("ZEN_HARNESS").ok().filter(|h| !h.is_empty()).unwrap_or_else(|| updater.running());
@@ -728,12 +732,17 @@ async fn decide(State(app): State<AppState>, Path(id): Path<Uuid>, Json(body): J
     })))
 }
 
+/// A session's messages in order, each with its block number (`seq`).
 async fn load_messages(db: &PgPool, id: Uuid) -> Result<Vec<Value>, sqlx::Error> {
-    let rows = sqlx::query("SELECT payload FROM tape_events WHERE session_id = $1 AND kind = 'message' ORDER BY id")
-        .bind(id)
-        .fetch_all(db)
-        .await?;
-    Ok(rows.into_iter().map(|r| r.get::<Value, _>("payload")).collect())
+    Ok(tape::load(db, id, &["message"])
+        .await?
+        .into_iter()
+        .map(|b| {
+            let mut m = b.payload;
+            m["seq"] = json!(b.seq);
+            m
+        })
+        .collect())
 }
 
 /// Keep long sessions within the context window: older tool outputs are trimmed
@@ -765,13 +774,9 @@ fn prune_history(mut history: Vec<Value>) -> Vec<Value> {
 
 /// Instruction files recorded for a session (tape kind `context`), oldest first.
 async fn load_context(db: &PgPool, id: Uuid) -> Result<Vec<PathBuf>, sqlx::Error> {
-    let rows = sqlx::query("SELECT payload FROM tape_events WHERE session_id = $1 AND kind = 'context' ORDER BY id")
-        .bind(id)
-        .fetch_all(db)
-        .await?;
     let mut out: Vec<PathBuf> = Vec::new();
-    for r in rows {
-        if let Some(p) = r.get::<Value, _>("payload")["path"].as_str().map(PathBuf::from) {
+    for b in tape::load(db, id, &["context"]).await? {
+        if let Some(p) = b.payload["path"].as_str().map(PathBuf::from) {
             if !out.contains(&p) {
                 out.push(p);
             }
@@ -781,14 +786,7 @@ async fn load_context(db: &PgPool, id: Uuid) -> Result<Vec<PathBuf>, sqlx::Error
 }
 
 async fn append_tape(db: &PgPool, id: Uuid, kind: &str, payload: &Value) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO tape_events (session_id, kind, payload) VALUES ($1, $2, $3)")
-        .bind(id)
-        .bind(kind)
-        .bind(payload)
-        .execute(db)
-        .await?;
-    sqlx::query("UPDATE sessions SET updated_at = now() WHERE id = $1").bind(id).execute(db).await?;
-    Ok(())
+    tape::append(db, id, kind, payload).await.map(|_| ())
 }
 
 // ---------- websocket ----------
