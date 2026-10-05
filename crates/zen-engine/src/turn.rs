@@ -9,6 +9,7 @@ use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 
 use crate::rpc::Rpc;
+use zen_proto::text_of;
 
 /// What the kernel sent for a turn (`turn.start`, docs/worker-protocol.md).
 #[derive(Clone, Debug, Default)]
@@ -151,14 +152,6 @@ pub fn enabled(var: &str) -> bool {
 
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
-}
-
-fn text_of(content: &Value) -> String {
-    match content {
-        Value::String(s) => s.clone(),
-        Value::Array(parts) => parts.iter().filter(|p| p["type"] == "text").filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n"),
-        _ => String::new(),
-    }
 }
 
 /// The text a user message carries: what the owner typed, then the turn context sent with it.

@@ -656,7 +656,7 @@ async fn run_check(dir: &Path, run: &str, expect: Option<&str>) -> Value {
     match tokio::time::timeout(Duration::from_secs(600), cmd).await {
         Ok(Ok(o)) => {
             let text = crate::secrets::mask(&format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)));
-            let tail: String = text.chars().rev().take(3000).collect::<Vec<_>>().into_iter().rev().collect();
+            let tail = zen_proto::tail(&text, 3000);
             let found = expect.is_none_or(|e| text.contains(e));
             json!({ "ok": o.status.success() && found, "exit": o.status.code(), "expect_found": found, "output": tail })
         }
@@ -800,7 +800,7 @@ async fn verify_inner(app: &AppState, session: Uuid) -> Result<()> {
         let list: Vec<String> = failed
             .iter()
             .map(|r| {
-                let why = r["evidence"].as_str().map(String::from).or_else(|| r["check"]["output"].as_str().map(|o| o.chars().rev().take(600).collect::<Vec<_>>().into_iter().rev().collect())).unwrap_or_default();
+                let why = r["evidence"].as_str().map(String::from).or_else(|| r["check"]["output"].as_str().map(|o| zen_proto::tail(o, 600))).unwrap_or_default();
                 format!("- [{}] {}: {}", r["id"].as_str().unwrap_or(""), r["text"].as_str().unwrap_or(""), why)
             })
             .collect();

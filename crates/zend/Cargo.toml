@@ -6,6 +6,7 @@ license.workspace = true
 description = "zenbot kernel"
 
 [dependencies]
+zen-proto = { path = "../zen-proto" }
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 chrono = { version = "0.4", features = ["serde"] }

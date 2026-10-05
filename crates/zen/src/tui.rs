@@ -11,6 +11,7 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use zen_proto::text_of;
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -343,14 +344,6 @@ fn fmt_tokens(n: i64) -> String {
         format!("{:.1}k", n as f64 / 1000.0)
     } else {
         n.to_string()
-    }
-}
-
-fn text_of(content: &Value) -> String {
-    match content {
-        Value::String(s) => s.clone(),
-        Value::Array(parts) => parts.iter().filter(|c| c["type"] == "text").filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join(""),
-        _ => String::new(),
     }
 }
 

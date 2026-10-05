@@ -17,6 +17,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::App;
+use zen_proto::text_of;
 
 pub const QUESTIONS_VERSION: &str = "v1";
 /// Most text sent per session; older turns are dropped first (a long state also lowers accuracy).
@@ -86,23 +87,8 @@ pub fn questions() -> Value {
     })
 }
 
-fn text_of(content: &Value) -> String {
-    match content {
-        Value::String(s) => s.clone(),
-        Value::Array(parts) => parts.iter().filter(|p| p["type"] == "text").filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n"),
-        _ => String::new(),
-    }
-}
-
 fn cap(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
+    zen_proto::head(s, max)
 }
 
 /// What the scorer sees: each user message and the agent's last text before the next one (its

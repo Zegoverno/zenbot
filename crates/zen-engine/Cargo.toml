@@ -6,6 +6,7 @@ license.workspace = true
 description = "zenbot worker that runs turns on the Claude Code and Codex CLIs (subscription sign-ins)"
 
 [dependencies]
+zen-proto = { path = "../zen-proto" }
 anyhow = "1"
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }

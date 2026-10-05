@@ -2948,6 +2948,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.27.0",
  "unicode-width",
+ "zen-proto",
 ]
 
 [[package]]
@@ -2957,6 +2958,14 @@ dependencies = [
  "anyhow",
  "serde_json",
  "tokio",
+ "zen-proto",
+]
+
+[[package]]
+name = "zen-proto"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -2974,6 +2983,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zen-proto",
 ]
 
 [[package]]

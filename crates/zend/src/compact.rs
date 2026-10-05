@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::tape::{self, Block};
 use crate::App;
+use zen_proto::{head, text_of};
 
 /// Limits, from the environment. The budget is what a session may grow to before it is summarized:
 /// the model's window if smaller, otherwise ZEN_CONTEXT_TOKENS (long contexts cost more and read
@@ -100,19 +101,7 @@ environment you are told about is yours, not the session's: never mention it.";
 
 /// One message as a numbered transcript line; long text is cut to `max` characters.
 pub fn render_message(seq: i32, m: &Value, max: usize) -> String {
-    let cut = |t: &str| -> String {
-        if t.chars().count() <= max {
-            t.to_string()
-        } else {
-            let head: String = t.chars().take(max).collect();
-            format!("{head} [… {} more characters]", t.chars().count() - max)
-        }
-    };
-    let text_of = |c: &Value| match c {
-        Value::String(s) => s.clone(),
-        Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n"),
-        _ => String::new(),
-    };
+    let cut = |t: &str| head(t, max);
     match m["role"].as_str() {
         Some("user") => format!("#{seq} User: {}", cut(&text_of(&m["content"]))),
         Some("assistant") => {
@@ -214,11 +203,6 @@ pub fn render(data: &Value, from: i32, to: i32) -> String {
 /// since, the files tools touched, and the last answer.
 pub fn fallback(previous: Option<&Value>, msgs: &[&Block]) -> Value {
     let short = |t: &str, n: usize| -> String { t.chars().take(n).collect() };
-    let text_of = |c: &Value| match c {
-        Value::String(s) => s.clone(),
-        Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join(" "),
-        _ => String::new(),
-    };
     let users: Vec<&&Block> = msgs.iter().filter(|b| b.payload["role"] == "user").collect();
     let goal = previous
         .and_then(|p| p["goal"].as_str().map(String::from))

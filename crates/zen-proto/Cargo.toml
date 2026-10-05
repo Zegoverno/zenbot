@@ -1,0 +1,9 @@
+[package]
+name = "zen-proto"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "zenbot's shared message helpers (kernel, workers, CLI)"
+
+[dependencies]
+serde_json = "1"
