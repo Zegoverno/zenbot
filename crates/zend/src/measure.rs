@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::compile::SummaryRef;
+use crate::compile::{Envelope, SummaryRef};
 
 /// The parts of the previous turn that decide whether this one can reuse its cache.
 #[derive(Clone, Debug, Default)]
@@ -68,7 +68,8 @@ pub fn cache_ttl_secs(model: &str) -> i64 {
 }
 
 /// The record of what a turn sends.
-pub fn record(system: &str, tools: &Value, history: &[Value], summary: &Option<SummaryRef>, prompt: &str, turn_context: &Option<String>, resume: bool, new_envelope: Option<&str>) -> Value {
+pub fn record(envelope: &Envelope, history: &[Value], summary: &Option<SummaryRef>, prompt: &str, turn_context: &Option<String>, resume: bool, new_envelope: Option<&str>) -> Value {
+    let (system, tools) = (&envelope.system, &envelope.tools);
     let messages: Vec<&Value> = history.iter().filter(|m| m["summary"] != true).collect();
     let bytes = |v: &Value| v.to_string().len();
     let history_bytes: usize = history.iter().map(bytes).sum();

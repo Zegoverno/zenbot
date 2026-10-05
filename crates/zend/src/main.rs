@@ -1154,7 +1154,7 @@ async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: Origin) -> R
         let today = chrono::Local::now().format("%Y-%m-%d (%A)").to_string();
         let phase = flow::phase_line(&state, brief_version);
         let turn_context = compile::turn_context(&blocks, &today, phase.as_deref());
-        let sent = measure::record(&envelope.system, &envelope.tools, &history, &summary, &text, &turn_context, resume.is_some(), new_envelope);
+        let sent = measure::record(&envelope, &history, &summary, &text, &turn_context, resume.is_some(), new_envelope);
         let cache_break = measure::break_at_start(prev.as_ref(), &model, &envelope.hash, &sent);
         sqlx::query(
             "INSERT INTO turns (id, session_id, harness, worker, model, effort, envelope, context, cache_break)

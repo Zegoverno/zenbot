@@ -191,7 +191,7 @@ pub fn render(data: &Value, from: i32, to: i32) -> String {
         (from + 2).min(to)
     );
     let text = |k: &str| data[k].as_str().map(str::trim).filter(|t| !t.is_empty());
-    let list = |k: &str, f: &dyn Fn(&Value) -> String| -> Vec<String> { data[k].as_array().into_iter().flatten().map(|i| f(i)).collect() };
+    let list = |k: &str, f: &dyn Fn(&Value) -> String| -> Vec<String> { data[k].as_array().into_iter().flatten().map(f).collect() };
     let plain = |i: &Value| format!("- {}{}", i["text"].as_str().unwrap_or(""), refs(i));
     let file = |i: &Value| format!("- {}: {}{}", i["path"].as_str().unwrap_or(""), i["note"].as_str().unwrap_or(""), refs(i));
     let mut section = |title: &str, body: Vec<String>| {
@@ -458,7 +458,7 @@ mod tests {
 
     #[test]
     fn fallback_keeps_requests_and_files() {
-        let blocks = vec![
+        let blocks = [
             Block { seq: 1, kind: "message".into(), payload: json!({ "role": "user", "content": "fix the importer" }) },
             Block { seq: 2, kind: "message".into(), payload: json!({ "role": "assistant", "content": [{ "type": "toolCall", "name": "read", "arguments": { "path": "src/import.rs" } }] }) },
             Block { seq: 3, kind: "message".into(), payload: json!({ "role": "assistant", "content": [{ "type": "text", "text": "Fixed." }] }) },

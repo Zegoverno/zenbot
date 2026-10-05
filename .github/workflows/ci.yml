@@ -1,0 +1,33 @@
+# Checks every push and pull request: build, unit tests, clippy with warnings as errors, and the
+# kernel's end-to-end scenarios (scripts/e2e.sh: the scripted faux model, a throwaway database).
+name: ci
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Tools for the end-to-end scenarios
+        run: sudo apt-get install -y --no-install-recommends bubblewrap jq
+      - name: Postgres
+        run: docker compose -f deploy/compose.yaml up -d --wait postgres
+      - name: Build
+        run: cargo build --release --locked
+      - name: Unit tests
+        run: cargo test --release --locked
+      - name: Clippy
+        run: cargo clippy --release --locked --all-targets -- -D warnings
+      - name: End-to-end scenarios
+        run: ZEN_E2E_NO_BUILD=1 scripts/e2e.sh

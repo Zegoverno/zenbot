@@ -9,10 +9,13 @@ use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{oneshot, Mutex};
 
+/// Requests to the kernel waiting for their answer, by id.
+type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
+
 #[derive(Clone)]
 pub struct Rpc {
     out: Arc<Mutex<tokio::io::Stdout>>,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>,
+    pending: Pending,
     next: Arc<AtomicU64>,
 }
 

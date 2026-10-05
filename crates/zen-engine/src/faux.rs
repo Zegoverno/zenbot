@@ -27,8 +27,8 @@ pub fn models() -> Vec<Value> {
 /// workflow phase (`frame`, `work`, `verify`, else `default`, from the turn context or the
 /// verifier's instructions), so one script can drive a whole briefed session.
 fn script(input: &TurnInput) -> Result<Vec<Value>> {
-    match std::env::var("ZEN_FAUX_SCRIPT") {
-        Ok(path) => {
+    match std::env::var("ZEN_FAUX_SCRIPT").ok().filter(|p| !p.trim().is_empty()) {
+        Some(path) => {
             let text = std::fs::read_to_string(&path).with_context(|| format!("reading ZEN_FAUX_SCRIPT {path}"))?;
             let v: Value = serde_json::from_str(&text).context("ZEN_FAUX_SCRIPT must be JSON")?;
             // The phase is in the latest turn context (the prompt's, else the history's).
@@ -48,7 +48,7 @@ fn script(input: &TurnInput) -> Result<Vec<Value>> {
             let steps = if v.is_object() { v.get(phase).or_else(|| v.get("default")).cloned().unwrap_or(json!([])) } else { v };
             serde_json::from_value(steps).context("ZEN_FAUX_SCRIPT must be a list of steps, or an object of them")
         }
-        Err(_) => Ok(vec![
+        None => Ok(vec![
             json!({ "tool": "bash", "args": { "command": "echo zen-ok" } }),
             json!({ "text": "Smoke test passed: I ran a command through the kernel." }),
         ]),
