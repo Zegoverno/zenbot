@@ -153,7 +153,18 @@ secrets_masked() {
   check "no tool output holds the token's value" eq "$(q "SELECT count(*) FROM tape_events WHERE payload->>'role'='toolResult' AND payload::text LIKE '%AbCdEfGhIjKlMnOp%'")" 0
 }
 
+restart_recovery() {
+  local ws; ws=$(new_workspace restart)
+  start_kernel "$ws" ""
+  local sid; sid=$(zen sessions new --json | jq -r .id)
+  q "UPDATE sessions SET state = 'verifying' WHERE id = '$sid'" >/dev/null
+  stop_kernel
+  start_kernel "$ws" ""
+  check "a verification cut short by a restart goes back to work" eq "$(q "SELECT state FROM sessions WHERE id='$sid'")" working
+}
+
 run open-loop open_loop
+run restart-recovery restart_recovery
 run workflow-pass workflow_pass
 run workflow-approval-and-rounds workflow_approval_and_rounds
 run summaries summaries

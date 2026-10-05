@@ -1,8 +1,9 @@
 //! Briefed work (docs/brief.md): frame → approve → work → verify → report → close.
 //!
-//! Every session starts in `framing`: read-only (no write tools, `bash` in a read-only sandbox),
-//! where the model answers directly or proposes a brief. An approved brief (by the owner, or
-//! automatically per route) starts the work in a fresh context seeded with it. `submit_work` starts
+//! A session is one job. It starts in `framing`: read-only (writes refused, `bash` in a read-only
+//! sandbox), where the model answers directly or proposes a brief. An approved brief (by the owner,
+//! or automatically per route) starts the work: in the same context for small work, in a fresh one
+//! with the brief in the instructions for architectural work. `submit_work` starts
 //! verification: the kernel runs the criteria's commands, a fresh verifier (a child session) judges
 //! the rest, failures go back to work a bounded number of times, then the session is reported and,
 //! where allowed, closed with the model's verdict (the owner's always replaces it).
@@ -413,8 +414,10 @@ If a question goes unanswered, take your recommended option and record it as an 
             resolve_shadow(&app.db, session, "work", args["work"].as_str(), "model").await;
             app.emit(session, json!({ "type": "brief", "version": version, "brief": args, "text": render_brief(args) })).await;
             *ending = Some("brief proposed");
-            let next = if auto_approve(args["route"].as_str().unwrap_or("")) { "it is approved automatically" } else { "the owner approves it" };
-            out(format!("Brief v{version} recorded; {next} and the work starts in a fresh context. End your turn now with one line."), false)
+            let route = args["route"].as_str().unwrap_or("");
+            let next = if auto_approve(route) { "it is approved automatically" } else { "the owner approves it" };
+            let context = if fresh_context(route) { "in a fresh context with the brief in the instructions" } else { "here, with the brief as a message" };
+            out(format!("Brief v{version} recorded; {next} and the work continues {context}. End your turn now with one line."), false)
         }
         "note_ruling" => {
             let r = json!({ "what": args["what"], "why": args["why"], "cost_if_wrong": args["cost_if_wrong"] });
@@ -591,11 +594,15 @@ fn repo_of(app: &App, brief: &Value) -> std::path::PathBuf {
     brief["context"]["repo"].as_str().map(|r| tools::resolve(&app.workspace, r)).unwrap_or_else(|| app.workspace.clone())
 }
 
-/// Approve the waiting brief and start the work in a fresh context: the brief goes into the
-/// instructions, the framing chat isn't replayed (the history tool still reads it), the routing
-/// policy may pick the model.
+/// Approve the waiting brief and start the work: in the same context with the brief as a message,
+/// or (architectural work) in a fresh context with the brief in the instructions, where the
+/// framing chat isn't replayed (the history tool still reads it). The routing policy may pick the
+/// model.
 pub async fn approve(app: AppState, session: Uuid, by: &'static str) {
-    if let Err(e) = approve_inner(&app, session, by).await {
+    app.background.lock().await.insert(session);
+    let res = approve_inner(&app, session, by).await;
+    app.background.lock().await.remove(&session);
+    if let Err(e) = res {
         tracing::error!("approving the brief for {session}: {e:#}");
         app.emit(session, json!({ "type": "error", "error": format!("couldn't start the work: {e:#}") })).await;
         app.emit(session, json!({ "type": "idle", "state": "framing" })).await;
@@ -682,7 +689,10 @@ fn diff_since(repo: &Path, head: Option<&str>) -> String {
 
 /// Verify the submitted work, then send it back to work or report it.
 pub async fn verify(app: AppState, session: Uuid) {
-    if let Err(e) = verify_inner(&app, session).await {
+    app.background.lock().await.insert(session);
+    let res = verify_inner(&app, session).await;
+    app.background.lock().await.remove(&session);
+    if let Err(e) = res {
         tracing::error!("verifying session {session}: {e:#}");
         let _ = report(&app, session, &json!([]), None, Some(&format!("verification failed to run: {e:#}"))).await;
     }

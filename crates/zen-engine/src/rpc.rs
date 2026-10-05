@@ -50,7 +50,14 @@ impl Rpc {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
         self.write(json!({ "id": id, "method": method, "params": params })).await;
-        rx.await.map_err(|_| anyhow!("kernel dropped request"))?.map_err(|e| anyhow!(e))
+        // A tool may run for up to 10 minutes; past an hour the kernel has lost the request.
+        match tokio::time::timeout(std::time::Duration::from_secs(3600), rx).await {
+            Ok(r) => r.map_err(|_| anyhow!("kernel dropped request"))?.map_err(|e| anyhow!(e)),
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                Err(anyhow!("the kernel didn't answer `{method}` within an hour"))
+            }
+        }
     }
 
     /// Route a response from the kernel to the waiting request.

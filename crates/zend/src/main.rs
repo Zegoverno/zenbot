@@ -100,6 +100,9 @@ struct App {
     compacting: Mutex<HashSet<Uuid>>,
     /// Kernel-started turns being waited for (verifier sessions), by session.
     waiters: Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<()>>>,
+    /// Sessions with workflow steps running outside a turn (approval, verification), counted as
+    /// busy so an upgrade waits for them.
+    pub(crate) background: Mutex<HashSet<Uuid>>,
 }
 
 type AppState = Arc<App>;
@@ -201,7 +204,12 @@ async fn main() -> Result<()> {
         updater,
         compacting: Mutex::new(HashSet::new()),
         waiters: Mutex::new(HashMap::new()),
+        background: Mutex::new(HashSet::new()),
     });
+    // A verification a restart cut short can't resume: send the work back so the session isn't stuck.
+    for id in sqlx::query_scalar::<_, Uuid>("SELECT id FROM sessions WHERE state = 'verifying'").fetch_all(&app.db).await? {
+        flow::set_state(&app, id, "working", "kernel", "verification was interrupted by a restart; submit the work again", false).await?;
+    }
     tokio::spawn(app.updater.clone().check_periodically());
     for (idx, exited) in exits.into_iter().enumerate() {
         tokio::spawn(supervise(app.clone(), idx, exited, merged_tx.clone()));
@@ -571,7 +579,7 @@ async fn health(State(app): State<AppState>) -> Json<Value> {
         workers.insert(w.name.clone(), json!(w.mind().request("ping", json!({})).await.is_ok()));
     }
     let mind = workers.values().all(|v| v == true);
-    let busy = app.turns.lock().await.len();
+    let busy = app.turns.lock().await.len() + app.background.lock().await.len();
     Json(json!({ "ok": db && mind, "db": db, "mind": mind, "workers": workers, "busy": busy,
                  "version": env!("CARGO_PKG_VERSION"), "commit": app.updater.running() }))
 }
@@ -1058,8 +1066,22 @@ pub(crate) async fn run_child(app: &AppState, parent: Uuid, kind: &str, prompt: 
     .await?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.waiters.lock().await.insert(child, tx);
-    start_kernel_turn(app, child, prompt.to_string()).await?;
-    let _ = tokio::time::timeout(Duration::from_secs(1800), rx).await;
+    if let Err(e) = start_kernel_turn(app, child, prompt.to_string()).await {
+        app.waiters.lock().await.remove(&child);
+        return Err(e);
+    }
+    if tokio::time::timeout(Duration::from_secs(1800), rx).await.is_err() {
+        tracing::warn!("{kind} session {child} took over 30 minutes; stopping it");
+        // Abort it as a user abort would; the watchdog ends it if it lingers.
+        let worker = app.turns.lock().await.get_mut(&child).map(|t| {
+            let _ = t.cancel.send(true);
+            t.abort_sent.get_or_insert_with(Instant::now);
+            t.worker
+        });
+        if let Some(w) = worker {
+            let _ = app.workers[w].mind().request("turn.abort", json!({ "session_id": child })).await;
+        }
+    }
     app.waiters.lock().await.remove(&child);
     Ok(tape::load(&app.db, child, &["verdict"]).await?.last().map(|b| b.payload.clone()).unwrap_or(Value::Null))
 }
@@ -1330,11 +1352,17 @@ async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming) -> Result
             };
             for path in new_context {
                 if let Some(text) = context::read_capped(&path) {
-                    append_tape(&app.db, id, "context", &json!({ "path": path })).await?;
+                    if let Err(e) = append_tape(&app.db, id, "context", &json!({ "path": path })).await {
+                        tracing::error!("recording instruction file {} for {id}: {e:#}", path.display());
+                    }
                     out.content.push_str(&context::attachment(&path, &text));
                 }
             }
-            sqlx::query(
+            // Answer the worker first: a recording failure must not leave the model waiting.
+            if let Some(req_id) = msg.id {
+                mind.respond(req_id, json!({ "content": out.content, "is_error": out.is_error })).await?;
+            }
+            let recorded = sqlx::query(
                 "INSERT INTO tool_calls (session_id, call_id, name, args, is_error, duration_ms, output_bytes, turn_id)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             )
@@ -1347,11 +1375,11 @@ async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming) -> Result
             .bind(out.content.len() as i64)
             .bind(turn_id)
             .execute(&app.db)
-            .await?;
-            app.emit(id, json!({ "type": "tool_end", "call_id": call_id, "is_error": out.is_error, "ms": ms })).await;
-            if let Some(req_id) = msg.id {
-                mind.respond(req_id, json!({ "content": out.content, "is_error": out.is_error })).await?;
+            .await;
+            if let Err(e) = recorded {
+                tracing::error!("recording tool call {call_id} for {id}: {e:#}");
             }
+            app.emit(id, json!({ "type": "tool_end", "call_id": call_id, "is_error": out.is_error, "ms": ms })).await;
         }
         "turn.delta" | "turn.thinking" => {
             let id = id?;
