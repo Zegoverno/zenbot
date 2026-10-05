@@ -130,6 +130,17 @@ workflow_approval_and_rounds() {
   check "the reply went back to work" eq "$(q "SELECT payload->>'reason' FROM tape_events WHERE session_id='$sid' AND kind='state' AND payload->>'by'='owner' ORDER BY seq DESC LIMIT 1")" "owner continued the job"
 }
 
+verifier() {
+  local ws; ws=$(new_workspace verifier)
+  start_kernel "$ws" "$(script judgment.json)"
+  local sid; sid=$(zen ask --json -m faux/smoke "Please create done.txt" | jq -r .session_id)
+  local child; child=$(q "SELECT id FROM sessions WHERE parent='$sid' AND kind='verifier'")
+  check "a criterion needing judgment ran the verifier" test -n "$child"
+  check "the verifier works in the brief's repository" grep -q "^$ws" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$child' AND payload->>'toolName'='bash'")"
+  check "its judgment is in the verification" eq "$(q "SELECT payload->'results'->0->>'result' FROM tape_events WHERE session_id='$sid' AND kind='verification'")" uncertain
+  check "uncertain work waits for the owner (no model verdict)" eq "$(q "SELECT state FROM sessions WHERE id='$sid'")" reported
+}
+
 summaries() {
   local ws; ws=$(new_workspace summary)
   start_kernel "$ws" "$(script summary.json)" ZEN_BRIEFS=0 ZEN_CONTEXT_TOKENS=4000 ZEN_COMPACT_IDLE_SECS=0 ZEN_SUMMARY_MODEL=faux/smoke
@@ -167,6 +178,7 @@ run open-loop open_loop
 run restart-recovery restart_recovery
 run workflow-pass workflow_pass
 run workflow-approval-and-rounds workflow_approval_and_rounds
+run verifier verifier
 run summaries summaries
 run secrets secrets_masked
 echo "== tape"

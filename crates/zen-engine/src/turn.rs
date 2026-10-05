@@ -24,6 +24,8 @@ pub struct TurnInput {
     pub context: Option<String>,
     /// The engine session the kernel says is in sync with the tape, to resume instead of replaying.
     pub resume: Option<String>,
+    /// The kind of session (e.g. `verifier` for a child session); none for the owner's sessions.
+    pub kind: Option<String>,
 }
 
 impl TurnInput {
@@ -37,6 +39,7 @@ impl TurnInput {
             prompt: p["prompt"].as_str().unwrap_or("").to_string(),
             context: p["prompt_context"].as_str().map(String::from),
             resume: p["resume"]["id"].as_str().map(String::from),
+            kind: p["kind"].as_str().map(String::from),
         }
     }
 }

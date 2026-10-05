@@ -22,6 +22,8 @@ pub(crate) struct Turn {
     pub(crate) model_resolved: Option<String>,
     /// The worker's `turn.usage` report, if any (engine, version, turn totals).
     pub(crate) reported: Value,
+    /// Where this session's tools run: its own workspace, or the kernel's.
+    pub(crate) workspace: PathBuf,
     /// What the turn sent (measure::record) and why it can't reuse the cache, judged at the start.
     pub(crate) sent: Value,
     pub(crate) cache_break: Option<&'static str>,
@@ -303,16 +305,17 @@ pub(crate) async fn start_kernel_turn(app: &AppState, id: Uuid, text: String) ->
 
 /// Run a child session of `kind` (e.g. a verifier) with one kernel prompt and wait for it to end.
 /// Returns the verdict it recorded (its latest `verdict` block), or null.
-pub(crate) async fn run_child(app: &AppState, parent: Uuid, kind: &str, prompt: &str, _dir: &std::path::Path) -> Result<Value> {
+pub(crate) async fn run_child(app: &AppState, parent: Uuid, kind: &str, prompt: &str, dir: &std::path::Path) -> Result<Value> {
     let child = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO sessions (id, title, model, effort, state, parent, kind)
-         SELECT $1, $2 || ': ' || title, model, effort, $3, id, $3 FROM sessions WHERE id = $4",
+        "INSERT INTO sessions (id, title, model, effort, state, parent, kind, workspace)
+         SELECT $1, $2 || ': ' || title, model, effort, $3, id, $3, $5 FROM sessions WHERE id = $4",
     )
     .bind(child)
     .bind(kind)
     .bind(kind)
     .bind(parent)
+    .bind(dir.display().to_string())
     .execute(&app.db)
     .await?;
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -338,9 +341,11 @@ pub(crate) async fn run_child(app: &AppState, parent: Uuid, kind: &str, prompt: 
 }
 
 pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: Origin) -> Result<()> {
-    let row = sqlx::query("SELECT model, effort, title FROM sessions WHERE id = $1").bind(id).fetch_optional(&app.db).await?;
+    let row = sqlx::query("SELECT model, effort, title, workspace, kind FROM sessions WHERE id = $1").bind(id).fetch_optional(&app.db).await?;
     let Some(row) = row else { anyhow::bail!("session not found") };
     let model: String = row.get("model");
+    let workspace = row.get::<Option<String>, _>("workspace").map(PathBuf::from).unwrap_or_else(|| app.workspace.clone());
+    let kind: Option<String> = row.get("kind");
     let title: String = row.get("title");
 
     let Some(widx) = worker_for(app, &model).await else {
@@ -374,6 +379,7 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
                 started: Instant::now(),
                 model_resolved: None,
                 reported: Value::Null,
+                workspace: workspace.clone(),
                 sent: Value::Null,
                 cache_break: None,
                 prev_context: None,
@@ -479,6 +485,7 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
                     "prompt_context": turn_context,
                     "tools": envelope.tools,
                     "resume": resume,
+                    "kind": kind,
                 }),
             )
             .await

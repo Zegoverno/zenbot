@@ -1,0 +1,13 @@
+{ "frame": [
+    {"tool": "propose_brief", "args": {"route": "bounded", "work": "build", "intent": {"stated": "make done.txt"},
+      "goal": "no done.txt -> done.txt exists", "context": {"repo": "."},
+      "criteria": [{"id": "j1", "text": "done.txt reads well"}]}},
+    {"text": "Brief proposed."}],
+  "work": [
+    {"tool": "write", "args": {"path": "done.txt", "content": "ok"}},
+    {"tool": "submit_work", "args": {"summary": "created done.txt"}},
+    {"text": "Submitted."}],
+  "verify": [
+    {"tool": "bash", "args": {"command": "pwd; ls"}},
+    {"tool": "submit_verdict", "args": {"criteria": [{"id": "j1", "verdict": "uncertain", "evidence": "taste"}]}},
+    {"text": "Done."}] }

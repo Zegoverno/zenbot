@@ -36,7 +36,7 @@ fn script(input: &TurnInput) -> Result<Vec<Value>> {
                 .chain(input.history.iter().rev().filter_map(|m| m["context"].as_str().map(String::from)))
                 .find(|c| c.contains("Phase:"))
                 .unwrap_or_default();
-            let phase = if input.system.starts_with("You are a verifier") {
+            let phase = if input.kind.as_deref() == Some("verifier") {
                 "verify"
             } else if phase_text.contains("Phase: framing") {
                 "frame"

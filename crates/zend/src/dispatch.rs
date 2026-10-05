@@ -56,11 +56,11 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             let name = p.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
             let call_id = p.get("call_id").and_then(Value::as_str).unwrap_or_default().to_string();
             let args = p.get("args").cloned().unwrap_or(json!({}));
-            let (mut cancel, model, turn_id, mut ending) = {
+            let (mut cancel, model, turn_id, mut ending, workspace) = {
                 let mut turns = app.turns.lock().await;
                 let Some(t) = turns.get_mut(&id) else { return Ok(()) };
                 t.tools_running += 1;
-                (t.cancel.subscribe(), t.model.clone(), t.turn_id, t.ending)
+                (t.cancel.subscribe(), t.model.clone(), t.turn_id, t.ending, t.workspace.clone())
             };
             let state = flow::state(&app.db, id).await.unwrap_or_else(|_| "open".into());
             // Commands can tell which session runs them (e.g. the commit-trailer hook in scripts/git-hooks).
@@ -85,7 +85,7 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                             let (content, is_error) = compact::history_tool(&app.db, id, &args).await;
                             tools::ToolOutput { content, is_error }
                         } else {
-                            tools::execute(&app.workspace, &name, &args, &env, flow::read_only(&state)).await
+                            tools::execute(&workspace, &name, &args, &env, flow::read_only(&state)).await
                         }
                     } => out,
                     _ = cancel.wait_for(|c| *c) => tools::ToolOutput { content: "interrupted: the turn was stopped before this tool finished".into(), is_error: true },
@@ -94,7 +94,7 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             let ms = started.elapsed().as_millis() as i64;
             // First time this session touches a project with its own instructions: attach them.
             let new_context: Vec<PathBuf> = {
-                let candidates = context::governing(&app.workspace, &context::paths_in_call(&app.workspace, &name, &args));
+                let candidates = context::governing(&workspace, &context::paths_in_call(&workspace, &name, &args));
                 let mut turns = app.turns.lock().await;
                 match turns.get_mut(&id) {
                     Some(t) => {
