@@ -135,17 +135,7 @@ impl TurnCtx {
 
 /// A random UUID (v4), for engine session ids.
 pub fn new_uuid() -> String {
-    let mut b = [0u8; 16];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = std::io::Read::read_exact(&mut f, &mut b);
-    }
-    if b == [0u8; 16] {
-        b = (now_ms() as u128 ^ (std::process::id() as u128) << 64).to_le_bytes();
-    }
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+    uuid::Uuid::new_v4().to_string()
 }
 
 /// Whether an engine feature is on: `var` unset or anything but "0".

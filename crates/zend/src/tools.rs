@@ -1,5 +1,6 @@
 //! Built-in tools. The kernel is the only place side effects happen.
-//! v0: commands run directly on the host inside the workspace; sandboxes come in M2.
+//! Commands run on the host in the workspace (read-only phases in a bubblewrap sandbox); per-project
+//! sandboxes come with M2.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -172,17 +173,11 @@ fn truncate(s: &str) -> Option<String> {
         return None;
     }
     let half = MAX_OUTPUT / 2;
-    let mut head_end = half;
-    while !s.is_char_boundary(head_end) {
-        head_end -= 1;
-    }
+    let mut head_end = s.floor_char_boundary(half);
     if let Some(nl) = s[..head_end].rfind('\n') {
         head_end = nl + 1;
     }
-    let mut tail_start = s.len() - half;
-    while !s.is_char_boundary(tail_start) {
-        tail_start += 1;
-    }
+    let mut tail_start = s.ceil_char_boundary(s.len() - half);
     if let Some(nl) = s[tail_start..].find('\n') {
         if tail_start + nl + 1 < s.len() {
             tail_start += nl + 1;
@@ -393,11 +388,7 @@ async fn read(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> 
         if out.len() + numbered.len() > MAX_OUTPUT {
             if out.is_empty() {
                 // A single line longer than the whole budget: show its start.
-                let mut end = MAX_OUTPUT;
-                while !numbered.is_char_boundary(end) {
-                    end -= 1;
-                }
-                out.push_str(&numbered[..end]);
+                out.push_str(&numbered[..numbered.floor_char_boundary(MAX_OUTPUT)]);
                 out.push_str(&format!(
                     "\n[line {} is {} bytes long and was cut; use bash (e.g. `sed -n '{}p' FILE | cut -c1-2000`) to see parts of it]\n",
                     i + 1,

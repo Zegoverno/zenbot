@@ -33,37 +33,26 @@ pub fn enabled() -> bool {
     std::env::var("ZEN_BRIEFS").map(|v| v.trim() != "0").unwrap_or(true)
 }
 
-fn list_setting(key: &str, default: &str) -> Vec<String> {
-    std::env::var(key).unwrap_or_else(|_| default.into()).split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+/// Whether a route is in a comma-separated setting (or the setting says `all`).
+fn route_on(key: &str, default: &str, route: &str) -> bool {
+    std::env::var(key).unwrap_or_else(|_| default.into()).split(',').map(str::trim).any(|r| r == route || r == "all")
 }
 
-/// Routes whose briefs are approved without the owner (ZEN_AUTO_APPROVE, default quick,bounded; `all`).
+/// Routes whose briefs are approved without the owner (ZEN_AUTO_APPROVE, default quick,bounded).
 pub fn auto_approve(route: &str) -> bool {
-    let l = list_setting("ZEN_AUTO_APPROVE", "quick,bounded");
-    l.iter().any(|r| r == route || r == "all")
+    route_on("ZEN_AUTO_APPROVE", "quick,bounded", route)
 }
 
-/// Routes the model may close with its own verdict (ZEN_AUTO_CLOSE, default quick,bounded; `all`).
+/// Routes the model may close with its own verdict (ZEN_AUTO_CLOSE, default quick,bounded).
 pub fn auto_close(route: &str) -> bool {
-    let l = list_setting("ZEN_AUTO_CLOSE", "quick,bounded");
-    l.iter().any(|r| r == route || r == "all")
+    route_on("ZEN_AUTO_CLOSE", "quick,bounded", route)
 }
 
 /// Routes whose work starts in a fresh context with the brief in the instructions
 /// (ZEN_FRESH_CONTEXT, default architectural). Others continue in the framing context: the files
 /// already read stay cached, and the brief arrives as a message.
 pub fn fresh_context(route: &str) -> bool {
-    list_setting("ZEN_FRESH_CONTEXT", "architectural").iter().any(|r| r == route || r == "all")
-}
-
-/// Share of verifications where the model verifier runs even though every criterion is a passing
-/// command (ZEN_VERIFY_SAMPLE, default 0.2), so its value keeps being measured.
-fn verify_sample() -> f64 {
-    std::env::var("ZEN_VERIFY_SAMPLE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.2)
-}
-
-fn verify_rounds() -> i64 {
-    std::env::var("ZEN_VERIFY_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(2)
+    route_on("ZEN_FRESH_CONTEXT", "architectural", route)
 }
 
 /// The state a new session starts in.
@@ -466,7 +455,7 @@ If a question goes unanswered, take your recommended option and record it as an 
 /// Ask the configured System One model (ZEN_S1_MODEL) typed questions.
 async fn s1(app: &App, state: &Value, questions: &Value) -> Result<Value> {
     let model = crate::score::scorer().context("no System One model is configured (ZEN_S1_MODEL)")?;
-    let w = crate::worker_for_classifier(app, &model).await.with_context(|| format!("no worker serves `{model}`"))?;
+    let w = crate::worker_for(app, &model).await.with_context(|| format!("no worker serves `{model}`"))?;
     app.workers[w].mind().request("s1.decide", json!({ "model": model, "state": state, "questions": questions })).await
 }
 
@@ -681,11 +670,7 @@ fn diff_since(repo: &Path, head: Option<&str>) -> String {
     }
     let d = crate::secrets::mask(&d);
     if d.len() > 60_000 {
-        let mut end = 60_000;
-        while !d.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}\n[diff cut at 60 KB; read files for the rest]", &d[..end])
+        format!("{}\n[diff cut at 60 KB; read files for the rest]", &d[..d.floor_char_boundary(60_000)])
     } else if d.trim().is_empty() {
         "(no changes)".into()
     } else {
@@ -735,7 +720,7 @@ async fn verify_inner(app: &AppState, session: Uuid) -> Result<()> {
     let route = brief["brief"]["route"].as_str().unwrap_or("");
     let any_failed = checks.values().any(|c| c["ok"] != true);
     let judgment = criteria.iter().any(|c| !c["run"].is_string());
-    let sampled = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0) % 1000) as f64 / 1000.0 < verify_sample();
+    let sampled = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0) % 1000) as f64 / 1000.0 < crate::env_num("ZEN_VERIFY_SAMPLE", 0.2);
     let why = if any_failed {
         None
     } else if judgment {
@@ -799,7 +784,7 @@ async fn verify_inner(app: &AppState, session: Uuid) -> Result<()> {
     resolve_shadow(&app.db, session, "claim", Some(if results.iter().all(|r| r["result"] == "pass") { "evidenced" } else { "unverified" }), "verification").await;
 
     let failed: Vec<&Value> = results.iter().filter(|r| r["result"] == "fail").collect();
-    if !failed.is_empty() && round <= verify_rounds() {
+    if !failed.is_empty() && round <= crate::env_num("ZEN_VERIFY_ROUNDS", 2.0) as i64 {
         let list: Vec<String> = failed
             .iter()
             .map(|r| {

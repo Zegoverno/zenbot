@@ -106,7 +106,7 @@ impl Updater {
 
     /// Check now and then every ZEN_UPDATE_CHECK_SECS (default an hour; 0 turns it off).
     pub async fn check_periodically(self: Arc<Self>) {
-        let every: u64 = std::env::var("ZEN_UPDATE_CHECK_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(3600);
+        let every = crate::env_num("ZEN_UPDATE_CHECK_SECS", 3600.0) as u64;
         if every == 0 {
             return;
         }

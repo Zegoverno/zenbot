@@ -47,12 +47,10 @@ use workers::*;
 struct App {
     db: PgPool,
     workers: Vec<Worker>,
-    /// model id -> index into `workers`
+    /// model or classifier id -> index into `workers`
     routes: Mutex<HashMap<String, usize>>,
     /// model id -> its entry from `models.list` (name, efforts, default_effort, …)
     catalog: Mutex<HashMap<String, Value>>,
-    /// classifier id (System One model, for live scoring) -> index into `workers`
-    classifiers: Mutex<HashMap<String, usize>>,
     turns: Mutex<HashMap<Uuid, Turn>>,
     token: String,
     workspace: PathBuf,
@@ -72,6 +70,11 @@ struct App {
 }
 
 type AppState = Arc<App>;
+
+/// A number from a setting, or the default when it's unset or not a number.
+pub(crate) fn env_num(key: &str, default: f64) -> f64 {
+    std::env::var(key).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
+}
 
 impl App {
     async fn hub(&self, id: Uuid) -> broadcast::Sender<String> {
@@ -135,7 +138,6 @@ async fn main() -> Result<()> {
         workers,
         routes: Mutex::new(HashMap::new()),
         catalog: Mutex::new(HashMap::new()),
-        classifiers: Mutex::new(HashMap::new()),
         turns: Mutex::new(HashMap::new()),
         token,
         workspace,

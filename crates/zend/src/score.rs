@@ -13,7 +13,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use sqlx::Row;
 use uuid::Uuid;
 
 use crate::App;
@@ -87,9 +86,6 @@ pub fn questions() -> Value {
     })
 }
 
-fn cap(s: &str, max: usize) -> String {
-    zen_proto::head(s, max)
-}
 
 /// What the scorer sees: each user message and the agent's last text before the next one (its
 /// final answer for that turn). Tool calls and their output are left out. The newest turns are kept
@@ -112,7 +108,7 @@ pub fn state(messages: &[Value]) -> Value {
     let mut size = 0;
     let total = turns.len();
     for (user, answer) in turns.into_iter().rev() {
-        let (user, answer) = (cap(&user, MAX_MESSAGE_CHARS), cap(&answer, MAX_MESSAGE_CHARS));
+        let (user, answer) = (zen_proto::head(&user, MAX_MESSAGE_CHARS), zen_proto::head(&answer, MAX_MESSAGE_CHARS));
         size += user.len() + answer.len();
         if size > MAX_STATE_CHARS && !kept.is_empty() {
             break;
@@ -156,7 +152,7 @@ pub async fn score_session(app: &App, session: Uuid, trigger: &str) -> Result<()
     }
     let messages = crate::load_messages(&app.db, session).await?;
     let questions = questions();
-    let res = match crate::worker_for_classifier(app, &model).await {
+    let res = match crate::worker_for(app, &model).await {
         Some(w) => app.workers[w].mind().request("s1.decide", json!({ "model": model, "state": state(&messages), "questions": questions })).await,
         None => Err(anyhow::anyhow!("no worker serves classifier `{model}` (is the pi worker running?)")),
     };
@@ -193,38 +189,30 @@ pub async fn score_session(app: &App, session: Uuid, trigger: &str) -> Result<()
 /// send a burst.
 pub async fn idle_loop(app: std::sync::Arc<App>) {
     let Some(model) = scorer() else { return };
-    let idle: i64 = std::env::var("ZEN_SCORE_IDLE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(7200);
+    let idle = crate::env_num("ZEN_SCORE_IDLE_SECS", 7200.0) as i64;
     tracing::info!("scoring sessions with {model} once idle for {idle}s");
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;
-        let rows = sqlx::query(
-            "SELECT DISTINCT ON (t.session_id) t.session_id, t.id, t.ended_at FROM turns t
-             WHERE t.ended_at IS NOT NULL AND t.model NOT LIKE 'faux/%'
-             ORDER BY t.session_id, t.started_at DESC",
+        // Each session's latest turn, quiet long enough and not scored yet (a failed score is
+        // retried after an hour); a few per round.
+        let due: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT l.session_id FROM (
+                 SELECT DISTINCT ON (session_id) session_id, id, ended_at FROM turns
+                 WHERE ended_at IS NOT NULL AND model NOT LIKE 'faux/%' ORDER BY session_id, started_at DESC) l
+             WHERE l.ended_at < now() - make_interval(secs => $1)
+               AND NOT EXISTS (SELECT 1 FROM session_scores s WHERE s.turn_id = l.id AND s.trigger = 'idle' AND s.questions = $2
+                               AND (s.error IS NULL OR s.created_at > now() - interval '1 hour'))
+             LIMIT 5",
         )
+        .bind(idle as f64)
+        .bind(QUESTIONS_VERSION)
         .fetch_all(&app.db)
-        .await;
-        let Ok(rows) = rows else { continue };
-        let now = chrono::Utc::now();
-        let mut due = Vec::new();
-        for r in rows {
-            let ended: chrono::DateTime<chrono::Utc> = r.get("ended_at");
-            if (now - ended).num_seconds() >= idle {
-                due.push((r.get::<Uuid, _>("session_id"), r.get::<Uuid, _>("id")));
-            }
-        }
-        let mut sent = 0;
-        for (session, turn) in due {
-            if sent >= 5 {
-                break;
-            }
+        .await
+        .unwrap_or_default();
+        for session in due {
             if app.is_busy(session).await {
                 continue;
             }
-            if already_scored(&app, turn, "idle").await.unwrap_or(true) {
-                continue;
-            }
-            sent += 1;
             if let Err(e) = score_session(&app, session, "idle").await {
                 tracing::warn!("scoring idle session {session}: {e:#}");
             }

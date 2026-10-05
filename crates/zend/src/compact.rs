@@ -31,7 +31,7 @@ pub struct Settings {
 
 impl Settings {
     pub fn from_env(window: Option<i64>) -> Self {
-        let num = |k: &str, d: f64| std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(d);
+        let num = crate::env_num;
         let budget = num("ZEN_CONTEXT_TOKENS", 200_000.0) as i64;
         Settings {
             budget: window.filter(|w| *w > 0).map(|w| w.min(budget)).unwrap_or(budget),
@@ -40,6 +40,10 @@ impl Settings {
             keep: num("ZEN_COMPACT_KEEP", 0.3),
             idle_secs: num("ZEN_COMPACT_IDLE_SECS", 300.0) as i64,
         }
+    }
+    /// How much of the session stays word for word after a summary.
+    pub fn keep_tokens(&self) -> i64 {
+        (self.keep * self.budget as f64) as i64
     }
     pub fn over_soft(&self, tokens: i64) -> bool {
         tokens as f64 > self.soft * self.budget as f64

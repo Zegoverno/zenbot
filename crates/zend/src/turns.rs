@@ -37,7 +37,7 @@ pub(crate) struct Turn {
 /// ZEN_TURN_IDLE_SECS (default 600). First ask the worker to abort; if the turn is still
 /// there 30s after any abort, end it in the kernel.
 pub(crate) async fn watchdog(app: AppState) {
-    let idle_limit = Duration::from_secs(std::env::var("ZEN_TURN_IDLE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(600));
+    let idle_limit = Duration::from_secs(crate::env_num("ZEN_TURN_IDLE_SECS", 600.0) as u64);
     let grace = Duration::from_secs(30);
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -120,7 +120,7 @@ pub(crate) async fn prepare_summary_if_needed(app: &AppState, id: Uuid, model: &
     tokio::spawn(async move {
         let res = match compact::pending(&app.db, id).await {
             Ok(Some(_)) => Ok(None),
-            Ok(None) => compact::prepare(&app, id, (settings.keep * settings.budget as f64) as i64, &model).await,
+            Ok(None) => compact::prepare(&app, id, settings.keep_tokens(), &model).await,
             Err(e) => Err(e.into()),
         };
         match res {
@@ -326,15 +326,7 @@ pub(crate) async fn run_child(app: &AppState, parent: Uuid, kind: &str, prompt: 
     }
     if tokio::time::timeout(Duration::from_secs(1800), rx).await.is_err() {
         tracing::warn!("{kind} session {child} took over 30 minutes; stopping it");
-        // Abort it as a user abort would; the watchdog ends it if it lingers.
-        let worker = app.turns.lock().await.get_mut(&child).map(|t| {
-            let _ = t.cancel.send(true);
-            t.abort_sent.get_or_insert_with(Instant::now);
-            t.worker
-        });
-        if let Some(w) = worker {
-            let _ = app.workers[w].mind().request("turn.abort", json!({ "session_id": child })).await;
-        }
+        abort_turn(app, child).await;
     }
     app.waiters.lock().await.remove(&child);
     Ok(tape::load(&app.db, child, &["verdict"]).await?.last().map(|b| b.payload.clone()).unwrap_or(Value::Null))
@@ -399,7 +391,7 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
                 Some(c) => Some(c),
                 None if over => {
                     app.emit(id, json!({ "type": "status", "text": "summarizing older turns to make room" })).await;
-                    compact::prepare(app, id, (settings.keep * settings.budget as f64) as i64, &model).await?
+                    compact::prepare(app, id, settings.keep_tokens(), &model).await?
                 }
                 None => None,
             };
@@ -500,4 +492,17 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
     }
     app.emit(id, json!({ "type": "busy", "busy": true, "turn_id": turn_id, "harness": app.harness, "model": model, "effort": effort })).await;
     Ok(())
+}
+
+/// Stop a session's turn: its tools at once, then the model (the worker's `turn.abort`). The
+/// watchdog ends the turn if it lingers.
+pub(crate) async fn abort_turn(app: &App, id: Uuid) {
+    let worker = app.turns.lock().await.get_mut(&id).map(|t| {
+        let _ = t.cancel.send(true);
+        t.abort_sent.get_or_insert_with(Instant::now);
+        t.worker
+    });
+    if let Some(w) = worker.and_then(|i| app.workers.get(i)) {
+        let _ = w.mind().request("turn.abort", json!({ "session_id": id })).await;
+    }
 }

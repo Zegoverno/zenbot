@@ -1262,9 +1262,6 @@ impl App {
                 }
                 self.draw();
             }
-            "usage" => {
-                self.turn_tokens += ev["input"].as_i64().unwrap_or(0) + ev["output"].as_i64().unwrap_or(0);
-            }
             "thinking" => {
                 self.status = "Thinking".into();
             }

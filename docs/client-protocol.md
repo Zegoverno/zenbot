@@ -11,7 +11,7 @@ UI). The token is in `~/.zenbot/token`.
 | Method and path | Body | Returns |
 |---|---|---|
 | `GET /health` (no token) | | `{ ok, db, mind, workers, busy, version, commit }`; `busy` counts running turns and workflow steps |
-| `GET /api/models` | | `{ models, authenticated, default, scorer, classifiers, workers }` |
+| `GET /api/models` | | `{ models, authenticated, default, scorer }` |
 | `GET /api/sessions?archived=` | | sessions (not child sessions): `{ id, title, model, effort, archived, state, cost, created_at, updated_at }` |
 | `POST /api/sessions` | `{ title?, model?, effort? }` | the session |
 | `GET /api/sessions/{id}` | | the session with `messages` (each with its `seq`) and `busy` |
@@ -49,7 +49,6 @@ The kernel sends events, in order:
 | `report` | `text, results` | the verification report |
 | `error` | `error` | a request failed (e.g. prompting while the work is being verified) |
 | `resync` | `skipped, busy` | the client fell behind and missed events |
-| `usage` | `input, output, cost` | (older kernels) usage reported outside messages |
 
 A client that predates an event can ignore it, except `end.next` and `idle`: a client that stops at
 the first `end` misses the rest of a workflow (approval, work, verification).

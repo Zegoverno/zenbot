@@ -331,17 +331,7 @@ pub(crate) async fn handle_socket(app: AppState, id: Uuid, socket: WebSocket) {
                     app.emit(id, json!({ "type": "error", "error": e.to_string() })).await;
                 }
             }
-            Some("abort") => {
-                // Stop the kernel's tools right away, then ask the worker to stop the model.
-                let worker = app.turns.lock().await.get_mut(&id).map(|t| {
-                    let _ = t.cancel.send(true);
-                    t.abort_sent.get_or_insert_with(Instant::now);
-                    t.worker
-                });
-                if let Some(w) = worker.and_then(|i| app.workers.get(i)) {
-                    let _ = w.mind().request("turn.abort", json!({ "session_id": id })).await;
-                }
-            }
+            Some("abort") => abort_turn(&app, id).await,
             _ => {}
         }
     }

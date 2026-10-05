@@ -112,16 +112,15 @@ openai/gpt-6.1-sol,openai/gpt-6-sol,openai/gpt-6-luna,openai/gpt-6-astra,openai/
 pub(crate) async fn collect_models(app: &App) -> Value {
     let mut all: Vec<(usize, Value)> = Vec::new();
     let mut authenticated = serde_json::Map::new();
-    let mut classifiers: Vec<String> = Vec::new();
     for (i, w) in app.workers.iter().enumerate() {
         let Ok(res) = w.mind().request("models.list", json!({})).await else { continue };
         if let Some(a) = res["authenticated"].as_object() {
             authenticated.extend(a.clone());
         }
-        let mut routes = app.classifiers.lock().await;
+        // Classifiers (System One models) route like models; their ids don't overlap.
+        let mut routes = app.routes.lock().await;
         for id in res["classifiers"].as_array().into_iter().flatten().filter_map(|c| c["id"].as_str()) {
             routes.entry(id.to_string()).or_insert(i);
-            classifiers.push(id.to_string());
         }
         drop(routes);
         all.extend(res["models"].as_array().into_iter().flatten().map(|m| (i, m.clone())));
@@ -147,26 +146,16 @@ pub(crate) async fn collect_models(app: &App) -> Value {
         curated.first().and_then(|m| m["id"].as_str()).unwrap_or(&app.default_model).to_string()
     };
     json!({ "models": curated, "authenticated": authenticated, "default": default,
-            "scorer": score::scorer(), "classifiers": classifiers,
-            "workers": app.workers.iter().map(|w| w.name.clone()).collect::<Vec<_>>() })
+            "scorer": score::scorer() })
 }
 
-/// The worker that serves a model (refreshing routes once if it's unknown).
+/// The worker that serves a model or a classifier (refreshing routes once if it's unknown).
 pub(crate) async fn worker_for(app: &App, model: &str) -> Option<usize> {
     if let Some(i) = app.routes.lock().await.get(model) {
         return Some(*i);
     }
     collect_models(app).await;
     app.routes.lock().await.get(model).copied()
-}
-
-/// The worker that serves a classifier (refreshing routes once if it's unknown).
-pub(crate) async fn worker_for_classifier(app: &App, model: &str) -> Option<usize> {
-    if let Some(i) = app.classifiers.lock().await.get(model) {
-        return Some(*i);
-    }
-    collect_models(app).await;
-    app.classifiers.lock().await.get(model).copied()
 }
 
 /// A model's entry from `models.list` (refreshing once if it's unknown).

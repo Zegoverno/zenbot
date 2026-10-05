@@ -228,11 +228,6 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
                         if show_tools && ev["is_error"] == true { eprintln!("{}", dim("    (failed)")); }
                     }
                     "busy" if started => turn.effort = ev["effort"].as_str().map(str::to_string),
-                    "usage" if started => {
-                        turn.input_tokens += ev["input"].as_i64().unwrap_or(0);
-                        turn.output_tokens += ev["output"].as_i64().unwrap_or(0);
-                        turn.cost += ev["cost"].as_f64().unwrap_or(0.0);
-                    }
                     "end" | "child_end" if started => {
                         if let Some(e) = ev["error"].as_str() { turn.error = Some(e.to_string()); }
                         let r = &ev["turn"];

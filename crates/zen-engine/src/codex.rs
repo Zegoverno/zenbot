@@ -17,7 +17,7 @@ use tokio::sync::{watch, OnceCell};
 use crate::turn::{enabled, now_ms, prompt_blocks, seed_blocks, TurnCtx, TurnInput};
 
 pub fn available() -> bool {
-    std::process::Command::new("codex").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    version().is_some()
 }
 
 /// The installed Codex CLI version ("codex-cli 0.155.1" -> "0.155.1").

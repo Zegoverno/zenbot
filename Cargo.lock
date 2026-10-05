@@ -2958,6 +2958,7 @@ dependencies = [
  "anyhow",
  "serde_json",
  "tokio",
+ "uuid",
  "zen-proto",
 ]
 
