@@ -6,6 +6,7 @@ mod context;
 mod measure;
 mod mind;
 mod score;
+mod secrets;
 mod tape;
 mod tools;
 mod update;

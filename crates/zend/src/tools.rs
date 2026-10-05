@@ -198,13 +198,18 @@ fn truncate(s: &str) -> Option<String> {
     ))
 }
 
-/// Save the full text of an oversized output so the model can page through it with `read`.
+/// Save the full text of an oversized output so the model can page through it with `read`. Kept in
+/// ~/.zenbot/outputs, readable only by the owner (not /tmp, which every user can read and a reboot
+/// clears while the history still points at it). Secrets are masked first.
 fn save_full_output(text: &str) -> Option<PathBuf> {
-    let dir = std::env::temp_dir().join("zen-tool-output");
-    std::fs::create_dir_all(&dir).ok()?;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let home = std::env::var("HOME").ok()?;
+    let dir = PathBuf::from(home).join(".zenbot/outputs");
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).ok()?;
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
     let path = dir.join(format!("{nanos}.log"));
-    std::fs::write(&path, text).ok()?;
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).ok()?;
+    std::io::Write::write_all(&mut f, crate::secrets::mask(text).as_bytes()).ok()?;
     Some(path)
 }
 
@@ -218,7 +223,9 @@ pub async fn execute(workspace: &Path, name: &str, args: &Value, env: &[(&str, &
         "move" => move_path(workspace, args).await,
         _ => Err(err(format!("unknown tool `{name}`"))),
     };
-    result.unwrap_or_else(|e| e)
+    let mut out = result.unwrap_or_else(|e| e);
+    out.content = crate::secrets::mask(&out.content);
+    out
 }
 
 // ---------- bash ----------

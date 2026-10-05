@@ -1,0 +1,158 @@
+//! Masking secrets in tool output before the model or the tape sees it (SPEC 5.18, docs/context.md).
+//!
+//! Two kinds are masked: the values of the kernel's own secrets (environment variables named like a
+//! token, key, secret or password, zenbot's API token, Pi's sign-in), and text in well-known token
+//! formats (API keys, GitHub, GitLab, Slack, AWS, Google and Hugging Face tokens, private key blocks).
+//! The prefix stays visible so the model knows what was there. A model that needs a secret's value
+//! should move it with the shell without printing it.
+
+use std::sync::LazyLock;
+
+/// Token prefixes and the shortest run of token characters that must follow.
+const PREFIXES: [(&str, usize); 18] = [
+    ("sk-ant-", 20),
+    ("sk-or-", 20),
+    ("sk-proj-", 20),
+    ("sk-", 32),
+    ("ghp_", 30),
+    ("gho_", 30),
+    ("ghu_", 30),
+    ("ghs_", 30),
+    ("ghr_", 30),
+    ("github_pat_", 30),
+    ("glpat-", 20),
+    ("xoxb-", 20),
+    ("xoxp-", 20),
+    ("xoxa-", 20),
+    ("AKIA", 16),
+    ("ASIA", 16),
+    ("AIza", 30),
+    ("hf_", 30),
+];
+
+const MASK: &str = "…[masked]";
+
+fn token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
+/// Secret values the kernel knows, longest first (so a value containing another is masked whole).
+static KNOWN: LazyLock<Vec<String>> = LazyLock::new(|| {
+    let mut values: Vec<String> = std::env::vars()
+        .filter(|(k, _)| {
+            let k = k.to_uppercase();
+            ["TOKEN", "KEY", "SECRET", "PASSWORD", "PASSWD"].iter().any(|w| k.contains(w))
+        })
+        .map(|(_, v)| v)
+        .collect();
+    let home = std::env::var("HOME").unwrap_or_default();
+    if let Ok(t) = std::fs::read_to_string(format!("{home}/.zenbot/token")) {
+        values.push(t.trim().to_string());
+    }
+    if let Ok(auth) = std::fs::read_to_string(format!("{home}/.zenbot/auth.json")) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&auth) {
+            collect_strings(&v, &mut values);
+        }
+    }
+    values.retain(|v| v.len() >= 12 && !v.contains(char::is_whitespace));
+    values.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    values.dedup();
+    values
+});
+
+fn collect_strings(v: &serde_json::Value, out: &mut Vec<String>) {
+    match v {
+        serde_json::Value::String(s) if s.len() >= 20 => out.push(s.clone()),
+        serde_json::Value::Array(a) => a.iter().for_each(|x| collect_strings(x, out)),
+        serde_json::Value::Object(o) => o.values().for_each(|x| collect_strings(x, out)),
+        _ => {}
+    }
+}
+
+/// `text` with known secret values and token-shaped strings masked.
+pub fn mask(text: &str) -> String {
+    mask_with(text, &KNOWN)
+}
+
+fn mask_with(text: &str, known: &[String]) -> String {
+    let mut out = text.to_string();
+    for v in known {
+        if out.contains(v.as_str()) {
+            out = out.replace(v.as_str(), &format!("{}{MASK}", &v[..4.min(v.len())]));
+        }
+    }
+    out = mask_private_keys(&out);
+    mask_prefixed(&out)
+}
+
+fn mask_prefixed(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    'scan: while !rest.is_empty() {
+        for (prefix, min) in PREFIXES {
+            if let Some(after) = rest.strip_prefix(prefix) {
+                let preceded_by_token = out.chars().last().is_some_and(token_char);
+                let run = after.chars().take_while(|c| token_char(*c)).count();
+                if !preceded_by_token && run >= min {
+                    out.push_str(prefix);
+                    out.push_str(MASK);
+                    rest = &after[after.char_indices().nth(run).map(|(i, _)| i).unwrap_or(after.len())..];
+                    continue 'scan;
+                }
+            }
+        }
+        let c = rest.chars().next().unwrap();
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
+/// Private key blocks keep their BEGIN and END lines; what's between is masked.
+fn mask_private_keys(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("-----BEGIN ") {
+        let Some(close) = rest[start + 11..].find("-----") else { break };
+        let header_end = start + 11 + close + 5;
+        let is_key = rest[start..header_end].contains("PRIVATE KEY");
+        out.push_str(&rest[..header_end]);
+        rest = &rest[header_end..];
+        if is_key {
+            out.push('\n');
+            out.push_str(MASK);
+            out.push('\n');
+            rest = rest.find("-----END ").map(|e| &rest[e..]).unwrap_or("");
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn masks_token_formats_but_not_ordinary_text() {
+        let gh = format!("ghp_{}", "a1B2".repeat(9));
+        let text = format!("export GITHUB_TOKEN={gh}\nAKIAIOSFODNN7EXAMPLE and sk-learn and task-1234 and my-sk-key");
+        let masked = mask_with(&text, &[]);
+        assert!(!masked.contains(&gh[4..]));
+        assert!(masked.contains("ghp_…[masked]"));
+        assert!(masked.contains("AKIA…[masked]"));
+        assert!(masked.contains("sk-learn and task-1234 and my-sk-key"), "short or embedded matches stay: {masked}");
+    }
+
+    #[test]
+    fn masks_known_values_and_private_keys() {
+        let known = vec!["zen-api-token-0123456789".to_string()];
+        let text = "token: zen-api-token-0123456789\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\nafter\n-----BEGIN CERTIFICATE-----\nMIIB\n";
+        let masked = mask_with(text, &known);
+        assert!(!masked.contains("0123456789"));
+        assert!(!masked.contains("b3BlbnNzaC1rZXktdjEAAAAA"));
+        assert!(masked.contains("-----BEGIN OPENSSH PRIVATE KEY-----"));
+        assert!(masked.contains("-----END OPENSSH PRIVATE KEY-----\nafter"));
+        assert!(masked.contains("-----BEGIN CERTIFICATE-----\nMIIB"), "certificates are public");
+    }
+}
