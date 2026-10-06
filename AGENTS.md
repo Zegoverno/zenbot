@@ -16,7 +16,9 @@ This file is for agents changing zenbot's own code, including zenbot itself. Rea
 
 The kernel owns all state and executes every tool call. Workers hold no state: they get the context for a turn and ask the kernel to run tools. Engines run with their own tools switched off (Claude Code `--tools ""`, Codex shell disabled) so every action goes through the kernel. Keep it that way.
 
-Config lives in `~/.zenbot/`: `env` (service environment, including `ZEN_WORKERS`), `token` (API token), `auth.json` (Pi's ChatGPT sign-in, secret, never print it; Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`), `history` (prompt history), `upgrade.log`, `version`.
+Config lives in `~/.zenbot/`: `env` (service environment, including `ZEN_WORKERS`), `token` (API token), `auth.json` (Pi's ChatGPT sign-in, secret, never print it; Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`), `history` (prompt history), `upgrade.log`, `version`, `engines.json` (engine versions from the last update check).
+
+The engines (Claude Code and Codex CLIs, Pi in `packages/mind`) are kept on their latest versions by `scripts/update-engines.sh`, run daily by `zen-engines.timer`. It tests each update and rolls back a failed one. A Pi update is a local commit (`mind: Pi X.Y.Z`) applied with `scripts/upgrade.sh`, so don't bump Pi by hand without the same checks. Code that depends on a CLI's flags or output should fail loudly, so the post-update check catches it.
 
 ## Making a change
 
@@ -53,5 +55,6 @@ zen status                       # health of kernel, database, worker, sign-in
 journalctl -u zenbot -n 50       # service logs
 cat ~/.zenbot/upgrade.log        # upgrade results
 scripts/upgrade.sh --check       # build, check and smoke test without installing
+scripts/update-engines.sh --check  # engine versions installed vs latest
 ./scripts/dev.sh                 # run a dev kernel in the foreground (stop the service first, or set ZEN_PORT)
 ```

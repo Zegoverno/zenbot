@@ -81,10 +81,14 @@ chmod 600 "$HOME/.zenbot/env"
 git rev-parse --short HEAD > "$HOME/.zenbot/version" 2>/dev/null || true
 
 say "Service"
-sed -e "s#__USER__#$USER#g" -e "s#__REPO__#$REPO#g" -e "s#__HOME__#$HOME#g" deploy/zenbot.service \
-  | sudo tee /etc/systemd/system/zenbot.service >/dev/null
+for unit in zenbot.service zen-engines.service zen-engines.timer; do
+  sed -e "s#__USER__#$USER#g" -e "s#__REPO__#$REPO#g" -e "s#__HOME__#$HOME#g" "deploy/$unit" \
+    | sudo tee "/etc/systemd/system/$unit" >/dev/null
+done
 sudo systemctl daemon-reload
 sudo systemctl enable zenbot >/dev/null 2>&1
+# Daily: keep Claude Code, Codex and Pi on their latest versions, tested (scripts/update-engines.sh).
+sudo systemctl enable --now zen-engines.timer >/dev/null 2>&1
 sudo systemctl restart zenbot
 for _ in $(seq 1 60); do
   curl -fs "http://127.0.0.1:${ZEN_PORT:-8100}/health" | grep -q '"ok":true' && break

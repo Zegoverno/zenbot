@@ -51,6 +51,16 @@ cd ~/zenbot && git pull && ./scripts/upgrade.sh
 
 `upgrade.sh` uses the prebuilt binaries for the new commit (or builds them if there are none yet, or if you changed the code locally), checks them, runs one scripted test turn against them, and then restarts zenbot as soon as no session is working. If the new version isn't healthy it rolls back by itself. The result is in `~/.zenbot/upgrade.log`, and `~/.zenbot/version` holds the running commit.
 
+### Engines
+
+The model engines are kept on their latest versions by a daily timer (`zen-engines.timer`, around 04:00 UTC): `scripts/update-engines.sh` updates the Claude Code and Codex CLIs and, with the `pi` worker, Pi. Each new version must pass a real test turn; if it doesn't, the previous version is put back. The CLIs need no restart. A Pi update is committed locally (never pushed) and applied through `upgrade.sh`, and it is skipped while the checkout has local changes or isn't on `main`. Results are in `~/.zenbot/upgrade.log` (`engines:` lines), and `zen status` shows the versions.
+
+```bash
+~/zenbot/scripts/update-engines.sh --check   # installed vs latest, changes nothing
+~/zenbot/scripts/update-engines.sh           # update now
+systemctl list-timers zen-engines.timer      # next run
+```
+
 Right after a push to `main`, CI needs a few minutes to publish the binaries; an upgrade started before that compiles locally instead.
 
 Troubleshooting: `journalctl -u zenbot -n 50` shows the service logs. The service listens on port 8100 (change with `ZEN_PORT` before installing).
