@@ -1,14 +1,24 @@
-# Checks every push and pull request: build, unit tests, clippy with warnings as errors, and the
-# kernel's end-to-end scenarios (scripts/e2e.sh: the scripted faux model, a throwaway database).
+# Checks every pull request and every push to main: build, unit tests, clippy with warnings as
+# errors, and the kernel's end-to-end scenarios (scripts/e2e.sh: the scripted faux model, a
+# throwaway database). For a push to main that passes, `release` then publishes Linux binaries, so
+# installs and upgrades download them instead of compiling (scripts/fetch-release.sh). Assets go to
+# the rolling `edge` release, one tarball per commit; the newest 20 are kept.
 name: ci
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
+# A newer push to a pull request replaces its running check; runs on main all finish, so every
+# commit there that passes gets its binaries.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
 
 jobs:
   check:
@@ -31,3 +41,45 @@ jobs:
         run: cargo clippy --release --locked --all-targets -- -D warnings
       - name: End-to-end scenarios
         run: ZEN_E2E_NO_BUILD=1 scripts/e2e.sh
+
+  release:
+    needs: check
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    # Oldest supported Ubuntu runner: binaries built against its glibc run on newer distros too.
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dist
+      - name: Build
+        # The `dist` profile (Cargo.toml): the release build with whole-program optimization, smaller.
+        run: cargo build --profile dist --locked
+      - name: Check the binaries start
+        run: |
+          PONG=$(echo '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}' | timeout 15 target/dist/zen-engine | head -1 || true)
+          echo "$PONG" | grep -q pong || { echo "zen-engine did not answer ping: $PONG"; exit 1; }
+          target/dist/zen --version
+      - name: Package
+        # A flat tarball (zend, zen, zen-engine, VERSION), as scripts/fetch-release.sh expects.
+        run: |
+          SHA=$(git rev-parse --short=12 HEAD)
+          mkdir -p dist/zenbot
+          cp target/dist/zend target/dist/zen target/dist/zen-engine dist/zenbot/
+          echo "$SHA" > dist/zenbot/VERSION
+          tar -C dist/zenbot -czf "dist/zenbot-x86_64-linux-$SHA.tar.gz" .
+          (cd dist && sha256sum "zenbot-x86_64-linux-$SHA.tar.gz" > "zenbot-x86_64-linux-$SHA.tar.gz.sha256")
+      - name: Publish to the edge release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view edge >/dev/null 2>&1 || \
+            gh release create edge --prerelease --title "edge (latest main)" \
+              --notes "Binaries for recent commits on main, used by install.sh and scripts/upgrade.sh."
+          gh release upload edge dist/zenbot-x86_64-linux-*.tar.gz dist/zenbot-x86_64-linux-*.sha256 --clobber
+          # Keep the 20 newest builds.
+          gh release view edge --json assets --jq '.assets | sort_by(.createdAt) | reverse | .[40:] | .[].name' |
+            while read -r name; do gh release delete-asset edge "$name" --yes; done

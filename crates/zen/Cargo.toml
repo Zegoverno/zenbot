@@ -8,11 +8,15 @@ description = "zenbot command-line interface"
 [dependencies]
 zen-proto = { path = "../zen-proto" }
 anyhow = "1"
-clap = { version = "4", features = ["derive", "env"] }
+# No colored help or "did you mean" suggestions: a smaller binary.
+clap = { version = "4", default-features = false, features = ["std", "help", "usage", "error-context", "derive", "env"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde_json = "1"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["macros", "rt", "net", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.27", features = ["rustls-tls-webpki-roots"] }
 unicode-width = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util"] }
