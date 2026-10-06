@@ -37,7 +37,7 @@ JSON-RPC 2.0 over the worker's stdin/stdout, one JSON object per line. The kerne
 | `turn.delta` | notification | `{ session_id, turn_id, delta }`: streamed answer text |
 | `turn.thinking` | notification | `{ session_id, turn_id, delta }`: streamed reasoning (optional) |
 | `turn.message` | notification | `{ session_id, turn_id, message }`: a finished message, appended to the session's tape |
-| `turn.usage` | notification | `{ session_id, turn_id, engine, engine_version, input?, output?, cache_read?, cache_write?, cost_usd?, render?, engine_session?, … }`: the worker's report for the whole turn, sent before `turn.end` |
+| `turn.usage` | notification | `{ session_id, turn_id, engine, engine_version, input?, output?, cache_read?, cache_write?, cost_usd?, render?, engine_session?, fallback_reason?, … }`: the worker's report for the whole turn, sent before `turn.end` |
 | `turn.end` | notification | `{ session_id, turn_id, error }`: the turn is over; `error` is null on success, `"interrupted"` after an abort |
 
 ## Messages
@@ -65,6 +65,7 @@ Some engines cache earlier turns only inside their own sessions (measured for Cl
 - It reports `engine_session: { id, resumable }` in `turn.usage`; `resumable` is true only when the turn finished cleanly, so the engine's session holds exactly what the tape holds.
 - The kernel records it on the tape. On the next turn, if nothing was written since (no other turn, summary or new instructions) and the model is on the same engine, it sends `resume: { id }`.
 - With `resume`, the worker continues that session and sends only the new prompt and its context. If the engine no longer has the session, or `resume` is null, it starts a new one from `history`.
+- `fallback_reason` (string) says why the turn couldn't run as asked and fell back: the engine no longer had the session to `resume`, or refused the history as native items (so it went as a transcript). The worker also logs it.
 - `render` says how the history reached the engine: `resume`, `seed` (new engine session from the history), `inject` (native items), `native` (messages), `transcript` (quoted text, no engine session).
 - An engine that continues its own session may report totals for the whole session; the kernel makes them per turn by subtracting the previous turn's report for the same engine session.
 

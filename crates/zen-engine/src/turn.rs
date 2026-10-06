@@ -139,6 +139,66 @@ impl TurnCtx {
     }
 }
 
+/// The end of an engine CLI's stderr, kept while it runs so its errors can say why it failed.
+#[derive(Clone, Default)]
+pub struct StderrTail {
+    buf: Arc<std::sync::Mutex<String>>,
+    reader: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+}
+
+impl StderrTail {
+    const KEEP: usize = 4096;
+
+    /// Collect `stderr` (a child's piped stderr) in the background, keeping its last few KB.
+    pub fn collect(stderr: Option<impl tokio::io::AsyncRead + Unpin + Send + 'static>) -> Self {
+        let tail = StderrTail::default();
+        let buf = tail.buf.clone();
+        if let Some(mut s) = stderr {
+            *tail.reader.lock().unwrap() = Some(tokio::spawn(async move {
+                let mut chunk = [0u8; 4096];
+                while let Ok(n) = tokio::io::AsyncReadExt::read(&mut s, &mut chunk).await {
+                    if n == 0 {
+                        break;
+                    }
+                    let mut b = buf.lock().unwrap();
+                    b.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                    if b.len() > 2 * Self::KEEP {
+                        let mut cut = b.len() - Self::KEEP;
+                        while !b.is_char_boundary(cut) {
+                            cut += 1;
+                        }
+                        b.drain(..cut);
+                    }
+                }
+            }));
+        }
+        tail
+    }
+
+    /// The last few non-empty lines, joined, for an error message ("" if there were none).
+    pub fn last_lines(&self, n: usize) -> String {
+        let b = self.buf.lock().unwrap();
+        let mut lines: Vec<&str> = b.lines().map(str::trim).filter(|l| !l.is_empty()).rev().take(n).collect();
+        lines.reverse();
+        lines.join(" | ")
+    }
+
+    /// `msg`, followed by the last lines of stderr when there are any. Once the process has ended,
+    /// waits (briefly) for what it wrote last to be read.
+    pub async fn explain(&self, msg: &str) -> String {
+        let reader = self.reader.lock().unwrap().take();
+        if let Some(r) = reader {
+            if !r.is_finished() {
+                let _ = tokio::time::timeout(std::time::Duration::from_millis(500), r).await;
+            }
+        }
+        match self.last_lines(3) {
+            t if t.is_empty() => msg.to_string(),
+            t => format!("{msg}: {t}"),
+        }
+    }
+}
+
 /// A random UUID (v4), for engine session ids.
 pub fn new_uuid() -> String {
     uuid::Uuid::new_v4().to_string()
@@ -255,5 +315,19 @@ mod tests {
         assert!(t.contains("Today is X."));
         assert!(t.contains("#42 Assistant: done"));
         assert!(transcript(&[]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn stderr_tail_keeps_the_last_lines() {
+        let mut child = tokio::process::Command::new("sh")
+            .args(["-c", "for i in $(seq 1 3000); do echo \"line $i\" >&2; done; echo >&2; echo 'fatal: it broke' >&2"])
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let tail = StderrTail::collect(child.stderr.take());
+        child.wait().await.unwrap();
+        assert_eq!(tail.explain("it exited").await, "it exited: line 2999 | line 3000 | fatal: it broke");
+        assert!(tail.buf.lock().unwrap().len() <= 2 * StderrTail::KEEP);
+        assert_eq!(StderrTail::default().explain("quiet").await, "quiet");
     }
 }
