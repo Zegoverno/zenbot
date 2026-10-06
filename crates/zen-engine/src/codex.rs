@@ -12,9 +12,9 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::{watch, OnceCell};
+use tokio::sync::{watch, Mutex};
 
-use crate::turn::{enabled, now_ms, prompt_blocks, seed_blocks, TurnCtx, TurnInput};
+use crate::turn::{enabled, now_ms, prompt_blocks, seed_blocks, StderrTail, TurnCtx, TurnInput};
 
 pub fn available() -> bool {
     version().is_some()
@@ -31,6 +31,9 @@ struct AppServer {
     stdin: ChildStdin,
     lines: Lines<BufReader<ChildStdout>>,
     next: AtomicU64,
+    stderr: StderrTail,
+    /// Lines from the app-server that weren't JSON (reported when a turn's stream makes no sense).
+    unknown: usize,
 }
 
 impl AppServer {
@@ -40,13 +43,14 @@ impl AppServer {
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .context("starting `codex app-server` (is Codex installed and signed in?)")?;
         let stdin = child.stdin.take().context("codex stdin")?;
         let lines = BufReader::new(child.stdout.take().context("codex stdout")?).lines();
-        let mut s = AppServer { child, stdin, lines, next: AtomicU64::new(1) };
+        let stderr = StderrTail::collect(child.stderr.take());
+        let mut s = AppServer { child, stdin, lines, next: AtomicU64::new(1), stderr, unknown: 0 };
         s.call("initialize", json!({ "clientInfo": { "name": "zen", "version": env!("CARGO_PKG_VERSION") }, "capabilities": { "experimentalApi": true } }), None).await?;
         s.send(json!({ "method": "initialized" })).await?;
         Ok(s)
@@ -59,49 +63,83 @@ impl AppServer {
         Ok(())
     }
 
-    /// Send a request and wait for its response. Other messages that arrive meanwhile go to `other`.
+    /// The next message from the app-server; an error (with what it last wrote to stderr) if it exited.
+    async fn next(&mut self) -> Result<Value> {
+        while let Some(line) = self.lines.next_line().await? {
+            match serde_json::from_str::<Value>(&line) {
+                Ok(v) => return Ok(v),
+                Err(_) => self.unknown += 1,
+            }
+        }
+        bail!("{}", self.stderr.explain("codex app-server exited").await)
+    }
+
+    /// Send a request and wait for its response. Other messages that arrive meanwhile go to `other`;
+    /// without `other`, a request from the app-server is refused and fails the call.
     async fn call(&mut self, method: &str, params: Value, mut other: Option<&mut Vec<Value>>) -> Result<Value> {
         let id = self.next.fetch_add(1, Ordering::SeqCst);
         self.send(json!({ "id": id, "method": method, "params": params })).await?;
-        while let Some(line) = self.lines.next_line().await? {
-            let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
+        loop {
+            let msg = self.next().await?;
             if msg["id"].as_u64() == Some(id) && msg.get("method").is_none() {
                 if let Some(e) = msg.get("error") {
-                    bail!("codex {method}: {}", e["message"].as_str().unwrap_or("error"));
+                    bail!("{}", self.stderr.explain(&format!("codex {method}: {}", e["message"].as_str().unwrap_or("error"))).await);
                 }
                 return Ok(msg["result"].clone());
             }
-            if let Some(o) = other.as_deref_mut() {
-                o.push(msg);
+            match other.as_deref_mut() {
+                Some(o) => o.push(msg),
+                None if is_request(&msg) => bail!("{}", self.refuse(&msg).await?),
+                None => {}
             }
         }
-        bail!("codex app-server exited")
+    }
+
+    /// Answer a request from the app-server that zen doesn't handle with an error, so Codex doesn't
+    /// wait for it forever. Returns the error for the turn: Codex's protocol may have changed.
+    async fn refuse(&mut self, msg: &Value) -> Result<String> {
+        let method = msg["method"].as_str().unwrap_or("");
+        self.send(json!({ "id": msg["id"], "error": { "code": -32601, "message": format!("zen doesn't handle `{method}`") } })).await?;
+        Ok(format!("codex asked for `{method}`, which zen doesn't handle (has Codex's app-server protocol changed?)"))
     }
 }
 
-static MODELS: OnceCell<Vec<Value>> = OnceCell::const_new();
+/// Whether a message from the app-server is a request (it waits for an answer).
+fn is_request(msg: &Value) -> bool {
+    msg.get("id").is_some_and(|id| !id.is_null()) && msg.get("method").is_some()
+}
 
-/// Models available to this Codex sign-in, asked from Codex itself (cached).
+/// Models available to this Codex sign-in, asked from Codex itself. Cached once Codex lists some;
+/// a failed lookup is logged and tried again next time.
+static MODELS: Mutex<Vec<Value>> = Mutex::const_new(Vec::new());
+
 pub async fn models() -> Vec<Value> {
-    MODELS
-        .get_or_init(|| async {
-            let Ok(mut s) = AppServer::start(&std::env::temp_dir()).await else { return vec![] };
-            let list = s.call("model/list", json!({}), None).await.unwrap_or(Value::Null);
-            let _ = s.child.start_kill();
-            list["data"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|m| {
-                    let id = m["id"].as_str().or(m["model"].as_str())?;
-                    let efforts: Vec<&Value> = m["supportedReasoningEfforts"].as_array().into_iter().flatten().map(|e| &e["reasoningEffort"]).collect();
-                    Some(json!({ "id": format!("codex/{id}"), "name": format!("Codex {}", m["displayName"].as_str().unwrap_or(id)), "engine": "codex", "default": m["isDefault"],
-                                 "efforts": efforts, "default_effort": m["defaultReasoningEffort"] }))
-                })
-                .collect()
+    let mut cached = MODELS.lock().await;
+    if cached.is_empty() {
+        match list_models().await {
+            Ok(list) if !list.is_empty() => *cached = list,
+            Ok(_) => eprintln!("[engine] codex: model/list returned no models"),
+            Err(e) => eprintln!("[engine] codex: listing models failed: {e:#}"),
+        }
+    }
+    cached.clone()
+}
+
+async fn list_models() -> Result<Vec<Value>> {
+    let mut s = AppServer::start(&std::env::temp_dir()).await?;
+    let list = s.call("model/list", json!({}), None).await;
+    let _ = s.child.start_kill();
+    Ok(list?["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let id = m["id"].as_str().or(m["model"].as_str())?;
+            let efforts: Vec<&Value> = m["supportedReasoningEfforts"].as_array().into_iter().flatten().map(|e| &e["reasoningEffort"]).collect();
+            Some(json!({ "id": format!("codex/{id}"), "name": format!("Codex {}", m["displayName"].as_str().unwrap_or(id)), "engine": "codex", "default": m["isDefault"],
+                         "efforts": efforts, "default_effort": m["defaultReasoningEffort"] }))
         })
-        .await
-        .clone()
+        .collect())
 }
 
 fn error_text(v: &Value) -> String {
@@ -135,13 +173,26 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
         let mut early = Vec::new();
         // Continue the thread the kernel says is in sync with the tape; if Codex no longer has it,
         // start a new one.
+        // Why the turn couldn't run the way the kernel asked (resume, native history), if it couldn't.
+        let mut fallback: Option<String> = None;
         let resumed = match &input.resume {
-            Some(id) if sessions => s
-                .call("thread/resume", json!({ "threadId": id, "model": model, "cwd": jail, "approvalPolicy": "never", "sandbox": "read-only",
-                    "baseInstructions": system_prompt, "developerInstructions": developer, "config": config }), Some(&mut early))
-                .await
-                .ok()
-                .and_then(|r| r["thread"]["id"].as_str().map(String::from)),
+            Some(id) if sessions => {
+                let r = s
+                    .call("thread/resume", json!({ "threadId": id, "model": model, "cwd": jail, "approvalPolicy": "never", "sandbox": "read-only",
+                        "baseInstructions": system_prompt, "developerInstructions": developer, "config": config }), Some(&mut early))
+                    .await;
+                match r.map(|r| r["thread"]["id"].as_str().map(String::from)) {
+                    Ok(Some(id)) => Some(id),
+                    Ok(None) => {
+                        fallback = Some(format!("thread/resume of {id} returned no thread id; starting a new thread"));
+                        None
+                    }
+                    Err(e) => {
+                        fallback = Some(format!("thread/resume of {id} failed ({e:#}); starting a new thread"));
+                        None
+                    }
+                }
+            }
             _ => None,
         };
         let (thread_id, render) = match resumed {
@@ -158,9 +209,16 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
                     )
                     .await?;
                 let id = thread["thread"]["id"].as_str().context("codex thread id")?.to_string();
-                let injected = !input.history.is_empty()
-                    && enabled("ZEN_CODEX_INJECT")
-                    && s.call("thread/inject_items", json!({ "threadId": id, "items": history_items(&input.history) }), Some(&mut early)).await.is_ok();
+                let mut injected = false;
+                if !input.history.is_empty() && enabled("ZEN_CODEX_INJECT") {
+                    match s.call("thread/inject_items", json!({ "threadId": id, "items": history_items(&input.history) }), Some(&mut early)).await {
+                        Ok(_) => injected = true,
+                        Err(e) => {
+                            let why = format!("thread/inject_items failed ({e:#}); sending the history as a transcript");
+                            fallback = Some(fallback.map_or(why.clone(), |f| format!("{f}; {why}")));
+                        }
+                    }
+                }
                 (id, if input.history.is_empty() || injected { "inject" } else { "transcript" })
             }
         };
@@ -171,16 +229,21 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
         };
         s.call("turn/start", json!({ "threadId": thread_id, "input": items, "effort": effort }), Some(&mut early)).await?;
 
+        if let Some(reason) = &fallback {
+            eprintln!("[engine] codex: {reason}");
+        }
         let mut usage = json!({ "input": 0, "output": 0, "cacheRead": 0 });
         let mut error: Option<String> = None;
+        // Messages sent to the tape: a turn that completes without any means the stream has changed.
+        let mut sent = 0;
         let mut pending = early.into_iter();
         loop {
             let msg = match pending.next() {
                 Some(m) => m,
                 None => tokio::select! {
-                    line = s.lines.next_line() => match line? {
-                        Some(l) => match serde_json::from_str::<Value>(&l) { Ok(v) => v, Err(_) => continue },
-                        None => { error.get_or_insert_with(|| "codex app-server exited".into()); break; }
+                    next = s.next() => match next {
+                        Ok(v) => v,
+                        Err(e) => { error.get_or_insert_with(|| e.to_string()); break; }
                     },
                     _ = abort.changed() => { let _ = s.child.start_kill(); return Ok(Some("interrupted".into())); }
                 },
@@ -199,6 +262,7 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
                         "content": [{ "type": "toolCall", "id": it["id"], "name": it["tool"], "arguments": it["arguments"] }],
                         "usage": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": { "total": 0.0 } } });
                     ctx.notify("turn.message", json!({ "message": message })).await;
+                    sent += 1;
                 }
                 "item/agentMessage/delta" => {
                     ctx.notify("turn.delta", json!({ "delta": p["delta"] })).await;
@@ -211,6 +275,7 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
                         "content": [{ "type": "text", "text": p["item"]["text"] }],
                         "usage": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": { "total": 0.0 } } });
                     ctx.notify("turn.message", json!({ "message": message })).await;
+                    sent += 1;
                 }
                 "thread/tokenUsage/updated" => {
                     let l = &p["tokenUsage"]["last"];
@@ -225,16 +290,28 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
                         error.get_or_insert_with(|| error_text(&p["turn"]["error"]));
                     } else if p["turn"]["status"] != "interrupted" {
                         error = None;
+                        if sent == 0 {
+                            error = Some(format!("codex stream format changed: the turn completed, but no message was read from it ({} lines not understood)", s.unknown));
+                        }
                     }
+                    break;
+                }
+                // A request zen doesn't know would leave Codex waiting until the watchdog: refuse it
+                // and end the turn, naming it.
+                _ if is_request(&msg) => {
+                    error = Some(s.refuse(&msg).await?);
                     break;
                 }
                 _ => {}
             }
         }
         let _ = s.child.start_kill();
+        if s.unknown > 0 {
+            eprintln!("[engine] codex: {} app-server lines not understood", s.unknown);
+        }
         ctx
             .notify("turn.usage", json!({ "engine": "codex", "engine_version": version(),
-                "provider": "codex", "model": model, "render": render,
+                "provider": "codex", "model": model, "render": render, "fallback_reason": fallback,
                 "engine_session": if sessions { json!({ "id": thread_id, "resumable": error.is_none() }) } else { Value::Null },
                 "input": usage["input"], "output": usage["output"], "cache_read": usage["cacheRead"], "cost_usd": null }))
             .await;
@@ -261,10 +338,7 @@ pub async fn complete(model: &str, system: &str, prompt: &str) -> Result<Value> 
     loop {
         let msg = match pending.next() {
             Some(m) => m,
-            None => match s.lines.next_line().await? {
-                Some(l) => match serde_json::from_str::<Value>(&l) { Ok(v) => v, Err(_) => continue },
-                None => anyhow::bail!("codex app-server exited"),
-            },
+            None => s.next().await?,
         };
         let p = &msg["params"];
         match msg["method"].as_str().unwrap_or("") {
@@ -280,6 +354,7 @@ pub async fn complete(model: &str, system: &str, prompt: &str) -> Result<Value> 
                 }
                 break;
             }
+            _ if is_request(&msg) => anyhow::bail!("{}", s.refuse(&msg).await?),
             _ => {}
         }
     }
@@ -331,6 +406,13 @@ fn history_items(history: &[Value]) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requests_are_told_from_notifications_and_responses() {
+        assert!(is_request(&json!({ "id": 7, "method": "item/tool/call", "params": {} })));
+        assert!(!is_request(&json!({ "method": "turn/completed", "params": {} })));
+        assert!(!is_request(&json!({ "id": 7, "result": {} })));
+    }
 
     /// Each turn's items start with the previous turn's (the prefix the provider can cache).
     #[test]

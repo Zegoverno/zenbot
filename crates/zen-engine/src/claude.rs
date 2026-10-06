@@ -17,7 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::watch;
 
-use crate::turn::{enabled, new_uuid, now_ms, prompt_blocks, seed_blocks, TurnCtx, TurnInput};
+use crate::turn::{enabled, new_uuid, now_ms, prompt_blocks, seed_blocks, StderrTail, TurnCtx, TurnInput};
 
 const PREFIX: &str = "mcp__zen__";
 
@@ -29,7 +29,7 @@ const PREFIX: &str = "mcp__zen__";
 pub fn models() -> Vec<Value> {
     let model = |id: &str, name: &str| {
         json!({ "id": format!("claude/{id}"), "name": name, "engine": "claude-code",
-                "efforts": EFFORTS, "default_effort": "medium" })
+                "efforts": EFFORTS, "default_effort": DEFAULT_EFFORT })
     };
     vec![
         model("claude-opus-5-5", "Claude Opus 5.5"),
@@ -39,6 +39,8 @@ pub fn models() -> Vec<Value> {
 }
 
 const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+/// The level a session runs at unless it picks another, and the one summaries (`complete`) use.
+const DEFAULT_EFFORT: &str = "medium";
 
 /// Claude Code's configuration directory (where it keeps sessions).
 fn config_dir() -> std::path::PathBuf {
@@ -87,6 +89,10 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
     // How this turn reaches Claude Code: continue its session, start one seeded from the tape, or
     // (sessions off) a throwaway session with the replayed history.
     let sessions = enabled("ZEN_CLAUDE_RESUME");
+    let fallback = match &input.resume {
+        Some(id) if sessions && !session_exists(id) => Some(format!("engine session {id} is gone; seeding a new one from the history")),
+        _ => None,
+    };
     let (render, engine_session, content) = match &input.resume {
         Some(id) if sessions && session_exists(id) => ("resume", Some(id.clone()), prompt_blocks(&input.prompt, input.context.as_deref())),
         _ if sessions => ("seed", Some(new_uuid()), seed_blocks(&input.history, &input.prompt, input.context.as_deref())),
@@ -124,25 +130,29 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
     stdin.flush().await?;
     let mut stdin = Some(stdin);
 
-    let stderr = child.stderr.take();
-    let stderr_task = tokio::spawn(async move {
-        let mut buf = String::new();
-        if let Some(mut s) = stderr {
-            let _ = tokio::io::AsyncReadExt::read_to_string(&mut s, &mut buf).await;
-        }
-        buf
-    });
+    let stderr = StderrTail::collect(child.stderr.take());
 
     let mut lines = BufReader::new(child.stdout.take().context("claude stdout")?).lines();
     let mut calls = Calls::default();
     let mut outcome: Option<Result<Option<String>>> = None;
     let mut usage = json!({ "engine": "claude-code", "provider": "claude", "model": model, "render": render });
+    if let Some(reason) = &fallback {
+        eprintln!("[engine] claude: {reason}");
+        usage["fallback_reason"] = json!(reason);
+    }
+    // Messages sent to the tape, and stream lines this code doesn't understand: if the CLI's
+    // stream format changes, the turn fails loudly instead of answering with nothing.
+    let mut sent = 0;
+    let mut unknown = 0;
 
     loop {
         tokio::select! {
             line = lines.next_line() => {
                 let Some(line) = line? else { break };
-                let Ok(ev) = serde_json::from_str::<Value>(&line) else { continue };
+                let Ok(ev) = serde_json::from_str::<Value>(&line) else { unknown += 1; continue };
+                if !matches!(ev["type"].as_str(), Some("stream_event" | "assistant" | "user" | "system" | "result")) {
+                    unknown += 1;
+                }
                 if ev["type"] == "stream_event" && ev["event"]["type"] == "content_block_delta" {
                     let d = &ev["event"]["delta"];
                     match d["type"].as_str() {
@@ -157,13 +167,17 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
                 }
                 if let Some(message) = calls.feed(&ev) {
                     ctx.notify("turn.message", json!({ "message": message })).await;
+                    sent += 1;
                 }
                 match ev["type"].as_str() {
                     Some("system") if ev["subtype"] == "init" => usage["engine_version"] = ev["claude_code_version"].clone(),
                     Some("result") => {
                         turn_usage(&ev, &mut usage);
+                        let answered = ev["result"].as_str().is_some_and(|t| !t.trim().is_empty());
                         let err = if ev["is_error"] == true {
                             Some(ev["result"].as_str().or(ev["subtype"].as_str()).unwrap_or("claude reported an error").to_string())
+                        } else if answered && sent == 0 {
+                            Some(format!("claude stream format changed: the CLI answered, but no assistant message was read from its stream ({unknown} lines not understood)"))
                         } else { None };
                         outcome = Some(Ok(err));
                         stdin = None; // closing stdin lets the CLI exit
@@ -189,7 +203,9 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
     if !sessions {
         let _ = std::fs::remove_dir_all(&dir);
     }
-    let stderr = stderr_task.await.unwrap_or_default();
+    if unknown > 0 {
+        eprintln!("[engine] claude: {unknown} stream lines not understood");
+    }
     // Only a turn that finished cleanly leaves the engine session in sync with the tape.
     let clean = matches!(outcome, Some(Ok(None)));
     if let Some(id) = engine_session {
@@ -198,10 +214,7 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
     ctx.notify("turn.usage", usage).await;
     match outcome {
         Some(o) => o,
-        None => {
-            let detail = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").to_string();
-            Ok(Some(format!("claude exited unexpectedly ({}): {detail}", status.map(|s| s.to_string()).unwrap_or_default())))
-        }
+        None => Ok(Some(stderr.explain(&format!("claude exited unexpectedly ({})", status.map(|s| s.to_string()).unwrap_or_default())).await)),
     }
 }
 
@@ -212,7 +225,7 @@ pub async fn complete(model: &str, system: &str, prompt: &str) -> Result<Value> 
     std::fs::create_dir_all(&dir)?;
     let mut child = Command::new("claude")
         .args(["-p", "--output-format", "json", "--tools", "", "--setting-sources", "", "--no-session-persistence"])
-        .args(["--strict-mcp-config", "--system-prompt", system, "--model", model])
+        .args(["--strict-mcp-config", "--effort", DEFAULT_EFFORT, "--system-prompt", system, "--model", model])
         .current_dir(&dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
