@@ -44,8 +44,8 @@ PROGRESS.md. The phases below replace the old next steps (old "Phase 2b", "Phase
    - Voyager: a composable skill library that grows.
    - The owner's earlier list for memory and context: gbrain, Karpathy's LLM Wiki, eggshell, qm,
      memvid, goose, caveman.
-2. Merge the open fix PRs (#8 kernel robustness, #9 worker turn id, #10 engines fail loudly, #13 kernel
-   queries) when green, independently of this plan.
+2. ~~Merge the open fix PRs~~ (#8, #9, #10, #13 merged 2026-10-06, without an eval; see PROGRESS.md).
+   Install them with `scripts/upgrade.sh` and run `scripts/eval.sh` against the previous install.
 
 **Done when** DESIGN.md's target design cites its sources and the owner has reviewed it.
 
@@ -149,11 +149,9 @@ maps to a model, a small share of subtasks explore, outcomes decide.
 - Settings are read from the environment in ~25 places (no single config).
 - Client events are untyped JSON.
 - `flow.rs` (~1,000 lines) is mostly removed in Phase 1, step 6.
-- WebSocket hubs are never freed; a summary made inline at the hard limit might trip the watchdog
-  (both addressed in PR #8).
 - The `policies` table is read on approval (`flow::route_for`) but nothing ever writes it, so policy
   routing does nothing until a row exists (found by the MAP.md survey; matters for Phase 6).
-- Brief criteria commands run with `bash -lc` outside bubblewrap; instruction files attached to a tool
+- Brief criteria commands run on the bash tool's shell, not in the read-only bubblewrap sandbox; instruction files attached to a tool
   result are added after secret masking runs. Both to settle with the sandbox and masking work.
 - Stale header comments: `flow.rs` (sessions start `open` by default, not `framing`), `codex.rs`
   (threads persist unless `ZEN_CODEX_RESUME=0`).
