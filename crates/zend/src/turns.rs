@@ -347,6 +347,7 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
         }
     }
     let turn_id = Uuid::new_v4();
+    let (cancel, mut stopped) = watch::channel(false);
     {
         let mut turns = app.turns.lock().await;
         if turns.contains_key(&id) {
@@ -356,7 +357,7 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
             id,
             Turn {
                 worker: widx,
-                cancel: watch::channel(false).0,
+                cancel,
                 last_activity: Instant::now(),
                 tools_running: 0,
                 abort_sent: None,
@@ -374,7 +375,9 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
             },
         );
     }
-    let res = async {
+    // How far the start got, for cleaning up when it fails.
+    let (mut row_written, mut busy_sent) = (false, false);
+    let res: Result<()> = async {
         let prev = measure::previous(&app.db, id).await?;
         // A prepared summary is applied after a pause (the cache has expired anyway) or past the
         // hard limit; past the hard limit with none prepared, one is made now.
@@ -386,7 +389,15 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
                 Some(c) => Some(c),
                 None if over => {
                     app.emit(id, json!({ "type": "status", "text": "summarizing older turns to make room" })).await;
-                    compact::prepare(app, id, settings.keep_tokens(), &model).await?
+                    // The summary can take minutes: the watchdog must not take that for a stalled
+                    // turn, and an abort stops the wait.
+                    hold(app, id, turn_id, true).await;
+                    let made = tokio::select! {
+                        made = compact::prepare(app, id, settings.keep_tokens(), &model) => Some(made),
+                        _ = stopped.wait_for(|s| *s) => None,
+                    };
+                    hold(app, id, turn_id, false).await;
+                    made.unwrap_or_else(|| Err(anyhow::anyhow!(INTERRUPTED)))?
                 }
                 None => None,
             };
@@ -423,6 +434,11 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
         let turn_context = compile::turn_context(&blocks, &today, phase.as_deref());
         let sent = measure::record(&envelope, &history, &summary, &text, &turn_context, resume.is_some(), new_envelope);
         let cache_break = measure::break_at_start(prev.as_ref(), &model, &envelope.hash, &sent);
+        // An abort or the watchdog may have ended the turn while it was being prepared: then
+        // finish_turn has told the clients, and there's nothing left to do.
+        if !still_ours(app, id, turn_id).await? {
+            return Ok(());
+        }
         sqlx::query(
             "INSERT INTO turns (id, session_id, harness, worker, model, effort, envelope, context, cache_break)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
@@ -438,6 +454,7 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
         .bind(cache_break)
         .execute(&app.db)
         .await?;
+        row_written = true;
         let extra = context_in(&blocks);
         if let Some(t) = app.turns.lock().await.get_mut(&id) {
             t.context = extra.iter().cloned().collect();
@@ -458,6 +475,12 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
             sqlx::query("UPDATE sessions SET title = $2 WHERE id = $1").bind(id).bind(t.trim()).execute(&app.db).await?;
         }
         app.emit(id, json!({ "type": "message", "message": user })).await;
+        if !still_ours(app, id, turn_id).await? {
+            return Ok(());
+        }
+        // `busy` goes out before the worker starts, so it can't arrive after the turn's `end`.
+        app.emit(id, json!({ "type": "busy", "busy": true, "turn_id": turn_id, "harness": app.harness, "model": model, "effort": effort })).await;
+        busy_sent = true;
         app.workers[widx]
             .mind()
             .request(
@@ -475,18 +498,61 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
                     "kind": kind,
                 }),
             )
-            .await
+            .await?;
+        Ok(())
     }
     .await;
-    if let Err(e) = res {
-        // The turn never started; close its row (if it was written) as an error.
-        if let Some(turn) = app.turns.lock().await.remove(&id) {
-            let _ = record_turn(app, &turn, &json!(e.to_string())).await;
+    match res {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // The turn never started; close its row (if it was written) as an error, and end it
+            // for clients that were told it started.
+            let turn = {
+                let mut turns = app.turns.lock().await;
+                if turns.get(&id).is_some_and(|t| t.turn_id == turn_id) {
+                    turns.remove(&id)
+                } else {
+                    None
+                }
+            };
+            if let Some(turn) = turn {
+                let error = json!(e.to_string());
+                let summary = if row_written { record_turn(app, &turn, &error).await.unwrap_or(Value::Null) } else { Value::Null };
+                if busy_sent {
+                    app.emit(id, json!({ "type": "end", "error": error, "turn": summary, "next": false })).await;
+                }
+            }
+            Err(e)
         }
-        return Err(e);
     }
-    app.emit(id, json!({ "type": "busy", "busy": true, "turn_id": turn_id, "harness": app.harness, "model": model, "effort": effort })).await;
-    Ok(())
+}
+
+/// The error a turn stopped before it reached the worker ends with (an abort while summarizing).
+const INTERRUPTED: &str = "interrupted";
+
+/// Whether the session's turn is still the one `turn_id` names and hasn't been stopped. Errors
+/// (as interrupted) when it is but was stopped; false when it is gone (ended by the kernel).
+async fn still_ours(app: &App, id: Uuid, turn_id: Uuid) -> Result<bool> {
+    match app.turns.lock().await.get(&id) {
+        Some(t) if t.turn_id == turn_id => {
+            anyhow::ensure!(!*t.cancel.borrow(), INTERRUPTED);
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Count kernel work for a turn before it reaches the worker (a summary made inline) as a running
+/// tool, so the watchdog doesn't take the quiet for a stall; it counts as activity when it ends.
+async fn hold(app: &App, id: Uuid, turn_id: Uuid, on: bool) {
+    if let Some(t) = app.turns.lock().await.get_mut(&id).filter(|t| t.turn_id == turn_id) {
+        if on {
+            t.tools_running += 1;
+        } else {
+            t.tools_running = t.tools_running.saturating_sub(1);
+            t.last_activity = Instant::now();
+        }
+    }
 }
 
 /// Stop a session's turn: its tools at once, then the model (the worker's `turn.abort`). The
