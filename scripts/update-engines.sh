@@ -23,6 +23,7 @@
 # that engine's post-update check fail, to test the rollback.
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$REPO/scripts/lib.sh"
 export PATH="$HOME/.local/bin:$HOME/.local/node/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 ZEN="$HOME/.zenbot"
 LOG="$ZEN/upgrade.log"
@@ -49,7 +50,6 @@ newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail 
 is_version() { [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; }
 wanted() { [ -z "${ZEN_ENGINES:-}" ] || [[ ",$ZEN_ENGINES," == *",$1,"* ]]; }
 forced_fail() { [[ ",${ZEN_ENGINES_FAIL:-}," == *",$1,"* ]]; }
-pi_enabled() { grep -qE '^ZEN_WORKERS=.*pi' "$ZEN/env" 2>/dev/null; }
 # Run a command as root only when the target directory isn't ours to write.
 as_owner() { local dir=$1; shift; if [ -w "$dir" ]; then "$@"; else sudo -n "$@"; fi; }
 # Point symlink $1 at $2 atomically.
