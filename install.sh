@@ -44,7 +44,7 @@ if ! command -v codex >/dev/null; then (npm install -g --no-audit --no-fund --si
 
 # Workers: `engine` (Claude Code + Codex on your subscriptions) and optionally `pi` (Pi agent loop).
 WORKERS="${ZEN_WORKERS:-engine}"
-if [[ ",$WORKERS," == *",pi,"* ]]; then (cd packages/mind && npm ci --no-audit --no-fund --silent); fi
+if [[ ",$WORKERS," == *",pi,"* ]]; then ./scripts/mind-deps.sh; fi
 if "$REPO/scripts/fetch-release.sh"; then
   say "Downloaded prebuilt zenbot $(git rev-parse --short HEAD)"
 else

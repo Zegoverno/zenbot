@@ -15,11 +15,13 @@
 #   check fails, the previous version is restored. Both CLIs are started fresh for every turn,
 #   so no restart is needed. When the check already fails on the installed version (signed out,
 #   offline), the update is skipped instead, since a test that fails anyway can't judge it.
-# - Pi: the exact pins in packages/mind are bumped, then checked: ping, the scripted model, and a
-#   real System One call when ZEN_S1_MODEL is set. The bump is committed locally ("mind: Pi X.Y.Z",
-#   never pushed) and applied with scripts/upgrade.sh, which runs a scripted Pi turn through a
-#   second kernel, restarts zenbot once no session is working, and rolls back if it is unhealthy.
-#   Pi is skipped when the checkout has local changes or isn't on main.
+# - Pi: the latest release is installed into packages/mind/node_modules only (npm --no-save). The
+#   repo pins Pi's minimum version and this job makes no commits; scripts/mind-deps.sh keeps the
+#   newer Pi when zenbot is reinstalled. It is checked: ping, the scripted model, and a real System
+#   One call when ZEN_S1_MODEL is set. Then it is applied with scripts/upgrade.sh, which runs a
+#   scripted Pi turn through a second kernel and restarts zenbot once no session is working. A
+#   failure puts the previous Pi back. Pi is skipped when the checkout has local changes or isn't
+#   on main, since upgrade.sh installs whatever the checkout holds.
 #
 # Results go to ~/.zenbot/upgrade.log ("engines: …", one line per engine) and the latest state
 # to ~/.zenbot/engines.json (shown by `zen status`).
@@ -244,7 +246,6 @@ update_cli() {
 
 MIND="$REPO/packages/mind"
 PI_PKGS=(@earendil-works/pi-ai @earendil-works/pi-agent-core)
-pi_pinned() { jq -r --arg p "$1" '.dependencies[$p] // empty' "$MIND/package.json"; }
 
 # Send the Pi worker one request ($1) and print its first line of output, waiting at most $2 seconds.
 # (The worker exits as soon as its stdin closes, so stdin is kept open until it answers.)
@@ -274,44 +275,50 @@ pi_check() {
   fi
 }
 
-# Undo the bump in the working tree and node_modules.
-pi_restore() { git -C "$REPO" checkout -q -- packages/mind/package.json packages/mind/package-lock.json; (cd "$MIND" && npm ci --no-audit --no-fund --silent); }
+pi_installed() { node -p "require('$MIND/node_modules/$1/package.json').version" 2>/dev/null || true; }
+# Put Pi packages (name@version …) into node_modules only: package.json and the lockfile, which pin
+# Pi's minimum version, stay as they are, so the update makes no commit (see scripts/mind-deps.sh).
+pi_put() { (cd "$MIND" && npm install --no-save --no-audit --no-fund --silent "$@"); }
 
 update_pi() {
   wanted pi || return 0
   if [ -z "${ZEN_ENGINES:-}" ] && ! pi_enabled; then return 0; fi
-  local have p latest want=() news="" why out
-  have=$(pi_pinned "${PI_PKGS[0]}")
+  local have p cur latest target="" old=() want=() news why out
+  have=$(pi_installed "${PI_PKGS[0]}")
+  [ -n "$have" ] || { record pi "" "not installed"; say "pi: not installed (scripts/mind-deps.sh installs it), skipped"; return 0; }
   for p in "${PI_PKGS[@]}"; do
+    cur=$(pi_installed "$p")
     latest=$(npm view "$p" version 2>/dev/null)
     is_version "$latest" || { record pi "$have" "latest version unknown"; log "pi $have: could not find the latest version of $p; skipped"; return 0; }
-    if newer "$(pi_pinned "$p")" "$latest"; then want+=("$p@$latest"); fi
-    [ "$p" = "${PI_PKGS[0]}" ] && news=$latest
+    old+=("$p@$cur")
+    if newer "$cur" "$latest"; then want+=("$p@$latest"); fi
+    [ "$p" = "${PI_PKGS[0]}" ] && target=$latest
   done
   if [ ${#want[@]} -eq 0 ]; then record pi "$have" "up to date"; say "pi $have: up to date"; return 0; fi
-  [ "$news" = "$have" ] && news="$have (${want[*]})"
+  news=$target; [ "$news" = "$have" ] && news="$have (${want[*]})"
   if [ -n "$CHECK_ONLY" ]; then record pi "$have" "update available: $news"; say "pi $have: $news available"; return 0; fi
+  # Applying means a zenbot restart through upgrade.sh, which installs whatever the checkout holds.
   if [ -n "$(git -C "$REPO" status --porcelain --untracked-files=no)" ]; then
     record pi "$have" "skipped: local changes"; log "pi $have → $news skipped: $REPO has local changes"; return 0
   fi
   if [ "$(git -C "$REPO" rev-parse --abbrev-ref HEAD)" != main ]; then
     record pi "$have" "skipped: not on main"; log "pi $have → $news skipped: $REPO is not on main"; return 0
   fi
-  if ! out=$(cd "$MIND" && npm install --save-exact --no-audit --no-fund --silent "${want[@]}" 2>&1); then
-    pi_restore; record pi "$have" "update failed"; log "pi $have → $news FAILED to install: $(echo "$out" | tail -1); kept $have"; return 0
+  if ! out=$(pi_put "${want[@]}" 2>&1); then
+    pi_put "${old[@]}" >/dev/null 2>&1; record pi "$(pi_installed "${PI_PKGS[0]}")" "update failed"
+    log "pi $have → $news FAILED to install: $(echo "$out" | tail -1); kept $(pi_installed "${PI_PKGS[0]}")"; return 0
   fi
-  if ! why=$(pi_check "$(pi_pinned "${PI_PKGS[0]}")"); then
-    pi_restore; rolled_back pi "$have" "$have" "$news" "$why"; return 0
+  if ! why=$(pi_check "$target"); then
+    pi_put "${old[@]}" >/dev/null 2>&1; rolled_back pi "$(pi_installed "${PI_PKGS[0]}")" "$have" "$news" "$why"; return 0
   fi
-  git -C "$REPO" commit -q -m "mind: Pi $(pi_pinned "${PI_PKGS[0]}")" \
-    -m "Bumped by scripts/update-engines.sh (${want[*]}). Checked: ping, the scripted model$(grep -qE '^ZEN_S1_MODEL=.' "$ZEN/env" 2>/dev/null && echo ', a System One call'); scripts/upgrade.sh then runs a scripted Pi turn through the new build." \
-    -- packages/mind/package.json packages/mind/package-lock.json || { pi_restore; record pi "$have" "update failed"; log "pi $have → $news FAILED: could not commit; kept $have"; return 0; }
+  # upgrade.sh runs a scripted Pi turn through a second kernel, then restarts zenbot at idle so the
+  # worker loads the new Pi (its scripts/mind-deps.sh keeps the newer version).
   if out=$("$REPO/scripts/upgrade.sh" 2>&1); then
-    record pi "$(pi_pinned "${PI_PKGS[0]}")" "updated from $have"
-    log "pi $have → $(pi_pinned "${PI_PKGS[0]}") OK (committed $(git -C "$REPO" rev-parse --short HEAD); zenbot restarts at idle, see the upgrade lines)"
+    record pi "$target" "updated from $have"
+    log "pi $have → $target OK (node_modules only, no commit; zenbot restarts at idle, see the upgrade lines)"
   else
-    git -C "$REPO" reset -q --keep HEAD~1 && (cd "$MIND" && npm ci --no-audit --no-fund --silent)
-    rolled_back pi "$(pi_pinned "${PI_PKGS[0]}")" "$have" "$news" "scripts/upgrade.sh failed, commit undone: $(echo "$out" | grep -E 'FAILED' | head -1)"
+    pi_put "${old[@]}" >/dev/null 2>&1
+    rolled_back pi "$(pi_installed "${PI_PKGS[0]}")" "$have" "$news" "scripts/upgrade.sh failed: $(echo "$out" | grep -E 'FAILED' | head -1)"
   fi
 }
 

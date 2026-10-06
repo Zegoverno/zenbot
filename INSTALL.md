@@ -53,7 +53,7 @@ cd ~/zenbot && git pull && ./scripts/upgrade.sh
 
 ### Engines
 
-The model engines are kept on their latest versions by a daily timer (`zen-engines.timer`, around 04:00 UTC): `scripts/update-engines.sh` updates the Claude Code and Codex CLIs and, with the `pi` worker, Pi. Each new version must pass a real test turn; if it doesn't, the previous version is put back. The CLIs need no restart. A Pi update is committed locally (never pushed) and applied through `upgrade.sh`, and it is skipped while the checkout has local changes or isn't on `main`. Results are in `~/.zenbot/upgrade.log` (`engines:` lines), and `zen status` shows the versions.
+The model engines are kept on their latest versions by a daily timer (`zen-engines.timer`, around 04:00 UTC): `scripts/update-engines.sh` updates the Claude Code and Codex CLIs and, with the `pi` worker, Pi. Each new version must pass a real test turn; if it doesn't, the previous version is put back. The CLIs need no restart. The updates make no commits: a newer Pi goes into `packages/mind/node_modules` only (the repo pins its minimum version) and is applied through `upgrade.sh`. It is skipped while the checkout has local changes or isn't on `main`. Results are in `~/.zenbot/upgrade.log` (`engines:` lines), and `zen status` shows the versions.
 
 ```bash
 ~/zenbot/scripts/update-engines.sh --check   # installed vs latest, changes nothing

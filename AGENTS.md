@@ -18,7 +18,7 @@ The kernel owns all state and executes every tool call. Workers hold no state: t
 
 Config lives in `~/.zenbot/`: `env` (service environment, including `ZEN_WORKERS`), `token` (API token), `auth.json` (Pi's ChatGPT sign-in, secret, never print it; Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`), `history` (prompt history), `upgrade.log`, `version`, `engines.json` (engine versions from the last update check).
 
-The engines (Claude Code and Codex CLIs, Pi in `packages/mind`) are kept on their latest versions by `scripts/update-engines.sh`, run daily by `zen-engines.timer`. It tests each update and rolls back a failed one. A Pi update is a local commit (`mind: Pi X.Y.Z`) applied with `scripts/upgrade.sh`, so don't bump Pi by hand without the same checks. Code that depends on a CLI's flags or output should fail loudly, so the post-update check catches it.
+The engines (Claude Code and Codex CLIs, Pi in `packages/mind`) are kept on their latest versions by `scripts/update-engines.sh`, run daily by `zen-engines.timer`. It tests each update and rolls back a failed one. The updates make no commits: Pi's pins in `packages/mind` are its minimum version, and newer releases go into `node_modules` only. Install Pi's dependencies with `scripts/mind-deps.sh`, not plain `npm ci`, which would put the minimum back. Raise the minimum with a normal commit when code needs a newer Pi. Code that depends on a CLI's flags or output should fail loudly, so the post-update check catches it.
 
 ## Making a change
 
