@@ -71,6 +71,16 @@ for t in "${TASK_LIST[@]}"; do [ -f "evals/tasks/$t/task.json" ] || { echo "no t
 
 # ---------- harness builds ----------
 
+# The Pi packages installed in mind directory $1 are the versions its lockfile pins.
+mind_current() {
+  local p pin got
+  for p in pi-ai pi-agent-core; do
+    pin=$(jq -r --arg k "node_modules/@earendil-works/$p" '.packages[$k].version // ""' "$1/package-lock.json")
+    got=$(jq -r '.version // ""' "$1/node_modules/@earendil-works/$p/package.json" 2>/dev/null)
+    [ "$pin" = "$got" ] || return 1
+  done
+}
+
 # The new harness is this checkout as it is now, uncommitted changes included. Its label says so:
 # <commit>, or <commit>+<hash of the diff> when the tree has changes.
 build_new() {
@@ -83,6 +93,16 @@ build_new() {
     label="$label+$( (git diff HEAD -- crates packages scripts Cargo.toml Cargo.lock; git ls-files --others --exclude-standard -- crates packages scripts | xargs -r cat) | sha1sum | cut -c1-7)"
   fi
   NEW_LABEL=$label
+  # Pi as this checkout pins it: when the installed node_modules hold another version (a bump not
+  # applied yet), the new side runs on its own copy of packages/mind.
+  NEW_MIND="$REPO/packages/mind"
+  if [[ $(grep -E '^ZEN_WORKERS=' "$HOME/.zenbot/env" 2>/dev/null) == *pi* || $MODEL == openai/* ]] && ! mind_current "$NEW_MIND"; then
+    log "== installing the Pi this checkout pins (packages/mind differs from node_modules)"
+    mkdir -p "$OUT/new-mind"
+    cp -r "$NEW_MIND/src" "$NEW_MIND/package.json" "$NEW_MIND/package-lock.json" "$OUT/new-mind/"
+    (cd "$OUT/new-mind" && npm ci --no-audit --no-fund --silent)
+    NEW_MIND="$OUT/new-mind"
+  fi
 }
 
 # The base harness is a commit, built once and cached in ~/.zenbot/evals/builds/<commit>: the
@@ -102,7 +122,18 @@ build_base() {
     fi
     mkdir -p "$dir/bin"
     cp "$dir/src/target/release/zend" "$dir/src/target/release/zen-engine" "$dir/bin/"
-    [ -d "$REPO/packages/mind/node_modules" ] && ln -sfn "$REPO/packages/mind/node_modules" "$dir/src/packages/mind/node_modules"
+  fi
+  # Pi as the base pins it: the checkout's node_modules when they hold the same versions,
+  # otherwise its own install (so a Pi bump shows up in the comparison).
+  local mind="$dir/src/packages/mind"
+  if ! mind_current "$mind"; then
+    rm -f "$mind/node_modules" 2>/dev/null || true
+    if [ -d "$REPO/packages/mind/node_modules" ] && cmp -s "$REPO/packages/mind/package-lock.json" "$mind/package-lock.json" && mind_current "$REPO/packages/mind"; then
+      ln -sfn "$REPO/packages/mind/node_modules" "$mind/node_modules"
+    elif [ -d "$REPO/packages/mind/node_modules" ]; then
+      log "== installing the Pi the base pins"
+      (cd "$mind" && npm ci --no-audit --no-fund --silent)
+    fi
   fi
   BASE_BIN="$dir/bin"
   BASE_MIND="$dir/src/packages/mind"
@@ -224,5 +255,5 @@ build_new
 [ "$ONLY" = new ] || build_base
 log "== model $MODEL${EFFORT:+ · effort $EFFORT} · ${#TASK_LIST[@]} tasks × $REPEAT · results in $OUT"
 [ "$ONLY" = new ] || run_harness base "$BASE_BIN" "$BASE_MIND" "$BASE_LABEL" "$BASE_MODEL" "$BASE_EFFORT"
-[ "$ONLY" = base ] || run_harness new "$OUT/new-bin" "$REPO/packages/mind" "$NEW_LABEL" "$MODEL" "$EFFORT"
+[ "$ONLY" = base ] || run_harness new "$OUT/new-bin" "$NEW_MIND" "$NEW_LABEL" "$MODEL" "$EFFORT"
 "$REPO/scripts/eval-report.sh" "$OUT" | tee "$OUT/report.md"
