@@ -20,7 +20,7 @@ esac
 git config core.hooksPath scripts/git-hooks # commit trailers linking zen's commits to sessions
 
 echo "== build"
-if grep -qE '^ZEN_WORKERS=.*pi' "$HOME/.zenbot/env" 2>/dev/null; then (cd packages/mind && npm ci --no-audit --no-fund --silent); fi
+if pi_enabled; then (cd packages/mind && npm ci --no-audit --no-fund --silent); fi
 # Use the binaries CI built for this commit when there are no local code changes;
 # otherwise compile here (installing Rust first on machines that never needed it).
 PREBUILT=
@@ -28,11 +28,7 @@ if ./scripts/fetch-release.sh; then
   PREBUILT=1
   echo "using prebuilt binaries for $(git rev-parse --short HEAD)"
 else
-  if ! command -v cargo >/dev/null; then
-    echo "installing Rust to build from source"
-    for p in build-essential pkg-config; do dpkg -s "$p" >/dev/null 2>&1 || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$p"; done
-    curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null
-  fi
+  ensure_rust
   rm -f target/release/.prebuilt
   BUILD_LOG=$(mktemp)
   if ! cargo build --release >"$BUILD_LOG" 2>&1; then
@@ -49,7 +45,7 @@ if [ -z "$PREBUILT" ]; then # CI already tested prebuilt binaries
 fi
 PONG=$(echo '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}' | timeout 15 ./target/release/zen-engine 2>/dev/null | head -1 || true)
 echo "$PONG" | grep -q pong || { echo "CHECK FAILED: zen-engine did not answer ping"; exit 1; }
-if grep -qE '^ZEN_WORKERS=.*pi' "$HOME/.zenbot/env" 2>/dev/null; then
+if pi_enabled; then
   PONG=$(echo '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}' | timeout 15 node packages/mind/src/main.ts 2>/dev/null | head -1 || true)
   echo "$PONG" | grep -q pong || { echo "CHECK FAILED: zen-mind (pi) did not answer ping"; exit 1; }
 fi
@@ -67,7 +63,7 @@ SMOKE_WS=$(mktemp -d)
 SMOKE_DB=zen_smoke_$$
 SMOKE_PID=
 SMOKE_WORKERS=engine
-grep -qE '^ZEN_WORKERS=.*pi' "$HOME/.zenbot/env" 2>/dev/null && SMOKE_WORKERS=engine,pi
+pi_enabled && SMOKE_WORKERS=engine,pi
 trap '[ -n "$SMOKE_PID" ] && kill $SMOKE_PID 2>/dev/null; rm -rf "$SMOKE_WS"; db_drop $SMOKE_DB' EXIT
 if ! db_copy_live "$SMOKE_DB" >"$SMOKE_LOG" 2>&1; then
   echo "SMOKE TEST FAILED: could not copy the live database ($(db_live_name)) to $SMOKE_DB"
@@ -82,7 +78,8 @@ SMOKE_DB_URL=$(db_url_for "$SMOKE_DB")
     exec ./target/release/zend
 ) >>"$SMOKE_LOG" 2>&1 &
 SMOKE_PID=$!
-for _ in $(seq 1 30); do curl -fs "$SMOKE_URL/health" | grep -q '"ok":true' && break; sleep 1; done
+# Not fatal by itself: a kernel that never comes up fails the turn below, which reports it with the log.
+wait_healthy "$SMOKE_URL/health" 30 "$SMOKE_PID" || true
 # One scripted turn per worker: zen-engine's faux/smoke and, with Pi enabled, Pi's faux/faux-1.
 SMOKE_FAILED=
 for SMOKE_MODEL in faux/smoke $([ "$SMOKE_WORKERS" = engine,pi ] && echo faux/faux-1); do

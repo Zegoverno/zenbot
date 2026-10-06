@@ -8,18 +8,18 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$REPO/scripts/db.sh"
 BIN="$HOME/.zenbot/bin"
 LOG="$HOME/.zenbot/upgrade.log"
-PORT=$(grep -E '^ZEN_PORT=' "$HOME/.zenbot/env" 2>/dev/null | cut -d= -f2); PORT=${PORT:-8100}
+PORT=$(zen_env ZEN_PORT); PORT=${PORT:-8100}
 HEALTH="http://127.0.0.1:$PORT/health"
 log() { echo "$(date -u +%FT%TZ) $*" >> "$LOG"; }
 
-healthy() { curl -fs "$HEALTH" | grep -q '"ok":true'; }
-wait_healthy() { for _ in $(seq 1 45); do healthy && return 0; sleep 1; done; return 1; }
-
 log "upgrade requested ($(git -C "$REPO" rev-parse --short HEAD 2>/dev/null))"
+IDLE=
 for _ in $(seq 1 900); do
-  curl -fs "$HEALTH" | grep -q '"busy":0' && break
+  curl -fs "$HEALTH" | grep -q '"busy":0' && { IDLE=1; break; }
   sleep 2
 done
+# After 30 minutes it goes ahead anyway (a stuck session must not block upgrades forever), but says so.
+[ -n "$IDLE" ] || log "zenbot still busy (or not answering) after 30 minutes; restarting anyway, which ends the running turns"
 
 PREV_VERSION=$(cat "$HOME/.zenbot/version" 2>/dev/null || true)
 BACKUP=
@@ -41,7 +41,7 @@ done
 git -C "$REPO" rev-parse --short HEAD > "$HOME/.zenbot/version" 2>/dev/null
 sudo systemctl restart zenbot
 
-if wait_healthy; then
+if wait_healthy "$HEALTH" 45; then
   log "upgrade OK: now running $(cat "$HOME/.zenbot/version")"
   exit 0
 fi
@@ -51,7 +51,7 @@ journalctl -u zenbot -n 30 --no-pager >> "$LOG" 2>&1
 for b in $BINS; do [ -f "$BIN/$b.prev" ] && mv -f "$BIN/$b.prev" "$BIN/$b"; done
 echo "$PREV_VERSION" > "$HOME/.zenbot/version"
 sudo systemctl restart zenbot
-if wait_healthy; then log "rolled back to previous version"; else log "ROLLBACK ALSO UNHEALTHY: check journalctl -u zenbot"; fi
+if wait_healthy "$HEALTH" 45; then log "rolled back to previous version"; else log "ROLLBACK ALSO UNHEALTHY: check journalctl -u zenbot"; fi
 if [ -n "$BACKUP" ]; then
   log "the new build may have applied migrations ${PENDING}(not undone). To restore the database as it was before: $(db_restore_cmd "$BACKUP")"
 fi
