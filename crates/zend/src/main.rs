@@ -6,6 +6,7 @@ mod compile;
 mod context;
 mod dispatch;
 mod flow;
+mod git;
 mod measure;
 mod mind;
 mod score;

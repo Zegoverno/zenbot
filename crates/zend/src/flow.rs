@@ -622,9 +622,8 @@ pub fn is_approval(text: &str) -> bool {
 }
 
 /// The git state of a repository (the diff baseline), if it is one.
-fn git_head(repo: &Path) -> Option<String> {
-    let out = std::process::Command::new("git").arg("-C").arg(repo).args(["rev-parse", "HEAD"]).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+async fn git_head(repo: &Path) -> Option<String> {
+    crate::git::git(repo, &["rev-parse", "HEAD"]).await
 }
 
 fn repo_of(app: &App, brief: &Value) -> std::path::PathBuf {
@@ -653,7 +652,7 @@ async fn approve_inner(app: &AppState, session: Uuid, by: &str) -> Result<()> {
     let (brief, approved) = latest_brief(&app.db, session).await?.context("there is no brief to approve")?;
     anyhow::ensure!(!approved, "the latest brief is already approved");
     let repo = repo_of(app, &brief["brief"]);
-    let head = git_head(&repo);
+    let head = git_head(&repo).await;
     let fresh = fresh_context(brief["brief"]["route"].as_str().unwrap_or(""));
     tape::append(&app.db, session, "approval", &json!({ "version": brief["version"], "by": by, "repo": repo, "head": head, "fresh": fresh })).await?;
     if by == "owner" {
@@ -699,19 +698,19 @@ async fn run_check(dir: &Path, run: &str, expect: Option<&str>) -> Value {
 }
 
 /// The diff since the approval's baseline (and untracked files), capped.
-fn diff_since(repo: &Path, head: Option<&str>) -> String {
-    let git = |args: &[&str]| {
-        std::process::Command::new("git").arg("-C").arg(repo).args(args).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
-    };
+async fn diff_since(repo: &Path, head: Option<&str>) -> String {
+    const CAP: usize = 60_000;
     let Some(head) = head else { return "(not a git repository: no diff)".into() };
-    let mut d = git(&["diff", head]);
-    let untracked = git(&["ls-files", "--others", "--exclude-standard"]);
+    // Read a little past the cap, so a secret at the cut is still whole when it is masked.
+    let read = |out: Option<(bool, String)>| out.map(|(_, text)| text).unwrap_or_default();
+    let mut d = read(crate::git::output(repo, &["diff", head], CAP + 4096).await);
+    let untracked = read(crate::git::output(repo, &["ls-files", "--others", "--exclude-standard"], CAP + 4096).await);
     if !untracked.trim().is_empty() {
         d.push_str(&format!("\nUntracked files:\n{untracked}"));
     }
     let d = crate::secrets::mask(&d);
-    if d.len() > 60_000 {
-        format!("{}\n[diff cut at 60 KB; read files for the rest]", &d[..d.floor_char_boundary(60_000)])
+    if d.len() > CAP {
+        format!("{}\n[diff cut at 60 KB; read files for the rest]", &d[..d.floor_char_boundary(CAP)])
     } else if d.trim().is_empty() {
         "(no changes)".into()
     } else {
@@ -753,7 +752,7 @@ async fn verify_inner(app: &AppState, session: Uuid) -> Result<()> {
     }
     let rulings: Vec<Value> = blocks.iter().filter(|b| b.kind == "ruling" && b.seq > since).map(|b| b.payload.clone()).collect();
     let summary = blocks.iter().rev().find(|b| b.kind == "submission").map(|b| b.payload["summary"].clone()).unwrap_or(Value::Null);
-    let diff = diff_since(&repo, approval.payload["head"].as_str());
+    let diff = diff_since(&repo, approval.payload["head"].as_str()).await;
 
     // The model verifier runs when it adds something: criteria only judgment can check,
     // architectural work, or a sample (to keep measuring it). A failed command needs no verifier:

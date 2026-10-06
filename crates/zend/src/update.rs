@@ -2,7 +2,7 @@
 //! scripts/self-update.sh (pull + upgrade.sh) on request. The restart itself is done by
 //! upgrade.sh once no session is working, so the kernel only has to start the job.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,6 +11,8 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Mutex;
+
+use crate::git::git;
 
 pub struct Updater {
     repo: PathBuf,
@@ -26,14 +28,6 @@ struct Job {
 
 fn now() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
-}
-
-async fn git(repo: &Path, args: &[&str]) -> Option<String> {
-    let out = tokio::time::timeout(Duration::from_secs(60), Command::new("git").arg("-C").arg(repo).args(args).stdin(Stdio::null()).output())
-        .await
-        .ok()?
-        .ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 impl Updater {
