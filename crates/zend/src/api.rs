@@ -303,7 +303,7 @@ pub(crate) async fn session_ws(State(app): State<AppState>, Path(id): Path<Uuid>
 
 pub(crate) async fn handle_socket(app: AppState, id: Uuid, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
-    let mut rx = app.hub(id).await.subscribe();
+    let mut rx = app.subscribe(id).await;
     let fwd_app = app.clone();
     let forward = tokio::spawn(async move {
         loop {
@@ -341,4 +341,7 @@ pub(crate) async fn handle_socket(app: AppState, id: Uuid, socket: WebSocket) {
         }
     }
     forward.abort();
+    // Wait until the forwarder (and its receiver) is gone, so the hub sees one client fewer.
+    let _ = forward.await;
+    app.unsubscribe(id).await;
 }

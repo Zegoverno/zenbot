@@ -58,6 +58,7 @@ struct App {
     default_model: String,
     /// What built this kernel, recorded with every turn: ZEN_HARNESS, else the installed commit.
     harness: String,
+    /// Event channels of sessions with clients connected; removed when the last one leaves.
     hubs: Mutex<HashMap<Uuid, broadcast::Sender<String>>>,
     updater: Arc<update::Updater>,
     /// Sessions whose summary is being prepared in the background.
@@ -77,12 +78,24 @@ pub(crate) fn env_num(key: &str, default: f64) -> f64 {
 }
 
 impl App {
-    async fn hub(&self, id: Uuid) -> broadcast::Sender<String> {
-        self.hubs.lock().await.entry(id).or_insert_with(|| broadcast::channel(1024).0).clone()
+    /// Listen to a session's events (a client's WebSocket). Call `unsubscribe` when it closes.
+    async fn subscribe(&self, id: Uuid) -> broadcast::Receiver<String> {
+        self.hubs.lock().await.entry(id).or_insert_with(|| broadcast::channel(1024).0).subscribe()
     }
 
+    /// Forget a session's hub once its last client has gone (the receiver must be dropped first).
+    async fn unsubscribe(&self, id: Uuid) {
+        let mut hubs = self.hubs.lock().await;
+        if hubs.get(&id).is_some_and(|h| h.receiver_count() == 0) {
+            hubs.remove(&id);
+        }
+    }
+
+    /// Send an event to a session's clients, if any are listening.
     async fn emit(&self, id: Uuid, event: Value) {
-        let _ = self.hub(id).await.send(event.to_string());
+        if let Some(hub) = self.hubs.lock().await.get(&id) {
+            let _ = hub.send(event.to_string());
+        }
     }
 
     async fn is_busy(&self, id: Uuid) -> bool {
