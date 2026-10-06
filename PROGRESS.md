@@ -6,6 +6,25 @@
 
 ---
 
+## 2026-10-06 — Kernel robustness, worker turn ids, loud engine failures, fewer queries
+
+Merged on the owner's instruction (PRs #8, #9, #10, #13). These are harness changes; the evals their
+descriptions call for were **not run** before merging, and they are not yet installed on the dev VM.
+CI (build, tests, clippy, e2e) passed on each, including on the combined code.
+
+- **Robustness** (#8): a slow summary at the hard limit no longer breaks the turn; WebSocket hubs are
+  created by clients and freed when the last one leaves; the API token is checked in constant time;
+  masking large output runs off the runtime's threads with a faster scan; criteria checks run on the
+  bash tool's core; one async git helper, so the verifier's diff no longer blocks the runtime.
+- **Turn ids** (#9, worker protocol change): workers echo the turn id, so a turn the kernel ended
+  can't touch the next one.
+- **Engines fail loudly** (#10) when a CLI's flags or output change under them, so the daily update
+  check catches it.
+- **Fewer queries** (#13): workflow state kept on the turn (no query per tool call); turn end gets the
+  session's cost and parent with the turn's record; new indexes for per-session lookups (expand-only
+  migration); the idle scorer no longer sorts every turn.
+- e2e: 10 scenarios (new: `slow-summary`, `stale-turn`).
+
 ## 2026-10-06 — The redesign agreed; docs reorganized
 
 No product code changed.
