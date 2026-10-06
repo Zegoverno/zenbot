@@ -62,13 +62,12 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             let name = p.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
             let call_id = p.get("call_id").and_then(Value::as_str).unwrap_or_default().to_string();
             let args = p.get("args").cloned().unwrap_or(json!({}));
-            let (mut cancel, model, turn_id, mut ending, workspace) = {
+            let (mut cancel, model, turn_id, mut ending, workspace, state) = {
                 let mut turns = app.turns.lock().await;
                 let Some(t) = turns.get_mut(&id) else { return Ok(()) };
                 t.tools_running += 1;
-                (t.cancel.subscribe(), t.model.clone(), t.turn_id, t.ending, t.workspace.clone())
+                (t.cancel.subscribe(), t.model.clone(), t.turn_id, t.ending, t.workspace.clone(), t.state.clone())
             };
-            let state = flow::state(&app.db, id).await.unwrap_or_else(|_| "open".into());
             // Commands can tell which session runs them (e.g. the commit-trailer hook in scripts/git-hooks).
             let session_env = id.to_string();
             let env = [("ZEN_SESSION_ID", session_env.as_str()), ("ZEN_MODEL", model.as_str())];

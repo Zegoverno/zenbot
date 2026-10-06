@@ -199,6 +199,21 @@ restart_recovery() {
   check "a verification cut short by a restart goes back to work" eq "$(q "SELECT state FROM sessions WHERE id='$sid'")" working
 }
 
+# A summary made at the hard limit by a summarizer slower than the watchdog's idle limit: the turn
+# waits for it instead of being taken for stalled.
+slow_summary() {
+  local ws; ws=$(new_workspace slow)
+  start_kernel "$ws" "$(script summary.json)" ZEN_BRIEFS=0 ZEN_CONTEXT_TOKENS=4000 ZEN_COMPACT_SOFT=100 ZEN_COMPACT_HARD=0.7 \
+    ZEN_SUMMARY_MODEL=slow/summarizer ZEN_SLOW_SECS=12 ZEN_TURN_IDLE_SECS=1 ZEN_WORKERS=engine,slow \
+    "ZEN_WORKER_SLOW_CMD=python3 $REPO/scripts/e2e/slow_worker.py"
+  local sid; sid=$(zen ask --json -m faux/smoke "one" | jq -r .session_id)
+  zen ask --json -s "$sid" "two" >/dev/null
+  local r; r=$(zen ask --json -s "$sid" "three")
+  check "the turn waited for the summary" eq "$(echo "$r" | jq -r .error)" null
+  check "the summary was made by the slow summarizer and applied" eq "$(q "SELECT model FROM compactions WHERE session_id='$sid' AND applied_seq > 0")" slow/summarizer
+  check "its tools ran (not interrupted)" eq "$(q "SELECT tool_errors || '/' || outcome FROM turns WHERE session_id='$sid' ORDER BY started_at DESC LIMIT 1")" 0/ok
+}
+
 run open-loop open_loop
 run restart-recovery restart_recovery
 run workflow-pass workflow_pass
@@ -207,6 +222,7 @@ run opt-in opt_in
 run verifier verifier
 run summaries summaries
 run secrets secrets_masked
+run slow-summary slow_summary
 run stale-turn stale_turn
 echo "== tape"
 check "every tape is numbered and its hash chain recomputes" tape_is_sound

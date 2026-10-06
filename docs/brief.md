@@ -1,5 +1,9 @@
 # Briefs, work and verification
 
+> **Being superseded** (2026-10-06, D-026 and D-030 in `DECISIONS.md`, Phase 1 in `ROADMAP.md`): the kernel-enforced workflow below moves
+> into skills (`brief`, `verify`) and tools in Phase 1 of the redesign, and Phase 2b is replaced by
+> model choice from real usage (redesign Phase 6). This document describes what is built today.
+
 How a zenbot session turns a job into verified work: **frame → approve → work → verify → report →
 close**. **A session is one job.** The workflow runs once per session, not once per message: framing
 spans as many turns as it takes to understand the job (clarifying, researching, questions,
