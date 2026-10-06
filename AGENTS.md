@@ -23,7 +23,7 @@ The Claude Code and Codex CLIs are kept on their latest versions by `scripts/upd
 ## Making a change
 
 1. Read the code you're changing first. Keep the existing style. Keep changes small.
-2. Build and check: `cargo build --release`, `cargo test --release`, `cargo clippy --release --all-targets -- -D warnings`, and `scripts/e2e.sh` (end-to-end scenarios with the scripted model on a throwaway database; CI runs all four on every push and pull request; add a scenario when you change the kernel's behavior). Test kernel behavior end to end without a subscription using the scripted `faux/smoke` model (`ZEN_FAUX=1`, see `docs/worker-protocol.md`). If you change the Pi worker, `node packages/mind/src/main.ts` must start (Node runs TypeScript directly by stripping types, so don't use TypeScript-only syntax like enums or constructor parameter properties). Changes to the worker protocol must update `docs/worker-protocol.md` and every worker.
+2. Build and check: `cargo build --release`, `cargo test --release`, `cargo clippy --release --all-targets -- -D warnings`, and `scripts/e2e.sh` (end-to-end scenarios with the scripted model on a throwaway database; CI runs all four on every pull request and push to `main`, and publishes binaries only for commits that pass; add a scenario when you change the kernel's behavior). Test kernel behavior end to end without a subscription using the scripted `faux/smoke` model (`ZEN_FAUX=1`, see `docs/worker-protocol.md`). If you change the Pi worker, `node packages/mind/src/main.ts` must start (Node runs TypeScript directly by stripping types, so don't use TypeScript-only syntax like enums or constructor parameter properties). Changes to the worker protocol must update `docs/worker-protocol.md` and every worker.
 3. Test the changed behavior for real where you can, for example `./target/release/zen ask --json "…"` against the running service.
 4. Apply it with `scripts/upgrade.sh`. It rebuilds (or, for a clean checkout of a commit CI has built, downloads the binaries via `scripts/fetch-release.sh`), checks, runs a scripted test turn, and schedules the restart for when no session is working, so it is safe to run from inside your own session. The restart will end the current turn's connection; the user reconnects by sending the next message.
 5. Afterwards, check `~/.zenbot/upgrade.log`. If the new version wasn't healthy it was rolled back automatically; read the log, fix, and run the script again.
@@ -56,5 +56,5 @@ journalctl -u zenbot -n 50       # service logs
 cat ~/.zenbot/upgrade.log        # upgrade results
 scripts/upgrade.sh --check       # build, check and smoke test without installing
 scripts/update-engines.sh --check  # engine versions installed vs latest
-./scripts/dev.sh                 # run a dev kernel in the foreground (stop the service first, or set ZEN_PORT)
+./scripts/dev.sh                 # dev kernel in the foreground on :18100 with its own zen_dev database
 ```

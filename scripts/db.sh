@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Database helpers for the upgrade scripts: Postgres runs in the deploy/compose.yaml container, so
 # psql, pg_dump and pg_restore run inside it and nothing extra is needed on the host.
-# Sourced by upgrade.sh and apply-upgrade.sh; also usable by hand:
+# Sourced by the other scripts (it also loads scripts/lib.sh); also usable by hand:
 #
 #   scripts/db.sh pending          migrations in this checkout the live database hasn't applied
 #   scripts/db.sh backup [label]   dump the live database to ~/.zenbot/backups (keeps the last 10)
@@ -9,12 +9,13 @@
 # The live database is the one in DATABASE_URL (from ~/.zenbot/env if set there), else zend's
 # default, `zen`.
 DB_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$DB_REPO/scripts/lib.sh"
 DB_BACKUPS="$HOME/.zenbot/backups"
 DB_KEEP=10
 
 db_live_url() {
   local url=${DATABASE_URL:-}
-  [ -n "$url" ] || url=$(grep -E '^DATABASE_URL=' "$HOME/.zenbot/env" 2>/dev/null | tail -1 | cut -d= -f2-)
+  [ -n "$url" ] || url=$(zen_env DATABASE_URL)
   echo "${url:-postgres://zen:zen@127.0.0.1:5432/zen}"
 }
 db_live_name() { local n; n=$(db_live_url); n=${n##*/}; echo "${n%%\?*}"; }

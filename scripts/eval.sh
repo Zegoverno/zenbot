@@ -21,6 +21,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 export PATH="$HOME/.local/node/bin:$HOME/.cargo/bin:$PATH"
+. "$REPO/scripts/db.sh"
 
 BASE_REF="" MODEL="" EFFORT="" BASE_MODEL="" BASE_EFFORT="" TASKS="" REPEAT=1 ONLY="" KEEP=""
 while [ $# -gt 0 ]; do
@@ -41,14 +42,13 @@ while [ $# -gt 0 ]; do
 done
 
 TOKEN="$(cat "$HOME/.zenbot/token")"
-LIVE_PORT=$(grep -E '^ZEN_PORT=' "$HOME/.zenbot/env" 2>/dev/null | cut -d= -f2); LIVE_PORT=${LIVE_PORT:-8100}
+LIVE_PORT=$(zen_env ZEN_PORT); LIVE_PORT=${LIVE_PORT:-8100}
 PORT=${ZEN_EVAL_PORT:-18301}
 RUN="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="$HOME/.zenbot/evals/$RUN"
 WORK="$OUT/work"
 BUILDS="$HOME/.zenbot/evals/builds"
 mkdir -p "$WORK" "$BUILDS"
-psql() { docker compose -f "$REPO/deploy/compose.yaml" exec -T postgres psql -U zen -d zen -v ON_ERROR_STOP=1 -q "$@"; }
 log() { echo "$*" >&2; }
 
 if [ -z "$MODEL" ]; then
@@ -96,13 +96,27 @@ build_new() {
   # Pi as this checkout pins it: when the installed node_modules hold another version (a bump not
   # applied yet), the new side runs on its own copy of packages/mind.
   NEW_MIND="$REPO/packages/mind"
-  if [[ $(grep -E '^ZEN_WORKERS=' "$HOME/.zenbot/env" 2>/dev/null) == *pi* || $MODEL == openai/* ]] && ! mind_current "$NEW_MIND"; then
+  if { pi_enabled || [[ $MODEL == openai/* ]]; } && ! mind_current "$NEW_MIND"; then
     log "== installing the Pi this checkout pins (packages/mind differs from node_modules)"
     mkdir -p "$OUT/new-mind"
     cp -r "$NEW_MIND/src" "$NEW_MIND/package.json" "$NEW_MIND/package-lock.json" "$OUT/new-mind/"
     (cd "$OUT/new-mind" && npm ci --no-audit --no-fund --silent)
     NEW_MIND="$OUT/new-mind"
   fi
+}
+
+# Keep the ZEN_EVAL_KEEP_BUILDS (default 5) most recently used base builds; remove the others
+# and their git worktrees.
+prune_builds() {
+  local d
+  { ls -1dt "$BUILDS"/*/ 2>/dev/null || true; } | tail -n +$((${ZEN_EVAL_KEEP_BUILDS:-5} + 1)) | while read -r d; do
+    d=${d%/}
+    log "== removing old base build $(basename "$d")"
+    [ -L "$d/src/packages/mind/node_modules" ] && rm -f "$d/src/packages/mind/node_modules"
+    git worktree remove --force "$d/src" 2>/dev/null || true
+    rm -rf "$d"
+  done
+  git worktree prune
 }
 
 # The base harness is a commit, built once and cached in ~/.zenbot/evals/builds/<commit>: the
@@ -123,6 +137,8 @@ build_base() {
     mkdir -p "$dir/bin"
     cp "$dir/src/target/release/zend" "$dir/src/target/release/zen-engine" "$dir/bin/"
   fi
+  touch "$dir"
+  prune_builds
   # Pi as the base pins it: the checkout's node_modules when they hold the same versions,
   # otherwise its own install (so a Pi bump shows up in the comparison).
   local mind="$dir/src/packages/mind"
@@ -152,7 +168,7 @@ trap stop_kernel EXIT
 start_kernel() { # bin mind_dir workspace db label model log [task-env…]
   # The live setup's workers (so System One models are served as in real use), at least the engine;
   # Pi also for openai/* models.
-  local workers; workers=$(grep -E '^ZEN_WORKERS=' "$HOME/.zenbot/env" 2>/dev/null | cut -d= -f2); workers=${workers:-engine}
+  local workers db_url; workers=$(zen_env ZEN_WORKERS); workers=${workers:-engine}; db_url=$(db_url_for "$4")
   case "$6" in openai/*) [[ $workers == *pi* ]] || workers=$workers,pi ;; esac
   local task_env=("${@:8}")
   (
@@ -160,15 +176,11 @@ start_kernel() { # bin mind_dir workspace db label model log [task-env…]
     # Settings the task asks for (e.g. a small context budget); a build that doesn't know one ignores it.
     for kv in "${task_env[@]}"; do export "$kv"; done
     ZEN_TOKEN="$TOKEN" ZEN_PORT=$PORT ZEN_WORKSPACE="$3" ZEN_HARNESS="$5" ZEN_WORKERS=$workers ZEN_FAUX=1 \
-      ZEN_ENGINE_CMD="$1/zen-engine" ZEN_MIND_DIR="$2" DATABASE_URL="postgres://zen:zen@127.0.0.1:5432/$4" \
+      ZEN_ENGINE_CMD="$1/zen-engine" ZEN_MIND_DIR="$2" DATABASE_URL="$db_url" \
       exec "$1/zend"
   ) >"$7" 2>&1 &
   KERNEL_PID=$!
-  for _ in $(seq 1 60); do
-    curl -fs "http://127.0.0.1:$PORT/health" 2>/dev/null | grep -q '"ok":true' && return 0
-    kill -0 "$KERNEL_PID" 2>/dev/null || break
-    sleep 1
-  done
+  wait_healthy "http://127.0.0.1:$PORT/health" 60 "$KERNEL_PID" && return 0
   log "kernel did not start; see $7"; return 1
 }
 
@@ -237,7 +249,7 @@ run_task() { # name bin mind label model effort db task repeat
 
 run_harness() { # name bin mind label model effort
   local name=$1 db; db="zen_eval_$(echo "${RUN}_$1" | tr 'A-Z' 'a-z')"
-  psql -c "CREATE DATABASE $db" >/dev/null
+  db_psql -d postgres -c "CREATE DATABASE $db" >/dev/null
   mkdir -p "$WORK/$name"
   for task in "${TASK_LIST[@]}"; do
     for r in $(seq 1 "$REPEAT"); do
@@ -245,7 +257,7 @@ run_harness() { # name bin mind label model effort
       run_task "$name" "$2" "$3" "$4" "$5" "$6" "$db" "$task" "$r" | tee -a "$OUT/$name.jsonl" | jq -r '"   " + (if .passed then "passed" else "FAILED" end) + (if .error then " (" + .error + ")" else "" end)' >&2
     done
   done
-  [ -z "$KEEP" ] && psql -c "DROP DATABASE $db" >/dev/null
+  [ -z "$KEEP" ] && db_psql -d postgres -c "DROP DATABASE $db" >/dev/null
   true
 }
 

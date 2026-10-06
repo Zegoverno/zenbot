@@ -183,7 +183,7 @@ fn inline(text: &str, base: Sty) -> Vec<Seg> {
 }
 
 /// Stateful markdown renderer (tracks code fences across lines).
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 pub struct Md {
     in_code: bool,
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Put prebuilt binaries for the checked-out commit into target/release, so no compile is needed.
-# They come from the `edge` release that CI publishes for every commit on main
-# (.github/workflows/release.yml). Exits non-zero, changing nothing, when they can't be used:
+# They come from the `edge` release that CI publishes for every commit on main that passes its
+# checks (.github/workflows/ci.yml). Exits non-zero, changing nothing, when they can't be used:
 # local changes to the Rust code, an unsupported platform, or no build for this commit (yet).
 #
 #   fetch-release.sh               download binaries for HEAD into target/release
