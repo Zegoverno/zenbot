@@ -266,6 +266,7 @@ pub(crate) async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result
     }
     if flow::enabled() {
         match flow::state(&app.db, id).await?.as_str() {
+            "open" => flow::shadow_request_once(app, id, &text).await?,
             "framing" => {
                 let waiting = flow::latest_brief(&app.db, id).await?.is_some_and(|(_, approved)| !approved);
                 if waiting && flow::is_approval(&text) && !app.is_busy(id).await {
@@ -275,13 +276,7 @@ pub(crate) async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result
                     tokio::spawn(flow::approve(app.clone(), id, "owner"));
                     return Ok(());
                 }
-                let first: bool = sqlx::query_scalar("SELECT NOT EXISTS (SELECT 1 FROM tape_events WHERE session_id = $1 AND kind = 'message')")
-                    .bind(id)
-                    .fetch_one(&app.db)
-                    .await?;
-                if first {
-                    flow::shadow_request(app, id, &text);
-                }
+                flow::shadow_request_once(app, id, &text).await?;
             }
             // A session is one job: a message after the report continues that job (more work on
             // the same brief), it doesn't start a new one. A new job is a new session.
@@ -415,7 +410,7 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
             _ => None,
         };
         let brief_version = flow::brief_in(&blocks).and_then(|(b, _)| b["version"].as_i64());
-        let tools = if state == "open" { tools::specs() } else { flow::tools_for(&state) };
+        let tools = if flow::enabled() { flow::tools_for(&state) } else { tools::specs() };
         let system = flow::system_for(&base, &state, brief.as_ref());
         let (envelope, new_envelope) = compile::envelope(&app.db, id, &blocks, &system, &tools).await?;
         let resume = match (&last, new_envelope) {

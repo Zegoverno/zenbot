@@ -42,10 +42,14 @@ fn script(input: &TurnInput) -> Result<Vec<Value>> {
                 "frame"
             } else if phase_text.contains("Phase: working") {
                 "work"
+            } else if phase_text.contains("Phase: open") {
+                "open"
             } else {
                 "default"
             };
-            let steps = if v.is_object() { v.get(phase).or_else(|| v.get("default")).cloned().unwrap_or(json!([])) } else { v };
+            let steps = if v.is_object() { v.get(phase).or_else(|| v.get("default")).cloned().unwrap_or(json!([])) } else { v.clone() };
+            // An open session's script defaults to the framing one (proposing a brief opts in).
+            let steps = if phase == "open" && steps.as_array().is_some_and(|a| a.is_empty()) { v.get("frame").cloned().unwrap_or(steps) } else { steps };
             serde_json::from_value(steps).context("ZEN_FAUX_SCRIPT must be a list of steps, or an object of them")
         }
         None => Ok(vec![

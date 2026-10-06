@@ -76,7 +76,7 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                     out = async {
                         // The workflow decides what may run in this state (flow.rs); then its own
                         // tools, the history tool, or the kernel's built-ins.
-                        let refused = if state == "open" { None } else { flow::refuse(&state, &name, ending) };
+                        let refused = if flow::enabled() { flow::refuse(&state, &name, ending) } else { None };
                         if let Some(why) = refused {
                             tools::ToolOutput { content: why, is_error: true }
                         } else if let Some(out) = flow::run_tool(app, id, &name, &args, &mut ending).await {

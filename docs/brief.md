@@ -14,6 +14,17 @@ docs. None of them measures whether planning helps, and almost none enforces its
 gates are instructions the model may ignore (Cline added a shell blacklist after models edited
 files from plan mode). zenbot runs every tool in the kernel, so the gates that matter are code.
 
+## Opt-in (ZEN_BRIEFS)
+
+Briefs are **opt-in** by default (`ZEN_BRIEFS=opt-in`): a session starts `open`, the single loop,
+and the model proposes a brief when the job is big, risky or unclear; `/brief` makes the next
+request start with one. From the moment a brief is proposed, the session follows the workflow below
+(nothing changes until it is approved). `ZEN_BRIEFS=always` starts every session by framing;
+`ZEN_BRIEFS=off` removes briefs. Why opt-in: on the evals, briefed work passed as often as the single
+loop at about twice the cost (after making it follow the job, it had been 4.9×), and synthetic
+"harder" tasks are what models are best at. Whether briefs pay off is judged from real use: the
+owner's verdicts and the cost of briefed and unbriefed sessions.
+
 ## Session states
 
 | State | The model can | Leaves when |
@@ -30,7 +41,7 @@ The owner can move a session himself: `/brief` (frame now), `/quick` (skip the b
 
 ## Framing
 
-Every session starts in `framing`. The procedure (`steps/frame.md`, loaded only in this state):
+A briefed session starts in `framing` (or reaches it when the model proposes a brief). The procedure (`steps/frame.md`, loaded only in this state):
 
 1. **Route out loud**: `quick` (a question or a look: answer it, no brief), `bounded` (a change with
    a clear shape), or `architectural` (several approaches or a design to choose). When in doubt,

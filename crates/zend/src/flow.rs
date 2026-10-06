@@ -28,9 +28,19 @@ const VERIFY: &str = include_str!("../steps/verify.md");
 pub const ROUTES: [&str; 3] = ["quick", "bounded", "architectural"];
 pub const WORK_KINDS: [&str; 8] = ["understand", "shape", "bet", "build", "verify", "maintain", "reflect", "reach"];
 
-/// Briefed work is on unless ZEN_BRIEFS=0 (then sessions are `open`: today's single loop).
+/// How briefs are used (ZEN_BRIEFS): `opt-in` (default: sessions start `open` and the model proposes
+/// a brief when the job is big, risky or unclear; the owner's /brief forces one), `always` (every
+/// session starts by framing), `off` (no briefs: the single loop).
+pub fn mode() -> String {
+    match std::env::var("ZEN_BRIEFS").unwrap_or_default().trim() {
+        "always" => "always".into(),
+        "off" | "0" => "off".into(),
+        _ => "opt-in".into(),
+    }
+}
+
 pub fn enabled() -> bool {
-    std::env::var("ZEN_BRIEFS").map(|v| v.trim() != "0").unwrap_or(true)
+    mode() != "off"
 }
 
 /// Whether a route is in a comma-separated setting (or the setting says `all`).
@@ -57,7 +67,7 @@ pub fn fresh_context(route: &str) -> bool {
 
 /// The state a new session starts in.
 pub fn initial_state() -> &'static str {
-    if enabled() {
+    if mode() == "always" {
         "framing"
     } else {
         "open"
@@ -209,7 +219,8 @@ fn allowed(state: &str, name: &str) -> bool {
         "framing" => matches!(name, "read" | "bash" | "history" | "ask" | "propose_brief" | "decide"),
         "working" => !matches!(name, "propose_brief" | "submit_verdict"),
         "verifier" => matches!(name, "read" | "bash" | "submit_verdict"),
-        _ => !matches!(name, "propose_brief" | "submit_work" | "submit_verdict"),
+        // open: everything but the steps of briefed work, except proposing a brief.
+        _ => !matches!(name, "submit_work" | "submit_verdict"),
     }
 }
 
@@ -218,7 +229,7 @@ fn allowed(state: &str, name: &str) -> bool {
 /// (`fresh_context`) also carries its brief here; the verifier has its own.
 pub fn system_for(base: &str, state: &str, fresh_brief: Option<&Value>) -> String {
     match (state, fresh_brief) {
-        ("open", _) => base.to_string(),
+        ("open", _) if !enabled() => base.to_string(),
         ("verifier", _) => VERIFY.trim_end().to_string(),
         ("working" | "verifying" | "reported", Some(b)) => format!(
             "{base}\n\n{}\n\n{}\n\n<brief version=\"{}\">\n{}\n</brief>",
@@ -235,6 +246,7 @@ pub fn system_for(base: &str, state: &str, fresh_brief: Option<&Value>) -> Strin
 pub fn phase_line(state: &str, brief_version: Option<i64>) -> Option<String> {
     match state {
         "framing" => Some("Phase: framing. Nothing can be changed: answer, ask, or propose a brief.".into()),
+        "open" if enabled() => Some("Phase: open. Work directly; for a big, risky or unclear job, propose a brief before changing anything.".into()),
         "working" => Some(format!("Phase: working on brief v{}.", brief_version.unwrap_or(0))),
         _ => None,
     }
@@ -406,6 +418,12 @@ If a question goes unanswered, take your recommended option and record it as an 
             resolve_shadow(&app.db, session, "work", args["work"].as_str(), "model").await;
             app.emit(session, json!({ "type": "brief", "version": version, "brief": args, "text": render_brief(args) })).await;
             *ending = Some("brief proposed");
+            if state(&app.db, session).await.ok().as_deref() == Some("open") {
+                // Proposed from an open session: from here on, nothing changes until it is approved.
+                if let Err(e) = set_state(app, session, "framing", "model", "the model proposed a brief", false).await {
+                    return out(format!("couldn't record the state: {e}"), true);
+                }
+            }
             let route = args["route"].as_str().unwrap_or("");
             let next = if auto_approve(route) { "it is approved automatically" } else { "the owner approves it" };
             let context = if fresh_context(route) { "in a fresh context with the brief in the instructions" } else { "here, with the brief as a message" };
@@ -494,6 +512,18 @@ pub async fn resolve_shadow(db: &PgPool, session: Uuid, point: &str, actual: Opt
     .bind(by)
     .execute(db)
     .await;
+}
+
+/// Shadow decisions on a session's first message (its job): route and kind of work.
+pub async fn shadow_request_once(app: &AppState, session: Uuid, text: &str) -> Result<()> {
+    let first: bool = sqlx::query_scalar("SELECT NOT EXISTS (SELECT 1 FROM tape_events WHERE session_id = $1 AND kind = 'message')")
+        .bind(session)
+        .fetch_one(&app.db)
+        .await?;
+    if first {
+        shadow_request(app, session, text);
+    }
+    Ok(())
 }
 
 /// Shadow decisions on a new request: its route and kind of work, logged, not acted on.
@@ -974,6 +1004,6 @@ mod tests {
         let sys = system_for("BASE", "working", Some(&json!({ "version": 2, "brief": brief() })));
         assert!(sys.starts_with("BASE") && sys.contains("<brief version=\"2\">") && sys.contains("source of intent"));
         assert_eq!(system_for("BASE", "framing", None), system_for("BASE", "working", None), "same instructions across phases");
-        assert_eq!(system_for("BASE", "open", None), "BASE");
+        assert_eq!(system_for("BASE", "open", None), system_for("BASE", "framing", None), "open sessions can opt into a brief");
     }
 }

@@ -340,12 +340,11 @@ day-to-day policy (which model for which work) may change automatically, system-
   a summary made inline at the hard limit might trip the watchdog (unconfirmed).
 
 **Next, in order**
-1. **Decide Phase 2's default** from the eval of the job-model fix: briefs by default (as now, with
-   quick questions answered directly), or opt-in (sessions start `open`, the model or `/brief`
-   starts a brief). Merge only on the owner's decision.
-2. **Harder eval tasks**, where the Phase 1 loop may fail: multi-file changes, a tempting
-   out-of-scope fix, a task where it's easy to claim success without checking, a change to a copy of
-   zenbot itself. A brief becomes a default only for the kinds of work where they show it pays.
+1. **Briefs are opt-in** (decided 2026-10-06, `docs/brief.md`): the eval of the job-model fix had
+   12/12 → 12/12 at 2.1× the cost (`~/.zenbot/evals/20261005T203851Z`). Synthetic harder tasks
+   won't settle it (models are best at benchmark-shaped tasks); real use will: verdicts and cost of
+   briefed vs unbriefed sessions. Briefs become a default only for kinds of work where they win.
+2. Merge `phase-2`, push, install.
 3. **Test the paths not yet run with real models**: Codex and Pi through the workflow, the questions
    path, a model switch mid-session, a failed verification followed by a real fix. Then a cleanup pass
    on `main.rs` / `flow.rs`.
@@ -432,3 +431,4 @@ day-to-day policy (which model for which work) may change automatically, system-
 | 2026-10-02 | Live scoring: the owner's `/done` decision (accept, more, reshape, drop) is the ground-truth label. A System One model (Jev via OpenRouter, through Pi's classifier API: `s1.decide`, §6.1) answers a versioned question set per session, from the user's messages and final answers only, never tool output; answers are stored, not acted on. Open models (Laya, CLM) can take over through the same API once there are enough labels to calibrate them. Reports on scores come later (V2). |
 | 2026-10-05 | Context v2 (`docs/context.md`): instructions fixed per session and stored once (`envelopes`); per-turn context at the end of the user's message; append-only history; the tape becomes a hash-linked chain of numbered blocks; summaries with block addresses and a `history` tool; every turn records what was sent and any cache break. Engines may take over a step when that measurably gives better results, behind the worker protocol with a zenbot-owned fallback: Claude Code keeps its own session per zenbot session (`--resume`), as a cache rebuilt from the tape when needed (supersedes "no engine-side sessions" of 2026-10-01: measured, a fresh Claude Code session per turn never caches earlier turns); Codex gets native history items. |
 | 2026-10-05 | Briefed work (`docs/brief.md`, Phase 2): sessions go frame → approve → work → verify → report → close; the model can run all of it, the owner can take any step. Gates that matter are kernel-enforced (read-only framing in a bubblewrap sandbox, brief schema, approval, criteria commands run by the kernel); a fresh verifier never grades its own work. Auto-approve and auto-close are settings; every verdict records its source. System One decisions (route, kind of work, model, unverified claims) start in shadow mode. Routing is a versioned policy: day-to-day changes are automatic with a log and undo; system-level changes need the owner. Phase 2b adds the improvement loop (sweeps, an improver session, simulated usage). |
+| 2026-10-06 | A session is one job; the briefed workflow runs once per job, not per message. Briefs are opt-in (`ZEN_BRIEFS`, default `opt-in`): the model proposes one for a big, risky or unclear job, the owner's `/brief` forces one. Their value is judged from real use (the owner's verdicts and cost, briefed vs unbriefed), not from synthetic harder evals. |

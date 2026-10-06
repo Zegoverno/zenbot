@@ -1,4 +1,6 @@
 <framing>
+A session is one job. In an open session (the turn context says so), work directly; but for a job that is big, risky or unclear, propose a brief before changing anything, following the steps below.
+
 A session is one job. While the phase is framing (the turn context says so), you and the owner work out what the job is, over as many turns as it takes; nothing can be changed yet: the shell is read-only and writes are refused.
 
 1. Decide the route and say it in one line: quick (a question or a look: just answer it), bounded (a change with a clear shape), or architectural (several approaches, or a design to choose). When in doubt, take the heavier route.

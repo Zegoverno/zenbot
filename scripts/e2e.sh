@@ -25,7 +25,7 @@ PASSED=0
 psql() { docker compose -f "$REPO/deploy/compose.yaml" exec -T postgres psql -U zen -v ON_ERROR_STOP=1 -qAt "$@"; }
 q() { psql -d "$DB" -c "$1"; }
 stop_kernel() { if [ -n "$KERNEL_PID" ]; then kill "$KERNEL_PID" 2>/dev/null || true; wait "$KERNEL_PID" 2>/dev/null || true; fi; KERNEL_PID=""; }
-cleanup() { stop_kernel; psql -d zen -c "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1 || true; rm -rf "$TMP"; }
+cleanup() { stop_kernel; [ -n "${ZEN_E2E_KEEP:-}" ] && { echo "kept: database $DB, files $TMP"; return; }; psql -d zen -c "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1 || true; rm -rf "$TMP"; }
 trap cleanup EXIT
 
 [ -n "${ZEN_E2E_NO_BUILD:-}" ] || cargo build --release -q
@@ -98,7 +98,7 @@ open_loop() {
 
 workflow_pass() {
   local ws; ws=$(new_workspace pass)
-  start_kernel "$ws" "$(script workflow.json 's/ROUTE/bounded/' 's/TARGET/done.txt/')"
+  start_kernel "$ws" "$(script workflow.json 's/ROUTE/bounded/' 's/TARGET/done.txt/')" ZEN_BRIEFS=always
   local r sid; r=$(zen ask --json -m faux/smoke "Please create done.txt"); sid=$(echo "$r" | jq -r .session_id)
   check "no error" eq "$(echo "$r" | jq -r .error)" null
   check "framing refused the write" eq "$(echo "$r" | jq -r '.tools[0].is_error')" true
@@ -114,7 +114,7 @@ workflow_pass() {
 
 workflow_approval_and_rounds() {
   local ws; ws=$(new_workspace rounds)
-  start_kernel "$ws" "$(script workflow.json 's/ROUTE/architectural/' 's/TARGET/never.txt/')" ZEN_VERIFY_ROUNDS=1
+  start_kernel "$ws" "$(script workflow.json 's/ROUTE/architectural/' 's/TARGET/never.txt/')" ZEN_VERIFY_ROUNDS=1 ZEN_BRIEFS=always
   local r sid; r=$(zen ask --json -m faux/smoke "Please create never.txt"); sid=$(echo "$r" | jq -r .session_id)
   check "an architectural brief waits for approval" eq "$(q "SELECT state FROM sessions WHERE id='$sid'")" framing
   check "nothing was done before approval" test ! -e "$ws/done.txt"
@@ -130,9 +130,20 @@ workflow_approval_and_rounds() {
   check "the reply went back to work" eq "$(q "SELECT payload->>'reason' FROM tape_events WHERE session_id='$sid' AND kind='state' AND payload->>'by'='owner' ORDER BY seq DESC LIMIT 1")" "owner continued the job"
 }
 
+opt_in() {
+  local ws; ws=$(new_workspace optin)
+  start_kernel "$ws" "$(script judgment.json)"
+  local sid; sid=$(zen sessions new -m faux/smoke --json | jq -r .id)
+  check "a session starts open (briefs are opt-in)" eq "$(q "SELECT state FROM sessions WHERE id='$sid'")" open
+  zen ask --json -s "$sid" "Please create done.txt" >/dev/null
+  check "the model opted in: brief, then work" eq "$(q "SELECT string_agg(payload->>'state' || '/' || (payload->>'by'), ',' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND kind='state'")" "framing/model,working/auto,verifying/kernel,reported/kernel"
+  check "the work was done" test -f "$ws/done.txt"
+  check "the open phase is in the turn context" grep -q "Phase: open" <<<"$(q "SELECT payload->>'context' FROM tape_events WHERE session_id='$sid' AND payload->>'role'='user' ORDER BY seq LIMIT 1")"
+}
+
 verifier() {
   local ws; ws=$(new_workspace verifier)
-  start_kernel "$ws" "$(script judgment.json)"
+  start_kernel "$ws" "$(script judgment.json)" ZEN_BRIEFS=always
   local sid; sid=$(zen ask --json -m faux/smoke "Please create done.txt" | jq -r .session_id)
   local child; child=$(q "SELECT id FROM sessions WHERE parent='$sid' AND kind='verifier'")
   check "a criterion needing judgment ran the verifier" test -n "$child"
@@ -178,6 +189,7 @@ run open-loop open_loop
 run restart-recovery restart_recovery
 run workflow-pass workflow_pass
 run workflow-approval-and-rounds workflow_approval_and_rounds
+run opt-in opt_in
 run verifier verifier
 run summaries summaries
 run secrets secrets_masked
