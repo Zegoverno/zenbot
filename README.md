@@ -2,11 +2,11 @@
 
 A personal + company operating system for niche builders: a machine for thinking, analyzing and building, with LLMs at the center and agents doing the work.
 
-Status: design phase. See [SPEC.md](SPEC.md).
+Status: early. The kernel, the `zen` terminal app and briefed work are built and in use; most of the OS described in [SPEC.md](SPEC.md) is still to come (status and next steps: [§8.1](SPEC.md#81-status-and-next-phases-2026-10-06)).
 
 ## Install
 
-Requirements: Debian/Ubuntu with systemd and sudo. The installer adds Docker, Rust, Node, and the Claude Code and Codex CLIs. See [INSTALL.md](INSTALL.md).
+Requirements: Debian/Ubuntu with systemd and sudo. The installer adds Docker, Node, and the Claude Code and Codex CLIs, and downloads prebuilt zenbot binaries (it installs Rust and compiles only when there are none for your platform or commit). See [INSTALL.md](INSTALL.md).
 
 Models run on your existing subscriptions: Claude (Opus, Sonnet, Haiku) through the Claude Code CLI and GPT through Codex, with zenbot's own prompt, tools and history ([how](docs/worker-protocol.md)). Pi is available as an optional worker (`ZEN_WORKERS=engine,pi`).
 

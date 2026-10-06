@@ -98,7 +98,7 @@ for unit in zenbot.service zen-engines.service zen-engines.timer; do
 done
 sudo systemctl daemon-reload
 sudo systemctl enable zenbot >/dev/null 2>&1
-# Daily: keep Claude Code, Codex and Pi on their latest versions, tested (scripts/update-engines.sh).
+# Daily: keep the Claude Code and Codex CLIs on their latest versions, tested; Pi is only reported (scripts/update-engines.sh).
 sudo systemctl enable --now zen-engines.timer >/dev/null 2>&1
 sudo systemctl restart zenbot
 wait_healthy "http://127.0.0.1:$PORT/health" 60 || { echo "zenbot did not become healthy; see: journalctl -u zenbot -n 50"; exit 1; }

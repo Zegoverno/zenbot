@@ -27,9 +27,9 @@ The Claude Code and Codex CLIs are kept on their latest versions by `scripts/upd
 3. Test the changed behavior for real where you can, for example `./target/release/zen ask --json "…"` against the running service.
 4. Apply it with `scripts/upgrade.sh`. It rebuilds (or, for a clean checkout of a commit CI has built, downloads the binaries via `scripts/fetch-release.sh`), checks, runs a scripted test turn, and schedules the restart for when no session is working, so it is safe to run from inside your own session. The restart will end the current turn's connection; the user reconnects by sending the next message.
 5. Afterwards, check `~/.zenbot/upgrade.log`. If the new version wasn't healthy it was rolled back automatically; read the log, fix, and run the script again.
-6. Commit with a clear message once the change works. Ask the owner before pushing.
+6. Work on a branch, never directly on `main`. Commit with a clear message once the change works, push the branch, and open a pull request. Merge it when CI is green (CI then publishes the binaries for the new `main`).
 
-Changes to the harness (system prompt, history, tools, workers, model or effort handling) also get an eval before they are committed: run `scripts/eval.sh` (this checkout against the installed version, same model), show the owner the report, and ask whether to commit. The report informs the owner's decision; it is never a pass/fail gate. See `evals/README.md`.
+Changes to the harness (system prompt, history, tools, workers, model or effort handling) also get an eval before they are merged: run `scripts/eval.sh` (this checkout against the installed version, same model), show the owner the report (in the pull request too), and merge only once the owner agrees. The report informs the owner's decision; it is never a pass/fail gate. See `evals/README.md`.
 
 ## Conventions
 

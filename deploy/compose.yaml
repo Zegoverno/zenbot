@@ -1,4 +1,4 @@
-# Local services for development. zend and zen-mind run on the host for now.
+# Postgres (with pgvector) for zenbot. zend and its workers run on the host (deploy/zenbot.service, or scripts/dev.sh).
 services:
   postgres:
     image: pgvector/pgvector:pg16
