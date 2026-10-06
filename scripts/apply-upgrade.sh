@@ -16,10 +16,13 @@ healthy() { curl -fs "$HEALTH" | grep -q '"ok":true'; }
 wait_healthy() { for _ in $(seq 1 45); do healthy && return 0; sleep 1; done; return 1; }
 
 log "upgrade requested ($(git -C "$REPO" rev-parse --short HEAD 2>/dev/null))"
+IDLE=
 for _ in $(seq 1 900); do
-  curl -fs "$HEALTH" | grep -q '"busy":0' && break
+  curl -fs "$HEALTH" | grep -q '"busy":0' && { IDLE=1; break; }
   sleep 2
 done
+# After 30 minutes it goes ahead anyway (a stuck session must not block upgrades forever), but says so.
+[ -n "$IDLE" ] || log "zenbot still busy (or not answering) after 30 minutes; restarting anyway, which ends the running turns"
 
 PREV_VERSION=$(cat "$HOME/.zenbot/version" 2>/dev/null || true)
 BACKUP=
