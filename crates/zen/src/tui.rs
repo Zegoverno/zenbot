@@ -488,9 +488,10 @@ impl App {
             return (lines, row, 0, false);
         }
 
-        // Streaming text that hasn't completed a line yet.
+        // Streaming text that hasn't completed a line yet, rendered in the state the committed
+        // lines left (e.g. inside a code fence), without changing it.
         if self.busy && self.committed < self.stream.len() {
-            let mut m = Md::default();
+            let mut m = self.md;
             let partial = m.render(&self.stream[self.committed..], w);
             let skip = partial.len().saturating_sub(6);
             lines.extend(partial.into_iter().skip(skip));
@@ -1550,6 +1551,20 @@ mod tests {
         a.on_event(json!({ "type": "idle", "state": "framing", "waiting": "approval" }));
         assert!(!a.busy);
         assert!(a.notice.as_ref().is_some_and(|(t, _)| t.contains("/go")), "{:?}", a.notice);
+    }
+
+    #[test]
+    fn a_streaming_partial_line_inside_a_code_fence_renders_as_code() {
+        let mut a = app(80, 20);
+        a.busy = true;
+        a.on_event(json!({ "type": "delta", "delta": "```\nlet x = 1;" }));
+        let (lines, _, _, _) = a.compose();
+        let code = lines.iter().find(|l| l.iter().any(|(t, _)| t.contains("let x = 1;"))).expect("partial line shown");
+        assert!(code.iter().any(|(t, s)| t.contains("let x") && *s == Sty::Code), "{code:?}");
+        // Rendering the partial line leaves the committed state alone.
+        a.on_event(json!({ "type": "delta", "delta": "\n```\nafter\n" }));
+        let out = a.capture.take().unwrap();
+        assert!(out.contains("\x1b[36mlet x = 1;") && out.contains("\r\nafter"), "{out:?}");
     }
 
     #[test]
