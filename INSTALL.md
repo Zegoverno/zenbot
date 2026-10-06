@@ -11,7 +11,7 @@ These steps are written so a coding agent (or a person) can follow them on a fre
 
    The installer is safe to re-run. It installs Docker, Node.js 22, and the Claude Code and Codex CLIs if they're missing, downloads zenbot's prebuilt binaries for the checked-out commit, starts Postgres in Docker, installs the `zenbot` systemd service (starts on boot, restarts on failure), and links the `zen` command into `~/.local/bin`.
 
-   Prebuilt binaries exist for every commit on `main` (built by CI on x86_64 Linux). On other platforms, for commits CI hasn't built yet, or with `ZEN_BUILD_FROM_SOURCE=1`, the installer installs Rust and compiles instead, which takes several minutes on a small VM.
+   Prebuilt binaries exist for every commit on `main` that passed CI's checks (built for x86_64 Linux after the tests, clippy and end-to-end scenarios pass). On other platforms, for commits CI hasn't published yet, or with `ZEN_BUILD_FROM_SOURCE=1`, the installer installs Rust and compiles instead, which takes several minutes on a small VM.
 
 2. Check that it's healthy:
 
@@ -61,6 +61,6 @@ The Claude Code and Codex CLIs are kept on their latest versions by a daily time
 systemctl list-timers zen-engines.timer      # next run
 ```
 
-Right after a push to `main`, CI needs a few minutes to publish the binaries; an upgrade started before that compiles locally instead.
+Right after a push to `main`, CI needs a few minutes to check and publish the binaries; an upgrade started before that (or for a commit whose checks failed) compiles locally instead.
 
 Troubleshooting: `journalctl -u zenbot -n 50` shows the service logs. The service listens on port 8100 (change with `ZEN_PORT` before installing).
