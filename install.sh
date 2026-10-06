@@ -6,10 +6,9 @@
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO"
+. "$REPO/scripts/lib.sh"
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 ENV_FILE="$HOME/.zenbot/env"
-# A setting in ~/.zenbot/env (empty when unset).
-env_get() { { grep -E "^$1=" "$ENV_FILE" 2>/dev/null || true; } | tail -1 | cut -d= -f2-; }
 # Add KEY=VALUE to ~/.zenbot/env unless KEY is set there already, so a re-run keeps the owner's settings.
 env_default() { grep -qE "^$1=" "$ENV_FILE" 2>/dev/null || echo "$1=$2" >> "$ENV_FILE"; }
 # Set KEY=VALUE in ~/.zenbot/env, replacing any line for KEY (for settings passed to this run).
@@ -56,16 +55,13 @@ if ! command -v codex >/dev/null; then (npm install -g --no-audit --no-fund --si
 # Workers: `engine` (Claude Code + Codex on your subscriptions) and optionally `pi` (Pi agent loop).
 # ZEN_WORKERS and ZEN_PORT given to this run are saved in ~/.zenbot/env; a re-run without them
 # keeps the installed ones.
-WORKERS="${ZEN_WORKERS:-$(env_get ZEN_WORKERS)}"; WORKERS=${WORKERS:-engine}
+WORKERS="${ZEN_WORKERS:-$(zen_env ZEN_WORKERS)}"; WORKERS=${WORKERS:-engine}
 if [[ ",$WORKERS," == *",pi,"* ]]; then (cd packages/mind && npm ci --no-audit --no-fund --silent); fi
 if "$REPO/scripts/fetch-release.sh"; then
   say "Downloaded prebuilt zenbot $(git rev-parse --short HEAD)"
 else
   say "Building zenbot from source (no prebuilt binaries for this commit; takes several minutes)"
-  NEED=()
-  for p in build-essential pkg-config; do dpkg -s "$p" >/dev/null 2>&1 || NEED+=("$p"); done
-  if [ ${#NEED[@]} -gt 0 ]; then sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${NEED[@]}"; fi
-  if ! command -v cargo >/dev/null; then curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null; fi
+  ensure_rust
   cargo build --release -q
 fi
 
@@ -79,8 +75,7 @@ mkdir -p "$HOME/.zenbot/bin" "$HOME/.local/bin"
 chmod 700 "$HOME/.zenbot"
 install -m 755 target/release/zend target/release/zen target/release/zen-engine "$HOME/.zenbot/bin/"
 ln -sf "$HOME/.zenbot/bin/zen" "$HOME/.local/bin/zen"
-[ -f "$HOME/.zenbot/token" ] || head -c 24 /dev/urandom | base64 | tr -d '/+=' > "$HOME/.zenbot/token"
-chmod 600 "$HOME/.zenbot/token"
+new_token
 touch "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 [ -z "${ZEN_WORKERS:-}" ] || env_set ZEN_WORKERS "$ZEN_WORKERS"
@@ -93,7 +88,7 @@ env_default ZEN_WORKERS "$WORKERS"
 env_default ZEN_MIND_DIR "$REPO/packages/mind"
 env_default HOME "$HOME"
 env_default PATH "$HOME/.local/bin:$NODE_DIR/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
-PORT=$(env_get ZEN_PORT)
+PORT=$(zen_env ZEN_PORT)
 git rev-parse --short HEAD > "$HOME/.zenbot/version" 2>/dev/null || true
 
 say "Service"
@@ -106,11 +101,7 @@ sudo systemctl enable zenbot >/dev/null 2>&1
 # Daily: keep Claude Code, Codex and Pi on their latest versions, tested (scripts/update-engines.sh).
 sudo systemctl enable --now zen-engines.timer >/dev/null 2>&1
 sudo systemctl restart zenbot
-for _ in $(seq 1 60); do
-  curl -fs "http://127.0.0.1:$PORT/health" | grep -q '"ok":true' && break
-  sleep 1
-done
-curl -fs "http://127.0.0.1:$PORT/health" | grep -q '"ok":true' || { echo "zenbot did not become healthy; see: journalctl -u zenbot -n 50"; exit 1; }
+wait_healthy "http://127.0.0.1:$PORT/health" 60 || { echo "zenbot did not become healthy; see: journalctl -u zenbot -n 50"; exit 1; }
 
 git -C "$REPO" config core.hooksPath scripts/git-hooks # commit trailers linking zen's commits to sessions
 

@@ -13,11 +13,7 @@ cd "$REPO"
 PORT=${ZEN_DEV_PORT:-18100}
 DB=${ZEN_DEV_DB:-zen_dev}
 
-mkdir -p "$HOME/.zenbot"
-if [ ! -f "$HOME/.zenbot/token" ]; then
-  head -c 24 /dev/urandom | base64 | tr -d '/+=' > "$HOME/.zenbot/token"
-  chmod 600 "$HOME/.zenbot/token"
-fi
+new_token
 # The service's settings (workers, models, budgets), as upgrade.sh's smoke test does.
 set -a; [ -f "$HOME/.zenbot/env" ] && . "$HOME/.zenbot/env"; set +a
 export PATH="$HOME/.local/node/bin:$HOME/.cargo/bin:$PATH"
@@ -30,7 +26,7 @@ docker compose -f deploy/compose.yaml up -d --wait postgres
 [ "$(db_psql -d postgres -c "SELECT 1 FROM pg_database WHERE datname = '$DB'")" = 1 ] ||
   db_psql -d postgres -c "CREATE DATABASE $DB"
 # Pi's packages as packages/mind pins them (npm ci when the lockfile is newer than the install).
-if [[ ",${ZEN_WORKERS:-}," == *",pi,"* ]] && [ ! packages/mind/node_modules/.package-lock.json -nt packages/mind/package-lock.json ]; then
+if pi_enabled && [ ! packages/mind/node_modules/.package-lock.json -nt packages/mind/package-lock.json ]; then
   (cd packages/mind && npm ci --no-audit --no-fund --silent)
 fi
 cargo build --release -q
