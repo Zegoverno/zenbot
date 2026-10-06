@@ -1,5 +1,5 @@
 [Unit]
-Description=zenbot kernel (zend + zen-mind)
+Description=zenbot kernel (zend, with its workers)
 After=network-online.target docker.service
 Wants=network-online.target docker.service
 
