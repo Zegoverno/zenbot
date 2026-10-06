@@ -198,19 +198,19 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
                     let message = json!({ "role": "assistant", "provider": "codex", "model": model, "stopReason": "toolUse", "timestamp": now_ms(),
                         "content": [{ "type": "toolCall", "id": it["id"], "name": it["tool"], "arguments": it["arguments"] }],
                         "usage": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": { "total": 0.0 } } });
-                    ctx.rpc.notify("turn.message", json!({ "session_id": ctx.session_id, "message": message })).await;
+                    ctx.notify("turn.message", json!({ "message": message })).await;
                 }
                 "item/agentMessage/delta" => {
-                    ctx.rpc.notify("turn.delta", json!({ "session_id": ctx.session_id, "delta": p["delta"] })).await;
+                    ctx.notify("turn.delta", json!({ "delta": p["delta"] })).await;
                 }
                 "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
-                    ctx.rpc.notify("turn.thinking", json!({ "session_id": ctx.session_id, "delta": p["delta"] })).await;
+                    ctx.notify("turn.thinking", json!({ "delta": p["delta"] })).await;
                 }
                 "item/completed" if p["item"]["type"] == "agentMessage" => {
                     let message = json!({ "role": "assistant", "provider": "codex", "model": model, "stopReason": "stop", "timestamp": now_ms(),
                         "content": [{ "type": "text", "text": p["item"]["text"] }],
                         "usage": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": { "total": 0.0 } } });
-                    ctx.rpc.notify("turn.message", json!({ "session_id": ctx.session_id, "message": message })).await;
+                    ctx.notify("turn.message", json!({ "message": message })).await;
                 }
                 "thread/tokenUsage/updated" => {
                     let l = &p["tokenUsage"]["last"];
@@ -232,8 +232,8 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
             }
         }
         let _ = s.child.start_kill();
-        ctx.rpc
-            .notify("turn.usage", json!({ "session_id": ctx.session_id, "engine": "codex", "engine_version": version(),
+        ctx
+            .notify("turn.usage", json!({ "engine": "codex", "engine_version": version(),
                 "provider": "codex", "model": model, "render": render,
                 "engine_session": if sessions { json!({ "id": thread_id, "resumable": error.is_none() }) } else { Value::Null },
                 "input": usage["input"], "output": usage["output"], "cache_read": usage["cacheRead"], "cost_usd": null }))

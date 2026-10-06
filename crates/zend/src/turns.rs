@@ -38,10 +38,10 @@ pub(crate) struct Turn {
 
 /// Stop turns that have gone quiet: no message from the worker and no tool running for
 /// ZEN_TURN_IDLE_SECS (default 600). First ask the worker to abort; if the turn is still
-/// there 30s after any abort, end it in the kernel.
+/// there ZEN_TURN_ABORT_GRACE_SECS (default 30) after any abort, end it in the kernel.
 pub(crate) async fn watchdog(app: AppState) {
     let idle_limit = Duration::from_secs(crate::env_num("ZEN_TURN_IDLE_SECS", 600.0) as u64);
-    let grace = Duration::from_secs(30);
+    let grace = Duration::from_secs(crate::env_num("ZEN_TURN_ABORT_GRACE_SECS", 30.0) as u64);
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
         let mut to_abort = Vec::new();
@@ -528,6 +528,7 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
                 "turn.start",
                 json!({
                     "session_id": id,
+                    "turn_id": turn_id,
                     "model": model,
                     "effort": effort,
                     "system_prompt": envelope.system,

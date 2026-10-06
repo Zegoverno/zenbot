@@ -136,7 +136,7 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
     let mut lines = BufReader::new(child.stdout.take().context("claude stdout")?).lines();
     let mut calls = Calls::default();
     let mut outcome: Option<Result<Option<String>>> = None;
-    let mut usage = json!({ "session_id": ctx.session_id, "engine": "claude-code", "provider": "claude", "model": model, "render": render });
+    let mut usage = json!({ "engine": "claude-code", "provider": "claude", "model": model, "render": render });
 
     loop {
         tokio::select! {
@@ -146,8 +146,8 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
                 if ev["type"] == "stream_event" && ev["event"]["type"] == "content_block_delta" {
                     let d = &ev["event"]["delta"];
                     match d["type"].as_str() {
-                        Some("text_delta") => ctx.rpc.notify("turn.delta", json!({ "session_id": ctx.session_id, "delta": d["text"] })).await,
-                        Some("thinking_delta") => ctx.rpc.notify("turn.thinking", json!({ "session_id": ctx.session_id, "delta": d["thinking"] })).await,
+                        Some("text_delta") => ctx.notify("turn.delta", json!({ "delta": d["text"] })).await,
+                        Some("thinking_delta") => ctx.notify("turn.thinking", json!({ "delta": d["thinking"] })).await,
                         _ => {}
                     }
                     continue;
@@ -156,7 +156,7 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
                     ctx.announce(&id, &name, &args).await;
                 }
                 if let Some(message) = calls.feed(&ev) {
-                    ctx.rpc.notify("turn.message", json!({ "session_id": ctx.session_id, "message": message })).await;
+                    ctx.notify("turn.message", json!({ "message": message })).await;
                 }
                 match ev["type"].as_str() {
                     Some("system") if ev["subtype"] == "init" => usage["engine_version"] = ev["claude_code_version"].clone(),
@@ -180,7 +180,7 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
     }
     // A model call cut off (abort, crash) still goes on the tape with what it had produced.
     if let Some(message) = calls.flush("aborted") {
-        ctx.rpc.notify("turn.message", json!({ "session_id": ctx.session_id, "message": message })).await;
+        ctx.notify("turn.message", json!({ "message": message })).await;
     }
     drop(stdin);
     let status = child.wait().await.ok();
@@ -195,7 +195,7 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
     if let Some(id) = engine_session {
         usage["engine_session"] = json!({ "id": id, "resumable": clean });
     }
-    ctx.rpc.notify("turn.usage", usage).await;
+    ctx.notify("turn.usage", usage).await;
     match outcome {
         Some(o) => o,
         None => {

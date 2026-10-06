@@ -44,19 +44,29 @@ impl TurnInput {
     }
 }
 
-/// Everything a running turn needs to execute tools through the kernel.
+/// Everything a running turn needs to talk to the kernel and execute tools through it.
 #[derive(Clone)]
 pub struct TurnCtx {
     pub rpc: Rpc,
     pub session_id: String,
+    /// The kernel's id for this turn, sent with everything the turn sends, so the kernel can drop
+    /// what a turn it has already ended sends late.
+    pub turn_id: String,
     pub tools: Vec<Value>,
     /// Tool calls the model announced and that haven't been executed yet: (call id, name, args).
     pub announced: Arc<Mutex<VecDeque<(String, String, Value)>>>,
 }
 
 impl TurnCtx {
-    pub fn new(rpc: Rpc, session_id: String, tools: Vec<Value>) -> Self {
-        TurnCtx { rpc, session_id, tools, announced: Arc::default() }
+    pub fn new(rpc: Rpc, session_id: String, turn_id: String, tools: Vec<Value>) -> Self {
+        TurnCtx { rpc, session_id, turn_id, tools, announced: Arc::default() }
+    }
+
+    /// Send a notification for this turn: `params` with the session and turn ids added.
+    pub async fn notify(&self, method: &str, mut params: Value) {
+        params["session_id"] = json!(self.session_id);
+        params["turn_id"] = json!(self.turn_id);
+        self.rpc.notify(method, params).await;
     }
 
     pub async fn announce(&self, id: &str, name: &str, args: &Value) {
@@ -81,21 +91,17 @@ impl TurnCtx {
         };
         let res = self
             .rpc
-            .request("tool.call", json!({ "session_id": self.session_id, "call_id": call_id, "name": name, "args": args }))
+            .request("tool.call", json!({ "session_id": self.session_id, "turn_id": self.turn_id, "call_id": call_id, "name": name, "args": args }))
             .await;
         let (content, is_error) = match res {
             Ok(v) => (v["content"].as_str().unwrap_or("").to_string(), v["is_error"].as_bool().unwrap_or(false)),
             Err(e) => (e.to_string(), true),
         };
-        self.rpc
-            .notify(
-                "turn.message",
-                json!({ "session_id": self.session_id, "message": {
-                    "role": "toolResult", "toolCallId": call_id, "toolName": name,
-                    "content": [{ "type": "text", "text": content }], "isError": is_error, "timestamp": now_ms()
-                }}),
-            )
-            .await;
+        let message = json!({
+            "role": "toolResult", "toolCallId": call_id, "toolName": name,
+            "content": [{ "type": "text", "text": content }], "isError": is_error, "timestamp": now_ms()
+        });
+        self.notify("turn.message", json!({ "message": message })).await;
         (content, is_error)
     }
 
