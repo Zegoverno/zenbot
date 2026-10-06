@@ -22,6 +22,10 @@ use uuid::Uuid;
 use crate::{tape, tools, App, AppState};
 
 const FRAME: &str = include_str!("../steps/frame.md");
+/// What an open session is told about briefs: only how to opt in.
+const OPEN: &str = "A session is one job. Do small or clear jobs directly. For a job that is big, risky or unclear, \
+investigate, then call propose_brief before changing anything: the owner approves it (or it is approved \
+automatically), and you are then told how briefed work proceeds.";
 const WORK: &str = include_str!("../steps/work.md");
 const VERIFY: &str = include_str!("../steps/verify.md");
 
@@ -193,6 +197,16 @@ pub fn read_only(state: &str) -> bool {
 /// run in each phase is enforced when a tool runs (`refuse`).
 pub fn tools_for(state: &str) -> Value {
     let base = tools::specs();
+    // An open session pays only for the way in: the kernel's tools plus propose_brief. The rest of
+    // the workflow's tools and procedures arrive with the brief (one cache miss, briefed sessions only).
+    if state == "open" {
+        let mut open = base.as_array().cloned().unwrap_or_default();
+        open.push(brief_spec());
+        if decide_tool_on() {
+            open.push(decide_spec());
+        }
+        return Value::Array(open);
+    }
     let mut picked: Vec<Value> = if state == "verifier" {
         base.as_array().into_iter().flatten().filter(|t| matches!(t["name"].as_str(), Some("read" | "bash"))).cloned().collect()
     } else {
@@ -230,6 +244,7 @@ fn allowed(state: &str, name: &str) -> bool {
 pub fn system_for(base: &str, state: &str, fresh_brief: Option<&Value>) -> String {
     match (state, fresh_brief) {
         ("open", _) if !enabled() => base.to_string(),
+        ("open", _) => format!("{base}\n\n{OPEN}"),
         ("verifier", _) => VERIFY.trim_end().to_string(),
         ("working" | "verifying" | "reported", Some(b)) => format!(
             "{base}\n\n{}\n\n{}\n\n<brief version=\"{}\">\n{}\n</brief>",
@@ -246,7 +261,7 @@ pub fn system_for(base: &str, state: &str, fresh_brief: Option<&Value>) -> Strin
 pub fn phase_line(state: &str, brief_version: Option<i64>) -> Option<String> {
     match state {
         "framing" => Some("Phase: framing. Nothing can be changed: answer, ask, or propose a brief.".into()),
-        "open" if enabled() => Some("Phase: open. Work directly; for a big, risky or unclear job, propose a brief before changing anything.".into()),
+        "open" if enabled() => Some("Phase: open.".into()),
         "working" => Some(format!("Phase: working on brief v{}.", brief_version.unwrap_or(0))),
         _ => None,
     }
@@ -992,6 +1007,8 @@ mod tests {
         assert!(refuse("working", "write", Some("work submitted")).is_some(), "nothing more once the step has ended");
         let verifier: Vec<String> = tools_for("verifier").as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
         assert_eq!(verifier, ["bash", "read", "submit_verdict"]);
+        let open: Vec<String> = tools_for("open").as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        assert!(open.contains(&"propose_brief".to_string()) && !open.contains(&"submit_work".to_string()), "open: only the way in");
     }
 
     #[test]
@@ -1004,6 +1021,7 @@ mod tests {
         let sys = system_for("BASE", "working", Some(&json!({ "version": 2, "brief": brief() })));
         assert!(sys.starts_with("BASE") && sys.contains("<brief version=\"2\">") && sys.contains("source of intent"));
         assert_eq!(system_for("BASE", "framing", None), system_for("BASE", "working", None), "same instructions across phases");
-        assert_eq!(system_for("BASE", "open", None), system_for("BASE", "framing", None), "open sessions can opt into a brief");
+        let open = system_for("BASE", "open", None);
+        assert!(open.contains("propose_brief") && !open.contains("<framing>"), "an open session only learns how to opt in");
     }
 }

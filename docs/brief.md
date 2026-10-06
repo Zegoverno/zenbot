@@ -56,9 +56,11 @@ A briefed session starts in `framing` (or reaches it when the model proposes a b
 
 Read-only is enforced, not requested: in `framing` the kernel refuses write tools when they're
 called, and `bash` runs in a read-only sandbox (bubblewrap: the filesystem is mounted read-only,
-`/tmp` is private). The model is offered the same tools and instructions in every phase (both
-procedures are in them; the turn context says which phase applies), so a session's prompt cache
-holds from framing into the work.
+`/tmp` is private). From the moment a brief is proposed, the model is offered the same tools and instructions in every
+phase (both procedures are in them; the turn context says which phase applies), so the prompt cache
+holds from framing into the work. An open session carries only a short note on how to opt in and
+the propose_brief tool: unbriefed sessions don't pay for the workflow (measured: the full
+procedures and tools on every session cost small jobs 27–61% more).
 
 ## The brief
 
