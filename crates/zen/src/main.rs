@@ -428,6 +428,34 @@ fn git_identity() -> Option<String> {
     Some(format!("{} <{}>", get("user.name")?, get("user.email")?))
 }
 
+/// The engines' state as `scripts/update-engines.sh` last left it (~/.zenbot/engines.json).
+fn engines_state() -> Value {
+    let home = std::env::var("HOME").unwrap_or_default();
+    std::fs::read_to_string(format!("{home}/.zenbot/engines.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null)
+}
+
+/// The `zen status` line for the engines: "claude 2.1.291, codex 0.160.1, pi 1.0.4  (checked …)",
+/// with any engine not left up to date (rolled back, skipped, failed) named with its status.
+fn engines_line(state: &Value) -> Option<String> {
+    let engines = state["engines"].as_object().filter(|e| !e.is_empty())?;
+    let mut names: Vec<&String> = engines.keys().collect();
+    names.sort_by_key(|n| (["claude", "codex", "pi"].iter().position(|k| k == n).unwrap_or(9), n.to_string()));
+    let versions: Vec<String> = names.iter().map(|n| format!("{n} {}", engines[*n]["version"].as_str().filter(|v| !v.is_empty()).unwrap_or("?"))).collect();
+    let problems: Vec<String> = names
+        .iter()
+        .filter_map(|n| {
+            let s = engines[*n]["status"].as_str().unwrap_or("");
+            (!(s == "up to date" || s.starts_with("updated"))).then(|| format!("{n}: {s}"))
+        })
+        .collect();
+    let checked = state["checked"].as_str().map(|c| c.replacen('T', " ", 1).trim_end_matches('Z').to_string() + " UTC").unwrap_or_default();
+    let mut line = format!("{}  (checked {checked}", versions.join(", "));
+    if !problems.is_empty() {
+        line += &format!("; {}", problems.join("; "));
+    }
+    Some(line + ")")
+}
+
 fn signed_in(engine: &str) -> bool {
     let run = |cmd: &str, args: &[&str]| std::process::Command::new(cmd).args(args).env("PATH", zen_path()).output().ok();
     match engine {
@@ -608,7 +636,9 @@ async fn run(cli: Cli) -> Result<()> {
             let any_signed_in = models["authenticated"].as_object().is_some_and(|a| a.values().any(|v| v == true));
             let version = c.get("/api/version").await.unwrap_or(Value::Null);
             let git_identity = git_identity();
+            let engines = engines_state();
             let status = json!({
+                "engines": engines,
                 "git_identity": git_identity,
                 "commit": health["commit"],
                 "update": version,
@@ -634,6 +664,10 @@ async fn run(cli: Cli) -> Result<()> {
                 // OpenRouter is only used for live scoring; it's shown with the scorer below.
                 for (name, ok) in models["authenticated"].as_object().into_iter().flatten().filter(|(n, _)| *n != "openrouter") {
                     println!("{:<9} {}", name, if *ok == true { "signed in" } else { "NOT signed in" });
+                }
+                match engines_line(&engines) {
+                    Some(line) => println!("engines   {line}"),
+                    None => println!("engines   not checked yet (scripts/update-engines.sh, daily via zen-engines.timer)"),
                 }
                 println!("model     {}", models["default"].as_str().unwrap_or(""));
                 match models["scorer"].as_str() {
@@ -704,4 +738,24 @@ async fn run(cli: Cli) -> Result<()> {
         },
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engines_line_lists_versions_and_flags_problems() {
+        let state = json!({ "checked": "2026-10-06T14:32:34Z", "engines": {
+            "pi": { "version": "1.0.4", "status": "up to date" },
+            "codex": { "version": "0.160.1", "status": "updated from 0.159.0" },
+            "claude": { "version": "2.1.284", "status": "rolled back from 2.1.291" },
+        }});
+        assert_eq!(
+            engines_line(&state).unwrap(),
+            "claude 2.1.284, codex 0.160.1, pi 1.0.4  (checked 2026-10-06 14:32:34 UTC; claude: rolled back from 2.1.291)"
+        );
+        assert_eq!(engines_line(&Value::Null), None);
+        assert_eq!(engines_line(&json!({ "engines": {} })), None);
+    }
 }
