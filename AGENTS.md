@@ -1,60 +1,106 @@
 # Working on zenbot
 
-This file is for agents changing zenbot's own code, including zenbot itself. Read it fully before making changes.
+This file is for agents (and people) changing zenbot's own code, including zenbot itself. Read it
+fully before making changes.
+
+## Read first
+
+1. [CONTEXT.md](CONTEXT.md): what zenbot is for and how success is measured.
+2. [ROADMAP.md](ROADMAP.md): the active phase and its next step. Start new work from there.
+3. [MAP.md](MAP.md): find what you'll touch, what it depends on and what depends on it. Then read the
+   code itself.
+4. [DESIGN.md](DESIGN.md) for how the system works, [DECISIONS.md](DECISIONS.md) before revisiting a
+   choice, [DEVELOPMENT.md](DEVELOPMENT.md) for every command below.
 
 ## What runs where
 
-| Piece | Path | Language | Runs as |
-|---|---|---|---|
-| Kernel `zend`: API, WebSocket, sessions, tools, auth, worker routing | `crates/zend` | Rust | systemd service `zenbot`, binary `~/.zenbot/bin/zend` |
-| CLI `zen`: interactive terminal app and script commands | `crates/zen` | Rust | `~/.zenbot/bin/zen` (linked from `~/.local/bin/zen`) |
-| Worker `zen-engine`: runs turns on the Claude Code and Codex CLIs (subscriptions) | `crates/zen-engine` | Rust | child process of `zend` |
-| Worker `zen-mind` (optional, `pi`): Pi agent loop, direct ChatGPT sign-in | `packages/mind` | TypeScript (Node 22, from source) | child process of `zend` when `ZEN_WORKERS` includes `pi` |
-| Web UI (frozen) | `crates/zend/web/index.html` | HTML/JS | served by `zend` |
-| Database | `deploy/compose.yaml` | Postgres + pgvector | Docker |
-| Design and plan | `SPEC.md`; current plan in `docs/redesign.md` (read it before starting new work); worker protocol in `docs/worker-protocol.md` | | |
+| Piece | Path | Runs as |
+|---|---|---|
+| Kernel `zend`: API, WebSocket, sessions, tools, auth, worker routing | `crates/zend` (Rust) | systemd service `zenbot`, binary `~/.zenbot/bin/zend` |
+| CLI `zen`: terminal app and script commands | `crates/zen` (Rust) | `~/.zenbot/bin/zen` (linked from `~/.local/bin/zen`) |
+| Worker `zen-engine`: turns on the Claude Code and Codex CLIs | `crates/zen-engine` (Rust) | child process of `zend` |
+| Worker `zen-mind` (optional, `pi`): Pi loop, ChatGPT sign-in, OpenRouter | `packages/mind` (TypeScript, Node 22 from source) | child process of `zend` when `ZEN_WORKERS` includes `pi` |
+| Web UI (frozen) | `crates/zend/web/index.html` | served by `zend` |
+| Database | `deploy/compose.yaml` | Postgres + pgvector in Docker |
 
-The kernel owns all state and executes every tool call. Workers hold no state: they get the context for a turn and ask the kernel to run tools. Engines run with their own tools switched off (Claude Code `--tools ""`, Codex shell disabled) so every action goes through the kernel. Keep it that way.
+The kernel owns all state and executes every tool call. Workers hold no state: they get the context
+for a turn and ask the kernel to run tools. Engines run with their own tools switched off (Claude
+Code `--tools ""`, Codex shell disabled) so every action goes through the kernel. Keep it that way.
 
-Config lives in `~/.zenbot/`: `env` (service environment, including `ZEN_WORKERS`), `token` (API token), `auth.json` (Pi's ChatGPT sign-in, secret, never print it; Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`), `history` (prompt history), `upgrade.log`, `version`, `engines.json` (engine versions from the last update check).
-
-The Claude Code and Codex CLIs are kept on their latest versions by `scripts/update-engines.sh`, run daily by `zen-engines.timer`: each update must pass a real test turn or it is rolled back, and nothing is committed, built or restarted. Pi is different: it is part of the harness, so `packages/mind` pins its exact version and a bump is a normal commit with an eval (below); the daily job only reports a newer Pi (`zen status`). Code that depends on a CLI's flags or output should fail loudly, so the post-update check catches it.
+Config lives in `~/.zenbot/` (MAP.md lists every file). `auth.json` holds Pi's ChatGPT sign-in: secret,
+never print it. This VM is a development box; the owner uses zenbot for real on another VM.
 
 ## Making a change
 
-1. Read the code you're changing first. Keep the existing style. Keep changes small.
-2. Build and check: `cargo build --release`, `cargo test --release`, `cargo clippy --release --all-targets -- -D warnings`, and `scripts/e2e.sh` (end-to-end scenarios with the scripted model on a throwaway database; CI runs all four on every pull request and push to `main`, and publishes binaries only for commits that pass; add a scenario when you change the kernel's behavior). Test kernel behavior end to end without a subscription using the scripted `faux/smoke` model (`ZEN_FAUX=1`, see `docs/worker-protocol.md`). If you change the Pi worker, `node packages/mind/src/main.ts` must start (Node runs TypeScript directly by stripping types, so don't use TypeScript-only syntax like enums or constructor parameter properties). Changes to the worker protocol must update `docs/worker-protocol.md` and every worker.
-3. Test the changed behavior for real where you can, for example `./target/release/zen ask --json "…"` against the running service.
-4. Apply it with `scripts/upgrade.sh`. It rebuilds (or, for a clean checkout of a commit CI has built, downloads the binaries via `scripts/fetch-release.sh`), checks, runs a scripted test turn, and schedules the restart for when no session is working, so it is safe to run from inside your own session. The restart will end the current turn's connection; the user reconnects by sending the next message.
-5. Afterwards, check `~/.zenbot/upgrade.log`. If the new version wasn't healthy it was rolled back automatically; read the log, fix, and run the script again.
-6. Work on a branch, never directly on `main`. Commit with a clear message once the change works, push the branch, and open a pull request. Merge it when CI is green (CI then publishes the binaries for the new `main`).
+1. **Branch.** Start from an up-to-date `main` and work on a branch (`feat/…`, `fix/…`, `docs/…`),
+   never directly on `main`.
+2. **Read the code you're changing.** Keep the existing style. Keep changes small.
+3. **Build and check** exactly as CI does: build, tests, clippy as errors, and `scripts/e2e.sh`
+   (DEVELOPMENT.md). Add an e2e scenario when you change the kernel's behavior. Test kernel behavior
+   without a subscription with the scripted `faux/smoke` model. If you change the Pi worker,
+   `node packages/mind/src/main.ts` must start (Node strips types: no enums or constructor parameter
+   properties). Changes to the worker protocol update `docs/worker-protocol.md` and every worker.
+4. **Test it for real** where you can, e.g. `./target/release/zen ask --json "…"` against the running
+   service or a dev kernel.
+5. **Update the docs** in the same branch (table below). Docs are not a follow-up task.
+6. **Apply it** with `scripts/upgrade.sh`, then check `~/.zenbot/upgrade.log`. It is safe to run from
+   inside your own session: it restarts when no session is working, and rolls back if the new
+   version isn't healthy.
+7. **Ship.** Commit (one concern per commit), push the branch, open a pull request, merge when CI is
+   green. Harness changes (system prompt, history, tools, workers, model or effort handling) also get
+   an eval first: run `scripts/eval.sh`, show the owner the report (in the pull request too), and merge
+   only once the owner agrees. The report informs the owner's decision; it is never a pass/fail gate.
+8. **After a merge**, `git checkout main && git pull` before starting the next branch.
 
-Changes to the harness (system prompt, history, tools, workers, model or effort handling) also get an eval before they are merged: run `scripts/eval.sh` (this checkout against the installed version, same model), show the owner the report (in the pull request too), and merge only once the owner agrees. The report informs the owner's decision; it is never a pass/fail gate. See `evals/README.md`.
+## Update the docs before shipping
+
+| File | Update when |
+|---|---|
+| `PROGRESS.md` | Always: add a dated entry at the top saying what shipped and why |
+| `ROADMAP.md` | A step is done, the active phase changes, a plan or an open decision changes, debt is found or paid |
+| `DECISIONS.md` | A decision is made or changed (new `D-NNN` entry; mark what it supersedes) |
+| `DESIGN.md` | How the system works changes, or the target design changes |
+| `MAP.md` | Files, routes, tables, settings or scripts are added, removed or change role |
+| `DEVELOPMENT.md` | The dev loop, scripts, tests or CI change |
+| `SPEC.md` | The long-term target of a module changes |
+| `CONTEXT.md` | What zenbot is for, the success measure, principles or constraints change |
+| `README.md` | How people install or use zen changes |
+| `docs/*.md` | The subsystem they describe changes |
+
+Keep each fact in one file and link to it from the others. Repo docs are for whoever works on the
+code next: no conversation notes, no memory-system link syntax (`[[…]]`), no perishable usage data.
+Refer to the owner as "the owner".
 
 ## Conventions
 
 - One concern per commit. The subject says what changed; the body says why, and what was tested.
-- Design decisions written down in `SPEC.md` or in a module's header comment change only with the owner's OK. If a change needs one, ask first, then update the doc in the same commit.
-- UI changes (`crates/zen/src/tui.rs`, `editor.rs`) come with render or key tests: build an `App` at a fixed size with output captured (see the tests at the bottom of `tui.rs`).
+- Design decisions (DECISIONS.md, DESIGN.md, SPEC.md, or a module's header comment) change only with
+  the owner's OK. If a change needs one, ask first, then update the doc in the same pull request.
+- UI changes (`crates/zen/src/tui.rs`, `editor.rs`) come with render or key tests: build an `App` at a
+  fixed size with output captured (see the tests at the bottom of `tui.rs`).
 - Keep doc comments attached to the item they describe, and update them when behavior changes.
-- Commits you make in a zen session get `Zen-Session` and `Co-Authored-By` trailers automatically (`scripts/git-hooks`); don't remove them.
+- Commits made in a zen session get `Zen-Session` and `Co-Authored-By` trailers automatically
+  (`scripts/git-hooks`); don't remove them.
+- Don't add dependencies without a good reason; prefer the standard library and what's already used.
 
 ## Rules
 
-- **Never** run `systemctl restart zenbot` or kill `zend` yourself: that kills the session you're running in. Always use `scripts/upgrade.sh`.
-- Database changes go in a new file in `crates/zend/migrations/` (never edit an applied migration). Migrations are **expand-only**: add tables, columns and indexes; don't drop, rename or change the type of anything in the same release that stops using it (do that in a later release). A rollback swaps the binaries back but not the schema, so the previous build must keep working on the new schema.
-- `scripts/upgrade.sh` tries new migrations on a throwaway copy of the live database (`--check` stops after that test), and the install backs the live database up to `~/.zenbot/backups/` (last 10 kept) before applying any. A rollback doesn't restore it; `~/.zenbot/upgrade.log` says how to. `scripts/db.sh pending` lists migrations the live database hasn't applied; `scripts/db.sh backup` takes a backup by hand.
-- Don't add dependencies without a good reason; prefer the standard library and what's already used.
+- **Never** run `systemctl restart zenbot` or kill `zend` yourself: that kills the session you're
+  running in. Always use `scripts/upgrade.sh`.
+- Database changes go in a new file in `crates/zend/migrations/`; never edit an applied migration.
+  Migrations are **expand-only**: add tables, columns and indexes; drop, rename or retype only in a
+  later release than the one that stops using it. A rollback swaps the binaries back but not the
+  schema.
 - Don't put secrets in the repo, logs or tool output.
-- Update `SPEC.md` when a change affects the architecture, and `README.md` when it affects how people install or use zen.
+- Code that depends on a CLI's flags or output fails loudly, so the daily engine update check catches
+  a breaking change.
 
 ## Useful commands
 
 ```bash
-zen status                       # health of kernel, database, worker, sign-in
-journalctl -u zenbot -n 50       # service logs
-cat ~/.zenbot/upgrade.log        # upgrade results
-scripts/upgrade.sh --check       # build, check and smoke test without installing
-scripts/update-engines.sh --check  # engine versions installed vs latest
-./scripts/dev.sh                 # dev kernel in the foreground on :18100 with its own zen_dev database
+zen status                  # health of kernel, database, workers, sign-in, engine versions
+journalctl -u zenbot -n 50  # service logs
+cat ~/.zenbot/upgrade.log   # upgrade results
+scripts/upgrade.sh --check  # build, check and smoke test without installing
+ZEN_FAUX=1 scripts/dev.sh   # dev kernel on :18100 with its own zen_dev database
 ```
