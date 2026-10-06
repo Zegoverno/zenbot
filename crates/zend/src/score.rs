@@ -196,9 +196,12 @@ pub async fn idle_loop(app: std::sync::Arc<App>) {
         // Each session's latest turn, quiet long enough and not scored yet (a failed score is
         // retried after an hour); a few per round.
         let due: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT l.session_id FROM (
-                 SELECT DISTINCT ON (session_id) session_id, id, ended_at FROM turns
-                 WHERE ended_at IS NOT NULL AND model NOT LIKE 'faux/%' ORDER BY session_id, started_at DESC) l
+            // One index lookup per session (turns_session), not a sort of every turn.
+            "SELECT s.id AS session_id FROM sessions s
+             CROSS JOIN LATERAL (
+                 SELECT t.id, t.ended_at FROM turns t
+                 WHERE t.session_id = s.id AND t.ended_at IS NOT NULL AND t.model NOT LIKE 'faux/%'
+                 ORDER BY t.started_at DESC LIMIT 1) l
              WHERE l.ended_at < now() - make_interval(secs => $1)
                AND NOT EXISTS (SELECT 1 FROM session_scores s WHERE s.turn_id = l.id AND s.trigger = 'idle' AND s.questions = $2
                                AND (s.error IS NULL OR s.created_at > now() - interval '1 hour'))

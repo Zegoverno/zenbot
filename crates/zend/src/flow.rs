@@ -85,9 +85,19 @@ pub async fn state(db: &PgPool, session: Uuid) -> Result<String, sqlx::Error> {
 }
 
 /// Move a session to a state: a `state` block on the tape (who and why), cached on the session.
-/// `fresh` marks the start of a new work context (history before it isn't replayed).
+/// `fresh` marks the start of a new work context (history before it isn't replayed). A running
+/// turn keeps the state it gates tools by (`Turn::state`) current.
 pub async fn set_state(app: &App, session: Uuid, to: &str, by: &str, reason: &str, fresh: bool) -> Result<i32> {
-    sqlx::query("UPDATE sessions SET state = $2 WHERE id = $1").bind(session).bind(to).execute(&app.db).await?;
+    {
+        // Under the turns lock, with a count of changes, so a turn starting now can't miss it
+        // (begin_turn).
+        let mut turns = app.turns.lock().await;
+        sqlx::query("UPDATE sessions SET state = $2 WHERE id = $1").bind(session).bind(to).execute(&app.db).await?;
+        if let Some(t) = turns.get_mut(&session) {
+            t.state = to.to_string();
+        }
+        app.state_changes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
     let (seq, _) = tape::append(&app.db, session, "state", &json!({ "state": to, "by": by, "reason": reason, "fresh": fresh })).await?;
     app.emit(session, json!({ "type": "state", "state": to, "by": by, "reason": reason })).await;
     Ok(seq)

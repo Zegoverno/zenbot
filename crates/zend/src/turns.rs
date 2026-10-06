@@ -31,6 +31,9 @@ pub(crate) struct Turn {
     pub(crate) prev_context: Option<i64>,
     /// Set when a workflow tool ended the model's step (flow.rs); later tool calls are refused.
     pub(crate) ending: Option<&'static str>,
+    /// The session's workflow state (flow.rs), read when the turn starts and kept current by
+    /// flow::set_state, so tool calls don't read it from the database.
+    pub(crate) state: String,
 }
 
 /// Stop turns that have gone quiet: no message from the worker and no tool running for
@@ -70,11 +73,13 @@ pub(crate) async fn watchdog(app: AppState) {
 pub(crate) async fn finish_turn(app: &AppState, id: Uuid, error: Value) -> bool {
     let Some(turn) = app.turns.lock().await.remove(&id) else { return false };
     let _ = turn.cancel.send(true);
-    let summary = match record_turn(app, &turn, &error).await {
-        Ok(s) => s,
+    let Recorded { turn: summary, parent, session_cost: cost } = match record_turn(app, &turn, &error).await {
+        Ok(r) => r,
         Err(e) => {
             tracing::error!("recording turn {}: {e:#}", turn.turn_id);
-            Value::Null
+            let parent = sqlx::query_scalar("SELECT parent FROM sessions WHERE id = $1").bind(id).fetch_optional(&app.db).await.ok().flatten().flatten();
+            let cost = sqlx::query_scalar(&format!("SELECT {}", session_cost("$1"))).bind(id).fetch_one(&app.db).await.unwrap_or(0.0);
+            Recorded { turn: Value::Null, parent, session_cost: cost }
         }
     };
     // A cleanly finished turn leaves the engine's own session (if it keeps one) in sync with the tape.
@@ -85,7 +90,6 @@ pub(crate) async fn finish_turn(app: &AppState, id: Uuid, error: Value) -> bool 
             tracing::error!("recording engine session for {id}: {e:#}");
         }
     }
-    let cost: f64 = sqlx::query_scalar(&format!("SELECT {}", session_cost("$1"))).bind(id).fetch_one(&app.db).await.unwrap_or(0.0);
     // The workflow may continue on its own (approve and work, verify); clients wait for `idle` then.
     let after = flow::after_turn(app, id, turn.ending, error.is_null()).await;
     app.emit(id, json!({ "type": "end", "error": error, "cost": cost, "turn": summary, "next": after.next })).await;
@@ -97,7 +101,6 @@ pub(crate) async fn finish_turn(app: &AppState, id: Uuid, error: Value) -> bool 
         let _ = waiter.send(());
     }
     // A child session's turn (a verifier) counts toward its parent's work: tell the parent's clients.
-    let parent: Option<Uuid> = sqlx::query_scalar("SELECT parent FROM sessions WHERE id = $1").bind(id).fetch_optional(&app.db).await.ok().flatten().flatten();
     if let Some(parent) = parent {
         app.emit(parent, json!({ "type": "child_end", "turn": summary })).await;
     }
@@ -140,10 +143,19 @@ pub(crate) fn session_cost(session: &str) -> String {
     )
 }
 
+/// A closed turn's row as JSON, with what ending it needs from its session.
+pub(crate) struct Recorded {
+    pub(crate) turn: Value,
+    /// The session's parent (a verifier's), whose clients hear of the turn.
+    pub(crate) parent: Option<Uuid>,
+    /// The session's cost, this turn included.
+    pub(crate) session_cost: f64,
+}
+
 /// Close a turn's row: outcome, duration, counts and totals. The worker's own turn report wins
 /// where it has a figure (Claude Code's covers side calls the stream never shows); otherwise the
-/// totals are summed from the turn's model calls. Returns the row as JSON.
-pub(crate) async fn record_turn(app: &App, turn: &Turn, error: &Value) -> Result<Value> {
+/// totals are summed from the turn's model calls. Returns the row, its session's parent and cost.
+pub(crate) async fn record_turn(app: &App, turn: &Turn, error: &Value) -> Result<Recorded> {
     let outcome = match error.as_str() {
         None => "ok",
         Some("interrupted") => "interrupted",
@@ -173,7 +185,14 @@ pub(crate) async fn record_turn(app: &App, turn: &Turn, error: &Value) -> Result
          WHERE id = $1
          RETURNING id, harness, worker, engine, engine_version, model, model_resolved, effort, duration_ms, outcome,
                    model_calls, tool_calls, tool_errors, input_tokens, output_tokens, cache_read, cache_write, cost_usd,
-                   cache_break, context_tokens, context->>'render' AS render",
+                   cache_break, context_tokens, context->>'render' AS render,
+                   (SELECT parent FROM sessions WHERE id = turns.session_id) AS parent,
+                   -- The session's cost: subqueries see the row before this update, so this
+                   -- turn's new cost is added to the other turns'.
+                   COALESCE((SELECT SUM(t.cost_usd) FROM turns t WHERE t.session_id = turns.session_id AND t.id <> turns.id), 0)
+                     + COALESCE(cost_usd, 0)
+                     + COALESCE((SELECT SUM(m.cost_usd) FROM model_calls m WHERE m.session_id = turns.session_id AND m.turn_id IS NULL), 0)
+                     AS session_cost",
     )
     .bind(turn.turn_id)
     .bind(turn.started.elapsed().as_millis() as i64)
@@ -193,7 +212,7 @@ pub(crate) async fn record_turn(app: &App, turn: &Turn, error: &Value) -> Result
     .bind(if sent.is_null() { None } else { Some(&sent) })
     .fetch_one(&app.db)
     .await?;
-    Ok(turn_json(&row))
+    Ok(Recorded { turn: turn_json(&row), parent: row.get("parent"), session_cost: row.get("session_cost") })
 }
 
 /// The worker's report with its totals made per turn. An engine that continues its own session
@@ -328,8 +347,14 @@ pub(crate) async fn run_child(app: &AppState, parent: Uuid, kind: &str, prompt: 
 }
 
 pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: Origin) -> Result<()> {
-    let row = sqlx::query("SELECT model, effort, title, workspace, kind FROM sessions WHERE id = $1").bind(id).fetch_optional(&app.db).await?;
+    // The session's row is read once; its state is then kept on the turn (flow::set_state updates it).
+    let state_changes = app.state_changes.load(Ordering::SeqCst);
+    let row = sqlx::query("SELECT model, effort, title, workspace, kind, COALESCE(state, 'open') AS state FROM sessions WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&app.db)
+        .await?;
     let Some(row) = row else { anyhow::bail!("session not found") };
+    let mut state: String = row.get("state");
     let model: String = row.get("model");
     let workspace = row.get::<Option<String>, _>("workspace").map(PathBuf::from).unwrap_or_else(|| app.workspace.clone());
     let kind: Option<String> = row.get("kind");
@@ -372,8 +397,23 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
                 cache_break: None,
                 prev_context: None,
                 ending: None,
+                state: state.clone(),
             },
         );
+        // A state change since the row was read missed this turn: read the state again, under
+        // the lock set_state takes, so no change can slip in between.
+        if app.state_changes.load(Ordering::SeqCst) != state_changes {
+            state = match flow::state(&app.db, id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    turns.remove(&id);
+                    return Err(e.into());
+                }
+            };
+            if let Some(t) = turns.get_mut(&id) {
+                t.state = state.clone();
+            }
+        }
     }
     // How far the start got, for cleaning up when it fails.
     let (mut row_written, mut busy_sent) = (false, false);
@@ -413,8 +453,9 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
         let blocks = tape::load_all(&app.db, id).await?;
         let engine = model.split_once('/').map(|(e, _)| e).unwrap_or("");
         let last = blocks.iter().rev().find(|b| matches!(b.kind.as_str(), "message" | "compaction" | "envelope" | "base" | "engine_session")).cloned();
-        // What the model is told and can use depends on the session's state (flow.rs).
-        let state = flow::state(&app.db, id).await?;
+        // What the model is told and can use depends on the session's state (flow.rs), as it is
+        // now (it may have changed while a summary was made).
+        let state = app.turns.lock().await.get(&id).filter(|t| t.turn_id == turn_id).map(|t| t.state.clone()).unwrap_or(state);
         let base = compile::base_prompt(&app.db, id, &blocks, &app.workspace, &app.repo).await?;
         let brief = match state.as_str() {
             "working" | "verifying" | "reported" => flow::fresh_brief_in(&blocks),
@@ -517,7 +558,7 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
             };
             if let Some(turn) = turn {
                 let error = json!(e.to_string());
-                let summary = if row_written { record_turn(app, &turn, &error).await.unwrap_or(Value::Null) } else { Value::Null };
+                let summary = if row_written { record_turn(app, &turn, &error).await.map(|r| r.turn).unwrap_or(Value::Null) } else { Value::Null };
                 if busy_sent {
                     app.emit(id, json!({ "type": "end", "error": error, "turn": summary, "next": false })).await;
                 }
