@@ -175,6 +175,19 @@ secrets_masked() {
   check "no tool output holds the token's value" eq "$(q "SELECT count(*) FROM tape_events WHERE payload->>'role'='toolResult' AND payload::text LIKE '%AbCdEfGhIjKlMnOp%'")" 0
 }
 
+# A turn the kernel ended (the watchdog, after an abort the worker ignored) keeps running in the
+# worker and ends while the session's next turn runs: what it sends late must not reach that turn.
+stale_turn() {
+  local ws; ws=$(new_workspace stale)
+  start_kernel "$ws" "$(script stale-turn.json)" ZEN_BRIEFS=0 ZEN_TURN_IDLE_SECS=1 ZEN_TURN_ABORT_GRACE_SECS=1
+  local r sid; r=$(zen ask --json -m faux/smoke "first" || true); sid=$(echo "$r" | jq -r .session_id)
+  check "the stuck turn was ended by the kernel" grep -q "stopped responding" <<<"$(echo "$r" | jq -r .error)"
+  r=$(zen ask --json -s "$sid" "second" || true)
+  check "the next turn ran to its end" eq "$(echo "$r" | jq -r .error)" null
+  check "with its own answer" grep -q "second turn done" <<<"$(echo "$r" | jq -r .text)"
+  check "the ended turn's late answer was dropped" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND payload::text LIKE '%LATE answer%'")" 0
+}
+
 restart_recovery() {
   local ws; ws=$(new_workspace restart)
   start_kernel "$ws" ""
@@ -193,6 +206,7 @@ run opt-in opt_in
 run verifier verifier
 run summaries summaries
 run secrets secrets_masked
+run stale-turn stale_turn
 echo "== tape"
 check "every tape is numbered and its hash chain recomputes" tape_is_sound
 

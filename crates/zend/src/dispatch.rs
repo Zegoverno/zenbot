@@ -24,12 +24,18 @@ pub(crate) fn session_id(params: &Value) -> Result<Uuid> {
     Ok(params.get("session_id").and_then(Value::as_str).unwrap_or_default().parse()?)
 }
 
+/// The turn a worker message names (`turn_id`, echoed from `turn.start`); None if it names none.
+pub(crate) fn turn_id(params: &Value) -> Option<Uuid> {
+    params.get("turn_id").and_then(Value::as_str).and_then(|t| t.parse().ok())
+}
+
 /// Note activity on a session's turn. Returns false when the message doesn't belong to the turn
-/// running on that worker (e.g. a late message from a turn that was already ended); such messages
-/// are dropped so they can't leak into the session.
-pub(crate) async fn touch(app: &App, id: Uuid, worker: usize) -> bool {
+/// running on that worker (e.g. a late message from a turn the kernel already ended, while the
+/// session's next turn runs); such messages are dropped so they can't leak into the session.
+/// A message without a `turn_id` (a worker that predates it) is matched by session and worker only.
+pub(crate) async fn touch(app: &App, id: Uuid, worker: usize, turn: Option<Uuid>) -> bool {
     match app.turns.lock().await.get_mut(&id) {
-        Some(t) if t.worker == worker => {
+        Some(t) if t.worker == worker && turn.is_none_or(|turn| turn == t.turn_id) => {
             t.last_activity = Instant::now();
             true
         }
@@ -42,8 +48,8 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
     let p = &msg.params;
     let id = session_id(p);
     if let Ok(id) = id {
-        if !touch(app, id, worker).await {
-            tracing::warn!("dropping `{}` for session {id}: no turn running on that worker", msg.method);
+        if !touch(app, id, worker, turn_id(p)).await {
+            tracing::warn!("dropping `{}` for session {id}: not from the turn running on that worker", msg.method);
             if let Some(req_id) = msg.id {
                 mind.respond(req_id, json!({ "content": "this turn has ended", "is_error": true })).await?;
             }

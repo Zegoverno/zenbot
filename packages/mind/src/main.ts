@@ -75,14 +75,14 @@ function toTypeBox(schema: Json): Json {
   }
 }
 
-function kernelTools(sessionId: string, specs: Json[]): AgentTool<any>[] {
+function kernelTools(ids: TurnIds, specs: Json[]): AgentTool<any>[] {
   return specs.map((spec) => ({
     name: spec.name,
     label: spec.name,
     description: spec.description,
     parameters: toTypeBox(spec.parameters),
     async execute(toolCallId: string, params: Json) {
-      const res = await request("tool.call", { session_id: sessionId, call_id: toolCallId, name: spec.name, args: params });
+      const res = await request("tool.call", { ...ids, call_id: toolCallId, name: spec.name, args: params });
       if (res.is_error) throw new Error(res.content);
       return { content: [{ type: "text", text: res.content }], details: res.details ?? null };
     },
@@ -112,8 +112,13 @@ function modelInfo(model: Json, id: string, name: string): Json {
 
 // ---- Turns ----
 
-const running = new Map<string, Agent>();
-const aborted = new Set<string>();
+// The ids every message about a turn carries: its session, and the kernel's id for the turn, so
+// the kernel can drop what a turn it has already ended sends late.
+type TurnIds = { session_id: string; turn_id: string };
+type Running = { session_id: string; agent?: Agent; aborted: boolean };
+
+// Turns running, by turn id. `aborted` is set by turn.abort; `agent` once the turn has one.
+const running = new Map<string, Running>();
 
 // Never throws: every failure becomes turn.end with an error, so the kernel frees the session.
 // The kernel's history as Pi messages: a user message's turn context becomes a second text block
@@ -132,6 +137,10 @@ function userContent(content: Json, context?: string): Json {
 
 async function turnStart(p: Json) {
   const { session_id, model: modelRef, effort, system_prompt, history, prompt, prompt_context, tools } = p;
+  // A kernel older than turn ids sends none; a local one keeps this turn's entry apart.
+  const ids: TurnIds = { session_id, turn_id: p.turn_id ?? crypto.randomUUID() };
+  const turn: Running = { session_id, aborted: false };
+  running.set(ids.turn_id, turn);
   try {
     const [provider, id] = String(modelRef).split("/");
     const model = models.getModel(provider as any, id);
@@ -143,7 +152,7 @@ async function turnStart(p: Json) {
         systemPrompt: system_prompt,
         model,
         thinkingLevel: effort ?? defaultEffort(model),
-        tools: kernelTools(session_id, tools),
+        tools: kernelTools(ids, tools),
         messages: piMessages(history ?? []),
       },
       // Long cache retention where the provider has it; the session id lets providers route a
@@ -151,32 +160,32 @@ async function turnStart(p: Json) {
       streamFn: (model: Json, context: Json, options: Json) => models.streamSimple(model, context, { ...options, cacheRetention: "long" }),
       sessionId: session_id,
     });
-    running.set(session_id, agent);
+    turn.agent = agent;
+    if (turn.aborted) throw new Error("interrupted");
 
     let callStarted = 0;
     agent.subscribe((ev: Json) => {
       if (ev.type === "message_start" && ev.message?.role === "assistant") callStarted = Date.now();
       if (ev.type === "message_update") {
         const e = ev.assistantMessageEvent;
-        if (e?.type === "text_delta") notify("turn.delta", { session_id, delta: e.delta });
-        else if (e?.type === "thinking_delta") notify("turn.thinking", { session_id, delta: e.delta });
+        if (e?.type === "text_delta") notify("turn.delta", { ...ids, delta: e.delta });
+        else if (e?.type === "thinking_delta") notify("turn.thinking", { ...ids, delta: e.delta });
       } else if (ev.type === "message_end") {
         const role = ev.message?.role;
-        if (role === "assistant") notify("turn.message", { session_id, message: { ...ev.message, durationMs: Date.now() - callStarted } });
-        else if (role === "toolResult") notify("turn.message", { session_id, message: ev.message });
+        if (role === "assistant") notify("turn.message", { ...ids, message: { ...ev.message, durationMs: Date.now() - callStarted } });
+        else if (role === "toolResult") notify("turn.message", { ...ids, message: ev.message });
       }
     });
 
     await agent.prompt({ role: "user", content: userContent(prompt, prompt_context ?? undefined), timestamp: Date.now() } as Json);
-    notify("turn.usage", { session_id, engine: "pi", engine_version: piVersion, render: "native" });
-    const err = aborted.has(session_id) ? "interrupted" : agent.state.errorMessage;
-    notify("turn.end", { session_id, error: err ?? null });
+    notify("turn.usage", { ...ids, engine: "pi", engine_version: piVersion, render: "native" });
+    const err = turn.aborted ? "interrupted" : agent.state.errorMessage;
+    notify("turn.end", { ...ids, error: err ?? null });
   } catch (e) {
-    const err = aborted.has(session_id) ? "interrupted" : e instanceof Error ? e.message : String(e);
-    notify("turn.end", { session_id, error: err });
+    const err = turn.aborted ? "interrupted" : e instanceof Error ? e.message : String(e);
+    notify("turn.end", { ...ids, error: err });
   } finally {
-    running.delete(session_id);
-    aborted.delete(session_id);
+    running.delete(ids.turn_id);
   }
 }
 
@@ -237,8 +246,12 @@ async function handle(method: string, params: Json): Promise<Json> {
       void turnStart(params);
       return { ok: true };
     case "turn.abort":
-      if (running.has(params.session_id)) aborted.add(params.session_id);
-      running.get(params.session_id)?.abort();
+      // The turn named, or every turn of the session (a stale one the kernel ended included).
+      for (const [turnId, turn] of running) {
+        if (turn.session_id !== params.session_id || (params.turn_id && params.turn_id !== turnId)) continue;
+        turn.aborted = true;
+        turn.agent?.abort();
+      }
       return { ok: true };
     case "ping":
       return { pong: true };

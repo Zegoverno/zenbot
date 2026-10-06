@@ -1,0 +1,6 @@
+[
+  { "when": "first", "sleep": 15, "ignore_abort": true },
+  { "when": "first", "text": "LATE answer from the turn the kernel ended", "ignore_abort": true },
+  { "when": "second", "tool": "bash", "args": { "command": "sleep 12; echo second-ok" } },
+  { "when": "second", "text": "second turn done" }
+]

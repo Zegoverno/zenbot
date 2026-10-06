@@ -23,6 +23,9 @@ use tokio::sync::{watch, Mutex};
 use rpc::Rpc;
 use turn::{TurnCtx, TurnInput};
 
+/// Turns running, by the kernel's turn id: their session and the switch that aborts them.
+type Running = Arc<Mutex<HashMap<String, (String, watch::Sender<bool>)>>>;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -34,7 +37,7 @@ async fn main() -> Result<()> {
 
 async fn serve() -> Result<()> {
     let rpc = Rpc::new();
-    let running: Arc<Mutex<HashMap<String, watch::Sender<bool>>>> = Arc::default();
+    let running: Running = Arc::default();
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     // Requests being answered. When stdin closes we still finish these, or a reply (e.g. to a
     // piped-in `ping`) could be lost as the process exits.
@@ -63,7 +66,7 @@ async fn serve() -> Result<()> {
     Ok(())
 }
 
-async fn handle(rpc: &Rpc, running: &Arc<Mutex<HashMap<String, watch::Sender<bool>>>>, method: &str, p: Value) -> Result<Value> {
+async fn handle(rpc: &Rpc, running: &Running, method: &str, p: Value) -> Result<Value> {
     match method {
         "ping" => Ok(json!({ "pong": true })),
         "models.list" => {
@@ -80,27 +83,28 @@ async fn handle(rpc: &Rpc, running: &Arc<Mutex<HashMap<String, watch::Sender<boo
         }
         "turn.start" => {
             let session_id = p["session_id"].as_str().unwrap_or("").to_string();
+            // A kernel older than turn ids sends none; a local one keeps this turn's entry apart.
+            let turn_id = p["turn_id"].as_str().map(String::from).unwrap_or_else(turn::new_uuid);
             let engine = p["model"].as_str().unwrap_or("").split_once('/').map(|(e, _)| e.to_string()).unwrap_or_default();
             let input = TurnInput::from_params(&p);
             let (abort_tx, abort_rx) = watch::channel(false);
-            running.lock().await.insert(session_id.clone(), abort_tx);
+            running.lock().await.insert(turn_id.clone(), (session_id.clone(), abort_tx));
             let tools = p["tools"].as_array().cloned().unwrap_or_default();
-            let ctx = TurnCtx::new(rpc.clone(), session_id.clone(), tools);
-            let rpc = rpc.clone();
+            let ctx = TurnCtx::new(rpc.clone(), session_id.clone(), turn_id.clone(), tools);
             let running = running.clone();
             tokio::spawn(async move {
                 let result = match engine.as_str() {
-                    "claude" => claude::run_turn(ctx, &input, abort_rx).await,
-                    "codex" => codex::run_turn(ctx, &input, abort_rx).await,
-                    "faux" if faux::enabled() => faux::run_turn(ctx, &input, abort_rx).await,
+                    "claude" => claude::run_turn(ctx.clone(), &input, abort_rx).await,
+                    "codex" => codex::run_turn(ctx.clone(), &input, abort_rx).await,
+                    "faux" if faux::enabled() => faux::run_turn(ctx.clone(), &input, abort_rx).await,
                     other => Ok(Some(format!("zen-engine has no `{other}` engine"))),
                 };
                 let error = match result {
                     Ok(e) => e,
                     Err(e) => Some(e.to_string()),
                 };
-                running.lock().await.remove(&session_id);
-                rpc.notify("turn.end", json!({ "session_id": session_id, "error": error })).await;
+                running.lock().await.remove(&turn_id);
+                ctx.notify("turn.end", json!({ "error": error })).await;
             });
             Ok(json!({ "ok": true }))
         }
@@ -118,8 +122,12 @@ async fn handle(rpc: &Rpc, running: &Arc<Mutex<HashMap<String, watch::Sender<boo
             Ok(res.unwrap_or_else(|e| json!({ "error": e.to_string() })))
         }
         "turn.abort" => {
-            if let Some(tx) = running.lock().await.get(p["session_id"].as_str().unwrap_or("")) {
-                let _ = tx.send(true);
+            // The turn named, or every turn of the session (a stale one the kernel ended included).
+            let session_id = p["session_id"].as_str().unwrap_or("");
+            for (turn_id, (session, tx)) in running.lock().await.iter() {
+                if session == session_id && p["turn_id"].as_str().is_none_or(|t| t == turn_id) {
+                    let _ = tx.send(true);
+                }
             }
             Ok(json!({ "ok": true }))
         }

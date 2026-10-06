@@ -12,8 +12,8 @@ JSON-RPC 2.0 over the worker's stdin/stdout, one JSON object per line. The kerne
 |---|---|---|
 | `ping` | `{}` | `{ "pong": true }` |
 | `models.list` | `{}` | `{ "authenticated": { "<engine>": bool, … }, "models": [{ "id": "<engine>/<model>", "name": "…", "efforts": ["low", …], "default_effort": "medium" }], "classifiers": [{ "id": "<provider>/<model>", "name": "…" }] }` |
-| `turn.start` | `{ session_id, model, effort, system_prompt, history, prompt, prompt_context, tools, resume, kind }` | `{ "ok": true }` immediately; the turn then runs asynchronously |
-| `turn.abort` | `{ session_id }` | `{ "ok": true }`; the worker stops the turn and sends `turn.end` |
+| `turn.start` | `{ session_id, turn_id, model, effort, system_prompt, history, prompt, prompt_context, tools, resume, kind }` | `{ "ok": true }` immediately; the turn then runs asynchronously |
+| `turn.abort` | `{ session_id, turn_id? }` | `{ "ok": true }`; the worker stops the turn (`turn_id`), or every turn it runs for the session, and sends `turn.end` |
 | `complete` | `{ model, system, prompt }` | `{ text, usage, model }` or `{ error }`: one completion without tools (the kernel uses it for summaries; may take minutes) |
 | `s1.decide` | `{ model, state, questions }` | `{ model, provider, answers, usage, error }` (optional; only workers that list `classifiers`) |
 
@@ -21,6 +21,7 @@ JSON-RPC 2.0 over the worker's stdin/stdout, one JSON object per line. The kerne
 - `efforts` are the thinking levels a model accepts, in order, and `default_effort` the one used when a session picks none. Both are optional: a model without them has no level to choose.
 - `effort` is the level for this turn: the session's choice, or the model's `default_effort`. The kernel always sends one for a model that has levels, so the level that ran is known; it is `null` only for models without levels. The worker must apply it, not substitute its own default.
 - `system_prompt` and `tools` are fixed for the session (docs/context.md): send them as they are, so the provider's cache keeps hitting.
+- `turn_id` is the kernel's id for this turn. The worker sends it back on every `tool.call` and notification of the turn (see "Late messages"). Messages without one are matched by session only, as from workers older than it.
 - `history` is the session so far as the kernel compiled it, in the format below. Each message carries `seq`, its number on the tape (`#12`). A user message may carry `context`, the turn context that was sent after it; send it as a second text block after the message's content, as it was sent. When older turns were summarized, the first message is the summary: a user message with `"summary": true`. Don't drop or rewrite earlier messages: each turn's history starts with the previous turn's.
 - `prompt_context` (string or null) is this turn's context (the date when it changed, …); send it as a text block after `prompt`.
 - `kind` (string or null) is the kind of session: `verifier` for a child session the kernel runs to check work (docs/brief.md); null for the owner's sessions.
@@ -32,12 +33,12 @@ JSON-RPC 2.0 over the worker's stdin/stdout, one JSON object per line. The kerne
 
 | Message | Kind | Params |
 |---|---|---|
-| `tool.call` | request | `{ session_id, call_id, name, args }` → result `{ content: string, is_error: bool }`. The kernel executes the tool. |
-| `turn.delta` | notification | `{ session_id, delta }`: streamed answer text |
-| `turn.thinking` | notification | `{ session_id, delta }`: streamed reasoning (optional) |
-| `turn.message` | notification | `{ session_id, message }`: a finished message, appended to the session's tape |
-| `turn.usage` | notification | `{ session_id, engine, engine_version, input?, output?, cache_read?, cache_write?, cost_usd?, render?, engine_session?, … }`: the worker's report for the whole turn, sent before `turn.end` |
-| `turn.end` | notification | `{ session_id, error }`: the turn is over; `error` is null on success, `"interrupted"` after an abort |
+| `tool.call` | request | `{ session_id, turn_id, call_id, name, args }` → result `{ content: string, is_error: bool }`. The kernel executes the tool. |
+| `turn.delta` | notification | `{ session_id, turn_id, delta }`: streamed answer text |
+| `turn.thinking` | notification | `{ session_id, turn_id, delta }`: streamed reasoning (optional) |
+| `turn.message` | notification | `{ session_id, turn_id, message }`: a finished message, appended to the session's tape |
+| `turn.usage` | notification | `{ session_id, turn_id, engine, engine_version, input?, output?, cache_read?, cache_write?, cost_usd?, render?, engine_session?, … }`: the worker's report for the whole turn, sent before `turn.end` |
+| `turn.end` | notification | `{ session_id, turn_id, error }`: the turn is over; `error` is null on success, `"interrupted"` after an abort |
 
 ## Messages
 
@@ -73,14 +74,14 @@ Switches: `ZEN_CLAUDE_RESUME=0` and `ZEN_CODEX_RESUME=0` run every turn without 
 
 - **Crashes.** The kernel restarts a worker that exits, with backoff. Turns it was running end with an error (`turn.end` is sent to clients by the kernel), and requests waiting on it fail at once.
 - **Abort.** On `turn.abort` the kernel also stops its own tool calls for that session: a running command is killed (its whole process group), and the pending `tool.call` returns an `is_error` result saying it was interrupted.
-- **Stalled turns.** If a turn sends nothing and runs no tool for `ZEN_TURN_IDLE_SECS` (default 600), the kernel sends `turn.abort`. Any turn still running 30 seconds after an abort is ended by the kernel.
-- **Late messages.** Messages for a session whose turn has already ended (or runs on another worker) are dropped; a late `tool.call` gets an `is_error` result.
+- **Stalled turns.** If a turn sends nothing and runs no tool for `ZEN_TURN_IDLE_SECS` (default 600), the kernel sends `turn.abort`. Any turn still running `ZEN_TURN_ABORT_GRACE_SECS` (default 30) after an abort is ended by the kernel.
+- **Late messages.** Messages from a turn that has already ended (another `turn_id`, a session with no turn, or one running on another worker) are dropped; a late `tool.call` gets an `is_error` result. The kernel may end a turn the worker is still running (after an abort, see above), so the worker must key its running turns by `turn_id`, not by session: the session's next turn can start while the old one is still stopping.
 
 So a worker never has to clean up after the kernel, but it must answer `turn.abort` promptly and always finish a turn with `turn.end`.
 
 ## Testing without a model
 
-With `ZEN_FAUX=1`, `zen-engine` also lists `faux/smoke`, a scripted model that drives a real turn through the kernel: by default one `bash` call, then an answer. `ZEN_FAUX_SCRIPT` can point to a JSON list of steps (or an object of lists keyed by workflow phase, `frame`, `work`, `verify`, `default`, to drive a whole briefed session) (`{"tool": name, "args": {…}}`, `{"text": "…"}`, `{"sleep": secs}`, `{"exit": code}`) to test tools, abort, the watchdog and crash recovery. `scripts/upgrade.sh` runs one such turn against the new build before installing it.
+With `ZEN_FAUX=1`, `zen-engine` also lists `faux/smoke`, a scripted model that drives a real turn through the kernel: by default one `bash` call, then an answer. `ZEN_FAUX_SCRIPT` can point to a JSON list of steps (or an object of lists keyed by workflow phase, `frame`, `work`, `verify`, `default`, to drive a whole briefed session) (`{"tool": name, "args": {…}}`, `{"text": "…"}`, `{"sleep": secs}`, `{"exit": code}`; a step with `"when": "<text>"` runs only in turns whose prompt contains the text, and one with `"ignore_abort": true` keeps running through an abort) to test tools, abort, the watchdog, late messages and crash recovery. `scripts/upgrade.sh` runs one such turn against the new build before installing it.
 
 ## Configuration
 
