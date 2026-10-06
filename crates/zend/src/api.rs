@@ -22,18 +22,23 @@ pub(crate) fn not_found() -> ApiError {
     ApiError(StatusCode::NOT_FOUND, "session not found".into())
 }
 
+/// Whether two byte strings are equal, in time that depends only on their lengths (so a wrong token
+/// can't be guessed byte by byte from response times).
+pub(crate) fn same_secret(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 pub(crate) async fn auth(State(app): State<AppState>, req: Request, next: Next) -> Response {
+    let token = app.token.as_bytes();
     let header_ok = req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .map(|v| v.strip_prefix("Bearer ").unwrap_or(v) == app.token)
-        .unwrap_or(false);
+        .is_some_and(|v| same_secret(v.strip_prefix("Bearer ").unwrap_or(v).as_bytes(), token));
     let query_ok = req
         .uri()
         .query()
-        .map(|q| q.split('&').any(|kv| kv == format!("token={}", app.token)))
-        .unwrap_or(false);
+        .is_some_and(|q| q.split('&').filter_map(|kv| kv.strip_prefix("token=")).any(|t| same_secret(t.as_bytes(), token)));
     if header_ok || query_ok {
         next.run(req).await
     } else {
@@ -344,4 +349,17 @@ pub(crate) async fn handle_socket(app: AppState, id: Uuid, socket: WebSocket) {
     // Wait until the forwarder (and its receiver) is gone, so the hub sees one client fewer.
     let _ = forward.await;
     app.unsubscribe(id).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tokens_compare_whole() {
+        assert!(same_secret(b"zen-token-123", b"zen-token-123"));
+        assert!(!same_secret(b"zen-token-123", b"zen-token-124"));
+        assert!(!same_secret(b"zen-token-12", b"zen-token-123"));
+        assert!(!same_secret(b"", b"x"));
+    }
 }
