@@ -655,15 +655,15 @@ mod tests {
     async fn bash_timeout_keeps_output_and_kills_group() {
         let ws = scratch("bash");
         let started = Instant::now();
-        // 3s leaves room for a slow login shell (bash -l) to start, e.g. on CI runners.
-        // A marker unique to this run, so leftovers from other runs can't be mistaken for ours.
+        // 8s leaves room for a slow login shell (bash -l) to start on a loaded CI runner: at 3s
+        // it sometimes hadn't printed "before" yet. A marker unique to this run, so leftovers from other runs can't be mistaken for ours.
         let marker = ws.file_name().unwrap().to_string_lossy().to_string();
-        let cmd = format!("echo before; (sleep 30; echo {marker} > leaked.txt) & sleep 30");
-        let r = run(&ws, "bash", json!({ "command": cmd, "timeout_secs": 3 })).await;
+        let cmd = format!("echo before; (sleep 60; echo {marker} > leaked.txt) & sleep 60");
+        let r = run(&ws, "bash", json!({ "command": cmd, "timeout_secs": 8 })).await;
         assert!(r.is_error);
         assert!(r.content.contains("before"), "{}", r.content);
         assert!(r.content.contains("timed out"));
-        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(started.elapsed() < Duration::from_secs(30));
         tokio::time::sleep(Duration::from_millis(200)).await;
         let out = std::process::Command::new("pgrep").args(["-f", &format!("echo {marker} ")]).output().unwrap();
         assert!(out.stdout.is_empty(), "background child survived the timeout");
@@ -673,10 +673,11 @@ mod tests {
     async fn bash_background_process_does_not_block() {
         let ws = scratch("bg");
         let started = Instant::now();
-        let r = run(&ws, "bash", json!({ "command": "sleep 5 & echo started" })).await;
+        let r = run(&ws, "bash", json!({ "command": "sleep 60 & echo started" })).await;
         assert!(!r.is_error, "{}", r.content);
         assert!(r.content.contains("started"));
-        assert!(started.elapsed() < Duration::from_secs(3), "waited for the background process");
+        // Far below the background sleep, with room for a slow login shell on a loaded runner.
+        assert!(started.elapsed() < Duration::from_secs(30), "waited for the background process");
     }
 
     #[tokio::test]
