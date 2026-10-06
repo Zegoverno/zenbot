@@ -31,6 +31,9 @@ pub(crate) struct Turn {
     pub(crate) prev_context: Option<i64>,
     /// Set when a workflow tool ended the model's step (flow.rs); later tool calls are refused.
     pub(crate) ending: Option<&'static str>,
+    /// The session's workflow state (flow.rs), read when the turn starts and kept current by
+    /// flow::set_state, so tool calls don't read it from the database.
+    pub(crate) state: String,
 }
 
 /// Stop turns that have gone quiet: no message from the worker and no tool running for
@@ -328,8 +331,14 @@ pub(crate) async fn run_child(app: &AppState, parent: Uuid, kind: &str, prompt: 
 }
 
 pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: Origin) -> Result<()> {
-    let row = sqlx::query("SELECT model, effort, title, workspace, kind FROM sessions WHERE id = $1").bind(id).fetch_optional(&app.db).await?;
+    // The session's row is read once; its state is then kept on the turn (flow::set_state updates it).
+    let state_changes = app.state_changes.load(Ordering::SeqCst);
+    let row = sqlx::query("SELECT model, effort, title, workspace, kind, COALESCE(state, 'open') AS state FROM sessions WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&app.db)
+        .await?;
     let Some(row) = row else { anyhow::bail!("session not found") };
+    let mut state: String = row.get("state");
     let model: String = row.get("model");
     let workspace = row.get::<Option<String>, _>("workspace").map(PathBuf::from).unwrap_or_else(|| app.workspace.clone());
     let kind: Option<String> = row.get("kind");
@@ -372,8 +381,23 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
                 cache_break: None,
                 prev_context: None,
                 ending: None,
+                state: state.clone(),
             },
         );
+        // A state change since the row was read missed this turn: read the state again, under
+        // the lock set_state takes, so no change can slip in between.
+        if app.state_changes.load(Ordering::SeqCst) != state_changes {
+            state = match flow::state(&app.db, id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    turns.remove(&id);
+                    return Err(e.into());
+                }
+            };
+            if let Some(t) = turns.get_mut(&id) {
+                t.state = state.clone();
+            }
+        }
     }
     // How far the start got, for cleaning up when it fails.
     let (mut row_written, mut busy_sent) = (false, false);
@@ -413,8 +437,9 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
         let blocks = tape::load_all(&app.db, id).await?;
         let engine = model.split_once('/').map(|(e, _)| e).unwrap_or("");
         let last = blocks.iter().rev().find(|b| matches!(b.kind.as_str(), "message" | "compaction" | "envelope" | "base" | "engine_session")).cloned();
-        // What the model is told and can use depends on the session's state (flow.rs).
-        let state = flow::state(&app.db, id).await?;
+        // What the model is told and can use depends on the session's state (flow.rs), as it is
+        // now (it may have changed while a summary was made).
+        let state = app.turns.lock().await.get(&id).filter(|t| t.turn_id == turn_id).map(|t| t.state.clone()).unwrap_or(state);
         let base = compile::base_prompt(&app.db, id, &blocks, &app.workspace, &app.repo).await?;
         let brief = match state.as_str() {
             "working" | "verifying" | "reported" => flow::fresh_brief_in(&blocks),

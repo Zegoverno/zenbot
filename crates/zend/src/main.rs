@@ -19,6 +19,7 @@ mod workers;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -69,6 +70,8 @@ struct App {
     /// Sessions with workflow steps running outside a turn (approval, verification), counted as
     /// busy so an upgrade waits for them.
     pub(crate) background: Mutex<HashSet<Uuid>>,
+    /// Session state changes so far (flow::set_state), so a turn starting meanwhile can tell.
+    pub(crate) state_changes: AtomicU64,
 }
 
 type AppState = Arc<App>;
@@ -163,6 +166,7 @@ async fn main() -> Result<()> {
         compacting: Mutex::new(HashSet::new()),
         waiters: Mutex::new(HashMap::new()),
         background: Mutex::new(HashSet::new()),
+        state_changes: AtomicU64::new(0),
     });
     // A verification a restart cut short can't resume: send the work back so the session isn't stuck.
     for id in sqlx::query_scalar::<_, Uuid>("SELECT id FROM sessions WHERE state = 'verifying'").fetch_all(&app.db).await? {
