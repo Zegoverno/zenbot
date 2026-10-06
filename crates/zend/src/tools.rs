@@ -257,13 +257,22 @@ impl Drop for GroupKill {
 /// private /tmp, the network left as it is (looking things up is allowed).
 const READ_ONLY_SANDBOX: [&str; 10] = ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--die-with-parent"];
 
-async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], read_only: bool) -> Result<ToolOutput, ToolOutput> {
-    let command = str_arg(args, "command")?;
-    let timeout = args.get("timeout_secs").and_then(Value::as_u64).unwrap_or(120).clamp(1, 600);
+/// What a command printed (stdout and stderr as they arrived; past MAX_CAPTURE only counted) and how
+/// it ended: `None` when it timed out and its process group was killed.
+pub struct Shell {
+    pub text: String,
+    pub status: Option<std::io::Result<std::process::ExitStatus>>,
+}
+
+/// Run `command` with `bash -lc` in `dir`, in a process group of its own: on a timeout, or when the
+/// future is dropped (an abort), the whole group is killed. A command that finishes leaves the
+/// background processes it started running. `read_only` runs it in a read-only sandbox (bubblewrap).
+/// Errors when it can't be started. Used by the bash tool and the workflow's criteria checks.
+pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], read_only: bool, timeout: Duration) -> Result<Shell, String> {
     let mut cmd = if read_only {
         let mut c = Command::new("bwrap");
         // The workspace is bound again after the private /tmp, in case it lives under /tmp.
-        c.args(READ_ONLY_SANDBOX).arg("--ro-bind").arg(workspace).arg(workspace).arg("--chdir").arg(workspace).args(["bash", "-lc"]);
+        c.args(READ_ONLY_SANDBOX).arg("--ro-bind").arg(dir).arg(dir).arg("--chdir").arg(dir).args(["bash", "-lc"]);
         c
     } else {
         let mut c = Command::new("bash");
@@ -272,7 +281,7 @@ async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], read_only: b
     };
     let mut child = cmd
         .arg(command)
-        .current_dir(workspace)
+        .current_dir(dir)
         .envs(env.iter().copied())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -280,7 +289,7 @@ async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], read_only: b
         .process_group(0)
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| err(if read_only { format!("the read-only shell (bubblewrap) couldn't start: {e}; use read instead") } else { format!("failed to start bash: {e}") }))?;
+        .map_err(|e| if read_only { format!("the read-only shell (bubblewrap) couldn't start: {e}; use read instead") } else { format!("failed to start bash: {e}") })?;
     let mut group = GroupKill(child.id().map(|p| p as i32));
 
     // Stream both pipes into one buffer as data arrives, so a timeout still returns what was printed.
@@ -306,7 +315,7 @@ async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], read_only: b
 
     let status = tokio::select! {
         s = child.wait() => Some(s),
-        _ = tokio::time::sleep(Duration::from_secs(timeout)) => None,
+        _ = tokio::time::sleep(timeout) => None,
     };
     if status.is_none() {
         group.kill_now();
@@ -323,12 +332,22 @@ async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], read_only: b
     for r in &readers {
         r.abort();
     }
+    if matches!(status, Some(Ok(_))) {
+        group.0 = None; // finished normally: leave background processes it started running
+    }
 
     let (bytes, dropped) = std::mem::take(&mut *buf.lock().unwrap());
     let mut text = String::from_utf8_lossy(&bytes).into_owned();
     if dropped > 0 {
         text.push_str(&format!("\n[... {dropped} more bytes of output were discarded ...]"));
     }
+    Ok(Shell { text, status })
+}
+
+async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], read_only: bool) -> Result<ToolOutput, ToolOutput> {
+    let command = str_arg(args, "command")?;
+    let timeout = args.get("timeout_secs").and_then(Value::as_u64).unwrap_or(120).clamp(1, 600);
+    let Shell { text, status } = run_shell(workspace, command, env, read_only, Duration::from_secs(timeout)).await.map_err(err)?;
     // Cutting and saving (with masking) up to 16 MB of output is blocking work: off the runtime's threads.
     let mut body = if text.len() <= MAX_OUTPUT {
         text
@@ -352,7 +371,6 @@ async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], read_only: b
         }
         Some(Err(e)) => Err(err(format!("{body}[failed waiting for bash: {e}]"))),
         Some(Ok(status)) => {
-            group.0 = None; // finished normally: leave background processes it started running
             let code = status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into());
             body.push_str(&format!("[exit code: {code}]"));
             Ok(if status.success() { ok(body) } else { err(body) })

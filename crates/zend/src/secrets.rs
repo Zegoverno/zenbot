@@ -74,6 +74,14 @@ pub fn mask(text: &str) -> String {
     mask_with(text, &KNOWN)
 }
 
+/// `mask` for text that may be large (up to 16 MB of command output), off the runtime's threads.
+pub async fn mask_off_thread(text: String) -> String {
+    if text.len() <= 64 * 1024 {
+        return mask(&text);
+    }
+    tokio::task::spawn_blocking(move || mask(&text)).await.unwrap_or_else(|e| format!("(the output couldn't be masked: {e})"))
+}
+
 fn mask_with(text: &str, known: &[String]) -> String {
     let mut out = text.to_string();
     for v in known {
