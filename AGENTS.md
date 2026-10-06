@@ -56,5 +56,5 @@ journalctl -u zenbot -n 50       # service logs
 cat ~/.zenbot/upgrade.log        # upgrade results
 scripts/upgrade.sh --check       # build, check and smoke test without installing
 scripts/update-engines.sh --check  # engine versions installed vs latest
-./scripts/dev.sh                 # run a dev kernel in the foreground (stop the service first, or set ZEN_PORT)
+./scripts/dev.sh                 # dev kernel in the foreground on :18100 with its own zen_dev database
 ```
