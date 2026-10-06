@@ -7,8 +7,8 @@ use std::time::Duration;
 
 /// How long to wait for the kernel to accept a connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// Longest a single API call may take. Generous: a version check fetches from GitHub (the kernel
-/// gives git 60 seconds). The session stream is a WebSocket and isn't subject to it.
+/// Longest a single API call, or opening the session stream, may take. Generous: a version check
+/// fetches from GitHub (the kernel gives git 60 seconds). The open stream itself has no limit.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone)]
@@ -84,8 +84,15 @@ impl Client {
     }
 
     pub async fn connect(&self, id: &str) -> Result<Ws> {
-        let ws_url = format!("{}/api/sessions/{id}/ws?token={}", self.url.replacen("http", "ws", 1), self.token);
-        let (ws, _) = tokio_tungstenite::connect_async(ws_url).await.context("opening session stream")?;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        use tokio_tungstenite::tungstenite::http::{header::AUTHORIZATION, HeaderValue};
+        // The token goes in a header, not the URL, where it could end up in logs.
+        let mut req = format!("{}/api/sessions/{id}/ws", self.url.replacen("http", "ws", 1)).into_client_request()?;
+        req.headers_mut().insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", self.token)).context("token is not a valid header value")?);
+        let (ws, _) = tokio::time::timeout(REQUEST_TIMEOUT, tokio_tungstenite::connect_async(req))
+            .await
+            .context("opening session stream: timed out")?
+            .context("opening session stream")?;
         Ok(ws)
     }
 }
@@ -198,5 +205,28 @@ pub fn tool_summary(name: &str, args: &Value) -> String {
         .unwrap_or_else(|| args.to_string());
     let detail: String = detail.lines().next().unwrap_or("").chars().take(120).collect();
     format!("{name} {detail}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn the_session_stream_sends_the_token_in_a_header_not_the_url() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = sock.read(&mut buf).await.unwrap();
+            String::from_utf8_lossy(&buf[..n]).to_string()
+        });
+        let c = Client::new(url, Some("s3cret+/=".into())).unwrap();
+        let _ = c.connect("abc").await; // the fake server hangs up without a handshake
+        let req = server.await.unwrap();
+        assert!(req.starts_with("GET /api/sessions/abc/ws HTTP/1.1\r\n"), "{req}");
+        assert!(req.lines().any(|l| l.eq_ignore_ascii_case("authorization: Bearer s3cret+/=")), "{req}");
+    }
 }
 
