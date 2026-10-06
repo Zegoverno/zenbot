@@ -1,0 +1,354 @@
+# zenbot: local development loop
+
+How to build, test, verify and ship a change to zenbot from this checkout. Written for a coding agent (or a person) starting a fresh session. `AGENTS.md` has the collaboration rules; this file has the how-to.
+
+> **This VM is a dev box.** Real use of zenbot happens on another VM. The `zenbot` service here is a dev install, but treat it like the real one: the rules below still apply.
+
+**The rule this enables:** a change is built, unit-tested, linted and run through the end-to-end scenarios locally, exactly as CI runs them, before it goes into a pull request. It is installed only through `scripts/upgrade.sh`, which smoke-tests it and rolls back on failure.
+
+---
+
+## What runs where
+
+The processes are listed in `AGENTS.md` and, file by file, in `MAP.md`. The kernel owns all state and runs every tool call; engines run with their own tools switched off. Keep it that way.
+
+Config lives in `~/.zenbot/`:
+
+| File | What |
+|---|---|
+| `env` | the service's environment (`ZEN_PORT`, `ZEN_WORKERS`, `ZEN_TOKEN`, …); the dev scripts read it too |
+| `token` | API token; the `zen` CLI reads it when `ZEN_TOKEN` is unset |
+| `auth.json` | Pi's ChatGPT sign-in. **Secret: never print it.** |
+| `version` | the commit the service runs |
+| `upgrade.log` | results of upgrades and engine updates |
+| `engines.json` | engine versions from the last update check |
+| `backups/` | database dumps taken before migrations (last 10) |
+| `evals/` | eval runs and cached base builds |
+| `history` | prompt history |
+
+Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
+
+## Prerequisites
+
+| Tool | Install | Used for |
+|---|---|---|
+| Rust (stable) with clippy | `rustup` (`ensure_rust` in `scripts/lib.sh` installs a minimal toolchain; add clippy with `rustup component add clippy`) | building and linting |
+| `build-essential`, `pkg-config` | apt | compiling |
+| Docker with `docker compose` | `install.sh` | Postgres (`deploy/compose.yaml`) |
+| `git`, `curl`, `jq` | apt | every script |
+| `bubblewrap` | apt | the read-only shell; the e2e scenarios need it |
+| Node.js 22+ | `install.sh` puts it in `~/.local/node` | the `pi` worker only |
+| `gh` | GitHub CLI | pull requests, checking CI |
+
+`install.sh` sets all of this up on a fresh VM except Rust and clippy (it downloads prebuilt binaries when it can). The scripts add `~/.local/node/bin` and `~/.cargo/bin` to `PATH` themselves.
+
+Postgres must be running for e2e, dev and upgrade:
+
+```bash
+docker compose -f deploy/compose.yaml up -d --wait postgres
+```
+
+It listens on `127.0.0.1:5432`, user and password `zen`, live database `zen`. The database helpers run `psql`, `pg_dump` and `pg_restore` inside the container, so nothing else is needed on the host.
+
+## The loop at a glance
+
+```bash
+# 1. branch
+git switch -c fix/short-name
+
+# 2. edit, then check exactly as CI does
+cargo build --release --locked
+cargo test --release --locked
+cargo clippy --release --locked --all-targets -- -D warnings
+ZEN_E2E_NO_BUILD=1 scripts/e2e.sh
+
+# 3. try it for real (faux model, own database, own port)
+ZEN_FAUX=1 scripts/dev.sh                       # in a second terminal
+ZEN_URL=http://127.0.0.1:18100 ./target/release/zen ask --json -m faux/smoke "hi"
+
+# 4. harness change? run an eval and show the owner the report
+scripts/eval.sh
+
+# 5. install on this box: smoke test, scheduled restart, auto rollback
+scripts/upgrade.sh
+tail -20 ~/.zenbot/upgrade.log
+
+# 6. commit, push the branch, open a PR; merge only on green CI
+```
+
+## Build, test, lint (as CI runs them)
+
+CI (`.github/workflows/ci.yml`, job `check`, on `ubuntu-22.04` with stable Rust) runs these on every pull request and every push to `main`:
+
+```bash
+docker compose -f deploy/compose.yaml up -d --wait postgres
+cargo build --release --locked
+cargo test --release --locked
+cargo clippy --release --locked --all-targets -- -D warnings
+ZEN_E2E_NO_BUILD=1 scripts/e2e.sh
+```
+
+Run the same four locally before a pull request. `--locked` fails if `Cargo.lock` would change; don't add dependencies without a good reason.
+
+UI changes (`crates/zen/src/tui.rs`, `editor.rs`) come with render or key tests: build an `App` at a fixed size with output captured (see the tests at the bottom of `tui.rs`).
+
+### The Pi worker
+
+If you change `packages/mind`, it must start under plain Node. Node 22 runs TypeScript by stripping types, so TypeScript-only syntax that emits code (enums, constructor parameter properties, namespaces) breaks it. Check it the way `upgrade.sh` does:
+
+```bash
+cd packages/mind && npm ci --no-audit --no-fund --silent && cd ../..
+echo '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}' | timeout 15 node packages/mind/src/main.ts | head -1   # must contain "pong"
+```
+
+Pi's version is pinned exactly in `packages/mind/package.json`. A Pi bump is a normal harness commit with an eval.
+
+Changes to the worker protocol must update `docs/worker-protocol.md` and every worker (`zen-engine` and `zen-mind`).
+
+## End-to-end scenarios
+
+`scripts/e2e.sh` builds (unless `ZEN_E2E_NO_BUILD=1`), then runs each scenario on a kernel built from this checkout with the scripted faux model. It uses a throwaway database (`zen_e2e_<pid>`), throwaway git workspaces and a throwaway `HOME`, on port 18377 (`ZEN_E2E_PORT`). No subscription is used and the live service isn't touched. It needs Postgres running, plus `git`, `curl`, `jq` and `bubblewrap`.
+
+```bash
+scripts/e2e.sh                # build, then every scenario
+scripts/e2e.sh workflow       # only scenarios whose name contains "workflow"
+ZEN_E2E_KEEP=1 scripts/e2e.sh # keep the database and files afterwards (it prints where)
+```
+
+It prints `ok` / `FAIL` per check, the kernel log path for a failed scenario, and exits non-zero if any check failed. After all scenarios it checks that every session's tape is numbered without gaps and its hash chain recomputes.
+
+### Adding a scenario
+
+Add one when you change the kernel's behavior.
+
+1. If the turn needs a scripted model, add a faux script in `scripts/e2e/<name>.json` (format below). Placeholders like `ROUTE` or `TARGET` are filled by `script <file> 's/ROUTE/bounded/' …`.
+2. Write a function in the scenarios section of `scripts/e2e.sh`:
+   - `ws=$(new_workspace <name>)` makes a git workspace with one commit.
+   - `start_kernel "$ws" "$(script <file>.json)" [ENV=VALUE …]` starts the kernel with `ZEN_FAUX=1`. Pass `""` for the default faux turn (one `bash` call, then an answer).
+   - `zen ask --json -m faux/smoke "…"` runs a turn; `zen ask --json -s "$sid" "…"` continues a session.
+   - `q "SQL"` queries the scenario's database.
+   - `check "description" <command…>` records a result; `eq actual expected` compares strings.
+3. Register it at the bottom with `run <name> <function>`.
+
+## Testing without a subscription: the faux model
+
+With `ZEN_FAUX=1`, `zen-engine` also lists `faux/smoke`, a scripted model that drives a real turn through the kernel. By default it makes one `bash` call, then answers "Smoke test passed: …". With the `pi` worker, Pi lists `faux/faux-1`, which does the same.
+
+`ZEN_FAUX_SCRIPT` points to a JSON file of steps, or an object of step lists keyed by workflow phase (`frame`, `work`, `verify`, `default`) to drive a whole briefed session. Steps:
+
+```json
+{"tool": "bash", "args": {"command": "echo hi"}}
+{"text": "an answer"}
+{"sleep": 5}
+{"exit": 1}
+```
+
+Use them to test tools, abort, the watchdog and crash recovery. See `docs/worker-protocol.md` ("Testing without a model") and the scripts in `scripts/e2e/`.
+
+## The dev kernel
+
+`scripts/dev.sh` runs a kernel from this checkout in the foreground, next to the installed service:
+
+```bash
+ZEN_FAUX=1 scripts/dev.sh
+```
+
+It:
+
+- starts Postgres (`docker compose … up -d --wait postgres`);
+- creates the database `zen_dev` if missing (override with `ZEN_DEV_DB`);
+- loads `~/.zenbot/env` (workers, models, budgets) and uses the token in `~/.zenbot/token`;
+- runs `npm ci` in `packages/mind` when `pi` is enabled and the lockfile is newer than the install;
+- runs `cargo build --release -q`, then `exec`s `./target/release/zend` on port **18100** (override with `ZEN_DEV_PORT`);
+- sets `ZEN_HARNESS` to this checkout's commit, so its turns record this build.
+
+Local endpoints:
+
+| Service | Address |
+|---|---|
+| Installed service | `http://127.0.0.1:8100` (or `ZEN_PORT` in `~/.zenbot/env`) |
+| Dev kernel (`scripts/dev.sh`) | `http://127.0.0.1:18100`, database `zen_dev` |
+| Upgrade smoke kernel (`upgrade.sh`) | `http://127.0.0.1:18199` (`ZEN_SMOKE_PORT`), on a throwaway copy of the live database |
+| e2e kernel | `http://127.0.0.1:18377` (`ZEN_E2E_PORT`), database `zen_e2e_<pid>` |
+| Eval kernels | `http://127.0.0.1:18301` (`ZEN_EVAL_PORT`), databases `zen_eval_*` |
+| Postgres | `127.0.0.1:5432`, user/password `zen` |
+| Health | `GET /health` on any kernel: `ok`, `db`, `mind`, `workers`, `busy` |
+
+Talk to the dev kernel with the CLI you just built:
+
+```bash
+ZEN_URL=http://127.0.0.1:18100 ./target/release/zen ask --json -m faux/smoke "run the smoke command"
+ZEN_URL=http://127.0.0.1:18100 ./target/release/zen        # interactive
+```
+
+`ZEN_FAUX` is not set by `dev.sh`; pass it as above (or have it in `~/.zenbot/env`) to get `faux/smoke`. Without it, the dev kernel serves real models on the owner's subscriptions.
+
+Caution: `dev.sh` does not set `ZEN_WORKSPACE`, so the dev kernel's tools work in `$HOME` (the kernel's default), on real files. Set `ZEN_WORKSPACE=/some/scratch/dir` when that matters.
+
+## Testing for real against the running service
+
+The installed service runs the installed binaries, not your checkout. So:
+
+- **CLI changes** (`crates/zen`): use `./target/release/zen` against the service directly.
+- **Kernel or worker changes**: use the dev kernel above, or install with `scripts/upgrade.sh` first.
+
+```bash
+./target/release/zen ask --json "…"                      # default model, real subscription
+./target/release/zen ask --json -m faux/smoke "…"        # only if the service runs with ZEN_FAUX=1
+```
+
+`zen ask --json` prints one JSON object: `session_id`, `text`, `tools` (each with `name` and `is_error`), `error`, usage. It exits non-zero on failure.
+
+## Applying a change: `scripts/upgrade.sh`
+
+This is the only way to install a change. **Never** run `systemctl restart zenbot` or kill `zend` yourself: that kills the session you are running in. `upgrade.sh` is safe to run from inside a zen session.
+
+```bash
+scripts/upgrade.sh           # build, check, smoke test, then schedule the install
+scripts/upgrade.sh --check   # build, check and smoke test only; installs nothing
+```
+
+What it does, in order:
+
+1. **Hooks.** Sets `git config core.hooksPath scripts/git-hooks`.
+2. **Build.** Runs `npm ci` in `packages/mind` when `pi` is enabled. Then tries `scripts/fetch-release.sh`: if nothing under `crates/`, `Cargo.toml` or `Cargo.lock` differs from `HEAD` (and no untracked files under `crates/`), on x86_64 Linux, and CI published binaries for this commit, it downloads them (checksum verified) into `target/release`. Otherwise it runs `cargo build --release`, installing Rust first if missing. `ZEN_BUILD_FROM_SOURCE=1` forces a local build.
+3. **Check.** `cargo test --release -q` (skipped for prebuilt binaries: CI already ran it). `zen-engine` must answer a JSON-RPC `ping`; so must `zen-mind` when `pi` is enabled. `zen --version` must run. It does **not** run clippy or the e2e scenarios: run those yourself.
+4. **Smoke.** Copies the live database into `zen_smoke_<pid>` and starts the new `zend` on port 18199 with `ZEN_FAUX=1` and the service's settings. Any pending migrations are applied to that copy, not to the live database. It runs one scripted turn on `faux/smoke` (and one on `faux/faux-1` with `pi`); each must answer "Smoke test passed" with a successful tool call. The copy is dropped afterwards. It lists migrations pending on the live database.
+5. **`--check` stops here** and prints `Check OK (<commit>[, uncommitted changes]); nothing installed.`
+6. **Schedule.** Starts `scripts/apply-upgrade.sh` detached via `sudo systemd-run` and returns.
+
+`apply-upgrade.sh` then, on its own:
+
+1. Waits until the service's `/health` says `"busy":0` (no session working). After 30 minutes it goes ahead anyway and logs that it did.
+2. If migrations are pending, backs up the live database to `~/.zenbot/backups/<UTC time>-<previous version>.dump` (last 10 kept). If the backup fails, it aborts and changes nothing.
+3. Keeps the old binaries as `~/.zenbot/bin/<name>.prev`, installs `zend`, `zen` and `zen-engine` from `target/release`, writes the commit to `~/.zenbot/version`, and runs `sudo systemctl restart zenbot`. The kernel applies migrations at start.
+4. Waits up to 45 seconds for `/health` to say `"ok":true`. If it doesn't, it logs the last 30 service log lines, puts the `.prev` binaries and the old version back, and restarts again. **A rollback does not restore the database.** When there was a backup, the log prints the exact command to restore it.
+
+The restart ends the current turn's connection. In a zen session, the owner reconnects by sending the next message.
+
+Afterwards, always check the result:
+
+```bash
+tail -20 ~/.zenbot/upgrade.log    # "upgrade OK: now running <commit>", or FAILED / rolled back
+cat ~/.zenbot/version
+zen status
+```
+
+If it rolled back, read the log, fix, and run `scripts/upgrade.sh` again.
+
+Note: `upgrade.sh` installs what is in your working tree, uncommitted changes included, but `~/.zenbot/version` records only `HEAD`. Commit first if you want the version to mean something.
+
+To update from GitHub instead (on `main`, clean tree): `zen upgrade` (or `/upgrade`), which runs `scripts/self-update.sh`: `git pull --ff-only origin main`, then `upgrade.sh`. It refuses on another branch or with local changes.
+
+## Database changes
+
+- Add a new file in `crates/zend/migrations/` (`NNNN_name.sql`, next number). **Never** edit an applied migration. Migrations are compiled into `zend` and applied when it starts.
+- **Expand-only.** Add tables, columns and indexes. Don't drop, rename or change the type of anything in the same release that stops using it; do that in a later release. A rollback swaps the binaries back but not the schema, so the previous build must keep working on the new schema.
+- `upgrade.sh` tries new migrations on a copy of the live database first; `--check` stops after that test.
+
+Helpers (`scripts/db.sh`; the live database is `DATABASE_URL` from the environment or `~/.zenbot/env`, else `zen`):
+
+```bash
+scripts/db.sh pending          # migrations in this checkout the live database hasn't applied
+scripts/db.sh backup [label]   # dump the live database to ~/.zenbot/backups (keeps the last 10)
+```
+
+Restoring a backup stops the service, so the owner does it, outside any zen session:
+
+```bash
+sudo systemctl stop zenbot && docker compose -f deploy/compose.yaml exec -T postgres \
+  pg_restore -U zen --clean --if-exists -d zen < ~/.zenbot/backups/<file>.dump && sudo systemctl start zenbot
+```
+
+## Harness evals
+
+Changes to the harness (system prompt, history, tools, workers, model or effort handling) get an eval before they are merged. The eval is **advisory**: run it, show the owner the report (in the pull request too), and ask whether to merge. The owner decides. It is never an automatic gate.
+
+```bash
+scripts/eval.sh                                    # this checkout (new) vs the installed version (base)
+scripts/eval.sh --base main --tasks repo-question --repeat 3
+scripts/eval.sh --model claude/claude-sonnet-5-5 --effort low
+scripts/eval.sh --model faux/smoke --tasks smoke   # self-test of the runner, no subscription used
+scripts/eval-report.sh ~/.zenbot/evals/<run>       # print a run's report again
+```
+
+Other options: `--base-model`, `--base-effort`, `--only new|base`, `--keep`. Without `--model` it asks the running service (`/api/models`) for its default model, so the service must be up.
+
+Each run gets a fresh copy of the task's files, its own kernel on port 18301 and its own database (`zen_eval_*`). The new side is this checkout, uncommitted changes included. The base side is cached in `~/.zenbot/evals/builds/`. Results and `report.md` go to `~/.zenbot/evals/<run>/`. Real models use the owner's subscription.
+
+Tasks live in `evals/tasks/<name>/` (`task.json` plus `files/`). See `evals/README.md` for the format and what makes a good task.
+
+## Engine updates
+
+The Claude Code and Codex CLIs track their latest versions. `zen-engines.timer` runs `scripts/update-engines.sh` daily (04:00 UTC, up to an hour's random delay). Each update downloads from the vendor, checks the SHA-256, runs one real tool-free completion through `zen-engine`, and rolls back if it fails. It never commits, builds or restarts zenbot.
+
+```bash
+scripts/update-engines.sh --check            # installed vs latest; changes nothing
+scripts/update-engines.sh                    # update now (safe from inside a zen session)
+ZEN_ENGINES=claude scripts/update-engines.sh # only some engines
+ZEN_ENGINES_FAIL=codex scripts/update-engines.sh  # force a failed check, to test the rollback
+systemctl list-timers zen-engines.timer      # next run
+```
+
+Results go to `~/.zenbot/upgrade.log` (`engines:` lines) and `~/.zenbot/engines.json` (shown by `zen status`).
+
+Pi is different: it is part of the harness. `packages/mind` pins its exact version, and the daily job only reports a newer one. A bump is a normal commit with an eval.
+
+Code that depends on a CLI's flags or output should fail loudly, so the post-update check catches a change.
+
+## CI and releases
+
+`.github/workflows/ci.yml` has two jobs (there is no separate release workflow):
+
+- **`check`**: on every pull request and every push to `main`. Build, unit tests, clippy, e2e (commands above). A newer push to a pull request cancels its running check.
+- **`release`**: only on a push to `main` that passed `check`. Builds the `dist` profile (fat LTO), checks `zen-engine` answers `ping` and `zen --version` runs, and uploads `zenbot-x86_64-linux-<sha12>.tar.gz` plus `.sha256` to the rolling `edge` prerelease (newest 20 builds kept).
+
+So binaries exist only for commits on `main` that passed. `install.sh`, `upgrade.sh` and `eval.sh` use them via `scripts/fetch-release.sh`; when there are none (yet), they compile locally. Right after a merge, CI needs a few minutes.
+
+```bash
+scripts/fetch-release.sh --check origin/main && echo "binaries published"
+gh run list --limit 5
+```
+
+## Git flow
+
+1. One branch per feature or fix, off `main`.
+2. One concern per commit. The subject says what changed; the body says why, and what was tested.
+3. Commits made from a zen session get `Zen-Session` and `Co-Authored-By` trailers from `scripts/git-hooks/prepare-commit-msg`. Don't remove them.
+4. Push the branch and open a pull request (`gh pr create`). Merge only when CI is green; harness changes also need the owner's OK on an eval.
+5. Update the docs in the same pull request (the table in `AGENTS.md`). Design decisions change only with the owner's OK.
+6. After a merge: `git checkout main && git pull`.
+
+## Hard rules
+
+- **Never** run `systemctl restart zenbot` (or stop/start) or kill `zend` from inside a session. Use `scripts/upgrade.sh`.
+- Migrations are **expand-only**, in new files; never edit an applied one.
+- No secrets in the repo, logs or tool output. **Never print `~/.zenbot/auth.json`**, `~/.zenbot/token` or `~/.zenbot/env` (it holds the token and API keys).
+- Keep engines' own tools switched off; every action goes through the kernel.
+- Don't add dependencies without a good reason.
+
+## Troubleshooting
+
+```bash
+zen status                          # kernel, database, workers, sign-in, engine versions
+curl -s http://127.0.0.1:8100/health   # ok / db / mind / workers / busy
+journalctl -u zenbot -n 50          # service logs
+tail -50 ~/.zenbot/upgrade.log      # upgrades, rollbacks, engine updates
+scripts/db.sh pending               # migrations not yet applied
+```
+
+| Symptom | Look at |
+|---|---|
+| `upgrade.sh` says `BUILD FAILED` | the compiler errors it printed; fix and re-run |
+| `CHECK FAILED: zen-engine did not answer ping` | run the ping by hand: `echo '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}' \| ./target/release/zen-engine` |
+| `CHECK FAILED: zen-mind (pi) did not answer ping` | the same with `node packages/mind/src/main.ts`; usually TypeScript-only syntax or a missing `npm ci` |
+| `SMOKE TEST FAILED` | the last 20 kernel log lines it printed; often a migration that fails on the copy of the live database |
+| `could not copy the live database` | Postgres not running: `docker compose -f deploy/compose.yaml up -d --wait postgres` |
+| Upgrade scheduled but nothing changed | `~/.zenbot/upgrade.log`: it waits for `"busy":0`, up to 30 minutes |
+| `upgrade FAILED health check; rolling back` | the service logs copied into `upgrade.log`; fix and re-run. If migrations ran, the log has the restore command |
+| `ROLLBACK ALSO UNHEALTHY` | `journalctl -u zenbot -n 50`; tell the owner |
+| e2e `kernel did not start` | the kernel log path it printed; check the port isn't taken and Postgres is up |
+| e2e check fails on the read-only shell | `bubblewrap` missing |
+| Upgrade compiles instead of downloading | local changes under `crates/` or `Cargo.*`, or CI hasn't published this commit yet (`scripts/fetch-release.sh --check HEAD`) |
+| `zen` says `no token` | `~/.zenbot/token` missing; `install.sh` creates it |
+| Engine shows `rolled back` or `skipped` in `zen status` | `engines:` lines in `upgrade.log`; `skipped: check fails before updating` usually means signed out (`zen login`, needs the owner) |

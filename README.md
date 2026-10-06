@@ -1,12 +1,28 @@
 # zenbot
 
-A personal + company operating system for niche builders: a machine for thinking, analyzing and building, with LLMs at the center and agents doing the work.
+A maker tool that works like a chief of staff: the owner hands it jobs, operational work and building software alike, and it carries them end to end with any model (Claude Code, Codex, Pi, API models), so the owner's attention goes to the decisions that matter. A personal tool, developed in public.
 
-Status: design phase. See [SPEC.md](SPEC.md).
+Status: early. The kernel, the `zen` terminal app, Claude Code / Codex engines, context management and briefed work are built and in use. A redesign around tools, skills and memory was agreed on 2026-10-06 and is the current plan ([ROADMAP.md](ROADMAP.md)).
+
+## Docs
+
+| File | Read it for |
+|---|---|
+| [CONTEXT.md](CONTEXT.md) | What zenbot is for, how success is measured, principles, constraints. Read first |
+| [ROADMAP.md](ROADMAP.md) | Phases, the active one, next steps, debt, open decisions |
+| [DESIGN.md](DESIGN.md) | How the system works today, and the agreed target design |
+| [SPEC.md](SPEC.md) | The modules zenbot is meant to have, long term |
+| [MAP.md](MAP.md) | The code: files, routes, tables, settings, scripts. Read before changing anything |
+| [DEVELOPMENT.md](DEVELOPMENT.md) | Build, test, run a dev kernel, upgrade, evals, CI |
+| [DECISIONS.md](DECISIONS.md) | Decisions and why (D-001…) |
+| [PROGRESS.md](PROGRESS.md) | What shipped, newest first |
+| [AGENTS.md](AGENTS.md) | Rules for agents (and people) working on this repo |
+| [INSTALL.md](INSTALL.md) | Installing on a fresh VM (written for a coding agent) |
+| `docs/` | Deep dives: [context.md](docs/context.md) (what the model reads each turn), [brief.md](docs/brief.md), [worker-protocol.md](docs/worker-protocol.md), [client-protocol.md](docs/client-protocol.md) |
 
 ## Install
 
-Requirements: Debian/Ubuntu with systemd and sudo. The installer adds Docker, Rust, Node, and the Claude Code and Codex CLIs. See [INSTALL.md](INSTALL.md).
+Requirements: Debian/Ubuntu with systemd and sudo. The installer adds Docker, Node, and the Claude Code and Codex CLIs, and downloads prebuilt zenbot binaries (it installs Rust and compiles only when there are none for your platform or commit). See [INSTALL.md](INSTALL.md).
 
 Models run on your existing subscriptions: Claude (Opus, Sonnet, Haiku) through the Claude Code CLI and GPT through Codex, with zenbot's own prompt, tools and history ([how](docs/worker-protocol.md)). Pi is available as an optional worker (`ZEN_WORKERS=engine,pi`).
 
@@ -18,7 +34,7 @@ zen status
 
 Update with `zen upgrade` (or `/upgrade` inside zen); zen tells you when a new version is on GitHub (see [INSTALL.md](INSTALL.md#updating)). The Claude Code and Codex CLIs update themselves daily, tested, with rollback ([engines](INSTALL.md#engines)).
 
-For development: `./scripts/dev.sh` runs a kernel from the checkout next to the service, on port 18100 with its own `zen_dev` database (`ZEN_FAUX=1` adds `faux/smoke`, a scripted test model; see [docs/worker-protocol.md](docs/worker-protocol.md#testing-without-a-model)).
+For development: `./scripts/dev.sh` runs a kernel from the checkout next to the service, on port 18100 with its own `zen_dev` database (`ZEN_FAUX=1 ./scripts/dev.sh` adds `faux/smoke`, a scripted test model). See [DEVELOPMENT.md](DEVELOPMENT.md).
 
 zenbot adds instruction files to every session's system prompt: `~/.zenbot/AGENTS.md` (global), then `AGENTS.md` (or `CLAUDE.md`) in each directory from `/` down to the workspace.
 

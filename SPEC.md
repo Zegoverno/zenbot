@@ -1,31 +1,18 @@
 # zenbot — Specification
 
-> Status: **draft v0.2** · 2026-09-30
-> This document is the source of truth for what zenbot is and how it is built. Change it before changing the architecture. Significant decisions also get an ADR in `docs/adr/`.
+> What zenbot is meant to have: its layers, modules and their contracts (the long-term target).
+> How it is built and works today, and the agreed near-term design: [DESIGN.md](DESIGN.md). Why:
+> [DECISIONS.md](DECISIONS.md). What it's for: [CONTEXT.md](CONTEXT.md). Order of work:
+> [ROADMAP.md](ROADMAP.md). Where DESIGN.md's target design (2026-10-06) refines a module below,
+> DESIGN.md wins until this file is updated. Section numbers are kept stable; code cites them.
 
 ---
 
 ## 1. Vision
-
-zenbot is a **personal + company operating system** for a niche builder: a machine for thinking, analyzing and building, where LLMs are central and agents do the work.
-
-**Thesis.** As AI makes building cheap, value moves to speed, uniqueness and taste. Expect many tiny companies solving very niche problems, often serving agents. Agents won't buy niche *code* — they can regenerate it. They buy what they can't cheaply regenerate: proprietary or fresh data, precomputed results, access, accountability and judgment. zenbot exists to help one person **accumulate knowledge and taste, and turn them into working companies**.
-
-**zenbot is a tool, not a product.** Its job is to get real work done on side projects (the things meant to make money). It is developed in public.
+Moved to [CONTEXT.md](CONTEXT.md).
 
 ## 2. Principles
-
-1. **Payback first.** Every milestone must be used on real work the week it ships. Build thin vertical slices, not complete modules.
-2. **Differentiate where it matters, borrow the rest.** Spend effort on the Mind and Work layers (§3). The Engine borrows heavily from existing harnesses.
-3. **Composable.** Every building block is a module with a documented contract. Modules talk only through contracts.
-4. **Adopt before build.** If a good open-source solution exists, plug it in behind our contract; replace it only when it gets in the way. Switching must be a config change, not a rewrite.
-5. **Open contracts.** MCP for tools · OpenAI/Anthropic-compatible HTTP for models · JSON-RPC between kernel and workers · markdown + git for knowledge · Postgres via `DATABASE_URL` for state · S3 API for blobs.
-6. **Host-agnostic.** Runs on any Linux box with Docker. exe.dev is only where it runs today.
-7. **The kernel owns state; workers are stateless.** All side effects (shell, files, browser, network) go through the kernel, under one permission model.
-8. **Deterministic where possible.** Prompts suggest; code and policies enforce. Repeatable LLM work is distilled into scripts over time.
-9. **Measured, not assumed.** Every model call, tool call and cost is traced; every claim that zenbot "got better" is backed by `zen-bench` (§5.15).
-10. **The owner's attention is the scarcest resource.** Agents interrupt only when needed, through one inbox.
-11. **Own your data.** Everything is exportable as plain files; nothing important lives only in a database.
+Moved to [CONTEXT.md](CONTEXT.md#principles).
 
 ## 3. Strategy: three layers
 
@@ -151,6 +138,7 @@ Each module lists what it does, its contract, the default implementation and pos
 - Records `{id, scope, text, kind: preference|fact|lesson|directive, sensitivity, source, created_by, revision}`; rendered to markdown for humans.
 - Written explicitly (`memory.remember`) or by post-session extraction. Only the owner's own statements and verified outcomes count; directives are quoted verbatim.
 - Loaded as a capped index per session; the rest via search.
+- Refined (D-028, DESIGN.md "Memory and knowledge"): a fixed-size short-term `MEMORY.md`; a nightly sleep keeps, drops or promotes; only really impactful memories reach long-term.
 
 #### 5.11 Taste
 The core of the moat: learning the owner's judgment and applying it everywhere.
@@ -179,6 +167,7 @@ The core of the moat: learning the owner's judgment and applying it everywhere.
 - **Project templates:** `zen project new <name> --template <t>` creates the folders, default agents, starter skills and a first goal.
 
 #### 5.14 Agents, tasks and the closed loop
+- **Briefs and verification become a skill and a tool** the agent uses when they help (D-026); the kernel-enforced version below is what's built today and is being removed.
 - **Sessions as briefed work** (`docs/brief.md`): frame (read-only, enforced by the kernel) → brief with checkable criteria → approve (owner, or auto-approve per route) → work in a fresh context seeded with the brief → verify (the kernel runs the criteria's commands; a fresh verifier judges the rest) → report → verdict (owner's is the ground truth; the model's is recorded as such). The model can run it end to end; the owner can take any step.
 - **Routing policy:** which model and thinking level per kind of work, versioned. Day-to-day policy changes automatically when evals and metrics show a better fit (logged, undoable); system-level changes need the owner.
 - **Agent definitions:** `agents/<name>.md` with frontmatter (instructions, model policy, tools, skills, scopes, budget, may-delegate).
@@ -220,163 +209,21 @@ Threats: prompt injection via web/email/docs, secret exfiltration, destructive c
 - Every model call (provider, model, class, tokens, cost, latency, cache hits) and every tool call (args, duration, size, status) is stored in Postgres and viewable per session, task, project and day. OpenTelemetry/Langfuse export later.
 
 ## 6. Architecture
-
-```
-            Web UI / PWA (chat · inbox · board · preview · wiki)      [later: Matrix]
-                                  │ HTTPS + WebSocket (one port, reverse proxy)
-┌──────────────────────────────── zend (Rust kernel) ────────────────────────────────┐
-│ API/WS · Auth · Policy/Taint · Sessions/Tape · Scheduler · Event bus · Tracing      │
-│ Engine: Executor (shell, PTY, files, services, sandboxes) · Preview proxy · MCP hub │
-│ Mind:   Sources · Wiki · Memory · Taste · Search                                    │
-│ Work:   Projects/Scopes · Agents · Goals/Tasks/Runs/Evals · Crons · Inbox           │
-│ Interfaces: HTTP API · MCP server (Mind + Work for Claude Code/Codex/others)        │
-└──────────┬────────────────────────────┬─────────────────────────────┬──────────────┘
-           │ JSON-RPC (Unix socket)     │                             │
-    zen-mind (TypeScript)          Postgres + pgvector            data/ (git)
-    agent loop (Pi) · providers    state · tape · index · traces   wiki · memory md · taste
-    S2 · S1 · embeddings                                           skills · scripts · workflows
-    agent providers (Claude SDK, Codex)   S3-compatible blobs (attachments, screenshots, backups)
-```
-
-| Process | Language | Responsibility |
-|---|---|---|
-| `zend` | Rust (axum, sqlx, tokio) | Always-on kernel; owns state and side effects; single binary |
-| `zen-engine` | Rust | Default worker: runs turns on the Claude Code CLI and `codex app-server` (owner's subscriptions) with their own tools off, zenbot's prompt, tools and replayed history |
-| `zen-mind` | TypeScript (Node) | Optional worker (`pi`): Pi loop, direct ChatGPT sign-in and API providers |
-| `web` | TypeScript | UI, served by `zend` |
-| `postgres` | — | 16+ with pgvector; local in compose, movable via `DATABASE_URL` |
-| sandboxes | — | Where agent commands and code run |
-
-**Why Rust + TypeScript.** The always-on OS parts benefit from Rust's safety, footprint and single binary. The LLM ecosystem we're adopting (Pi with 40+ providers and ChatGPT sign-in, the Claude Agent SDK, MCP SDKs) is TypeScript-first. LLM latency dominates, so the loop's language doesn't affect speed. `zen-mind` can be ported to Rust later against the same protocol.
-
-### 6.1 Kernel ⇄ worker protocol (sketch)
-JSON-RPC 2.0 over a Unix socket; types defined once in `crates/zen-proto` and generated for TypeScript.
-```
-kernel → mind   turn.start   {session_id, agent, model_policy, context, tools, budget, taint}
-mind   → kernel turn.event   {session_id, event: text_delta|thinking_delta|tool_call|usage|done|error}
-mind   → kernel tool.call    {session_id, call_id, name, args}      # kernel applies policy, executes
-kernel → mind   tool.result  {call_id, content, is_error, details}
-kernel → mind   turn.steer | turn.abort
-kernel → mind   s1.decide    {questions, state} → {answers: [{value, p}]}
-kernel → mind   embed        {texts, model?}    → {vectors}
-```
-
-### 6.2 Repository layout
-```
-zenbot/
-  SPEC.md README.md INSTALL.md AGENTS.md LICENSE CONTRIBUTING.md
-  crates/   zend/ zen-proto/ zen-exec/ zen-store/ zen-mcp/
-  packages/ mind/ web/ proto/
-  bench/    tasks/ runner/
-  deploy/   compose.yaml Caddyfile sandbox/Dockerfile
-  docs/     adr/ devlog/
-```
-
-### 6.3 Data model (v1 tables)
-`projects` · `agents` · `sessions` · `tape_events` · `attachments` · `sources` · `wiki_pages` (index; content in git) · `memory_records` · `taste_records` · `principles` (index) · `chunks` · `goals` · `tasks` · `runs` · `evals` · `crons` · `workflows` · `workflow_runs` · `inbox_items` · `skills` (index) · `scripts` (index) · `mcp_servers` · `secrets` · `devices` · `model_calls` · `tool_calls` · `bench_runs`.
+Moved to [DESIGN.md](DESIGN.md) (as built) and [MAP.md](MAP.md) (the code). Target layout, not built
+yet: crates `zen-exec`, `zen-store`, `zen-mcp`; `packages/web`; `bench/`; `deploy/Caddyfile` and a
+sandbox image. Target v1 tables: `projects` · `agents` · `attachments` · `sources` · `wiki_pages`
+(index; content in git) · `memory_records` · `taste_records` · `principles` (index) · `chunks` ·
+`goals` · `tasks` · `runs` · `evals` · `crons` · `workflows` · `workflow_runs` · `inbox_items` ·
+`skills` (index) · `scripts` (index) · `mcp_servers` · `secrets` · `devices` · `bench_runs`.
 
 ## 7. Deployment
-- `deploy/compose.yaml`: `zend` (+ `zen-mind`), `postgres`, `caddy` (reverse proxy, WebSockets), sandbox image.
-- One public port; everything goes through it. `/health` reports each component.
-- `INSTALL.md` is written **for a coding agent** to follow on any fresh Linux VM, ending with a green health check.
-- Nightly backup: `pg_dump` + push of the `data/` repos to S3-compatible storage. Moving the database = changing `DATABASE_URL`.
+Moved to [DESIGN.md](DESIGN.md#deployment) and [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## 8. Roadmap
-
-Rules: each milestone is used on a real side project (the **pilot project**) the week it ships. Target is about 1–2 weeks each. Tracing is on from M0.
-
-| | Milestone | Scope | Done when |
-|---|---|---|---|
-| **M0** | Walking skeleton | Repo, CI, compose; `zend` API/WS; Postgres + migrations; sessions + tape; `bash`/`read`/`write`/`edit`/`move`; `zen-mind` with one S2 provider; minimal web chat; owner token auth; tracing | I chat with zenbot from my phone and it runs commands and edits files on the VM; every call shows its cost |
-| **M1** | Mind v0 over MCP | Projects + scopes on disk; sources; wiki pages + review queue; memory records; `taste.record`; full-text search; **zenbot MCP server** | Claude Code / Codex on the VM use zenbot's brain for the pilot project, and the wiki grows from real sessions |
-| **M2** | Build loop | Sandboxes; `run` in any language; services; **dev preview + point & comment + screenshots**; MCP client; skills | I build and review the pilot project's web app inside zenbot |
-| **M3** | Work v0 | Goals/tasks/board; agent definitions; `delegate`; **inbox** with push; device pairing | I hand tasks to specialists, track them on the board, and approve from my phone |
-| **M4** | Router, context, bench | S1 (Jev) and embeddings; auto model selection; budgets; context manager v1; hybrid search; **zen-bench v1** (20 tasks) | Bench runs nightly; auto routing matches or beats my manual picks on cost and quality |
-| **M5** | Closed loop | Crons (script/workflow/agent); runs + evals; reviewer; taste distillation into principles; crystallization | One recurring task measurably improves (score up, cost down) over 3 weeks |
-| **M6** | Research & reach | `web.search`/`web.fetch` with taint rules; agent browser + live view; Matrix; publish skill with approval | I run research from Matrix and publish a devlog post with one approval |
-| **M7** | Ship to agents | Project template exposing the project's own MCP server, skills, API, agent-facing docs and usage metering | A pilot project is usable by other people's agents |
-
-### 8.1 Status and next phases (2026-10-05)
-
-The near-term goal: the bare minimum that lets the owner use zenbot to improve zenbot itself, then
-use it for real. Rules for all of it: every choice follows the best known practice (checked in code,
-not READMEs) and says where it comes from; a step runs only when it measurably adds something;
-harness changes are evaluated against the previous version (`scripts/eval.sh`) and the owner decides;
-day-to-day policy (which model for which work) may change automatically, system-level changes may not.
-
-**Done**
-- M0 walking skeleton, with the `zen` terminal app instead of the web UI.
-- **Phase 1, context v2** (`docs/context.md`), on `main`: fixed instructions per session, per-turn
-  context at the end, an append-only hash-chained tape with block numbers, Claude Code / Codex engine
-  sessions (resume), summaries with block addresses and a `history` tool, per-turn measurement of
-  what was sent and of cache breaks, secret masking. Eval against the previous version: same model,
-  11 tasks, 8/8 → 8/8 passed (two long-session tasks newly passing), cost −78%, cache hit 60% → 95%.
-  Merged and pushed; **not installed** on the running service yet.
-
-**Built, not merged: Phase 2, briefed work** (`docs/brief.md`, branch `phase-2`, local)
-- Frame (read-only, enforced by the kernel and a bubblewrap sandbox) → brief (schema-checked, criteria
-  as commands) → approve (owner or per-route auto) → work → verify (the kernel runs the criteria; a
-  fresh verifier only when it adds) → report → verdict (owner's, or the model's marked as such).
-  System One (Jev) decisions in shadow mode, a `decide` tool, a routing policy table, `/go`,
-  `/brief`, `/quick`, `/verify`, three new eval tasks.
-- Eval against Phase 1 (`~/.zenbot/evals/20261005T194445Z`): 11/11 → 11/11 passed, cost **4.9×**,
-  time 3.2×. Most of that cost was a misreading, since corrected: the workflow ran per *message*
-  (re-framing after every report, the model submitting after each step), while **a session is one
-  job**: framing and work each span many turns, the owner's messages steer the same job, it is
-  verified once when the job should be done, and a reply after the report continues it. Fixed in
-  5ada0ae; small work also continues in one context and the model verifier runs only when it adds
-  (e191022). Its claimed benefits (catching false "done", staying in scope, verified criteria) still
-  need harder eval tasks to show.
-- Technical debt paid on the branch (from a survey): an end-to-end suite (`scripts/e2e.sh`, 7
-  scenarios on the scripted model and a throwaway database) and CI on every push (build, tests,
-  clippy as errors, e2e); tool calls always answered; workflow steps counted as busy and recovered
-  after a restart; the tape read once per turn start and two missing indexes; one copy of the
-  message helpers (`zen-proto`); `main.rs` split into `api`, `turns`, `dispatch`, `workers`; the
-  verifier working in the brief's repository; the client protocol documented
-  (`docs/client-protocol.md`); the web UI following the workflow.
-- Debt paid on `main` (2026-10-06): the upgrade smoke test runs on a throwaway copy of the live
-  database, the install backs the database up before applying new migrations, and migrations are
-  expand-only so a rollback runs on the newer schema (`scripts/db.sh`, AGENTS.md).
-- Debt still open: settings are read from the environment in ~25 places (no single config); client
-  events are untyped JSON; `flow.rs` (~1,000 lines) could split; WebSocket hubs are never freed;
-  a summary made inline at the hard limit might trip the watchdog (unconfirmed).
-
-**Next, in order**
-1. **Briefs are opt-in** (decided 2026-10-06, `docs/brief.md`): the eval of the job-model fix had
-   12/12 → 12/12 at 2.1× the cost (`~/.zenbot/evals/20261005T203851Z`). Synthetic harder tasks
-   won't settle it (models are best at benchmark-shaped tasks); real use will: verdicts and cost of
-   briefed vs unbriefed sessions. Briefs become a default only for kinds of work where they win.
-2. Merge `phase-2`, push, install.
-3. **Test the paths not yet run with real models**: Codex and Pi through the workflow, the questions
-   path, a model switch mid-session, a failed verification followed by a real fix. Then a cleanup pass
-   on `main.rs` / `flow.rs`.
-4. **Install and use zenbot on zenbot** (dogfooding). Real sessions and `/done` verdicts are the
-   data everything after this learns from.
-5. **Phase 2b, the improvement loop**: model/effort sweeps on the eval tasks per kind of work (the
-   cheapest that passes as often as the best); an improver session (kind `reflect`) that reads
-   metrics from real sessions and sweeps, applies day-to-day policy changes itself (logged with
-   evidence, undoable) and proposes system-level ones; a promotion rule for System One decisions
-   (one question at a time, after enough correct answers above a confidence threshold); eval tasks
-   generated from real sessions; a schedule to run it.
-6. **Phase 3, memory**: `USER.md` and a capped `MEMORY.md` loaded once per session; memories proposed
-   at `/done` only from the owner's words and verified results, checked against the source, approved
-   by the owner; each points to its source, a newer one supersedes an older one, corrections win.
-7. **Phase 4, search**: Postgres full-text, then pgvector, over sessions and memory, merged ranking
-   with exact names and paths first; given to the agent as tools (`history` across sessions,
-   `memory.search`); every search logged.
-8. **Phase 5, wiki and suggestions**: wiki pages (rewritten summary over an append-only timeline, an
-   index page); at most 3 relevant pointers in the turn context, scored by System One above a
-   confidence bar, each logged and measured.
-9. Then the milestones above: M2 build loop (sandboxes, preview), M3 work (board, delegation, inbox),
-   M5 closed loop (crons, distillation, crystallization), M6 research and reach, M7 ship to agents.
+Moved to [ROADMAP.md](ROADMAP.md).
 
 ## 9. Success metrics
-- Owner hours saved per week (self-reported weekly in the devlog).
-- Tasks completed by agents per week, and the share accepted without edits (per domain).
-- Cost per accepted task.
-- Share of recurring work running as scripts or workflows instead of pure LLM.
-- `zen-bench` score and cost trend.
-- Wiki pages and principles that the owner actually reads and approves.
+Moved to [CONTEXT.md](CONTEXT.md#how-success-is-measured).
 
 ## 10. Risks
 | Risk | Mitigation |
@@ -390,13 +237,7 @@ day-to-day policy (which model for which work) may change automatically, system-
 | Scope creep | Anything not in the current milestone goes to `docs/ideas.md` |
 
 ## 11. Open questions
-1. **License** for the public repo (Apache-2.0 vs MIT vs AGPL-3.0).
-2. **Pilot project:** which side project does zenbot serve first?
-3. Web UI framework (Svelte / React / Lit).
-4. Sandbox granularity (per project vs per session); when to move to gVisor.
-5. Search API for `web.search`; first embedding model.
-6. Own minimal workflow engine vs adopting Windmill early.
-7. Public handle and devlog cadence.
+Moved to [ROADMAP.md](ROADMAP.md#open-decisions).
 
 ## 12. Prior art (per module)
 | Module | Study |
@@ -412,26 +253,4 @@ day-to-day policy (which model for which work) may change automatically, system-
 | Ship to agents | Continual Company OS, MCP Registry, Cloudflare Monetization Gateway, Stripe metering |
 
 ## 13. Decision log
-| Date | Decision |
-|---|---|
-| 2026-09-30 | zenbot is a personal tool for getting work done, not a product; developed in public. |
-| 2026-09-30 | Composable modules with open contracts; adopt existing OSS first; switchable. |
-| 2026-09-30 | Host-agnostic; exe.dev is only the current VM. |
-| 2026-09-30 | Rust kernel (`zend`) + TypeScript model worker (`zen-mind`, using Pi) + TS web UI. |
-| 2026-09-30 | Local Postgres + pgvector via `DATABASE_URL`; movable off-VM later. |
-| 2026-09-30 | Existing Claude and ChatGPT subscriptions via supported paths; small capped API budget for S1 and embeddings. |
-| 2026-09-30 | Channels: web UI first, Matrix later. |
-| 2026-09-30 | Knowledge: our own take, borrowing from LLM Wiki; open-source capture module replaces Readwise later. |
-| 2026-10-01 | Interface: `zen` single Rust binary with a Claude Code/Codex/Pi-style terminal app plus script commands; web UI frozen. zen is used directly, not called from other agents. |
-| 2026-10-01 | Engines: the worker is swappable behind `docs/worker-protocol.md`. Default worker `zen-engine` (Rust) drives the official Claude Code and Codex CLIs on the owner's subscriptions the way qm does: built-in tools off, zenbot's tools over MCP / dynamic tools, zenbot's system prompt, no engine-side sessions (history replayed from the tape). Pi stays available as the optional `pi` worker. The kernel routes models to workers. |
-| 2026-10-01 | Robustness pass informed by Pi's code: the kernel supervises and restarts workers, ends their orphaned turns, cancels its own tools on abort (process-group kill), stops stalled turns (watchdog), and serializes edits per file. Tools: partial output on timeout, full output saved when truncated, line-based paging in `read`, CRLF/BOM-safe edit with a normalized-match fallback. AGENTS.md/CLAUDE.md files are loaded into the system prompt. `upgrade.sh` runs a scripted end-to-end turn (`faux/smoke`) before installing. |
-| 2026-10-01 | Terminal app: full screen by default (input pinned to the bottom), `--inline` keeps the scrollback-following layout. Instruction files load on demand: the first time a tool touches a project below the workspace, its AGENTS.md/CLAUDE.md is attached to the result and kept in the session's system prompt. Commits made in a zen session carry `Zen-Session` and `Co-Authored-By` trailers (kernel sets `ZEN_SESSION_ID`/`ZEN_MODEL` for commands; `scripts/git-hooks`), so each change links to its transcript. |
-| 2026-09-30 | **v0.2:** three layers (Engine / Mind / Work); Mind and Work built first as services exposed over MCP; taste as its own module; zen-bench from M4; inbox; taint-based trust model; roadmap reordered. |
-| 2026-10-02 | Models are named by their full id, never by an engine's alias (`opus` moved from Opus 5 to 5.5 with a Claude Code update). The thinking level (effort) is a session setting, and the kernel always sends an explicit level, so what ran is known. |
-| 2026-10-02 | Tracing: one `turns` row per turn with what produced it (harness = zenbot build, engine and its version, model requested and resolved, effort) and its tokens, cost, time and tool errors. Workers send one message per model call and a turn report. |
-| 2026-10-02 | Evals (zen-bench v0, §5.15): fixed tasks in `evals/`; `scripts/eval.sh` runs the previous and the new harness with the same model on isolated kernels and databases. Before a harness change is committed, the owner sees the comparison and decides; it is never an automatic gate. |
-| 2026-10-02 | Live scoring: the owner's `/done` decision (accept, more, reshape, drop) is the ground-truth label. A System One model (Jev via OpenRouter, through Pi's classifier API: `s1.decide`, §6.1) answers a versioned question set per session, from the user's messages and final answers only, never tool output; answers are stored, not acted on. Open models (Laya, CLM) can take over through the same API once there are enough labels to calibrate them. Reports on scores come later (V2). |
-| 2026-10-05 | Context v2 (`docs/context.md`): instructions fixed per session and stored once (`envelopes`); per-turn context at the end of the user's message; append-only history; the tape becomes a hash-linked chain of numbered blocks; summaries with block addresses and a `history` tool; every turn records what was sent and any cache break. Engines may take over a step when that measurably gives better results, behind the worker protocol with a zenbot-owned fallback: Claude Code keeps its own session per zenbot session (`--resume`), as a cache rebuilt from the tape when needed (supersedes "no engine-side sessions" of 2026-10-01: measured, a fresh Claude Code session per turn never caches earlier turns); Codex gets native history items. |
-| 2026-10-05 | Briefed work (`docs/brief.md`, Phase 2): sessions go frame → approve → work → verify → report → close; the model can run all of it, the owner can take any step. Gates that matter are kernel-enforced (read-only framing in a bubblewrap sandbox, brief schema, approval, criteria commands run by the kernel); a fresh verifier never grades its own work. Auto-approve and auto-close are settings; every verdict records its source. System One decisions (route, kind of work, model, unverified claims) start in shadow mode. Routing is a versioned policy: day-to-day changes are automatic with a log and undo; system-level changes need the owner. Phase 2b adds the improvement loop (sweeps, an improver session, simulated usage). |
-| 2026-10-06 | A session is one job; the briefed workflow runs once per job, not per message. Briefs are opt-in (`ZEN_BRIEFS`, default `opt-in`): the model proposes one for a big, risky or unclear job, the owner's `/brief` forces one. Their value is judged from real use (the owner's verdicts and cost, briefed vs unbriefed), not from synthetic harder evals. |
-| 2026-10-06 | The vendor CLIs stay on their latest versions: `scripts/update-engines.sh`, daily via `zen-engines.timer`, updates Claude Code and Codex (vendor release, checksum-verified, installed next to the old one). Each update must pass a tool-free completion through zen-engine or it is rolled back; no restart is needed, and the job never commits, builds or restarts zenbot. Pi stays pinned: it is harness code running in our process with the ChatGPT sign-in, so a bump is a commit with an eval, and the job only reports a newer Pi. Results go to `upgrade.log` and `zen status`; every turn records `engine_version`. |
+Moved to [DECISIONS.md](DECISIONS.md).

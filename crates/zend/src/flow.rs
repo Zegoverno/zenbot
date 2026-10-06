@@ -85,9 +85,19 @@ pub async fn state(db: &PgPool, session: Uuid) -> Result<String, sqlx::Error> {
 }
 
 /// Move a session to a state: a `state` block on the tape (who and why), cached on the session.
-/// `fresh` marks the start of a new work context (history before it isn't replayed).
+/// `fresh` marks the start of a new work context (history before it isn't replayed). A running
+/// turn keeps the state it gates tools by (`Turn::state`) current.
 pub async fn set_state(app: &App, session: Uuid, to: &str, by: &str, reason: &str, fresh: bool) -> Result<i32> {
-    sqlx::query("UPDATE sessions SET state = $2 WHERE id = $1").bind(session).bind(to).execute(&app.db).await?;
+    {
+        // Under the turns lock, with a count of changes, so a turn starting now can't miss it
+        // (begin_turn).
+        let mut turns = app.turns.lock().await;
+        sqlx::query("UPDATE sessions SET state = $2 WHERE id = $1").bind(session).bind(to).execute(&app.db).await?;
+        if let Some(t) = turns.get_mut(&session) {
+            t.state = to.to_string();
+        }
+        app.state_changes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
     let (seq, _) = tape::append(&app.db, session, "state", &json!({ "state": to, "by": by, "reason": reason, "fresh": fresh })).await?;
     app.emit(session, json!({ "type": "state", "state": to, "by": by, "reason": reason })).await;
     Ok(seq)
@@ -622,9 +632,8 @@ pub fn is_approval(text: &str) -> bool {
 }
 
 /// The git state of a repository (the diff baseline), if it is one.
-fn git_head(repo: &Path) -> Option<String> {
-    let out = std::process::Command::new("git").arg("-C").arg(repo).args(["rev-parse", "HEAD"]).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+async fn git_head(repo: &Path) -> Option<String> {
+    crate::git::git(repo, &["rev-parse", "HEAD"]).await
 }
 
 fn repo_of(app: &App, brief: &Value) -> std::path::PathBuf {
@@ -653,7 +662,7 @@ async fn approve_inner(app: &AppState, session: Uuid, by: &str) -> Result<()> {
     let (brief, approved) = latest_brief(&app.db, session).await?.context("there is no brief to approve")?;
     anyhow::ensure!(!approved, "the latest brief is already approved");
     let repo = repo_of(app, &brief["brief"]);
-    let head = git_head(&repo);
+    let head = git_head(&repo).await;
     let fresh = fresh_context(brief["brief"]["route"].as_str().unwrap_or(""));
     tape::append(&app.db, session, "approval", &json!({ "version": brief["version"], "by": by, "repo": repo, "head": head, "fresh": fresh })).await?;
     if by == "owner" {
@@ -682,40 +691,36 @@ async fn approve_inner(app: &AppState, session: Uuid, by: &str) -> Result<()> {
 // ---------- verification ----------
 
 /// A criterion's check, run by the kernel.
+/// Runs like the bash tool (tools::run_shell): its own process group, killed on a timeout or an
+/// abort, output capped and masked.
 async fn run_check(dir: &Path, run: &str, expect: Option<&str>) -> Value {
-    let cmd = tokio::process::Command::new("bash")
-        .arg("-lc")
-        .arg(run)
-        .current_dir(dir)
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
-    match tokio::time::timeout(Duration::from_secs(600), cmd).await {
-        Ok(Ok(o)) => {
-            let text = crate::secrets::mask(&format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)));
+    match tools::run_shell(dir, run, &[], false, Duration::from_secs(600)).await {
+        Ok(tools::Shell { text, status: Some(Ok(status)) }) => {
+            let text = crate::secrets::mask_off_thread(text).await;
             let tail = zen_proto::tail(&text, 3000);
             let found = expect.is_none_or(|e| text.contains(e));
-            json!({ "ok": o.status.success() && found, "exit": o.status.code(), "expect_found": found, "output": tail })
+            json!({ "ok": status.success() && found, "exit": status.code(), "expect_found": found, "output": tail })
         }
-        Ok(Err(e)) => json!({ "ok": false, "output": format!("couldn't run it: {e}") }),
-        Err(_) => json!({ "ok": false, "output": "timed out after 600s" }),
+        Ok(tools::Shell { status: Some(Err(e)), .. }) => json!({ "ok": false, "output": format!("couldn't run it: {e}") }),
+        Ok(tools::Shell { status: None, .. }) => json!({ "ok": false, "output": "timed out after 600s" }),
+        Err(e) => json!({ "ok": false, "output": format!("couldn't run it: {e}") }),
     }
 }
 
 /// The diff since the approval's baseline (and untracked files), capped.
-fn diff_since(repo: &Path, head: Option<&str>) -> String {
-    let git = |args: &[&str]| {
-        std::process::Command::new("git").arg("-C").arg(repo).args(args).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
-    };
+async fn diff_since(repo: &Path, head: Option<&str>) -> String {
+    const CAP: usize = 60_000;
     let Some(head) = head else { return "(not a git repository: no diff)".into() };
-    let mut d = git(&["diff", head]);
-    let untracked = git(&["ls-files", "--others", "--exclude-standard"]);
+    // Read a little past the cap, so a secret at the cut is still whole when it is masked.
+    let read = |out: Option<(bool, String)>| out.map(|(_, text)| text).unwrap_or_default();
+    let mut d = read(crate::git::output(repo, &["diff", head], CAP + 4096).await);
+    let untracked = read(crate::git::output(repo, &["ls-files", "--others", "--exclude-standard"], CAP + 4096).await);
     if !untracked.trim().is_empty() {
         d.push_str(&format!("\nUntracked files:\n{untracked}"));
     }
     let d = crate::secrets::mask(&d);
-    if d.len() > 60_000 {
-        format!("{}\n[diff cut at 60 KB; read files for the rest]", &d[..d.floor_char_boundary(60_000)])
+    if d.len() > CAP {
+        format!("{}\n[diff cut at 60 KB; read files for the rest]", &d[..d.floor_char_boundary(CAP)])
     } else if d.trim().is_empty() {
         "(no changes)".into()
     } else {
@@ -757,7 +762,7 @@ async fn verify_inner(app: &AppState, session: Uuid) -> Result<()> {
     }
     let rulings: Vec<Value> = blocks.iter().filter(|b| b.kind == "ruling" && b.seq > since).map(|b| b.payload.clone()).collect();
     let summary = blocks.iter().rev().find(|b| b.kind == "submission").map(|b| b.payload["summary"].clone()).unwrap_or(Value::Null);
-    let diff = diff_since(&repo, approval.payload["head"].as_str());
+    let diff = diff_since(&repo, approval.payload["head"].as_str()).await;
 
     // The model verifier runs when it adds something: criteria only judgment can check,
     // architectural work, or a sample (to keep measuring it). A failed command needs no verifier:
@@ -1009,6 +1014,17 @@ mod tests {
         assert_eq!(verifier, ["bash", "read", "submit_verdict"]);
         let open: Vec<String> = tools_for("open").as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
         assert!(open.contains(&"propose_brief".to_string()) && !open.contains(&"submit_work".to_string()), "open: only the way in");
+    }
+
+    #[tokio::test]
+    async fn checks_run_like_the_bash_tool() {
+        let dir = std::env::temp_dir();
+        let r = run_check(&dir, "echo out; echo err >&2; exit 3", Some("err")).await;
+        assert_eq!((r["ok"].clone(), r["exit"].clone(), r["expect_found"].clone()), (json!(false), json!(3), json!(true)), "{r}");
+        let token = format!("ghp_{}", "a1B2".repeat(9));
+        let r = run_check(&dir, &format!("echo {token}"), Some("ghp_")).await;
+        assert_eq!(r["ok"], true);
+        assert!(!r["output"].as_str().unwrap().contains(&token[4..]), "output is masked: {r}");
     }
 
     #[test]
