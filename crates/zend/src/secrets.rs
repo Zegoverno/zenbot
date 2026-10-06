@@ -85,10 +85,32 @@ fn mask_with(text: &str, known: &[String]) -> String {
     mask_prefixed(&out)
 }
 
+/// The bytes that start one of PREFIXES: the scan skips ahead to the next such byte.
+const STARTS: [bool; 256] = {
+    let mut t = [false; 256];
+    let mut i = 0;
+    while i < PREFIXES.len() {
+        t[PREFIXES[i].0.as_bytes()[0] as usize] = true;
+        i += 1;
+    }
+    t
+};
+
+fn may_start_token(b: u8) -> bool {
+    STARTS[b as usize]
+}
+
 fn mask_prefixed(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     'scan: while !rest.is_empty() {
+        // Only ASCII bytes start a prefix, so the skip ends on a char boundary.
+        let skip = rest.bytes().position(may_start_token).unwrap_or(rest.len());
+        out.push_str(&rest[..skip]);
+        rest = &rest[skip..];
+        if rest.is_empty() {
+            break;
+        }
         for (prefix, min) in PREFIXES {
             if let Some(after) = rest.strip_prefix(prefix) {
                 let preceded_by_token = out.chars().last().is_some_and(token_char);
@@ -142,6 +164,11 @@ mod tests {
         assert!(masked.contains("ghp_…[masked]"));
         assert!(masked.contains("AKIA…[masked]"));
         assert!(masked.contains("sk-learn and task-1234 and my-sk-key"), "short or embedded matches stay: {masked}");
+        let wide = format!("é→ {gh} ü{gh}\n{}", "ß".repeat(1000));
+        let masked = mask_with(&wide, &[]);
+        assert!(masked.starts_with("é→ ghp_…[masked] ü"), "{masked}");
+        assert_eq!(masked.matches("[masked]").count(), 2, "a token after a non-token character is masked");
+        assert!(masked.ends_with(&"ß".repeat(1000)));
     }
 
     #[test]

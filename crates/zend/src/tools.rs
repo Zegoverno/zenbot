@@ -329,12 +329,18 @@ async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], read_only: b
     if dropped > 0 {
         text.push_str(&format!("\n[... {dropped} more bytes of output were discarded ...]"));
     }
-    let mut body = match truncate(&text) {
-        Some(cut) => match save_full_output(&text) {
-            Some(path) => format!("{cut}\n[output truncated; full output ({} bytes) saved to {}]", text.len(), path.display()),
-            None => cut,
-        },
-        None => text,
+    // Cutting and saving (with masking) up to 16 MB of output is blocking work: off the runtime's threads.
+    let mut body = if text.len() <= MAX_OUTPUT {
+        text
+    } else {
+        let cut = tokio::task::spawn_blocking(move || {
+            let cut = truncate(&text).unwrap_or_default();
+            match save_full_output(&text) {
+                Some(path) => format!("{cut}\n[output truncated; full output ({} bytes) saved to {}]", text.len(), path.display()),
+                None => cut,
+            }
+        });
+        cut.await.map_err(|e| err(format!("failed to collect the output: {e}")))?
     };
     if !body.is_empty() && !body.ends_with('\n') {
         body.push('\n');
