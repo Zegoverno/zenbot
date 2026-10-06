@@ -591,7 +591,12 @@ impl App {
         self.model = s["model"].as_str().unwrap_or(&self.default_model).to_string();
         self.effort = s["effort"].as_str().map(String::from);
         self.connect(&id).await?;
+        self.show_history(&s);
+        Ok(())
+    }
 
+    /// Print a session's latest messages into scrollback and total its tokens for the footer.
+    fn show_history(&mut self, s: &Value) {
         let w = self.width();
         let msgs = s["messages"].as_array().cloned().unwrap_or_default();
         let mut out: Vec<Line> = vec![line(format!("── {} ──", if self.title.is_empty() { "session" } else { &self.title }), Sty::Dim), Vec::new()];
@@ -602,9 +607,10 @@ impl App {
         }
         for m in msgs.iter().skip(skip) {
             out.extend(self.render_message(m, w));
-            if m["role"] == "assistant" {
-                self.session_tokens += ["input", "output", "cacheRead", "cacheWrite"].iter().map(|k| m["usage"][*k].as_i64().unwrap_or(0)).sum::<i64>();
-            }
+        }
+        // The footer's total covers the whole session, not only the messages shown.
+        for m in msgs.iter().filter(|m| m["role"] == "assistant") {
+            self.session_tokens += ["input", "output", "cacheRead", "cacheWrite"].iter().map(|k| m["usage"][*k].as_i64().unwrap_or(0)).sum::<i64>();
         }
         self.commit(out);
         if s["busy"] == true {
@@ -612,7 +618,6 @@ impl App {
             self.status = "Working".into();
             self.turn_started = Instant::now();
         }
-        Ok(())
     }
 
     fn render_user(&self, text: &str, w: usize) -> Vec<Line> {
@@ -1545,6 +1550,17 @@ mod tests {
         a.on_event(json!({ "type": "idle", "state": "framing", "waiting": "approval" }));
         assert!(!a.busy);
         assert!(a.notice.as_ref().is_some_and(|(t, _)| t.contains("/go")), "{:?}", a.notice);
+    }
+
+    #[test]
+    fn resumed_session_counts_the_tokens_of_messages_not_shown() {
+        let mut a = app(80, 20);
+        let msg = json!({ "role": "assistant", "content": [{ "type": "text", "text": "ok" }], "usage": { "input": 10, "output": 5, "cacheRead": 0, "cacheWrite": 0 } });
+        let s = json!({ "title": "t", "messages": vec![msg; 50] });
+        a.show_history(&s);
+        let out = a.capture.take().unwrap();
+        assert!(out.contains("… 10 earlier messages"), "{out}");
+        assert_eq!(a.session_tokens, 50 * 15, "every message counts, shown or not");
     }
 
     #[tokio::test]
