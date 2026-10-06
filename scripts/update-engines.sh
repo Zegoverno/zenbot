@@ -1,29 +1,23 @@
 #!/usr/bin/env bash
-# Keep the model engines on their latest versions: the Claude Code CLI, the Codex CLI and, when
-# the `pi` worker is enabled, Pi (@earendil-works/pi-ai and pi-agent-core in packages/mind).
+# Keep the model engines' CLIs on their latest versions: Claude Code and Codex. Pi (the `pi`
+# worker's library in packages/mind) is only reported: it is pinned in the repo and bumped by a
+# commit with an eval, like any harness change.
 # Run daily by zen-engines.timer (deploy/); safe to run by hand, also from inside a zen session.
 #
 #   scripts/update-engines.sh           update what is behind, test it, roll back what fails
 #   scripts/update-engines.sh --check   report installed and latest versions; change nothing
 #
-# Each update is tested and undone if the test fails:
-# - Claude Code and Codex: the new release is downloaded from the vendor's own channel and its
-#   SHA-256 checked against the vendor's manifest. It is then installed next to the old one, which
-#   is kept, wherever the CLI lives now (a plain binary such as /usr/local/bin/claude, the native or
-#   standalone installers' versioned layout, or a global npm install). Then one real tool-free
-#   completion runs through zen-engine (`complete`, the path the kernel uses for summaries). If the
-#   check fails, the previous version is restored. Both CLIs are started fresh for every turn,
-#   so no restart is needed. When the check already fails on the installed version (signed out,
-#   offline), the update is skipped instead, since a test that fails anyway can't judge it.
-# - Pi: the latest release is installed into packages/mind/node_modules only (npm --no-save). The
-#   repo pins Pi's minimum version and this job makes no commits; scripts/mind-deps.sh keeps the
-#   newer Pi when zenbot is reinstalled. It is checked: ping, the scripted model, and a real System
-#   One call when ZEN_S1_MODEL is set. Then it is applied with scripts/upgrade.sh, which runs a
-#   scripted Pi turn through a second kernel and restarts zenbot once no session is working. A
-#   failure puts the previous Pi back. Pi is skipped when the checkout has local changes or isn't
-#   on main, since upgrade.sh installs whatever the checkout holds.
+# The new CLI release is downloaded from the vendor's own channel and its SHA-256 checked against
+# the vendor's manifest (this catches a broken download, not a compromised vendor). It is installed
+# next to the old one, which is kept, wherever the CLI lives now (a plain binary such as
+# /usr/local/bin/claude, the native or standalone installers' versioned layout, or a global npm
+# install). Then one real tool-free completion runs through zen-engine (`complete`, the path the
+# kernel uses for summaries). If the check fails, the previous version is restored. Both CLIs are
+# started fresh for every turn, so no restart is needed. When the check already fails on the
+# installed version (signed out, offline), the update is skipped instead, since a test that fails
+# anyway can't judge it. Nothing here commits, builds or restarts zenbot.
 #
-# Results go to ~/.zenbot/upgrade.log ("engines: …", one line per engine) and the latest state
+# Results go to ~/.zenbot/upgrade.log ("engines: …", one line per change) and the latest state
 # to ~/.zenbot/engines.json (shown by `zen status`).
 # ZEN_ENGINES=claude,codex,pi limits which engines are looked at. ZEN_ENGINES_FAIL=<engine> makes
 # that engine's post-update check fail, to test the rollback.
@@ -242,89 +236,29 @@ update_cli() {
   fi
 }
 
-# ---- Pi ----
+# ---- Pi: reported, not installed ----
+# Pi is part of the harness: the repo pins its exact version, and a bump is an ordinary commit
+# that gets an eval first (AGENTS.md). So this job only says when a newer Pi is out.
 
-MIND="$REPO/packages/mind"
-PI_PKGS=(@earendil-works/pi-ai @earendil-works/pi-agent-core)
-
-# Send the Pi worker one request ($1) and print its first line of output, waiting at most $2 seconds.
-# (The worker exits as soon as its stdin closes, so stdin is kept open until it answers.)
-pi_rpc() {
-  (cd "$MIND" && set -a && { . "$ZEN/env" 2>/dev/null || true; } && set +a && ZEN_FAUX=1 timeout "$2" node -e '
-    const c = require("node:child_process").spawn(process.execPath, ["src/main.ts"], { stdio: ["pipe", "pipe", "ignore"] });
-    let buf = "";
-    c.stdout.on("data", (d) => { buf += d; const i = buf.indexOf("\n"); if (i >= 0) { process.stdout.write(buf.slice(0, i + 1)); c.kill(); process.exit(0); } });
-    c.on("exit", () => process.exit(1));
-    c.stdin.write(process.argv[1] + "\n");' "$1" 2>/dev/null)
-}
-
-pi_check() {
-  local want=$1 got req res
-  if forced_fail pi; then echo "forced failure (ZEN_ENGINES_FAIL)"; return 1; fi
-  got=$(node -p "require('$MIND/node_modules/@earendil-works/pi-ai/package.json').version" 2>/dev/null)
-  [ "$got" = "$want" ] || { echo "node_modules has pi-ai ${got:-nothing}, expected $want"; return 1; }
-  pi_rpc '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}' 15 | grep -q pong || { echo "the worker didn't answer ping"; return 1; }
-  res=$(pi_rpc '{"jsonrpc":"2.0","id":1,"method":"models.list","params":{}}' 30)
-  echo "$res" | jq -e '[.result.models[].id] | index("faux/faux-1")' >/dev/null 2>&1 || { echo "the worker doesn't list its models"; return 1; }
-  local s1; s1=$(grep -E '^ZEN_S1_MODEL=' "$ZEN/env" 2>/dev/null | cut -d= -f2-)
-  if [ -n "$s1" ] && echo "$res" | jq -e '.result.authenticated.openrouter == true' >/dev/null 2>&1; then
-    req=$(jq -nc --arg m "$s1" '{jsonrpc:"2.0",id:1,method:"s1.decide",params:{model:$m,state:{text:"The sky is blue."},questions:{color:{type:"bool",instructions:"Is the text about a color?",criteria:{"true":"yes","false":"no"}}}}}')
-    res=$(pi_rpc "$req" 90)
-    echo "$res" | jq -e '.result.error == null and .result.answers.color != null' >/dev/null 2>&1 \
-      || { echo "a System One call on $s1 failed: $(echo "$res" | jq -r '.result.error // .error.message // "no answer"' 2>/dev/null | head -c 300)"; return 1; }
-  fi
-}
-
-pi_installed() { node -p "require('$MIND/node_modules/$1/package.json').version" 2>/dev/null || true; }
-# Put Pi packages (name@version …) into node_modules only: package.json and the lockfile, which pin
-# Pi's minimum version, stay as they are, so the update makes no commit (see scripts/mind-deps.sh).
-pi_put() { (cd "$MIND" && npm install --no-save --no-audit --no-fund --silent "$@"); }
-
-update_pi() {
+check_pi() {
   wanted pi || return 0
   if [ -z "${ZEN_ENGINES:-}" ] && ! pi_enabled; then return 0; fi
-  local have p cur latest target="" old=() want=() news why out
-  have=$(pi_installed "${PI_PKGS[0]}")
-  [ -n "$have" ] || { record pi "" "not installed"; say "pi: not installed (scripts/mind-deps.sh installs it), skipped"; return 0; }
-  for p in "${PI_PKGS[@]}"; do
-    cur=$(pi_installed "$p")
-    latest=$(npm view "$p" version 2>/dev/null)
-    is_version "$latest" || { record pi "$have" "latest version unknown"; log "pi $have: could not find the latest version of $p; skipped"; return 0; }
-    old+=("$p@$cur")
-    if newer "$cur" "$latest"; then want+=("$p@$latest"); fi
-    [ "$p" = "${PI_PKGS[0]}" ] && target=$latest
-  done
-  if [ ${#want[@]} -eq 0 ]; then record pi "$have" "up to date"; say "pi $have: up to date"; return 0; fi
-  news=$target; [ "$news" = "$have" ] && news="$have (${want[*]})"
-  if [ -n "$CHECK_ONLY" ]; then record pi "$have" "update available: $news"; say "pi $have: $news available"; return 0; fi
-  # Applying means a zenbot restart through upgrade.sh, which installs whatever the checkout holds.
-  if [ -n "$(git -C "$REPO" status --porcelain --untracked-files=no)" ]; then
-    record pi "$have" "skipped: local changes"; log "pi $have → $news skipped: $REPO has local changes"; return 0
-  fi
-  if [ "$(git -C "$REPO" rev-parse --abbrev-ref HEAD)" != main ]; then
-    record pi "$have" "skipped: not on main"; log "pi $have → $news skipped: $REPO is not on main"; return 0
-  fi
-  if ! out=$(pi_put "${want[@]}" 2>&1); then
-    pi_put "${old[@]}" >/dev/null 2>&1; record pi "$(pi_installed "${PI_PKGS[0]}")" "update failed"
-    log "pi $have → $news FAILED to install: $(echo "$out" | tail -1); kept $(pi_installed "${PI_PKGS[0]}")"; return 0
-  fi
-  if ! why=$(pi_check "$target"); then
-    pi_put "${old[@]}" >/dev/null 2>&1; rolled_back pi "$(pi_installed "${PI_PKGS[0]}")" "$have" "$news" "$why"; return 0
-  fi
-  # upgrade.sh runs a scripted Pi turn through a second kernel, then restarts zenbot at idle so the
-  # worker loads the new Pi (its scripts/mind-deps.sh keeps the newer version).
-  if out=$("$REPO/scripts/upgrade.sh" 2>&1); then
-    record pi "$target" "updated from $have"
-    log "pi $have → $target OK (node_modules only, no commit; zenbot restarts at idle, see the upgrade lines)"
+  local have latest
+  have=$(node -p "require('$REPO/packages/mind/node_modules/@earendil-works/pi-ai/package.json').version" 2>/dev/null)
+  [ -n "$have" ] || { record pi "" "not installed"; say "pi: not installed, skipped"; return 0; }
+  latest=$(npm view @earendil-works/pi-ai version 2>/dev/null)
+  if ! is_version "$latest"; then record pi "$have" "latest version unknown"; say "pi $have: could not find the latest version"; return 0; fi
+  if newer "$have" "$latest"; then
+    record pi "$have" "update available: $latest"
+    say "pi $have: $latest available (bump the pins in packages/mind and run scripts/eval.sh; see AGENTS.md)"
   else
-    pi_put "${old[@]}" >/dev/null 2>&1
-    rolled_back pi "$(pi_installed "${PI_PKGS[0]}")" "$have" "$news" "scripts/upgrade.sh failed: $(echo "$out" | grep -E 'FAILED' | head -1)"
+    record pi "$have" "up to date"; say "pi $have: up to date"
   fi
 }
 
 update_cli claude
 update_cli codex
-update_pi
+check_pi
 
 # ---- state for `zen status` ----
 if [ -z "$CHECK_ONLY" ]; then

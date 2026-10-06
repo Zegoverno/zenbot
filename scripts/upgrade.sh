@@ -20,7 +20,7 @@ esac
 git config core.hooksPath scripts/git-hooks # commit trailers linking zen's commits to sessions
 
 echo "== build"
-if grep -qE '^ZEN_WORKERS=.*pi' "$HOME/.zenbot/env" 2>/dev/null; then ./scripts/mind-deps.sh; fi
+if grep -qE '^ZEN_WORKERS=.*pi' "$HOME/.zenbot/env" 2>/dev/null; then (cd packages/mind && npm ci --no-audit --no-fund --silent); fi
 # Use the binaries CI built for this commit when there are no local code changes;
 # otherwise compile here (installing Rust first on machines that never needed it).
 PREBUILT=

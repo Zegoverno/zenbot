@@ -1,5 +1,5 @@
 [Unit]
-Description=zenbot: keep the model engines on their latest versions (daily)
+Description=zenbot: keep the Claude Code and Codex CLIs on their latest versions (daily)
 
 [Timer]
 OnCalendar=*-*-* 04:00:00 UTC
