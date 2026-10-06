@@ -326,10 +326,15 @@ pub(crate) async fn handle_socket(app: AppState, id: Uuid, socket: WebSocket) {
         let Ok(cmd) = serde_json::from_str::<Value>(&text) else { continue };
         match cmd.get("type").and_then(Value::as_str) {
             Some("prompt") => {
+                // Started apart from this loop, so an abort is read while the turn is prepared
+                // (a summary at the hard limit can take minutes).
                 let text = cmd.get("text").and_then(Value::as_str).unwrap_or("").to_string();
-                if let Err(e) = start_turn(&app, id, text).await {
-                    app.emit(id, json!({ "type": "error", "error": e.to_string() })).await;
-                }
+                let app = app.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = start_turn(&app, id, text).await {
+                        app.emit(id, json!({ "type": "error", "error": e.to_string() })).await;
+                    }
+                });
             }
             Some("abort") => abort_turn(&app, id).await,
             _ => {}
