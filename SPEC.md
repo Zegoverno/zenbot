@@ -7,11 +7,13 @@
 
 ## 1. Vision
 
-zenbot is a **personal + company operating system** for a niche builder: a machine for thinking, analyzing and building, where LLMs are central and agents do the work.
+zenbot is a **maker tool that works like a chief of staff** (reframed 2026-10-06, `docs/redesign.md`). The owner drives: they start every job and decide where tokens are spent; zenbot never starts a job on its own, but inside a job it may split the work into subtasks and delegate them. It carries each job end to end, operational work and building software alike, across the owner's job, projects and own companies. It offloads tasks, memory and thinking, so the owner's attention goes to the frontier of knowledge, gut calls and taste.
 
-**Thesis.** As AI makes building cheap, value moves to speed, uniqueness and taste. Expect many tiny companies solving very niche problems, often serving agents. Agents won't buy niche *code* — they can regenerate it. They buy what they can't cheaply regenerate: proprietary or fresh data, precomputed results, access, accountability and judgment. zenbot exists to help one person **accumulate knowledge and taste, and turn them into working companies**.
+**How it gets there.** Give the agent tools, skills and context rather than a fixed workflow: zenbot owns the prompt files, tools, skills, memory and knowledge, and any model (Claude Code, Codex, Pi, API models) can do the work. Fixed rules exist only for authority (the owner starts jobs and sets the budget), safety (the kernel runs every action) and measurement (the tape records everything).
 
-**zenbot is a tool, not a product.** Its job is to get real work done on side projects (the things meant to make money). It is developed in public.
+**Thesis.** As AI makes building cheap, value moves to speed, uniqueness and taste. Expect many tiny companies solving very niche problems, often serving agents. Agents won't buy niche *code* — they can regenerate it. They buy what they can't cheaply regenerate: proprietary or fresh data, precomputed results, access, accountability and judgment. zenbot helps one person **accumulate knowledge and taste, and turn them into working companies**.
+
+**zenbot is a tool, not a product.** It is developed in public.
 
 ## 2. Principles
 
@@ -300,7 +302,7 @@ of the `data/` repos to S3-compatible storage).
 
 ## 8. Roadmap
 
-Rules: each milestone is used on a real side project (the **pilot project**) the week it ships. Target is about 1–2 weeks each. Tracing is on from M0.
+**Current plan: `docs/redesign.md`** (phases 0–6, agreed 2026-10-06); it supersedes the next steps in §8.1. Rules: each milestone is used on a real side project (the **pilot project**) the week it ships. Target is about 1–2 weeks each. Tracing is on from M0.
 
 | | Milestone | Scope | Done when |
 |---|---|---|---|
@@ -389,12 +391,19 @@ day-to-day policy (which model for which work) may change automatically, system-
    M5 closed loop (crons, distillation, crystallization), M6 research and reach, M7 ship to agents.
 
 ## 9. Success metrics
-- Owner hours saved per week (self-reported weekly in the devlog).
-- Tasks completed by agents per week, and the share accepted without edits (per domain).
-- Cost per accepted task.
-- Share of recurring work running as scripts or workflows instead of pure LLM.
-- `zen-bench` score and cost trend.
-- Wiki pages and principles that the owner actually reads and approves.
+The measure is how well zenbot does a job end to end (`docs/redesign.md`):
+1. identifies the real job to be done;
+2. researches all the context it needs;
+3. decides what to build and what is relevant;
+4. brings the owner only the questions and decisions that are theirs;
+5. solves it to a state-of-the-art standard.
+
+The owner's verdict on each job is the ground truth. Supporting numbers:
+- Jobs accepted without edits, per kind of work; cost and time per accepted job.
+- Questions asked, and how many only the owner could answer.
+- Share of recurring work running as scripts or skills instead of pure LLM.
+- Memories, skills and wiki pages that are used, and that the owner reads and approves.
+- Eval pass rate and cost trend (a regression check, not the measure of quality).
 
 ## 10. Risks
 | Risk | Mitigation |
@@ -453,3 +462,4 @@ day-to-day policy (which model for which work) may change automatically, system-
 | 2026-10-05 | Briefed work (`docs/brief.md`, Phase 2): sessions go frame → approve → work → verify → report → close; the model can run all of it, the owner can take any step. Gates that matter are kernel-enforced (read-only framing in a bubblewrap sandbox, brief schema, approval, criteria commands run by the kernel); a fresh verifier never grades its own work. Auto-approve and auto-close are settings; every verdict records its source. System One decisions (route, kind of work, model, unverified claims) start in shadow mode. Routing is a versioned policy: day-to-day changes are automatic with a log and undo; system-level changes need the owner. Phase 2b adds the improvement loop (sweeps, an improver session, simulated usage). |
 | 2026-10-06 | A session is one job; the briefed workflow runs once per job, not per message. Briefs are opt-in (`ZEN_BRIEFS`, default `opt-in`): the model proposes one for a big, risky or unclear job, the owner's `/brief` forces one. Their value is judged from real use (the owner's verdicts and cost, briefed vs unbriefed), not from synthetic harder evals. |
 | 2026-10-06 | The vendor CLIs stay on their latest versions: `scripts/update-engines.sh`, daily via `zen-engines.timer`, updates Claude Code and Codex (vendor release, checksum-verified, installed next to the old one). Each update must pass a tool-free completion through zen-engine or it is rolled back; no restart is needed, and the job never commits, builds or restarts zenbot. Pi stays pinned: it is harness code running in our process with the ChatGPT sign-in, so a bump is a commit with an eval, and the job only reports a newer Pi. Results go to `upgrade.log` and `zen status`; every turn records `engine_version`. |
+| 2026-10-06 | **Redesign** (`docs/redesign.md`): zenbot is a maker tool that works like a chief of staff; the owner starts every job and sets the budget. Tools, skills and context replace the kernel-enforced workflow: briefs and verification become skills and tools (supersedes the gates of 2026-10-05), with fixed rules only for authority, safety and measurement. The system prompt comes from `SOUL.md`, `AGENTS.md`, `USER.md` and a fixed-size `MEMORY.md`, loaded at session start; system tools load with it; skills and MCP or agent-made tools load on demand, appended so the cache holds. System One is used heavily, by the model through `decide` and inside tools. Short-term memory competes for fixed space; a nightly sleep job keeps, drops or promotes, and only really impactful memories reach long-term (very high probability on the lower end of the confidence interval). Skills improve in a closed loop without sprawl (domains, edit before create, from evidence). Model choice from real usage replaces Phase 2b's sweeps (Phase 6). |

@@ -12,7 +12,7 @@ This file is for agents changing zenbot's own code, including zenbot itself. Rea
 | Worker `zen-mind` (optional, `pi`): Pi agent loop, direct ChatGPT sign-in | `packages/mind` | TypeScript (Node 22, from source) | child process of `zend` when `ZEN_WORKERS` includes `pi` |
 | Web UI (frozen) | `crates/zend/web/index.html` | HTML/JS | served by `zend` |
 | Database | `deploy/compose.yaml` | Postgres + pgvector | Docker |
-| Design and plan | `SPEC.md`; worker protocol in `docs/worker-protocol.md` | | |
+| Design and plan | `SPEC.md`; current plan in `docs/redesign.md` (read it before starting new work); worker protocol in `docs/worker-protocol.md` | | |
 
 The kernel owns all state and executes every tool call. Workers hold no state: they get the context for a turn and ask the kernel to run tools. Engines run with their own tools switched off (Claude Code `--tools ""`, Codex shell disabled) so every action goes through the kernel. Keep it that way.
 
