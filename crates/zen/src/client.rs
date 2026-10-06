@@ -3,6 +3,13 @@
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::io::IsTerminal;
+use std::time::Duration;
+
+/// How long to wait for the kernel to accept a connection.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Longest a single API call may take. Generous: a version check fetches from GitHub (the kernel
+/// gives git 60 seconds). The session stream is a WebSocket and isn't subject to it.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone)]
 pub struct Client {
@@ -23,7 +30,8 @@ impl Client {
                     .to_string()
             }
         };
-        Ok(Client { http: reqwest::Client::new(), url: url.trim_end_matches('/').to_string(), token })
+        let http = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT).timeout(REQUEST_TIMEOUT).build()?;
+        Ok(Client { http, url: url.trim_end_matches('/').to_string(), token })
     }
 
     pub async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value> {
@@ -50,6 +58,12 @@ impl Client {
 
     pub async fn patch(&self, path: &str, body: Value) -> Result<Value> {
         self.call(reqwest::Method::PATCH, path, Some(body)).await
+    }
+
+    /// The kernel's health report (GET /health, no token needed).
+    pub async fn health(&self) -> Result<Value> {
+        let res = self.http.get(format!("{}/health", self.url)).send().await.with_context(|| format!("cannot reach zenbot at {}", self.url))?;
+        Ok(res.json().await?)
     }
 
     /// Resolve a full id or a unique prefix, searching active and archived sessions.
@@ -145,8 +159,7 @@ impl Client {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30 * 60);
         while std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            let Ok(res) = self.http.get(format!("{}/health", self.url)).send().await else { continue };
-            let Ok(health) = res.json::<Value>().await else { continue };
+            let Ok(health) = self.health().await else { continue };
             let commit = health["commit"].as_str().unwrap_or("");
             if !target.is_empty() && commit.starts_with(&target) && health["ok"] == true {
                 return Ok(format!("zenbot upgraded to {target}"));

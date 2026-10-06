@@ -632,7 +632,7 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Status => {
-            let health: Value = reqwest::get(format!("{}/health", c.url)).await.with_context(|| format!("cannot reach zenbot at {}", c.url))?.json().await?;
+            let health = c.health().await?;
             let models = c.get("/api/models").await?;
             let any_signed_in = models["authenticated"].as_object().is_some_and(|a| a.values().any(|v| v == true));
             let version = c.get("/api/version").await.unwrap_or(Value::Null);
