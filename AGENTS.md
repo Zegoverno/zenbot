@@ -40,7 +40,8 @@ Changes to the harness (system prompt, history, tools, workers, model or effort 
 ## Rules
 
 - **Never** run `systemctl restart zenbot` or kill `zend` yourself: that kills the session you're running in. Always use `scripts/upgrade.sh`.
-- Database changes go in a new file in `crates/zend/migrations/` (never edit an applied migration).
+- Database changes go in a new file in `crates/zend/migrations/` (never edit an applied migration). Migrations are **expand-only**: add tables, columns and indexes; don't drop, rename or change the type of anything in the same release that stops using it (do that in a later release). A rollback swaps the binaries back but not the schema, so the previous build must keep working on the new schema.
+- `scripts/upgrade.sh` tries new migrations on a throwaway copy of the live database (`--check` stops after that test), and the install backs the live database up to `~/.zenbot/backups/` (last 10 kept) before applying any. A rollback doesn't restore it; `~/.zenbot/upgrade.log` says how to. `scripts/db.sh pending` lists migrations the live database hasn't applied; `scripts/db.sh backup` takes a backup by hand.
 - Don't add dependencies without a good reason; prefer the standard library and what's already used.
 - Don't put secrets in the repo, logs or tool output.
 - Update `SPEC.md` when a change affects the architecture, and `README.md` when it affects how people install or use zen.
@@ -51,5 +52,6 @@ Changes to the harness (system prompt, history, tools, workers, model or effort 
 zen status                       # health of kernel, database, worker, sign-in
 journalctl -u zenbot -n 50       # service logs
 cat ~/.zenbot/upgrade.log        # upgrade results
+scripts/upgrade.sh --check       # build, check and smoke test without installing
 ./scripts/dev.sh                 # run a dev kernel in the foreground (stop the service first, or set ZEN_PORT)
 ```

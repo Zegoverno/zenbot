@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Runs detached (via systemd-run) from upgrade.sh: waits for idle, swaps binaries,
-# restarts, health-checks, and rolls back on failure.
+# restarts, health-checks, and rolls back on failure. If the new build brings migrations the
+# live database hasn't applied, the database is backed up first (scripts/db.sh); a rollback
+# doesn't restore it (migrations are expand-only, see AGENTS.md) but logs how to.
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$REPO/scripts/db.sh"
 BIN="$HOME/.zenbot/bin"
 LOG="$HOME/.zenbot/upgrade.log"
 PORT=$(grep -E '^ZEN_PORT=' "$HOME/.zenbot/env" 2>/dev/null | cut -d= -f2); PORT=${PORT:-8100}
@@ -18,13 +21,23 @@ for _ in $(seq 1 900); do
   sleep 2
 done
 
+PREV_VERSION=$(cat "$HOME/.zenbot/version" 2>/dev/null || true)
+BACKUP=
+PENDING=$(db_pending | tr '\n' ' ')
+if [ -n "$PENDING" ]; then
+  if ! BACKUP=$(db_backup "${PREV_VERSION:-unknown}" 2>>"$LOG"); then
+    log "upgrade ABORTED: migrations ${PENDING}pending but the database backup failed; nothing changed"
+    exit 1
+  fi
+  log "migrations ${PENDING}pending; database backed up to $BACKUP"
+fi
+
 BINS="zend zen zen-engine"
 for b in $BINS; do
   [ -f "$BIN/$b" ] && cp -f "$BIN/$b" "$BIN/$b.prev"
   install -m 755 "$REPO/target/release/$b" "$BIN/$b.new" && mv -f "$BIN/$b.new" "$BIN/$b"
 done
 # The kernel reads the version at start and records it with every turn, so write it first.
-PREV_VERSION=$(cat "$HOME/.zenbot/version" 2>/dev/null || true)
 git -C "$REPO" rev-parse --short HEAD > "$HOME/.zenbot/version" 2>/dev/null
 sudo systemctl restart zenbot
 
@@ -39,4 +52,7 @@ for b in $BINS; do [ -f "$BIN/$b.prev" ] && mv -f "$BIN/$b.prev" "$BIN/$b"; done
 echo "$PREV_VERSION" > "$HOME/.zenbot/version"
 sudo systemctl restart zenbot
 if wait_healthy; then log "rolled back to previous version"; else log "ROLLBACK ALSO UNHEALTHY: check journalctl -u zenbot"; fi
+if [ -n "$BACKUP" ]; then
+  log "the new build may have applied migrations ${PENDING}(not undone). To restore the database as it was before: $(db_restore_cmd "$BACKUP")"
+fi
 exit 1

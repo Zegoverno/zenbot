@@ -2,10 +2,20 @@
 # Build and check zenbot from this checkout, then apply it once no session is working.
 # Safe to run from inside a zen session: the restart waits until the current turn ends,
 # and a build that doesn't come up healthy is rolled back automatically.
+#
+#   scripts/upgrade.sh           build, check, smoke test, then schedule the install
+#   scripts/upgrade.sh --check   build, check and smoke test only
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 export PATH="$HOME/.local/node/bin:$HOME/.cargo/bin:$PATH"
+. "$REPO/scripts/db.sh"
+CHECK_ONLY=
+case ${1:-} in
+  --check) CHECK_ONLY=1 ;;
+  "") ;;
+  *) echo "usage: $0 [--check]" >&2; exit 2 ;;
+esac
 
 git config core.hooksPath scripts/git-hooks # commit trailers linking zen's commits to sessions
 
@@ -47,31 +57,46 @@ fi
 
 echo "== smoke"
 # Run the new build as a second kernel on a spare port and drive one scripted turn
-# (faux engine -> kernel -> bash tool -> answer) through it. It uses the same database,
-# so pending migrations are applied here, before the restart.
+# (faux engine -> kernel -> bash tool -> answer) through it. It runs on a throwaway copy of
+# the live database, so pending migrations are tried there and the live database is
+# untouched until the install (which backs it up first if migrations are pending).
 SMOKE_PORT=${ZEN_SMOKE_PORT:-18199}
 SMOKE_URL="http://127.0.0.1:$SMOKE_PORT"
 SMOKE_LOG=$(mktemp)
 SMOKE_WS=$(mktemp -d)
+SMOKE_DB=zen_smoke_$$
+SMOKE_PID=
+trap '[ -n "$SMOKE_PID" ] && kill $SMOKE_PID 2>/dev/null; rm -rf "$SMOKE_WS"; db_drop $SMOKE_DB' EXIT
+if ! db_copy_live "$SMOKE_DB" >"$SMOKE_LOG" 2>&1; then
+  echo "SMOKE TEST FAILED: could not copy the live database ($(db_live_name)) to $SMOKE_DB"
+  tail -20 "$SMOKE_LOG"
+  exit 1
+fi
+SMOKE_DB_URL=$(db_url_for "$SMOKE_DB")
 (
   set -a; [ -f "$HOME/.zenbot/env" ] && . "$HOME/.zenbot/env"; set +a
   ZEN_TOKEN="$(cat "$HOME/.zenbot/token")" ZEN_PORT=$SMOKE_PORT ZEN_WORKERS=engine ZEN_FAUX=1 ZEN_WORKSPACE="$SMOKE_WS" \
-    ZEN_HARNESS="$(git rev-parse --short HEAD)" \
+    ZEN_HARNESS="$(git rev-parse --short HEAD)" DATABASE_URL="$SMOKE_DB_URL" \
     exec ./target/release/zend
-) >"$SMOKE_LOG" 2>&1 &
+) >>"$SMOKE_LOG" 2>&1 &
 SMOKE_PID=$!
-trap 'kill $SMOKE_PID 2>/dev/null; rm -rf "$SMOKE_WS"' EXIT
 for _ in $(seq 1 30); do curl -fs "$SMOKE_URL/health" | grep -q '"ok":true' && break; sleep 1; done
 RESULT=$(ZEN_URL="$SMOKE_URL" timeout 60 ./target/release/zen ask --json -m faux/smoke "upgrade smoke test" 2>/dev/null || true)
-SID=$(echo "$RESULT" | jq -r '.session_id // empty' 2>/dev/null || true)
-[ -n "$SID" ] && ZEN_URL="$SMOKE_URL" ./target/release/zen sessions archive "$SID" >/dev/null 2>&1
 kill $SMOKE_PID 2>/dev/null; wait $SMOKE_PID 2>/dev/null || true
+SMOKE_PID=
 if ! echo "$RESULT" | jq -e '.error == null and (.text | contains("Smoke test passed")) and .tools[0].is_error == false' >/dev/null 2>&1; then
   echo "SMOKE TEST FAILED: the new build could not run a turn. Result: ${RESULT:-none}"
   tail -20 "$SMOKE_LOG"
   exit 1
 fi
 rm -f "$SMOKE_LOG"
+PENDING=$(db_pending | tr '\n' ' ')
+[ -n "$PENDING" ] && echo "migrations pending on the live database: $PENDING(tested on a copy; the install backs it up first)"
+
+if [ -n "$CHECK_ONLY" ]; then
+  echo "Check OK ($(git rev-parse --short HEAD 2>/dev/null)$(git diff --quiet 2>/dev/null || echo ', uncommitted changes')); nothing installed."
+  exit 0
+fi
 
 echo "== schedule"
 sudo systemd-run --quiet --collect --unit "zen-upgrade-$(date +%s)" --uid "$(id -u)" --gid "$(id -g)" \

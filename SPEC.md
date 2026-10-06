@@ -334,8 +334,10 @@ day-to-day policy (which model for which work) may change automatically, system-
   message helpers (`zen-proto`); `main.rs` split into `api`, `turns`, `dispatch`, `workers`; the
   verifier working in the brief's repository; the client protocol documented
   (`docs/client-protocol.md`); the web UI following the workflow.
-- Debt still open: the upgrade smoke test runs new migrations on the live database before
-  installing; settings are read from the environment in ~25 places (no single config); client
+- Debt paid on `main` (2026-10-06): the upgrade smoke test runs on a throwaway copy of the live
+  database, the install backs the database up before applying new migrations, and migrations are
+  expand-only so a rollback runs on the newer schema (`scripts/db.sh`, AGENTS.md).
+- Debt still open: settings are read from the environment in ~25 places (no single config); client
   events are untyped JSON; `flow.rs` (~1,000 lines) could split; WebSocket hubs are never freed;
   a summary made inline at the hard limit might trip the watchdog (unconfirmed).
 
