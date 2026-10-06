@@ -9,3 +9,12 @@ license = "Apache-2.0"
 [profile.release]
 # Smaller binaries to download and install; panics still print a message.
 strip = true
+
+# The binaries CI publishes (.github/workflows/ci.yml, job `release`): the release build with
+# whole-program optimization, 25–30% smaller (zen 6.2 → 4.3 MB, zend 6.7 → 5.0 MB). Local
+# builds, tests and clippy stay on `release`, which compiles much faster; scripts install either
+# kind from target/release (scripts/fetch-release.sh puts downloaded ones there).
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1

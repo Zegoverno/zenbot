@@ -15,6 +15,7 @@ use clap::{Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::Message;
+use zen_proto::text_of;
 
 #[derive(Parser)]
 #[command(name = "zen", version, about = "zenbot in your terminal. Run `zen` for an interactive session, or use the commands below for scripts.")]
@@ -188,7 +189,7 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
                     "message" => {
                         let m = &ev["message"];
                         match m["role"].as_str() {
-                            Some("user") if m["content"].as_str() == Some(prompt) => started = true,
+                            Some("user") if text_of(&m["content"]) == prompt => started = true,
                             Some("assistant") if started => {
                                 let text: String = m["content"].as_array().into_iter().flatten()
                                     .filter(|c| c["type"] == "text").filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("");
@@ -543,7 +544,7 @@ fn print_messages(s: &Value) {
     println!("{}  ({})", s["title"].as_str().unwrap_or(""), s["model"].as_str().unwrap_or(""));
     for m in s["messages"].as_array().into_iter().flatten() {
         match m["role"].as_str() {
-            Some("user") => println!("\n› {}", m["content"].as_str().unwrap_or("")),
+            Some("user") => println!("\n› {}", text_of(&m["content"])),
             Some("assistant") => {
                 for c in m["content"].as_array().into_iter().flatten() {
                     match c["type"].as_str() {
@@ -558,7 +559,7 @@ fn print_messages(s: &Value) {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     let cli = Cli::parse();
     if let Err(e) = run(cli).await {
@@ -631,7 +632,7 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Status => {
-            let health: Value = reqwest::get(format!("{}/health", c.url)).await.with_context(|| format!("cannot reach zenbot at {}", c.url))?.json().await?;
+            let health = c.health().await?;
             let models = c.get("/api/models").await?;
             let any_signed_in = models["authenticated"].as_object().is_some_and(|a| a.values().any(|v| v == true));
             let version = c.get("/api/version").await.unwrap_or(Value::Null);

@@ -6,11 +6,12 @@
 #   scripts/e2e.sh              build, then run every scenario
 #   scripts/e2e.sh workflow     only scenarios whose name contains "workflow"
 #
-# Needs Postgres from deploy/compose.yaml (or DATABASE_ADMIN_URL), git, bubblewrap and python3.
+# Needs Docker with Postgres from deploy/compose.yaml, git, curl, jq and bubblewrap.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 export PATH="$HOME/.cargo/bin:$PATH"
+. "$REPO/scripts/db.sh"
 FILTER=${1:-}
 PORT=${ZEN_E2E_PORT:-18377}
 TOKEN=e2e-token-$$
@@ -22,14 +23,14 @@ KERNEL_PID=""
 FAILED=0
 PASSED=0
 
-psql() { docker compose -f "$REPO/deploy/compose.yaml" exec -T postgres psql -U zen -v ON_ERROR_STOP=1 -qAt "$@"; }
-q() { psql -d "$DB" -c "$1"; }
+DB_URL=$(db_url_for "$DB")
+q() { db_psql -d "$DB" -c "$1"; }
 stop_kernel() { if [ -n "$KERNEL_PID" ]; then kill "$KERNEL_PID" 2>/dev/null || true; wait "$KERNEL_PID" 2>/dev/null || true; fi; KERNEL_PID=""; }
-cleanup() { stop_kernel; [ -n "${ZEN_E2E_KEEP:-}" ] && { echo "kept: database $DB, files $TMP"; return; }; psql -d zen -c "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1 || true; rm -rf "$TMP"; }
+cleanup() { stop_kernel; [ -n "${ZEN_E2E_KEEP:-}" ] && { echo "kept: database $DB, files $TMP"; return; }; db_drop "$DB" || true; rm -rf "$TMP"; }
 trap cleanup EXIT
 
 [ -n "${ZEN_E2E_NO_BUILD:-}" ] || cargo build --release -q
-psql -d zen -c "CREATE DATABASE $DB" >/dev/null
+db_psql -d postgres -c "CREATE DATABASE $DB" >/dev/null
 
 # A git workspace with one commit, so verification has a diff baseline.
 new_workspace() {
@@ -43,14 +44,14 @@ start_kernel() {
   local ws=$1 script=$2; shift 2
   (
     export ZEN_TOKEN=$TOKEN ZEN_PORT=$PORT ZEN_WORKERS=engine ZEN_FAUX=1 ZEN_FAUX_SCRIPT=$script ZEN_WORKSPACE=$ws \
-      ZEN_ENGINE_CMD="$BIN/zen-engine" ZEN_VERIFY_SAMPLE=0 DATABASE_URL="postgres://zen:zen@127.0.0.1:5432/$DB" HOME="$TMP/home"
+      ZEN_ENGINE_CMD="$BIN/zen-engine" ZEN_VERIFY_SAMPLE=0 DATABASE_URL="$DB_URL" HOME="$TMP/home"
     unset ZEN_S1_MODEL OPENROUTER_API_KEY
     for kv in "$@"; do export "$kv"; done
     mkdir -p "$HOME"
     exec "$BIN/zend"
   ) >"$TMP/kernel.log" 2>&1 &
   KERNEL_PID=$!
-  for _ in $(seq 1 30); do curl -fs "$URL/health" >/dev/null 2>&1 && return 0; sleep 0.5; done
+  wait_healthy "$URL/health" 15 "$KERNEL_PID" && return 0
   echo "kernel did not start:"; tail -20 "$TMP/kernel.log"; return 1
 }
 
