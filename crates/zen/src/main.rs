@@ -559,7 +559,7 @@ fn print_messages(s: &Value) {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     let cli = Cli::parse();
     if let Err(e) = run(cli).await {
