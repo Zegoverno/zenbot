@@ -1,8 +1,8 @@
 # Evals
 
 Fixed tasks for comparing two versions of zenbot's harness with the same model and thinking
-level. Run them before a harness change, and show the report to the owner, who decides. They never
-block a commit or an upgrade on their own.
+level. Run them before a harness change is merged, and show the report to the owner, who decides. They
+never block a merge or an upgrade on their own.
 
 ```bash
 scripts/eval.sh                                   # this checkout vs the installed version
