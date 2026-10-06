@@ -57,7 +57,7 @@ fi
 
 echo "== smoke"
 # Run the new build as a second kernel on a spare port and drive one scripted turn
-# (faux engine -> kernel -> bash tool -> answer) through it. It runs on a throwaway copy of
+# (faux engine -> kernel -> bash tool -> answer) through it, and one through Pi when it's enabled. It runs on a throwaway copy of
 # the live database, so pending migrations are tried there and the live database is
 # untouched until the install (which backs it up first if migrations are pending).
 SMOKE_PORT=${ZEN_SMOKE_PORT:-18199}
@@ -66,6 +66,8 @@ SMOKE_LOG=$(mktemp)
 SMOKE_WS=$(mktemp -d)
 SMOKE_DB=zen_smoke_$$
 SMOKE_PID=
+SMOKE_WORKERS=engine
+grep -qE '^ZEN_WORKERS=.*pi' "$HOME/.zenbot/env" 2>/dev/null && SMOKE_WORKERS=engine,pi
 trap '[ -n "$SMOKE_PID" ] && kill $SMOKE_PID 2>/dev/null; rm -rf "$SMOKE_WS"; db_drop $SMOKE_DB' EXIT
 if ! db_copy_live "$SMOKE_DB" >"$SMOKE_LOG" 2>&1; then
   echo "SMOKE TEST FAILED: could not copy the live database ($(db_live_name)) to $SMOKE_DB"
@@ -75,17 +77,26 @@ fi
 SMOKE_DB_URL=$(db_url_for "$SMOKE_DB")
 (
   set -a; [ -f "$HOME/.zenbot/env" ] && . "$HOME/.zenbot/env"; set +a
-  ZEN_TOKEN="$(cat "$HOME/.zenbot/token")" ZEN_PORT=$SMOKE_PORT ZEN_WORKERS=engine ZEN_FAUX=1 ZEN_WORKSPACE="$SMOKE_WS" \
+  ZEN_TOKEN="$(cat "$HOME/.zenbot/token")" ZEN_PORT=$SMOKE_PORT ZEN_WORKERS=$SMOKE_WORKERS ZEN_MIND_DIR="$REPO/packages/mind" ZEN_FAUX=1 ZEN_WORKSPACE="$SMOKE_WS" \
     ZEN_HARNESS="$(git rev-parse --short HEAD)" DATABASE_URL="$SMOKE_DB_URL" \
     exec ./target/release/zend
 ) >>"$SMOKE_LOG" 2>&1 &
 SMOKE_PID=$!
 for _ in $(seq 1 30); do curl -fs "$SMOKE_URL/health" | grep -q '"ok":true' && break; sleep 1; done
-RESULT=$(ZEN_URL="$SMOKE_URL" timeout 60 ./target/release/zen ask --json -m faux/smoke "upgrade smoke test" 2>/dev/null || true)
+# One scripted turn per worker: zen-engine's faux/smoke and, with Pi enabled, Pi's faux/faux-1.
+SMOKE_FAILED=
+for SMOKE_MODEL in faux/smoke $([ "$SMOKE_WORKERS" = engine,pi ] && echo faux/faux-1); do
+  RESULT=$(ZEN_URL="$SMOKE_URL" timeout 60 ./target/release/zen ask --json -m "$SMOKE_MODEL" "upgrade smoke test" 2>/dev/null || true)
+  if ! echo "$RESULT" | jq -e '.error == null and (.text | contains("Smoke test passed")) and .tools[0].is_error == false' >/dev/null 2>&1; then
+    SMOKE_FAILED="$SMOKE_MODEL: ${RESULT:-none}"
+    break
+  fi
+  echo "turn on $SMOKE_MODEL ok"
+done
 kill $SMOKE_PID 2>/dev/null; wait $SMOKE_PID 2>/dev/null || true
 SMOKE_PID=
-if ! echo "$RESULT" | jq -e '.error == null and (.text | contains("Smoke test passed")) and .tools[0].is_error == false' >/dev/null 2>&1; then
-  echo "SMOKE TEST FAILED: the new build could not run a turn. Result: ${RESULT:-none}"
+if [ -n "$SMOKE_FAILED" ]; then
+  echo "SMOKE TEST FAILED: the new build could not run a turn on $SMOKE_FAILED"
   tail -20 "$SMOKE_LOG"
   exit 1
 fi
