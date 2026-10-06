@@ -61,6 +61,8 @@ relink() { local tmp; tmp="$(dirname "$1")/.zen-relink.$$"; as_owner "$(dirname 
 
 declare -A STATUS VERSION
 record() { VERSION[$1]=$2; STATUS[$1]=$3; }
+# rolled_back ENGINE NOW OLD NEW WHY: the update OLD → NEW failed its check and was undone.
+rolled_back() { record "$1" "$2" "rolled back from $4"; log "$1 $3 → $4 ROLLED BACK to $2: $5"; }
 
 # ---- the check every CLI update must pass: a real completion through zen-engine ----
 
@@ -234,8 +236,7 @@ update_cli() {
     log "$engine $have → $latest OK"
   else
     eval "$ROLLBACK"
-    record "$engine" "$("${engine}_installed")" "rolled back from $latest"
-    log "$engine $have → $latest ROLLED BACK to $("${engine}_installed"): $why"
+    rolled_back "$engine" "$("${engine}_installed")" "$have" "$latest" "$why"
   fi
 }
 
@@ -300,7 +301,7 @@ update_pi() {
     pi_restore; record pi "$have" "update failed"; log "pi $have → $news FAILED to install: $(echo "$out" | tail -1); kept $have"; return 0
   fi
   if ! why=$(pi_check "$(pi_pinned "${PI_PKGS[0]}")"); then
-    pi_restore; record pi "$have" "rolled back from $news"; log "pi $have → $news ROLLED BACK: $why"; return 0
+    pi_restore; rolled_back pi "$have" "$have" "$news" "$why"; return 0
   fi
   git -C "$REPO" commit -q -m "mind: Pi $(pi_pinned "${PI_PKGS[0]}")" \
     -m "Bumped by scripts/update-engines.sh (${want[*]}). Checked: ping, the scripted model$(grep -qE '^ZEN_S1_MODEL=.' "$ZEN/env" 2>/dev/null && echo ', a System One call'); scripts/upgrade.sh then runs a scripted Pi turn through the new build." \
@@ -310,8 +311,7 @@ update_pi() {
     log "pi $have → $(pi_pinned "${PI_PKGS[0]}") OK (committed $(git -C "$REPO" rev-parse --short HEAD); zenbot restarts at idle, see the upgrade lines)"
   else
     git -C "$REPO" reset -q --keep HEAD~1 && (cd "$MIND" && npm ci --no-audit --no-fund --silent)
-    record pi "$(pi_pinned "${PI_PKGS[0]}")" "rolled back from $news"
-    log "pi $have → $news ROLLED BACK (commit undone): scripts/upgrade.sh failed: $(echo "$out" | grep -E 'FAILED' | head -1)"
+    rolled_back pi "$(pi_pinned "${PI_PKGS[0]}")" "$have" "$news" "scripts/upgrade.sh failed, commit undone: $(echo "$out" | grep -E 'FAILED' | head -1)"
   fi
 }
 
