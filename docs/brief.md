@@ -1,6 +1,6 @@
 # Briefs, work and verification
 
-> **Being superseded** (2026-10-06, `docs/redesign.md`): the kernel-enforced workflow below moves
+> **Being superseded** (2026-10-06, D-026 and D-030 in `DECISIONS.md`, Phase 1 in `ROADMAP.md`): the kernel-enforced workflow below moves
 > into skills (`brief`, `verify`) and tools in Phase 1 of the redesign, and Phase 2b is replaced by
 > model choice from real usage (redesign Phase 6). This document describes what is built today.
 
