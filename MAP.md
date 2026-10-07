@@ -225,7 +225,8 @@ newer Pi.
 |---|---|---|---|---|
 | `src/main.rs` | 968 | clap commands: `ask`, `chat`, `sessions {ls,new,show,archive,restore,rename,decide}`, `memory [--tier short\|long\|archived\|proposed\|all] [sleep\|accept <id>\|reject <id>]`, `skills [accept\|reject <domain/name>]` (use per skill and the made tools), `tools accept\|reject <name>` (a `made_` prefix is dropped), `policy [set <kind> <model> [--candidates a,b] [--explore x] \| undo]` (the routing policy and its evidence), `models`, `login [claude\|codex\|pi]`, `status` (with a memory line), `upgrade [--check]` (the workflow commands are gone); flags `--url` (`ZEN_URL`), `--token` (`ZEN_TOKEN`), `--json`, `-c`, `-r`, `-m`, `-e`, `--inline` (`ZEN_INLINE`). Reads `~/.zenbot/env` (for `ZEN_REPO`, `ZEN_MIND_DIR`, `PATH`) and `~/.zenbot/engines.json` | `client`, `tui`, `md` | owner, scripts (`zen ask --json`), e2e, evals |
 | `src/client.rs` | 232 | HTTP + WebSocket client; token from `--token`/`ZEN_TOKEN` or `~/.zenbot/token`; upgrade wait/poll messages | reqwest, tungstenite | `main.rs`, `tui.rs` |
-| `src/tui.rs` | 1542 | **Largest file in the repo.** Interactive app: scrollback + live region, pickers, slash commands (`/new /resume /model /effort /done /rename /archive /upgrade /help /exit`), the `ask` tool's questions, history in `~/.zenbot/history`, banner from `~/.zenbot/version`. Render/key tests at the bottom | `client`, `editor`, `md` | `main.rs` |
+| `src/tui.rs` | 2067 | **Largest file in the repo.** Interactive app. Full screen: conversation entries re-rendered at the chat width in a scrolled viewport (PgUp/PgDn, wheel), the `/open` side panel (file reloaded on change), live region below. Inline: scrollback + live region. Pickers, slash commands (`/new /resume /model /effort /done /rename /open /close /mouse /archive /upgrade /help /exit`), the `ask` tool's questions, history in `~/.zenbot/history`, banner from `~/.zenbot/version`. Render/key tests at the bottom | `client`, `editor`, `md` | `main.rs` |
+| `src/screen.rs` | 124 | Full-screen frames: writes only the rows that changed, in place (no clearing, so no flicker); `fit` cuts/pads styled lines; `row` joins chat and panel | `md` | `tui.rs` |
 | `src/editor.rs` | 391 | Multi-line input editor with prompt history | — | `tui.rs` |
 | `src/md.rs` | 238 | Styled lines, word wrap, line-oriented markdown renderer | — | `tui.rs`, `main.rs` |
 
@@ -423,7 +424,7 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 
 - **Unit tests** live in `#[cfg(test)] mod tests` at the bottom of each file: `zend` (`tools` 10,
   `memory` 6, `skills` 5, `web` 5, `compile` 4, `mcp` 3, `search` 2, `wiki` 3, `workshop` 2, `delegate` 2, `compact` 3, `score` 3, `agent` 2, `context` 2, `measure` 2,
-  `secrets` 2, `defaults` 1, `api` 1, `git` 1), `zen` (`tui` 16 render/key tests, `editor` 5,
+  `secrets` 2, `defaults` 1, `api` 1, `git` 1), `zen` (`tui` 22 render/key tests, `screen` 2, `editor` 5,
   `main` 2, `client` 1), `zen-engine`
   (`claude` 3, `codex` 2, `turn` 2), `zen-proto` 1. Run `cargo test --release`.
 - **End to end:** `scripts/e2e.sh [filter]` builds, then runs each scenario on a fresh kernel (port

@@ -1,20 +1,24 @@
-//! Interactive terminal app. The conversation is printed into normal terminal scrollback; a
-//! live region at the bottom holds streaming text, status, the input box and the footer,
-//! redrawn in place.
+//! Interactive terminal app. A live region at the bottom holds status, the input box and the
+//! footer.
 //!
-//! Full screen (default): on start the screen is cleared (old contents go to scrollback) and
-//! the live region is padded so it stays pinned to the bottom of the terminal.
-//! Inline (`zen --inline` or ZEN_INLINE=1): no clearing or padding; the live region follows
-//! the conversation, like Claude Code, Codex and Pi.
+//! Full screen (default): zen owns the terminal's alternate screen. The conversation is kept as
+//! entries and re-rendered at the current width, in a viewport above the live region that
+//! scrolls with PgUp/PgDn or the mouse wheel. `/open <file>` shows a file in a side panel next to
+//! the chat, reloaded when it changes. Each frame is drawn whole and only changed rows are
+//! written (`screen.rs`), so nothing flickers.
+//! Inline (`zen --inline` or ZEN_INLINE=1): the conversation is printed into normal terminal
+//! scrollback and the live region (with the streaming text) follows it, like Claude Code, Codex
+//! and Pi.
 
 use std::io::Write;
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
 use zen_proto::text_of;
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::{execute, terminal};
 use futures_util::stream::SplitSink;
@@ -27,9 +31,16 @@ use unicode_width::UnicodeWidthStr;
 use crate::client::{short, tool_summary, Client, NewSession, Ws};
 use crate::editor::Editor;
 use crate::md::{self, line, Line, Md, Sty};
+use crate::screen::{self, Screen};
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const PLACEHOLDER: &str = "Ask zenbot to do something…";
+
+const ALT_SCREEN_ON: &str = "\x1b[?1049h\x1b[H\x1b[2J";
+const ALT_SCREEN_OFF: &str = "\x1b[?1049l";
+/// Report mouse buttons and the wheel (SGR encoding), but not motion.
+const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1006h";
+const MOUSE_OFF: &str = "\x1b[?1006l\x1b[?1000l";
 
 struct Command {
     name: &'static str,
@@ -49,6 +60,9 @@ const COMMANDS: &[Command] = &[
     cmd("/effort", "choose the thinking level", false),
     cmd("/done", "judge the work so far: accept, more, reshape or drop", false),
     cmd("/rename", "rename this session: /rename <title>", true),
+    cmd("/open", "show a file next to the chat: /open <path> (no path: the last file zenbot touched)", true),
+    cmd("/close", "close the side panel", false),
+    cmd("/mouse", "mouse wheel scrolling on/off (off lets the terminal select text)", false),
     cmd("/archive", "archive this session and start a new one", false),
     cmd("/upgrade", "update zenbot to the latest version and restart it", false),
     cmd("/help", "keys and commands", false),
@@ -81,6 +95,88 @@ struct Picker {
     items: Vec<(String, String)>,
     selected: usize,
     kind: PickKind,
+}
+
+/// One piece of the conversation, kept as its source so it can be re-rendered at any width
+/// (a resize, or the side panel opening or closing).
+enum Entry {
+    User(String),
+    /// Assistant text, as markdown.
+    Md(String),
+    ToolCall(String, Value),
+    /// A tool's result: its first lines, how many more there are, and whether it failed.
+    ToolResult { head: Vec<String>, more: usize, error: bool },
+    /// Already styled lines (notes, help, end-of-turn lines); re-wrapped when too wide.
+    Raw(Vec<Line>),
+}
+
+/// Narrowest terminal (columns) that fits the chat and the side panel next to each other.
+const SPLIT_MIN: usize = 60;
+
+/// Largest file the side panel loads.
+const PANEL_MAX_BYTES: u64 = 2 << 20;
+
+/// A file shown next to the chat.
+struct Panel {
+    path: PathBuf,
+    text: String,
+    modified: Option<SystemTime>,
+    /// First line shown.
+    scroll: usize,
+    /// Rendered lines, and the width they were rendered at.
+    lines: Vec<Line>,
+    lines_w: usize,
+}
+
+impl Panel {
+    fn open(path: PathBuf) -> std::result::Result<Panel, String> {
+        let mut p = Panel { path, text: String::new(), modified: None, scroll: 0, lines: Vec::new(), lines_w: 0 };
+        p.load()?;
+        Ok(p)
+    }
+
+    fn load(&mut self) -> std::result::Result<(), String> {
+        let meta = std::fs::metadata(&self.path).map_err(|e| format!("can't open {}: {e}", self.path.display()))?;
+        if !meta.is_file() {
+            return Err(format!("{} is not a file", self.path.display()));
+        }
+        if meta.len() > PANEL_MAX_BYTES {
+            return Err(format!("{} is too big to show ({} MB)", self.path.display(), meta.len() >> 20));
+        }
+        let bytes = std::fs::read(&self.path).map_err(|e| format!("can't read {}: {e}", self.path.display()))?;
+        self.text = String::from_utf8_lossy(&bytes).replace('\t', "    ").replace('\r', "");
+        self.modified = meta.modified().ok();
+        self.lines_w = 0;
+        Ok(())
+    }
+
+    /// Reload the file if it changed on disk; true when it did.
+    fn reload_if_changed(&mut self) -> bool {
+        let now = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
+        if now.is_some() && now != self.modified {
+            return self.load().is_ok();
+        }
+        false
+    }
+
+    fn name(&self) -> String {
+        self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| self.path.display().to_string())
+    }
+
+    /// The file's lines at `width` columns: markdown files rendered, others wrapped as they are.
+    fn lines(&mut self, width: usize) -> &[Line] {
+        if self.lines_w != width {
+            let is_md = self.path.extension().is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"));
+            self.lines = if is_md {
+                Md::default().render(&self.text, width)
+            } else {
+                let none = || (String::new(), Sty::Plain);
+                self.text.split('\n').flat_map(|l| md::wrap(vec![(l.to_string(), Sty::Plain)], width, none(), none())).collect()
+            };
+            self.lines_w = width;
+        }
+        &self.lines
+    }
 }
 
 /// The live region at the bottom of the terminal, as last painted.
@@ -152,6 +248,22 @@ struct App {
     ctrl_c_at: Option<Instant>,
     upgrading: bool,
     quit: bool,
+    /// Full screen: the conversation, and its lines rendered at `view_w` columns.
+    entries: Vec<Entry>,
+    view: Vec<Line>,
+    view_w: usize,
+    /// Full screen: lines scrolled up from the bottom of the conversation (0 follows it).
+    scroll: usize,
+    /// Conversation lines at the last frame, to keep a scrolled-up view still as lines arrive.
+    last_total: usize,
+    screen: Screen,
+    panel: Option<Panel>,
+    /// The last file a tool read or changed: what `/open` with no path shows.
+    last_file: Option<String>,
+    /// Mouse wheel reporting is on (the terminal then needs shift+drag to select text).
+    mouse: bool,
+    /// When the running tool started, for its elapsed time in the status line.
+    tool_since: Option<Instant>,
 }
 
 fn banner(version_path: Option<&std::path::Path>) -> Line {
@@ -214,6 +326,16 @@ impl App {
             ctrl_c_at: None,
             upgrading: false,
             quit: false,
+            entries: Vec::new(),
+            view: Vec::new(),
+            view_w: 0,
+            scroll: 0,
+            last_total: 0,
+            screen: Screen::default(),
+            panel: None,
+            last_file: None,
+            mouse: !inline,
+            tool_since: None,
         }
     }
 }
@@ -243,12 +365,15 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
     }
     app.enhanced = enhanced;
     if !inline {
-        // Full screen: push what's on screen into scrollback and start from the top.
-        let _ = out.write_all(format!("\x1b[999B{}\x1b[H", "\n".repeat(app.height())).as_bytes());
+        // Full screen: the alternate screen leaves the terminal's own scrollback untouched.
+        let _ = out.write_all(format!("{ALT_SCREEN_ON}{MOUSE_ON}").as_bytes());
         let _ = out.flush();
     }
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        if !inline {
+            let _ = std::io::stdout().write_all(format!("{MOUSE_OFF}{ALT_SCREEN_OFF}\x1b[?25h").as_bytes());
+        }
         let _ = terminal::disable_raw_mode();
         default_hook(info);
     }));
@@ -291,6 +416,7 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
 
         let mut events = EventStream::new();
         let mut tick = tokio::time::interval(Duration::from_millis(90));
+        let mut watch = tokio::time::interval(Duration::from_millis(500));
         while !app.quit {
             tokio::select! {
                 ev = events.next() => match ev {
@@ -309,6 +435,12 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
                     app.spin = app.spin.wrapping_add(1);
                     app.draw();
                 }
+                // The side panel follows its file as it changes (e.g. while zenbot edits it).
+                _ = watch.tick(), if app.panel.is_some() => {
+                    if app.panel.as_mut().is_some_and(Panel::reload_if_changed) {
+                        app.draw();
+                    }
+                }
             }
         }
         Ok::<(), anyhow::Error>(())
@@ -317,7 +449,11 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
 
     // Restore the terminal.
     let mut s = String::from("\x1b[?2026h");
-    app.erase(&mut s);
+    if inline {
+        app.erase(&mut s);
+    } else {
+        s.push_str(&format!("{MOUSE_OFF}{ALT_SCREEN_OFF}"));
+    }
     if let Some(id) = &app.session {
         s.push_str(&md::to_ansi(&line(format!("session {} · resume with: zen -r {}", short(id), short(id)), Sty::Dim)));
         s.push_str("\r\n");
@@ -408,8 +544,12 @@ impl App {
         let _ = stdout.flush();
     }
 
-    /// Redraw the live region in place.
+    /// Redraw: the whole frame in full screen, the live region in place inline.
     fn draw(&mut self) {
+        if !self.inline {
+            self.frame();
+            return;
+        }
         let mut out = String::from("\x1b[?2026h");
         self.erase(&mut out);
         self.paint_region(&mut out);
@@ -417,9 +557,136 @@ impl App {
         self.flush(out);
     }
 
-    /// Print lines permanently into scrollback above the live region. Lines wider than the
-    /// screen are wrapped here, so every printed line is exactly one row and `filled` stays true.
+    /// Columns for the chat and for the side panel (0 when it's closed or the screen is too narrow).
+    fn columns(&self) -> (usize, usize) {
+        let total = self.width();
+        if self.panel.is_some() && !self.inline && total >= SPLIT_MIN {
+            let panel = (total - 3) / 2;
+            (total - 3 - panel, panel)
+        } else {
+            (total, 0)
+        }
+    }
+
+    fn render_entry(e: &Entry, w: usize) -> Vec<Line> {
+        match e {
+            Entry::User(text) => Self::render_user(text, w),
+            Entry::Md(text) => {
+                let mut out = Md::default().render(text.trim_end(), w);
+                out.push(Vec::new());
+                out
+            }
+            Entry::ToolCall(name, args) => Self::render_tool_call(name, args, w),
+            Entry::ToolResult { head, more, error } => Self::render_tool_result(head, *more, *error, w),
+            Entry::Raw(lines) => lines
+                .iter()
+                .flat_map(|l| {
+                    if l.iter().map(|(t, _)| UnicodeWidthStr::width(t.as_str())).sum::<usize>() <= w {
+                        vec![l.clone()]
+                    } else {
+                        md::wrap(l.clone(), w, (String::new(), Sty::Plain), (String::new(), Sty::Plain))
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    /// Add to the conversation: into the transcript in full screen, into scrollback inline.
+    fn push(&mut self, e: Entry) {
+        self.push_all(vec![e]);
+    }
+
+    /// Render the transcript again when the chat width changed.
+    fn sync_view(&mut self) {
+        let w = self.columns().0;
+        if self.view_w != w {
+            self.view = self.entries.iter().flat_map(|e| Self::render_entry(e, w)).collect();
+            self.view_w = w;
+        }
+    }
+
+    /// Rows the conversation gets above the live region at the current size.
+    fn viewport_rows(&self) -> usize {
+        let region = self.compose().0.len().min(self.height().saturating_sub(1));
+        self.height().saturating_sub(region).max(1)
+    }
+
+    fn scroll_chat(&mut self, up: bool, n: usize) {
+        self.scroll = if up { self.scroll + n } else { self.scroll.saturating_sub(n) };
+    }
+
+    fn scroll_panel(&mut self, up: bool, n: usize) {
+        if let Some(p) = &mut self.panel {
+            p.scroll = if up { p.scroll.saturating_sub(n) } else { p.scroll + n };
+        }
+    }
+
+    /// Full screen: compose every row (conversation and side panel above, live region below)
+    /// and write the rows that changed.
+    fn frame(&mut self) {
+        self.sync_view();
+        let (cw, pw) = self.columns();
+        let h = self.height();
+        let (mut region, mut caret_row, caret_col, show_caret) = self.compose();
+        let max = h.saturating_sub(1);
+        if region.len() > max {
+            let cut = region.len() - max;
+            region.drain(..cut);
+            caret_row = caret_row.saturating_sub(cut);
+        }
+        let vh = h - region.len();
+
+        // The conversation, with the streaming reply at the end: all of it, as it arrives.
+        let live = if self.busy && !self.stream.is_empty() { Md::default().render(&self.stream, cw) } else { Vec::new() };
+        let total = self.view.len() + live.len();
+        if self.scroll > 0 && total > self.last_total {
+            self.scroll += total - self.last_total; // scrolled up: keep the view where it is
+        }
+        self.last_total = total;
+        self.scroll = self.scroll.min(total.saturating_sub(vh));
+        let end = total - self.scroll;
+        let start = end.saturating_sub(vh);
+        let at = |i: usize| if i < self.view.len() { &self.view[i] } else { &live[i - self.view.len()] };
+        let mut chat: Vec<Line> = (start..end).map(|i| at(i).clone()).collect();
+        if self.scroll > 0 && !chat.is_empty() {
+            let last = chat.len() - 1;
+            chat[last] = line(format!("↓ {} more lines · PgDn", self.scroll), Sty::Accent);
+        }
+
+        // The side panel: a title row, then the file from its scroll position.
+        let mut side: Vec<Line> = Vec::new();
+        if pw > 0 {
+            if let Some(p) = &mut self.panel {
+                let name = p.name();
+                let rows = vh.saturating_sub(1);
+                let lines = p.lines(pw);
+                let n = lines.len();
+                p.scroll = p.scroll.min(n.saturating_sub(rows));
+                let s = p.scroll;
+                let lines = p.lines(pw);
+                let pos = if n > rows { format!(" · {}-{} of {n}", s + 1, (s + rows).min(n)) } else { String::new() };
+                side.push(vec![(name, Sty::Bold), (format!("{pos} · alt+↑↓ scroll · /close"), Sty::Dim)]);
+                side.extend(lines.iter().skip(s).take(rows).cloned());
+            }
+        }
+
+        let mut rows: Vec<String> = (0..vh)
+            .map(|r| screen::row(chat.get(r), (pw > 0).then(|| (side.get(r), pw)), cw))
+            .collect();
+        rows.extend(region.iter().map(|l| md::to_ansi(&screen::fit(l, self.width(), false))));
+        let caret = show_caret.then_some((vh + caret_row, caret_col));
+        let out = self.screen.frame(rows, caret);
+        self.flush(out);
+    }
+
+    /// Add lines to the conversation (see `push`).
     fn commit(&mut self, lines: Vec<Line>) {
+        self.push(Entry::Raw(lines));
+    }
+
+    /// Inline: print lines permanently into scrollback above the live region. Lines wider than the
+    /// screen are wrapped here, so every printed line is exactly one row and `filled` stays true.
+    fn print(&mut self, lines: Vec<Line>) {
         if lines.is_empty() {
             return;
         }
@@ -486,7 +753,8 @@ impl App {
 
         // Streaming text that hasn't completed a line yet, rendered in the state the committed
         // lines left (e.g. inside a code fence), without changing it.
-        if self.busy && self.committed < self.stream.len() {
+        // (Full screen shows it in the conversation instead.)
+        if self.inline && self.busy && self.committed < self.stream.len() {
             let mut m = self.md;
             let partial = m.render(&self.stream[self.committed..], w);
             let skip = partial.len().saturating_sub(6);
@@ -494,10 +762,12 @@ impl App {
         }
         if self.busy {
             let secs = self.turn_started.elapsed().as_secs();
+            // How long the running tool has taken, so a long one (a subagent) visibly progresses.
+            let tool = self.tool_since.map(|t| t.elapsed().as_secs()).filter(|s| *s > 0).map(|s| format!(" ({s}s)")).unwrap_or_default();
             lines.push(vec![
                 (format!("{} ", SPINNER[self.spin % SPINNER.len()]), Sty::Accent),
-                (self.status.chars().take(w.saturating_sub(30)).collect(), Sty::Plain),
-                (format!("  {secs}s · esc to interrupt"), Sty::Dim),
+                (self.status.chars().take(w.saturating_sub(40)).collect(), Sty::Plain),
+                (format!("{tool}  ·  turn {secs}s · esc to interrupt"), Sty::Dim),
             ]);
         } else if let Some((n, s)) = &self.notice {
             lines.push(line(n.chars().take(w).collect::<String>(), *s));
@@ -592,24 +862,24 @@ impl App {
         Ok(())
     }
 
-    /// Print a session's latest messages into scrollback and total its tokens for the footer.
+    /// Show a session's latest messages and total its tokens for the footer.
     fn show_history(&mut self, s: &Value) {
-        let w = self.width();
         let msgs = s["messages"].as_array().cloned().unwrap_or_default();
-        let mut out: Vec<Line> = vec![line(format!("── {} ──", if self.title.is_empty() { "session" } else { &self.title }), Sty::Dim), Vec::new()];
+        let mut head: Vec<Line> = vec![line(format!("── {} ──", if self.title.is_empty() { "session" } else { &self.title }), Sty::Dim), Vec::new()];
         let skip = msgs.len().saturating_sub(40);
         if skip > 0 {
-            out.push(line(format!("… {skip} earlier messages"), Sty::Dim));
-            out.push(Vec::new());
+            head.push(line(format!("… {skip} earlier messages"), Sty::Dim));
+            head.push(Vec::new());
         }
+        let mut entries = vec![Entry::Raw(head)];
         for m in msgs.iter().skip(skip) {
-            out.extend(self.render_message(m, w));
+            entries.extend(Self::message_entries(m));
         }
         // The footer's total covers the whole session, not only the messages shown.
         for m in msgs.iter().filter(|m| m["role"] == "assistant") {
             self.session_tokens += ["input", "output", "cacheRead", "cacheWrite"].iter().map(|k| m["usage"][*k].as_i64().unwrap_or(0)).sum::<i64>();
         }
-        self.commit(out);
+        self.push_all(entries);
         if s["busy"] == true {
             self.busy = true;
             self.status = "Working".into();
@@ -617,7 +887,23 @@ impl App {
         }
     }
 
-    fn render_user(&self, text: &str, w: usize) -> Vec<Line> {
+    /// Add several entries with one redraw.
+    fn push_all(&mut self, entries: Vec<Entry>) {
+        if self.inline {
+            let w = self.width();
+            let lines = entries.iter().flat_map(|e| Self::render_entry(e, w)).collect();
+            self.print(lines);
+            return;
+        }
+        if self.view_w == self.columns().0 {
+            let w = self.view_w;
+            self.view.extend(entries.iter().flat_map(|e| Self::render_entry(e, w)));
+        }
+        self.entries.extend(entries);
+        self.draw();
+    }
+
+    fn render_user(text: &str, w: usize) -> Vec<Line> {
         let mut out = Vec::new();
         for (i, l) in text.split('\n').enumerate() {
             let prefix = if i == 0 { ("› ".to_string(), Sty::Accent) } else { ("  ".to_string(), Sty::Plain) };
@@ -633,15 +919,21 @@ impl App {
         md::wrap(vec![(name.to_string(), Sty::Bold), (format!(" {detail}"), Sty::Dim)], w, ("• ".into(), Sty::Accent), ("  ".into(), Sty::Plain))
     }
 
-    fn render_tool_result(m: &Value, w: usize) -> Vec<Line> {
+    /// A tool result as shown: its first three non-empty lines and how many more there are.
+    fn tool_result_entry(m: &Value) -> Entry {
         let text = text_of(&m["content"]);
-        let sty = if m["isError"] == true { Sty::Err } else { Sty::Dim };
         let body: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+        let head = body.iter().take(3).map(|l| l.chars().take(400).collect()).collect();
+        Entry::ToolResult { head, more: body.len().saturating_sub(3), error: m["isError"] == true }
+    }
+
+    fn render_tool_result(head: &[String], more: usize, error: bool, w: usize) -> Vec<Line> {
+        let sty = if error { Sty::Err } else { Sty::Dim };
         let mut out = Vec::new();
-        if body.is_empty() {
+        if head.is_empty() {
             out.push(line("  └ (no output)", Sty::Dim));
         }
-        for (i, l) in body.iter().take(3).enumerate() {
+        for (i, l) in head.iter().enumerate() {
             let max = w.saturating_sub(5);
             let mut s: String = l.chars().take(max).collect();
             if UnicodeWidthStr::width(s.as_str()) > max {
@@ -649,36 +941,34 @@ impl App {
             }
             out.push(vec![(if i == 0 { "  └ " } else { "    " }.to_string(), Sty::Dim), (s, sty)]);
         }
-        if body.len() > 3 {
-            out.push(line(format!("    … {} more lines", body.len() - 3), Sty::Dim));
+        if more > 0 {
+            out.push(line(format!("    … {more} more lines"), Sty::Dim));
         }
         out.push(Vec::new());
         out
     }
 
-    fn render_message(&self, m: &Value, w: usize) -> Vec<Line> {
+    /// A stored message as conversation entries.
+    fn message_entries(m: &Value) -> Vec<Entry> {
         match m["role"].as_str() {
-            Some("user") => self.render_user(&text_of(&m["content"]), w),
+            Some("user") => vec![Entry::User(text_of(&m["content"]))],
             Some("assistant") => {
                 let mut out = Vec::new();
-                let mut md = Md::default();
                 for c in m["content"].as_array().into_iter().flatten() {
                     match c["type"].as_str() {
                         Some("text") if !c["text"].as_str().unwrap_or("").trim().is_empty() => {
-                            out.extend(md.render(c["text"].as_str().unwrap_or("").trim_end(), w));
-                            out.push(Vec::new());
+                            out.push(Entry::Md(c["text"].as_str().unwrap_or("").to_string()));
                         }
-                        Some("toolCall") => out.extend(Self::render_tool_call(c["name"].as_str().unwrap_or(""), &c["arguments"], w)),
+                        Some("toolCall") => out.push(Entry::ToolCall(c["name"].as_str().unwrap_or("").to_string(), c["arguments"].clone())),
                         _ => {}
                     }
                 }
                 if m["stopReason"] == "error" {
-                    out.push(line(m["errorMessage"].as_str().unwrap_or("error").to_string(), Sty::Err));
-                    out.push(Vec::new());
+                    out.push(Entry::Raw(vec![line(m["errorMessage"].as_str().unwrap_or("error").to_string(), Sty::Err), Vec::new()]));
                 }
                 out
             }
-            Some("toolResult") => Self::render_tool_result(m, w),
+            Some("toolResult") => vec![Self::tool_result_entry(m)],
             _ => Vec::new(),
         }
     }
@@ -812,6 +1102,21 @@ impl App {
                 self.region.reflow(cols as usize);
                 self.size = (cols as usize, rows as usize);
                 self.filled = self.filled.min(self.height());
+                self.screen.invalidate();
+            }
+            Event::Mouse(m) => {
+                // The wheel scrolls whichever side is under the pointer.
+                let up = match m.kind {
+                    MouseEventKind::ScrollUp => true,
+                    MouseEventKind::ScrollDown => false,
+                    _ => return Ok(()),
+                };
+                let (cw, pw) = self.columns();
+                if pw > 0 && m.column as usize > cw + 1 && (m.row as usize) < self.viewport_rows() {
+                    self.scroll_panel(up, 3);
+                } else {
+                    self.scroll_chat(up, 3);
+                }
             }
             _ => return Ok(()),
         }
@@ -836,6 +1141,27 @@ impl App {
                 _ => {}
             }
             return Ok(());
+        }
+
+        // Scrolling (full screen): PgUp/PgDn move the chat, alt+↑↓ and alt+PgUp/PgDn the side panel.
+        if !self.inline {
+            let page = self.viewport_rows().saturating_sub(2).max(1);
+            let panel = self.columns().1 > 0;
+            match k.code {
+                KeyCode::Up | KeyCode::Down if alt && panel => {
+                    self.scroll_panel(k.code == KeyCode::Up, 1);
+                    return Ok(());
+                }
+                KeyCode::PageUp | KeyCode::PageDown if alt && panel => {
+                    self.scroll_panel(k.code == KeyCode::PageUp, page);
+                    return Ok(());
+                }
+                KeyCode::PageUp | KeyCode::PageDown => {
+                    self.scroll_chat(k.code == KeyCode::PageUp, page);
+                    return Ok(());
+                }
+                _ => {}
+            }
         }
 
         if !(ctrl && k.code == KeyCode::Char('c')) {
@@ -988,8 +1314,8 @@ impl App {
         if self.title.is_empty() {
             self.title = text.chars().take(40).collect::<String>().trim().to_string();
         }
-        let w = self.width();
-        self.commit(self.render_user(&text, w));
+        self.scroll = 0; // back to the latest when you send
+        self.push(Entry::User(text.clone()));
         self.pending_prompt = Some(text.clone());
         self.busy = true;
         self.status = "Working".into();
@@ -1057,6 +1383,8 @@ impl App {
                     ("↑ ↓", "previous prompts; in the / menu, choose a command (tab completes)"),
                     ("ctrl+←/→", "move by word (also alt+b / alt+f); ctrl+a/e line start/end"),
                     ("ctrl+u/k", "delete to line start / end; ctrl+w deletes a word"),
+                    ("PgUp/PgDn", "scroll the conversation (also the mouse wheel)"),
+                    ("alt+↑↓", "scroll the side panel (alt+PgUp/PgDn by page; or the wheel over it)"),
                     ("ctrl+c", "clear input; twice to exit"),
                     ("ctrl+d", "exit"),
                 ] {
@@ -1065,11 +1393,53 @@ impl App {
                 out.push(Vec::new());
                 self.commit(out);
             }
+            Some("/open") => self.open_panel(arg),
+            Some("/close") => {
+                if self.panel.take().is_none() {
+                    self.note("no file is open", Sty::Dim);
+                }
+            }
+            Some("/mouse") if !self.inline => {
+                self.mouse = !self.mouse;
+                self.flush((if self.mouse { MOUSE_ON } else { MOUSE_OFF }).to_string());
+                let state = if self.mouse { "on: the wheel scrolls (to select text: /mouse off, or shift+drag in most terminals)" } else { "off: drag selects text; PgUp/PgDn scroll" };
+                self.note(format!("mouse {state}"), Sty::Dim);
+            }
+            Some("/mouse") => self.note("inline mode leaves the mouse to the terminal", Sty::Dim),
             Some("/upgrade") => self.start_upgrade(),
             Some("/exit") => self.quit = true,
             _ => self.note(format!("unknown command {input}; try /help"), Sty::Warn),
         }
         Ok(())
+    }
+
+    // ---------- side panel ----------
+
+    /// `/open [path]`: show a file next to the chat; with no path, the last file a tool touched.
+    fn open_panel(&mut self, arg: &str) {
+        if self.inline {
+            self.note("the side panel needs full screen: run zen without --inline", Sty::Warn);
+            return;
+        }
+        let Some(raw) = (if arg.is_empty() { self.last_file.clone() } else { Some(arg.to_string()) }) else {
+            self.note("usage: /open <path> (no file touched yet in this session)", Sty::Warn);
+            return;
+        };
+        let home = std::env::var("HOME").unwrap_or_default();
+        let path = match raw.strip_prefix("~/") {
+            Some(rest) => PathBuf::from(&home).join(rest),
+            None if raw == "~" => PathBuf::from(&home),
+            None => PathBuf::from(&raw),
+        };
+        match Panel::open(path) {
+            Ok(p) => {
+                if self.width() < SPLIT_MIN {
+                    self.note(format!("the terminal is too narrow for the side panel (needs {SPLIT_MIN} columns)"), Sty::Warn);
+                }
+                self.panel = Some(p);
+            }
+            Err(e) => self.note(e, Sty::Err),
+        }
     }
 
     // ---------- upgrade ----------
@@ -1136,44 +1506,59 @@ impl App {
                         if self.pending_prompt.as_deref() == Some(text.as_str()) {
                             self.pending_prompt = None;
                         } else {
-                            self.commit(self.render_user(&text, w));
+                            self.push(Entry::User(text));
                         }
                     }
                     Some("assistant") => {
-                        let mut out = Vec::new();
+                        let mut entries = Vec::new();
                         let full: String = m["content"].as_array().into_iter().flatten().filter(|c| c["type"] == "text").filter_map(|c| c["text"].as_str()).collect();
-                        if self.stream.is_empty() {
-                            if !full.trim().is_empty() {
-                                out.extend(self.md.render(full.trim_end(), w));
+                        if self.inline {
+                            // Inline, the streamed lines are already in scrollback: print the rest.
+                            let mut out = Vec::new();
+                            if self.stream.is_empty() {
+                                if !full.trim().is_empty() {
+                                    out.extend(self.md.render(full.trim_end(), w));
+                                }
+                            } else if self.committed < self.stream.len() {
+                                let rest = self.stream[self.committed..].to_string();
+                                out.extend(self.md.render(rest.trim_end(), w));
                             }
-                        } else if self.committed < self.stream.len() {
-                            let rest = self.stream[self.committed..].to_string();
-                            out.extend(self.md.render(rest.trim_end(), w));
-                        }
-                        if !full.trim().is_empty() {
-                            out.push(Vec::new());
+                            if !full.trim().is_empty() {
+                                out.push(Vec::new());
+                            }
+                            entries.push(Entry::Raw(out));
+                        } else {
+                            let text = if full.trim().is_empty() { self.stream.clone() } else { full };
+                            if !text.trim().is_empty() {
+                                entries.push(Entry::Md(text));
+                            }
                         }
                         self.stream.clear();
                         self.committed = 0;
                         self.md = Md::default();
                         for c in m["content"].as_array().into_iter().flatten().filter(|c| c["type"] == "toolCall") {
-                            out.extend(Self::render_tool_call(c["name"].as_str().unwrap_or(""), &c["arguments"], w));
+                            entries.push(Entry::ToolCall(c["name"].as_str().unwrap_or("").to_string(), c["arguments"].clone()));
                         }
                         if m["stopReason"] == "error" && !self.aborting {
-                            out.push(line(m["errorMessage"].as_str().unwrap_or("error").to_string(), Sty::Err));
+                            entries.push(Entry::Raw(vec![line(m["errorMessage"].as_str().unwrap_or("error").to_string(), Sty::Err)]));
                         }
                         let u = &m["usage"];
                         self.turn_tokens += ["input", "output", "cacheRead", "cacheWrite"].iter().map(|k| u[*k].as_i64().unwrap_or(0)).sum::<i64>();
                         self.turn_model = m["model"].as_str().unwrap_or("").to_string();
-                        self.commit(out);
+                        self.push_all(entries);
                     }
-                    Some("toolResult") => self.commit(Self::render_tool_result(m, w)),
+                    Some("toolResult") => self.push(Self::tool_result_entry(m)),
                     _ => {}
                 }
             }
             "delta" => {
                 self.stream.push_str(ev["delta"].as_str().unwrap_or(""));
                 self.status = "Writing".into();
+                self.tool_since = None;
+                if !self.inline {
+                    self.draw(); // the whole reply so far shows in the conversation
+                    return;
+                }
                 let mut out = Vec::new();
                 while let Some(pos) = self.stream[self.committed..].find('\n') {
                     let l = self.stream[self.committed..self.committed + pos].to_string();
@@ -1223,11 +1608,24 @@ impl App {
                 self.status = "Thinking".into();
             }
             "tool_start" => {
-                self.status = format!("Running {}", tool_summary(ev["name"].as_str().unwrap_or(""), &ev["args"]));
+                let name = ev["name"].as_str().unwrap_or("");
+                self.status = format!("Running {}", tool_summary(name, &ev["args"]));
+                self.tool_since = Some(Instant::now());
+                // Remember the file, for `/open` with no path.
+                if matches!(name.rsplit("__").next(), Some("read" | "write" | "edit")) {
+                    if let Some(path) = ev["args"]["path"].as_str() {
+                        self.last_file = Some(path.to_string());
+                    }
+                }
                 self.draw();
             }
             "tool_end" => {
                 self.status = "Working".into();
+                self.tool_since = None;
+                // A tool may have changed the file in the side panel: show it now, not on the next poll.
+                if self.panel.as_mut().is_some_and(Panel::reload_if_changed) {
+                    self.draw();
+                }
             }
             "end" if !self.busy => {} // already ended (e.g. after a resync)
             "resync" => {
@@ -1238,8 +1636,13 @@ impl App {
             }
             "end" => {
                 let mut out = Vec::new();
+                self.tool_since = None;
                 if self.aborting {
-                    if self.committed < self.stream.len() {
+                    if !self.inline {
+                        if !self.stream.trim().is_empty() {
+                            out.extend(Md::default().render(self.stream.trim_end(), w));
+                        }
+                    } else if self.committed < self.stream.len() {
                         let rest = self.stream[self.committed..].to_string();
                         out.extend(self.md.render(rest.trim_end(), w));
                     }
@@ -1369,6 +1772,7 @@ mod tests {
     #[test]
     fn committed_lines_wider_than_the_screen_are_wrapped_and_counted() {
         let mut a = app(40, 30);
+        a.inline = true;
         a.commit(vec![line("x".repeat(100), Sty::Err)]);
         // 39 usable columns: 100 characters take 3 rows, and the pinning must count all 3.
         assert_eq!(a.filled, 3);
@@ -1380,7 +1784,9 @@ mod tests {
     fn full_screen_pins_the_region_to_the_bottom_and_inline_does_not() {
         let mut a = app(40, 20);
         a.draw();
-        assert_eq!(a.region.height, 20, "padded to fill the screen");
+        let rows = a.screen.rows();
+        assert_eq!(rows.len(), 20, "every row of the screen is drawn");
+        assert!(rows[rows.len() - 2].contains('╰'), "the input box sits at the bottom, above the footer: {rows:#?}");
         let mut b = app(40, 20);
         b.inline = true;
         b.draw();
@@ -1502,6 +1908,7 @@ mod tests {
     #[test]
     fn a_streaming_partial_line_inside_a_code_fence_renders_as_code() {
         let mut a = app(80, 20);
+        a.inline = true;
         a.busy = true;
         a.on_event(json!({ "type": "delta", "delta": "```\nlet x = 1;" }));
         let (lines, _, _, _) = a.compose();
@@ -1514,13 +1921,131 @@ mod tests {
     }
 
     #[test]
+    fn full_screen_streams_the_whole_reply_into_the_conversation() {
+        let mut a = app(80, 30);
+        a.busy = true;
+        let reply: String = (1..=12).map(|i| format!("line {i}\n")).collect();
+        a.on_event(json!({ "type": "delta", "delta": reply }));
+        let rows = a.screen.rows().join("\n");
+        assert!(rows.contains("line 1") && rows.contains("line 12"), "not only the last few lines: {rows}");
+        assert!(a.compose().0.iter().all(|l| !l.iter().any(|(t, _)| t.contains("line 12"))), "and not in the live region");
+        // The finished message replaces the stream, rendered once.
+        a.on_event(json!({ "type": "message", "message": { "role": "assistant", "content": [{ "type": "text", "text": reply }] } }));
+        let rows = a.screen.rows().join("\n");
+        assert_eq!(rows.matches("line 12").count(), 1, "{rows}");
+    }
+
+    #[test]
+    fn a_delta_rewrites_only_the_rows_that_changed() {
+        let mut a = app(80, 30);
+        a.busy = true;
+        a.commit(vec![line("earlier conversation", Sty::Plain)]);
+        a.on_event(json!({ "type": "delta", "delta": "Hello" }));
+        a.capture = Some(String::new());
+        a.on_event(json!({ "type": "delta", "delta": " world" }));
+        let out = a.capture.take().unwrap();
+        assert!(out.contains("Hello world"), "{out:?}");
+        assert!(!out.contains("earlier conversation"), "unchanged rows are not rewritten: {out:?}");
+        assert!(!out.contains("\x1b[2J") && !out.contains("\x1b[J"), "no clearing, so no flicker: {out:?}");
+    }
+
+    const DIVIDER: &str = "\x1b[2m │ \x1b[0m";
+
+    fn temp_file(name: &str, text: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("zen-panel-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn open_shows_a_file_beside_the_chat_and_close_hides_it() {
+        let mut a = app(100, 20);
+        let path = temp_file("USER.md", "# Who I am\n\nJose, a builder.\n");
+        a.commit(vec![line("chat text", Sty::Plain)]);
+        a.command(&format!("/open {}", path.display())).await.unwrap();
+        a.draw();
+        let rows = a.screen.rows().to_vec();
+        assert!(rows[0].contains("chat text") && rows[0].contains("USER.md"), "{rows:#?}");
+        assert!(rows.iter().any(|r| r.contains(DIVIDER) && r.contains("Jose, a builder.")), "{rows:#?}");
+        assert_eq!(a.columns(), (48, 48));
+        // It follows the file as it changes.
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(&path, "# Who I am\n\nJose (Ze), a builder.\n").unwrap();
+        let later = SystemTime::now() + Duration::from_secs(1);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(later).unwrap();
+        assert!(a.panel.as_mut().unwrap().reload_if_changed());
+        a.draw();
+        assert!(a.screen.rows().iter().any(|r| r.contains("Jose (Ze), a builder.")));
+        a.command("/close").await.unwrap();
+        a.draw();
+        assert!(a.screen.rows().iter().all(|r| !r.contains(DIVIDER)));
+        assert_eq!(a.columns(), (99, 0));
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn open_with_no_path_shows_the_last_file_a_tool_touched() {
+        let mut a = app(100, 20);
+        a.command("/open").await.unwrap();
+        assert!(a.panel.is_none() && a.notice.as_ref().is_some_and(|(t, _)| t.starts_with("usage: /open")));
+        let path = temp_file("notes.txt", "first line\nsecond line\n");
+        a.busy = true;
+        a.on_event(json!({ "type": "tool_start", "name": "edit", "args": { "path": path.display().to_string() } }));
+        a.command("/open").await.unwrap();
+        assert_eq!(a.panel.as_ref().map(|p| p.path.clone()), Some(path.clone()));
+        a.command("/open /no/such/file").await.unwrap();
+        assert!(a.notice.as_ref().is_some_and(|(t, s)| t.starts_with("can't open") && *s == Sty::Err), "{:?}", a.notice);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn the_conversation_rewraps_when_the_panel_narrows_it() {
+        let mut a = app(100, 30);
+        a.push(Entry::User("word ".repeat(30).trim().to_string()));
+        a.draw();
+        let wide = a.view.len();
+        a.panel = Some(Panel { path: "x.txt".into(), text: "x".into(), modified: None, scroll: 0, lines: Vec::new(), lines_w: 0 });
+        a.draw();
+        assert!(a.view.len() > wide, "narrower chat, more rows");
+        assert!(a.view.iter().all(|l| l.iter().map(|(t, _)| width(t)).sum::<usize>() <= a.columns().0));
+        a.panel = None;
+        a.draw();
+        assert_eq!(a.view.len(), wide, "closing the panel widens it again");
+    }
+
+    #[tokio::test]
+    async fn page_up_scrolls_and_new_lines_keep_the_view_still() {
+        let mut a = app(80, 20);
+        for i in 0..100 {
+            a.commit(vec![line(format!("row {i}"), Sty::Plain)]);
+        }
+        let bottom = a.screen.rows().join("\n");
+        assert!(bottom.contains("row 99"));
+        key(&mut a, KeyCode::PageUp).await;
+        a.draw();
+        let up = a.screen.rows().join("\n");
+        assert!(!up.contains("row 99") && up.contains("more lines · PgDn"), "{up}");
+        a.commit(vec![line("row 100", Sty::Plain)]);
+        assert_eq!(a.screen.rows().join("\n").replace("more lines", ""), up.replace("more lines", "").replace(&format!("↓ {} ", a.scroll - 1), &format!("↓ {} ", a.scroll)), "new output doesn't move a scrolled-up view");
+        a.command("/new").await.unwrap(); // any send returns to the bottom; here PgDn does
+        for _ in 0..20 {
+            key(&mut a, KeyCode::PageDown).await;
+        }
+        a.draw();
+        assert_eq!(a.scroll, 0);
+        assert!(a.screen.rows().join("\n").contains("new session"));
+    }
+
+    #[test]
     fn resumed_session_counts_the_tokens_of_messages_not_shown() {
         let mut a = app(80, 20);
         let msg = json!({ "role": "assistant", "content": [{ "type": "text", "text": "ok" }], "usage": { "input": 10, "output": 5, "cacheRead": 0, "cacheWrite": 0 } });
         let s = json!({ "title": "t", "messages": vec![msg; 50] });
         a.show_history(&s);
-        let out = a.capture.take().unwrap();
-        assert!(out.contains("… 10 earlier messages"), "{out}");
+        let shown = texts(&a.view).join("\n");
+        assert!(shown.contains("… 10 earlier messages"), "{shown}");
         assert_eq!(a.session_tokens, 50 * 15, "every message counts, shown or not");
     }
 

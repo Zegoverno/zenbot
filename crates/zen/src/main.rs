@@ -4,6 +4,7 @@
 mod client;
 mod editor;
 mod md;
+mod screen;
 mod tui;
 
 use std::io::{IsTerminal, Read, Write};
