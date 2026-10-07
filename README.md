@@ -40,7 +40,7 @@ Every session starts from the prompt files in `~/.zenbot/`: `SOUL.md` (who zenbo
 
 ## Using zen
 
-Run `zen` for an interactive session in your terminal. It's full screen: the conversation scrolls with PgUp/PgDn or the mouse wheel, and `/open <file>` shows a file next to the chat (reloaded as it changes; `/close` hides it). Runs of tool calls show as one line; Ctrl+O unfolds them.
+Run `zen` for an interactive session in your terminal. It's full screen: the conversation scrolls with PgUp/PgDn or the mouse wheel, and a side panel sits next to the chat: Ctrl+B opens it on a folder tree (↑↓ move, →/Enter open a folder or file, ← fold, `.` dotfiles, Tab moves the keys between chat and panel, or click), and `/open <file>` shows a file there (reloaded as it changes; `/close` hides it). Runs of tool calls show as one line; Ctrl+O unfolds them.
 
 ```bash
 zen              # new session
@@ -51,7 +51,7 @@ zen -e xhigh     # thinking level (default: the model's; `zen models` lists them
 zen --inline     # no full screen: the conversation goes to terminal scrollback, like Claude Code (or ZEN_INLINE=1)
 ```
 
-Inside: `/new`, `/resume`, `/model`, `/effort`, `/done`, `/rename <title>`, `/open [file]`, `/close`, `/mouse` (wheel scrolling off, so the terminal can select text), `/archive`, `/upgrade`, `/help`, `/exit`. Enter sends; Shift+Enter (or Alt+Enter, Ctrl+J) starts a new line or paragraph; Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
+Inside: `/new`, `/resume`, `/model`, `/effort`, `/done`, `/rename <title>`, `/files`, `/open [file]`, `/close`, `/mouse` (wheel scrolling off, so the terminal can select text), `/archive`, `/upgrade`, `/help`, `/exit`. Enter sends; Shift+Enter (or Alt+Enter, Ctrl+J) starts a new line or paragraph; Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
 
 For scripts, every command accepts `--json` and exits non-zero on failure:
 

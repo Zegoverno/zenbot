@@ -17,7 +17,7 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::Result;
 use zen_proto::text_of;
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    MouseButton, DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
     KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::{execute, terminal};
@@ -30,6 +30,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::client::{short, tool_summary, Client, NewSession, Ws};
 use crate::editor::Editor;
+use crate::files::Files;
 use crate::md::{self, line, Line, Md, Sty};
 use crate::screen::{self, Screen};
 
@@ -60,6 +61,7 @@ const COMMANDS: &[Command] = &[
     cmd("/effort", "choose the thinking level", false),
     cmd("/done", "judge the work so far: accept, more, reshape or drop", false),
     cmd("/rename", "rename this session: /rename <title>", true),
+    cmd("/files", "show or hide the folder tree in the side panel (also ctrl+b)", false),
     cmd("/open", "show a file next to the chat: /open <path> (no path: the last file zenbot touched)", true),
     cmd("/close", "close the side panel", false),
     cmd("/mouse", "mouse wheel scrolling on/off (off lets the terminal select text)", false),
@@ -141,6 +143,13 @@ fn absorb(list: &mut Vec<Entry>, e: Entry) {
         }
         e => list.push(e),
     }
+}
+
+/// Which tab of the side panel is showing.
+#[derive(Clone, Copy, PartialEq)]
+enum Tab {
+    Files,
+    Viewer,
 }
 
 /// Narrowest terminal (columns) that fits the chat and the side panel next to each other.
@@ -297,6 +306,13 @@ struct App {
     mouse: bool,
     /// When the running tool started, for its elapsed time in the status line.
     tool_since: Option<Instant>,
+    /// The side panel is open (it is also open whenever a file is).
+    side: bool,
+    /// The folder tree of the Files tab, created when first shown.
+    files: Option<Files>,
+    tab: Tab,
+    /// Keys go to the side panel, not the input (tab switches).
+    side_focus: bool,
     /// Show every step of each run of tool calls (ctrl+o) instead of one line per run.
     expand_work: bool,
     /// Tool calls and distinct files written or edited in the running turn, for the status line.
@@ -374,6 +390,10 @@ impl App {
             last_file: None,
             mouse: !inline,
             tool_since: None,
+            side: false,
+            files: None,
+            tab: Tab::Files,
+            side_focus: false,
             expand_work: false,
             turn_tools: 0,
             turn_files: Default::default(),
@@ -598,10 +618,212 @@ impl App {
         self.flush(out);
     }
 
+    fn side_open(&self) -> bool {
+        self.side || self.panel.is_some()
+    }
+
+    /// Open the side panel on the Files tab with the keys, or close it (and the file in it).
+    fn toggle_side(&mut self) {
+        if self.inline {
+            self.note("the side panel needs full screen: run zen without --inline", Sty::Warn);
+        } else if self.side_open() {
+            self.side = false;
+            self.panel = None;
+            self.side_focus = false;
+        } else {
+            if self.width() < SPLIT_MIN {
+                self.note(format!("the terminal is too narrow for the side panel (needs {SPLIT_MIN} columns)"), Sty::Warn);
+            }
+            self.side = true;
+            self.tab = Tab::Files;
+            self.side_focus = true;
+        }
+    }
+
+    fn open_file(&mut self, path: PathBuf) {
+        match Panel::open(path) {
+            Ok(p) => {
+                self.panel = Some(p);
+                self.tab = Tab::Viewer;
+            }
+            Err(e) => self.note(e, Sty::Err),
+        }
+    }
+
+    /// Open or fold the selected row of the tree, as Enter and a click do.
+    fn activate_row(&mut self) {
+        let Some(f) = &mut self.files else { return };
+        let Some(r) = f.selected() else { return };
+        if r.dir {
+            if !f.expand() {
+                f.collapse_or_parent();
+            }
+        } else {
+            let p = r.path.clone();
+            self.open_file(p);
+        }
+    }
+
+    /// A key while the side panel has the keys; false lets it through to the input.
+    fn side_key(&mut self, k: KeyEvent) -> bool {
+        if k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+            return false;
+        }
+        if k.code == KeyCode::Esc {
+            self.side_focus = false;
+            return true;
+        }
+        let page = self.viewport_rows().saturating_sub(3).max(1) as isize;
+        if self.tab == Tab::Viewer && self.panel.is_none() {
+            self.tab = Tab::Files;
+        }
+        match self.tab {
+            Tab::Files => {
+                if self.files.is_none() {
+                    self.files = Some(Files::new(std::env::current_dir().unwrap_or_default()));
+                }
+                match k.code {
+                    KeyCode::Up => self.files.as_mut().unwrap().move_by(-1),
+                    KeyCode::Down => self.files.as_mut().unwrap().move_by(1),
+                    KeyCode::PageUp => self.files.as_mut().unwrap().move_by(-page),
+                    KeyCode::PageDown => self.files.as_mut().unwrap().move_by(page),
+                    KeyCode::Home => self.files.as_mut().unwrap().sel = 0,
+                    KeyCode::End => {
+                        let f = self.files.as_mut().unwrap();
+                        f.sel = f.rows.len().saturating_sub(1);
+                    }
+                    KeyCode::Right => {
+                        let f = self.files.as_mut().unwrap();
+                        if !f.expand() && f.selected().is_some_and(|r| !r.dir) {
+                            self.activate_row();
+                        }
+                    }
+                    KeyCode::Enter => self.activate_row(),
+                    KeyCode::Left => self.files.as_mut().unwrap().collapse_or_parent(),
+                    KeyCode::Char('.') => self.files.as_mut().unwrap().toggle_hidden(),
+                    KeyCode::Char('r') => self.files.as_mut().unwrap().rebuild(),
+                    KeyCode::Char(_) => {
+                        self.side_focus = false; // typing goes to the input
+                        return false;
+                    }
+                    _ => {}
+                }
+            }
+            Tab::Viewer => match k.code {
+                KeyCode::Up => self.scroll_panel(true, 1),
+                KeyCode::Down => self.scroll_panel(false, 1),
+                KeyCode::PageUp => self.scroll_panel(true, page as usize),
+                KeyCode::PageDown => self.scroll_panel(false, page as usize),
+                KeyCode::Home => self.scroll_panel(true, usize::MAX / 2),
+                KeyCode::Left | KeyCode::Backspace => self.tab = Tab::Files,
+                KeyCode::Char('x') => {
+                    self.panel = None;
+                    self.tab = Tab::Files;
+                }
+                KeyCode::Char(_) => {
+                    self.side_focus = false;
+                    return false;
+                }
+                _ => {}
+            },
+        }
+        true
+    }
+
+    /// A click at (`x`, `row`) inside the side panel: a tab, or a row of the tree.
+    fn click_side(&mut self, x: usize, row: usize) {
+        if row == 0 {
+            if x < 7 {
+                self.tab = Tab::Files;
+            } else if self.panel.is_some() {
+                self.tab = Tab::Viewer;
+            }
+            self.side_focus = true;
+            return;
+        }
+        if self.tab != Tab::Files {
+            self.side_focus = true;
+            return;
+        }
+        if let Some(f) = &mut self.files {
+            let idx = f.scroll + row.saturating_sub(2); // row 1 is the folder's path
+            if row >= 2 && idx < f.rows.len() {
+                f.sel = idx;
+                self.side_focus = true;
+                self.activate_row();
+            }
+        }
+    }
+
+    /// The tab strip: Files, and the open file when there is one.
+    fn tab_bar(&self) -> Line {
+        let style = |on: bool| if on { Sty::Accent } else { Sty::Dim };
+        let mut bar = vec![(" Files ".to_string(), style(self.tab == Tab::Files))];
+        if let Some(p) = &self.panel {
+            bar.push((format!(" {} ", p.name()), style(self.tab == Tab::Viewer)));
+        }
+        if self.side_focus {
+            bar.push(("  ●".to_string(), Sty::Accent));
+        }
+        bar
+    }
+
+    /// The side panel's rows (`vh` of them) at `pw` columns.
+    fn side_lines(&mut self, pw: usize, vh: usize) -> Vec<Line> {
+        if self.tab == Tab::Viewer && self.panel.is_none() {
+            self.tab = Tab::Files;
+        }
+        let mut out = vec![self.tab_bar()];
+        let body = vh.saturating_sub(2); // below the tab strip, above the hint row
+        match self.tab {
+            Tab::Files => {
+                if self.files.is_none() {
+                    self.files = Some(Files::new(std::env::current_dir().unwrap_or_default()));
+                }
+                let focus = self.side_focus;
+                let f = self.files.as_mut().unwrap();
+                f.follow(body);
+                let root = f.root.to_string_lossy().into_owned();
+                out.push(vec![(root, Sty::Dim)]);
+                for (i, r) in f.rows.iter().enumerate().skip(f.scroll).take(body.saturating_sub(1)) {
+                    let name = r.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let mark = if !r.dir { "  " } else if f.is_open(r) { "▾ " } else { "▸ " };
+                    let text = format!("{}{mark}{name}{}", "  ".repeat(r.depth), if r.dir { "/" } else { "" });
+                    let sty = if i == f.sel && focus { Sty::Accent } else if i == f.sel { Sty::Bold } else if r.dir { Sty::Plain } else { Sty::Dim };
+                    out.push(vec![(if i == f.sel { "› " } else { "  " }.to_string(), sty), (text, sty)]);
+                }
+            }
+            Tab::Viewer => {
+                if let Some(p) = &mut self.panel {
+                    let rows = body.saturating_sub(1);
+                    let n = p.lines(pw).len();
+                    p.scroll = p.scroll.min(n.saturating_sub(rows));
+                    let s = p.scroll;
+                    let pos = if n > rows { format!(" · {}-{} of {n}", s + 1, (s + rows).min(n)) } else { String::new() };
+                    out.push(vec![(p.path.display().to_string(), Sty::Bold), (pos, Sty::Dim)]);
+                    out.extend(p.lines(pw).iter().skip(s).take(rows).cloned());
+                }
+            }
+        }
+        if vh >= 3 {
+            out.truncate(vh - 1);
+            while out.len() < vh - 1 {
+                out.push(Vec::new());
+            }
+            let hint = match (self.side_focus, self.tab) {
+                (false, _) => "tab: use this panel · ctrl+b: close",
+                (true, Tab::Files) => "↑↓ move · →/enter open · ← fold · . hidden · esc/tab chat",
+                (true, Tab::Viewer) => "↑↓ scroll · ← files · x close file · esc/tab chat",
+            };
+            out.push(vec![(hint.to_string(), Sty::Dim)]);
+        }
+        out
+    }
+
     /// Columns for the chat and for the side panel (0 when it's closed or the screen is too narrow).
     fn columns(&self) -> (usize, usize) {
         let total = self.width();
-        if self.panel.is_some() && !self.inline && total >= SPLIT_MIN {
+        if self.side_open() && !self.inline && total >= SPLIT_MIN {
             let panel = (total - 3) / 2;
             (total - 3 - panel, panel)
         } else {
@@ -659,6 +881,12 @@ impl App {
     }
 
     fn scroll_panel(&mut self, up: bool, n: usize) {
+        if self.tab == Tab::Files {
+            if let Some(f) = &mut self.files {
+                f.move_by(if up { -(n.min(1000) as isize) } else { n.min(1000) as isize });
+            }
+            return;
+        }
         if let Some(p) = &mut self.panel {
             p.scroll = if up { p.scroll.saturating_sub(n) } else { p.scroll + n };
         }
@@ -696,22 +924,8 @@ impl App {
             chat[last] = line(format!("↓ {} more lines · PgDn", self.scroll), Sty::Accent);
         }
 
-        // The side panel: a title row, then the file from its scroll position.
-        let mut side: Vec<Line> = Vec::new();
-        if pw > 0 {
-            if let Some(p) = &mut self.panel {
-                let name = p.name();
-                let rows = vh.saturating_sub(1);
-                let lines = p.lines(pw);
-                let n = lines.len();
-                p.scroll = p.scroll.min(n.saturating_sub(rows));
-                let s = p.scroll;
-                let lines = p.lines(pw);
-                let pos = if n > rows { format!(" · {}-{} of {n}", s + 1, (s + rows).min(n)) } else { String::new() };
-                side.push(vec![(name, Sty::Bold), (format!("{pos} · alt+↑↓ scroll · /close"), Sty::Dim)]);
-                side.extend(lines.iter().skip(s).take(rows).cloned());
-            }
-        }
+        // The side panel: tabs on top, the folder tree or the open file below.
+        let side: Vec<Line> = if pw > 0 { self.side_lines(pw, vh) } else { Vec::new() };
 
         let mut rows: Vec<String> = (0..vh)
             .map(|r| screen::row(chat.get(r), (pw > 0).then(|| (side.get(r), pw)), cw))
@@ -1186,12 +1400,19 @@ impl App {
             }
             Event::Mouse(m) => {
                 // The wheel scrolls whichever side is under the pointer.
+                let (cw, pw) = self.columns();
+                if m.kind == MouseEventKind::Down(MouseButton::Left) {
+                    if pw > 0 && m.column as usize >= cw + 3 && (m.row as usize) < self.viewport_rows() {
+                        self.click_side(m.column as usize - (cw + 3), m.row as usize);
+                    }
+                    self.draw();
+                    return Ok(());
+                }
                 let up = match m.kind {
                     MouseEventKind::ScrollUp => true,
                     MouseEventKind::ScrollDown => false,
                     _ => return Ok(()),
                 };
-                let (cw, pw) = self.columns();
                 if pw > 0 && m.column as usize > cw + 1 && (m.row as usize) < self.viewport_rows() {
                     self.scroll_panel(up, 3);
                 } else {
@@ -1228,6 +1449,21 @@ impl App {
             self.view_w = 0;
             self.draw();
             return Ok(());
+        }
+
+        if !self.inline {
+            let plain = !ctrl && !alt && !shift;
+            if ctrl && k.code == KeyCode::Char('b') {
+                self.toggle_side();
+                return Ok(());
+            }
+            if k.code == KeyCode::Tab && plain && self.side_open() && (self.side_focus || (self.editor.is_empty() && self.menu().is_empty())) {
+                self.side_focus = !self.side_focus;
+                return Ok(());
+            }
+            if self.side_focus && self.side_open() && self.side_key(k) {
+                return Ok(());
+            }
         }
 
         // Scrolling (full screen): PgUp/PgDn move the chat, alt+↑↓ and alt+PgUp/PgDn the side panel.
@@ -1472,6 +1708,7 @@ impl App {
                     ("↑ ↓", "previous prompts; in the / menu, choose a command (tab completes)"),
                     ("ctrl+←/→", "move by word (also alt+b / alt+f); ctrl+a/e line start/end"),
                     ("ctrl+u/k", "delete to line start / end; ctrl+w deletes a word"),
+                    ("ctrl+b", "open or close the side panel; tab moves the keys between chat and panel"),
                     ("ctrl+o", "show or fold the steps of tool calls (full screen)"),
                     ("PgUp/PgDn", "scroll the conversation (also the mouse wheel)"),
                     ("alt+↑↓", "scroll the side panel (alt+PgUp/PgDn by page; or the wheel over it)"),
@@ -1484,9 +1721,14 @@ impl App {
                 self.commit(out);
             }
             Some("/open") => self.open_panel(arg),
+            Some("/files") => self.toggle_side(),
             Some("/close") => {
-                if self.panel.take().is_none() {
-                    self.note("no file is open", Sty::Dim);
+                if self.side_open() {
+                    self.side = false;
+                    self.panel = None;
+                    self.side_focus = false;
+                } else {
+                    self.note("no side panel is open", Sty::Dim);
                 }
             }
             Some("/mouse") if !self.inline => {
@@ -1527,6 +1769,7 @@ impl App {
                     self.note(format!("the terminal is too narrow for the side panel (needs {SPLIT_MIN} columns)"), Sty::Warn);
                 }
                 self.panel = Some(p);
+                self.tab = Tab::Viewer;
             }
             Err(e) => self.note(e, Sty::Err),
         }
@@ -2130,6 +2373,67 @@ mod tests {
         a.command("/open /no/such/file").await.unwrap();
         assert!(a.notice.as_ref().is_some_and(|(t, s)| t.starts_with("can't open") && *s == Sty::Err), "{:?}", a.notice);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_files_tab_is_a_tree_you_walk_with_the_keyboard() {
+        let dir = std::env::temp_dir().join(format!("zen-dash-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/guide.md"), "# The guide\n\nhello from the guide\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "plain notes\n").unwrap();
+        let mut a = app(110, 24);
+        a.files = Some(Files::new(dir.clone()));
+        let ctrl_b = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        a.on_key(ctrl_b).await.unwrap();
+        a.draw();
+        let rows = a.screen.rows().join("\n");
+        assert!(rows.contains("Files") && rows.contains("docs/") && rows.contains("notes.txt"), "{rows}");
+        assert!(a.side_focus && a.columns().1 > 0);
+        // Right opens the folder, down walks into it, enter opens the file in the Viewer tab.
+        key(&mut a, KeyCode::Right).await;
+        key(&mut a, KeyCode::Down).await;
+        a.draw();
+        assert!(a.screen.rows().join("\n").contains("guide.md"));
+        key(&mut a, KeyCode::Enter).await;
+        a.draw();
+        let rows = a.screen.rows().join("\n");
+        assert!(a.tab == Tab::Viewer && rows.contains("hello from the guide"), "{rows}");
+        // Left goes back to the tree, which keeps its place; the file stays a tab.
+        key(&mut a, KeyCode::Left).await;
+        a.draw();
+        assert!(a.tab == Tab::Files && a.screen.rows().join("\n").contains("guide.md"));
+        // Tab hands the keys back to the chat, where typing reaches the input again.
+        key(&mut a, KeyCode::Tab).await;
+        assert!(!a.side_focus);
+        typed(&mut a, "hi").await;
+        assert_eq!(a.editor.buf, "hi");
+        // ctrl+b closes the whole panel.
+        a.on_key(ctrl_b).await.unwrap();
+        a.draw();
+        assert_eq!(a.columns().1, 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn clicking_a_tree_row_opens_it_and_a_tab_switches() {
+        let dir = std::env::temp_dir().join(format!("zen-click-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), "alpha text\n").unwrap();
+        let mut a = app(110, 24);
+        a.files = Some(Files::new(dir.clone()));
+        a.toggle_side();
+        a.draw();
+        let (cw, _) = a.columns();
+        let x = cw + 3;
+        // Row 0 is the tabs, row 1 the folder's path, row 2 the first entry (sub/), row 3 a.txt.
+        let click = |row: u16| Event::Mouse(crossterm::event::MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x as u16 + 2, row, modifiers: KeyModifiers::NONE });
+        a.on_terminal(click(3)).await.unwrap();
+        let rows = a.screen.rows().join("\n");
+        assert!(a.tab == Tab::Viewer && rows.contains("alpha text"), "{rows}");
+        let files_tab = Event::Mouse(crossterm::event::MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x as u16 + 1, row: 0, modifiers: KeyModifiers::NONE });
+        a.on_terminal(files_tab).await.unwrap();
+        assert!(a.tab == Tab::Files);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
