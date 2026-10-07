@@ -186,13 +186,7 @@ pub async fn export(db: &PgPool) {
 pub fn spec() -> Value {
     json!({
         "name": "remember",
-        "description": "Save something to your short-term memory, which every new session starts with (MEMORY.md in your \
-instructions; changes show from the next session). Save what will matter again: the owner's preferences and decisions, \
-facts about their projects, lessons from mistakes, where things are. Write facts (\"The owner prefers X\"), not orders to \
-yourself. Not for what's in the code, the docs or git history, or only matters to this conversation. Memory has a fixed size and entries compete for it: a nightly sleep keeps the most \
-useful, archives the rest, and promotes the few that matter for good. Keep entries short and self-contained. \
-Use `replace` to update an entry (by its id, e.g. m12) rather than adding a near-duplicate, and `remove` for one that's wrong. \
-Mark `source`: owner for the owner's own words, verified for a result you checked, inferred otherwise.",
+        "description": "Save a fact to your short-term memory, which every new session starts with (it shows from the next session). Save what will matter again: the owner's preferences and decisions, facts about their projects, lessons, where things are; not what's in the code, docs or git. Write facts (\"The owner prefers X\"), not orders to yourself. Space is fixed and tidied nightly: `replace` an entry by id (m12) rather than adding a near-duplicate; `remove` one that's wrong. `source`: owner (their words), verified (you checked it) or inferred (default).",
         "parameters": {
             "type": "object",
             "properties": {

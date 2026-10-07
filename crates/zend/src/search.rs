@@ -461,11 +461,7 @@ fn render(found: &[(Found, Option<f64>)]) -> String {
 pub fn spec() -> Value {
     json!({
         "name": "search",
-        "description": "Search your past: every earlier session with the owner (what was asked, what you answered and did) and \
-your memories, short- and long-term. Use it before asking the owner something they may have told you already, when a job \
-continues earlier work, or to find a decision, a file or a fact you saw before. Exact names and paths (`compile.rs`, `D-026`, \
-`m12`) are matched first; otherwise by words and meaning. Returns dated results with where they come from; read a whole \
-session's messages with history (session + from). Long-term memories are only reachable through search.",
+        "description": "Search your earlier sessions with the owner (what was asked, answered and done) and your memories, long-term ones included (reachable only here). Use it before asking something the owner may have told you, or when a job continues earlier work. Exact names and paths (quote them) match first, then words and meaning. Returns dated results with their session id; read a session with history.",
         "parameters": {
             "type": "object",
             "properties": {
