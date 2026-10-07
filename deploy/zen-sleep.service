@@ -1,0 +1,12 @@
+[Unit]
+Description=zenbot: tidy short-term memory (the nightly sleep)
+After=zenbot.service
+Wants=zenbot.service
+
+[Service]
+Type=oneshot
+User=__USER__
+WorkingDirectory=__REPO__
+Environment=HOME=__HOME__
+ExecStart=__REPO__/scripts/sleep.sh
+TimeoutStartSec=1h

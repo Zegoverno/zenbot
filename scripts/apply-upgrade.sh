@@ -43,6 +43,8 @@ sudo systemctl restart zenbot
 
 if wait_healthy "$HEALTH" 45; then
   log "upgrade OK: now running $(cat "$HOME/.zenbot/version")"
+  # Timers a new version brings (deploy/); the service unit itself only changes with install.sh.
+  install_timers "$REPO" 2>>"$LOG" || log "installing the timers failed; re-run install.sh"
   exit 0
 fi
 

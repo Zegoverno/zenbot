@@ -175,8 +175,10 @@ start_kernel() { # bin mind_dir workspace db label model log [task-env…]
     set -a; [ -f "$HOME/.zenbot/env" ] && . "$HOME/.zenbot/env"; set +a
     # Settings the task asks for (e.g. a small context budget); a build that doesn't know one ignores it.
     for kv in "${task_env[@]}"; do export "$kv"; done
+    # Its own zenbot home: the default prompt files and skills, not the owner's, and memory exports
+    # that never touch ~/.zenbot (a build that predates ZEN_HOME ignores it).
     ZEN_TOKEN="$TOKEN" ZEN_PORT=$PORT ZEN_WORKSPACE="$3" ZEN_HARNESS="$5" ZEN_WORKERS=$workers ZEN_FAUX=1 \
-      ZEN_ENGINE_CMD="$1/zen-engine" ZEN_MIND_DIR="$2" DATABASE_URL="$db_url" \
+      ZEN_ENGINE_CMD="$1/zen-engine" ZEN_MIND_DIR="$2" DATABASE_URL="$db_url" ZEN_HOME="$3.zenbot" \
       exec "$1/zend"
   ) >"$7" 2>&1 &
   KERNEL_PID=$!
