@@ -8,12 +8,14 @@
 
 ## 2026-10-07 — Terminal app: a navigable side panel
 
-- The side panel is now a small dashboard: a tab strip, a **Files** tab (folder tree of the
-  directory zen started in) and a **Viewer** tab (the open file). Ctrl+B or `/files` opens and
+- The side panel is now a small dashboard: a tab strip, a **Files** tab (folder tree) and a **Viewer** tab (the open file). Ctrl+B or `/files` opens and
   closes it; Tab moves the keys between chat and panel; ↑↓ move, →/Enter open or expand, ← fold or
   go to the parent, `.` shows dotfiles, Esc/Tab return to chat, typing returns to chat too. Mouse
   clicks work on tabs and rows. `/open <file>` and `/close` still work.
 - Tree logic is in `crates/zen/src/files.rs` (listing is lazy, noise folders skipped).
+- The tree starts at zenbot's home, `~/.zenbot` (prompt files, wiki, skills), not the directory zen
+  started in; `/files <dir>` re-roots it (`~` works). Why: the owner browses zenbot's own files from
+  the panel, and launching zen from `~` showed the whole home folder.
 - Not built yet: a Changes (diff) tab, other tabs (wiki, sessions).
 
 ## 2026-10-07 — Terminal app: tool work folds into one line

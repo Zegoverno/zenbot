@@ -61,7 +61,7 @@ const COMMANDS: &[Command] = &[
     cmd("/effort", "choose the thinking level", false),
     cmd("/done", "judge the work so far: accept, more, reshape or drop", false),
     cmd("/rename", "rename this session: /rename <title>", true),
-    cmd("/files", "show or hide the folder tree in the side panel (also ctrl+b)", false),
+    cmd("/files", "show or hide the folder tree (also ctrl+b); /files <dir> shows that folder instead of ~/.zenbot", false),
     cmd("/open", "show a file next to the chat: /open <path> (no path: the last file zenbot touched)", true),
     cmd("/close", "close the side panel", false),
     cmd("/mouse", "mouse wheel scrolling on/off (off lets the terminal select text)", false),
@@ -310,6 +310,8 @@ struct App {
     side: bool,
     /// The folder tree of the Files tab, created when first shown.
     files: Option<Files>,
+    /// Where the folder tree starts: zenbot's home (~/.zenbot) unless `/files <dir>` changes it.
+    files_root: PathBuf,
     tab: Tab,
     /// Keys go to the side panel, not the input (tab switches).
     side_focus: bool,
@@ -318,6 +320,16 @@ struct App {
     /// Tool calls and distinct files written or edited in the running turn, for the status line.
     turn_tools: usize,
     turn_files: std::collections::HashSet<String>,
+}
+
+/// A path the owner typed, with a leading `~` meaning the home folder.
+fn expand_home(raw: &str) -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    match raw.strip_prefix("~/") {
+        Some(rest) => PathBuf::from(&home).join(rest),
+        None if raw == "~" => PathBuf::from(&home),
+        None => PathBuf::from(raw),
+    }
 }
 
 fn banner(version_path: Option<&std::path::Path>) -> Line {
@@ -392,6 +404,7 @@ impl App {
             tool_since: None,
             side: false,
             files: None,
+            files_root: std::env::current_dir().unwrap_or_default(),
             tab: Tab::Files,
             side_focus: false,
             expand_work: false,
@@ -416,6 +429,9 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
     let model = new.model.unwrap_or_else(|| default_model.clone());
     let mut app = App::new(c, tx, model, default_model, catalog, history, terminal_size(), inline);
     app.effort = new.effort;
+    if let Some(home) = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".zenbot")).filter(|p| p.is_dir()) {
+        app.files_root = home;
+    }
 
     terminal::enable_raw_mode()?;
     let enhanced = terminal::supports_keyboard_enhancement().unwrap_or(false);
@@ -680,7 +696,7 @@ impl App {
         match self.tab {
             Tab::Files => {
                 if self.files.is_none() {
-                    self.files = Some(Files::new(std::env::current_dir().unwrap_or_default()));
+                    self.files = Some(Files::new(self.files_root.clone()));
                 }
                 match k.code {
                     KeyCode::Up => self.files.as_mut().unwrap().move_by(-1),
@@ -778,7 +794,7 @@ impl App {
         match self.tab {
             Tab::Files => {
                 if self.files.is_none() {
-                    self.files = Some(Files::new(std::env::current_dir().unwrap_or_default()));
+                    self.files = Some(Files::new(self.files_root.clone()));
                 }
                 let focus = self.side_focus;
                 let f = self.files.as_mut().unwrap();
@@ -1721,7 +1737,8 @@ impl App {
                 self.commit(out);
             }
             Some("/open") => self.open_panel(arg),
-            Some("/files") => self.toggle_side(),
+            Some("/files") if arg.is_empty() => self.toggle_side(),
+            Some("/files") => self.show_folder(arg),
             Some("/close") => {
                 if self.side_open() {
                     self.side = false;
@@ -1757,13 +1774,7 @@ impl App {
             self.note("usage: /open <path> (no file touched yet in this session)", Sty::Warn);
             return;
         };
-        let home = std::env::var("HOME").unwrap_or_default();
-        let path = match raw.strip_prefix("~/") {
-            Some(rest) => PathBuf::from(&home).join(rest),
-            None if raw == "~" => PathBuf::from(&home),
-            None => PathBuf::from(&raw),
-        };
-        match Panel::open(path) {
+        match Panel::open(expand_home(&raw)) {
             Ok(p) => {
                 if self.width() < SPLIT_MIN {
                     self.note(format!("the terminal is too narrow for the side panel (needs {SPLIT_MIN} columns)"), Sty::Warn);
@@ -1773,6 +1784,26 @@ impl App {
             }
             Err(e) => self.note(e, Sty::Err),
         }
+    }
+
+    /// `/files <dir>`: root the folder tree at `dir` and show it.
+    fn show_folder(&mut self, arg: &str) {
+        if self.inline {
+            self.note("the side panel needs full screen: run zen without --inline", Sty::Warn);
+            return;
+        }
+        let dir = expand_home(arg);
+        if !dir.is_dir() {
+            self.note(format!("not a folder: {arg}"), Sty::Err);
+            return;
+        }
+        self.files_root = dir.clone();
+        self.files = Some(Files::new(dir));
+        if !self.side_open() {
+            self.toggle_side();
+        }
+        self.tab = Tab::Files;
+        self.side_focus = true;
     }
 
     // ---------- upgrade ----------
@@ -2412,6 +2443,35 @@ mod tests {
         a.draw();
         assert_eq!(a.columns().1, 0);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_tree_starts_at_its_root_and_files_dir_moves_it() {
+        let base = std::env::temp_dir().join(format!("zen-root-{}", std::process::id()));
+        std::fs::create_dir_all(base.join("home/skills")).unwrap();
+        std::fs::create_dir_all(base.join("other/elsewhere")).unwrap();
+        let mut a = app(110, 24);
+        a.files_root = base.join("home");
+        a.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)).await.unwrap();
+        a.draw();
+        let rows = a.screen.rows().join("\n");
+        assert!(rows.contains("skills/") && !rows.contains("elsewhere"), "{rows}");
+        // `/files <dir>` re-roots the tree; the panel stays open on the Files tab.
+        a.command(&format!("/files {}", base.join("other").display())).await.unwrap();
+        a.draw();
+        let rows = a.screen.rows().join("\n");
+        assert!(rows.contains("elsewhere/") && !rows.contains("skills/"), "{rows}");
+        assert!(a.tab == Tab::Files && a.side_focus && a.columns().1 > 0);
+        // A missing folder is refused and the tree stays where it was.
+        a.command("/files /no/such/dir").await.unwrap();
+        assert_eq!(a.files.as_ref().unwrap().root, base.join("other"));
+        // Closed and reopened, the tree keeps its new root.
+        a.command("/files").await.unwrap();
+        assert_eq!(a.columns().1, 0);
+        a.command("/files").await.unwrap();
+        a.draw();
+        assert!(a.screen.rows().join("\n").contains("elsewhere/"));
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[tokio::test]
