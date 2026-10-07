@@ -108,6 +108,39 @@ enum Entry {
     ToolResult { head: Vec<String>, more: usize, error: bool },
     /// Already styled lines (notes, help, end-of-turn lines); re-wrapped when too wide.
     Raw(Vec<Line>),
+    /// Full screen: a run of tool calls between pieces of text, shown as one line until expanded.
+    Work(Vec<Step>),
+}
+
+/// One tool call in a `Work` run, with its result once it arrives.
+struct Step {
+    name: String,
+    args: Value,
+    /// First lines, how many more, and whether it failed.
+    result: Option<(Vec<String>, usize, bool)>,
+}
+
+/// Fold a tool call or result into a trailing `Work` run (full screen); anything else is added as is.
+fn absorb(list: &mut Vec<Entry>, e: Entry) {
+    match e {
+        Entry::ToolCall(name, args) => {
+            let step = Step { name, args, result: None };
+            match list.last_mut() {
+                Some(Entry::Work(steps)) => steps.push(step),
+                _ => list.push(Entry::Work(vec![step])),
+            }
+        }
+        Entry::ToolResult { head, more, error } => {
+            if let Some(Entry::Work(steps)) = list.last_mut() {
+                if let Some(step) = steps.iter_mut().find(|s| s.result.is_none()) {
+                    step.result = Some((head, more, error));
+                    return;
+                }
+            }
+            list.push(Entry::ToolResult { head, more, error });
+        }
+        e => list.push(e),
+    }
 }
 
 /// Narrowest terminal (columns) that fits the chat and the side panel next to each other.
@@ -264,6 +297,11 @@ struct App {
     mouse: bool,
     /// When the running tool started, for its elapsed time in the status line.
     tool_since: Option<Instant>,
+    /// Show every step of each run of tool calls (ctrl+o) instead of one line per run.
+    expand_work: bool,
+    /// Tool calls and distinct files written or edited in the running turn, for the status line.
+    turn_tools: usize,
+    turn_files: std::collections::HashSet<String>,
 }
 
 fn banner(version_path: Option<&std::path::Path>) -> Line {
@@ -336,6 +374,9 @@ impl App {
             last_file: None,
             mouse: !inline,
             tool_since: None,
+            expand_work: false,
+            turn_tools: 0,
+            turn_files: Default::default(),
         }
     }
 }
@@ -568,7 +609,7 @@ impl App {
         }
     }
 
-    fn render_entry(e: &Entry, w: usize) -> Vec<Line> {
+    fn render_entry(e: &Entry, w: usize, expanded: bool) -> Vec<Line> {
         match e {
             Entry::User(text) => Self::render_user(text, w),
             Entry::Md(text) => {
@@ -578,6 +619,7 @@ impl App {
             }
             Entry::ToolCall(name, args) => Self::render_tool_call(name, args, w),
             Entry::ToolResult { head, more, error } => Self::render_tool_result(head, *more, *error, w),
+            Entry::Work(steps) => Self::render_work(steps, w, expanded),
             Entry::Raw(lines) => lines
                 .iter()
                 .flat_map(|l| {
@@ -600,7 +642,8 @@ impl App {
     fn sync_view(&mut self) {
         let w = self.columns().0;
         if self.view_w != w {
-            self.view = self.entries.iter().flat_map(|e| Self::render_entry(e, w)).collect();
+            let x = self.expand_work;
+            self.view = self.entries.iter().flat_map(|e| Self::render_entry(e, w, x)).collect();
             self.view_w = w;
         }
     }
@@ -764,10 +807,17 @@ impl App {
             let secs = self.turn_started.elapsed().as_secs();
             // How long the running tool has taken, so a long one (a subagent) visibly progresses.
             let tool = self.tool_since.map(|t| t.elapsed().as_secs()).filter(|s| *s > 0).map(|s| format!(" ({s}s)")).unwrap_or_default();
+            let mut work = String::new();
+            if self.turn_tools > 0 {
+                work.push_str(&format!(" · {} tool{}", self.turn_tools, if self.turn_tools == 1 { "" } else { "s" }));
+            }
+            if !self.turn_files.is_empty() {
+                work.push_str(&format!(" · {} file{} edited", self.turn_files.len(), if self.turn_files.len() == 1 { "" } else { "s" }));
+            }
             lines.push(vec![
                 (format!("{} ", SPINNER[self.spin % SPINNER.len()]), Sty::Accent),
-                (self.status.chars().take(w.saturating_sub(40)).collect(), Sty::Plain),
-                (format!("{tool}  ·  turn {secs}s · esc to interrupt"), Sty::Dim),
+                (self.status.chars().take(w.saturating_sub(60)).collect(), Sty::Plain),
+                (format!("{tool}  ·  turn {secs}s{work} · esc to interrupt"), Sty::Dim),
             ]);
         } else if let Some((n, s)) = &self.notice {
             lines.push(line(n.chars().take(w).collect::<String>(), *s));
@@ -891,15 +941,15 @@ impl App {
     fn push_all(&mut self, entries: Vec<Entry>) {
         if self.inline {
             let w = self.width();
-            let lines = entries.iter().flat_map(|e| Self::render_entry(e, w)).collect();
+            let lines = entries.iter().flat_map(|e| Self::render_entry(e, w, true)).collect();
             self.print(lines);
             return;
         }
-        if self.view_w == self.columns().0 {
-            let w = self.view_w;
-            self.view.extend(entries.iter().flat_map(|e| Self::render_entry(e, w)));
+        // Tool calls fold into the run before them, which changes lines already rendered.
+        for e in entries {
+            absorb(&mut self.entries, e);
         }
-        self.entries.extend(entries);
+        self.view_w = 0;
         self.draw();
     }
 
@@ -917,6 +967,36 @@ impl App {
         let summary = tool_summary(name, args);
         let detail = summary.strip_prefix(name).unwrap_or(&summary).trim().to_string();
         md::wrap(vec![(name.to_string(), Sty::Bold), (format!(" {detail}"), Sty::Dim)], w, ("• ".into(), Sty::Accent), ("  ".into(), Sty::Plain))
+    }
+
+    /// A run of tool calls: one line (the latest step and a count) or, expanded, every step with its result.
+    fn render_work(steps: &[Step], w: usize, expanded: bool) -> Vec<Line> {
+        let failed = steps.iter().filter(|s| s.result.as_ref().is_some_and(|r| r.2)).count();
+        let n = steps.len();
+        let count = format!("{n} step{}", if n == 1 { "" } else { "s" });
+        if expanded {
+            let mut out = vec![vec![("▾ ".to_string(), Sty::Accent), (format!("{count} · ctrl+o to fold"), Sty::Dim)]];
+            for s in steps {
+                out.extend(Self::render_tool_call(&s.name, &s.args, w));
+                if let Some((head, more, error)) = &s.result {
+                    out.extend(Self::render_tool_result(head, *more, *error, w));
+                }
+            }
+            return out;
+        }
+        let last = &steps[n - 1];
+        let summary = tool_summary(&last.name, &last.args);
+        let mut tail = format!("  · {count}");
+        if failed > 0 {
+            tail.push_str(&format!(" · {failed} failed"));
+        }
+        tail.push_str(" · ctrl+o");
+        let room = w.saturating_sub(UnicodeWidthStr::width(tail.as_str()) + 3).max(8);
+        let mut text: String = summary.chars().take(room).collect();
+        while UnicodeWidthStr::width(text.as_str()) > room {
+            text.pop();
+        }
+        vec![vec![("▸ ".to_string(), Sty::Accent), (text, Sty::Plain), (tail, if failed > 0 { Sty::Err } else { Sty::Dim })], Vec::new()]
     }
 
     /// A tool result as shown: its first three non-empty lines and how many more there are.
@@ -1143,6 +1223,13 @@ impl App {
             return Ok(());
         }
 
+        if !self.inline && ctrl && k.code == KeyCode::Char('o') {
+            self.expand_work = !self.expand_work;
+            self.view_w = 0;
+            self.draw();
+            return Ok(());
+        }
+
         // Scrolling (full screen): PgUp/PgDn move the chat, alt+↑↓ and alt+PgUp/PgDn the side panel.
         if !self.inline {
             let page = self.viewport_rows().saturating_sub(2).max(1);
@@ -1321,6 +1408,8 @@ impl App {
         self.status = "Working".into();
         self.turn_started = Instant::now();
         self.turn_tokens = 0;
+        self.turn_tools = 0;
+        self.turn_files.clear();
         self.aborting = false;
         self.stream.clear();
         self.committed = 0;
@@ -1383,6 +1472,7 @@ impl App {
                     ("↑ ↓", "previous prompts; in the / menu, choose a command (tab completes)"),
                     ("ctrl+←/→", "move by word (also alt+b / alt+f); ctrl+a/e line start/end"),
                     ("ctrl+u/k", "delete to line start / end; ctrl+w deletes a word"),
+                    ("ctrl+o", "show or fold the steps of tool calls (full screen)"),
                     ("PgUp/PgDn", "scroll the conversation (also the mouse wheel)"),
                     ("alt+↑↓", "scroll the side panel (alt+PgUp/PgDn by page; or the wheel over it)"),
                     ("ctrl+c", "clear input; twice to exit"),
@@ -1577,6 +1667,8 @@ impl App {
                     self.busy = true;
                     self.turn_started = std::time::Instant::now();
                     self.turn_tokens = 0;
+                    self.turn_tools = 0;
+                    self.turn_files.clear();
                 }
                 self.turn_effort = ev["effort"].as_str().map(String::from);
             }
@@ -1611,6 +1703,12 @@ impl App {
                 let name = ev["name"].as_str().unwrap_or("");
                 self.status = format!("Running {}", tool_summary(name, &ev["args"]));
                 self.tool_since = Some(Instant::now());
+                self.turn_tools += 1;
+                if matches!(name.rsplit("__").next(), Some("write" | "edit")) {
+                    if let Some(path) = ev["args"]["path"].as_str() {
+                        self.turn_files.insert(path.to_string());
+                    }
+                }
                 // Remember the file, for `/open` with no path.
                 if matches!(name.rsplit("__").next(), Some("read" | "write" | "edit")) {
                     if let Some(path) = ev["args"]["path"].as_str() {
@@ -1933,6 +2031,40 @@ mod tests {
         a.on_event(json!({ "type": "message", "message": { "role": "assistant", "content": [{ "type": "text", "text": reply }] } }));
         let rows = a.screen.rows().join("\n");
         assert_eq!(rows.matches("line 12").count(), 1, "{rows}");
+    }
+
+    fn tool_turn(a: &mut App, n: usize) {
+        for i in 0..n {
+            a.on_event(json!({ "type": "tool_start", "name": "bash", "args": { "command": format!("step {i}") } }));
+            a.on_event(json!({ "type": "message", "message": { "role": "assistant", "content": [{ "type": "toolCall", "name": "bash", "arguments": { "command": format!("step {i}") } }] } }));
+            a.on_event(json!({ "type": "tool_end" }));
+            a.on_event(json!({ "type": "message", "message": { "role": "toolResult", "content": [{ "type": "text", "text": format!("out {i}a\nout {i}b") }] } }));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_run_of_tool_calls_folds_into_one_line_and_ctrl_o_unfolds_it() {
+        let mut a = app(80, 30);
+        a.busy = true;
+        tool_turn(&mut a, 4);
+        let rows = a.screen.rows().join("\n");
+        assert!(rows.contains("step 3") && rows.contains("4 steps"), "{rows}");
+        assert!(!rows.contains("step 1") && !rows.contains("out 3a"), "earlier steps and results are hidden: {rows}");
+        assert!(rows.contains("4 tools"), "the status line counts tools: {rows}");
+        a.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)).await.unwrap();
+        let rows = a.screen.rows().join("\n");
+        assert!(rows.contains("step 1") && rows.contains("out 3a"), "{rows}");
+    }
+
+    #[test]
+    fn edits_count_distinct_files_in_the_status_line() {
+        let mut a = app(100, 30);
+        a.busy = true;
+        for p in ["a.rs", "b.rs", "a.rs"] {
+            a.on_event(json!({ "type": "tool_start", "name": "edit", "args": { "path": p } }));
+        }
+        let rows = a.screen.rows().join("\n");
+        assert!(rows.contains("3 tools") && rows.contains("2 files edited"), "{rows}");
     }
 
     #[test]

@@ -40,7 +40,7 @@ Every session starts from the prompt files in `~/.zenbot/`: `SOUL.md` (who zenbo
 
 ## Using zen
 
-Run `zen` for an interactive session in your terminal. It's full screen: the conversation scrolls with PgUp/PgDn or the mouse wheel, and `/open <file>` shows a file next to the chat (reloaded as it changes; `/close` hides it).
+Run `zen` for an interactive session in your terminal. It's full screen: the conversation scrolls with PgUp/PgDn or the mouse wheel, and `/open <file>` shows a file next to the chat (reloaded as it changes; `/close` hides it). Runs of tool calls show as one line; Ctrl+O unfolds them.
 
 ```bash
 zen              # new session

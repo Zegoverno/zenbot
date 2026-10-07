@@ -6,6 +6,14 @@
 
 ---
 
+## 2026-10-07 — Terminal app: tool work folds into one line
+
+- In full screen, a run of tool calls between pieces of text is one line (`▸ <latest step> · N steps ·
+  ctrl+o`), so only the current step shows. Ctrl+O unfolds every step with its result, and folds
+  them again. Inline mode is unchanged (it prints into scrollback and can't fold).
+- The status line counts the running turn's tool calls and distinct files written or edited.
+- Why: a long turn buried the answer under tool output; Claude Code's own TUI folds the same way.
+
 ## 2026-10-07 — Terminal app: no flicker, a side panel for files
 
 - **No flicker** (D-039): full screen now draws each frame whole and writes only the rows that
