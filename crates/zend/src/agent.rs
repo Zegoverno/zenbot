@@ -121,8 +121,13 @@ pub fn specs(kind: Option<&str>) -> Value {
     all.push(crate::compact::tool_spec());
     all.push(ask_spec());
     all.push(crate::memory::spec());
+    all.push(crate::web::search_spec());
+    all.push(crate::web::fetch_spec());
     all.push(crate::skills::find_spec());
     all.push(crate::skills::load_spec());
+    all.push(crate::mcp::find_spec());
+    all.push(crate::mcp::load_spec());
+    all.push(crate::mcp::call_spec());
     all.push(verify_spec());
     if decide_on() {
         all.push(decide_spec());
@@ -181,6 +186,8 @@ If a question goes unanswered, take your recommended option and say it was an as
             out(content, is_error)
         }
         "verify" => Some(verify(app, session, workspace, args).await),
+        "web_search" | "web_fetch" => crate::web::run_tool(app, session, name, args).await,
+        "find_tools" | "load_tool" | "call_tool" => crate::mcp::run_tool(app, session, name, args).await,
         "decide" => {
             let res = crate::score::decide(app, &args["state"], &args["questions"]).await;
             let (answer, error) = match &res {
@@ -406,7 +413,7 @@ mod tests {
         let names = |v: Value| v.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         assert_eq!(names(specs(Some(VERIFIER))), ["bash", "read", "submit_verdict"]);
         let all = names(specs(None));
-        for t in ["bash", "read", "write", "edit", "history", "ask", "remember", "find_skills", "load_skill", "verify"] {
+        for t in ["bash", "read", "write", "edit", "history", "ask", "remember", "web_search", "web_fetch", "find_skills", "load_skill", "find_tools", "load_tool", "call_tool", "verify"] {
             assert!(all.contains(&t.to_string()), "{t} offered");
         }
         assert!(!all.contains(&"move".to_string()) && !all.contains(&"propose_brief".to_string()));

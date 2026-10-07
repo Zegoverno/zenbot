@@ -8,6 +8,7 @@ mod context;
 mod defaults;
 mod dispatch;
 mod git;
+mod mcp;
 mod measure;
 mod memory;
 mod mind;
@@ -18,6 +19,7 @@ mod tape;
 mod tools;
 mod turns;
 mod update;
+mod web;
 mod workers;
 
 use std::collections::{HashMap, HashSet};
@@ -189,6 +191,7 @@ async fn main() -> Result<()> {
         .route("/sessions/{id}/ws", get(session_ws))
         .route("/sessions/{id}/decision", axum::routing::post(decide))
         .route("/memory", get(list_memory))
+        .route("/mcp", get(mcp_status))
         .route("/memory/sleep", axum::routing::post(run_sleep))
         .route("/version", get(version))
         .route("/upgrade", get(upgrade_status).post(upgrade_start))

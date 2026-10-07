@@ -1,0 +1,12 @@
+[
+  {"when": "mcp", "tool": "find_tools", "args": {"query": "echo a message"}},
+  {"when": "mcp", "tool": "load_tool", "args": {"name": "local_echo"}},
+  {"when": "mcp", "tool": "call_tool", "args": {"name": "local_echo", "arguments": {"message": "hi"}}},
+  {"when": "mcp", "tool": "call_tool", "args": {"name": "remote_add", "arguments": {"a": 2, "b": 3}}},
+  {"when": "mcp", "tool": "call_tool", "args": {"name": "remote_add", "arguments": {"a": 2}}},
+  {"when": "web", "tool": "web_fetch", "args": {"url": "http://127.0.0.1:18100/health"}},
+  {"when": "web", "tool": "web_fetch", "args": {"url": "http://169.254.169.254/latest/meta-data"}},
+  {"when": "web", "tool": "web_search", "args": {"query": "zenbot agent"}},
+  {"when": "web", "tool": "remember", "args": {"text": "Something read on the web.", "source": "owner"}},
+  {"text": "Done."}
+]
