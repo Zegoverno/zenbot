@@ -157,12 +157,15 @@ The core of the moat: learning the owner's judgment and applying it everywhere.
 #### 5.13 Projects & scopes
 - **Scopes:** `global` → `project:<id>` → `session` / `agent`. Every record, page, skill, principle and secret has an owner scope and a sensitivity (`ordinary | sensitive | private`).
 - Projects read global (except `private`); global never reads project data unless granted; agents see only the scopes in their definition.
-- **On disk (each scope is a git repo):**
+- **On disk** (under the zen home, `~/.zenbot`; the first step is built, D-040):
   ```
-  data/
-    global/          wiki/ memory/ taste/ skills/ scripts/ workflows/ agents/ sources/
-    projects/<id>/   wiki/ memory/ taste/ skills/ scripts/ workflows/ agents/ sources/ project.yaml
+  USER.md AGENTS.md mcp.json   system-wide: one owner, one environment
+  agents/<name>/               each agent's own files: SOUL.md now; later agent.md (frontmatter below)
+  global/                      MEMORY.md wiki/ skills/ tools/ now; later taste/ scripts/ workflows/ sources/
+  projects/<id>/               the same folders as global/, plus project.yaml (made with the first project)
   ```
+  Agents are thin definitions; knowledge belongs to a scope, not to an agent, so every agent with
+  access to a scope learns from the same pages, skills and memories.
   `project.yaml` lists linked product repos (git URLs + checkout paths).
 - **Project templates:** `zen project new <name> --template <t>` creates the folders, default agents, starter skills and a first goal.
 

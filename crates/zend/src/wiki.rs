@@ -25,9 +25,9 @@ use crate::{tools, App};
 const NO_SUMMARY: &str = "> [No summary yet: write one from the timeline.]";
 const TYPES: [&str; 6] = ["concept", "entity", "decision", "playbook", "project", "person"];
 
-/// Where the wiki lives: ZEN_WIKI_DIR, else `~/.zenbot/wiki`.
+/// Where the wiki lives: ZEN_WIKI_DIR, else `~/.zenbot/global/wiki` (shared by every agent).
 pub fn root() -> PathBuf {
-    std::env::var("ZEN_WIKI_DIR").map(PathBuf::from).unwrap_or_else(|_| crate::zen_home().join("wiki"))
+    std::env::var("ZEN_WIKI_DIR").map(PathBuf::from).unwrap_or_else(|_| crate::layout::global_dir().join("wiki"))
 }
 
 /// A page name from a title: lowercase letters, digits and hyphens.
@@ -338,7 +338,7 @@ decision, playbook, project or person, each a summary over a dated timeline). Us
 about how the owner wants you to act (that's remember): what a library does, how a system works, why a decision was made, \
 what a project's state is. The kernel picks the page (or makes one), skips what's already recorded and appends a dated entry \
 with its source; you then keep the page's summary current with edit. Find pages with search (scope wiki); they live in \
-~/.zenbot/wiki/. Never put secrets in the wiki.",
+~/.zenbot/global/wiki/. Never put secrets in the wiki.",
         "parameters": {
             "type": "object",
             "properties": {

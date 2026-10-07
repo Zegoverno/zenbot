@@ -72,7 +72,7 @@ link and a hash over the parent's hash and the content. Block kinds include `mes
 What the model reads each turn (`docs/context.md`): the envelope (system prompt and tools, fixed for
 the session) → a summary of older turns, if any → the history (append-only) → the new message with
 its turn context (the date) at the end, sent only when it
-changed. The system prompt is the prompt files `~/.zenbot/SOUL.md`, `AGENTS.md` (the environment)
+changed. The system prompt is the prompt files (laid out by scope, `layout.rs`, D-040) `~/.zenbot/agents/zenbot/SOUL.md`, `AGENTS.md` (the environment)
 and `USER.md`, short-term memory as of the session's start, the skills index, then `AGENTS.md` (or
 `CLAUDE.md`) from `/` down to the workspace; a project's file found later by a tool is attached to
 that tool result and kept. The kernel writes missing default prompt files and skills at start
@@ -100,7 +100,7 @@ with questions for the owner. The kernel-enforced workflow (`flow.rs`) was remov
 
 - **Short-term memory** (`memory.rs`, table `memories`): `remember` adds, replaces or removes an
   entry with its source (`owner`, `verified`, `inferred`). Rendered into the instructions at a
-  session's start (frozen for the session) and exported to `~/.zenbot/MEMORY.md`. Size
+  session's start (frozen for the session) and exported to `~/.zenbot/global/MEMORY.md`. Size
   `ZEN_MEMORY_CHARS` (4000); writes past twice that are refused and start a sleep at once.
 - **Sleep** (`memory::sleep`, `scripts/sleep.sh` from `zen-sleep.timer` nightly, `zen memory
   sleep`): ranks entries (System One's "needed soon" when allowed, else recency; the owner's words
@@ -119,7 +119,7 @@ with questions for the owner. The kernel-enforced workflow (`flow.rs`) was remov
   rank fusion, and System One reranks. Long-term memories are reached this way; a memory found
   counts as used. Every search is a `searches` row. `history` reads any session's messages by
   number.
-- **Wiki** (`wiki.rs`, D-036): pages in `~/.zenbot/wiki/` (git) with a summary over an append-only
+- **Wiki** (`wiki.rs`, D-036): pages in `~/.zenbot/global/wiki/` (git) with a summary over an append-only
   dated timeline; `capture` finds candidate pages with search, System One picks the page (or a new
   one) and catches duplicates and sensitive notes, the kernel appends, masks, labels web-sourced
   notes, keeps `index.md` and `log.md`, and commits; the agent writes the summary. Indexed for
@@ -127,12 +127,12 @@ with questions for the owner. The kernel-enforced workflow (`flow.rs`) was remov
 - **Workshop** (`workshop.rs`, D-037): `save_skill` (reason required, format and size checked,
   near-duplicates refused, drafts in `skills/_proposed` until the owner or an accepted session
   vouches, new domains the owner's call, commits; the sleep flags and archives unused skills) and
-  `save_tool` (made tools in `~/.zenbot/tools/`, called as `made_<name>`, sandboxed without network
+  `save_tool` (made tools in `~/.zenbot/global/tools/`, called as `made_<name>`, sandboxed without network
   until approved in `made_tools`).
 - **Delegation** (`delegate.rs`, D-038): subagents (kind `subagent`, no `ask` or `delegate`), several
   tasks per call in parallel; the model from the routing policy (`policies`) by kind of work, with
   logged exploration; the sleep tunes routes on clear evidence.
-- **Skills** (`skills.rs`): folders in `~/.zenbot/skills/<domain>/<name>/` in the agentskills.io
+- **Skills** (`skills.rs`): folders in `~/.zenbot/global/skills/<domain>/<name>/` in the agentskills.io
   format, validated when scanned (invalid ones are skipped and logged). The instructions carry an
   index; `find_skills` matches names, descriptions and bodies; `load_skill` returns a SKILL.md or a
   file inside the skill (never outside it) as a tool result.
@@ -334,7 +334,7 @@ readable-text extraction and link following; a browser later.
 ### Skills and tools that improve themselves
 
 **Skills** use the agentskills.io format (`SKILL.md` with frontmatter, `references/`, `scripts/`) in
-`~/.zenbot/skills/<domain>/<skill>/`, in git. Rules against sprawl (D-029): domains first (a new
+`~/.zenbot/global/skills/<domain>/<skill>/`, in git. Rules against sprawl (D-029): domains first (a new
 domain needs the owner's OK); edit before create (search first; a new skill only when none covers
 the work, with the reason recorded); changes from evidence at session close, never from one task;
 small and composable; loads and outcomes measured, near-duplicates merged, unused skills retired;

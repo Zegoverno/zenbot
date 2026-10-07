@@ -6,6 +6,7 @@ mod compact;
 mod compile;
 mod context;
 mod defaults;
+mod layout;
 mod delegate;
 mod dispatch;
 mod git;
@@ -140,6 +141,10 @@ async fn main() -> Result<()> {
     let default_model = std::env::var("ZEN_DEFAULT_MODEL").unwrap_or_else(|_| "claude/claude-opus-5-5".into());
 
     tokio::fs::create_dir_all(&workspace).await?;
+    // Move an older flat layout first, so a default never takes the place of the owner's file.
+    for m in layout::migrate(&zen_home()) {
+        tracing::info!("moved {m} (a symlink stays at the old path)");
+    }
     for f in defaults::install(&zen_home()) {
         tracing::info!("installed default {}", zen_home().join(f).display());
     }

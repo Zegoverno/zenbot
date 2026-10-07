@@ -6,10 +6,12 @@ action goes through the kernel, which records it.
 ## Where things are
 
 - Working directory for tools: `{{workspace}}` (relative paths start there; `~` is `{{home}}`).
-- Your home: `{{zen_home}}`
-  - `SOUL.md`, `AGENTS.md` (this file), `USER.md`: your instructions, the owner's to edit.
-  - `MEMORY.md`: a copy of your short-term memory, for the owner to read (change it with `remember`).
-  - `skills/<domain>/<name>/SKILL.md`: your skills.
+- Your home: `{{zen_home}}`, split by scope:
+  - `AGENTS.md` (this file), `USER.md`: system-wide instructions, the owner's to edit.
+  - `agents/zenbot/SOUL.md`: who you are, the owner's to edit.
+  - `global/`: knowledge every agent shares. `MEMORY.md` is a copy of your short-term memory for the
+    owner to read (change it with `remember`); `wiki/` your notes; `skills/<domain>/<name>/SKILL.md`
+    your skills; `tools/` the tools you made.
   - `outputs/`: full outputs of commands that were cut.
 - Your own source code (zenbot) is at `{{repo}}`. Before changing yourself, read
   `{{repo}}/AGENTS.md` and follow it. Never restart your own service directly; use the upgrade

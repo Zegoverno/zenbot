@@ -24,8 +24,8 @@ pub struct Envelope {
 /// Largest size of each prompt file in the instructions (characters): SOUL.md 4000
 /// (ZEN_SOUL_CHARS), AGENTS.md 12000 (ZEN_AGENTS_CHARS), USER.md 3000 (ZEN_USER_CHARS). Sizes from
 /// Hermes and OpenClaw (DESIGN.md, Target design).
-fn file_cap(name: &str) -> usize {
-    let (key, default) = match name {
+fn file_cap(path: &str) -> usize {
+    let (key, default) = match path.rsplit('/').next().unwrap_or(path) {
         "SOUL.md" => ("ZEN_SOUL_CHARS", 4000.0),
         "AGENTS.md" => ("ZEN_AGENTS_CHARS", 12000.0),
         _ => ("ZEN_USER_CHARS", 3000.0),
@@ -49,14 +49,14 @@ pub fn cut_middle(text: &str, cap: usize, path: &str) -> String {
     )
 }
 
-/// A prompt file's text with its placeholders filled in, cut to its size.
-fn prompt_file(name: &str, vars: &[(&str, String)]) -> Option<String> {
-    let path = crate::zen_home().join(name);
+/// A prompt file's text (`rel` under the zen home) with its placeholders filled in, cut to its size.
+fn prompt_file(rel: &str, vars: &[(&str, String)]) -> Option<String> {
+    let path = crate::zen_home().join(rel);
     let mut text = std::fs::read_to_string(&path).ok()?;
     for (k, v) in vars {
         text = text.replace(&format!("{{{{{k}}}}}"), v);
     }
-    Some(cut_middle(text.trim(), file_cap(name), &path.display().to_string()))
+    Some(cut_middle(text.trim(), file_cap(rel), &path.display().to_string()))
 }
 
 /// The system prompt, fixed for the session: who the agent is (SOUL.md), its environment
@@ -72,8 +72,10 @@ pub fn system_prompt(workspace: &Path, repo: &str, memory: &str, sleep_note: Opt
         ("repo", repo.to_string()),
     ];
     let mut s = String::new();
-    let soul = prompt_file("SOUL.md", &vars).unwrap_or_else(|| "You are zenbot, the owner's agent on their Linux VM.".into());
-    s.push_str(&format!("<soul file=\"~/.zenbot/SOUL.md\">\n{soul}\n</soul>\n"));
+    // The agent's own soul; the environment and the owner are system-wide (layout.rs).
+    let soul_rel = format!("agents/{}/SOUL.md", crate::layout::AGENT);
+    let soul = prompt_file(&soul_rel, &vars).unwrap_or_else(|| "You are zenbot, the owner's agent on their Linux VM.".into());
+    s.push_str(&format!("<soul file=\"~/.zenbot/{soul_rel}\">\n{soul}\n</soul>\n"));
     if let Some(env) = prompt_file("AGENTS.md", &vars) {
         s.push_str(&format!("\n<environment file=\"~/.zenbot/AGENTS.md\">\n{env}\n</environment>\n"));
     }

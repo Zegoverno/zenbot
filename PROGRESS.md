@@ -6,6 +6,19 @@
 
 ---
 
+## 2026-10-07 — zenbot's home laid out by scope (D-040)
+
+- `~/.zenbot` is split by scope: `USER.md` and `AGENTS.md` stay at the top (system-wide),
+  `agents/zenbot/SOUL.md` is the agent's own, and `global/` holds what every agent shares
+  (`MEMORY.md`, `wiki/`, `skills/`, `tools/`). New module `crates/zend/src/layout.rs`.
+- The kernel moves an existing flat layout at startup, once, before writing defaults, never
+  overwriting; each old path becomes a relative symlink so a rolled-back build still finds the
+  owner's files. The `zen` Files tree hides symlinks (`.` shows them).
+- Tested: unit tests for the move (once, no overwrite, fresh home), e2e scenario `layout-move`
+  (content, wiki history, an agent-edited skill kept, symlinks, the moved soul in the instructions,
+  a second start changes nothing), the full e2e suite and the other scenarios on the new paths.
+- Why: the owner wants the multi-agent layout in place now, with one agent for the moment.
+
 ## 2026-10-07 — Terminal app: restart onto a new version
 
 - `/restart` restarts zen on the installed binary (`~/.zenbot/bin/zen`), back in the same session

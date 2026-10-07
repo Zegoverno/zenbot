@@ -164,9 +164,9 @@ fn render_entries(entries: &[Entry], cap: usize) -> String {
     out
 }
 
-/// Write short-term memory to `~/.zenbot/MEMORY.md`, for the owner to read (own your data).
+/// Write short-term memory to `~/.zenbot/global/MEMORY.md`, for the owner to read (own your data).
 pub async fn export(db: &PgPool) {
-    let path = crate::zen_home().join("MEMORY.md");
+    let path = crate::layout::global_dir().join("MEMORY.md");
     match short_entries(db).await {
         Ok(entries) => {
             let body: String = entries.iter().map(line).collect();

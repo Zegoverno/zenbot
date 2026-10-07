@@ -49,7 +49,10 @@ impl Files {
             .filter_map(|e| e.ok())
             .filter(|e| {
                 let name = e.file_name().to_string_lossy().into_owned();
-                !SKIP.contains(&name.as_str()) && (self.hidden || !name.starts_with('.'))
+                // Symlinks are hidden like dotfiles: in ~/.zenbot they are the old layout's paths
+                // kept for rollbacks (crates/zend/src/layout.rs), not files of their own.
+                let link = e.file_type().is_ok_and(|t| t.is_symlink());
+                !SKIP.contains(&name.as_str()) && (self.hidden || (!name.starts_with('.') && !link))
             })
             .map(|e| (e.path(), e.path().is_dir()))
             .collect();
@@ -148,6 +151,17 @@ mod tests {
         let d = tree();
         let f = Files::new(d.clone());
         assert_eq!(names(&f), ["src", "README.md"]);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn symlinks_are_hidden_like_dotfiles() {
+        let d = tree();
+        std::os::unix::fs::symlink("README.md", d.join("OLD.md")).unwrap();
+        let mut f = Files::new(d.clone());
+        assert_eq!(names(&f), ["src", "README.md"]);
+        f.toggle_hidden();
+        assert!(names(&f).contains(&"OLD.md".to_string()));
         std::fs::remove_dir_all(d).unwrap();
     }
 

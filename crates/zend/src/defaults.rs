@@ -4,15 +4,15 @@
 
 use std::path::Path;
 
-/// (path under ~/.zenbot, contents)
+/// (path under ~/.zenbot, contents), in the scoped layout (layout.rs)
 const FILES: &[(&str, &str)] = &[
-    ("SOUL.md", include_str!("../defaults/SOUL.md")),
+    ("agents/zenbot/SOUL.md", include_str!("../defaults/SOUL.md")),
     ("AGENTS.md", include_str!("../defaults/AGENTS.md")),
     ("USER.md", include_str!("../defaults/USER.md")),
-    ("skills/work/brief/SKILL.md", include_str!("../defaults/skills/work/brief/SKILL.md")),
-    ("skills/work/brief/references/template.md", include_str!("../defaults/skills/work/brief/references/template.md")),
-    ("skills/work/verify/SKILL.md", include_str!("../defaults/skills/work/verify/SKILL.md")),
-    ("skills/work/close/SKILL.md", include_str!("../defaults/skills/work/close/SKILL.md")),
+    ("global/skills/work/brief/SKILL.md", include_str!("../defaults/skills/work/brief/SKILL.md")),
+    ("global/skills/work/brief/references/template.md", include_str!("../defaults/skills/work/brief/references/template.md")),
+    ("global/skills/work/verify/SKILL.md", include_str!("../defaults/skills/work/verify/SKILL.md")),
+    ("global/skills/work/close/SKILL.md", include_str!("../defaults/skills/work/close/SKILL.md")),
 ];
 
 /// Write the default files missing under `home`. A default skill is written only when its whole
@@ -43,12 +43,11 @@ pub fn install(home: &Path) -> Vec<String> {
     written
 }
 
-/// For `skills/<domain>/<name>/…`, the skill's folder.
+/// For `global/skills/<domain>/<name>/…`, the skill's folder.
 fn skill_dir_of(home: &Path, rel: &str) -> Option<std::path::PathBuf> {
-    let mut parts = rel.split('/');
-    (parts.next()? == "skills").then_some(())?;
+    let mut parts = rel.strip_prefix("global/skills/")?.split('/');
     let (domain, name) = (parts.next()?, parts.next()?);
-    Some(home.join("skills").join(domain).join(name))
+    Some(home.join("global/skills").join(domain).join(name))
 }
 
 #[cfg(test)]
@@ -59,17 +58,17 @@ mod tests {
     fn writes_missing_files_and_never_overwrites() {
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let home = std::env::temp_dir().join(format!("zend-defaults-{nanos}"));
-        std::fs::create_dir_all(home.join("skills/work/verify")).unwrap();
-        std::fs::write(home.join("skills/work/verify/SKILL.md"), "the agent's own version").unwrap();
+        std::fs::create_dir_all(home.join("global/skills/work/verify")).unwrap();
+        std::fs::write(home.join("global/skills/work/verify/SKILL.md"), "the agent's own version").unwrap();
         std::fs::write(home.join("USER.md"), "mine").unwrap();
         let written = install(&home);
-        assert!(written.contains(&"SOUL.md".to_string()));
-        assert!(written.contains(&"skills/work/brief/references/template.md".to_string()), "a new skill is written whole");
+        assert!(written.contains(&"agents/zenbot/SOUL.md".to_string()));
+        assert!(written.contains(&"global/skills/work/brief/references/template.md".to_string()), "a new skill is written whole");
         assert_eq!(std::fs::read_to_string(home.join("USER.md")).unwrap(), "mine");
-        assert_eq!(std::fs::read_to_string(home.join("skills/work/verify/SKILL.md")).unwrap(), "the agent's own version");
+        assert_eq!(std::fs::read_to_string(home.join("global/skills/work/verify/SKILL.md")).unwrap(), "the agent's own version");
         assert!(install(&home).is_empty(), "a second run writes nothing");
         // A skill folder the agent emptied of a file stays as it is.
-        std::fs::remove_file(home.join("skills/work/brief/references/template.md")).unwrap();
+        std::fs::remove_file(home.join("global/skills/work/brief/references/template.md")).unwrap();
         assert!(install(&home).is_empty());
     }
 }

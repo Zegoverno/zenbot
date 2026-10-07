@@ -23,7 +23,7 @@ the discount, so anything that changes must come after everything that doesn't.
 | Turn context (footer) | per turn | the date when it changed; later, memories and search results |
 | Prompt | per turn | what the owner typed |
 
-- **What the instructions hold** (`compile::system_prompt`, D-027), in this order: `~/.zenbot/SOUL.md`
+- **What the instructions hold** (`compile::system_prompt`, D-027), in this order: `~/.zenbot/agents/zenbot/SOUL.md`
   (who the agent is), `~/.zenbot/AGENTS.md` (its environment; `{{workspace}}`, `{{home}}`,
   `{{zen_home}}` and `{{repo}}` filled in), `~/.zenbot/USER.md` (the owner), short-term memory as it
   was at the session's start (entries `[m12] …`, plus a note on last night's sleep when there was

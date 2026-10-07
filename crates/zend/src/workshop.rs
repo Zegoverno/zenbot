@@ -43,9 +43,9 @@ fn archived_root() -> PathBuf {
     skills::root().join("_archived")
 }
 
-/// Where the agent's tools live: ZEN_TOOLS_DIR, else `~/.zenbot/tools`.
+/// Where the agent's tools live: ZEN_TOOLS_DIR, else `~/.zenbot/global/tools` (shared by every agent).
 pub fn tools_root() -> PathBuf {
-    std::env::var("ZEN_TOOLS_DIR").map(PathBuf::from).unwrap_or_else(|_| crate::zen_home().join("tools"))
+    std::env::var("ZEN_TOOLS_DIR").map(PathBuf::from).unwrap_or_else(|_| crate::layout::global_dir().join("tools"))
 }
 
 async fn git(dir: &Path, args: &[&str]) -> bool {
