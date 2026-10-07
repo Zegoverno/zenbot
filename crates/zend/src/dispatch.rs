@@ -1,4 +1,4 @@
-//! Messages from workers: tool calls (run by the kernel, gated by the workflow), streamed text,
+//! Messages from workers: tool calls (run by the kernel), streamed text,
 //! finished messages, usage reports and turn ends.
 
 use super::*;
@@ -62,11 +62,11 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             let name = p.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
             let call_id = p.get("call_id").and_then(Value::as_str).unwrap_or_default().to_string();
             let args = p.get("args").cloned().unwrap_or(json!({}));
-            let (mut cancel, model, turn_id, mut ending, workspace, state) = {
+            let (mut cancel, model, turn_id, mut ending, workspace, kind) = {
                 let mut turns = app.turns.lock().await;
                 let Some(t) = turns.get_mut(&id) else { return Ok(()) };
                 t.tools_running += 1;
-                (t.cancel.subscribe(), t.model.clone(), t.turn_id, t.ending, t.workspace.clone(), t.state.clone())
+                (t.cancel.subscribe(), t.model.clone(), t.turn_id, t.ending, t.workspace.clone(), t.kind.clone())
             };
             // Commands can tell which session runs them (e.g. the commit-trailer hook in scripts/git-hooks).
             let session_env = id.to_string();
@@ -79,18 +79,17 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             } else {
                 tokio::select! {
                     out = async {
-                        // The workflow decides what may run in this state (flow.rs); then its own
-                        // tools, the history tool, or the kernel's built-ins.
-                        let refused = if flow::enabled() { flow::refuse(&state, &name, ending) } else { None };
-                        if let Some(why) = refused {
+                        // Nothing more after a tool ended the turn; then the agent's own tools
+                        // (agent.rs), or the kernel's built-ins.
+                        let read_only = agent::read_only(kind.as_deref());
+                        if let Some(why) = agent::refuse(ending) {
                             tools::ToolOutput { content: why, is_error: true }
-                        } else if let Some(out) = flow::run_tool(app, id, &name, &args, &mut ending).await {
+                        } else if read_only && !matches!(name.as_str(), "bash" | "read" | "submit_verdict") {
+                            tools::ToolOutput { content: format!("`{name}` isn't available to a verifier"), is_error: true }
+                        } else if let Some(out) = agent::run_tool(app, id, &workspace, &name, &args, &mut ending).await {
                             out
-                        } else if name == "history" {
-                            let (content, is_error) = compact::history_tool(&app.db, id, &args).await;
-                            tools::ToolOutput { content, is_error }
                         } else {
-                            tools::execute(&workspace, &name, &args, &env, flow::read_only(&state)).await
+                            tools::execute(&workspace, &name, &args, &env, read_only).await
                         }
                     } => out,
                     _ = cancel.wait_for(|c| *c) => tools::ToolOutput { content: "interrupted: the turn was stopped before this tool finished".into(), is_error: true },

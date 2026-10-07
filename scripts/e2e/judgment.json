@@ -1,13 +1,12 @@
-{ "frame": [
-    {"tool": "propose_brief", "args": {"route": "bounded", "work": "build", "intent": {"stated": "make done.txt"},
-      "goal": "no done.txt -> done.txt exists", "context": {"repo": "."},
-      "criteria": [{"id": "j1", "text": "done.txt reads well"}]}},
-    {"text": "Brief proposed."}],
-  "work": [
+{ "default": [
     {"tool": "write", "args": {"path": "done.txt", "content": "ok"}},
-    {"tool": "submit_work", "args": {"summary": "created done.txt"}},
-    {"text": "Submitted."}],
+    {"tool": "verify", "args": {"goal": "no done.txt -> done.txt exists and reads well", "summary": "created done.txt",
+      "criteria": [{"text": "done.txt exists", "run": "test -f TARGET && echo present", "expect": "present"},
+                   {"text": "done.txt reads well"}]}},
+    {"text": "Checked."}],
   "verify": [
     {"tool": "bash", "args": {"command": "pwd; ls"}},
-    {"tool": "submit_verdict", "args": {"criteria": [{"id": "j1", "verdict": "uncertain", "evidence": "taste"}]}},
+    {"tool": "write", "args": {"path": "verifier-wrote.txt", "content": "x"}},
+    {"tool": "bash", "args": {"command": "touch verifier-touched.txt"}},
+    {"tool": "submit_verdict", "args": {"criteria": [{"id": "c1", "verdict": "pass", "evidence": "in the diff"}, {"id": "c2", "verdict": "uncertain", "evidence": "taste"}]}},
     {"text": "Done."}] }

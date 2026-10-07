@@ -48,10 +48,6 @@ const COMMANDS: &[Command] = &[
     cmd("/model", "choose the model", false),
     cmd("/effort", "choose the thinking level", false),
     cmd("/done", "judge the work so far: accept, more, reshape or drop", false),
-    cmd("/go", "approve the waiting brief and start the work", false),
-    cmd("/brief", "frame the next request with a brief first", false),
-    cmd("/quick", "skip the brief: work directly with every tool", false),
-    cmd("/verify", "verify the work against the brief now", false),
     cmd("/rename", "rename this session: /rename <title>", true),
     cmd("/archive", "archive this session and start a new one", false),
     cmd("/upgrade", "update zenbot to the latest version and restart it", false),
@@ -76,7 +72,7 @@ enum PickKind {
 const DECISIONS: [(&str, &str); 4] = [
     ("accept", "done, and good as it is"),
     ("more", "same goal, keep working"),
-    ("reshape", "the framing was wrong: rethink the approach"),
+    ("reshape", "the approach was wrong: rethink it"),
     ("drop", "stop: not worth continuing"),
 ];
 
@@ -754,26 +750,6 @@ impl App {
         Ok(())
     }
 
-    /// Take a step of the briefed workflow (docs/brief.md) in place of the model.
-    async fn flow(&mut self, action: &str) -> Result<()> {
-        let Some(id) = self.session.clone() else {
-            self.note("no session yet: send a message first", Sty::Warn);
-            return Ok(());
-        };
-        match self.c.post(&format!("/api/sessions/{id}/flow"), json!({ "action": action })).await {
-            Ok(v) => {
-                let msg = match action {
-                    "go" => "approved; the work starts".to_string(),
-                    "verify" => "verifying".to_string(),
-                    _ => format!("now {}", v["state"].as_str().unwrap_or("")),
-                };
-                self.note(msg, Sty::Dim);
-            }
-            Err(e) => self.note(e.to_string(), Sty::Warn),
-        }
-        Ok(())
-    }
-
     async fn record_decision(&mut self, decision: &str, note: &str) -> Result<()> {
         let Some(id) = self.session.clone() else { return Ok(()) };
         self.c.post(&format!("/api/sessions/{id}/decision"), json!({ "decision": decision, "note": note })).await?;
@@ -1050,7 +1026,6 @@ impl App {
             Some("/model") => self.open_model_picker(),
             Some("/effort") => self.open_effort_picker(),
             Some("/done") => self.done(arg).await?,
-            Some(c @ ("/go" | "/brief" | "/quick" | "/verify")) => self.flow(&c[1..]).await?,
             Some("/rename") => match (&self.session, arg.is_empty()) {
                 (_, true) => self.note("usage: /rename <title>", Sty::Warn),
                 (None, _) => self.note("nothing to rename yet; send a message first", Sty::Warn),
@@ -1150,7 +1125,7 @@ impl App {
                 let m = &ev["message"];
                 match m["role"].as_str() {
                     Some("user") if m["kernel"] == true => {
-                        // The workflow talking to the model (e.g. "the brief is approved"), not the owner.
+                        // The kernel talking to the model (a verifier's instructions), not the owner.
                         let text = text_of(&m["content"]);
                         let mut out: Vec<Line> = text.lines().map(|l| line(format!("  zen › {l}"), Sty::Dim)).collect();
                         out.push(Vec::new());
@@ -1212,20 +1187,13 @@ impl App {
                 }
             }
             "busy" => {
-                // A turn the kernel started (the work after approval, a fix round) also counts.
+                // A turn the kernel started also counts.
                 if !self.busy {
                     self.busy = true;
                     self.turn_started = std::time::Instant::now();
                     self.turn_tokens = 0;
                 }
                 self.turn_effort = ev["effort"].as_str().map(String::from);
-            }
-            "brief" => {
-                let mut out = vec![line(format!("── Brief v{} ──", ev["version"]), Sty::Dim)];
-                out.extend(self.md.render(ev["text"].as_str().unwrap_or(""), w));
-                out.push(Vec::new());
-                self.md = Md::default();
-                self.commit(out);
             }
             "questions" => {
                 let mut out = vec![line("── Questions ──", Sty::Dim)];
@@ -1239,21 +1207,9 @@ impl App {
                 out.push(Vec::new());
                 self.commit(out);
             }
-            "report" => {
-                let mut out = vec![line("── Report ──", Sty::Dim)];
-                out.extend(self.md.render(ev["text"].as_str().unwrap_or(""), w));
-                out.push(Vec::new());
-                self.md = Md::default();
-                self.commit(out);
-            }
             "status" => {
                 self.status = ev["text"].as_str().unwrap_or("Working").to_string();
                 self.draw();
-            }
-            "state" => {
-                if ev["state"] == "working" && ev["by"] != "kernel" {
-                    self.note(format!("work started ({})", ev["reason"].as_str().unwrap_or("")), Sty::Dim);
-                }
             }
             "child_end" => {
                 let r = &ev["turn"];
@@ -1261,11 +1217,6 @@ impl App {
             }
             "idle" => {
                 self.busy = false;
-                if ev["waiting"] == "approval" {
-                    self.note("the brief is waiting: /go to approve, or reply with changes", Sty::Dim);
-                } else if matches!(ev["state"].as_str(), Some("reported" | "closed")) {
-                    self.note("reply to continue this job, /done to judge it, /new for a new job", Sty::Dim);
-                }
                 self.draw();
             }
             "thinking" => {
@@ -1524,20 +1475,16 @@ mod tests {
     }
 
     #[test]
-    fn workflow_events_render_and_keep_the_turn_busy_until_idle() {
+    fn questions_render_with_the_recommended_option_first() {
         let mut a = app_with_models(80, 30);
         a.busy = true;
-        a.on_event(json!({ "type": "brief", "version": 1, "text": "Route: bounded · Work: build\nGoal: no flag -> --json flag" }));
-        a.on_event(json!({ "type": "end", "error": null, "turn": {}, "next": true }));
-        assert!(a.busy, "the kernel continues (approval, then the work): still busy");
-        a.on_event(json!({ "type": "message", "message": { "role": "user", "kernel": true, "content": "The brief is approved." } }));
         a.on_event(json!({ "type": "questions", "questions": [{ "question": "Which flag name?", "options": ["--json", "--format json"] }] }));
-        a.on_event(json!({ "type": "report", "text": "Verification: 1 passed, 0 failed, 0 uncertain." }));
-        a.on_event(json!({ "type": "idle", "state": "closed" }));
+        a.on_event(json!({ "type": "status", "text": "verifying: running 1 check(s)" }));
+        assert_eq!(a.status, "verifying: running 1 check(s)");
+        a.on_event(json!({ "type": "end", "error": null, "turn": {} }));
         assert!(!a.busy);
-        assert!(a.notice.as_ref().is_some_and(|(t, _)| t.contains("/new for a new job")), "{:?}", a.notice);
         let out = a.capture.take().unwrap();
-        for want in ["── Brief v1 ──", "Goal: no flag -> --json flag", "zen › The brief is approved.", "a) --json  (recommended)", "── Report ──", "1 passed"] {
+        for want in ["── Questions ──", "1. Which flag name?", "a) --json  (recommended)", "b) --format json"] {
             assert!(out.contains(want), "missing {want:?} in {out}");
         }
     }
@@ -1547,10 +1494,9 @@ mod tests {
         let mut a = app_with_models(80, 20);
         assert!(!a.busy);
         a.on_event(json!({ "type": "busy", "busy": true, "model": "claude/claude-opus-5-5", "effort": "high" }));
-        assert!(a.busy, "after /go the work runs without a prompt from this terminal");
-        a.on_event(json!({ "type": "idle", "state": "framing", "waiting": "approval" }));
+        assert!(a.busy, "a turn started elsewhere shows here too");
+        a.on_event(json!({ "type": "idle" }));
         assert!(!a.busy);
-        assert!(a.notice.as_ref().is_some_and(|(t, _)| t.contains("/go")), "{:?}", a.notice);
     }
 
     #[test]

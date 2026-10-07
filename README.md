@@ -2,7 +2,7 @@
 
 A maker tool that works like a chief of staff: the owner hands it jobs, operational work and building software alike, and it carries them end to end with any model (Claude Code, Codex, Pi, API models), so the owner's attention goes to the decisions that matter. A personal tool, developed in public.
 
-Status: early. The kernel, the `zen` terminal app, Claude Code / Codex engines, context management and briefed work are built and in use. A redesign around tools, skills and memory was agreed on 2026-10-06 and is the current plan ([ROADMAP.md](ROADMAP.md)).
+Status: early. The kernel, the `zen` terminal app, Claude Code / Codex engines and context management are built and in use. The redesign around tools, skills and memory agreed on 2026-10-06 is being built ([ROADMAP.md](ROADMAP.md)): prompt files, short-term memory with a nightly sleep, skills, and briefs and verification as a skill and a tool are in.
 
 ## Docs
 
@@ -36,7 +36,7 @@ Update with `zen upgrade` (or `/upgrade` inside zen); zen tells you when a new v
 
 For development: `./scripts/dev.sh` runs a kernel from the checkout next to the service, on port 18100 with its own `zen_dev` database (`ZEN_FAUX=1 ./scripts/dev.sh` adds `faux/smoke`, a scripted test model). See [DEVELOPMENT.md](DEVELOPMENT.md).
 
-zenbot adds instruction files to every session's system prompt: `~/.zenbot/AGENTS.md` (global), then `AGENTS.md` (or `CLAUDE.md`) in each directory from `/` down to the workspace.
+Every session starts from the prompt files in `~/.zenbot/`: `SOUL.md` (who zenbot is), `AGENTS.md` (its environment), `USER.md` (you: fill it in), and its short-term memory; then `AGENTS.md` (or `CLAUDE.md`) in each directory from `/` down to the workspace. zenbot writes default versions of its files when they're missing and never overwrites yours.
 
 ## Using zen
 
@@ -51,7 +51,7 @@ zen -e xhigh     # thinking level (default: the model's; `zen models` lists them
 zen --inline     # no full-screen layout: the input follows the conversation (or ZEN_INLINE=1)
 ```
 
-Inside: `/new`, `/resume`, `/model`, `/effort`, `/done`, `/go`, `/brief`, `/quick`, `/verify`, `/rename <title>`, `/archive`, `/upgrade`, `/help`, `/exit`. Enter sends; Shift+Enter (or Alt+Enter, Ctrl+J) starts a new line or paragraph; Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
+Inside: `/new`, `/resume`, `/model`, `/effort`, `/done`, `/rename <title>`, `/archive`, `/upgrade`, `/help`, `/exit`. Enter sends; Shift+Enter (or Alt+Enter, Ctrl+J) starts a new line or paragraph; Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
 
 For scripts, every command accepts `--json` and exits non-zero on failure:
 
@@ -61,7 +61,8 @@ echo "notes…" | zen ask "Summarize this" --json   # prompt from stdin, JSON re
 zen ask -s 3f2a "And now fix it"                  # continue a session (id or prefix)
 zen sessions ls | show <id> | new | archive <id> | restore <id> | rename <id> <title>
 zen sessions decide <id> accept|more|reshape|drop [-n note]   # same as /done
-zen sessions flow <id> go|brief|quick|verify                 # same as /go, /brief, …
+zen memory [--tier short|long|archived|all]       # what zenbot remembers, and the last sleep
+zen memory sleep                                  # tidy short-term memory now
 zen ask -m claude/claude-sonnet-5-5 -e low "…"    # model and thinking level for a new session
 zen models                                        # models and their thinking levels, [default]
 zen status
@@ -70,9 +71,14 @@ zen upgrade [--check]
 
 ## How a session works
 
-A session is one job. For a job that's big, risky or unclear, zen frames it before changing anything ([docs/brief.md](docs/brief.md)); small jobs it just does. Framing looks around read-only (the shell can't write) and either answers, or asks up to three questions, or proposes a short **brief**: the goal, scope, must-nots, assumptions and success criteria, written as commands where possible. Small briefs are approved automatically; bigger ones wait for you (`/go`, or reply "yes"; reply with changes to reshape it). The work then continues with the brief (small work in the same context, architectural work in a fresh one), and when it's submitted zen runs the criteria's commands itself and a fresh verifier checks the rest. Failures go back to work twice at most, then you get a report: criteria results, the decisions it made on its own, and its assumptions. Where allowed it closes the session with its own verdict; yours (`/done`) always replaces it.
+A session is one job. zenbot gets tools, skills and memory rather than a fixed procedure ([docs/brief.md](docs/brief.md)):
 
-You can take any step yourself: `/brief` (frame the next request), `/quick` (skip the brief), `/go`, `/verify`, `/done`. Settings in `~/.zenbot/env`: `ZEN_BRIEFS` (`opt-in`, the default: the model decides; `always`; `off`), `ZEN_AUTO_APPROVE` and `ZEN_AUTO_CLOSE` (routes, default `quick,bounded`; `all`), `ZEN_VERIFY_ROUNDS` (default 2), `ZEN_DECIDE_TOOL=0`.
+- **Skills** are how to do a kind of work well: `~/.zenbot/skills/<domain>/<name>/SKILL.md` ([agentskills.io](https://agentskills.io) format). Only their names and descriptions are in the instructions; zenbot loads one when a job matches it. It starts with `work/brief` (frame a big, risky or unclear job: the real goal, scope, assumptions, criteria as commands) and `work/verify` (prove it before saying it's done).
+- **`verify`**: the kernel runs the criteria's commands itself, and when some need judgment a fresh verifier (no history, read-only) reads the diff and judges them.
+- **`ask`**: up to three questions only you can answer, each with options and a recommendation; the turn ends until you reply.
+- **Memory**: zenbot saves what will matter again with `remember` (`MEMORY.md`, a fixed size, shown from the next session). Every night (`zen-sleep.timer`) a sleep keeps what's most likely needed, archives the rest (never deletes) and proposes the few lasting, impactful memories for long-term memory. `zen memory` shows it; `~/.zenbot/MEMORY.md` is a copy to read. Settings: `ZEN_MEMORY_CHARS` (size, default 4000), `ZEN_S1_PRIVATE=0` (keep memories away from the System One model; the sleep then ranks by recency).
+
+`/done` records your verdict on the work so far.
 
 ## Context
 

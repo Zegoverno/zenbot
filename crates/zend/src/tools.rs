@@ -1,5 +1,5 @@
 //! Built-in tools. The kernel is the only place side effects happen.
-//! Commands run on the host in the workspace (read-only phases in a bubblewrap sandbox); per-project
+//! Commands run on the host in the workspace (a verifier's in a read-only bubblewrap sandbox); per-project
 //! sandboxes come with M2.
 
 use std::collections::HashMap;
@@ -16,24 +16,18 @@ const DEFAULT_READ_LINES: usize = 2000;
 /// Most bash output kept in memory; the rest is counted but dropped.
 const MAX_CAPTURE: usize = 16 * 1024 * 1024;
 
-/// The kernel's tools, in a fixed order (they are part of the cached prefix). `history` is executed
-/// by the kernel itself (compact.rs), since it reads the session's tape.
+/// The file and shell tools, in a fixed order (they are part of the cached prefix). The agent's
+/// other tools are added after them (agent.rs). Each description says what the tool does, when to
+/// use it and when not, and what it returns (DESIGN.md, "Who teaches what").
 pub fn specs() -> Value {
-    let mut all = builtin_specs();
-    if let Some(list) = all.as_array_mut() {
-        list.push(crate::compact::tool_spec());
-    }
-    all
-}
-
-fn builtin_specs() -> Value {
     json!([
         {
             "name": "bash",
-            "description": "Run a shell command with bash in the workspace directory. Returns combined stdout/stderr and the exit code. \
-Use for listing files, searching (rg, grep, find), git, builds, tests and running programs. \
-Output over 50KB is cut to its head and tail and the full output is saved to a file you can read. \
-For servers and other long-running processes, start them in the background with output redirected, e.g. `cmd > /tmp/cmd.log 2>&1 &`.",
+            "description": "Run a shell command with bash in the workspace directory. Use it for searching (rg, grep, find), git, \
+builds, tests and running programs. Not for reading or changing files: use read, write and edit, which are safer and \
+easier to review. Returns stdout and stderr together, then the exit code; output over 50KB is cut to its head and tail \
+and the full output saved to a file you can read. Start servers and other long-running processes in the background \
+with output redirected, e.g. `npm run dev > /tmp/dev.log 2>&1 &`, then check the log.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -45,7 +39,10 @@ For servers and other long-running processes, start them in the background with 
         },
         {
             "name": "read",
-            "description": "Read a text file. Returns numbered lines (up to 2000 lines or 50KB per call; the footer says which offset to continue from). Paths are relative to the workspace unless absolute.",
+            "description": "Read a text file, or part of one, as numbered lines. Use it to look at files (not cat, head or \
+sed) and always before editing one. Returns up to 2000 lines or 50KB per call; the footer says which offset to \
+continue from. Paths are relative to the workspace unless absolute; `~` is the home directory. Example: \
+{\"path\": \"src/main.rs\", \"offset\": 120, \"limit\": 80}.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -58,7 +55,9 @@ For servers and other long-running processes, start them in the background with 
         },
         {
             "name": "write",
-            "description": "Create or overwrite a file with the given content. Creates parent directories. Use edit for small changes to existing files.",
+            "description": "Create a file, or replace a whole file, with the given content; parent directories are created. \
+Use it for new files and complete rewrites; for changes to an existing file use edit, which keeps the rest intact. \
+To move or delete files, use bash (mv, rm). Returns the path and size written.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -70,8 +69,11 @@ For servers and other long-running processes, start them in the background with 
         },
         {
             "name": "edit",
-            "description": "Replace text in a file. old_text must match the file (copy it from read, without the line numbers) and be unique unless replace_all is true. \
-Read the file first. Line endings and trailing whitespace are handled for you.",
+            "description": "Change an existing file by replacing exact text. Read the file first, then copy old_text from it \
+(without the line numbers), with enough surrounding lines to be unique, unless replace_all is true. Line endings and \
+trailing whitespace are handled for you; edits to the same file are applied one at a time, so several in one step are \
+safe. Returns how many occurrences were replaced, or why none matched. Example: {\"path\": \"app.py\", \
+\"old_text\": \"DEBUG = True\", \"new_text\": \"DEBUG = False\"}.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -81,18 +83,6 @@ Read the file first. Line endings and trailing whitespace are handled for you.",
                     "replace_all": { "type": "boolean", "description": "Replace every occurrence" }
                 },
                 "required": ["path", "old_text", "new_text"]
-            }
-        },
-        {
-            "name": "move",
-            "description": "Move or rename a file or directory. Creates parent directories of the destination.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "from": { "type": "string", "description": "Source path" },
-                    "to": { "type": "string", "description": "Destination path" }
-                },
-                "required": ["from", "to"]
             }
         }
     ])
@@ -212,14 +202,13 @@ fn save_full_output(text: &str) -> Option<PathBuf> {
 /// a sandbox where the filesystem is mounted read-only (bubblewrap) and only `read` may run besides.
 pub async fn execute(workspace: &Path, name: &str, args: &Value, env: &[(&str, &str)], read_only: bool) -> ToolOutput {
     if read_only && !matches!(name, "bash" | "read") {
-        return err(format!("`{name}` can't run in a read-only phase"));
+        return err(format!("`{name}` can't run in a read-only session"));
     }
     let result = match name {
         "bash" => bash(workspace, args, env, read_only).await,
         "read" => read(workspace, args).await,
         "write" => write(workspace, args).await,
         "edit" => edit(workspace, args).await,
-        "move" => move_path(workspace, args).await,
         _ => Err(err(format!("unknown tool `{name}`"))),
     };
     let mut out = result.unwrap_or_else(|e| e);
@@ -432,7 +421,7 @@ async fn read(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> 
     Ok(ok(out))
 }
 
-// ---------- write / edit / move ----------
+// ---------- write / edit ----------
 
 async fn write(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> {
     let path = resolve(workspace, str_arg(args, "path")?);
@@ -560,19 +549,6 @@ async fn edit(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> 
     let n = if all { matches.len() } else { 1 };
     let note = if loose { " (matched after normalizing whitespace and quotes)" } else { "" };
     Ok(ok(format!("replaced {n} occurrence(s) in {}{note}", path.display())))
-}
-
-async fn move_path(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> {
-    let from = resolve(workspace, str_arg(args, "from")?);
-    let to = resolve(workspace, str_arg(args, "to")?);
-    let _guard = lock_files(&[&from, &to]).await;
-    if let Some(parent) = to.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| err(format!("cannot create {}: {e}", parent.display())))?;
-    }
-    tokio::fs::rename(&from, &to)
-        .await
-        .map_err(|e| err(format!("cannot move {} to {}: {e}", from.display(), to.display())))?;
-    Ok(ok(format!("moved {} to {}", from.display(), to.display())))
 }
 
 #[cfg(test)]

@@ -29,6 +29,24 @@ pub fn scorer() -> Option<String> {
     std::env::var("ZEN_S1_MODEL").ok().map(|m| m.trim().to_string()).filter(|m| !m.is_empty())
 }
 
+/// Whether System One may see private content (file contents, tool output, memories, search
+/// results), not only the owner's messages and final answers: on by default (D-032; the main
+/// model's provider already sees the same content, and secrets are masked). ZEN_S1_PRIVATE=0 keeps
+/// System One to the conversation; the tools that would send it more then do without it (the
+/// sleep ranks by recency).
+pub fn private_ok() -> bool {
+    std::env::var("ZEN_S1_PRIVATE").map(|v| v.trim() != "0").unwrap_or(true)
+}
+
+/// Ask the configured System One model typed questions about `state` (`s1.decide`,
+/// docs/worker-protocol.md). The answer is the worker's result; a model-side failure comes back
+/// in its `error` field.
+pub async fn decide(app: &App, state: &Value, questions: &Value) -> Result<Value> {
+    let model = scorer().context("no System One model is configured (ZEN_S1_MODEL)")?;
+    let w = crate::worker_for(app, &model).await.with_context(|| format!("no worker serves classifier `{model}` (is the pi worker running?)"))?;
+    app.workers[w].mind().request("s1.decide", json!({ "model": model, "state": state, "questions": questions })).await
+}
+
 /// The v1 questions. Each is atomic; a choice has an `unknown` option because the model can't abstain.
 pub fn questions() -> Value {
     json!({

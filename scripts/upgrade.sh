@@ -73,7 +73,7 @@ fi
 SMOKE_DB_URL=$(db_url_for "$SMOKE_DB")
 (
   set -a; [ -f "$HOME/.zenbot/env" ] && . "$HOME/.zenbot/env"; set +a
-  ZEN_TOKEN="$(cat "$HOME/.zenbot/token")" ZEN_PORT=$SMOKE_PORT ZEN_WORKERS=$SMOKE_WORKERS ZEN_MIND_DIR="$REPO/packages/mind" ZEN_FAUX=1 ZEN_WORKSPACE="$SMOKE_WS" \
+  ZEN_TOKEN="$(cat "$HOME/.zenbot/token")" ZEN_PORT=$SMOKE_PORT ZEN_WORKERS=$SMOKE_WORKERS ZEN_MIND_DIR="$REPO/packages/mind" ZEN_FAUX=1 ZEN_WORKSPACE="$SMOKE_WS" ZEN_HOME="$SMOKE_WS/.zenbot" \
     ZEN_HARNESS="$(git rev-parse --short HEAD)" DATABASE_URL="$SMOKE_DB_URL" \
     exec ./target/release/zend
 ) >>"$SMOKE_LOG" 2>&1 &

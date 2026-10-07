@@ -1,7 +1,8 @@
 //! Instruction files the owner keeps for agents (AGENTS.md, or CLAUDE.md).
 //!
 //! Two kinds reach the model:
-//! - Always: `~/.zenbot/AGENTS.md`, then one per directory from `/` down to the workspace.
+//! - Always: one per directory from `/` down to the workspace. (`~/.zenbot/AGENTS.md` is not one of
+//!   these: it describes the agent's environment and has its own place in the instructions, compile.rs.)
 //! - On demand: a project below the workspace (e.g. ~/zenbot) has its own AGENTS.md. The first
 //!   time a tool touches a path there, the kernel attaches that file to the tool's result and
 //!   records it in the session (tape kind `context`), so later turns get it in the system prompt.
@@ -32,18 +33,11 @@ fn in_dir(dir: &Path) -> Option<PathBuf> {
     NAMES.iter().map(|n| dir.join(n)).find(|p| p.is_file())
 }
 
-/// Files that always go into the system prompt: global first, then from `/` down to the workspace.
+/// Files that always go into the system prompt: from `/` down to the workspace.
 pub fn always(workspace: &Path) -> Vec<(PathBuf, String)> {
-    let mut paths = Vec::new();
-    if let Ok(home) = std::env::var("HOME") {
-        let global = PathBuf::from(home).join(".zenbot/AGENTS.md");
-        if global.is_file() {
-            paths.push(global);
-        }
-    }
     let mut dirs: Vec<&Path> = workspace.ancestors().collect();
     dirs.reverse();
-    paths.extend(dirs.into_iter().filter_map(in_dir));
+    let paths: Vec<PathBuf> = dirs.into_iter().filter_map(in_dir).collect();
     let mut out: Vec<(PathBuf, String)> = Vec::new();
     for p in paths {
         if !out.iter().any(|(q, _)| q == &p) {

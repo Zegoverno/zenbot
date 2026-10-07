@@ -52,7 +52,7 @@ pub async fn load(db: &PgPool, session: Uuid, kinds: &[&str]) -> Result<Vec<Bloc
         .collect())
 }
 
-/// All of a session's blocks, in order: read once per turn start and derived from (compile.rs, flow.rs).
+/// All of a session's blocks, in order: read once per turn start and derived from (compile.rs, turns.rs).
 pub async fn load_all(db: &PgPool, session: Uuid) -> Result<Vec<Block>, sqlx::Error> {
     let rows = sqlx::query("SELECT seq, kind, payload FROM tape_events WHERE session_id = $1 AND seq IS NOT NULL ORDER BY seq")
         .bind(session)

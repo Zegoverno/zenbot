@@ -37,3 +37,18 @@ new_token() {
   [ -s "$HOME/.zenbot/token" ] || (umask 077 && head -c 24 /dev/urandom | base64 | tr -d '/+=' > "$HOME/.zenbot/token")
   chmod 600 "$HOME/.zenbot/token"
 }
+
+# The timers in deploy/ (engine updates, the memory sleep), written to /etc/systemd/system and
+# enabled. install.sh calls it, and apply-upgrade.sh, so an upgrade brings a new timer too.
+install_timers() {
+  local repo=$1 user=${USER:-$(id -un)} unit
+  for unit in zen-engines.service zen-engines.timer zen-sleep.service zen-sleep.timer; do
+    sed -e "s#__USER__#$user#g" -e "s#__REPO__#$repo#g" -e "s#__HOME__#$HOME#g" "$repo/deploy/$unit" \
+      | sudo tee "/etc/systemd/system/$unit" >/dev/null
+  done
+  sudo systemctl daemon-reload
+  # Daily: the Claude Code and Codex CLIs on their latest versions, tested (scripts/update-engines.sh).
+  sudo systemctl enable --now zen-engines.timer >/dev/null 2>&1
+  # Nightly: short-term memory tidied to its size (scripts/sleep.sh).
+  sudo systemctl enable --now zen-sleep.timer >/dev/null 2>&1
+}

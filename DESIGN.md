@@ -4,7 +4,7 @@
 > 2026-10-06 (D-025 to D-030) that the roadmap builds. What zenbot is meant to have, module by module,
 > is in [SPEC.md](SPEC.md); where each piece lives in the code, in [MAP.md](MAP.md); the order of
 > work, in [ROADMAP.md](ROADMAP.md). Deep dives: `docs/context.md` (what the model reads each turn),
-> `docs/brief.md` (briefed work, being replaced), `docs/worker-protocol.md`,
+> `docs/brief.md` (briefs and verification), `docs/worker-protocol.md`,
 > `docs/client-protocol.md`.
 
 ## Invariants
@@ -36,7 +36,7 @@ These hold today and in the target design. Changing one needs the owner's OK and
  zen (terminal app, script commands)        web UI (frozen)
           │ HTTP + WebSocket, one port (ZEN_PORT, default 8100), owner token
 ┌──────────────────────── zend (Rust kernel, systemd service `zenbot`) ────────────────────────┐
-│ API/WS · sessions and tape · context compiler · tools and executor · flow (briefed work)      │
+│ API/WS · sessions and tape · context compiler · tools and executor · memory and sleep · skills │
 │ System One decisions and scoring · summaries · tracing · worker routing and supervision        │
 └────────────┬───────────────────────────────┬─────────────────────────────────────┬───────────┘
              │ JSON-RPC 2.0 over stdio        │ JSON-RPC 2.0 over stdio              │ sqlx
@@ -65,51 +65,73 @@ subscription for tests.
 
 Each session has an append-only tape: a chain of blocks with a per-session number (`seq`), a parent
 link and a hash over the parent's hash and the content. Block kinds include `message`, `context`,
-`envelope`, `compaction`, `engine_session`, and the briefed-work blocks (`state`, `brief`,
-`questions`, `submission`, `verification`, …).
+`envelope`, `compaction`, `engine_session`, `base` (the session's instructions), `questions` and
+`verification` (and, from sessions before 2026-10-07, the old workflow's `state`, `brief`,
+`submission`, … blocks).
 
 What the model reads each turn (`docs/context.md`): the envelope (system prompt and tools, fixed for
 the session) → a summary of older turns, if any → the history (append-only) → the new message with
-its turn context (the date, and the workflow step when there is one) at the end, sent only when it
-changed. The system prompt is zenbot's base instructions
-plus instruction files: `~/.zenbot/AGENTS.md` (global), then `AGENTS.md` (or `CLAUDE.md`) from `/`
-down to the workspace; a project's file found later by a tool is attached to that tool result and
-kept. Each zenbot session keeps a matching Claude Code session (`--resume`) or Codex thread, so
+its turn context (the date) at the end, sent only when it
+changed. The system prompt is the prompt files `~/.zenbot/SOUL.md`, `AGENTS.md` (the environment)
+and `USER.md`, short-term memory as of the session's start, the skills index, then `AGENTS.md` (or
+`CLAUDE.md`) from `/` down to the workspace; a project's file found later by a tool is attached to
+that tool result and kept. The kernel writes missing default prompt files and skills at start
+(`crates/zend/defaults/`), never overwriting. Each zenbot session keeps a matching Claude Code session (`--resume`) or Codex thread, so
 earlier turns come from the provider's cache. Past 70% of the context budget, older turns are
 summarized in the background with block addresses; the `history` tool reads any block back.
 
 ### Tools today
 
-`bash`, `read`, `write`, `edit`, `move`, `history`, `ask`, `decide`, plus the briefed-work tools
-(`propose_brief`, `submit_work`, the verifier's `submit_verdict`). Tool output is cut once, when the
-tool runs (full output saved and referenced); edits are serialized per file and CRLF/BOM-safe; tools
-are cancelled with their process group on abort.
+Fixed order, the same every turn of a session: `bash`, `read`, `write`, `edit`, `history`, `ask`,
+`remember`, `find_skills`, `load_skill`, `verify`, and `decide` when a System One model is
+configured. A verifier session gets only `bash` (read-only, bubblewrap), `read` and
+`submit_verdict`. Each description says what the tool does, when to use it and when not, and what
+it returns. Tool output is cut once, when the tool runs (full output saved and referenced); edits
+are serialized per file and CRLF/BOM-safe; tools are cancelled with their process group on abort.
 
-### Briefed work (being replaced)
+### Briefs and verification
 
-Sessions are one job. Briefs are opt-in: framing (read-only, bubblewrap) → brief (schema-checked,
-criteria as commands) → approve → work → verify (the kernel runs criteria; a fresh verifier when it
-adds) → report → verdict. The kernel enforces the gates in `crates/zend/src/flow.rs`. Phase 1 of the
-roadmap removes the gates and keeps `verify` and `ask` (see "Target design"). Details:
-`docs/brief.md`.
+A skill and a tool, not a kernel workflow (D-026, `docs/brief.md`): the `work/brief` skill frames a
+big, risky or unclear job; the `verify` tool has the kernel run the criteria's commands and, for
+criteria that need judgment, a fresh read-only verifier session judge the diff. `ask` ends the turn
+with questions for the owner. The kernel-enforced workflow (`flow.rs`) was removed on 2026-10-07.
+
+### Memory and skills
+
+- **Short-term memory** (`memory.rs`, table `memories`): `remember` adds, replaces or removes an
+  entry with its source (`owner`, `verified`, `inferred`). Rendered into the instructions at a
+  session's start (frozen for the session) and exported to `~/.zenbot/MEMORY.md`. Size
+  `ZEN_MEMORY_CHARS` (4000); writes past twice that are refused and start a sleep at once.
+- **Sleep** (`memory::sleep`, `scripts/sleep.sh` from `zen-sleep.timer` nightly, `zen memory
+  sleep`): ranks entries (System One's "needed soon" when allowed, else recency; the owner's words
+  and verified results a little higher), keeps what fits, archives the rest, and proposes for
+  long-term the entries from the owner or a check that System One judges durable and impactful at
+  ≥ 0.95 on the lowest of three samples (shadow: `ZEN_MEMORY_PROMOTE=on` acts). Every entry's fate
+  is a `decisions` row; the run is a `sleep_runs` row; the next sessions get a one-line note. System
+  One sees memories unless `ZEN_S1_PRIVATE=0` (D-032).
+- **Skills** (`skills.rs`): folders in `~/.zenbot/skills/<domain>/<name>/` in the agentskills.io
+  format, validated when scanned (invalid ones are skipped and logged). The instructions carry an
+  index; `find_skills` matches names, descriptions and bodies; `load_skill` returns a SKILL.md or a
+  file inside the skill (never outside it) as a tool result.
 
 ### System One
 
 A fast typed-decision model (Jev via OpenRouter, through Pi's `s1.decide`): choice, score or bool
 questions, answered with probabilities. Used today for live scoring of sessions (from the owner's
-messages and final answers only, never tool output; `session_scores`), shadow decisions in briefed
-work (route, kind of work, unverified claims; `decisions`), and the model's `decide` tool. Configured
+messages and final answers only, never tool output; `session_scores`), the model's `decide` tool,
+and the memory sleep (private content allowed unless `ZEN_S1_PRIVATE=0`, D-032). Configured
 by `ZEN_S1_MODEL` and `OPENROUTER_API_KEY`; needs the `pi` worker.
 
 ### Measurement
 
-`turns` (one row per turn), `model_calls`, `tool_calls`, `envelopes`, `session_decisions` (the owner's
-`/done` verdicts, with their source), `session_scores`, `decisions`. Evals: `scripts/eval.sh` runs two
+`turns` (one row per turn), `model_calls`, `tool_calls` (skill loads included), `envelopes`,
+`session_decisions` (the owner's `/done` verdicts, with their source), `session_scores`,
+`decisions`, `memories`, `sleep_runs`. Evals: `scripts/eval.sh` runs two
 harness versions with the same model on isolated kernels and databases (`evals/README.md`).
 
 ### Security today
 
-One owner token for the API. Every tool runs in the kernel; framing runs read-only in bubblewrap.
+One owner token for the API. Every tool runs in the kernel; a verifier runs read-only in bubblewrap.
 Secrets are masked in tool output; full outputs stay under `~/.zenbot/outputs`. Commands run as the
 owner's user on the VM (no per-project sandbox yet). Outward-facing actions are covered by the system
 prompt ("ask before"), not enforced.
@@ -120,7 +142,8 @@ prompt ("ask before"), not enforced.
   `zenbot` (installed by `install.sh`) and starts its workers. One port for API, WebSocket and web
   UI; `/health` reports the database, workers and busy sessions.
 - `zen-engines.timer` updates the Claude Code and Codex CLIs daily, tested, with rollback; Pi is
-  pinned (D-022).
+  pinned (D-022). `zen-sleep.timer` runs the memory sleep nightly. Both are installed by
+  `install.sh` and refreshed after each upgrade.
 - CI publishes binaries for every commit on `main` that passes its checks; installs and upgrades
   download them or compile. `scripts/upgrade.sh` checks, smoke-tests on a throwaway database copy,
   backs up before migrations, restarts when no session is busy, and rolls back if unhealthy
@@ -183,22 +206,22 @@ Loaded at session start.
 | `read` | Read a file or image | exists |
 | `write` | Create or overwrite a file | exists |
 | `edit` | Exact string replacement in a file | exists |
-| `ask` | Bring the owner 1–3 questions, each with 2–4 options, recommended first; unanswered → the recommendation, recorded as an assumption. `wait: false` keeps working on what doesn't depend on the answer | exists (ends the turn) |
+| `ask` | Bring the owner 1–3 questions, each with 2–4 options, recommended first; unanswered → the recommendation, recorded as an assumption. `wait: false` keeps working on what doesn't depend on the answer | built (ends the turn; `wait: false` in Phase 6) |
 | `search` | One search across sessions (this one included), memories and the wiki | new; replaces `history` |
-| `remember` | Add, replace or remove a short-term memory entry, with its source | new |
+| `remember` | Add, replace or remove a short-term memory entry, with its source | built |
 | `web_search` | Search the web through the configured provider | new |
 | `web_fetch` | Fetch a URL as readable text, with its links | new |
-| `find_skills` | Search skills by need: names and one-line descriptions | new |
-| `load_skill` | Load a skill, or one of its reference files | new |
+| `find_skills` | Search skills by need: names and one-line descriptions | built (word match; System One ranking later) |
+| `load_skill` | Load a skill, or one of its reference files | built |
 | `find_tools` | Search MCP and agent-made tools by need: names and one-line descriptions | new |
 | `load_tool` | Load a tool's full definition so it can be called | new |
-| `decide` | Ask System One typed questions, in batches, with probabilities | exists |
-| `verify` | A fresh verifier checks work against criteria, without the maker's reasoning | exists inside briefed work |
+| `decide` | Ask System One typed questions, in batches, with probabilities | built |
+| `verify` | A fresh verifier checks work against criteria, without the maker's reasoning | built |
 | `capture` | Put a concept into the wiki | new |
 | `delegate` | Hand a subtask to a subagent with fresh context and a chosen model | new |
 
-Going away: `move` (`bash mv`), `propose_brief` (a brief is a file the `brief` skill writes),
-`submit_work` and the other workflow tools, `history` (once `search` exists). Wiki pages, skills and
+Gone (2026-10-07): `move` (`bash mv`), `propose_brief` (a brief is a file the `brief` skill
+writes), `submit_work`, `note_ruling` and the approvals. Going: `history` (once `search` exists). Wiki pages, skills and
 tool manifests are files, so `write` and `edit` cover authoring; the kernel validates the format on
 save.
 

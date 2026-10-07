@@ -1,16 +1,19 @@
 //! zend — the zenbot kernel. Owns all state and all side effects.
 
+mod agent;
 mod api;
 mod compact;
 mod compile;
 mod context;
+mod defaults;
 mod dispatch;
-mod flow;
 mod git;
 mod measure;
+mod memory;
 mod mind;
 mod score;
 mod secrets;
+mod skills;
 mod tape;
 mod tools;
 mod turns;
@@ -19,7 +22,6 @@ mod workers;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -67,14 +69,16 @@ struct App {
     compacting: Mutex<HashSet<Uuid>>,
     /// Kernel-started turns being waited for (verifier sessions), by session.
     waiters: Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<()>>>,
-    /// Sessions with workflow steps running outside a turn (approval, verification), counted as
-    /// busy so an upgrade waits for them.
+    /// Sessions with kernel work running outside a turn, counted as busy so an upgrade waits for them.
     pub(crate) background: Mutex<HashSet<Uuid>>,
-    /// Session state changes so far (flow::set_state), so a turn starting meanwhile can tell.
-    pub(crate) state_changes: AtomicU64,
 }
 
 type AppState = Arc<App>;
+
+/// zenbot's home on the host: ZEN_HOME, else `~/.zenbot` (prompt files, skills, outputs, …).
+pub(crate) fn zen_home() -> PathBuf {
+    std::env::var("ZEN_HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())).join(".zenbot"))
+}
 
 /// A number from a setting, or the default when it's unset or not a number.
 pub(crate) fn env_num(key: &str, default: f64) -> f64 {
@@ -121,6 +125,9 @@ async fn main() -> Result<()> {
     let default_model = std::env::var("ZEN_DEFAULT_MODEL").unwrap_or_else(|_| "claude/claude-opus-5-5".into());
 
     tokio::fs::create_dir_all(&workspace).await?;
+    for f in defaults::install(&zen_home()) {
+        tracing::info!("installed default {}", zen_home().join(f).display());
+    }
     let db = PgPoolOptions::new().max_connections(10).connect(&database_url).await?;
     // A rolled-back build must still start on a database a newer build already migrated.
     let mut migrator = sqlx::migrate!("./migrations");
@@ -166,12 +173,7 @@ async fn main() -> Result<()> {
         compacting: Mutex::new(HashSet::new()),
         waiters: Mutex::new(HashMap::new()),
         background: Mutex::new(HashSet::new()),
-        state_changes: AtomicU64::new(0),
     });
-    // A verification a restart cut short can't resume: send the work back so the session isn't stuck.
-    for id in sqlx::query_scalar::<_, Uuid>("SELECT id FROM sessions WHERE state = 'verifying'").fetch_all(&app.db).await? {
-        flow::set_state(&app, id, "working", "kernel", "verification was interrupted by a restart; submit the work again", false).await?;
-    }
     tokio::spawn(app.updater.clone().check_periodically());
     for (idx, exited) in exits.into_iter().enumerate() {
         tokio::spawn(supervise(app.clone(), idx, exited, merged_tx.clone()));
@@ -186,7 +188,8 @@ async fn main() -> Result<()> {
         .route("/sessions/{id}", get(get_session).patch(update_session))
         .route("/sessions/{id}/ws", get(session_ws))
         .route("/sessions/{id}/decision", axum::routing::post(decide))
-        .route("/sessions/{id}/flow", axum::routing::post(flow_action))
+        .route("/memory", get(list_memory))
+        .route("/memory/sleep", axum::routing::post(run_sleep))
         .route("/version", get(version))
         .route("/upgrade", get(upgrade_status).post(upgrade_start))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth));

@@ -2,7 +2,7 @@
 //! through the kernel (tool calls included) without any subscription.
 //!
 //! Listed as `faux/smoke` when ZEN_FAUX=1. The script is read from the JSON file in
-//! ZEN_FAUX_SCRIPT if set: a list of steps (or an object of lists by workflow phase, see `script`),
+//! ZEN_FAUX_SCRIPT if set: a list of steps (or an object of lists by kind of session, see `script`),
 //! each one of
 //!   {"tool": "<name>", "args": {...}}   call a kernel tool
 //!   {"text": "..."}                    answer (streamed as deltas, then a message)
@@ -26,32 +26,14 @@ pub fn models() -> Vec<Value> {
 }
 
 /// The steps for this turn. The script is a list of steps, or an object of lists keyed by the
-/// workflow phase (`frame`, `work`, `verify`, else `default`, from the turn context or the
-/// verifier's instructions), so one script can drive a whole briefed session.
+/// kind of session: `verify` for a verifier (a child session that checks work), else `default`.
 fn script(input: &TurnInput) -> Result<Vec<Value>> {
     match std::env::var("ZEN_FAUX_SCRIPT").ok().filter(|p| !p.trim().is_empty()) {
         Some(path) => {
             let text = std::fs::read_to_string(&path).with_context(|| format!("reading ZEN_FAUX_SCRIPT {path}"))?;
             let v: Value = serde_json::from_str(&text).context("ZEN_FAUX_SCRIPT must be JSON")?;
-            // The phase is in the latest turn context (the prompt's, else the history's).
-            let phase_text = std::iter::once(input.context.clone().unwrap_or_default())
-                .chain(input.history.iter().rev().filter_map(|m| m["context"].as_str().map(String::from)))
-                .find(|c| c.contains("Phase:"))
-                .unwrap_or_default();
-            let phase = if input.kind.as_deref() == Some("verifier") {
-                "verify"
-            } else if phase_text.contains("Phase: framing") {
-                "frame"
-            } else if phase_text.contains("Phase: working") {
-                "work"
-            } else if phase_text.contains("Phase: open") {
-                "open"
-            } else {
-                "default"
-            };
-            let steps = if v.is_object() { v.get(phase).or_else(|| v.get("default")).cloned().unwrap_or(json!([])) } else { v.clone() };
-            // An open session's script defaults to the framing one (proposing a brief opts in).
-            let steps = if phase == "open" && steps.as_array().is_some_and(|a| a.is_empty()) { v.get("frame").cloned().unwrap_or(steps) } else { steps };
+            let key = if input.kind.as_deref() == Some("verifier") { "verify" } else { "default" };
+            let steps = if v.is_object() { v.get(key).cloned().unwrap_or(json!([])) } else { v.clone() };
             serde_json::from_value(steps).context("ZEN_FAUX_SCRIPT must be a list of steps, or an object of them")
         }
         None => Ok(vec![

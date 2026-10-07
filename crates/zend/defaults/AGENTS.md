@@ -1,0 +1,28 @@
+# AGENTS.md — your environment
+
+You live on the owner's Linux VM and act through the tools the kernel (`zend`) runs for you. Every
+action goes through the kernel, which records it.
+
+## Where things are
+
+- Working directory for tools: `{{workspace}}` (relative paths start there; `~` is `{{home}}`).
+- Your home: `{{zen_home}}`
+  - `SOUL.md`, `AGENTS.md` (this file), `USER.md`: your instructions, the owner's to edit.
+  - `MEMORY.md`: a copy of your short-term memory, for the owner to read (change it with `remember`).
+  - `skills/<domain>/<name>/SKILL.md`: your skills.
+  - `outputs/`: full outputs of commands that were cut.
+- Your own source code (zenbot) is at `{{repo}}`. Before changing yourself, read
+  `{{repo}}/AGENTS.md` and follow it. Never restart your own service directly; use the upgrade
+  script it describes.
+
+## How the conversation works
+
+- The owner sees every tool call and its output, so never repeat raw tool output; say what matters
+  and quote only the relevant lines.
+- Messages in a session are numbered (#n). In a long session older turns are replaced by a summary;
+  the `history` tool reads any of them back.
+- Instruction files (`AGENTS.md` or `CLAUDE.md`) of the projects you work in are added as you touch
+  them. Follow them.
+
+The owner may edit this file (`~/.zenbot/AGENTS.md`). Keep it about the environment: how to use a
+tool belongs in the tool's description, how to do a kind of work in a skill.

@@ -167,8 +167,8 @@ The core of the moat: learning the owner's judgment and applying it everywhere.
 - **Project templates:** `zen project new <name> --template <t>` creates the folders, default agents, starter skills and a first goal.
 
 #### 5.14 Agents, tasks and the closed loop
-- **Briefs and verification become a skill and a tool** the agent uses when they help (D-026); the kernel-enforced version below is what's built today and is being removed.
-- **Sessions as briefed work** (`docs/brief.md`): frame (read-only, enforced by the kernel) → brief with checkable criteria → approve (owner, or auto-approve per route) → work in a fresh context seeded with the brief → verify (the kernel runs the criteria's commands; a fresh verifier judges the rest) → report → verdict (owner's is the ground truth; the model's is recorded as such). The model can run it end to end; the owner can take any step.
+- **Briefs and verification are a skill and a tool** the agent uses when they help (D-026; built 2026-10-07, `docs/brief.md`). The kernel-enforced version below was removed then.
+- **Sessions as briefed work** (removed, D-020): frame (read-only, enforced by the kernel) → brief with checkable criteria → approve (owner, or auto-approve per route) → work in a fresh context seeded with the brief → verify (the kernel runs the criteria's commands; a fresh verifier judges the rest) → report → verdict (owner's is the ground truth; the model's is recorded as such). The model can run it end to end; the owner can take any step.
 - **Routing policy:** which model and thinking level per kind of work, versioned. Day-to-day policy changes automatically when evals and metrics show a better fit (logged, undoable); system-level changes need the owner.
 - **Agent definitions:** `agents/<name>.md` with frontmatter (instructions, model policy, tools, skills, scopes, budget, may-delegate).
 - **Delegation:** `delegate(agent, goal, context, output_schema?, background?)` → child session with a fresh context; results return to the parent; background delegations report back through the board and inbox. Children can't widen permissions; nesting depth is capped.

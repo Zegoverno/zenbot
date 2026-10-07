@@ -29,11 +29,12 @@ pub(crate) struct Turn {
     pub(crate) cache_break: Option<&'static str>,
     /// The previous turn's context size, to check the provider really reused its cache.
     pub(crate) prev_context: Option<i64>,
-    /// Set when a workflow tool ended the model's step (flow.rs); later tool calls are refused.
+    /// Set when a tool ended the model's turn (a question to the owner, a verdict; agent.rs);
+    /// later tool calls are refused.
     pub(crate) ending: Option<&'static str>,
-    /// The session's workflow state (flow.rs), read when the turn starts and kept current by
-    /// flow::set_state, so tool calls don't read it from the database.
-    pub(crate) state: String,
+    /// The session's kind (`verifier` for a child that checks work; agent.rs), read when the turn
+    /// starts, so tool calls don't read it from the database.
+    pub(crate) kind: Option<String>,
 }
 
 /// Stop turns that have gone quiet: no message from the worker and no tool running for
@@ -90,13 +91,7 @@ pub(crate) async fn finish_turn(app: &AppState, id: Uuid, error: Value) -> bool 
             tracing::error!("recording engine session for {id}: {e:#}");
         }
     }
-    // The workflow may continue on its own (approve and work, verify); clients wait for `idle` then.
-    let after = flow::after_turn(app, id, turn.ending, error.is_null()).await;
-    app.emit(id, json!({ "type": "end", "error": error, "cost": cost, "turn": summary, "next": after.next })).await;
-    if let Some(w) = after.waiting {
-        let state = flow::state(&app.db, id).await.unwrap_or_default();
-        app.emit(id, json!({ "type": "idle", "state": state, "waiting": w })).await;
-    }
+    app.emit(id, json!({ "type": "end", "error": error, "cost": cost, "turn": summary, "next": false })).await;
     if let Some(waiter) = app.waiters.lock().await.remove(&id) {
         let _ = waiter.send(());
     }
@@ -270,49 +265,22 @@ pub(crate) fn turn_json(r: &sqlx::postgres::PgRow) -> Value {
     })
 }
 
-/// Who started a turn: the owner (a prompt), or the kernel continuing the workflow (flow.rs).
+/// Who started a turn: the owner (a prompt), or the kernel (a verifier's review).
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Origin {
     Owner,
     Kernel,
 }
 
-/// The owner's prompt. With briefed work, it may approve a waiting brief instead of starting a
-/// turn, or start a new request after a report.
+/// The owner's prompt.
 pub(crate) async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
     if text.trim().is_empty() {
         return Ok(());
     }
-    if flow::enabled() {
-        match flow::state(&app.db, id).await?.as_str() {
-            "open" => flow::shadow_request_once(app, id, &text).await?,
-            "framing" => {
-                let waiting = flow::latest_brief(&app.db, id).await?.is_some_and(|(_, approved)| !approved);
-                if waiting && flow::is_approval(&text) && !app.is_busy(id).await {
-                    let user = json!({ "role": "user", "content": text, "timestamp": chrono::Utc::now().timestamp_millis() });
-                    append_tape(&app.db, id, "message", &user).await?;
-                    app.emit(id, json!({ "type": "message", "message": user })).await;
-                    tokio::spawn(flow::approve(app.clone(), id, "owner"));
-                    return Ok(());
-                }
-                flow::shadow_request_once(app, id, &text).await?;
-            }
-            // A session is one job: a message after the report continues that job (more work on
-            // the same brief), it doesn't start a new one. A new job is a new session.
-            "reported" | "closed" => {
-                let briefed = flow::latest_brief(&app.db, id).await?.is_some_and(|(_, approved)| approved);
-                let (to, why) = if briefed { ("working", "owner continued the job") } else { ("framing", "owner continued") };
-                flow::set_state(app, id, to, "owner", why, false).await?;
-            }
-            "verifying" => anyhow::bail!("the work is being verified; wait for the report"),
-            _ => {}
-        }
-    }
     begin_turn(app, id, text, Origin::Owner).await
 }
 
-/// Start a turn the kernel asks for (the work after approval, fixes after a failed verification,
-/// a verifier's review).
+/// Start a turn the kernel asks for (a verifier's review).
 pub(crate) async fn start_kernel_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
     begin_turn(app, id, text, Origin::Kernel).await
 }
@@ -347,14 +315,11 @@ pub(crate) async fn run_child(app: &AppState, parent: Uuid, kind: &str, prompt: 
 }
 
 pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: Origin) -> Result<()> {
-    // The session's row is read once; its state is then kept on the turn (flow::set_state updates it).
-    let state_changes = app.state_changes.load(Ordering::SeqCst);
-    let row = sqlx::query("SELECT model, effort, title, workspace, kind, COALESCE(state, 'open') AS state FROM sessions WHERE id = $1")
+    let row = sqlx::query("SELECT model, effort, title, workspace, kind FROM sessions WHERE id = $1")
         .bind(id)
         .fetch_optional(&app.db)
         .await?;
     let Some(row) = row else { anyhow::bail!("session not found") };
-    let mut state: String = row.get("state");
     let model: String = row.get("model");
     let workspace = row.get::<Option<String>, _>("workspace").map(PathBuf::from).unwrap_or_else(|| app.workspace.clone());
     let kind: Option<String> = row.get("kind");
@@ -397,23 +362,9 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
                 cache_break: None,
                 prev_context: None,
                 ending: None,
-                state: state.clone(),
+                kind: kind.clone(),
             },
         );
-        // A state change since the row was read missed this turn: read the state again, under
-        // the lock set_state takes, so no change can slip in between.
-        if app.state_changes.load(Ordering::SeqCst) != state_changes {
-            state = match flow::state(&app.db, id).await {
-                Ok(s) => s,
-                Err(e) => {
-                    turns.remove(&id);
-                    return Err(e.into());
-                }
-            };
-            if let Some(t) = turns.get_mut(&id) {
-                t.state = state.clone();
-            }
-        }
     }
     // How far the start got, for cleaning up when it fails.
     let (mut row_written, mut busy_sent) = (false, false);
@@ -448,22 +399,14 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
         }
         // The engine's own session can be resumed only if nothing was written since it last
         // matched the tape (no other turn, summary or new instructions in between).
-        // Workflow bookkeeping (state, brief, approval, rulings, …) doesn't touch what the engine saw.
+        // Bookkeeping blocks (questions, verifications, …) don't touch what the engine saw.
         // The tape is read once; everything below is derived from it.
         let blocks = tape::load_all(&app.db, id).await?;
         let engine = model.split_once('/').map(|(e, _)| e).unwrap_or("");
         let last = blocks.iter().rev().find(|b| matches!(b.kind.as_str(), "message" | "compaction" | "envelope" | "base" | "engine_session")).cloned();
-        // What the model is told and can use depends on the session's state (flow.rs), as it is
-        // now (it may have changed while a summary was made).
-        let state = app.turns.lock().await.get(&id).filter(|t| t.turn_id == turn_id).map(|t| t.state.clone()).unwrap_or(state);
         let base = compile::base_prompt(&app.db, id, &blocks, &app.workspace, &app.repo).await?;
-        let brief = match state.as_str() {
-            "working" | "verifying" | "reported" => flow::fresh_brief_in(&blocks),
-            _ => None,
-        };
-        let brief_version = flow::brief_in(&blocks).and_then(|(b, _)| b["version"].as_i64());
-        let tools = if flow::enabled() { flow::tools_for(&state) } else { tools::specs() };
-        let system = flow::system_for(&base, &state, brief.as_ref());
+        let tools = agent::specs(kind.as_deref());
+        let system = agent::system_for(&base, kind.as_deref());
         let (envelope, new_envelope) = compile::envelope(&app.db, id, &blocks, &system, &tools).await?;
         let resume = match (&last, new_envelope) {
             (Some(b), None) if b.kind == "engine_session" && b.payload["engine"] == engine => Some(json!({ "id": b.payload["id"] })),
@@ -471,8 +414,7 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
         };
         let (history, summary) = compile::history(&blocks);
         let today = chrono::Local::now().format("%Y-%m-%d (%A)").to_string();
-        let phase = flow::phase_line(&state, brief_version);
-        let turn_context = compile::turn_context(&blocks, &today, phase.as_deref());
+        let turn_context = compile::turn_context(&blocks, &today, None);
         let sent = measure::record(&envelope, &history, &summary, &text, &turn_context, resume.is_some(), new_envelope);
         let cache_break = measure::break_at_start(prev.as_ref(), &model, &envelope.hash, &sent);
         // An abort or the watchdog may have ended the turn while it was being prepared: then

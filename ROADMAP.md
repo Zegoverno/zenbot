@@ -11,15 +11,16 @@ decides; every load and call is recorded per turn; System One is built into each
 
 ## Where things stand
 
-Built and installed: the kernel, the `zen` terminal app, the Claude Code / Codex engines (and Pi),
-context v2 (`docs/context.md`) and briefed work with opt-in briefs (`docs/brief.md`). See
+Built and installed: the kernel, the `zen` terminal app, the Claude Code / Codex engines (and Pi)
+and context v2 (`docs/context.md`). Built on `feat/foundation`, not yet evaluated or installed:
+Phase 1 (prompt files, memory with sleep, skills, the workflow replaced by skills and tools). See
 PROGRESS.md. The phases below replace the old next steps (old "Phase 2b", "Phase 3 memory",
 "Phase 4 search", "Phase 5 wiki").
 
 | Phase | Name | Delivers | Status |
 |---|---|---|---|
-| 0 | Ground | Research the reference projects in their code; merge the open fix PRs | **ACTIVE** |
-| 1 | Foundation | Prompt files, tool descriptions, short-term memory with sleep, skills, workflow into skills | next |
+| 0 | Ground | Research the reference projects in their code; merge the open fix PRs | PRs merged; research still to record |
+| 1 | Foundation | Prompt files, tool descriptions, short-term memory with sleep, skills, workflow into skills | **ACTIVE**: built, eval and dogfooding next |
 | 2 | Reach | `web_search`, `web_fetch`, MCP client, `find_tools` / `load_tool` | |
 | 3 | Recall | `search` (full-text, then semantic) over sessions and memories; long-term memory acts | |
 | 4 | Knowledge | The wiki and `capture` | |
@@ -28,7 +29,7 @@ PROGRESS.md. The phases below replace the old next steps (old "Phase 2b", "Phase
 
 ---
 
-## Phase 0 — Ground `[ ACTIVE ]`
+## Phase 0 — Ground `[ research outstanding ]`
 
 **Goal:** every part of the target design checked against the best reference projects before code.
 
@@ -49,9 +50,13 @@ PROGRESS.md. The phases below replace the old next steps (old "Phase 2b", "Phase
 
 **Done when** DESIGN.md's target design cites its sources and the owner has reviewed it.
 
+Phase 1 was built before this research was recorded; its choices cite sources in the code and
+docs where known (OpenClaw's prompt-file cut, Hermes' refused writes when memory is full,
+agentskills.io's rules), but the code-level comparison is still owed and may change Phase 1.
+
 ---
 
-## Phase 1 — Foundation
+## Phase 1 — Foundation `[ ACTIVE ]`
 
 **Goal:** sessions start from the prompt files and system tools, load only the skills they use, keep
 short-term memory across sessions, and frame and verify through skills instead of kernel gates.
@@ -86,6 +91,11 @@ short-term memory across sessions, and frame and verify through skills instead o
 7. **Check and ship.** New e2e scenarios: the files load; a skill loads on demand; memory carries
    across sessions; sleep keeps memory within its size. Eval against the installed version (pass
    rate, cost, prefix size); the owner decides. Install and dogfood.
+
+**Status (2026-10-07):** steps 1–7 built on `feat/foundation`, with unit tests and 12 e2e scenarios
+passing. Left: the eval against the installed version and the owner's call; install and dogfood;
+and the smaller parts not built yet: prompt-file and tool-description sizes recorded per session
+(they're in `envelopes`, not yet measured), System One ranking in `find_skills`, skills kept in git.
 
 **Done when** every session starts from the four files and the system tools, the agent loads only
 the skills it uses, framing and verification happen through skills with no kernel gates, memory
@@ -136,10 +146,8 @@ maps to a model, a small share of subtasks explore, outcomes decide.
 
 ## Open decisions
 
-1. **What System One may see.** Heavy use sends private content (files, search results, wiki text) to
-   Jev on OpenRouter, ending the rule that tool output never leaves the VM for scoring. Recommended:
-   allow everything except content marked sensitive (secrets are masked; the main model's provider
-   already sees the same content). Waiting on the owner.
+1. ~~What System One may see~~: decided (D-032): private content allowed by default,
+   `ZEN_S1_PRIVATE=0` turns it off.
 2. **Dogfooding data.** Real use runs on another VM. A `zen export` (sessions, verdicts, cost, model
    choices; secrets masked) would bring it here for evals and, later, Phase 6. Not yet scheduled.
 3. **Pilot project.** Which side project zenbot serves after zenbot itself.
@@ -148,15 +156,14 @@ maps to a model, a small share of subtasks explore, outcomes decide.
 
 - Settings are read from the environment in ~25 places (no single config).
 - Client events are untyped JSON.
-- `flow.rs` (~1,000 lines) is mostly removed in Phase 1, step 6.
-- The `policies` table is read on approval (`flow::route_for`) but nothing ever writes it, so policy
-  routing does nothing until a row exists (found by the MAP.md survey; matters for Phase 6).
-- Brief criteria commands run on the bash tool's shell, not in the read-only bubblewrap sandbox; instruction files attached to a tool
-  result are added after secret masking runs. Both to settle with the sandbox and masking work.
-- Stale header comments: `flow.rs` (sessions start `open` by default, not `framing`), `codex.rs`
-  (threads persist unless `ZEN_CODEX_RESUME=0`).
-- Paths never run with real models: Codex and Pi through the workflow, the questions path, a model
-  switch mid-session, a failed verification followed by a real fix.
+- The old workflow's schema stays (expand-only): `sessions.state`, `policies` (never written),
+  old tape block kinds. Drop them in a later release.
+- `verify`'s criteria commands run on the bash tool's shell, not in the read-only bubblewrap
+  sandbox; instruction files attached to a tool result are added after secret masking runs. Both
+  to settle with the sandbox and masking work.
+- Stale header comment: `codex.rs` (threads persist unless `ZEN_CODEX_RESUME=0`).
+- Paths never run with real models: the new tools (`remember`, `load_skill`, `verify`, `ask`) on
+  Codex and Pi, a model switch mid-session, a failed verification followed by a real fix.
 
 ## Long-term milestones
 
