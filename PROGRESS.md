@@ -6,6 +6,36 @@
 
 ---
 
+## 2026-10-07 — Phase 1 built: prompt files, memory, skills; the workflow out of the kernel
+
+On `feat/foundation`; not yet evaluated or installed. Harness change: the eval against the installed
+version and the owner's call come before merging.
+
+- **Prompt files** (D-027): every session starts from `~/.zenbot/SOUL.md`, `AGENTS.md` (the
+  environment), `USER.md`, short-term memory and a skills index. The text hardcoded in the kernel
+  moved into default files the kernel writes when missing and never overwrites.
+- **Tool descriptions** say what each tool does, when to use it and when not, and what it returns;
+  the `<tool_guidelines>` block is gone. `move` is gone (`bash mv`).
+- **Memory** (D-028): `remember` (add, replace, remove; with its source), `MEMORY.md` frozen per
+  session and exported to `~/.zenbot/MEMORY.md`, a hard ceiling that refuses writes and starts a
+  sleep. The sleep (nightly `zen-sleep.timer`, or `zen memory sleep`) keeps what fits, archives the
+  rest, proposes long-term promotions in shadow, logs every fate in `decisions`, and leaves a note
+  for the next sessions. System One judges memories only with `ZEN_S1_PRIVATE=1` (open decision).
+- **Skills**: `~/.zenbot/skills/<domain>/<name>/` (agentskills.io), `find_skills`, `load_skill`;
+  first skills `work/brief` and `work/verify`.
+- **Workflow out of the kernel** (D-026): `flow.rs` (1,043 lines) replaced by `agent.rs` (433):
+  no session states, approvals, `propose_brief`, `submit_work` or `ZEN_BRIEFS`; `verify` (kernel
+  runs the commands, a fresh read-only verifier judges the rest) and `ask` stay as tools. The CLI
+  lost `/go`, `/brief`, `/quick`, `/verify` and `sessions flow`, and gained `zen memory`.
+- **Fixed on the way:** `history` was offered twice; memory ages decoded as the wrong SQL type
+  (the turn hung); the sleep's handler could be cut off by a client timeout.
+- Dev, eval and smoke kernels get their own zenbot home, so they never overwrite the live
+  `MEMORY.md`. Timers are refreshed after each upgrade, so `zen-sleep.timer` arrives by upgrade.
+- e2e: 12 scenarios (new: `prompt-files`, `skills`, `memory-across-sessions`, `memory-sleep`,
+  `ask`; `verifier` rewritten for the tool; the workflow scenarios removed).
+
+---
+
 ## 2026-10-06 — Kernel robustness, worker turn ids, loud engine failures, fewer queries
 
 Merged on the owner's instruction (PRs #8, #9, #10, #13). These are harness changes; the evals their

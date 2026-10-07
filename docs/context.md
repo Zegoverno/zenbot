@@ -17,12 +17,24 @@ the discount, so anything that changes must come after everything that doesn't.
 | Piece | Changes | Holds |
 |---|---|---|
 | Tools | per session | the kernel's tools, in a fixed order |
-| Instructions (system prompt) | per session | zenbot's rules, the AGENTS.md files from `/` to the workspace, the working directory |
+| Instructions (system prompt) | per session | the prompt files (`SOUL.md`, `AGENTS.md`, `USER.md`), short-term memory (`MEMORY.md`), the skills index, the AGENTS.md files from `/` to the workspace |
 | Summary | rarely | older turns, summarized, with the addresses of the originals |
 | History | only appended to | messages since the summary, word for word |
 | Turn context (footer) | per turn | the date when it changed; later, memories and search results |
 | Prompt | per turn | what the owner typed |
 
+- **What the instructions hold** (`compile::system_prompt`, D-027), in this order: `~/.zenbot/SOUL.md`
+  (who the agent is), `~/.zenbot/AGENTS.md` (its environment; `{{workspace}}`, `{{home}}`,
+  `{{zen_home}}` and `{{repo}}` filled in), `~/.zenbot/USER.md` (the owner), short-term memory as it
+  was at the session's start (entries `[m12] …`, plus a note on last night's sleep when there was
+  one), the skills index (each skill's name and description, or only the domains when that's over
+  `ZEN_SKILL_INDEX_CHARS`), then the projects' instruction files. Each prompt file has a size cap
+  (`ZEN_SOUL_CHARS` 4000, `ZEN_AGENTS_CHARS` 12000, `ZEN_USER_CHARS` 3000); a longer file keeps its
+  first 70% and last 20% with a note where to read the rest (OpenClaw's cut). The kernel writes
+  default prompt files and skills that are missing when it starts (`crates/zend/defaults/`) and
+  never overwrites one. How to use each tool is in the tool's description, not the instructions.
+- **Loaded on demand, appended.** A skill (`load_skill`) arrives as a tool result, so the
+  instructions never change mid-session; a memory saved with `remember` shows from the next session.
 - **Instructions are fixed for the session.** They are written once, stored (`envelopes`), and reused
   unchanged, so editing an AGENTS.md takes effect in the next session. An instruction file found
   mid-session (a project below the workspace) arrives once, attached to the tool result that touched

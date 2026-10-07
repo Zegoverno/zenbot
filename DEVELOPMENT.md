@@ -25,6 +25,10 @@ Config lives in `~/.zenbot/`:
 | `backups/` | database dumps taken before migrations (last 10) |
 | `evals/` | eval runs and cached base builds |
 | `history` | prompt history |
+| `SOUL.md`, `AGENTS.md`, `USER.md` | prompt files: who zenbot is, its environment, the owner (defaults written when missing, never overwritten) |
+| `MEMORY.md` | a copy of short-term memory, for reading |
+| `skills/` | skills, `<domain>/<name>/SKILL.md` |
+| `dev/` | the dev kernel's own home (`scripts/dev.sh`) |
 
 Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 
@@ -111,7 +115,7 @@ Changes to the worker protocol must update `docs/worker-protocol.md` and every w
 
 ```bash
 scripts/e2e.sh                # build, then every scenario
-scripts/e2e.sh workflow       # only scenarios whose name contains "workflow"
+scripts/e2e.sh memory         # only scenarios whose name contains "memory"
 ZEN_E2E_KEEP=1 scripts/e2e.sh # keep the database and files afterwards (it prints where)
 ```
 
@@ -134,7 +138,7 @@ Add one when you change the kernel's behavior.
 
 With `ZEN_FAUX=1`, `zen-engine` also lists `faux/smoke`, a scripted model that drives a real turn through the kernel. By default it makes one `bash` call, then answers "Smoke test passed: …". With the `pi` worker, Pi lists `faux/faux-1`, which does the same.
 
-`ZEN_FAUX_SCRIPT` points to a JSON file of steps, or an object of step lists keyed by workflow phase (`frame`, `work`, `verify`, `default`) to drive a whole briefed session. Steps:
+`ZEN_FAUX_SCRIPT` points to a JSON file of steps, or an object of step lists keyed by kind of session (`verify` for a verifier the `verify` tool starts, `default` otherwise). Steps:
 
 ```json
 {"tool": "bash", "args": {"command": "echo hi"}}
@@ -160,7 +164,8 @@ It:
 - loads `~/.zenbot/env` (workers, models, budgets) and uses the token in `~/.zenbot/token`;
 - runs `npm ci` in `packages/mind` when `pi` is enabled and the lockfile is newer than the install;
 - runs `cargo build --release -q`, then `exec`s `./target/release/zend` on port **18100** (override with `ZEN_DEV_PORT`);
-- sets `ZEN_HARNESS` to this checkout's commit, so its turns record this build.
+- sets `ZEN_HARNESS` to this checkout's commit, so its turns record this build;
+- uses its own zenbot home, `~/.zenbot/dev` (`ZEN_DEV_HOME`), for prompt files, skills and `MEMORY.md`: it starts with the defaults, and the dev database's memory never overwrites the live `~/.zenbot/MEMORY.md`. Copy your prompt files there to try them. (Eval and smoke kernels get a throwaway home too.)
 
 Local endpoints:
 
@@ -277,6 +282,18 @@ Other options: `--base-model`, `--base-effort`, `--only new|base`, `--keep`. Wit
 Each run gets a fresh copy of the task's files, its own kernel on port 18301 and its own database (`zen_eval_*`). The new side is this checkout, uncommitted changes included. The base side is cached in `~/.zenbot/evals/builds/`. Results and `report.md` go to `~/.zenbot/evals/<run>/`. Real models use the owner's subscription.
 
 Tasks live in `evals/tasks/<name>/` (`task.json` plus `files/`). See `evals/README.md` for the format and what makes a good task.
+
+## Memory sleep
+
+`zen-sleep.timer` runs `scripts/sleep.sh` nightly (03:00 UTC, up to 30 minutes' random delay): it asks the running kernel to tidy short-term memory (`POST /api/memory/sleep?trigger=nightly`). The kernel does the work; the script only waits for it to be healthy and prints the counts.
+
+```bash
+scripts/sleep.sh                             # sleep now (same as `zen memory sleep`)
+zen memory                                   # short-term memory and the last sleep
+systemctl list-timers zen-sleep.timer        # next run
+```
+
+`install.sh` installs the timers, and `apply-upgrade.sh` refreshes them after a healthy upgrade (`install_timers` in `scripts/lib.sh`), so a new timer arrives with an upgrade.
 
 ## Engine updates
 

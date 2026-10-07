@@ -10,14 +10,15 @@ UI). The token is in `~/.zenbot/token`.
 
 | Method and path | Body | Returns |
 |---|---|---|
-| `GET /health` (no token) | | `{ ok, db, mind, workers, busy, version, commit }`; `busy` counts running turns and workflow steps |
+| `GET /health` (no token) | | `{ ok, db, mind, workers, busy, version, commit }`; `busy` counts running turns and kernel work outside them |
 | `GET /api/models` | | `{ models, authenticated, default, scorer }` |
-| `GET /api/sessions?archived=` | | sessions (not child sessions): `{ id, title, model, effort, archived, state, cost, created_at, updated_at }` |
+| `GET /api/sessions?archived=` | | sessions (not child sessions): `{ id, title, model, effort, archived, state, cost, created_at, updated_at }` (`state` is from the old briefed workflow; null for new sessions) |
 | `POST /api/sessions` | `{ title?, model?, effort? }` | the session |
 | `GET /api/sessions/{id}` | | the session with `messages` (each with its `seq`) and `busy` |
 | `PATCH /api/sessions/{id}` | `{ title?, model?, effort? ("default" clears), archived? }` | the session |
 | `POST /api/sessions/{id}/decision` | `{ decision: accept\|more\|reshape\|drop, note? }` | the recorded verdict (source `owner`) |
-| `POST /api/sessions/{id}/flow` | `{ action: brief\|quick\|go\|verify }` | `{ state }`; 409 when the action doesn't apply now |
+| `GET /api/memory?tier=` | | `{ memories, last_sleep, size }`: memories of a tier (`short`, the default; `long`, `archived`, `all`), each `{ id: "m12", text, source, tier, proposed, reason, created_at, updated_at }`; the latest `sleep_runs` row; short-term memory's size in characters |
+| `POST /api/memory/sleep?trigger=` | | tidy short-term memory now (`trigger=nightly` from the timer, else the owner): `{ run, entries, kept, dropped, promoted, proposed, scorer, note }` |
 | `GET /api/version?refresh=` | | the running commit and whether `main` is ahead |
 | `GET /api/upgrade`, `POST /api/upgrade` | | upgrade progress / start one |
 
@@ -27,28 +28,25 @@ The client sends:
 
 | Message | Effect |
 |---|---|
-| `{ "type": "prompt", "text": "…" }` | the owner's message: starts a turn, or approves a waiting brief ("yes", "go"), or continues the job after a report (docs/brief.md) |
+| `{ "type": "prompt", "text": "…" }` | the owner's message: starts a turn |
 | `{ "type": "abort" }` | stops the running turn |
 
 The kernel sends events, in order:
 
 | Event | Fields | Meaning |
 |---|---|---|
-| `message` | `message` | a message added to the session (Pi's format, with `seq`). A user message with `kernel: true` is the workflow talking to the model, not the owner |
+| `message` | `message` | a message added to the session (Pi's format, with `seq`). A user message with `kernel: true` is the kernel talking to the model (a verifier's instructions), not the owner |
 | `busy` | `turn_id, harness, model, effort` | a turn started (also turns the kernel started itself) |
 | `delta`, `thinking` | `delta` | streamed answer text / reasoning |
 | `tool_start` | `call_id, name, args` | a tool call began |
 | `tool_end` | `call_id, is_error, ms` | it finished |
-| `end` | `error, cost, turn, next` | the turn ended. `turn` is the kernel's record (tokens, cost, time, `cache_break`, `context_tokens`, `render`). With `next: true` the workflow continues on its own: keep waiting for `idle` |
+| `end` | `error, cost, turn, next` | the turn ended. `turn` is the kernel's record (tokens, cost, time, `cache_break`, `context_tokens`, `render`). With `next: true` the kernel starts another turn itself: keep waiting for `idle` (nothing sends it today) |
 | `child_end` | `turn` | a child session's turn ended (a verifier); count its cost with the job |
-| `idle` | `state, waiting?` | the workflow stopped and waits for the owner: `waiting` is `approval` or `answers`, or the session is `reported` / `closed` |
-| `state` | `state, by, reason` | the session moved to another state (`framing`, `working`, `verifying`, `reported`, `closed`, `open`) |
-| `status` | `text` | progress of a workflow step ("verifying: running 3 checks") |
-| `brief` | `version, brief, text` | a proposed brief; `text` is rendered for reading |
-| `questions` | `questions: [{ question, options }]` | questions for the owner, recommended option first |
-| `report` | `text, results` | the verification report |
-| `error` | `error` | a request failed (e.g. prompting while the work is being verified) |
+| `idle` | | the kernel's own turns are over (after `end` with `next: true`) |
+| `status` | `text` | progress of a long tool ("verifying: running 3 check(s)") |
+| `questions` | `questions: [{ question, options }]` | the `ask` tool's questions for the owner, recommended option first; the answers are the owner's next prompt |
+| `error` | `error` | a request failed |
 | `resync` | `skipped, busy` | the client fell behind and missed events |
 
-A client that predates an event can ignore it, except `end.next` and `idle`: a client that stops at
-the first `end` misses the rest of a workflow (approval, work, verification).
+A client that predates an event can ignore it. The old workflow's events (`brief`, `report`,
+`state`, `idle` with `waiting`) and `POST /api/sessions/{id}/flow` were removed on 2026-10-07.
