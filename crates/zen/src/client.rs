@@ -204,7 +204,7 @@ pub fn tool_summary(name: &str, args: &Value) -> String {
         .or_else(|| args["from"].as_str().map(|f| format!("{f} → {}", args["to"].as_str().unwrap_or(""))))
         .unwrap_or_else(|| args.to_string());
     let detail: String = detail.lines().next().unwrap_or("").chars().take(120).collect();
-    format!("{name} {detail}")
+    crate::md::sanitize(&format!("{name} {detail}")).into_owned()
 }
 
 #[cfg(test)]

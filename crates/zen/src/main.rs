@@ -6,6 +6,8 @@ mod editor;
 mod files;
 mod md;
 mod screen;
+#[cfg(test)]
+mod test_util;
 mod tui;
 
 use std::io::{IsTerminal, Read, Write};
@@ -254,7 +256,7 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
                                 if !text.is_empty() {
                                     if !turn.text.is_empty() { turn.text.push_str("\n\n"); }
                                     turn.text.push_str(&text);
-                                    if show && !streamed { print!("{text}"); }
+                                    if show && !streamed { print!("{}", for_stdout(&text)); }
                                     if show { println!(); }
                                 }
                                 streamed = false;
@@ -271,7 +273,7 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
                         }
                     }
                     "delta" if started && show => {
-                        print!("{}", ev["delta"].as_str().unwrap_or(""));
+                        print!("{}", for_stdout(ev["delta"].as_str().unwrap_or("")));
                         stdout.flush().ok();
                         streamed = true;
                     }
@@ -312,7 +314,7 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
                             format!("{}\n  {}", q["question"].as_str().unwrap_or(""), opts.join(" / "))
                         }).collect();
                         let text = qs.join("\n");
-                        if show { println!("\n── Questions\n{text}\n"); }
+                        if show { println!("\n── Questions\n{}\n", for_stdout(&text)); }
                         if !turn.text.is_empty() { turn.text.push_str("\n\n"); }
                         turn.text.push_str(&format!("Questions:\n{text}"));
                     }
@@ -570,15 +572,21 @@ fn print_sessions(list: &Value) {
     }
 }
 
+/// Text for stdout: sanitized when it is a terminal (escape sequences in a model's reply or a
+/// tool's output must not reach it), as is when piped.
+fn for_stdout(s: &str) -> std::borrow::Cow<'_, str> {
+    if std::io::stdout().is_terminal() { md::sanitize(s) } else { s.into() }
+}
+
 fn print_messages(s: &Value) {
-    println!("{}  ({})", s["title"].as_str().unwrap_or(""), s["model"].as_str().unwrap_or(""));
+    println!("{}  ({})", for_stdout(s["title"].as_str().unwrap_or("")), s["model"].as_str().unwrap_or(""));
     for m in s["messages"].as_array().into_iter().flatten() {
         match m["role"].as_str() {
-            Some("user") => println!("\n› {}", text_of(&m["content"])),
+            Some("user") => println!("\n› {}", for_stdout(&text_of(&m["content"]))),
             Some("assistant") => {
                 for c in m["content"].as_array().into_iter().flatten() {
                     match c["type"].as_str() {
-                        Some("text") => println!("\n{}", c["text"].as_str().unwrap_or("")),
+                        Some("text") => println!("\n{}", for_stdout(c["text"].as_str().unwrap_or(""))),
                         Some("toolCall") => println!("{}", dim(&format!("  ▸ {}", tool_summary(c["name"].as_str().unwrap_or(""), &c["arguments"])))),
                         _ => {}
                     }

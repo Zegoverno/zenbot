@@ -187,7 +187,7 @@ impl Panel {
             return Err(format!("{} is too big to show ({} MB)", self.path.display(), meta.len() >> 20));
         }
         let bytes = std::fs::read(&self.path).map_err(|e| format!("can't read {}: {e}", self.path.display()))?;
-        self.text = String::from_utf8_lossy(&bytes).replace('\t', "    ").replace('\r', "");
+        self.text = md::sanitize(&String::from_utf8_lossy(&bytes)).into_owned();
         self.modified = meta.modified().ok();
         self.lines_w = 0;
         Ok(())
@@ -338,6 +338,11 @@ fn expand_home(raw: &str) -> PathBuf {
         None if raw == "~" => PathBuf::from(&home),
         None => PathBuf::from(raw),
     }
+}
+
+/// Text from outside (the kernel, a model, a tool, a file) made safe to show: see `md::sanitize`.
+fn clean(s: &str) -> String {
+    md::sanitize(s).into_owned()
 }
 
 fn banner(version_path: Option<&std::path::Path>) -> Line {
@@ -1043,7 +1048,7 @@ impl App {
     }
 
     fn note(&mut self, text: impl Into<String>, sty: Sty) {
-        self.notice = Some((text.into(), sty));
+        self.notice = Some((clean(&text.into()), sty));
     }
 
     /// Commands matching what's typed, while the input is a bare `/word`.
@@ -1190,7 +1195,7 @@ impl App {
         let s = self.c.get(&format!("/api/sessions/{id}")).await?;
         self.reset_session();
         self.session = Some(id.clone());
-        self.title = s["title"].as_str().unwrap_or("").to_string();
+        self.title = clean(s["title"].as_str().unwrap_or(""));
         self.model = s["model"].as_str().unwrap_or(&self.default_model).to_string();
         self.effort = s["effort"].as_str().map(String::from);
         self.connect(&id).await?;
@@ -1287,7 +1292,7 @@ impl App {
 
     /// A tool result as shown: its first three non-empty lines and how many more there are.
     fn tool_result_entry(m: &Value) -> Entry {
-        let text = text_of(&m["content"]);
+        let text = clean(&text_of(&m["content"]));
         let body: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
         let head = body.iter().take(3).map(|l| l.chars().take(400).collect()).collect();
         Entry::ToolResult { head, more: body.len().saturating_sub(3), error: m["isError"] == true }
@@ -1317,20 +1322,20 @@ impl App {
     /// A stored message as conversation entries.
     fn message_entries(m: &Value) -> Vec<Entry> {
         match m["role"].as_str() {
-            Some("user") => vec![Entry::User(text_of(&m["content"]))],
+            Some("user") => vec![Entry::User(clean(&text_of(&m["content"])))],
             Some("assistant") => {
                 let mut out = Vec::new();
                 for c in m["content"].as_array().into_iter().flatten() {
                     match c["type"].as_str() {
                         Some("text") if !c["text"].as_str().unwrap_or("").trim().is_empty() => {
-                            out.push(Entry::Md(c["text"].as_str().unwrap_or("").to_string()));
+                            out.push(Entry::Md(clean(c["text"].as_str().unwrap_or(""))));
                         }
                         Some("toolCall") => out.push(Entry::ToolCall(c["name"].as_str().unwrap_or("").to_string(), c["arguments"].clone())),
                         _ => {}
                     }
                 }
                 if m["stopReason"] == "error" {
-                    out.push(Entry::Raw(vec![line(m["errorMessage"].as_str().unwrap_or("error").to_string(), Sty::Err), Vec::new()]));
+                    out.push(Entry::Raw(vec![line(clean(m["errorMessage"].as_str().unwrap_or("error")), Sty::Err), Vec::new()]));
                 }
                 out
             }
@@ -1346,7 +1351,7 @@ impl App {
             .into_iter()
             .flatten()
             .map(|s| {
-                let title = s["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("(untitled)");
+                let title = clean(s["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("(untitled)"));
                 let when = s["updated_at"].as_str().unwrap_or("").get(5..16).unwrap_or("").replace('T', " ");
                 (format!("{when}  {title}"), s["id"].as_str().unwrap_or("").to_string())
             })
@@ -1897,7 +1902,7 @@ impl App {
 
     /// Events that aren't tied to a session (sent with an empty session id).
     async fn on_app_event(&mut self, ev: Value) {
-        let text = ev["text"].as_str().or(ev["line"].as_str()).unwrap_or("").to_string();
+        let text = clean(ev["text"].as_str().or(ev["line"].as_str()).unwrap_or(""));
         match ev["type"].as_str().unwrap_or("") {
             "update_available" => self.commit(vec![line(text, Sty::Warn), Vec::new()]),
             "upgrade_log" => self.commit(vec![line(text, Sty::Dim)]),
@@ -1932,13 +1937,13 @@ impl App {
                 match m["role"].as_str() {
                     Some("user") if m["kernel"] == true => {
                         // The kernel talking to the model (a verifier's instructions), not the owner.
-                        let text = text_of(&m["content"]);
+                        let text = clean(&text_of(&m["content"]));
                         let mut out: Vec<Line> = text.lines().map(|l| line(format!("  zen › {l}"), Sty::Dim)).collect();
                         out.push(Vec::new());
                         self.commit(out);
                     }
                     Some("user") => {
-                        let text = text_of(&m["content"]);
+                        let text = clean(&text_of(&m["content"]));
                         if self.pending_prompt.as_deref() == Some(text.as_str()) {
                             self.pending_prompt = None;
                         } else {
@@ -1947,7 +1952,7 @@ impl App {
                     }
                     Some("assistant") => {
                         let mut entries = Vec::new();
-                        let full: String = m["content"].as_array().into_iter().flatten().filter(|c| c["type"] == "text").filter_map(|c| c["text"].as_str()).collect();
+                        let full = clean(&m["content"].as_array().into_iter().flatten().filter(|c| c["type"] == "text").filter_map(|c| c["text"].as_str()).collect::<String>());
                         if self.inline {
                             // Inline, the streamed lines are already in scrollback: print the rest.
                             let mut out = Vec::new();
@@ -1976,7 +1981,7 @@ impl App {
                             entries.push(Entry::ToolCall(c["name"].as_str().unwrap_or("").to_string(), c["arguments"].clone()));
                         }
                         if m["stopReason"] == "error" && !self.aborting {
-                            entries.push(Entry::Raw(vec![line(m["errorMessage"].as_str().unwrap_or("error").to_string(), Sty::Err)]));
+                            entries.push(Entry::Raw(vec![line(clean(m["errorMessage"].as_str().unwrap_or("error")), Sty::Err)]));
                         }
                         let u = &m["usage"];
                         self.turn_tokens += ["input", "output", "cacheRead", "cacheWrite"].iter().map(|k| u[*k].as_i64().unwrap_or(0)).sum::<i64>();
@@ -1988,7 +1993,7 @@ impl App {
                 }
             }
             "delta" => {
-                self.stream.push_str(ev["delta"].as_str().unwrap_or(""));
+                self.stream.push_str(&md::sanitize(ev["delta"].as_str().unwrap_or("")));
                 self.status = "Writing".into();
                 self.tool_since = None;
                 if !self.inline {
@@ -2021,17 +2026,17 @@ impl App {
             "questions" => {
                 let mut out = vec![line("── Questions ──", Sty::Dim)];
                 for (i, q) in ev["questions"].as_array().into_iter().flatten().enumerate() {
-                    out.push(line(format!("{}. {}", i + 1, q["question"].as_str().unwrap_or("")), Sty::Plain));
+                    out.push(line(format!("{}. {}", i + 1, clean(q["question"].as_str().unwrap_or(""))), Sty::Plain));
                     for (j, o) in q["options"].as_array().into_iter().flatten().enumerate() {
                         let rec = if j == 0 { "  (recommended)" } else { "" };
-                        out.push(line(format!("   {}) {}{rec}", (b'a' + j as u8) as char, o.as_str().unwrap_or("")), Sty::Plain));
+                        out.push(line(format!("   {}) {}{rec}", (b'a' + j as u8) as char, clean(o.as_str().unwrap_or(""))), Sty::Plain));
                     }
                 }
                 out.push(Vec::new());
                 self.commit(out);
             }
             "status" => {
-                self.status = ev["text"].as_str().unwrap_or("Working").to_string();
+                self.status = clean(ev["text"].as_str().unwrap_or("Working"));
                 self.draw();
             }
             "child_end" => {
@@ -2092,7 +2097,7 @@ impl App {
                     }
                     out.push(line("interrupted", Sty::Warn));
                 } else if let Some(e) = ev["error"].as_str() {
-                    out.push(line(e.to_string(), Sty::Err));
+                    out.push(line(clean(e), Sty::Err));
                 }
                 self.aborting = false;
                 self.stream.clear();
@@ -2116,7 +2121,7 @@ impl App {
             }
             "error" => {
                 self.busy = false;
-                self.commit(vec![line(ev["error"].as_str().unwrap_or("error").to_string(), Sty::Err), Vec::new()]);
+                self.commit(vec![line(clean(ev["error"].as_str().unwrap_or("error")), Sty::Err), Vec::new()]);
             }
             "disconnected" if self.upgrading => {
                 self.busy = false;
@@ -2136,6 +2141,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::TempDir;
 
     /// An app on a fake terminal of `cols` x `rows`, capturing output, with no kernel behind it.
     fn app(cols: usize, rows: usize) -> App {
@@ -2425,6 +2431,25 @@ mod tests {
         assert!(out.contains("Hello world"), "{out:?}");
         assert!(!out.contains("earlier conversation"), "unchanged rows are not rewritten: {out:?}");
         assert!(!out.contains("\x1b[2J") && !out.contains("\x1b[J"), "no clearing, so no flicker: {out:?}");
+    }
+
+    #[tokio::test]
+    async fn escape_sequences_in_replies_tool_output_and_files_are_dropped() {
+        let evil = "\x1b]0;pwned\x07\x1b[5Agot you\x1b]52;c;aGk=\x07";
+        let mut a = app(100, 30);
+        a.busy = true;
+        a.on_event(json!({ "type": "delta", "delta": evil }));
+        a.on_event(json!({ "type": "message", "message": { "role": "toolResult", "content": [{ "type": "text", "text": evil }] } }));
+        a.on_event(json!({ "type": "status", "text": evil }));
+        let dir = TempDir::new("escapes");
+        let path = dir.file("evil.txt", evil);
+        a.command(&format!("/open {}", path.display())).await.unwrap();
+        a.draw();
+        let out = a.capture.take().unwrap();
+        assert!(out.contains("got you"), "{out:?}");
+        for bad in ["\x1b]", "\x07", "\x1b[5A"] {
+            assert!(!out.contains(bad), "{bad:?} reached the terminal: {out:?}");
+        }
     }
 
     const DIVIDER: &str = "\x1b[2m │ \x1b[0m";
