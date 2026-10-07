@@ -1,5 +1,5 @@
 {
-  "description": "One job over several messages: a CSV export, then the owner steers it (a header row, then skip empty items). The workflow should run once for the job, not per message.",
+  "description": "One job over several messages: a CSV export, then the owner steers it (a header row, then skip empty items). zenbot should carry one job across the messages, not restart it per message.",
   "work": "build",
   "steps": [
     { "prompt": "Add export_csv(items, path) to inventory.py that writes one name,count row per item, with a test." },

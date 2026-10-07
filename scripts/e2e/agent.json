@@ -1,0 +1,11 @@
+[
+  {"when": "skill", "tool": "find_skills", "args": {"query": "verify a change"}},
+  {"when": "skill", "tool": "load_skill", "args": {"name": "work/verify"}},
+  {"when": "skill", "tool": "load_skill", "args": {"name": "work/brief", "file": "references/template.md"}},
+  {"when": "skill", "tool": "load_skill", "args": {"name": "work/brief", "file": "../verify/SKILL.md"}},
+  {"when": "remember", "tool": "remember", "args": {"text": "The owner prefers tabs over spaces.", "source": "owner"}},
+  {"when": "ask", "tool": "ask", "args": {"questions": [{"question": "Which flag name?", "options": ["--json", "--format json"]}]}},
+  {"when": "ask", "tool": "bash", "args": {"command": "echo after-ask"}},
+  {"when": "move", "tool": "move", "args": {"from": "README", "to": "README2"}},
+  {"text": "Done."}
+]

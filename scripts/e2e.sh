@@ -4,7 +4,7 @@
 # the database. No subscription is used and the live service isn't touched.
 #
 #   scripts/e2e.sh              build, then run every scenario
-#   scripts/e2e.sh workflow     only scenarios whose name contains "workflow"
+#   scripts/e2e.sh memory       only scenarios whose name contains "memory"
 #
 # Needs Docker with Postgres from deploy/compose.yaml, git, curl, jq and bubblewrap.
 set -euo pipefail
@@ -44,7 +44,7 @@ start_kernel() {
   local ws=$1 script=$2; shift 2
   (
     export ZEN_TOKEN=$TOKEN ZEN_PORT=$PORT ZEN_WORKERS=engine ZEN_FAUX=1 ZEN_FAUX_SCRIPT=$script ZEN_WORKSPACE=$ws \
-      ZEN_ENGINE_CMD="$BIN/zen-engine" ZEN_VERIFY_SAMPLE=0 DATABASE_URL="$DB_URL" HOME="$TMP/home"
+      ZEN_ENGINE_CMD="$BIN/zen-engine" DATABASE_URL="$DB_URL" HOME="$TMP/home"
     unset ZEN_S1_MODEL OPENROUTER_API_KEY
     for kv in "$@"; do export "$kv"; done
     mkdir -p "$HOME"
@@ -90,72 +90,113 @@ run() { # run <name> <function>
 
 open_loop() {
   local ws; ws=$(new_workspace open)
-  start_kernel "$ws" "" ZEN_BRIEFS=0
+  start_kernel "$ws" ""
   local r; r=$(zen ask --json -m faux/smoke "run the smoke command")
   check "answer" eq "$(echo "$r" | jq -r .error)" null
   check "the bash tool ran" eq "$(echo "$r" | jq -r '[.tools[].name] | join(",")')" bash
-  check "state is open" eq "$(q "SELECT state FROM sessions")" open
 }
 
-workflow_pass() {
-  local ws; ws=$(new_workspace pass)
-  start_kernel "$ws" "$(script workflow.json 's/ROUTE/bounded/' 's/TARGET/done.txt/')" ZEN_BRIEFS=always
-  local r sid; r=$(zen ask --json -m faux/smoke "Please create done.txt"); sid=$(echo "$r" | jq -r .session_id)
-  check "no error" eq "$(echo "$r" | jq -r .error)" null
-  check "framing refused the write" eq "$(echo "$r" | jq -r '.tools[0].is_error')" true
-  check "the read-only shell blocked the write" test ! -e "$ws/sneaky2.txt"
-  check "nothing written while framing" test ! -e "$ws/sneaky.txt"
-  check "the work wrote done.txt" test -f "$ws/done.txt"
-  check "states: framing, working, verifying, reported, closed" eq "$(q "SELECT string_agg(payload->>'state', ',' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND kind='state'")" working,verifying,reported,closed
-  check "criterion passed, verifier skipped" eq "$(q "SELECT payload->'results'->0->>'result' || ' ' || (payload->>'verifier') FROM tape_events WHERE session_id='$sid' AND kind='verification'")" "pass skipped: every criterion is a passing command"
-  check "model verdict recorded as the model's" eq "$(q "SELECT decision || '/' || source FROM session_decisions WHERE session_id='$sid'")" accept/model
-  check "one envelope for the whole session" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND kind='envelope'")" 1
-  check "the report reached the client" grep -q "1 passed" <<<"$(echo "$r" | jq -r .text)"
+# The prompt files: installed when missing, never overwritten, read at session start.
+prompt_files() {
+  local ws; ws=$(new_workspace prompt)
+  mkdir -p "$TMP/home/.zenbot" && echo "# USER.md
+The owner's name is E2E Owner." >"$TMP/home/.zenbot/USER.md"
+  start_kernel "$ws" ""
+  local zh="$TMP/home/.zenbot"
+  check "defaults installed" test -s "$zh/SOUL.md" -a -s "$zh/AGENTS.md" -a -s "$zh/skills/work/verify/SKILL.md" -a -s "$zh/skills/work/brief/references/template.md"
+  check "the owner's USER.md was kept" grep -q "E2E Owner" "$zh/USER.md"
+  local sid; sid=$(zen ask --json -m faux/smoke "hi" | jq -r .session_id)
+  local base; base=$(q "SELECT payload->>'text' FROM tape_events WHERE session_id='$sid' AND kind='base'")
+  check "SOUL.md is in the instructions" grep -q "<soul" <<<"$base"
+  check "AGENTS.md is the environment, placeholders filled" grep -qF "Working directory for tools: $ws" <<<"$base"
+  check "USER.md is in the instructions" grep -q "E2E Owner" <<<"$base"
+  check "the skills index is in the instructions" grep -q "work/verify:" <<<"$base"
+  check "memory starts empty" grep -q "(empty)" <<<"$base"
+  local tools; tools=$(q "SELECT string_agg(t->>'name', ',') FROM turns, envelopes e, jsonb_array_elements(e.tools) t WHERE turns.session_id='$sid' AND e.hash = turns.envelope")
+  check "the system tools, in order, no workflow tools" eq "$tools" bash,read,write,edit,history,ask,remember,find_skills,load_skill,verify
 }
 
-workflow_approval_and_rounds() {
-  local ws; ws=$(new_workspace rounds)
-  start_kernel "$ws" "$(script workflow.json 's/ROUTE/architectural/' 's/TARGET/never.txt/')" ZEN_VERIFY_ROUNDS=1 ZEN_BRIEFS=always
-  local r sid; r=$(zen ask --json -m faux/smoke "Please create never.txt"); sid=$(echo "$r" | jq -r .session_id)
-  check "an architectural brief waits for approval" eq "$(q "SELECT state FROM sessions WHERE id='$sid'")" framing
-  check "nothing was done before approval" test ! -e "$ws/done.txt"
-  r=$(zen ask --json -s "$sid" "go")
-  check "approved by the owner" eq "$(q "SELECT payload->>'by' FROM tape_events WHERE session_id='$sid' AND kind='approval'")" owner
-  check "a failed check went back to work once, then was reported" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND kind='verification'")" 2
-  check "reported, not closed (architectural)" eq "$(q "SELECT state FROM sessions WHERE id='$sid'")" reported
-  check "no model verdict for architectural work" eq "$(q "SELECT count(*) FROM session_decisions WHERE session_id='$sid'")" 0
-  check "the report shows the failed check" grep -q "check failed" <<<"$(echo "$r" | jq -r .text)"
-  # One session is one job: a reply after the report continues it on the same brief.
-  zen ask --json -s "$sid" "try again" >/dev/null || true
-  check "a reply continues the same job" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND kind='brief'")" 1
-  check "the reply went back to work" eq "$(q "SELECT payload->>'reason' FROM tape_events WHERE session_id='$sid' AND kind='state' AND payload->>'by'='owner' ORDER BY seq DESC LIMIT 1")" "owner continued the job"
+# Skills load on demand, as tool results; nothing outside a skill's folder can be read through them.
+skills_on_demand() {
+  local ws; ws=$(new_workspace skills)
+  start_kernel "$ws" "$(script agent.json)"
+  local r sid; r=$(zen ask --json -m faux/smoke "use a skill"); sid=$(echo "$r" | jq -r .session_id)
+  check "find, load, load a file, refused outside" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" find_skills:false,load_skill:false,load_skill:false,load_skill:true
+  local res; res=$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult'")
+  check "find_skills names it" grep -q "work/verify:" <<<"$res"
+  check "load_skill returns SKILL.md" grep -q "Decide whether a fresh verifier adds something" <<<"$res"
+  check "and a reference file" grep -q "## Criteria" <<<"$res"
+  check "the instructions didn't change mid-session" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND kind='envelope'")" 1
 }
 
-opt_in() {
-  local ws; ws=$(new_workspace optin)
-  start_kernel "$ws" "$(script judgment.json)"
-  local sid; sid=$(zen sessions new -m faux/smoke --json | jq -r .id)
-  check "a session starts open (briefs are opt-in)" eq "$(q "SELECT state FROM sessions WHERE id='$sid'")" open
-  zen ask --json -s "$sid" "Please create done.txt" >/dev/null
-  check "the model opted in: brief, then work" eq "$(q "SELECT string_agg(payload->>'state' || '/' || (payload->>'by'), ',' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND kind='state'")" "framing/model,working/auto,verifying/kernel,reported/kernel"
-  check "the work was done" test -f "$ws/done.txt"
-  check "the open phase is in the turn context" grep -q "Phase: open" <<<"$(q "SELECT payload->>'context' FROM tape_events WHERE session_id='$sid' AND payload->>'role'='user' ORDER BY seq LIMIT 1")"
+# remember: a memory saved in one session is in the next session's instructions, not the current one's.
+memory_across_sessions() {
+  local ws; ws=$(new_workspace memory)
+  start_kernel "$ws" "$(script agent.json)"
+  local s1; s1=$(zen ask --json -m faux/smoke "remember this" | jq -r .session_id)
+  check "saved with its source" eq "$(q "SELECT source || '/' || tier FROM memories")" owner/short
+  check "exported to MEMORY.md" grep -q "\[m1\] The owner prefers tabs" "$TMP/home/.zenbot/MEMORY.md"
+  zen ask --json -s "$s1" "and now" >/dev/null
+  check "frozen for the session that wrote it" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$s1' AND kind='base' AND payload->>'text' LIKE '%prefers tabs%'")" 0
+  local s2; s2=$(zen ask --json -m faux/smoke "hello" | jq -r .session_id)
+  check "in the next session's instructions" grep -q "\[m1\] The owner prefers tabs" <<<"$(q "SELECT payload->>'text' FROM tape_events WHERE session_id='$s2' AND kind='base'")"
 }
 
+# The sleep tidies short-term memory to its size, archives (never deletes) and records what it did.
+memory_sleep() {
+  local ws; ws=$(new_workspace sleep)
+  start_kernel "$ws" "$(script agent.json)" ZEN_MEMORY_CHARS=1000
+  q "DELETE FROM decisions WHERE point='sleep'; DELETE FROM sleep_runs; DELETE FROM memories" >/dev/null
+  q "INSERT INTO memories (text, source, updated_at) SELECT 'memory number ' || i || ' ' || repeat('x', 80), 'inferred', now() - (i || ' hours')::interval FROM generate_series(1, 30) i" >/dev/null
+  local r; r=$(zen ask --json -m faux/smoke "remember this")
+  check "over the hard limit, add is refused" eq "$(echo "$r" | jq -r '.tools[0].is_error')" true
+  for _ in $(seq 1 20); do [ "$(q "SELECT count(*) FROM sleep_runs WHERE ended_at IS NOT NULL")" -gt 0 ] && break; sleep 0.5; done
+  check "and starts a sleep" eq "$(q "SELECT trigger FROM sleep_runs ORDER BY id LIMIT 1")" ceiling
+  r=$(zen memory sleep --json)
+  check "a sleep by hand reports what it did" eq "$(echo "$r" | jq -r .entries)" "$(echo "$r" | jq -r '.kept + .dropped')"
+  check "memory fits its size" test "$(q "SELECT COALESCE(SUM(length(text) + 10), 0) FROM memories WHERE tier='short'")" -le 1000
+  check "the freshest were kept" eq "$(q "SELECT count(*) FROM memories WHERE tier='short' AND text LIKE 'memory number 1 %'")" 1
+  check "nothing deleted" eq "$(q "SELECT count(*) FROM memories")" 30
+  check "every entry's fate is a decision" test "$(q "SELECT count(*) FROM decisions WHERE point='sleep'")" -ge 30
+  local s2; s2=$(zen ask --json -m faux/smoke "hello" | jq -r .session_id)
+  check "the next session hears about the sleep" grep -q "Last sleep" <<<"$(q "SELECT payload->>'text' FROM tape_events WHERE session_id='$s2' AND kind='base'")"
+  check "zen memory lists it" grep -q "last sleep" <<<"$(zen memory)"
+}
+
+# ask ends the turn; tools that are gone are refused.
+ask_and_gone_tools() {
+  local ws; ws=$(new_workspace ask)
+  start_kernel "$ws" "$(script agent.json)"
+  local r sid; r=$(zen ask --json -m faux/smoke "ask me"); sid=$(echo "$r" | jq -r .session_id)
+  check "the questions were recorded" eq "$(q "SELECT payload->'questions'->0->>'question' FROM tape_events WHERE session_id='$sid' AND kind='questions'")" "Which flag name?"
+  check "nothing runs after ask in that turn" eq "$(echo "$r" | jq -r '[.tools[].is_error] | join(",")')" false,true
+  r=$(zen ask --json -m faux/smoke "move it")
+  check "move is gone" eq "$(echo "$r" | jq -r '.tools[0].is_error')" true
+  check "README not moved" test -e "$ws/README"
+}
+
+# verify: the kernel runs the commands, a fresh read-only verifier judges the rest.
 verifier() {
   local ws; ws=$(new_workspace verifier)
-  start_kernel "$ws" "$(script judgment.json)" ZEN_BRIEFS=always
-  local sid; sid=$(zen ask --json -m faux/smoke "Please create done.txt" | jq -r .session_id)
+  start_kernel "$ws" "$(script judgment.json 's/TARGET/done.txt/')"
+  local r sid; r=$(zen ask --json -m faux/smoke "Please create done.txt"); sid=$(echo "$r" | jq -r .session_id)
   local child; child=$(q "SELECT id FROM sessions WHERE parent='$sid' AND kind='verifier'")
   check "a criterion needing judgment ran the verifier" test -n "$child"
-  check "the verifier works in the brief's repository" grep -q "^$ws" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$child' AND payload->>'toolName'='bash'")"
-  check "its judgment is in the verification" eq "$(q "SELECT payload->'results'->0->>'result' FROM tape_events WHERE session_id='$sid' AND kind='verification'")" uncertain
-  check "uncertain work waits for the owner (no model verdict)" eq "$(q "SELECT state FROM sessions WHERE id='$sid'")" reported
+  check "the verifier works in the repository" grep -q "^$ws" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$child' AND payload->>'toolName'='bash' ORDER BY seq LIMIT 1")"
+  check "the verifier can't write" test ! -e "$ws/verifier-wrote.txt" -a ! -e "$ws/verifier-touched.txt"
+  check "command passed, judgment uncertain" eq "$(q "SELECT string_agg(x->>'result', ',') FROM tape_events, jsonb_array_elements(payload->'results') x WHERE session_id='$sid' AND kind='verification'")" pass,uncertain
+  check "the result went back to the model" grep -q "1 passed, 0 failed, 1 uncertain" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='verify'")"
+  # A failed command needs no verifier: its output is the evidence.
+  stop_kernel
+  start_kernel "$ws" "$(script judgment.json 's/TARGET/missing.txt/')"
+  sid=$(zen ask --json -m faux/smoke "again" | jq -r .session_id)
+  check "a failed command skips the verifier" eq "$(q "SELECT count(*) FROM sessions WHERE parent='$sid'")" 0
+  check "and fails the criterion" eq "$(q "SELECT payload->'results'->0->>'result' FROM tape_events WHERE session_id='$sid' AND kind='verification'")" fail
 }
 
 summaries() {
   local ws; ws=$(new_workspace summary)
-  start_kernel "$ws" "$(script summary.json)" ZEN_BRIEFS=0 ZEN_CONTEXT_TOKENS=4000 ZEN_COMPACT_IDLE_SECS=0 ZEN_SUMMARY_MODEL=faux/smoke
+  start_kernel "$ws" "$(script summary.json)" ZEN_CONTEXT_TOKENS=4000 ZEN_COMPACT_IDLE_SECS=0 ZEN_SUMMARY_MODEL=faux/smoke
   local sid; sid=$(zen ask --json -m faux/smoke "one" | jq -r .session_id)
   zen ask --json -s "$sid" "two" >/dev/null; sleep 1
   for _ in $(seq 1 20); do [ "$(q "SELECT count(*) FROM compactions")" -gt 0 ] && break; sleep 0.5; done
@@ -168,7 +209,7 @@ summaries() {
 
 secrets_masked() {
   local ws; ws=$(new_workspace secret)
-  start_kernel "$ws" "$(script secret.json)" ZEN_BRIEFS=0
+  start_kernel "$ws" "$(script secret.json)"
   local sid; sid=$(zen ask --json -m faux/smoke "print the token" | jq -r .session_id)
   local out; out=$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult'")
   check "the token is masked on the tape" grep -q 'ghp_…\[masked\]' <<<"$out"
@@ -180,7 +221,7 @@ secrets_masked() {
 # worker and ends while the session's next turn runs: what it sends late must not reach that turn.
 stale_turn() {
   local ws; ws=$(new_workspace stale)
-  start_kernel "$ws" "$(script stale-turn.json)" ZEN_BRIEFS=0 ZEN_TURN_IDLE_SECS=1 ZEN_TURN_ABORT_GRACE_SECS=1
+  start_kernel "$ws" "$(script stale-turn.json)" ZEN_TURN_IDLE_SECS=1 ZEN_TURN_ABORT_GRACE_SECS=1
   local r sid; r=$(zen ask --json -m faux/smoke "first" || true); sid=$(echo "$r" | jq -r .session_id)
   check "the stuck turn was ended by the kernel" grep -q "stopped responding" <<<"$(echo "$r" | jq -r .error)"
   r=$(zen ask --json -s "$sid" "second" || true)
@@ -189,21 +230,22 @@ stale_turn() {
   check "the ended turn's late answer was dropped" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND payload::text LIKE '%LATE answer%'")" 0
 }
 
+# A session the old briefed workflow left mid-verification still works after an upgrade.
 restart_recovery() {
   local ws; ws=$(new_workspace restart)
   start_kernel "$ws" ""
-  local sid; sid=$(zen sessions new --json | jq -r .id)
+  local sid; sid=$(zen sessions new --json -m faux/smoke | jq -r .id)
   q "UPDATE sessions SET state = 'verifying' WHERE id = '$sid'" >/dev/null
   stop_kernel
   start_kernel "$ws" ""
-  check "a verification cut short by a restart goes back to work" eq "$(q "SELECT state FROM sessions WHERE id='$sid'")" working
+  check "an old session in a workflow state takes a prompt" eq "$(zen ask --json -s "$sid" "hi" | jq -r .error)" null
 }
 
 # A summary made at the hard limit by a summarizer slower than the watchdog's idle limit: the turn
 # waits for it instead of being taken for stalled.
 slow_summary() {
   local ws; ws=$(new_workspace slow)
-  start_kernel "$ws" "$(script summary.json)" ZEN_BRIEFS=0 ZEN_CONTEXT_TOKENS=4000 ZEN_COMPACT_SOFT=100 ZEN_COMPACT_HARD=0.7 \
+  start_kernel "$ws" "$(script summary.json)" ZEN_CONTEXT_TOKENS=4000 ZEN_COMPACT_SOFT=100 ZEN_COMPACT_HARD=0.7 \
     ZEN_SUMMARY_MODEL=slow/summarizer ZEN_SLOW_SECS=12 ZEN_TURN_IDLE_SECS=1 ZEN_WORKERS=engine,slow \
     "ZEN_WORKER_SLOW_CMD=python3 $REPO/scripts/e2e/slow_worker.py"
   local sid; sid=$(zen ask --json -m faux/smoke "one" | jq -r .session_id)
@@ -216,9 +258,11 @@ slow_summary() {
 
 run open-loop open_loop
 run restart-recovery restart_recovery
-run workflow-pass workflow_pass
-run workflow-approval-and-rounds workflow_approval_and_rounds
-run opt-in opt_in
+run prompt-files prompt_files
+run skills skills_on_demand
+run memory-across-sessions memory_across_sessions
+run memory-sleep memory_sleep
+run ask ask_and_gone_tools
 run verifier verifier
 run summaries summaries
 run secrets secrets_masked
