@@ -21,6 +21,7 @@ mod tools;
 mod turns;
 mod update;
 mod web;
+mod wiki;
 mod workers;
 
 use std::collections::{HashMap, HashSet};

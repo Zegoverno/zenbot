@@ -6,6 +6,19 @@
 
 ---
 
+## 2026-10-07 — Phase 4 built: the wiki and capture
+
+- **Wiki** (D-036): `~/.zenbot/wiki/`, a git repository of pages (summary over a dated timeline with
+  sources), with `index.md` and `log.md`.
+- **capture**: System One routes a note to its page (or a new one) and skips notes already recorded
+  or sensitive; secrets are masked; notes from a session that read the web are labelled `web`; every
+  capture is committed. The agent writes and updates summaries.
+- `search` covers the wiki (scope `wiki`); the nightly sleep commits the agent's wiki edits and
+  reports pages without a summary and broken links.
+- Tested: unit tests, e2e `wiki` (10 checks), and a real Sonnet session that captured two facts as
+  new pages and wrote their summaries; a third, untitled note was routed by System One to the right
+  existing page (0.93) and judged new (0.15 already known).
+
 ## 2026-10-07 — Phase 3 built: search over sessions and memories; long-term memory
 
 - **search** (D-035): every session's turns (the owner's words, the answers, the tools called; not

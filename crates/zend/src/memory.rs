@@ -524,6 +524,14 @@ async fn sleep_inner(app: &App, run: i64) -> Result<Value> {
             .execute(db)
             .await?;
     }
+    // The wiki's nightly care: commit the agent's own edits since the last capture, report problems.
+    let wiki = crate::wiki::root();
+    if wiki.join(".git").exists() {
+        crate::wiki::commit(&wiki, "sleep: edits since the last capture").await;
+        for p in crate::wiki::lint(&wiki) {
+            notes.push(format!("wiki: {p}"));
+        }
+    }
     let note = if notes.is_empty() { None } else { Some(notes.join("\n")) };
     sqlx::query("UPDATE sleep_runs SET ended_at = now(), entries = $2, kept = $3, dropped = $4, promoted = $5, proposed = $6, note = $7 WHERE id = $1")
         .bind(run)

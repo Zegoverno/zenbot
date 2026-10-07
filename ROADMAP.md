@@ -21,10 +21,11 @@ steps (old "Phase 2b", "Phase 3 memory", "Phase 4 search", "Phase 5 wiki").
 | 0 | Ground | Research the reference projects in their code; merge the open fix PRs | done (`docs/research/`) |
 | 1 | Foundation | Prompt files, tool descriptions, short-term memory with sleep, skills, workflow into skills | done (#17): 12/12 → 12/12, cost +27% |
 | 2 | Reach | `web_search`, `web_fetch`, MCP client, `find_tools` / `load_tool` / `call_tool` | built (#18) |
-| 3 | Recall | `search` (exact, full-text and semantic) over sessions and memories; long-term memory acts | built |
+| 3 | Recall | `search` (exact, full-text and semantic) over sessions and memories; long-term memory acts | built (#19) |
 
-| 4 | Knowledge | The wiki and `capture` | **ACTIVE** next |
-| 5 | Self-improvement | The agent creates and improves skills and tools, without sprawl | |
+| 4 | Knowledge | The wiki and `capture` | built |
+
+| 5 | Self-improvement | The agent creates and improves skills and tools, without sprawl | **ACTIVE** next |
 | 6 | Delegation | `delegate`: subagents; model choice from real usage | |
 
 ---
@@ -69,11 +70,15 @@ descriptions for `verify`, `remember` and `decide`.
   (`zen memory accept|reject`); promotion acts on its own once the Wilson lower bound of the owner's
   agreement with them reaches 0.95 (D-035).
 
-## Phase 4 — Knowledge
+## Phase 4 — Knowledge `[ built ]`
 
-The wiki (markdown in git; each page an append-only timeline plus a summary rewritten from it; an
-index page) and `capture` (System One picks the page, flags duplicates, unclear or sensitive content;
-a model writes the clean text).
+The wiki (`~/.zenbot/wiki/`, in git): one page per concept, entity, decision, playbook, project or
+person, in gbrain's shape (a summary over an append-only, dated timeline with sources), plus
+`index.md` and `log.md` kept by the kernel. `capture` (D-036): search finds candidate pages, System
+One picks the page (or a new one) and catches notes already recorded or sensitive, the kernel
+appends the entry, masks secrets, labels notes from web-tainted sessions `web`, and commits; the
+agent keeps the summary current with `edit`. `search` covers the wiki; the nightly sleep commits the
+agent's wiki edits and reports pages without a summary and broken links.
 
 ## Phase 5 — Self-improvement
 

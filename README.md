@@ -80,6 +80,10 @@ A session is one job. zenbot gets tools, skills and memory rather than a fixed p
 
 `/done` records your verdict on the work so far.
 
+## The wiki
+
+zenbot keeps lasting knowledge in `~/.zenbot/wiki/` (a git repository of markdown pages you can read and edit): one page per concept, project, decision or person, each a short summary over a dated timeline with sources. It adds to it with `capture` (System One finds the right page and skips what's already there) and finds pages with `search`. `index.md` lists the pages; `log.md` lists every capture.
+
 ## The web and connected services
 
 - **Web**: `web_search` and `web_fetch` work out of the box. Search goes through a SearXNG container the installer starts next to Postgres (only reachable from the VM); set `BRAVE_API_KEY` or `TAVILY_API_KEY` in `~/.zenbot/env` to use those instead. Fetching reaches public addresses only. Everything read from the web is marked untrusted, and a session that read it can't save memories that count as the owner's words.

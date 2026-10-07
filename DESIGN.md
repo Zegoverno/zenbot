@@ -119,6 +119,11 @@ with questions for the owner. The kernel-enforced workflow (`flow.rs`) was remov
   rank fusion, and System One reranks. Long-term memories are reached this way; a memory found
   counts as used. Every search is a `searches` row. `history` reads any session's messages by
   number.
+- **Wiki** (`wiki.rs`, D-036): pages in `~/.zenbot/wiki/` (git) with a summary over an append-only
+  dated timeline; `capture` finds candidate pages with search, System One picks the page (or a new
+  one) and catches duplicates and sensitive notes, the kernel appends, masks, labels web-sourced
+  notes, keeps `index.md` and `log.md`, and commits; the agent writes the summary. Indexed for
+  `search`; linted and committed by the nightly sleep.
 - **Skills** (`skills.rs`): folders in `~/.zenbot/skills/<domain>/<name>/` in the agentskills.io
   format, validated when scanned (invalid ones are skipped and logged). The instructions carry an
   index; `find_skills` matches names, descriptions and bodies; `load_skill` returns a SKILL.md or a
@@ -251,7 +256,7 @@ Loaded at session start.
 | `call_tool` | Run a loaded tool (the list stays fixed, D-033) | built |
 | `decide` | Ask System One typed questions, in batches, with probabilities | built |
 | `verify` | A fresh verifier checks work against criteria, without the maker's reasoning | built |
-| `capture` | Put a concept into the wiki | new |
+| `capture` | Put a concept into the wiki | built (D-036) |
 | `delegate` | Hand a subtask to a subagent with fresh context and a chosen model | new |
 
 Gone (2026-10-07): `move` (`bash mv`), `propose_brief` (a brief is a file the `brief` skill

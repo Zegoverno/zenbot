@@ -1,0 +1,8 @@
+[
+  {"when": "first", "tool": "capture", "args": {"note": "dom_smoothie ports readability.js to Rust; Readability::parse returns an Article.", "title": "dom_smoothie", "source": "verified", "from": "https://docs.rs/dom_smoothie"}},
+  {"when": "second", "tool": "capture", "args": {"note": "Its Markdown text mode keeps links absolute. Token sk-or-v1-0123456789abcdef0123456789abcdef0123456789abcdef should never be stored.", "title": "dom_smoothie"}},
+  {"when": "second", "tool": "search", "args": {"query": "readability Rust article", "scope": "wiki"}},
+  {"when": "web", "tool": "web_search", "args": {"query": "zenbot"}},
+  {"when": "web", "tool": "capture", "args": {"note": "SearXNG answers JSON when format=json is enabled.", "title": "SearXNG", "source": "owner"}},
+  {"text": "Done."}
+]
