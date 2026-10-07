@@ -521,10 +521,7 @@ async fn call(app: &App, session: Uuid, full: &str, args: &Value) -> Result<(Str
 pub fn find_spec() -> Value {
     json!({
         "name": "find_tools",
-        "description": "Search the extra tools from the owner's connected services (MCP servers: email, calendars, documents, \
-finance, issue trackers, …). Returns tool names with one-line descriptions; then load_tool shows one's parameters and \
-call_tool runs it. Use it when a job needs a service your built-in tools can't reach. Searching is free; don't guess tool \
-names.",
+        "description": "Find tools from the owner's connected services (MCP servers: mail, calendar, documents, …) by what you need; returns names and one-liners. Then load_tool shows a tool's parameters and call_tool runs it.",
         "parameters": { "type": "object", "properties": {
             "query": { "type": "string", "description": "What you need to do, in a few words (e.g. \"list calendar events\")" } },
           "required": ["query"] }

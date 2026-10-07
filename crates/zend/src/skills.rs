@@ -274,10 +274,7 @@ fn files_of(dir: &Path) -> Vec<String> {
 pub fn find_spec() -> Value {
     json!({
         "name": "find_skills",
-        "description": "Search your skills: written know-how for doing a kind of work well (how to frame a job, verify work, \
-change zenbot, …). Returns matching skills with their descriptions; load one with load_skill. Use it when a task \
-matches a skill in the index in your instructions, or when you're unsure how a kind of work should be done here. \
-Skills are cheap to find and load; don't guess at a procedure a skill covers.",
+        "description": "Find your skills (how to do a kind of work well: framing a job, verifying work, …) by what you need to do; returns names and descriptions. Load one with load_skill when a job matches it.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -291,9 +288,7 @@ Skills are cheap to find and load; don't guess at a procedure a skill covers.",
 pub fn load_spec() -> Value {
     json!({
         "name": "load_skill",
-        "description": "Load a skill's instructions (its SKILL.md), or one of its other files, into this conversation, then follow \
-them. Name it as domain/name (from the index or find_skills). A skill stays loaded for the rest of the session; \
-don't load the same file twice.",
+        "description": "Load a skill's SKILL.md (or a file inside it, with `file`) and follow it. Name it domain/name. Once loaded it stays in the conversation.",
         "parameters": {
             "type": "object",
             "properties": {

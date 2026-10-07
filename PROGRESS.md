@@ -6,6 +6,21 @@
 
 ---
 
+## 2026-10-07 — Phase 3 built: search over sessions and memories; long-term memory
+
+- **search** (D-035): every session's turns (the owner's words, the answers, the tools called; not
+  tool output) and every short- and long-term memory, indexed in the background; exact names and
+  paths first, then full text and meaning (embeddings through OpenRouter) merged by rank; System One
+  reranks; a memory found counts as used; every search logged (`searches`).
+- **history** reads any session (`session`), so a session search found can be read in full.
+- **Long-term memory**: reached through search. The sleep's promotions are proposals; `zen memory
+  accept|reject <id>` reviews them, and promotion acts on its own once the owner's reviews show
+  System One can be trusted (Wilson lower bound ≥ 0.95, about 52 agreeing reviews).
+- Tested: unit tests, e2e `search` (found across sessions, exact path first, memory used, history
+  across sessions, accepted promotion found as long-term), and a real Sonnet turn that found a past
+  session by meaning (words not in it), reranked by System One. Fixed on the way: a match by
+  meaning showed only the start of the turn, not the answer.
+
 ## 2026-10-07 — Phase 2 built: web search, web fetch, MCP; Phase 1 merged
 
 - **Phase 1 merged** (#17) after its eval: 12/12 → 12/12, cost +27% (the larger fixed prefix).

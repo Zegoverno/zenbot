@@ -6,6 +6,30 @@
 
 ---
 
+## D-035 — Search: three arms in one query; promotion earns its trust
+
+**Decision:** One `search_docs` table over session turns and memories (later the wiki and skills),
+indexed in the background. A search runs exact names and paths first (trigram over identifiers),
+then full text (`simple` configuration: no stemming, identifiers survive) and meaning (pgvector,
+1536-dimension `openai/text-embedding-3-small` through OpenRouter, filled in afterwards) merged by
+reciprocal rank fusion (k = 60); System One reranks, an exact hit stays on top. Tool output is not
+indexed. Long-term memory is reached only through search. A sleep's promotions are proposals the
+owner reviews; promotion acts on its own once the one-sided 95% Wilson lower bound of the owner's
+agreement with them reaches 0.95.
+
+**Why:** Full text alone can't find `compile.rs` (Postgres keeps a path as one token) and misses
+meaning; vectors alone miss exact names (gbrain's recipe, checked on zenbot's own Postgres,
+`docs/research/memory-search-web.md`). A raw System One probability is not a confidence: trust comes
+from its track record against the owner's calls, which also makes "shadow until it matches often
+enough" one formula.
+
+**Considered:** a separate vector store (another service), stemming (`english` mangles identifiers
+and the owner writes in more than one language), promoting on System One's probability alone.
+
+**Date:** 2026-10-07
+
+---
+
 ## D-034 — Web access: keyless search by default, untrusted content taints
 
 **Decision:** `web_search` uses Brave or Tavily when their key is set, else a self-hosted SearXNG

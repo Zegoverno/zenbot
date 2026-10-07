@@ -20,9 +20,10 @@ steps (old "Phase 2b", "Phase 3 memory", "Phase 4 search", "Phase 5 wiki").
 |---|---|---|---|
 | 0 | Ground | Research the reference projects in their code; merge the open fix PRs | done (`docs/research/`) |
 | 1 | Foundation | Prompt files, tool descriptions, short-term memory with sleep, skills, workflow into skills | done (#17): 12/12 → 12/12, cost +27% |
-| 2 | Reach | `web_search`, `web_fetch`, MCP client, `find_tools` / `load_tool` / `call_tool` | built, PR next |
-| 3 | Recall | `search` (full-text, then semantic) over sessions and memories; long-term memory acts | **ACTIVE** next |
-| 4 | Knowledge | The wiki and `capture` | |
+| 2 | Reach | `web_search`, `web_fetch`, MCP client, `find_tools` / `load_tool` / `call_tool` | built (#18) |
+| 3 | Recall | `search` (exact, full-text and semantic) over sessions and memories; long-term memory acts | built |
+
+| 4 | Knowledge | The wiki and `capture` | **ACTIVE** next |
 | 5 | Self-improvement | The agent creates and improves skills and tools, without sprawl | |
 | 6 | Delegation | `delegate`: subagents; model choice from real usage | |
 
@@ -57,12 +58,16 @@ descriptions for `verify`, `remember` and `decide`.
 3. MCP client written against the spec (stdio and streamable HTTP; not `rmcp`, D-033), configured
    in `~/.zenbot/mcp.json`.
 
-## Phase 3 — Recall
+## Phase 3 — Recall `[ built ]`
 
-`search`: Postgres full-text, then pgvector, merged by rank (reciprocal rank fusion), exact names and
-paths first, over sessions and memories (later the wiki and skills); System One reranking; every
-search logged. Replaces `history`. Long-term memory gets its reader, so promotion leaves shadow mode
-once its proposals have matched the owner's calls often enough. Embedding model to choose.
+- `search` over every session's turns and over short- and long-term memories: an indexer keeps
+  `search_docs` current; exact names and paths first (trigram), then full text (`simple` config) and
+  meaning (pgvector, `openai/text-embedding-3-small` through OpenRouter) merged by reciprocal rank
+  fusion; System One reranks; a memory found counts as used; every search is logged. `history` stays
+  for reading messages by number, now in any session.
+- Long-term memory is reached through search. Promotions are proposals the owner reviews
+  (`zen memory accept|reject`); promotion acts on its own once the Wilson lower bound of the owner's
+  agreement with them reaches 0.95 (D-035).
 
 ## Phase 4 — Knowledge
 

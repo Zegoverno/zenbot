@@ -8,8 +8,13 @@
 //! really impactful memories: System One must judge them durable and impactful with a very high
 //! probability on the lower end of several samples, and their source must be the owner's words or a
 //! verified result. Without a System One model the sleep keeps the most recent entries and promotes
-//! nothing. Nothing is ever deleted. While long-term memory has no reader (`ZEN_MEMORY_PROMOTE`
-//! unset or `shadow`), promotions are only proposed.
+//! nothing. Nothing is ever deleted.
+//!
+//! Long-term memories are reached through `search` (search.rs). A sleep's promotions are proposals
+//! the owner reviews (`zen memory accept|reject <id>`) until System One has earned trust: promotion
+//! acts on its own once the one-sided 95% Wilson lower bound of the owner's agreement with its
+//! proposals reaches the bar (about 52 reviewed proposals with none rejected; docs/research/
+//! memory-search-web.md §A). `ZEN_MEMORY_PROMOTE=on` or `shadow` overrides that.
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -34,10 +39,63 @@ fn promote_bar() -> f64 {
     crate::env_num("ZEN_MEMORY_PROMOTE_BAR", 0.95)
 }
 
-/// Whether promotion moves memories to long-term (`on`) or only proposes it (`shadow`, the
-/// default until long-term memory is searchable).
-fn promote_on() -> bool {
-    std::env::var("ZEN_MEMORY_PROMOTE").is_ok_and(|v| v.trim() == "on")
+/// The lower end of the one-sided Wilson score interval for `k` successes in `n` trials.
+pub fn wilson_lower(k: u64, n: u64, z: f64) -> f64 {
+    if n == 0 {
+        return 0.0;
+    }
+    let (n, p) = (n as f64, k as f64 / n as f64);
+    let z2 = z * z;
+    ((p + z2 / (2.0 * n)) - z * ((p * (1.0 - p) + z2 / (4.0 * n)) / n).sqrt()) / (1.0 + z2 / n)
+}
+
+/// How promotion runs: `on` / `shadow` from ZEN_MEMORY_PROMOTE, else `auto` (acts once the owner's
+/// reviews show System One's proposals can be trusted). Returns the mode, whether it acts, and the
+/// calibration: proposals the owner accepted, reviewed, and the lower bound of their agreement.
+pub async fn promotion(db: &PgPool) -> (String, bool, u64, u64, f64) {
+    let row = sqlx::query(
+        "SELECT count(*) FILTER (WHERE actual = 'accept') AS k, count(*) AS n FROM decisions
+         WHERE point = 'sleep' AND chosen = 'promote' AND actual IN ('accept', 'reject')",
+    )
+    .fetch_one(db)
+    .await;
+    let (k, n) = row.map(|r| (r.get::<i64, _>("k") as u64, r.get::<i64, _>("n") as u64)).unwrap_or((0, 0));
+    let lcb = wilson_lower(k, n, 1.645);
+    match std::env::var("ZEN_MEMORY_PROMOTE").unwrap_or_default().trim() {
+        "on" => ("on".into(), true, k, n, lcb),
+        "shadow" | "off" => ("shadow".into(), false, k, n, lcb),
+        _ => ("auto".into(), lcb >= promote_bar(), k, n, lcb),
+    }
+}
+
+/// The owner's review of a promotion the sleep proposed: `accept` moves it to long-term memory,
+/// `reject` leaves it archived. Either way the review is recorded on the sleep's decision, which is
+/// what promotion's trust is calibrated on.
+pub async fn review(db: &PgPool, id: &str, decision: &str) -> Result<Value> {
+    let id = parse_id(&json!(id)).ok_or_else(|| anyhow::anyhow!("not a memory id: {id}"))?;
+    anyhow::ensure!(matches!(decision, "accept" | "reject"), "decision must be accept or reject");
+    let proposed: Option<Option<String>> = sqlx::query_scalar("SELECT proposed FROM memories WHERE id = $1").bind(id).fetch_optional(db).await?;
+    let Some(proposed) = proposed else { anyhow::bail!("no memory m{id}") };
+    anyhow::ensure!(proposed.as_deref() == Some("promote"), "m{id} isn't proposed for long-term memory");
+    let (tier, reason) = if decision == "accept" { ("long", "promoted by the owner") } else { ("archived", "promotion rejected by the owner") };
+    sqlx::query("UPDATE memories SET tier = $2, reason = $3, proposed = $4, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .bind(tier)
+        .bind(reason)
+        .bind(if decision == "accept" { None } else { Some("rejected") })
+        .execute(db)
+        .await?;
+    sqlx::query(
+        "UPDATE decisions SET actual = $2, actual_by = 'owner', resolved_at = now()
+         WHERE id = (SELECT id FROM decisions WHERE point = 'sleep' AND chosen = 'promote' AND (input->>'memory')::bigint = $1 ORDER BY id DESC LIMIT 1)",
+    )
+    .bind(id)
+    .bind(decision)
+    .execute(db)
+    .await?;
+    export(db).await;
+    let (mode, acts, k, n, lcb) = promotion(db).await;
+    Ok(json!({ "id": format!("m{id}"), "tier": tier, "promotion": { "mode": mode, "acts": acts, "accepted": k, "reviewed": n, "lower_bound": lcb } }))
 }
 
 #[derive(Clone, Debug)]
@@ -128,13 +186,7 @@ pub async fn export(db: &PgPool) {
 pub fn spec() -> Value {
     json!({
         "name": "remember",
-        "description": "Save something to your short-term memory, which every new session starts with (MEMORY.md in your \
-instructions; changes show from the next session). Save what will matter again: the owner's preferences and decisions, \
-facts about their projects, lessons from mistakes, where things are. Write facts (\"The owner prefers X\"), not orders to \
-yourself. Not for what's in the code, the docs or git history, or only matters to this conversation. Memory has a fixed size and entries compete for it: a nightly sleep keeps the most \
-useful, archives the rest, and promotes the few that matter for good. Keep entries short and self-contained. \
-Use `replace` to update an entry (by its id, e.g. m12) rather than adding a near-duplicate, and `remove` for one that's wrong. \
-Mark `source`: owner for the owner's own words, verified for a result you checked, inferred otherwise.",
+        "description": "Save a fact to your short-term memory, which every new session starts with (it shows from the next session). Save what will matter again: the owner's preferences and decisions, facts about their projects, lessons, where things are; not what's in the code, docs or git. Write facts (\"The owner prefers X\"), not orders to yourself. Space is fixed and tidied nightly: `replace` an entry by id (m12) rather than adding a near-duplicate; `remove` one that's wrong. `source`: owner (their words), verified (you checked it) or inferred (default).",
         "parameters": {
             "type": "object",
             "properties": {
@@ -424,6 +476,7 @@ async fn sleep_inner(app: &App, run: i64) -> Result<Value> {
         }
     }
     let fates = plan(&entries, &judged, &lower, cap(), promote_bar());
+    let promote_on = promotion(db).await.1;
     let (mut kept, mut dropped, mut promoted, mut proposed) = (0, 0, 0, 0);
     let mut notes: Vec<String> = Vec::new();
     for (i, e) in entries.iter().enumerate() {
@@ -438,7 +491,7 @@ async fn sleep_inner(app: &App, run: i64) -> Result<Value> {
                 dropped += 1;
                 ("archived", Some(*why), user_fact.then_some("user"), "drop")
             }
-            Fate::Promote if promote_on() => {
+            Fate::Promote if promote_on => {
                 promoted += 1;
                 notes.push(format!("promoted m{}: {}", e.id, zen_proto::head(&e.text, 120)));
                 ("long", Some("promoted by the sleep"), user_fact.then_some("user"), "promote")
@@ -467,7 +520,7 @@ async fn sleep_inner(app: &App, run: i64) -> Result<Value> {
             .bind(&raw[i])
             .bind(chosen)
             .bind(p)
-            .bind(chosen != "promote" || promote_on())
+            .bind(chosen != "promote" || promote_on)
             .execute(db)
             .await?;
     }
@@ -531,7 +584,10 @@ pub async fn last_run(db: &PgPool) -> Result<Value, sqlx::Error> {
 
 /// Memories by tier, newest first, for `zen memory`.
 pub async fn list(db: &PgPool, tier: &str) -> Result<Value, sqlx::Error> {
-    let rows = sqlx::query("SELECT id, text, source, tier, proposed, reason, created_at, updated_at FROM memories WHERE $1 = 'all' OR tier = $1 ORDER BY id DESC LIMIT 500")
+    let rows = sqlx::query(
+        "SELECT id, text, source, tier, proposed, reason, created_at, updated_at FROM memories
+         WHERE $1 = 'all' OR tier = $1 OR ($1 = 'proposed' AND proposed = 'promote') ORDER BY id DESC LIMIT 500",
+    )
         .bind(tier)
         .fetch_all(db)
         .await?;
@@ -589,6 +645,14 @@ mod tests {
         let all = vec![e(1, "stale", "inferred", 30.0), e(2, "fresh", "inferred", 0.0)];
         let fates = plan(&all, &[None, None], &[None, None], line(&all[1]).len(), 0.95);
         assert_eq!(fates, vec![Fate::Drop("didn't fit"), Fate::Keep]);
+    }
+
+    #[test]
+    fn trust_needs_many_agreeing_reviews() {
+        assert_eq!(wilson_lower(0, 0, 1.645), 0.0);
+        assert!(wilson_lower(10, 10, 1.645) < 0.95, "ten agreements aren't enough");
+        assert!(wilson_lower(52, 52, 1.645) >= 0.95);
+        assert!(wilson_lower(51, 52, 1.645) < 0.95, "one rejection costs a lot");
     }
 
     #[test]

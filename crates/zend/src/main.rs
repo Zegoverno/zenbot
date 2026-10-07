@@ -13,6 +13,7 @@ mod measure;
 mod memory;
 mod mind;
 mod score;
+mod search;
 mod secrets;
 mod skills;
 mod tape;
@@ -192,6 +193,7 @@ async fn main() -> Result<()> {
     tokio::spawn(dispatch(app.clone(), incoming));
     tokio::spawn(watchdog(app.clone()));
     tokio::spawn(score::idle_loop(app.clone()));
+    tokio::spawn(search::index_loop(app.clone()));
 
     let api = Router::new()
         .route("/models", get(list_models))
@@ -202,6 +204,7 @@ async fn main() -> Result<()> {
         .route("/memory", get(list_memory))
         .route("/mcp", get(mcp_status))
         .route("/memory/sleep", axum::routing::post(run_sleep))
+        .route("/memory/{id}/review", axum::routing::post(review_memory))
         .route("/version", get(version))
         .route("/upgrade", get(upgrade_status).post(upgrade_start))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth));

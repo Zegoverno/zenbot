@@ -36,10 +36,7 @@ fn spec(name: &str, description: &str, parameters: Value) -> Value {
 fn ask_spec() -> Value {
     spec(
         "ask",
-        "Ask the owner up to 3 questions only they can answer, then end your turn; their answers arrive as the next message. \
-Ask about taste, the bet, or anything public, security-sensitive, costly or hard to reverse, or a goal you can't infer; \
-never what you can look up or decide yourself. Each question has 2 to 4 options, your recommended one first. \
-If a question goes unanswered, take your recommended option and say it was an assumption.",
+        "Ask the owner up to 3 questions only they can answer (taste, the bet, anything public, costly or hard to reverse), then end your turn; answers arrive as the next message. Never ask what you can look up or decide yourself. 2 to 4 options each, your recommendation first; if a question goes unanswered, take your recommendation and say so.",
         json!({ "type": "object", "properties": { "questions": { "type": "array", "description": "1 to 3 questions",
             "items": { "type": "object", "properties": {
                 "question": { "type": "string" },
@@ -51,21 +48,17 @@ If a question goes unanswered, take your recommended option and say it was an as
 fn verify_spec() -> Value {
     spec(
         "verify",
-        "Get a job's result checked before you report it done. The kernel runs each criterion's `run` command itself (in `dir`), \
-then, when some criteria need judgment (or you ask with fresh=true), a fresh verifier that never sees your reasoning reads the \
-diff and the files and judges them; it can't change anything. Returns pass, fail or uncertain per criterion with evidence. \
-Use it for work whose correctness isn't settled by commands you already ran, or that is risky or architectural; skip it when \
-every criterion is a command that passes. The work/verify skill says how to use it well. Takes minutes when a verifier runs.",
+        "Have a job's result checked before you report it done. The kernel runs each criterion's `run` command (exit 0, and `expect` in the output, is a pass); criteria without a command go to a fresh verifier that sees only the goal, the criteria, the diff and your summary, and can't change anything. Use it when the commands you already ran don't settle the work, or the work is risky; skip it when every criterion is a passing command. Returns pass, fail or uncertain per criterion, with evidence. Takes minutes when the verifier runs.",
         json!({ "type": "object", "properties": {
-            "goal": { "type": "string", "description": "What the job had to achieve, in one or two lines" },
-            "criteria": { "type": "array", "description": "What must be true for the job to be done", "items": { "type": "object", "properties": {
+            "goal": { "type": "string", "description": "What the job had to achieve" },
+            "criteria": { "type": "array", "description": "What must be true", "items": { "type": "object", "properties": {
                 "id": { "type": "string" }, "text": { "type": "string", "description": "The criterion" },
-                "run": { "type": "string", "description": "A shell command that checks it (exit 0 = pass)" },
-                "expect": { "type": "string", "description": "Text the command's output must contain" } }, "required": ["text"] } },
-            "dir": { "type": "string", "description": "The repository or directory the work changed (default: the workspace)" },
-            "base": { "type": "string", "description": "The git commit the work started from, if you committed along the way (default HEAD: uncommitted changes)" },
-            "summary": { "type": "string", "description": "What you did and how you checked it (a claim the verifier weighs, not evidence)" },
-            "fresh": { "type": "boolean", "description": "Run the fresh verifier even when every criterion is a command" } },
+                "run": { "type": "string", "description": "Shell command that checks it" },
+                "expect": { "type": "string", "description": "Text its output must contain" } }, "required": ["text"] } },
+            "dir": { "type": "string", "description": "Directory the work changed (default: workspace)" },
+            "base": { "type": "string", "description": "Commit the work started from (default HEAD)" },
+            "summary": { "type": "string", "description": "What you did and how you checked it" },
+            "fresh": { "type": "boolean", "description": "Run the verifier even if every criterion has a command" } },
           "required": ["goal", "criteria"] }),
     )
 }
@@ -86,14 +79,7 @@ fn verdict_spec() -> Value {
 fn decide_spec() -> Value {
     spec(
         "decide",
-        "Ask a fast, cheap System One model typed questions and get answers with probabilities in about a second. Use it \
-whenever the answer is one of known options and there's a lot to judge, or a cheap second opinion helps: triage 200 search \
-results or log lines for relevance, rank candidates, classify files, check whether a text claims success without evidence. \
-Not for reasoning, writing or anything you'd need to explain. Put the material in `state` (keep it under ~20,000 characters; \
-for many items, give a list and ask per item or ask which ones). `questions` maps a key to {type: choice, instructions, \
-criteria: {option: description}}, {type: score, instructions, criteria: [lowest, …, highest]} or {type: bool, instructions, \
-criteria: {true: description, false: description}}. Answers: choice → {choice, probabilities, confidence}; score → {score \
-(level index), confidence}; bool → {probability}. Set your own threshold, e.g. keep items above 0.8.",
+        "Ask a fast System One model typed questions; answers in about a second, with probabilities. For judging many items or a cheap second opinion: triage results or log lines, rank candidates, classify files. Not for reasoning or writing. `state`: the material (JSON, under ~20,000 characters). `questions`: key -> {type: choice, instructions, criteria: {option: description}} | {type: score, instructions, criteria: [lowest, …, highest]} | {type: bool, instructions, criteria: {true: …, false: …}}. Answers: choice {choice, probabilities}, score {score, confidence}, bool {probability}; set your own threshold.",
         json!({ "type": "object", "properties": {
             "state": { "type": "object", "description": "The material to judge, as a JSON object" },
             "questions": { "type": "object", "description": "Typed questions by key" } }, "required": ["state", "questions"] }),
@@ -119,6 +105,7 @@ pub fn specs(kind: Option<&str>) -> Value {
     }
     let mut all = builtins;
     all.push(crate::compact::tool_spec());
+    all.push(crate::search::spec());
     all.push(ask_spec());
     all.push(crate::memory::spec());
     all.push(crate::web::search_spec());
@@ -151,6 +138,19 @@ pub async fn run_tool(app: &AppState, session: Uuid, workspace: &Path, name: &st
     match name {
         "history" => {
             let (content, is_error) = crate::compact::history_tool(&app.db, session, args).await;
+            // Another session's messages may carry web content it read: then they're untrusted here too.
+            let other = args["session"].as_str().map(str::trim).filter(|s| !s.is_empty());
+            if let (Some(other), false) = (other, is_error) {
+                let tainted: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sessions WHERE id::text LIKE $1 || '%' AND tainted_at IS NOT NULL)")
+                    .bind(other.to_lowercase())
+                    .fetch_one(&app.db)
+                    .await
+                    .unwrap_or(true);
+                if tainted {
+                    crate::web::taint(app, session, "history", other).await;
+                    return out(crate::web::untrusted("history", other, &content), false);
+                }
+            }
             out(content, is_error)
         }
         "ask" => {
@@ -187,6 +187,7 @@ If a question goes unanswered, take your recommended option and say it was an as
         }
         "verify" => Some(verify(app, session, workspace, args).await),
         "web_search" | "web_fetch" => crate::web::run_tool(app, session, name, args).await,
+        "search" => crate::search::run_tool(app, session, name, args).await,
         "find_tools" | "load_tool" | "call_tool" => crate::mcp::run_tool(app, session, name, args).await,
         "decide" => {
             let res = crate::score::decide(app, &args["state"], &args["questions"]).await;
@@ -413,7 +414,7 @@ mod tests {
         let names = |v: Value| v.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         assert_eq!(names(specs(Some(VERIFIER))), ["bash", "read", "submit_verdict"]);
         let all = names(specs(None));
-        for t in ["bash", "read", "write", "edit", "history", "ask", "remember", "web_search", "web_fetch", "find_skills", "load_skill", "find_tools", "load_tool", "call_tool", "verify"] {
+        for t in ["bash", "read", "write", "edit", "history", "search", "ask", "remember", "web_search", "web_fetch", "find_skills", "load_skill", "find_tools", "load_tool", "call_tool", "verify"] {
             assert!(all.contains(&t.to_string()), "{t} offered");
         }
         assert!(!all.contains(&"move".to_string()) && !all.contains(&"propose_brief".to_string()));

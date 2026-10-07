@@ -128,7 +128,7 @@ Changes to the worker protocol must update `docs/worker-protocol.md` and every w
 
 `scripts/e2e.sh` builds (unless `ZEN_E2E_NO_BUILD=1`), then runs each scenario on a kernel built from this checkout with the scripted faux model. It uses a throwaway database (`zen_e2e_<pid>`), throwaway git workspaces and a throwaway `HOME`, on port 18377 (`ZEN_E2E_PORT`). No subscription is used, nothing reaches the internet and the live service isn't touched. It needs Postgres running, plus `git`, `curl`, `jq`, `bubblewrap` and `python3`.
 
-There are 14 scenarios (`run …` lines at the bottom of the script). Some start small test servers from `scripts/e2e/`:
+There are 15 scenarios (`run …` lines at the bottom of the script). Some start small test servers from `scripts/e2e/`:
 
 | Server | Started by | What it is |
 |---|---|---|
@@ -318,7 +318,20 @@ Tasks live in `evals/tasks/<name>/` (`task.json` plus `files/`). See `evals/READ
 ```bash
 scripts/sleep.sh                             # sleep now (same as `zen memory sleep`)
 zen memory                                   # short-term memory and the last sleep
+zen memory --tier proposed                   # memories the sleep proposed for long-term
+zen memory accept m12                        # the owner accepts a proposal (reject m12 keeps it archived)
 systemctl list-timers zen-sleep.timer        # next run
+```
+
+Promotion to long-term memory is calibrated on those reviews (`ZEN_MEMORY_PROMOTE`, default `auto`): the sleep only proposes until the one-sided 95% Wilson lower bound of the owner's acceptances reaches `ZEN_MEMORY_PROMOTE_BAR` (0.95, about 52 accepted with none rejected), then promotes on its own. `GET /api/memory` shows the current `promotion` state. To test it on a dev kernel, the `search` e2e scenario shows how to fake a proposal in SQL.
+
+## Search index
+
+The kernel indexes every session's turns and every short- and long-term memory into `search_docs` in the background (`search::index_loop`, every `ZEN_INDEX_SECS`, default 20 s), for the `search` tool. Exact-name and full-text search need nothing else. Vector search needs embeddings, which the indexer fetches only when `OPENROUTER_API_KEY` is set (`ZEN_EMBED_MODEL`, `ZEN_EMBED_URL`; `ZEN_EMBED=0` turns them off). That sends turn and memory text to the provider, so leave the key out of a dev kernel's environment unless you mean to test embeddings: `dev.sh` loads `~/.zenbot/env`, and the e2e kernels unset `OPENROUTER_API_KEY`. Migration 0017 needs the `vector` and `pg_trgm` extensions, which the `pgvector/pgvector:pg16` image has.
+
+```bash
+docker compose -f deploy/compose.yaml exec -T postgres psql -U zen -d zen_dev \
+  -c "SELECT kind, count(*), count(embedding) FROM search_docs GROUP BY kind"   # what the dev kernel indexed
 ```
 
 `install.sh` installs the timers, and `apply-upgrade.sh` refreshes them after a healthy upgrade (`install_timers` in `scripts/lib.sh`), so a new timer arrives with an upgrade.
@@ -397,6 +410,7 @@ scripts/db.sh pending               # migrations not yet applied
 | e2e `mcp` or `web` fails to start its server | `python3` missing, or the e2e port + 1 / + 2 is taken |
 | `web_search failed: … searxng at http://127.0.0.1:8888` | SearXNG not running: `docker compose -f deploy/compose.yaml up -d searxng` |
 | `find_tools` lists problems | `~/.zenbot/mcp.json` (invalid JSON, a server with both or neither of `command`/`url`, an unset `${VAR}`); `GET /api/mcp` shows the same |
+| `search` finds nothing recent | the indexer runs every `ZEN_INDEX_SECS`; `search` also indexes before it queries. Warnings `search index:` / `embedding search documents:` in the kernel log |
 | A build is killed with no compiler error | out of memory: `CARGO_BUILD_JOBS=2`, one build at a time |
 | Upgrade compiles instead of downloading | local changes under `crates/` or `Cargo.*`, or CI hasn't published this commit yet (`scripts/fetch-release.sh --check HEAD`) |
 | `zen` says `no token` | `~/.zenbot/token` missing; `install.sh` creates it |

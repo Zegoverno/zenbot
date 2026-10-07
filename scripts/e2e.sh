@@ -113,7 +113,7 @@ The owner's name is E2E Owner." >"$TMP/home/.zenbot/USER.md"
   check "the skills index is in the instructions" grep -q "work/verify:" <<<"$base"
   check "memory starts empty" grep -q "(empty)" <<<"$base"
   local tools; tools=$(q "SELECT string_agg(t->>'name', ',') FROM turns, envelopes e, jsonb_array_elements(e.tools) t WHERE turns.session_id='$sid' AND e.hash = turns.envelope")
-  check "the system tools, in order, no workflow tools" eq "$tools" bash,read,write,edit,history,ask,remember,web_search,web_fetch,find_skills,load_skill,find_tools,load_tool,call_tool,verify
+  check "the system tools, in order, no workflow tools" eq "$tools" bash,read,write,edit,history,search,ask,remember,web_search,web_fetch,find_skills,load_skill,find_tools,load_tool,call_tool,verify
 }
 
 # Skills load on demand, as tool results; nothing outside a skill's folder can be read through them.
@@ -175,6 +175,37 @@ web_tools() {
   check "its memory counts as inference" eq "$(q "SELECT source FROM memories WHERE text LIKE 'Something read on the web.%'")" inferred
   q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART" >/dev/null  # the memory scenarios start from none
   kill "$srv" 2>/dev/null || true
+}
+
+# Search: a fact from one session is found from another (by words, and by its exact path first), a
+# memory is found and counted as used, history reads the other session, and a promotion the owner
+# accepts makes the memory long-term and still findable.
+search_recall() {
+  local ws; ws=$(new_workspace search)
+  q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART" >/dev/null
+  start_kernel "$ws" "$(script search.json)"
+  local a; a=$(zen ask --json -m faux/smoke "save: the purple elephant config lives in deploy/elephant.yaml" | jq -r .session_id)
+  sleep 6  # the indexer takes events once they're 5 seconds old (search.rs)
+  local s="$TMP/search-filled.json"; sed "s/SESSION/${a:0:8}/" "$REPO/scripts/e2e/search.json" >"$s"
+  stop_kernel; start_kernel "$ws" "$s"
+  local r sid; r=$(zen ask --json -m faux/smoke "find it"); sid=$(echo "$r" | jq -r .session_id)
+  check "searches and history ran" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" search:false,search:false,search:false,history:false
+  local res; res=$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult'")
+  check "found by words, in the other session" grep -q "session ${a:0:8}" <<<"$res"
+  check "the exact path comes first" grep -q "(exact match)" <<<"$res"
+  check "the memory is found" grep -q "m1 — short-term memory (owner)" <<<"$res"
+  check "and counted as used" eq "$(q "SELECT uses FROM memories WHERE id = 1")" 1
+  check "history read the other session" grep -q "purple elephant" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='history'")"
+  check "every search is logged" eq "$(q "SELECT count(*) FROM searches WHERE session_id='$sid'")" 3
+  # The sleep proposed m1 for long-term memory; the owner accepts it.
+  q "UPDATE memories SET tier='archived', proposed='promote' WHERE id=1; INSERT INTO decisions (point, input, chosen, acted) VALUES ('sleep', '{\"memory\": 1}', 'promote', false)" >/dev/null
+  check "a non-proposed memory can't be accepted" bash -c '! ZEN_URL=$1 ZEN_TOKEN=$2 timeout 30 "$3/zen" memory accept m99 >/dev/null 2>&1' _ "$URL" "$TOKEN" "$BIN"
+  zen memory accept m1 >/dev/null
+  check "accepted: long-term" eq "$(q "SELECT tier || '/' || coalesce(proposed, '-') FROM memories WHERE id=1")" long/-
+  check "the review is recorded for calibration" eq "$(q "SELECT actual || '/' || actual_by FROM decisions WHERE point='sleep' AND chosen='promote'")" accept/owner
+  local l; l=$(zen ask --json -m faux/smoke "long term?" | jq -r .session_id)
+  check "a long-term memory is found by search" grep -q "m1 — long-term memory" <<<"$(q "SELECT string_agg(payload->'content'->0->>'text', '|') FROM tape_events WHERE session_id='$l' AND payload->>'role'='toolResult'")"
+  q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART; DELETE FROM search_docs WHERE kind='memory'" >/dev/null
 }
 
 # remember: a memory saved in one session is in the next session's instructions, not the current one's.
@@ -310,6 +341,7 @@ run prompt-files prompt_files
 run skills skills_on_demand
 run mcp mcp_tools
 run web web_tools
+run search search_recall
 run memory-across-sessions memory_across_sessions
 run memory-sleep memory_sleep
 run ask ask_and_gone_tools
