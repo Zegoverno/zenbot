@@ -161,7 +161,7 @@ pub fn untrusted(source: &str, about: &str, text: &str) -> String {
 }
 
 /// Mark the session as having read untrusted content (once).
-async fn taint(app: &App, session: Uuid, source: &str, about: &str) {
+pub async fn taint(app: &App, session: Uuid, source: &str, about: &str) {
     let first = sqlx::query("UPDATE sessions SET tainted_at = now() WHERE id = $1 AND tainted_at IS NULL")
         .bind(session)
         .execute(&app.db)

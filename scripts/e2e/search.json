@@ -1,0 +1,9 @@
+[
+  {"when": "save", "tool": "remember", "args": {"text": "The owner deploys from the staging branch on Fridays.", "source": "owner"}},
+  {"when": "find", "tool": "search", "args": {"query": "purple elephant config"}},
+  {"when": "find", "tool": "search", "args": {"query": "deploy/elephant.yaml"}},
+  {"when": "find", "tool": "search", "args": {"query": "staging branch Fridays", "scope": "memories"}},
+  {"when": "find", "tool": "history", "args": {"session": "SESSION", "from": 1, "to": 3}},
+  {"when": "long", "tool": "search", "args": {"query": "staging Fridays"}},
+  {"text": "Done."}
+]

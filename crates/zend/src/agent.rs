@@ -119,6 +119,7 @@ pub fn specs(kind: Option<&str>) -> Value {
     }
     let mut all = builtins;
     all.push(crate::compact::tool_spec());
+    all.push(crate::search::spec());
     all.push(ask_spec());
     all.push(crate::memory::spec());
     all.push(crate::web::search_spec());
@@ -151,6 +152,19 @@ pub async fn run_tool(app: &AppState, session: Uuid, workspace: &Path, name: &st
     match name {
         "history" => {
             let (content, is_error) = crate::compact::history_tool(&app.db, session, args).await;
+            // Another session's messages may carry web content it read: then they're untrusted here too.
+            let other = args["session"].as_str().map(str::trim).filter(|s| !s.is_empty());
+            if let (Some(other), false) = (other, is_error) {
+                let tainted: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sessions WHERE id::text LIKE $1 || '%' AND tainted_at IS NOT NULL)")
+                    .bind(other.to_lowercase())
+                    .fetch_one(&app.db)
+                    .await
+                    .unwrap_or(true);
+                if tainted {
+                    crate::web::taint(app, session, "history", other).await;
+                    return out(crate::web::untrusted("history", other, &content), false);
+                }
+            }
             out(content, is_error)
         }
         "ask" => {
@@ -187,6 +201,7 @@ If a question goes unanswered, take your recommended option and say it was an as
         }
         "verify" => Some(verify(app, session, workspace, args).await),
         "web_search" | "web_fetch" => crate::web::run_tool(app, session, name, args).await,
+        "search" => crate::search::run_tool(app, session, name, args).await,
         "find_tools" | "load_tool" | "call_tool" => crate::mcp::run_tool(app, session, name, args).await,
         "decide" => {
             let res = crate::score::decide(app, &args["state"], &args["questions"]).await;
@@ -413,7 +428,7 @@ mod tests {
         let names = |v: Value| v.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         assert_eq!(names(specs(Some(VERIFIER))), ["bash", "read", "submit_verdict"]);
         let all = names(specs(None));
-        for t in ["bash", "read", "write", "edit", "history", "ask", "remember", "web_search", "web_fetch", "find_skills", "load_skill", "find_tools", "load_tool", "call_tool", "verify"] {
+        for t in ["bash", "read", "write", "edit", "history", "search", "ask", "remember", "web_search", "web_fetch", "find_skills", "load_skill", "find_tools", "load_tool", "call_tool", "verify"] {
             assert!(all.contains(&t.to_string()), "{t} offered");
         }
         assert!(!all.contains(&"move".to_string()) && !all.contains(&"propose_brief".to_string()));

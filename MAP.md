@@ -5,8 +5,8 @@
 > code before changing it, and if the two disagree, the code wins (then fix the map).
 >
 > Written from the code on 2026-10-06; updated after PRs #8, #9, #10 and #13, for Phase 1
-> (prompt files, memory, skills, the workflow removed) and for Phase 2 (web search and fetch, the MCP
-> client) on 2026-10-07. Where something couldn't be confirmed in the code it says "unverified". Line counts are approximate and only show which files are big.
+> (prompt files, memory, skills, the workflow removed), for Phase 2 (web search and fetch, the MCP
+> client) and for Phase 3 (search over sessions and memories, promotion calibration) on 2026-10-07. Where something couldn't be confirmed in the code it says "unverified". Line counts are approximate and only show which files are big.
 
 ---
 
@@ -23,6 +23,7 @@
    │  owns all state, runs every tool call, keeps the tape
    │  web.rs ──HTTP──▶ SearXNG (Docker, 127.0.0.1:8888) or Brave / Tavily; public web pages
    │  mcp.rs ──stdio / streamable HTTP──▶ the owner's MCP servers (~/.zenbot/mcp.json)
+   │  search.rs ──HTTPS──▶ OpenRouter /embeddings (only with OPENROUTER_API_KEY)
    │  JSON-RPC 2.0 over stdio, one JSON object per line (docs/worker-protocol.md)
    ├──▶ zen-engine (crates/zen-engine)            default worker `engine`
    │      ├─ claude: `claude -p --tools ""` + MCP config pointing at
@@ -50,32 +51,33 @@
 ## Layer 1 — Kernel `zend` (`crates/zend`)
 
 Single binary (axum, sqlx, tokio). Modules are declared in `main.rs`; most share `App` through
-`use super::*`. ~7,100 lines of Rust plus migrations, default prompt files and skills, the verifier's
+`use super::*`. ~7,800 lines of Rust plus migrations, default prompt files and skills, the verifier's
 prompt and the web UI.
 
 ### Files
 
 | File | Lines | Role | Main items | Depends on | Used by |
 |---|---|---|---|---|---|
-| `src/main.rs` | 240 | Startup and shared state. Reads env, writes missing default prompt files and skills (`defaults::install`), connects to Postgres, runs migrations (`set_ignore_missing(true)` so a rolled-back build starts on a newer schema), repairs the tape, spawns workers, starts background tasks, builds the router | `App` (incl. `hubs`), `zen_home` (`ZEN_HOME`, else `~/.zenbot`), `subscribe`/`unsubscribe`/`emit` (a session's event hub exists only while a client is connected; `emit` with no client sends nothing), `env_num`, `load_messages`, `context_in`, `append_tape` | every module | everything (via `App`) |
-| `src/api.rs` | 346 | HTTP handlers and the WebSocket (docs/client-protocol.md). Token auth middleware (header `Authorization: Bearer` or `?token=`, compared in constant time). A WebSocket `prompt` starts its turn in a separate task, so an `abort` is read while the turn is prepared. `run_sleep` runs the sleep in its own task, so a client that stops waiting doesn't cut it short | `auth`, `same_secret`, `health`, `version`, `upgrade_*`, `list_models`, `*_session`, `decide`, `DECISIONS`, `list_memory`, `run_sleep`, `mcp_status`, `handle_socket` | `turns` (start/abort), `memory`, `mcp`, `score`, `workers`, `update` | router in `main.rs` |
+| `src/main.rs` | 252 | Startup and shared state. Reads env, writes missing default prompt files and skills (`defaults::install`), connects to Postgres, runs migrations (`set_ignore_missing(true)` so a rolled-back build starts on a newer schema), repairs the tape, spawns workers, starts background tasks (dispatch, watchdog, `score::idle_loop`, `search::index_loop`, the updater), builds the router | `App` (incl. `hubs`), `zen_home` (`ZEN_HOME`, else `~/.zenbot`), `subscribe`/`unsubscribe`/`emit` (a session's event hub exists only while a client is connected; `emit` with no client sends nothing), `env_num`, `load_messages`, `context_in`, `append_tape` | every module | everything (via `App`) |
+| `src/api.rs` | 362 | HTTP handlers and the WebSocket (docs/client-protocol.md). Token auth middleware (header `Authorization: Bearer` or `?token=`, compared in constant time). A WebSocket `prompt` starts its turn in a separate task, so an `abort` is read while the turn is prepared. `run_sleep` runs the sleep in its own task, so a client that stops waiting doesn't cut it short | `auth`, `same_secret`, `health`, `version`, `upgrade_*`, `list_models`, `*_session`, `decide`, `DECISIONS`, `list_memory` (with `promotion`), `review_memory`, `run_sleep`, `mcp_status`, `handle_socket` | `turns` (start/abort), `memory`, `mcp`, `score`, `workers`, `update` | router in `main.rs` |
 | `src/turns.rs` | 553 | A turn's lifecycle: start (owner or kernel), compile what it sends (tools and instructions from `agent::specs` / `agent::system_for` by the session's kind), record it in `turns`, finish, abort, watchdog, child sessions (verifiers). `Turn.kind` is read once at start. A summary made inline at the hard limit is `hold`-counted as a running tool so the watchdog waits, and an abort stops it. `record_turn` returns the row plus the session's parent and cost in one query | `Turn`, `Origin`, `Recorded`, `start_turn`, `start_kernel_turn`, `begin_turn`, `still_ours`, `hold`, `finish_turn`, `abort_turn`, `run_child`, `watchdog`, `record_turn`, `session_cost` | `agent`, `compile`, `compact`, `measure`, `tape`, `workers` | `api`, `dispatch`, `agent`, `workers` |
 | `src/dispatch.rs` | 202 | Handles every message from workers: `tool.call` (refused after a tool ended the turn, `agent::refuse`; a verifier may run only `bash`, `read`, `submit_verdict`; then `agent::run_tool` or `tools::execute`), `turn.delta`/`turn.thinking`, `turn.message` (tape + `model_calls`), `turn.usage`, `turn.end`. Drops messages not from the turn running on that worker (matched by echoed `turn_id`; by session and worker when a message has none). Attaches newly met AGENTS.md files to tool results | `dispatch`, `handle_incoming`, `touch`, `turn_id` | `agent`, `tools`, `compact`, `context`, `turns` | `main.rs` (spawned task) |
-| `src/agent.rs` | 440 | The agent's tools beyond files and the shell, in a fixed order after them (see "Tools the model gets"); runs `ask` (questions block, ends the turn), `verify` (kernel runs criteria commands, a child verifier session judges the rest; `verification` block), `decide` (when a System One model is set; logged as `point = 'tool'`) and the verifier's `submit_verdict`; hands `history`, `remember`, `web_*`, `find_skills`/`load_skill` and `find_tools`/`load_tool`/`call_tool` to their modules. Replaced `flow.rs`: no workflow (docs/brief.md) | `specs`, `system_for`, `read_only`, `run_tool`, `refuse`, `log_decision`, `combine`, `render_results`, `VERIFIER` | `tools` (`run_shell` for checks), `memory`, `skills`, `web`, `mcp`, `compact`, `git`, `secrets`, `score`, `turns` (`run_child`); `steps/verify.md` | `dispatch`, `turns` |
-| `src/memory.rs` | 608 | Short-term memory and the sleep (DESIGN.md "Memory and skills"): the `remember` tool (what a tainted session saves counts as `inferred`), rendering into the instructions, export to `~/.zenbot/MEMORY.md`, the hard ceiling (refuse + start a sleep), `sleep` (rank, keep, archive, propose/promote; one at a time), the morning note | `cap`, `render`, `export`, `spec`, `run_tool`, `sleep`, `plan`, `priority`, `questions`, `morning_note`, `last_run`, `list` | `score` (`decide`, `private_ok`), `secrets`, `web::tainted` | `agent`, `compile`, `api` |
+| `src/agent.rs` | 442 | The agent's tools beyond files and the shell, in a fixed order after them (see "Tools the model gets"); runs `ask` (questions block, ends the turn), `verify` (kernel runs criteria commands, a child verifier session judges the rest; `verification` block), `decide` (when a System One model is set; logged as `point = 'tool'`) and the verifier's `submit_verdict`; hands `history`, `search`, `remember`, `web_*`, `find_skills`/`load_skill` and `find_tools`/`load_tool`/`call_tool` to their modules. Replaced `flow.rs`: no workflow (docs/brief.md) | `specs`, `system_for`, `read_only`, `run_tool`, `refuse`, `log_decision`, `combine`, `render_results`, `VERIFIER` | `tools` (`run_shell` for checks), `memory`, `search`, `skills`, `web`, `mcp`, `compact`, `git`, `secrets`, `score`, `turns` (`run_child`); `steps/verify.md` | `dispatch`, `turns` |
+| `src/memory.rs` | 678 | Short-term memory and the sleep (DESIGN.md "Memory and skills"): the `remember` tool (what a tainted session saves counts as `inferred`), rendering into the instructions, export to `~/.zenbot/MEMORY.md`, the hard ceiling (refuse + start a sleep), `sleep` (rank, keep, archive, propose/promote; one at a time), the morning note. Promotion calibration: `promotion` reads the owner's reviews of `sleep`/`promote` decisions and acts on its own (mode `auto`) once their one-sided 95% Wilson lower bound reaches `ZEN_MEMORY_PROMOTE_BAR`; `review` (accept → `long`, reject → stays `archived`) records the owner's answer on that decision (`actual`, `actual_by = 'owner'`) | `cap`, `render`, `export`, `spec`, `run_tool`, `sleep`, `promotion`, `review`, `wilson_lower`, `plan`, `priority`, `questions`, `morning_note`, `last_run`, `list` | `score` (`decide`, `private_ok`), `secrets`, `web::tainted` | `agent`, `compile`, `api` |
 | `src/skills.rs` | 409 | Skills in `~/.zenbot/skills/<domain>/<name>/` (`ZEN_SKILLS_DIR`): frontmatter, validation (agentskills.io rules), scan, the index for the instructions, `find_skills` word matching, `load_skill` (SKILL.md or a file inside the skill, cut at 48 KB) | `root`, `frontmatter`, `validate`, `scan`, `index_text`, `find`, `lookup`, `load`, `find_spec`, `load_spec`, `run_tool` | — | `agent`, `compile` |
 | `src/defaults.rs` | 74 | Writes the default prompt files and skills (`defaults/`, compiled in) that are missing under `~/.zenbot`; never overwrites; a skill only when its whole folder is missing | `install` | — | `main.rs` |
+| `src/search.rs` | 552 | Search over past sessions and memories. `index_loop` (every `ZEN_INDEX_SECS`, sooner while there's a backlog) keeps `search_docs` current: one document per turn of every non-verifier session (the owner's message, the answers and tool calls, not tool output; watermark: last `tape_events.id` in `search_state`), one per short- or long-term memory (archived ones removed); then embeddings through an OpenAI-compatible `/embeddings` (`ZEN_EMBED_URL`, default OpenRouter; `ZEN_EMBED_MODEL`, 1536 dimensions) when `OPENROUTER_API_KEY` is set and `ZEN_EMBED` isn't `0`. A query: exact names and paths first (trigram over `ident`), then full text and vectors merged by reciprocal rank fusion; System One reranks (`search_rerank` decision, only with `private_ok`). The `search` tool (scope `all`, `sessions`, `memories`, `this_session`) indexes first, marks returned memories as used, logs every search in `searches` | `index_loop`, `index_once`, `identifiers`, `turn_text`, `exact_candidate`, `query`, `Found`, `spec`, `run_tool` | `score` (`decide`, `private_ok`), `agent::log_decision` | `agent`, `main.rs` |
 | `src/web.rs` | 711 | `web_search` and `web_fetch`. Fetch: http(s) to public addresses only (own DNS resolver drops non-public addresses; IP literals and each of at most 5 redirects checked; no proxy), 10 s connect / 30 s / 5 MB, HTML to markdown (`dom_smoothie`, `htmd` fallback), 20,000 characters per call paged by `offset`, 15-minute cache, PDFs saved to `~/.zenbot/outputs/web-*.pdf` for `pdftotext`, `focus` keeps the parts System One judges relevant (`web_focus` decision). Search: Brave or Tavily when a key is set (or `ZEN_SEARCH_PROVIDER`), else SearXNG, which also rescues one failed keyed call; System One reranks (`web_rerank` decision). Every result is wrapped in an `<untrusted>` envelope and taints the session (`sessions.tainted_at`, a `taint` tape block) | `is_public`, `check_url`, `untrusted`, `tainted`, `readable`, `chunks`, `render_hits`, `search_spec`, `fetch_spec`, `run_tool` | `score` (`decide`, `private_ok`), `agent::log_decision`, `secrets`, `tape` | `agent`, `memory`, `mcp` (`untrusted`) |
 | `src/mcp.rs` | 628 | MCP client, written against the spec (2025-06-18; no `rmcp`): servers from `~/.zenbot/mcp.json` (`ZEN_MCP_CONFIG`; `mcpServers`, `command`/`args`/`env` for stdio or `url`/`headers` for streamable HTTP, `${VAR}` from the kernel's environment; per server `enabled`, `timeout_s`, `include`/`exclude`, `untrusted`, default true for remote). Config re-read when its mtime changes; servers connected lazily. The model's tool list stays fixed: `find_tools` (word ranking, names as `<server>_<tool>`), `load_tool` (schema as a tool result), `call_tool` (required arguments checked, output masked, over 50 KB cut with the full text in `~/.zenbot/outputs/mcp-*.txt`; untrusted servers' output wrapped and the session tainted) | `config_path`, `expand`, `parse_config`, `sse_messages`, `rank`, `missing_args`, `result_text`, `find_spec`, `load_spec`, `call_spec`, `run_tool`, `status` | `web::untrusted`, `secrets`, `tape` | `agent`, `api` (`/api/mcp`) |
 | `src/tools.rs` | 704 | The file and shell tools and their execution: `bash` on `run_shell` (own process group killed on timeout or abort, read-only `bwrap` sandbox for a verifier; also used by `agent::run_check`), `read`, `write`, `edit` (whitespace/line-ending normalized matching). Per-file locks. Output over 50 KB cut to head and tail (off the runtime threads), full text saved under `~/.zenbot/outputs/`. Every result goes through `secrets::mask` | `specs`, `execute`, `run_shell`, `Shell`, `resolve`, `ToolOutput` | `secrets` | `dispatch`, `agent`, `context`, `web`/`mcp` (`ToolOutput`) |
 | `src/compile.rs` | 305 | What a turn sends, in cache order: envelope (system prompt + tools, stored once in `envelopes`) → summary → history → prompt with turn context. The system prompt: SOUL.md, AGENTS.md (placeholders filled), USER.md (each capped, cut in the middle), memory and the sleep note, the skills index, project instruction files | `system_prompt`, `cut_middle`, `base_prompt`, `envelope`, `turn_context`, `history`, `Envelope`, `SummaryRef` | `context`, `memory`, `skills`, `tape` | `turns`, `measure` |
 | `src/context.rs` | 144 | Instruction files (AGENTS.md, else CLAUDE.md, capped at 32 KB): always one per directory from `/` to the workspace (`~/.zenbot/AGENTS.md` is a prompt file, compile.rs); on demand, a project's file the first time a tool touches a path in it (tape kind `context`) | `always`, `governing`, `paths_in_call`, `attachment`, `read_capped` | `tools::resolve` | `compile`, `dispatch` |
-| `src/compact.rs` | 460 | Summaries of older turns: prepared in the background past the soft limit, applied after a pause or at once past the hard limit (`compaction` block). Also the `history` tool, which reads old blocks back by number or search | `Settings`, `summary_model`, `plan`, `prepare`, `pending`, `apply`, `tool_spec`, `history_tool` | `tape`, `workers::complete` | `turns`, `dispatch`, `tools` |
+| `src/compact.rs` | 473 | Summaries of older turns: prepared in the background past the soft limit, applied after a pause or at once past the hard limit (`compaction` block). Also the `history` tool, which reads old blocks back by number or search, in this session or another (`session`: a full id or a unique prefix, e.g. the 8 characters `search` shows) | `Settings`, `summary_model`, `plan`, `prepare`, `pending`, `apply`, `tool_spec`, `history_tool` | `tape`, `workers::complete` | `turns`, `dispatch`, `tools` |
 | `src/measure.rs` | 177 | Per-turn record of what was sent and why the prompt cache could or couldn't be reused (`cache_break`: `first`, `instructions`, `summary`, `model`, `engine_session`, `expired`; unexpected: `history`, `miss`) | `previous`, `record`, `break_at_start`, `break_at_end`, `cache_ttl_secs` | `compile` types | `turns` |
 | `src/tape.rs` | 70 | The tape: append (advisory lock per session, `seq` + parent + hash computed in SQL by `zen_block_hash`), load, repair (`zen_rechain`) | `Block`, `append`, `load`, `load_all`, `repair` | DB functions from migration 0007 | `compile`, `compact`, `agent`, `turns`, `web`, `mcp`, `main.rs` |
 | `src/workers.rs` | 189 | Worker configs from `ZEN_WORKERS`, supervision with backoff (ends orphaned turns on a crash), model and classifier routing, curated model list, effort checks, `complete` for summaries | `Worker`, `worker_configs`, `supervise`, `complete`, `DEFAULT_MODELS`, `collect_models`, `worker_for`, `model_info`, `check_effort` | `mind`, `score` | `main.rs`, `api`, `turns`, `agent`, `compact` |
 | `src/mind.rs` | 124 | JSON-RPC client for one worker process (`bash -lc <cmd>`); 30 s default request timeout, `request_within` for longer | `Mind`, `Incoming`, `spawn`, `request`, `request_within`, `respond` | — | `workers`, `main.rs` |
-| `src/score.rs` | 283 | Live scoring: a System One classifier answers fixed, versioned questions (`QUESTIONS_VERSION = "v1"`) about a session after a decision or after it goes idle; stored in `session_scores`. Off unless `ZEN_S1_MODEL` is set. Also `decide` (any typed question to System One) and `private_ok` (`ZEN_S1_PRIVATE`) | `scorer`, `decide`, `private_ok`, `questions`, `state`, `score_session`, `idle_loop` | `workers` (`s1.decide`) | `api`, `agent`, `memory`, `web`, `workers`, `main.rs` |
+| `src/score.rs` | 283 | Live scoring: a System One classifier answers fixed, versioned questions (`QUESTIONS_VERSION = "v1"`) about a session after a decision or after it goes idle; stored in `session_scores`. Off unless `ZEN_S1_MODEL` is set. Also `decide` (any typed question to System One) and `private_ok` (`ZEN_S1_PRIVATE`) | `scorer`, `decide`, `private_ok`, `questions`, `state`, `score_session`, `idle_loop` | `workers` (`s1.decide`) | `api`, `agent`, `memory`, `web`, `search`, `workers`, `main.rs` |
 | `src/secrets.rs` | 193 | Masks secrets in tool output: values of the kernel's own secret-looking env vars, `~/.zenbot/token`, `~/.zenbot/auth.json` values, and well-known token prefixes / private key blocks | `mask`, `mask_off_thread` (large text on a blocking thread) | — | `tools`, `agent` (check output, diff), `memory` (memories), `web` (pages), `mcp` (tool output) |
 | `src/update.rs` | 176 | Self-update: compares `~/.zenbot/version` with `origin/main` (hourly by default), asks `scripts/fetch-release.sh --check` whether binaries exist, starts `scripts/self-update.sh` on request | `Updater` (`running`, `info`, `check`, `check_periodically`, `start`, `status`) | `git`, scripts | `api`, `main.rs` |
 | `src/git.rs` | 64 | Async git with a 60 s limit and an output cap (git is stopped once the cap is reached) | `output`, `git` | — | `update`, `agent` (the verifier's diff) |
@@ -129,7 +131,8 @@ From `main.rs` (router) and `api.rs`. Everything under `/api` needs the token.
 | PATCH | `/api/sessions/{id}` | `update_session` | Title, model, effort (`"default"` clears it), archived |
 | GET | `/api/sessions/{id}/ws` | `session_ws` | WebSocket; its session's event hub is created on connect and freed when the last client leaves. Client sends `{type:"prompt",text}` or `{type:"abort"}`. Server events: `message`, `delta`, `thinking`, `tool_start`, `tool_end`, `busy`, `end`, `idle`, `status`, `questions`, `child_end`, `error`, `resync` |
 | POST | `/api/sessions/{id}/decision` | `decide` | `{decision: accept\|more\|reshape\|drop, note?}` → `session_decisions`; triggers scoring |
-| GET | `/api/memory?tier=` | `list_memory` | Memories of a tier (default `short`), the last sleep, the size |
+| GET | `/api/memory?tier=` | `list_memory` | Memories of a tier (`short` by default, `long`, `archived`, `proposed` for proposed promotions, `all`), the last sleep, the size, and `promotion` `{mode, acts, accepted, reviewed, lower_bound}` |
+| POST | `/api/memory/{id}/review` | `review_memory` | `{decision: accept\|reject}` for a memory the sleep proposed for long-term (`m12` or `12`); 400 if it isn't proposed. Returns its new tier and `promotion` |
 | POST | `/api/memory/sleep?trigger=` | `run_sleep` | Tidy short-term memory now (`nightly` from `scripts/sleep.sh`, else `owner`) |
 | GET | `/api/mcp` | `mcp_status` | `{config, servers:{name:tool count}, problems}` from `~/.zenbot/mcp.json`; connects servers not yet connected |
 | GET | `/api/version?refresh=` | `version` | Running commit vs `origin/main` |
@@ -140,7 +143,7 @@ From `main.rs` (router) and `api.rs`. Everything under `/api` needs the token.
 ## Tools the model gets
 
 `tools.rs::specs()` (`bash`, `read`, `write`, `edit`) then `agent.rs::specs()` adds the rest, in a
-fixed order, the same every turn: `bash`, `read`, `write`, `edit`, `history`, `ask`, `remember`,
+fixed order, the same every turn: `bash`, `read`, `write`, `edit`, `history`, `search`, `ask`, `remember`,
 `web_search`, `web_fetch`, `find_skills`, `load_skill`, `find_tools`, `load_tool`, `call_tool`,
 `verify`, then `decide` when System One is configured. A verifier session (`kind = 'verifier'`)
 gets `bash`, `read`, `submit_verdict` only (`dispatch.rs` refuses anything else). There are no
@@ -149,7 +152,8 @@ session states and no state-dependent tools.
 | Tool | Executed by | Offered to |
 |---|---|---|
 | `bash`, `read`, `write`, `edit` | `tools.rs` (bash in a read-only bwrap sandbox for a verifier) | every session (a verifier: `bash`, `read`) |
-| `history` | `compact.rs::history_tool` | the owner's sessions |
+| `history` | `compact.rs::history_tool` (this session, or another by `session`) | the owner's sessions |
+| `search` | `search.rs` (past sessions and memories; long-term memories are reachable only here) | the owner's sessions |
 | `ask` | `agent.rs` (`questions` block and event; ends the turn) | the owner's sessions |
 | `remember` | `memory.rs` | the owner's sessions |
 | `web_search`, `web_fetch` | `web.rs` (results wrapped as untrusted; the session is tainted) | the owner's sessions |
@@ -201,11 +205,11 @@ newer Pi.
 
 ---
 
-## Layer 3 — CLI `zen` (`crates/zen`, ~3,230 lines)
+## Layer 3 — CLI `zen` (`crates/zen`, ~3,250 lines)
 
 | File | Lines | Role | Depends on | Used by |
 |---|---|---|---|---|
-| `src/main.rs` | 826 | clap commands: `ask`, `chat`, `sessions {ls,new,show,archive,restore,rename,decide}`, `memory [--tier] [sleep]`, `models`, `login [claude\|codex\|pi]`, `status` (with a memory line), `upgrade [--check]` (the workflow commands are gone); flags `--url` (`ZEN_URL`), `--token` (`ZEN_TOKEN`), `--json`, `-c`, `-r`, `-m`, `-e`, `--inline` (`ZEN_INLINE`). Reads `~/.zenbot/env` (for `ZEN_REPO`, `ZEN_MIND_DIR`, `PATH`) and `~/.zenbot/engines.json` | `client`, `tui`, `md` | owner, scripts (`zen ask --json`), e2e, evals |
+| `src/main.rs` | 852 | clap commands: `ask`, `chat`, `sessions {ls,new,show,archive,restore,rename,decide}`, `memory [--tier short\|long\|archived\|proposed\|all] [sleep\|accept <id>\|reject <id>]`, `models`, `login [claude\|codex\|pi]`, `status` (with a memory line), `upgrade [--check]` (the workflow commands are gone); flags `--url` (`ZEN_URL`), `--token` (`ZEN_TOKEN`), `--json`, `-c`, `-r`, `-m`, `-e`, `--inline` (`ZEN_INLINE`). Reads `~/.zenbot/env` (for `ZEN_REPO`, `ZEN_MIND_DIR`, `PATH`) and `~/.zenbot/engines.json` | `client`, `tui`, `md` | owner, scripts (`zen ask --json`), e2e, evals |
 | `src/client.rs` | 232 | HTTP + WebSocket client; token from `--token`/`ZEN_TOKEN` or `~/.zenbot/token`; upgrade wait/poll messages | reqwest, tungstenite | `main.rs`, `tui.rs` |
 | `src/tui.rs` | 1542 | **Largest file in the repo.** Interactive app: scrollback + live region, pickers, slash commands (`/new /resume /model /effort /done /rename /archive /upgrade /help /exit`), the `ask` tool's questions, history in `~/.zenbot/history`, banner from `~/.zenbot/version`. Render/key tests at the bottom | `client`, `editor`, `md` | `main.rs` |
 | `src/editor.rs` | 391 | Multi-line input editor with prompt history | — | `tui.rs` |
@@ -216,7 +220,7 @@ UI changes to `tui.rs` / `editor.rs` come with render or key tests (AGENTS.md).
 ## Shared: `zen-proto` (`crates/zen-proto`, 48 lines)
 
 `text_of` (message content as text, Pi's format), `head`, `tail`. Used by `zend` (`compact`,
-`agent`, `memory`, `score`), `zen-engine` (`turn`) and `zen` (`main`, `tui`). Changing how content is read
+`agent`, `memory`, `score`, `web`, `mcp`, `search`), `zen-engine` (`turn`) and `zen` (`main`, `tui`). Changing how content is read
 changes it in all three.
 
 ---
@@ -242,10 +246,13 @@ older build starts on a newer schema.
 | `session_scores` | 0006; index `(turn_id, trigger)` 0014 | System One answers about a session | `score` | `score` |
 | `envelopes` | 0008 | System prompt + tools, stored once per distinct pair, keyed by hash | `compile::envelope` | `compile` |
 | `compactions` | 0010 | How each summary was made; applied ones have `applied_seq` | `compact` | `compact`, e2e |
-| `decisions` | 0011 | System One decisions and what was done, by `point`: `tool` (the `decide` tool), `sleep` (the sleep's fate for each memory), `web_rerank` (search results ordered), `web_focus` (parts of a page kept); older rows from the workflow's shadow decisions | `agent::log_decision` (from `agent`, `web`), `memory::sleep` | — (for calibration) |
+| `decisions` | 0011 | System One decisions and what was done, by `point`: `tool` (the `decide` tool), `sleep` (the sleep's fate for each memory), `web_rerank` (web search results ordered), `web_focus` (parts of a page kept), `search_rerank` (`search` results ordered); older rows from the workflow's shadow decisions. The owner's review of a proposed promotion fills `actual`, `actual_by`, `resolved_at` | `agent::log_decision` (from `agent`, `web`, `search`), `memory::sleep`, `memory::review` | `memory::promotion` (calibration) |
 | `policies` | 0011 | Versioned routing policy from the old workflow | nothing | nothing (kept: expand-only; Phase 6 may reuse it) |
-| `memories` | 0015 | Memory entries: text, source (`owner`, `verified`, `inferred`), tier (`short`, `long`, `archived`), use counts, the last sleep's scores, what a sleep proposed, why the tier changed | `memory` (`remember`, `sleep`) | `memory`, `api` |
+| `memories` | 0015 | Memory entries: text, source (`owner`, `verified`, `inferred`), tier (`short`, `long`, `archived`), use counts, the last sleep's scores, what a sleep proposed (`promote`, or `rejected` after the owner's review), why the tier changed | `memory` (`remember`, `sleep`, `review`), `search` (`used_at`, `uses` of returned memories) | `memory`, `api`, `search` (indexer) |
 | `sleep_runs` | 0015 | One row per sleep: trigger (`nightly`, `ceiling`, `owner`), scorer, counts, note, error | `memory::sleep` | `memory` (`morning_note`, `last_run`), `api` |
+| `search_docs` | 0017 (extensions `vector`, `pg_trgm`) | One searchable document per turn (`ref` `<session>:<seq>`) or memory (`ref` `m<id>`): `ident` (exact names, trigram index), `title`, `body`, generated `tsv` (`simple` config, GIN), `embedding vector(1536)` (HNSW, cosine) + `embed_model`, `at` | `search` (indexer) | `search::query` |
+| `search_state` | 0017 | The indexer's watermarks (`tape`: last tape event id; `memories`: last `updated_at`) | `search` | `search` |
+| `searches` | 0017 | Every `search` call: session, query, scope, results (`kind`, `ref`, `exact`, `relevance`), `reranked` | `search` | — (to measure search) |
 
 `scripts/db.sh pending` lists migrations the live database hasn't applied; `scripts/db.sh backup`
 dumps it to `~/.zenbot/backups/` (last 10 kept).
@@ -280,8 +287,12 @@ the kernel's environment.
 | `ZEN_SKILLS_DIR` | `$ZEN_HOME/skills` | `skills.rs` | Where skills live |
 | `ZEN_SKILL_INDEX_CHARS` | `2500` | `skills.rs` | Above this the skills index lists domains only |
 | `ZEN_MEMORY_CHARS` | `4000` | `memory.rs` | Short-term memory's size; twice it is the hard ceiling |
-| `ZEN_MEMORY_PROMOTE` | `shadow` | `memory.rs` | `on`: the sleep moves memories to long-term instead of proposing it |
-| `ZEN_MEMORY_PROMOTE_BAR` | `0.95` | `memory.rs` | Durable and impactful bar for long-term, on the lowest of three samples |
+| `ZEN_MEMORY_PROMOTE` | `auto` | `memory.rs` | `auto`: the sleep only proposes promotions until the owner's reviews earn trust (Wilson lower bound ≥ the bar, about 52 accepted with none rejected), then promotes on its own; `on`: always promotes; `shadow` (or `off`): only proposes |
+| `ZEN_MEMORY_PROMOTE_BAR` | `0.95` | `memory.rs` | Durable and impactful bar for long-term, on the lowest of three samples; also the trust bar for `auto` |
+| `ZEN_INDEX_SECS` | `20` | `search.rs` | Pause between search-index passes when there's no backlog |
+| `ZEN_EMBED` | on | `search.rs` | `0`: no embeddings (search by exact names and full text only) |
+| `ZEN_EMBED_MODEL` | `openai/text-embedding-3-small` | `search.rs` | Embedding model (must give 1536 dimensions) |
+| `ZEN_EMBED_URL` | `https://openrouter.ai/api/v1` | `search.rs` | OpenAI-compatible base URL for `/embeddings` |
 | `ZEN_DECIDE_TOOL` | on | `agent.rs` | `0` hides the `decide` tool |
 | `ZEN_S1_MODEL` | unset (off) | `score.rs` | System One classifier: scoring, `decide`, the sleep |
 | `ZEN_S1_PRIVATE` | on | `score.rs` | `0`: System One sees only the conversation, not private content (today: memories in the sleep, and page text for `web_fetch`'s `focus`) |
@@ -315,7 +326,7 @@ Set by the kernel for every `bash` command: `ZEN_SESSION_ID`, `ZEN_MODEL` (read 
 | `ZEN_CODEX_INJECT` | on | `codex.rs` | `0`: history as a transcript instead of native items |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | `claude.rs` | Where Claude Code keeps its sessions |
 | `ZEN_AUTH_FILE` | `~/.zenbot/auth.json` | `mind/src/main.ts` | Pi's sign-in file (secret) |
-| `OPENROUTER_API_KEY` | unset | pi-ai library (not read in our code) | Enables OpenRouter classifiers in the Pi worker |
+| `OPENROUTER_API_KEY` | unset | pi-ai library; `zend`'s `search.rs` | Enables OpenRouter classifiers in the Pi worker, and the kernel's search embeddings (sent as the bearer token to `ZEN_EMBED_URL`) |
 
 ### CLI and scripts
 
@@ -390,26 +401,29 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 ## Tests
 
 - **Unit tests** live in `#[cfg(test)] mod tests` at the bottom of each file: `zend` (`tools` 10,
-  `memory` 5, `skills` 5, `web` 5, `compile` 4, `mcp` 3, `compact` 3, `score` 3, `agent` 2, `context` 2, `measure` 2,
+  `memory` 6, `skills` 5, `web` 5, `compile` 4, `mcp` 3, `search` 2, `compact` 3, `score` 3, `agent` 2, `context` 2, `measure` 2,
   `secrets` 2, `defaults` 1, `api` 1, `git` 1), `zen` (`tui` 16 render/key tests, `editor` 5,
   `main` 2, `client` 1), `zen-engine`
   (`claude` 3, `codex` 2, `turn` 2), `zen-proto` 1. Run `cargo test --release`.
 - **End to end:** `scripts/e2e.sh [filter]` builds, then runs each scenario on a fresh kernel (port
   18377, `ZEN_FAUX=1`, `ZEN_WORKERS=engine`) with its own git workspace, all on one throwaway
   database (`zen_e2e_<pid>`), checking the database. At the end it checks every tape is numbered
-  without gaps and its hash chain recomputes. Scenarios (14): `open-loop`, `restart-recovery` (an old session in a workflow state still
+  without gaps and its hash chain recomputes. Scenarios (15): `open-loop`, `restart-recovery` (an old session in a workflow state still
   works), `prompt-files` (defaults installed, the owner's kept, all in the instructions, the tool
   list), `skills` (found and loaded on demand, nothing outside a skill), `mcp` (find, load and call
   tools on a stdio and an HTTP test server, a missing argument refused, remote output wrapped and
   the session tainted), `web` (loopback and metadata addresses refused, search through a SearXNG
   stub, one envelope with markers defused, a tainted session's memory saved as `inferred`),
+  `search` (a fact from one session found from another by words and by exact path first, a memory
+  found and counted as used, `history` reads the other session, every search logged, `zen memory
+  accept` makes a proposed memory long-term, records the review, and it stays findable),
   `memory-across-sessions`,
   `memory-sleep` (the ceiling, a sleep tidies to size, archives, records, the morning note), `ask`
   (ends the turn; `move` is gone), `verifier` (commands by the kernel, a read-only verifier,
   a failed command skips it), `summaries`, `secrets`, `slow-summary` (a
   summary at the hard limit slower than the watchdog: the turn waits, then runs), `stale-turn` (a
   turn the kernel ended keeps running in the worker; its late answer must not reach the next turn).
-  Faux scripts in `scripts/e2e/*.json` (`reach.json` drives `mcp` and `web`); `slow-summary` adds the
+  Faux scripts in `scripts/e2e/*.json` (`reach.json` drives `mcp` and `web`, `search.json` drives `search`); `slow-summary` adds the
   `slow` worker from `scripts/e2e/slow_worker.py` via `ZEN_WORKER_SLOW_CMD`; `mcp` starts
   `scripts/e2e/mcp_server.py` (stdio, and `--http` on port +1), `web` starts
   `scripts/e2e/searxng_stub.py` on port +2 (`ZEN_SEARXNG_URL`). Nothing reaches the internet. Add a scenario when kernel behavior changes.
@@ -449,6 +463,12 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 - **MCP stdio servers** start with a clean environment (PATH, HOME, USER, LANG, LC_ALL, TZ, TMPDIR and
   the config's `env`), so the kernel's token and keys never reach them; they still run outside
   bubblewrap, and remote MCP URLs aren't address-checked like `web_fetch` (the owner configures them).
+- **Search and private content:** embeddings (and System One reranking) send session and memory
+  text to OpenRouter only while `ZEN_S1_PRIVATE` allows private content (D-032); results recalled
+  from a session that read web content (by `search` or `history`) are wrapped as untrusted and taint
+  the recalling session. A changed `ZEN_EMBED_MODEL` re-embeds in the background; vector search
+  compares only rows of the current model. The indexer takes tape events once they are 5 seconds
+  old, so an id committed late isn't skipped.
 
 ## Deeper docs
 

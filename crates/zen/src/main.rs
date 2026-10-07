@@ -95,7 +95,7 @@ enum Cmd {
     Memory {
         #[command(subcommand)]
         cmd: Option<MemoryCmd>,
-        /// Which memories: short (default), long, archived or all
+        /// Which memories: short (default), long, archived, proposed (for long-term) or all
         #[arg(long, default_value = "short")]
         tier: String,
     },
@@ -146,6 +146,10 @@ enum SessionsCmd {
 enum MemoryCmd {
     /// Tidy short-term memory now (what the nightly sleep does)
     Sleep,
+    /// Accept a memory the sleep proposed for long-term memory (`zen memory --tier proposed` lists them)
+    Accept { id: String },
+    /// Reject a proposed promotion (the memory stays archived)
+    Reject { id: String },
 }
 
 /// Outcome of one turn, collected from the session stream.
@@ -715,6 +719,28 @@ async fn run(cli: Cli) -> Result<()> {
                 if let Some(note) = r["note"].as_str() {
                     println!("{note}");
                 }
+            }
+        }
+        Cmd::Memory { cmd: Some(c2 @ (MemoryCmd::Accept { .. } | MemoryCmd::Reject { .. })), .. } => {
+            let (id, decision) = match c2 {
+                MemoryCmd::Accept { id } => (id, "accept"),
+                MemoryCmd::Reject { id } => (id, "reject"),
+                MemoryCmd::Sleep => unreachable!(),
+            };
+            let r = c.post(&format!("/api/memory/{id}/review"), json!({ "decision": decision })).await?;
+            if cli.json {
+                out(&r);
+            } else {
+                let p = &r["promotion"];
+                println!(
+                    "{} is now {}-term. Promotion: {} ({} of {} proposals accepted; acts on its own at 0.95, now {:.2})",
+                    r["id"].as_str().unwrap_or(""),
+                    r["tier"].as_str().unwrap_or(""),
+                    p["mode"].as_str().unwrap_or(""),
+                    p["accepted"],
+                    p["reviewed"],
+                    p["lower_bound"].as_f64().unwrap_or(0.0)
+                );
             }
         }
         Cmd::Memory { cmd: None, tier } => {

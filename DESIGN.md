@@ -106,9 +106,19 @@ with questions for the owner. The kernel-enforced workflow (`flow.rs`) was remov
   sleep`): ranks entries (System One's "needed soon" when allowed, else recency; the owner's words
   and verified results a little higher), keeps what fits, archives the rest, and proposes for
   long-term the entries from the owner or a check that System One judges durable and impactful at
-  ≥ 0.95 on the lowest of three samples (shadow: `ZEN_MEMORY_PROMOTE=on` acts). Every entry's fate
+  ≥ 0.95 on the lowest of three samples. Proposals wait for the owner (`zen memory accept|reject`);
+  promotion acts on its own once the Wilson lower bound of the owner's agreement with its proposals
+  reaches 0.95 (D-035; `ZEN_MEMORY_PROMOTE=on|shadow` overrides). Every entry's fate
   is a `decisions` row; the run is a `sleep_runs` row; the next sessions get a one-line note. System
   One sees memories unless `ZEN_S1_PRIVATE=0` (D-032).
+- **Search** (`search.rs`, D-035): an indexer keeps `search_docs` current: one document per turn of
+  every session (the owner's words, the answers, the tools called; no tool output) and one per
+  short- or long-term memory. `search` runs exact names and paths first (trigram over identifiers),
+  then full text (`simple`) and meaning (pgvector; `ZEN_EMBED_MODEL`, default
+  `openai/text-embedding-3-small` through OpenRouter, filled in the background) merged by reciprocal
+  rank fusion, and System One reranks. Long-term memories are reached this way; a memory found
+  counts as used. Every search is a `searches` row. `history` reads any session's messages by
+  number.
 - **Skills** (`skills.rs`): folders in `~/.zenbot/skills/<domain>/<name>/` in the agentskills.io
   format, validated when scanned (invalid ones are skipped and logged). The instructions carry an
   index; `find_skills` matches names, descriptions and bodies; `load_skill` returns a SKILL.md or a
@@ -230,7 +240,7 @@ Loaded at session start.
 | `write` | Create or overwrite a file | exists |
 | `edit` | Exact string replacement in a file | exists |
 | `ask` | Bring the owner 1–3 questions, each with 2–4 options, recommended first; unanswered → the recommendation, recorded as an assumption. `wait: false` keeps working on what doesn't depend on the answer | built (ends the turn; `wait: false` in Phase 6) |
-| `search` | One search across sessions (this one included), memories and the wiki | new; replaces `history` |
+| `search` | One search across sessions (this one included), memories and the wiki | built (sessions, memories; the wiki in Phase 4) |
 | `remember` | Add, replace or remove a short-term memory entry, with its source | built |
 | `web_search` | Search the web through the configured provider | built |
 | `web_fetch` | Fetch a URL as readable text, with its links | built |
