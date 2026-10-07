@@ -2258,14 +2258,14 @@ mod tests {
 
     #[test]
     fn banner_shows_installed_version_when_available() {
-        let path = std::env::temp_dir().join(format!("zen-banner-version-{}", std::process::id()));
+        let dir = TempDir::new("banner");
+        let path = dir.join("version");
         assert_eq!(banner_text(None), "zen · zenbot");
         assert_eq!(banner_text(Some(&path.join("missing"))), "zen · zenbot");
         std::fs::write(&path, "775d408\n").unwrap();
         assert_eq!(banner_text(Some(&path)), "zen · zenbot · 775d408");
         std::fs::write(&path, " \n").unwrap();
         assert_eq!(banner_text(Some(&path)), "zen · zenbot");
-        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
@@ -2454,18 +2454,11 @@ mod tests {
 
     const DIVIDER: &str = "\x1b[2m │ \x1b[0m";
 
-    fn temp_file(name: &str, text: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("zen-panel-{}-{name}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(name);
-        std::fs::write(&path, text).unwrap();
-        path
-    }
-
     #[tokio::test]
     async fn open_shows_a_file_beside_the_chat_and_close_hides_it() {
         let mut a = app(100, 20);
-        let path = temp_file("USER.md", "# Who I am\n\nJose, a builder.\n");
+        let dir = TempDir::new("panel");
+        let path = dir.file("USER.md", "# Who I am\n\nJose, a builder.\n");
         a.commit(vec![line("chat text", Sty::Plain)]);
         a.command(&format!("/open {}", path.display())).await.unwrap();
         a.draw();
@@ -2485,7 +2478,6 @@ mod tests {
         a.draw();
         assert!(a.screen.rows().iter().all(|r| !r.contains(DIVIDER)));
         assert_eq!(a.columns(), (99, 0));
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[tokio::test]
@@ -2493,24 +2485,23 @@ mod tests {
         let mut a = app(100, 20);
         a.command("/open").await.unwrap();
         assert!(a.panel.is_none() && a.notice.as_ref().is_some_and(|(t, _)| t.starts_with("usage: /open")));
-        let path = temp_file("notes.txt", "first line\nsecond line\n");
+        let dir = TempDir::new("last-file");
+        let path = dir.file("notes.txt", "first line\nsecond line\n");
         a.busy = true;
         a.on_event(json!({ "type": "tool_start", "name": "edit", "args": { "path": path.display().to_string() } }));
         a.command("/open").await.unwrap();
         assert_eq!(a.panel.as_ref().map(|p| p.path.clone()), Some(path.clone()));
         a.command("/open /no/such/file").await.unwrap();
         assert!(a.notice.as_ref().is_some_and(|(t, s)| t.starts_with("can't open") && *s == Sty::Err), "{:?}", a.notice);
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[tokio::test]
     async fn the_files_tab_is_a_tree_you_walk_with_the_keyboard() {
-        let dir = std::env::temp_dir().join(format!("zen-dash-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("docs")).unwrap();
-        std::fs::write(dir.join("docs/guide.md"), "# The guide\n\nhello from the guide\n").unwrap();
-        std::fs::write(dir.join("notes.txt"), "plain notes\n").unwrap();
+        let dir = TempDir::new("dash");
+        dir.file("docs/guide.md", "# The guide\n\nhello from the guide\n");
+        dir.file("notes.txt", "plain notes\n");
         let mut a = app(110, 24);
-        a.files = Some(Files::new(dir.clone()));
+        a.files = Some(Files::new(dir.path().to_path_buf()));
         let ctrl_b = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
         a.on_key(ctrl_b).await.unwrap();
         a.draw();
@@ -2539,7 +2530,6 @@ mod tests {
         a.on_key(ctrl_b).await.unwrap();
         a.draw();
         assert_eq!(a.columns().1, 0);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
@@ -2554,10 +2544,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_newer_install_is_noticed_and_an_upgrade_that_brings_one_restarts() {
-        let dir = std::env::temp_dir().join(format!("zen-install-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let bin = dir.join("zen");
-        std::fs::write(&bin, "old").unwrap();
+        let dir = TempDir::new("install");
+        let bin = dir.file("zen", "old");
         let mut a = app(80, 24);
         let started = std::fs::metadata(&bin).unwrap().modified().unwrap();
         a.installed = Some((bin.clone(), started));
@@ -2573,12 +2561,11 @@ mod tests {
         assert!(!a.restart);
         a.on_app_event(json!({ "type": "upgrade_done", "ok": true, "text": "zenbot upgraded" })).await;
         assert!(a.restart && a.quit);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
     async fn the_tree_starts_at_its_root_and_files_dir_moves_it() {
-        let base = std::env::temp_dir().join(format!("zen-root-{}", std::process::id()));
+        let base = TempDir::new("root");
         std::fs::create_dir_all(base.join("home/skills")).unwrap();
         std::fs::create_dir_all(base.join("other/elsewhere")).unwrap();
         let mut a = app(110, 24);
@@ -2602,16 +2589,15 @@ mod tests {
         a.command("/files").await.unwrap();
         a.draw();
         assert!(a.screen.rows().join("\n").contains("elsewhere/"));
-        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[tokio::test]
     async fn clicking_a_tree_row_opens_it_and_a_tab_switches() {
-        let dir = std::env::temp_dir().join(format!("zen-click-{}", std::process::id()));
+        let dir = TempDir::new("click");
         std::fs::create_dir_all(dir.join("sub")).unwrap();
-        std::fs::write(dir.join("a.txt"), "alpha text\n").unwrap();
+        dir.file("a.txt", "alpha text\n");
         let mut a = app(110, 24);
-        a.files = Some(Files::new(dir.clone()));
+        a.files = Some(Files::new(dir.path().to_path_buf()));
         a.toggle_side();
         a.draw();
         let (cw, _) = a.columns();
@@ -2624,7 +2610,6 @@ mod tests {
         let files_tab = Event::Mouse(crossterm::event::MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x as u16 + 1, row: 0, modifiers: KeyModifiers::NONE });
         a.on_terminal(files_tab).await.unwrap();
         assert!(a.tab == Tab::Files);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

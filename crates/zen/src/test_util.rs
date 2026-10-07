@@ -1,6 +1,6 @@
 //! Helpers shared by the tests.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A fresh temporary folder, removed when dropped, so a failing test doesn't leave it behind.
 pub struct TempDir(PathBuf);
@@ -11,6 +11,14 @@ impl TempDir {
         let dir = std::env::temp_dir().join(format!("zen-test-{name}-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         TempDir(dir)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    pub fn join(&self, rel: &str) -> PathBuf {
+        self.0.join(rel)
     }
 
     /// Write `text` to `rel` inside the folder (creating its parents) and return its path.
