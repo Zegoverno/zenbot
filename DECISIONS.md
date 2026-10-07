@@ -6,6 +6,30 @@
 
 ---
 
+## D-038 — Subagents, and model choice that learns from verdicts
+
+**Decision:** `delegate` runs subagents as child sessions (kind `subagent`) with the parent's
+instructions, memory and tools except `ask` and `delegate`; several tasks in one call run at the same
+time in the kernel. Without a named model, System One classifies the task's kind of work and the
+latest policy version maps it to a model; a small share (ZEN_EXPLORE, 0.1) tries the route's other
+candidates, each choice logged in `decisions` with its probability. The evidence is the owner's
+verdict on the parent session and cost per subtask. The nightly sleep changes a route only when a
+model's Wilson lower bound of acceptance beats the current model's upper bound with at least 20
+judged subtasks each; every change is a new version with its reason, and `zen policy undo` reverts.
+
+**Why:** D-030's design, made concrete. Engines run separate tool calls one at a time (measured:
+Claude Code ran two `delegate` calls back to back), so parallelism is the kernel's. Logging the
+probability of each choice keeps the comparison unbiased (a contextual bandit); bounds on both
+sides keep a handful of verdicts from flipping a route.
+
+**Considered:** separate `delegate` calls for parallel work (serialized by the engine), System One
+choosing the model directly (it can classify, not judge frontier models), switching on point
+estimates (too noisy at this volume).
+
+**Date:** 2026-10-07
+
+---
+
 ## D-037 — The workshop: rules the kernel enforces for skills and tools the agent makes
 
 **Decision:** The agent changes skills only through `save_skill` and makes tools only through

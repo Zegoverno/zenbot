@@ -6,6 +6,7 @@ mod compact;
 mod compile;
 mod context;
 mod defaults;
+mod delegate;
 mod dispatch;
 mod git;
 mod mcp;
@@ -206,6 +207,8 @@ async fn main() -> Result<()> {
         .route("/memory", get(list_memory))
         .route("/mcp", get(mcp_status))
         .route("/skills", get(list_skills))
+        .route("/policy", get(get_policy).post(put_policy))
+        .route("/policy/undo", axum::routing::post(undo_policy))
         .route("/skills/review", axum::routing::post(review_skill))
         .route("/tools/{name}/review", axum::routing::post(review_tool))
         .route("/memory/sleep", axum::routing::post(run_sleep))
