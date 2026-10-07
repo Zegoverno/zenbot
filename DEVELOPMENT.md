@@ -30,6 +30,7 @@ Config lives in `~/.zenbot/`:
 | `skills/` | skills, `<domain>/<name>/SKILL.md` |
 | `mcp.json` | the owner's MCP servers (`mcpServers`; `${VAR}` filled from `env`), reached through `find_tools` / `load_tool` / `call_tool` |
 | `outputs/` | full text of cut tool output, PDFs saved by `web_fetch`, MCP output over 50 KB |
+| `wiki/` | the wiki (`ZEN_WIKI_DIR`): markdown pages, `index.md`, `log.md`, its own git repository; written by the `capture` tool |
 | `dev/` | the dev kernel's own home (`scripts/dev.sh`) |
 
 Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
@@ -43,7 +44,7 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 | Docker with `docker compose` | `install.sh` | Postgres and SearXNG (`deploy/compose.yaml`) |
 | `git`, `curl`, `jq` | apt | every script |
 | `python3` | preinstalled on Ubuntu | the e2e test servers (`scripts/e2e/*.py`) |
-| `pdftotext` (`poppler-utils`) | apt; **not** installed by `install.sh` | reading PDFs that `web_fetch` saves (optional) |
+| `pdftotext` (`poppler-utils`) | apt (`install.sh` installs it) | reading PDFs that `web_fetch` saves |
 | `bubblewrap` | apt | the read-only shell; the e2e scenarios need it |
 | Node.js 22+ | `install.sh` puts it in `~/.local/node` | the `pi` worker only |
 | `gh` | GitHub CLI | pull requests, checking CI |
@@ -128,13 +129,13 @@ Changes to the worker protocol must update `docs/worker-protocol.md` and every w
 
 `scripts/e2e.sh` builds (unless `ZEN_E2E_NO_BUILD=1`), then runs each scenario on a kernel built from this checkout with the scripted faux model. It uses a throwaway database (`zen_e2e_<pid>`), throwaway git workspaces and a throwaway `HOME`, on port 18377 (`ZEN_E2E_PORT`). No subscription is used, nothing reaches the internet and the live service isn't touched. It needs Postgres running, plus `git`, `curl`, `jq`, `bubblewrap` and `python3`.
 
-There are 15 scenarios (`run …` lines at the bottom of the script). Some start small test servers from `scripts/e2e/`:
+There are 16 scenarios (`run …` lines at the bottom of the script). Some start small test servers from `scripts/e2e/`:
 
 | Server | Started by | What it is |
 |---|---|---|
 | `slow_worker.py` | `slow-summary` (`ZEN_WORKER_SLOW_CMD`) | a worker whose `complete` is deliberately slow (`ZEN_SLOW_SECS`) |
 | `mcp_server.py` | `mcp` | an MCP server with `echo` and `add`: over stdio, and with `--http PORT` as streamable HTTP on the e2e port + 1 |
-| `searxng_stub.py` | `web` (`ZEN_SEARXNG_URL`) | answers `/search?format=json` with fixed results, on the e2e port + 2 |
+| `searxng_stub.py` | `web`, `wiki` (`ZEN_SEARXNG_URL`) | answers `/search?format=json` with fixed results, on the e2e port + 2 |
 
 ```bash
 scripts/e2e.sh                # build, then every scenario
@@ -190,7 +191,7 @@ It:
 - sets `ZEN_HARNESS` to this checkout's commit, so its turns record this build;
 - uses its own zenbot home, `~/.zenbot/dev` (`ZEN_DEV_HOME`), for prompt files, skills, `mcp.json` and `MEMORY.md`: it starts with the defaults, and the dev database's memory never overwrites the live `~/.zenbot/MEMORY.md`. Copy your prompt files (or an `mcp.json`) there to try them.
 
-Every non-live kernel gets its own `ZEN_HOME`: the dev kernel `~/.zenbot/dev`, the upgrade smoke kernel `<smoke workspace>/.zenbot`, eval kernels `<task workspace>.zenbot` (so evals run on the default prompt files and skills, not the owner's), and e2e kernels a throwaway `HOME`. Note that `bash` output cut at 50 KB still goes to `$HOME/.zenbot/outputs` (`tools.rs` doesn't read `ZEN_HOME`).
+Every non-live kernel gets its own `ZEN_HOME`: the dev kernel `~/.zenbot/dev`, the upgrade smoke kernel `<smoke workspace>/.zenbot`, eval kernels `<task workspace>.zenbot` (so evals run on the default prompt files and skills, not the owner's), and e2e kernels a throwaway `HOME`. Cut tool output, web PDFs and the wiki follow `ZEN_HOME` too (`<zen home>/outputs`, `<zen home>/wiki`).
 
 `web_search` in the dev kernel needs SearXNG running (above) or a search key in `~/.zenbot/env`; `web_fetch` reaches only public addresses, so it can't fetch the dev kernel or anything else on this VM.
 
@@ -327,7 +328,7 @@ Promotion to long-term memory is calibrated on those reviews (`ZEN_MEMORY_PROMOT
 
 ## Search index
 
-The kernel indexes every session's turns and every short- and long-term memory into `search_docs` in the background (`search::index_loop`, every `ZEN_INDEX_SECS`, default 20 s), for the `search` tool. Exact-name and full-text search need nothing else. Vector search needs embeddings, which the indexer fetches only when `OPENROUTER_API_KEY` is set (`ZEN_EMBED_MODEL`, `ZEN_EMBED_URL`; `ZEN_EMBED=0` turns them off). That sends turn and memory text to the provider, so leave the key out of a dev kernel's environment unless you mean to test embeddings: `dev.sh` loads `~/.zenbot/env`, and the e2e kernels unset `OPENROUTER_API_KEY`. Migration 0017 needs the `vector` and `pg_trgm` extensions, which the `pgvector/pgvector:pg16` image has.
+The kernel indexes every session's turns, every short- and long-term memory and every wiki page into `search_docs` in the background (`search::index_loop`, every `ZEN_INDEX_SECS`, default 20 s), for the `search` tool. Exact-name and full-text search need nothing else. Vector search needs embeddings, which the indexer fetches only when `OPENROUTER_API_KEY` is set and `ZEN_S1_PRIVATE` isn't `0` (`ZEN_EMBED_MODEL`, `ZEN_EMBED_URL`; `ZEN_EMBED=0` turns them off). That sends turn, memory and wiki text to the provider, so leave the key out of a dev kernel's environment unless you mean to test embeddings: `dev.sh` loads `~/.zenbot/env`, and the e2e kernels unset `OPENROUTER_API_KEY`. Migration 0017 needs the `vector` and `pg_trgm` extensions, which the `pgvector/pgvector:pg16` image has.
 
 ```bash
 docker compose -f deploy/compose.yaml exec -T postgres psql -U zen -d zen_dev \
@@ -335,6 +336,15 @@ docker compose -f deploy/compose.yaml exec -T postgres psql -U zen -d zen_dev \
 ```
 
 `install.sh` installs the timers, and `apply-upgrade.sh` refreshes them after a healthy upgrade (`install_timers` in `scripts/lib.sh`), so a new timer arrives with an upgrade.
+
+## Wiki
+
+The `capture` tool writes the wiki: markdown pages in `ZEN_WIKI_DIR` (default `<zen home>/wiki`, so `~/.zenbot/dev/wiki` for the dev kernel), a git repository the kernel creates and commits to (`index.md` lists the pages, `log.md` records each capture). The agent edits page summaries itself; those edits are committed by the next capture or the nightly sleep, which also lists wiki problems (pages with no summary, links to missing pages) in its note. Pages are indexed for `search` (scope `wiki`) by file modification time.
+
+```bash
+git -C ~/.zenbot/dev/wiki log --oneline | head   # what the dev kernel captured
+cat ~/.zenbot/dev/wiki/index.md
+```
 
 ## Engine updates
 
@@ -407,7 +417,7 @@ scripts/db.sh pending               # migrations not yet applied
 | `ROLLBACK ALSO UNHEALTHY` | `journalctl -u zenbot -n 50`; tell the owner |
 | e2e `kernel did not start` | the kernel log path it printed; check the port isn't taken and Postgres is up |
 | e2e check fails on the read-only shell | `bubblewrap` missing |
-| e2e `mcp` or `web` fails to start its server | `python3` missing, or the e2e port + 1 / + 2 is taken |
+| e2e `mcp`, `web` or `wiki` fails to start its server | `python3` missing, or the e2e port + 1 / + 2 is taken |
 | `web_search failed: … searxng at http://127.0.0.1:8888` | SearXNG not running: `docker compose -f deploy/compose.yaml up -d searxng` |
 | `find_tools` lists problems | `~/.zenbot/mcp.json` (invalid JSON, a server with both or neither of `command`/`url`, an unset `${VAR}`); `GET /api/mcp` shows the same |
 | `search` finds nothing recent | the indexer runs every `ZEN_INDEX_SECS`; `search` also indexes before it queries. Warnings `search index:` / `embedding search documents:` in the kernel log |

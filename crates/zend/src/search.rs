@@ -243,6 +243,45 @@ async fn index_memories(db: &PgPool) -> Result<usize> {
     Ok(rows.len())
 }
 
+/// Index wiki pages changed since the last pass, and take out pages that are gone.
+async fn index_wiki(db: &PgPool) -> Result<usize> {
+    let dir = crate::wiki::root();
+    if !dir.is_dir() {
+        return Ok(0);
+    }
+    let wm: u64 = state_get(db, "wiki").await.and_then(|v| v.parse().ok()).unwrap_or(0);
+    let docs = crate::wiki::documents(&dir);
+    let slugs: Vec<String> = docs.iter().map(|d| d.0.clone()).collect();
+    sqlx::query("DELETE FROM search_docs WHERE kind = 'wiki' AND NOT (ref = ANY($1))").bind(&slugs).execute(db).await?;
+    let mut newest = wm;
+    let mut changed = 0;
+    for (slug, title, ident, body, modified) in docs {
+        let secs = modified.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        if secs <= wm {
+            continue;
+        }
+        newest = newest.max(secs);
+        let at = chrono::DateTime::<chrono::Utc>::from(modified);
+        sqlx::query(
+            "INSERT INTO search_docs (kind, ref, ident, title, body, at) VALUES ('wiki', $1, $2, $3, $4, $5)
+             ON CONFLICT (kind, ref) DO UPDATE SET ident = EXCLUDED.ident, title = EXCLUDED.title, body = EXCLUDED.body, at = EXCLUDED.at,
+                 embedding = CASE WHEN search_docs.body = EXCLUDED.body THEN search_docs.embedding END, updated_at = now()",
+        )
+        .bind(&slug)
+        .bind(&ident)
+        .bind(&title)
+        .bind(&body)
+        .bind(at)
+        .execute(db)
+        .await?;
+        changed += 1;
+    }
+    if newest > wm {
+        state_set(db, "wiki", &newest.to_string()).await?;
+    }
+    Ok(changed)
+}
+
 /// Embed documents that have none yet, a batch at a time.
 async fn embed_pending(db: &PgPool) -> Result<usize> {
     if embed_key().is_none() {
@@ -272,7 +311,7 @@ async fn embed_pending(db: &PgPool) -> Result<usize> {
 /// One indexing pass (turns, memories, embeddings).
 pub async fn index_once(db: &PgPool) -> Result<(usize, usize, usize)> {
     let t = index_turns(db).await?;
-    let m = index_memories(db).await?;
+    let m = index_memories(db).await? + index_wiki(db).await?;
     let e = match embed_pending(db).await {
         Ok(n) => n,
         Err(e) => {
@@ -441,6 +480,7 @@ fn render(found: &[(Found, Option<f64>)]) -> String {
         let when = f.at.format("%Y-%m-%d");
         let head = match f.kind.as_str() {
             "memory" => format!("{} — {} ({when})", f.reference, f.title),
+            "wiki" => format!("wiki [[{}]] {} (updated {when}; {})", f.reference, f.title, crate::wiki::root().join(format!("{}.md", f.reference)).display()),
             "turn" => {
                 let (s, seq) = f.reference.split_once(':').unwrap_or((&f.reference, ""));
                 let title = if f.title.is_empty() { String::new() } else { format!(" \"{}\"", zen_proto::head(&f.title, 60)) };
@@ -461,12 +501,12 @@ fn render(found: &[(Found, Option<f64>)]) -> String {
 pub fn spec() -> Value {
     json!({
         "name": "search",
-        "description": "Search your earlier sessions with the owner (what was asked, answered and done) and your memories, long-term ones included (reachable only here). Use it before asking something the owner may have told you, or when a job continues earlier work. Exact names and paths (quote them) match first, then words and meaning. Returns dated results with their session id; read a session with history.",
+        "description": "Search your earlier sessions with the owner (what was asked, answered and done), your memories (long-term ones are reachable only here) and your wiki notes. Use it before asking something the owner may have told you, or when a job continues earlier work. Exact names and paths (quote them) match first, then words and meaning. Returns dated results with where they come from; read a session with history, a wiki page with read.",
         "parameters": {
             "type": "object",
             "properties": {
                 "query": { "type": "string", "description": "What you're looking for: words, a question, or an exact name or path (quote it)" },
-                "scope": { "type": "string", "enum": ["all", "sessions", "memories", "this_session"], "description": "Where to look (default all)" },
+                "scope": { "type": "string", "enum": ["all", "sessions", "memories", "wiki", "this_session"], "description": "Where to look (default all)" },
                 "limit": { "type": "integer", "description": "How many results (default 8, at most 20)" }
             },
             "required": ["query"]
@@ -481,11 +521,12 @@ async fn run(app: &App, session: Uuid, args: &Value) -> Result<String> {
     let (kinds, only): (Vec<&str>, Option<Uuid>) = match scope {
         "sessions" => (vec!["turn"], None),
         "memories" => (vec!["memory"], None),
+        "wiki" => (vec!["wiki"], None),
         "this_session" => (vec!["turn"], Some(session)),
-        _ => (vec!["turn", "memory"], None),
+        _ => (vec!["turn", "memory", "wiki"], None),
     };
     // Make sure the latest turns and memories are in (a pass is cheap when nothing changed).
-    if let Err(e) = index_turns(&app.db).await.and(index_memories(&app.db).await) {
+    if let Err(e) = index_turns(&app.db).await.and(index_memories(&app.db).await).and(index_wiki(&app.db).await) {
         tracing::warn!("indexing before a search: {e:#}");
     }
     let found = query(&app.db, q, &kinds, only, (limit * 2).max(12)).await?;
@@ -519,7 +560,16 @@ async fn run(app: &App, session: Uuid, args: &Value) -> Result<String> {
     );
     // A session that read web content may carry it: recalling from one is reading untrusted content.
     let sources: Vec<Uuid> = listed.iter().filter(|(f, _)| f.kind == "turn").filter_map(|(f, _)| f.reference.split(':').next().and_then(|s| s.parse().ok())).collect();
-    let tainted: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sessions WHERE id = ANY($1) AND tainted_at IS NOT NULL)").bind(&sources).fetch_one(&app.db).await?;
+    let pages: Vec<String> = listed.iter().filter(|(f, _)| f.kind == "wiki").map(|(f, _)| f.reference.clone()).collect();
+    // So may a wiki page with entries captured after reading the web (labelled `web`).
+    let tainted: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM sessions WHERE id = ANY($1) AND tainted_at IS NOT NULL)
+             OR EXISTS (SELECT 1 FROM search_docs WHERE kind = 'wiki' AND ref = ANY($2) AND body LIKE '%(web) —%')",
+    )
+    .bind(&sources)
+    .bind(&pages)
+    .fetch_one(&app.db)
+    .await?;
     if tainted {
         crate::web::taint(app, session, "search", "results from a session that read web content").await;
         return Ok(format!("{header}{}", crate::web::untrusted("search", q, &render(&listed))));

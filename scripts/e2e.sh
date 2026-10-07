@@ -113,7 +113,7 @@ The owner's name is E2E Owner." >"$TMP/home/.zenbot/USER.md"
   check "the skills index is in the instructions" grep -q "work/verify:" <<<"$base"
   check "memory starts empty" grep -q "(empty)" <<<"$base"
   local tools; tools=$(q "SELECT string_agg(t->>'name', ',') FROM turns, envelopes e, jsonb_array_elements(e.tools) t WHERE turns.session_id='$sid' AND e.hash = turns.envelope")
-  check "the system tools, in order, no workflow tools" eq "$tools" bash,read,write,edit,history,search,ask,remember,web_search,web_fetch,find_skills,load_skill,find_tools,load_tool,call_tool,verify
+  check "the system tools, in order, no workflow tools" eq "$tools" bash,read,write,edit,history,search,ask,remember,capture,web_search,web_fetch,find_skills,load_skill,find_tools,load_tool,call_tool,verify
 }
 
 # Skills load on demand, as tool results; nothing outside a skill's folder can be read through them.
@@ -206,6 +206,33 @@ search_recall() {
   local l; l=$(zen ask --json -m faux/smoke "long term?" | jq -r .session_id)
   check "a long-term memory is found by search" grep -q "m1 — long-term memory" <<<"$(q "SELECT string_agg(payload->'content'->0->>'text', '|') FROM tape_events WHERE session_id='$l' AND payload->>'role'='toolResult'")"
   q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART; DELETE FROM search_docs WHERE kind='memory'" >/dev/null
+}
+
+# Wiki: capture makes a page and appends to it (same title), commits, keeps the index and the log,
+# masks secrets; search finds the page; a capture after reading the web is labelled web; the sleep
+# reports a page that still has no summary.
+wiki_capture() {
+  local ws; ws=$(new_workspace wiki)
+  local port=$((PORT + 2))
+  python3 "$REPO/scripts/e2e/searxng_stub.py" "$port" & local srv=$!
+  start_kernel "$ws" "$(script wiki.json)" ZEN_SEARXNG_URL="http://127.0.0.1:$port"
+  local w="$TMP/home/.zenbot/wiki"
+  local r; r=$(zen ask --json -m faux/smoke "first")
+  check "a new page" bash -c 'grep -q "Captured to \[\[dom-smoothie\]\] (new page" <<<"$1"' _ "$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE payload->>'toolName'='capture' ORDER BY id DESC LIMIT 1")"
+  check "it has a dated entry with its source" grep -q "(verified) — dom_smoothie ports readability.js" "$w/dom-smoothie.md"
+  sleep 6
+  r=$(zen ask --json -m faux/smoke "second"); local sid; sid=$(echo "$r" | jq -r .session_id)
+  check "capture, then search" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" capture:false,search:false
+  check "the same page, two entries, newest first" eq "$(grep -c '^- \*\*' "$w/dom-smoothie.md"):$(grep -m1 '^- \*\*' "$w/dom-smoothie.md" | grep -c 'Markdown text mode')" 2:1
+  check "the secret is masked" bash -c '! grep -q "0123456789abcdef0123" "$1"' _ "$w/dom-smoothie.md"
+  check "committed in git" bash -c '[ "$(git -C "$1" log --oneline | wc -l)" -ge 2 ]' _ "$w"
+  check "listed in index.md, logged" bash -c 'grep -q "\[\[dom-smoothie\]\]" "$1/index.md" && grep -q "capture | dom-smoothie" "$1/log.md"' _ "$w"
+  check "search finds the page" grep -q "wiki \[\[dom-smoothie\]\]" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='search'")"
+  zen ask --json -m faux/smoke "web" >/dev/null
+  check "a capture after reading the web is labelled web" grep -q "(web) — SearXNG answers JSON" "$w/searxng.md"
+  local note; note=$(zen memory sleep --json | jq -r .note)
+  check "the sleep reports pages without a summary" grep -q "wiki: dom-smoothie: no summary yet" <<<"$note"
+  kill "$srv" 2>/dev/null || true
 }
 
 # remember: a memory saved in one session is in the next session's instructions, not the current one's.
@@ -342,6 +369,7 @@ run skills skills_on_demand
 run mcp mcp_tools
 run web web_tools
 run search search_recall
+run wiki wiki_capture
 run memory-across-sessions memory_across_sessions
 run memory-sleep memory_sleep
 run ask ask_and_gone_tools
