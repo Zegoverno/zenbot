@@ -23,6 +23,7 @@ mod update;
 mod web;
 mod wiki;
 mod workers;
+mod workshop;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -204,6 +205,9 @@ async fn main() -> Result<()> {
         .route("/sessions/{id}/decision", axum::routing::post(decide))
         .route("/memory", get(list_memory))
         .route("/mcp", get(mcp_status))
+        .route("/skills", get(list_skills))
+        .route("/skills/review", axum::routing::post(review_skill))
+        .route("/tools/{name}/review", axum::routing::post(review_tool))
         .route("/memory/sleep", axum::routing::post(run_sleep))
         .route("/memory/{id}/review", axum::routing::post(review_memory))
         .route("/version", get(version))

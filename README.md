@@ -80,6 +80,10 @@ A session is one job. zenbot gets tools, skills and memory rather than a fixed p
 
 `/done` records your verdict on the work so far.
 
+## Skills and tools zenbot improves itself
+
+zenbot keeps its know-how as skills (`~/.zenbot/skills/`, a git repository) and can write tools of its own (`~/.zenbot/tools/`). It improves a skill when a job shows what works, rather than adding near-duplicates; a new skill stays a draft until you accept it (or a session that used it is accepted), and a new kind of work needs your OK. A tool it makes runs sandboxed, with no network, until you approve it. `zen skills` shows each skill's use; `zen skills accept|reject <domain/name>` and `zen tools accept|reject <name>` decide.
+
 ## The wiki
 
 zenbot keeps lasting knowledge in `~/.zenbot/wiki/` (a git repository of markdown pages you can read and edit): one page per concept, project, decision or person, each a short summary over a dated timeline with sources. It adds to it with `capture` (System One finds the right page and skips what's already there) and finds pages with `search`. `index.md` lists the pages; `log.md` lists every capture.

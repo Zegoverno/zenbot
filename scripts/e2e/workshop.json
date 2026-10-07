@@ -1,0 +1,13 @@
+[
+  {"when": "make", "tool": "save_skill", "args": {"domain": "work", "name": "release-notes", "description": "Write release notes from merged pull requests. Use when a release is cut.", "body": "1. List merged PRs since the last tag.\n2. Group them by kind.\n3. Check every PR is mentioned: `git log` count matches.", "reason": "The owner asked for release notes twice this week and corrected the grouping."}},
+  {"when": "make", "tool": "save_skill", "args": {"domain": "work", "name": "release-notes-writer", "description": "Write release notes from merged pull requests. Use when a release is cut.", "body": "Same thing.", "reason": "again"}},
+  {"when": "make", "tool": "save_skill", "args": {"domain": "work", "name": "no-reason", "description": "Something.", "body": "Body.", "reason": ""}},
+  {"when": "make", "tool": "save_skill", "args": {"domain": "finance", "name": "budget-review", "description": "Review the monthly budget against spending. Use at month end.", "body": "Compare and report.", "reason": "Monthly review requested by the owner."}},
+  {"when": "make", "tool": "save_tool", "args": {"name": "word-count", "description": "Count the words in a text. Returns the count.", "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}, "command": "python3 run.py", "files": {"run.py": "import json, sys, os\nargs = json.load(sys.stdin)\nprint(len(args['text'].split()))\ntry:\n    open('wrote.txt', 'w').write('x')\n    print('write: ok')\nexcept OSError:\n    print('write: refused')\n"}, "reason": "Counting words by hand is error-prone."}},
+  {"when": "use", "tool": "find_skills", "args": {"query": "release notes"}},
+  {"when": "use", "tool": "load_skill", "args": {"name": "work/release-notes"}},
+  {"when": "use", "tool": "find_tools", "args": {"query": "count words"}},
+  {"when": "use", "tool": "call_tool", "args": {"name": "made_word-count", "arguments": {"text": "one two three"}}},
+  {"when": "again", "tool": "call_tool", "args": {"name": "made_word-count", "arguments": {"text": "a b"}}},
+  {"text": "Done."}
+]

@@ -25,8 +25,8 @@ steps (old "Phase 2b", "Phase 3 memory", "Phase 4 search", "Phase 5 wiki").
 
 | 4 | Knowledge | The wiki and `capture` | built |
 
-| 5 | Self-improvement | The agent creates and improves skills and tools, without sprawl | **ACTIVE** next |
-| 6 | Delegation | `delegate`: subagents; model choice from real usage | |
+| 5 | Self-improvement | The agent creates and improves skills and tools, without sprawl | built |
+| 6 | Delegation | `delegate`: subagents; model choice from real usage | **ACTIVE** next |
 
 ---
 
@@ -80,11 +80,18 @@ appends the entry, masks secrets, labels notes from web-tainted sessions `web`, 
 agent keeps the summary current with `edit`. `search` covers the wiki; the nightly sleep commits the
 agent's wiki edits and reports pages without a summary and broken links.
 
-## Phase 5 — Self-improvement
+## Phase 5 — Self-improvement `[ built ]`
 
-The closed loop for skills and tools under D-029's rules: domains, edit before create, changes from
-outcomes at session close, measured and pruned, versioned. Agent-made tools (script + manifest,
-sandboxed, no network or secrets until the owner approves).
+`save_skill` and `save_tool` (D-037). Skills: the agentskills.io format under 10,000 characters,
+a reason (the evidence) required, a near-duplicate in the domain refused with "extend X instead"
+(System One, or word overlap), new skills as drafts (`skills/_proposed`) that become active when the
+owner accepts them or a session that used them is accepted, a new domain always the owner's call,
+every change a commit; the sleep flags skills unused for 30 days and archives them at 90. Tools: a
+manifest and files in `~/.zenbot/tools/<name>/`, found and called like MCP tools (`made_<name>`),
+JSON on stdin, never the kernel's secrets, sandboxed with no network and read-only files until the
+owner approves (`made_tools`, out of the agent's reach). A default `work/close` skill says when to
+remember, capture and improve skills. `zen skills`, `zen skills accept|reject`, `zen tools
+accept|reject`.
 
 ## Phase 6 — Delegation and model choice
 

@@ -91,6 +91,7 @@ pub fn validate(dir: &Path) -> Vec<String> {
     match field(&fields, "description") {
         None | Some("") => errs.push("frontmatter has no `description` (what it does and when to use it)".into()),
         Some(d) if d.chars().count() > 1024 => errs.push("description is over 1024 characters".into()),
+        Some(d) if d.contains(['<', '>']) => errs.push("description can't contain < or >".into()),
         _ => {}
     }
     if body.trim().is_empty() {
@@ -107,7 +108,8 @@ pub fn scan(root: &Path) -> Vec<Skill> {
     for d in domains.flatten() {
         let dpath = d.path();
         let domain = d.file_name().to_string_lossy().to_string();
-        if !dpath.is_dir() || domain.starts_with('.') {
+        // `_proposed` (drafts) and `_archived` aren't domains (workshop.rs).
+        if !dpath.is_dir() || domain.starts_with('.') || domain.starts_with('_') {
             continue;
         }
         let Ok(skills) = std::fs::read_dir(&dpath) else { continue };
@@ -300,9 +302,22 @@ pub fn load_spec() -> Value {
     })
 }
 
-/// Run `find_skills` or `load_skill`. None for other tools.
+/// Draft skills (`_proposed/<domain>/<name>`), waiting for the owner's OK or a verified use.
+pub fn drafts() -> Vec<Skill> {
+    scan(&root().join("_proposed"))
+}
+
+/// Run `find_skills` or `load_skill`. None for other tools. Drafts can be found and loaded too,
+/// marked as drafts: a session that uses one and is accepted makes it active (workshop.rs).
 pub fn run_tool(name: &str, args: &Value) -> Option<(String, bool)> {
-    let skills = || scan(&root());
+    let skills = || {
+        let mut all = scan(&root());
+        all.extend(drafts().into_iter().map(|mut s| {
+            s.description = format!("(draft) {}", s.description);
+            s
+        }));
+        all
+    };
     match name {
         "find_skills" => {
             let all = skills();

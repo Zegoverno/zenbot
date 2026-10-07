@@ -12,6 +12,7 @@ const FILES: &[(&str, &str)] = &[
     ("skills/work/brief/SKILL.md", include_str!("../defaults/skills/work/brief/SKILL.md")),
     ("skills/work/brief/references/template.md", include_str!("../defaults/skills/work/brief/references/template.md")),
     ("skills/work/verify/SKILL.md", include_str!("../defaults/skills/work/verify/SKILL.md")),
+    ("skills/work/close/SKILL.md", include_str!("../defaults/skills/work/close/SKILL.md")),
 ];
 
 /// Write the default files missing under `home`. A default skill is written only when its whole

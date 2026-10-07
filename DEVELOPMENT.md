@@ -27,7 +27,8 @@ Config lives in `~/.zenbot/`:
 | `history` | prompt history |
 | `SOUL.md`, `AGENTS.md`, `USER.md` | prompt files: who zenbot is, its environment, the owner (defaults written when missing, never overwritten) |
 | `MEMORY.md` | a copy of short-term memory, for reading |
-| `skills/` | skills, `<domain>/<name>/SKILL.md` |
+| `skills/` | skills, `<domain>/<name>/SKILL.md`; drafts in `_proposed/`, retired ones in `_archived/`; a git repository once `save_skill` first commits |
+| `tools/` | tools the agent made (`save_tool`): `<name>/tool.json` and files; a git repository (`ZEN_TOOLS_DIR`) |
 | `mcp.json` | the owner's MCP servers (`mcpServers`; `${VAR}` filled from `env`), reached through `find_tools` / `load_tool` / `call_tool` |
 | `outputs/` | full text of cut tool output, PDFs saved by `web_fetch`, MCP output over 50 KB |
 | `wiki/` | the wiki (`ZEN_WIKI_DIR`): markdown pages, `index.md`, `log.md`, its own git repository; written by the `capture` tool |
@@ -45,7 +46,7 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 | `git`, `curl`, `jq` | apt | every script |
 | `python3` | preinstalled on Ubuntu | the e2e test servers (`scripts/e2e/*.py`) |
 | `pdftotext` (`poppler-utils`) | apt (`install.sh` installs it) | reading PDFs that `web_fetch` saves |
-| `bubblewrap` | apt | the read-only shell; the e2e scenarios need it |
+| `bubblewrap` | apt | the verifier's read-only shell and the sandbox for unapproved made tools; the e2e scenarios need it |
 | Node.js 22+ | `install.sh` puts it in `~/.local/node` | the `pi` worker only |
 | `gh` | GitHub CLI | pull requests, checking CI |
 
@@ -129,7 +130,7 @@ Changes to the worker protocol must update `docs/worker-protocol.md` and every w
 
 `scripts/e2e.sh` builds (unless `ZEN_E2E_NO_BUILD=1`), then runs each scenario on a kernel built from this checkout with the scripted faux model. It uses a throwaway database (`zen_e2e_<pid>`), throwaway git workspaces and a throwaway `HOME`, on port 18377 (`ZEN_E2E_PORT`). No subscription is used, nothing reaches the internet and the live service isn't touched. It needs Postgres running, plus `git`, `curl`, `jq`, `bubblewrap` and `python3`.
 
-There are 16 scenarios (`run …` lines at the bottom of the script). Some start small test servers from `scripts/e2e/`:
+There are 17 scenarios (`run …` lines at the bottom of the script). Some start small test servers from `scripts/e2e/`:
 
 | Server | Started by | What it is |
 |---|---|---|
@@ -345,6 +346,19 @@ The `capture` tool writes the wiki: markdown pages in `ZEN_WIKI_DIR` (default `<
 git -C ~/.zenbot/dev/wiki log --oneline | head   # what the dev kernel captured
 cat ~/.zenbot/dev/wiki/index.md
 ```
+
+## Workshop: skills and tools the agent makes
+
+`save_skill` creates or improves a skill (new ones are drafts in `skills/_proposed/`); `save_tool` makes a tool in `tools/<name>/`, offered through `find_tools` / `call_tool` as `made_<name>`. The owner reviews them from the CLI:
+
+```bash
+zen skills                                   # skills with their use, drafts marked; the made tools
+zen skills accept work/release-notes         # activate a draft (reject moves it to _archived)
+zen tools accept word-count                  # let a made tool run unsandboxed, with the network
+git -C ~/.zenbot/dev/skills log --oneline    # every change the dev kernel made to its skills
+```
+
+A draft also becomes active when the owner accepts a session that loaded it (`zen sessions decide <id> accept`), unless it opens a new domain. Unapproved tools run in bubblewrap with the filesystem read-only and no network; approval is stored in the `made_tools` table. The nightly sleep flags skills unused for 30 days and archives them at 90. To test without a subscription, see the `workshop` e2e scenario and `scripts/e2e/workshop.json`.
 
 ## Engine updates
 

@@ -236,6 +236,11 @@ pub(crate) async fn decide(State(app): State<AppState>, Path(id): Path<Uuid>, Js
     .fetch_optional(&app.db)
     .await?
     .ok_or_else(not_found)?;
+    // Accepted work vouches for the draft skills it used (workshop.rs).
+    if body.decision == "accept" {
+        let app2 = app.clone();
+        tokio::spawn(async move { workshop::on_accept(&app2, id).await });
+    }
     // Score the work the decision covers, so each decision has a score to compare it with.
     let scoring = app.clone();
     tokio::spawn(async move {
@@ -337,6 +342,12 @@ pub(crate) struct Review {
     decision: String,
 }
 
+impl Review {
+    fn decision(&self) -> &str {
+        &self.decision
+    }
+}
+
 /// The owner accepts or rejects a promotion the sleep proposed (`zen memory accept|reject`).
 pub(crate) async fn review_memory(State(app): State<AppState>, Path(id): Path<String>, Json(body): Json<Review>) -> ApiResult<Json<Value>> {
     Ok(Json(memory::review(&app.db, &id, &body.decision).await.map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{e:#}")))?))
@@ -359,4 +370,37 @@ pub(crate) async fn run_sleep(State(app): State<AppState>, Query(q): Query<Sleep
 /// MCP servers from ~/.zenbot/mcp.json: tools per server and problems (connecting the servers).
 pub(crate) async fn mcp_status() -> Json<Value> {
     Json(mcp::status().await)
+}
+
+/// Skills (active and drafts) with their use, and the tools the agent made.
+pub(crate) async fn list_skills(State(app): State<AppState>) -> ApiResult<Json<Value>> {
+    Ok(Json(workshop::stats(&app.db).await?))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct SkillReview {
+    name: String,
+    decision: String,
+}
+
+/// The owner accepts (activates) or rejects (archives) a draft skill.
+pub(crate) async fn review_skill(Json(body): Json<SkillReview>) -> ApiResult<Json<Value>> {
+    let accept = match body.decision.as_str() {
+        "accept" => true,
+        "reject" => false,
+        _ => return Err(ApiError(StatusCode::BAD_REQUEST, "decision must be accept or reject".into())),
+    };
+    let msg = workshop::decide_draft(&body.name, accept, "the owner").await.map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+    Ok(Json(json!({ "result": msg })))
+}
+
+/// The owner approves (network allowed) or rejects a tool the agent made.
+pub(crate) async fn review_tool(State(app): State<AppState>, Path(name): Path<String>, Json(body): Json<Review>) -> ApiResult<Json<Value>> {
+    let accept = match body.decision() {
+        "accept" => true,
+        "reject" => false,
+        _ => return Err(ApiError(StatusCode::BAD_REQUEST, "decision must be accept or reject".into())),
+    };
+    let msg = workshop::decide_tool(&app.db, &name, accept).await.map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+    Ok(Json(json!({ "result": msg })))
 }

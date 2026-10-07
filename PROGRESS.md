@@ -6,6 +6,24 @@
 
 ---
 
+## 2026-10-07 — Phase 5 built: skills and tools the agent improves itself
+
+- **save_skill** (D-037): reason required, format and size checked, near-duplicates refused
+  ("extend X instead"), new skills as drafts until the owner accepts them or an accepted session
+  used them, new domains the owner's call, every change committed (skills are now a git repo).
+- **save_tool**: tools the agent writes, found and called like MCP tools (`made_<name>`), run with
+  JSON on stdin and a clean environment, sandboxed (no network, read-only files) until the owner
+  approves them.
+- The sleep flags unused skills at 30 days and archives them at 90. `zen skills` shows each skill's
+  loads and the verdicts of sessions that used it; `zen skills accept|reject`, `zen tools
+  accept|reject`.
+- New default skill `work/close`: what to remember, capture and improve when a job ends.
+- Tested: unit tests, e2e `workshop` (14 checks: draft, duplicate refused, reason required, new
+  domain held, drafts found and loaded, activation by an accepted session and by the owner, the
+  made tool sandboxed then approved, git history).
+- Phase 3's eval re-run on Sonnet (low): Claude's monthly spend limit for the owner's org was hit
+  during the first run (every turn failed on both sides); later evals use Sonnet to spare it.
+
 ## 2026-10-07 — Phase 4 built: the wiki and capture
 
 - **Wiki** (D-036): `~/.zenbot/wiki/`, a git repository of pages (summary over a dated timeline with
