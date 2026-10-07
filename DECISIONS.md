@@ -6,6 +6,28 @@
 
 ---
 
+## D-039 — Full screen owns the screen: diffed frames, scrolling, a side panel
+
+**Decision:** The full-screen terminal app runs on the alternate screen and keeps the conversation
+as entries it re-renders at the current width, in a viewport it scrolls itself (PgUp/PgDn, mouse
+wheel). Each frame is composed whole, and only rows that changed are written, overwritten in place.
+`/open <path>` shows a file in a side panel next to the chat, reloaded when it changes. `--inline`
+keeps the scrollback layout. Supersedes the full-screen part of D-014.
+
+**Why:** The owner saw heavy flicker in the browser terminal: every update erased the live region
+and repainted it, and that terminal shows the erase. Diffed rows never blank the screen, the
+technique ratatui (Codex) uses. The owner asked for a file beside the chat, which needs the app to
+own the whole screen, at the cost of the terminal's native scrollback and selection (`/mouse` gives
+selection back).
+
+**Considered:** tmux splits with an `/open` that starts `less` in a pane (no rewrite, but needs tmux
+and splits outside zen's layout); ratatui (a new dependency and a rewrite of every renderer; the
+diffing is about 100 lines); cell-level diffing (row-level is enough to stop the flicker).
+
+**Date:** 2026-10-07
+
+---
+
 ## D-038 — Subagents, and model choice that learns from verdicts
 
 **Decision:** `delegate` runs subagents as child sessions (kind `subagent`) with the parent's

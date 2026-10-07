@@ -6,6 +6,23 @@
 
 ---
 
+## 2026-10-07 — Terminal app: no flicker, a side panel for files
+
+- **No flicker** (D-039): full screen now draws each frame whole and writes only the rows that
+  changed, overwriting in place (`crates/zen/src/screen.rs`). Before, every streamed word and every
+  spinner tick (90 ms) cleared the bottom of the screen and repainted it, which flashed on terminals
+  that ignore synchronized output (the owner's browser terminal).
+- **Feels live:** the whole reply streams into the conversation, not just its last 6 lines. The
+  status line shows how long the running tool has taken, so a long one (a subagent) visibly moves.
+- **Side panel:** `/open <path>` shows a file next to the chat. With no path, it opens the last file
+  a tool read or changed. It reloads when the file changes; `/close` closes it. The conversation
+  re-wraps to fit the narrower chat.
+- **Scrolling:** full screen uses the alternate screen and keeps the conversation itself: PgUp/PgDn
+  or the wheel scroll it, and alt+↑↓ (alt+PgUp/PgDn, or the wheel over it) scrolls the panel.
+  `/mouse` turns wheel reporting off so the terminal can select text. `--inline` is unchanged.
+- Tested: 8 new render/key tests (row diffing, streaming, panel open/close/reload, re-wrap,
+  scrolling), and a real run in tmux against a dev kernel with a scripted model.
+
 ## 2026-10-07 — Phase 6 built: delegation and model choice
 
 - **delegate** (D-038): subagents with a fresh context and the same tools except `ask` and

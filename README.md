@@ -40,7 +40,7 @@ Every session starts from the prompt files in `~/.zenbot/`: `SOUL.md` (who zenbo
 
 ## Using zen
 
-Run `zen` for an interactive session in your terminal (inline, like Claude Code, Codex or Pi):
+Run `zen` for an interactive session in your terminal. It's full screen: the conversation scrolls with PgUp/PgDn or the mouse wheel, and `/open <file>` shows a file next to the chat (reloaded as it changes; `/close` hides it).
 
 ```bash
 zen              # new session
@@ -48,10 +48,10 @@ zen -c           # continue the most recent session
 zen -r [id]      # resume a session (picker when no id)
 zen -m codex/gpt-6-sol     # default is claude/claude-opus-5-5
 zen -e xhigh     # thinking level (default: the model's; `zen models` lists them)
-zen --inline     # no full-screen layout: the input follows the conversation (or ZEN_INLINE=1)
+zen --inline     # no full screen: the conversation goes to terminal scrollback, like Claude Code (or ZEN_INLINE=1)
 ```
 
-Inside: `/new`, `/resume`, `/model`, `/effort`, `/done`, `/rename <title>`, `/archive`, `/upgrade`, `/help`, `/exit`. Enter sends; Shift+Enter (or Alt+Enter, Ctrl+J) starts a new line or paragraph; Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
+Inside: `/new`, `/resume`, `/model`, `/effort`, `/done`, `/rename <title>`, `/open [file]`, `/close`, `/mouse` (wheel scrolling off, so the terminal can select text), `/archive`, `/upgrade`, `/help`, `/exit`. Enter sends; Shift+Enter (or Alt+Enter, Ctrl+J) starts a new line or paragraph; Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
 
 For scripts, every command accepts `--json` and exits non-zero on failure:
 
