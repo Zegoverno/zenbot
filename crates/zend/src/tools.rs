@@ -184,13 +184,11 @@ fn truncate(s: &str) -> Option<String> {
 }
 
 /// Save the full text of an oversized output so the model can page through it with `read`. Kept in
-/// ~/.zenbot/outputs, readable only by the owner (not /tmp, which every user can read and a reboot
+/// `<zen home>/outputs` (crate::outputs_dir), readable only by the owner (not /tmp, which every user can read and a reboot
 /// clears while the history still points at it). Secrets are masked first.
 fn save_full_output(text: &str) -> Option<PathBuf> {
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-    let home = std::env::var("HOME").ok()?;
-    let dir = PathBuf::from(home).join(".zenbot/outputs");
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).ok()?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = crate::outputs_dir()?;
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
     let path = dir.join(format!("{nanos}.log"));
     let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).ok()?;

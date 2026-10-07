@@ -83,8 +83,8 @@ summarized in the background with block addresses; the `history` tool reads any 
 ### Tools today
 
 Fixed order, the same every turn of a session: `bash`, `read`, `write`, `edit`, `history`, `ask`,
-`remember`, `find_skills`, `load_skill`, `verify`, and `decide` when a System One model is
-configured. A verifier session gets only `bash` (read-only, bubblewrap), `read` and
+`remember`, `web_search`, `web_fetch`, `find_skills`, `load_skill`, `find_tools`, `load_tool`,
+`call_tool`, `verify`, and `decide` when a System One model is configured. A verifier session gets only `bash` (read-only, bubblewrap), `read` and
 `submit_verdict`. Each description says what the tool does, when to use it and when not, and what
 it returns. Tool output is cut once, when the tool runs (full output saved and referenced); edits
 are serialized per file and CRLF/BOM-safe; tools are cancelled with their process group on abort.
@@ -129,16 +129,37 @@ by `ZEN_S1_MODEL` and `OPENROUTER_API_KEY`; needs the `pi` worker.
 `decisions`, `memories`, `sleep_runs`. Evals: `scripts/eval.sh` runs two
 harness versions with the same model on isolated kernels and databases (`evals/README.md`).
 
+### Web and MCP
+
+- **`web_fetch`** (`web.rs`): readable markdown (readability.js's algorithm via `dom_smoothie`,
+  `htmd` for pages without an article), public addresses only (the kernel resolves names and keeps
+  public addresses, IP literals and every redirect are checked, no proxy), 30 s / 5 MB / 20,000
+  characters per call with `offset` paging and a 15-minute cache, `focus` keeping only the parts
+  System One judges relevant, PDFs saved for `pdftotext`.
+- **`web_search`**: Brave (`BRAVE_API_KEY`) or Tavily (`TAVILY_API_KEY`), else SearXNG
+  (`ZEN_SEARXNG_URL`, the compose service on 127.0.0.1:8888), which also rescues one failed keyed
+  call; results deduplicated, http(s) only, reranked by System One.
+- **Untrusted content** (D-034): results are wrapped in `<untrusted …>` (markers inside are
+  defused) and the session is tainted (`sessions.tainted_at`, a `taint` block); `remember` from a
+  tainted session records `inferred`, so web text can't become a promotable memory.
+- **MCP** (`mcp.rs`, D-033): servers in `~/.zenbot/mcp.json` (stdio or streamable HTTP, `${VAR}`
+  from the environment, `include`/`exclude`, `timeout_s`, `untrusted`, default true for remote
+  servers). The tool list never changes: `find_tools` ranks tools by name and description,
+  `load_tool` returns the schema, `call_tool` checks required arguments, runs the call with a
+  timeout, masks and caps the output (the rest to `~/.zenbot/outputs`), and wraps untrusted output.
+  `GET /api/mcp` shows servers and problems.
+
 ### Security today
 
 One owner token for the API. Every tool runs in the kernel; a verifier runs read-only in bubblewrap.
+Web pages and remote MCP output are untrusted and taint the session (above).
 Secrets are masked in tool output; full outputs stay under `~/.zenbot/outputs`. Commands run as the
 owner's user on the VM (no per-project sandbox yet). Outward-facing actions are covered by the system
 prompt ("ask before"), not enforced.
 
 ### Deployment
 
-- `deploy/compose.yaml` runs Postgres (pgvector). `zend` runs on the host as the systemd service
+- `deploy/compose.yaml` runs Postgres (pgvector) and SearXNG (keyless web search). `zend` runs on the host as the systemd service
   `zenbot` (installed by `install.sh`) and starts its workers. One port for API, WebSocket and web
   UI; `/health` reports the database, workers and busy sessions.
 - `zen-engines.timer` updates the Claude Code and Codex CLIs daily, tested, with rollback; Pi is
@@ -155,8 +176,10 @@ prompt ("ask before"), not enforced.
 
 ## Target design (agreed 2026-10-06)
 
-Not built yet unless marked. The roadmap builds it in phases; Phase 0 checks each part against
-reference projects' code and records the sources here.
+Not built yet unless marked. The roadmap builds it in phases. Sources: the Phase 0 research in
+`docs/research/` (Hermes, OpenClaw, agentskills.io, Anthropic's tool search, FastMCP, rmcp, Voyager,
+Letta, LLM Wiki and gbrain, Postgres hybrid search, web providers and fetch safety), each claim with
+file paths in the projects' code.
 
 ### Principle
 
@@ -209,12 +232,13 @@ Loaded at session start.
 | `ask` | Bring the owner 1–3 questions, each with 2–4 options, recommended first; unanswered → the recommendation, recorded as an assumption. `wait: false` keeps working on what doesn't depend on the answer | built (ends the turn; `wait: false` in Phase 6) |
 | `search` | One search across sessions (this one included), memories and the wiki | new; replaces `history` |
 | `remember` | Add, replace or remove a short-term memory entry, with its source | built |
-| `web_search` | Search the web through the configured provider | new |
-| `web_fetch` | Fetch a URL as readable text, with its links | new |
+| `web_search` | Search the web through the configured provider | built |
+| `web_fetch` | Fetch a URL as readable text, with its links | built |
 | `find_skills` | Search skills by need: names and one-line descriptions | built (word match; System One ranking later) |
 | `load_skill` | Load a skill, or one of its reference files | built |
-| `find_tools` | Search MCP and agent-made tools by need: names and one-line descriptions | new |
-| `load_tool` | Load a tool's full definition so it can be called | new |
+| `find_tools` | Search MCP and agent-made tools by need: names and one-line descriptions | built (MCP) |
+| `load_tool` | Load a tool's full definition so it can be called | built |
+| `call_tool` | Run a loaded tool (the list stays fixed, D-033) | built |
 | `decide` | Ask System One typed questions, in batches, with probabilities | built |
 | `verify` | A fresh verifier checks work against criteria, without the maker's reasoning | built |
 | `capture` | Put a concept into the wiki | new |
@@ -293,7 +317,7 @@ the work, with the reason recorded); changes from evidence at session close, nev
 small and composable; loads and outcomes measured, near-duplicates merged, unused skills retired;
 every change a revertible commit.
 
-**MCP client** with the official Rust SDK (`rmcp`). From FastMCP: namespacing and mounting
+**MCP client** written against the spec (D-033; built). From FastMCP: namespacing and mounting
 (`<server>_<tool>`), tool transformation (rename, hide arguments, rewrite descriptions), middleware
 (audit, permissions, secret injection), proxying (zenbot's own tools as an MCP server, SPEC.md §3).
 
@@ -301,9 +325,9 @@ every change a revertible commit.
 the sandbox and kept in git; a full MCP server only when a tool must keep state. A new tool gets no
 network or secrets until the owner approves.
 
-**Loading tools mid-session** changes the tool list. Whether each engine picks up a changed list
-without breaking the cache (Claude Code through the MCP bridge, Codex, Pi) is tested before Phase 2;
-the fallback is a generic `call_tool(name, args)`.
+**Loading tools mid-session** would change the tool list, which rewrites the cached prefix on every
+engine (the Phase 0 spike), so the list stays fixed and `call_tool` runs whatever `load_tool`
+showed (built).
 
 ### Model choice
 

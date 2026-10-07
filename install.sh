@@ -23,8 +23,9 @@ env_set() {
 
 say "System packages"
 NEED=()
-# bubblewrap: the read-only shell zen uses while framing a job (crates/zend/src/tools.rs).
-for p in git curl ca-certificates jq bubblewrap; do dpkg -s "$p" >/dev/null 2>&1 || NEED+=("$p"); done
+# bubblewrap: the read-only shell a verifier gets (crates/zend/src/tools.rs); poppler-utils:
+# pdftotext, for PDFs web_fetch saves (crates/zend/src/web.rs).
+for p in git curl ca-certificates jq bubblewrap poppler-utils; do dpkg -s "$p" >/dev/null 2>&1 || NEED+=("$p"); done
 if ! command -v docker >/dev/null; then NEED+=(docker.io); fi
 if ! docker compose version >/dev/null 2>&1 && ! sudo docker compose version >/dev/null 2>&1; then NEED+=(docker-compose-v2); fi
 if [ ${#NEED[@]} -gt 0 ]; then

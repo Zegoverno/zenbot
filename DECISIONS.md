@@ -6,6 +6,47 @@
 
 ---
 
+## D-034 — Web access: keyless search by default, untrusted content taints
+
+**Decision:** `web_search` uses Brave or Tavily when their key is set, else a self-hosted SearXNG
+started with the service (deploy/compose.yaml, bound to 127.0.0.1), which also rescues one failed
+keyed call. `web_fetch` reaches only public addresses: the kernel resolves names itself and keeps
+public addresses only, checks IP literals and every redirect, and uses no proxy. Web content (and
+the output of remote MCP servers) is wrapped in an envelope a page can't close, and taints the
+session; what a tainted session saves to memory counts as inference, so it can never be promoted.
+
+**Why:** Web access must work on a fresh install without buying an API, and web pages are the main
+prompt-injection and SSRF risk an agent with a shell faces. Sources: Hermes (url_safety, keyless
+rescue), OpenClaw (re-wrap once, redirect checks), Claude Code's WebFetch (`docs/research/`).
+
+**Considered:** DuckDuckGo (unofficial scraping; rejected), OpenRouter's web plugin (paid per call,
+answers not results), following redirects freely (SSRF through a public redirector; rejected).
+
+**Date:** 2026-10-07
+
+---
+
+## D-033 — MCP behind three fixed tools; a small client of our own
+
+**Decision:** MCP servers' tools are not added to the model's tool list. The list stays fixed per
+session and the model uses `find_tools`, `load_tool` (the schema as a tool result) and `call_tool`.
+The client (stdio and streamable HTTP; initialize, tools/list, tools/call) is written in the
+kernel against the MCP spec instead of using `rmcp`. Servers are configured in
+`~/.zenbot/mcp.json`, the `mcpServers` shape, with `${VAR}` from the environment.
+
+**Why:** The Phase 0 spike showed a changed tool list reaches Claude Code mid-turn but rewrites the
+whole cached prefix, and Codex and Pi can't take new tools mid-session at all; a fixed list keeps
+the cache on every engine (FastMCP's tool-search transform does the same). `rmcp` would add a
+second `reqwest` and a C crypto build for three methods.
+
+**Considered:** Claude Code's own ToolSearch with deferred tools (engine-specific; keeps the cache
+only there); `rmcp` (weight); adding MCP tools to the list at session start (every server's tools
+in every prompt).
+
+**Date:** 2026-10-07
+
+---
+
 ## D-032 — System One may see private content
 
 **Decision:** System One (Jev on OpenRouter) may see private content: file contents, tool output,

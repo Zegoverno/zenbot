@@ -208,8 +208,13 @@ impl Server {
     async fn connect(&mut self) -> Result<()> {
         let conn = match (&self.cfg.command, &self.cfg.url) {
             (Some(cmd), _) => {
+                // A clean environment: the kernel's own (its token, API keys) never reaches a
+                // server; only the basics and what the config gives it.
+                let keep = ["PATH", "HOME", "USER", "LANG", "LC_ALL", "TZ", "TMPDIR"];
                 let mut child = Command::new(cmd)
                     .args(&self.cfg.args)
+                    .env_clear()
+                    .envs(keep.iter().filter_map(|k| std::env::var(k).ok().map(|v| (*k, v))))
                     .envs(self.cfg.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
@@ -499,8 +504,7 @@ async fn call(app: &App, session: Uuid, full: &str, args: &Value) -> Result<(Str
     };
     let mut text = crate::secrets::mask_off_thread(result_text(&result)).await;
     if text.len() > MAX_OUTPUT {
-        let path = crate::zen_home().join("outputs").join(format!("mcp-{}.txt", Uuid::new_v4()));
-        let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
+        let path = crate::outputs_dir().unwrap_or_else(std::env::temp_dir).join(format!("mcp-{}.txt", Uuid::new_v4()));
         let _ = std::fs::write(&path, &text);
         text = format!("{}\n[... cut at 50 KB; the full output is in {} ...]", &text[..text.floor_char_boundary(MAX_OUTPUT)], path.display());
     }
@@ -568,7 +572,7 @@ pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value) -> Opt
     Some(tools::ToolOutput { content, is_error })
 }
 
-/// Servers and their tool counts, for `zen status` and the API.
+/// Servers and their tool counts (`GET /api/mcp`). Connects (starts) every configured server.
 pub async fn status() -> Value {
     let (tools, problems) = catalog().await;
     let mut by: HashMap<String, usize> = HashMap::new();

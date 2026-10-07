@@ -255,8 +255,7 @@ async fn download(url: &str) -> Result<Page, String> {
     } else if kind.starts_with("text/") || kind.contains("json") || kind.contains("xml") || kind.contains("markdown") || kind.contains("javascript") {
         (String::new(), String::from_utf8_lossy(&body).into_owned())
     } else if kind == "application/pdf" {
-        let dir = crate::zen_home().join("outputs");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = crate::outputs_dir().ok_or("couldn't create the outputs folder")?;
         let path = dir.join(format!("web-{}.pdf", Uuid::new_v4()));
         std::fs::write(&path, &body).map_err(|e| format!("saving the PDF: {e}"))?;
         (String::new(), format!("A PDF ({} KB) was saved to {}. Read it with `pdftotext {} -` (bash).", body.len() / 1024, path.display(), path.display()))

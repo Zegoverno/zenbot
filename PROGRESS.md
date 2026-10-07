@@ -6,10 +6,26 @@
 
 ---
 
+## 2026-10-07 — Phase 2 built: web search, web fetch, MCP; Phase 1 merged
+
+- **Phase 1 merged** (#17) after its eval: 12/12 → 12/12, cost +27% (the larger fixed prefix).
+- **Phase 0 recorded:** the research reports are in `docs/research/`.
+- **web_fetch:** readable markdown with links, public addresses only (own resolver; IP literals and
+  every redirect checked), 30 s / 5 MB / 20,000 characters per call with paging and a 15-minute
+  cache, `focus` keeps only the relevant parts (System One), PDFs saved for pdftotext.
+- **web_search:** Brave or Tavily with a key, else SearXNG (new compose service, started with the
+  service and on upgrade); System One reranks results.
+- **Untrusted content** (D-034): web results and remote MCP output are wrapped in an envelope a page
+  can't fake and taint the session (`sessions.tainted_at`); memories from a tainted session count
+  as inference.
+- **MCP** (D-033): `~/.zenbot/mcp.json`; stdio and streamable HTTP; `find_tools`, `load_tool`,
+  `call_tool`, so the tool list never changes mid-session.
+- Tested: unit tests, e2e `mcp` (test server over stdio and HTTP) and `web` (SearXNG stub, refusals,
+  taint); a real turn on Sonnet searched through SearXNG and read docs.rs with `focus`.
+
 ## 2026-10-07 — Phase 1 built: prompt files, memory, skills; the workflow out of the kernel
 
-On `feat/foundation`; not yet evaluated or installed. Harness change: the eval against the installed
-version and the owner's call come before merging.
+Merged in #17 after its eval (12/12 → 12/12, cost +27%).
 
 - **Prompt files** (D-027): every session starts from `~/.zenbot/SOUL.md`, `AGENTS.md` (the
   environment), `USER.md`, short-term memory and a skills index. The text hardcoded in the kernel
