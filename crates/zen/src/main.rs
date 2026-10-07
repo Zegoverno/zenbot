@@ -91,6 +91,14 @@ enum Cmd {
     },
     /// Check that the kernel, database, worker and model sign-in are healthy
     Status,
+    /// Show zenbot's memory (short-term by default) and the last sleep; `zen memory sleep` tidies it now
+    Memory {
+        #[command(subcommand)]
+        cmd: Option<MemoryCmd>,
+        /// Which memories: short (default), long, archived or all
+        #[arg(long, default_value = "short")]
+        tier: String,
+    },
     /// Update zenbot to the latest version on GitHub (main) and restart it
     Upgrade {
         /// Only check whether an update is available
@@ -132,8 +140,12 @@ enum SessionsCmd {
         #[arg(short, long)]
         note: Option<String>,
     },
-    /// Take a step of the briefed workflow: go (approve the brief), brief, quick or verify
-    Flow { id: String, action: String },
+}
+
+#[derive(Subcommand)]
+enum MemoryCmd {
+    /// Tidy short-term memory now (what the nightly sleep does)
+    Sleep,
 }
 
 /// Outcome of one turn, collected from the session stream.
@@ -146,8 +158,8 @@ struct Turn {
     cost: f64,
     model: String,
     effort: Option<String>,
-    /// The kernel's record of the turn (harness, engine, totals), sent with its end. When the
-    /// workflow chains several turns (frame, work, verify), the totals of all of them.
+    /// The kernel's record of the turn (harness, engine, totals), sent with its end, plus the
+    /// records of child turns it ran (a verifier's).
     record: Value,
     /// Each turn's record, in order (verifier turns included).
     records: Vec<Value>,
@@ -242,19 +254,12 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
                             turn.output_tokens = n("output_tokens");
                             turn.cost = t["cost_usd"].as_f64().unwrap_or(turn.cost);
                         }
-                        // The workflow may continue on its own (approve and work, verify): wait for `idle`.
+                        // A turn may be followed by another the kernel starts itself (`next`): wait for `idle`.
                         if ev["type"] == "end" && ev["next"] != true {
                             return Ok(turn);
                         }
                     }
                     "idle" if started => return Ok(turn),
-                    "brief" | "report" if started => {
-                        let text = ev["text"].as_str().unwrap_or("");
-                        let title = if ev["type"] == "brief" { format!("Brief v{}", ev["version"]) } else { "Report".to_string() };
-                        if show { println!("\n── {title}\n{text}\n"); }
-                        if !turn.text.is_empty() { turn.text.push_str("\n\n"); }
-                        turn.text.push_str(&format!("{title}:\n{text}"));
-                    }
                     "questions" if started => {
                         let qs: Vec<String> = ev["questions"].as_array().into_iter().flatten().map(|q| {
                             let opts: Vec<&str> = q["options"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
@@ -265,9 +270,8 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
                         if !turn.text.is_empty() { turn.text.push_str("\n\n"); }
                         turn.text.push_str(&format!("Questions:\n{text}"));
                     }
-                    "status" | "state" if started && show_tools => {
-                        let t = ev["text"].as_str().map(String::from).unwrap_or_else(|| format!("state: {}", ev["state"].as_str().unwrap_or("")));
-                        eprintln!("{}", dim(&format!("  · {t}")));
+                    "status" if started && show_tools => {
+                        eprintln!("{}", dim(&format!("  · {}", ev["text"].as_str().unwrap_or(""))));
                     }
                     "resync" if started && ev["busy"] == false => {
                         turn.error.get_or_insert_with(|| "missed the end of the turn (client fell behind); see `zen sessions show`".into());
@@ -638,7 +642,9 @@ async fn run(cli: Cli) -> Result<()> {
             let version = c.get("/api/version").await.unwrap_or(Value::Null);
             let git_identity = git_identity();
             let engines = engines_state();
+            let memory = c.get("/api/memory").await.unwrap_or(Value::Null);
             let status = json!({
+                "memory": memory_summary(&memory),
                 "engines": engines,
                 "git_identity": git_identity,
                 "commit": health["commit"],
@@ -671,6 +677,9 @@ async fn run(cli: Cli) -> Result<()> {
                     None => println!("engines   not checked yet (scripts/update-engines.sh, daily via zen-engines.timer)"),
                 }
                 println!("model     {}", models["default"].as_str().unwrap_or(""));
+                if !memory.is_null() {
+                    println!("memory    {}", memory_line(&memory));
+                }
                 match models["scorer"].as_str() {
                     None => println!("scorer    off (set ZEN_S1_MODEL to score sessions)"),
                     Some(s) if s.starts_with("openrouter/") && models["authenticated"]["openrouter"] != true => {
@@ -695,6 +704,29 @@ async fn run(cli: Cli) -> Result<()> {
             }
             if status["ok"] != true {
                 std::process::exit(1);
+            }
+        }
+        Cmd::Memory { cmd: Some(MemoryCmd::Sleep), .. } => {
+            let r = c.post("/api/memory/sleep", json!({})).await?;
+            if cli.json {
+                out(&r);
+            } else {
+                println!("{}", sleep_counts(&r));
+                if let Some(note) = r["note"].as_str() {
+                    println!("{note}");
+                }
+            }
+        }
+        Cmd::Memory { cmd: None, tier } => {
+            let m = c.get(&format!("/api/memory?tier={tier}")).await?;
+            if cli.json {
+                out(&m);
+            } else {
+                for x in m["memories"].as_array().into_iter().flatten() {
+                    let tier = if x["tier"] == "short" { String::new() } else { format!(", {}", x["tier"].as_str().unwrap_or("")) };
+                    println!("{:<6} {}  {}", x["id"].as_str().unwrap_or(""), x["text"].as_str().unwrap_or(""), dim(&format!("({}{tier})", x["source"].as_str().unwrap_or(""))));
+                }
+                println!("{}", dim(&memory_line(&m)));
             }
         }
         Cmd::Sessions(cmd) => match cmd {
@@ -726,11 +758,6 @@ async fn run(cli: Cli) -> Result<()> {
                 let d = c.post(&format!("/api/sessions/{id}/decision"), json!({ "decision": decision, "note": note })).await?;
                 if cli.json { out(&d) } else { println!("recorded {} for {}", d["decision"].as_str().unwrap_or(""), short(&id)) }
             }
-            SessionsCmd::Flow { id, action } => {
-                let id = c.resolve(&id).await?;
-                let r = c.post(&format!("/api/sessions/{id}/flow"), json!({ "action": action })).await?;
-                if cli.json { out(&r) } else { println!("{} is now {}", short(&id), r["state"].as_str().unwrap_or("")) }
-            }
             SessionsCmd::Rename { id, title } => {
                 let id = c.resolve(&id).await?;
                 let s = c.patch(&format!("/api/sessions/{id}"), json!({ "title": title })).await?;
@@ -741,9 +768,46 @@ async fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
+/// What a sleep did, in one line.
+fn sleep_counts(r: &Value) -> String {
+    if let Some(e) = r["error"].as_str() {
+        return format!("failed: {e}");
+    }
+    let n = |k: &str| r[k].as_i64().unwrap_or(0);
+    let scorer = r["scorer"].as_str().map(|s| format!(" (judged by {s})")).unwrap_or_else(|| " (by recency: no System One model)".into());
+    format!("{} entries: {} kept, {} archived, {} promoted, {} proposed for long-term{scorer}", n("entries"), n("kept"), n("dropped"), n("promoted"), n("proposed"))
+}
+
+/// Short-term memory's size and the last sleep, from `/api/memory`.
+fn memory_summary(m: &Value) -> Value {
+    let list = m["memories"].as_array().cloned().unwrap_or_default();
+    let chars: usize = list.iter().map(|x| x["text"].as_str().map_or(0, str::len) + 10).sum();
+    json!({ "entries": list.len(), "chars": chars, "size": m["size"], "last_sleep": m["last_sleep"] })
+}
+
+fn memory_line(m: &Value) -> String {
+    let s = memory_summary(m);
+    let sleep = &s["last_sleep"];
+    let last = if sleep.is_null() {
+        "no sleep yet".to_string()
+    } else {
+        let when = sleep["ended_at"].as_str().or(sleep["started_at"].as_str()).unwrap_or("").get(..16).unwrap_or("").replace('T', " ");
+        format!("last sleep {when} UTC: {}", sleep_counts(sleep))
+    };
+    format!("{} entries, {}/{} characters; {last}", s["entries"], s["chars"], s["size"])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_line_shows_size_and_the_last_sleep() {
+        let m = json!({ "size": 4000, "memories": [{ "text": "abc" }, { "text": "defgh" }],
+            "last_sleep": { "ended_at": "2026-10-07T04:01:02Z", "entries": 3, "kept": 2, "dropped": 1, "promoted": 0, "proposed": 0, "scorer": null } });
+        assert_eq!(memory_line(&m), "2 entries, 28/4000 characters; last sleep 2026-10-07 04:01 UTC: 3 entries: 2 kept, 1 archived, 0 promoted, 0 proposed for long-term (by recency: no System One model)");
+        assert!(memory_line(&json!({ "size": 4000, "memories": [], "last_sleep": null })).ends_with("no sleep yet"));
+    }
 
     #[test]
     fn engines_line_lists_versions_and_flags_problems() {
