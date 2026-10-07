@@ -404,3 +404,42 @@ pub(crate) async fn review_tool(State(app): State<AppState>, Path(name): Path<St
     let msg = workshop::decide_tool(&app.db, &name, accept).await.map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
     Ok(Json(json!({ "result": msg })))
 }
+
+/// The routing policy in force, the evidence per kind of work and model, and what it suggests.
+pub(crate) async fn get_policy(State(app): State<AppState>) -> ApiResult<Json<Value>> {
+    let (version, data) = delegate::policy(&app.db).await;
+    let stats = delegate::stats(&app.db).await?;
+    let suggestions: Vec<Value> = delegate::suggest(&data, &stats, crate::env_num("ZEN_POLICY_MIN_JUDGED", 20.0) as u64)
+        .into_iter()
+        .map(|(k, m, why)| json!({ "kind": k, "model": m, "why": why }))
+        .collect();
+    Ok(Json(json!({ "version": version, "policy": data, "stats": stats, "suggestions": suggestions })))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PolicyBody {
+    policy: Value,
+    reason: Option<String>,
+}
+
+/// The owner sets the routing policy (a new version).
+pub(crate) async fn put_policy(State(app): State<AppState>, Json(body): Json<PolicyBody>) -> ApiResult<Json<Value>> {
+    if !body.policy["routes"].is_object() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "the policy needs a `routes` object".into()));
+    }
+    let v = delegate::set_policy(&app.db, &body.policy, body.reason.as_deref().unwrap_or("set by the owner"), "owner").await?;
+    Ok(Json(json!({ "version": v })))
+}
+
+/// Go back to the policy before the latest change (as a new version, so nothing is lost).
+pub(crate) async fn undo_policy(State(app): State<AppState>) -> ApiResult<Json<Value>> {
+    let rows: Vec<(i32, Value)> = sqlx::query_as("SELECT version, data FROM policies ORDER BY version DESC LIMIT 2").fetch_all(&app.db).await?;
+    let previous = match rows.as_slice() {
+        [latest, prev, ..] => Some((latest.0, prev.1.clone())),
+        [latest] => Some((latest.0, json!({ "routes": {} }))),
+        [] => None,
+    };
+    let Some((latest, data)) = previous else { return Err(ApiError(StatusCode::CONFLICT, "there is no policy to undo".into())) };
+    let v = delegate::set_policy(&app.db, &data, &format!("undo v{latest}"), "owner").await?;
+    Ok(Json(json!({ "version": v })))
+}

@@ -129,6 +129,9 @@ with questions for the owner. The kernel-enforced workflow (`flow.rs`) was remov
   vouches, new domains the owner's call, commits; the sleep flags and archives unused skills) and
   `save_tool` (made tools in `~/.zenbot/tools/`, called as `made_<name>`, sandboxed without network
   until approved in `made_tools`).
+- **Delegation** (`delegate.rs`, D-038): subagents (kind `subagent`, no `ask` or `delegate`), several
+  tasks per call in parallel; the model from the routing policy (`policies`) by kind of work, with
+  logged exploration; the sleep tunes routes on clear evidence.
 - **Skills** (`skills.rs`): folders in `~/.zenbot/skills/<domain>/<name>/` in the agentskills.io
   format, validated when scanned (invalid ones are skipped and logged). The instructions carry an
   index; `find_skills` matches names, descriptions and bodies; `load_skill` returns a SKILL.md or a
@@ -262,7 +265,7 @@ Loaded at session start.
 | `decide` | Ask System One typed questions, in batches, with probabilities | built |
 | `verify` | A fresh verifier checks work against criteria, without the maker's reasoning | built |
 | `capture` | Put a concept into the wiki | built (D-036) |
-| `delegate` | Hand a subtask to a subagent with fresh context and a chosen model | new |
+| `delegate` | Hand subtasks to subagents with fresh context and a chosen model, in parallel | built (D-038) |
 
 Gone (2026-10-07): `move` (`bash mv`), `propose_brief` (a brief is a file the `brief` skill
 writes), `submit_work`, `note_ruling` and the approvals. Going: `history` (once `search` exists). Wiki pages, skills and

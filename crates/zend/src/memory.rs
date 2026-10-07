@@ -533,6 +533,7 @@ async fn sleep_inner(app: &App, run: i64) -> Result<Value> {
         }
     }
     notes.extend(crate::workshop::tend(db).await);
+    notes.extend(crate::delegate::tune(db).await);
     let note = if notes.is_empty() { None } else { Some(notes.join("\n")) };
     sqlx::query("UPDATE sleep_runs SET ended_at = now(), entries = $2, kept = $3, dropped = $4, promoted = $5, proposed = $6, note = $7 WHERE id = $1")
         .bind(run)

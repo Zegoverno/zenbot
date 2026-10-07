@@ -113,7 +113,7 @@ The owner's name is E2E Owner." >"$TMP/home/.zenbot/USER.md"
   check "the skills index is in the instructions" grep -q "work/verify:" <<<"$base"
   check "memory starts empty" grep -q "(empty)" <<<"$base"
   local tools; tools=$(q "SELECT string_agg(t->>'name', ',') FROM turns, envelopes e, jsonb_array_elements(e.tools) t WHERE turns.session_id='$sid' AND e.hash = turns.envelope")
-  check "the system tools, in order, no workflow tools" eq "$tools" bash,read,write,edit,history,search,ask,remember,capture,web_search,web_fetch,find_skills,load_skill,save_skill,find_tools,load_tool,call_tool,save_tool,verify
+  check "the system tools, in order, no workflow tools" eq "$tools" bash,read,write,edit,history,search,ask,remember,capture,web_search,web_fetch,find_skills,load_skill,save_skill,find_tools,load_tool,call_tool,save_tool,verify,delegate
 }
 
 # Skills load on demand, as tool results; nothing outside a skill's folder can be read through them.
@@ -271,6 +271,31 @@ workshop() {
   check "zen skills lists use" grep -q "work/release-notes" <<<"$(zen skills)"
 }
 
+# Delegation: subagents run their own turns (one on a named model, one routed by the owner's policy),
+# can't ask or delegate, report back; each choice is logged with its probability, and the owner's
+# verdict on the parent is the evidence `zen policy` shows. ask with wait=false keeps the turn going.
+delegation() {
+  local ws; ws=$(new_workspace delegate)
+  start_kernel "$ws" "$(script delegate.json)"
+  zen policy set default faux/smoke >/dev/null
+  local r sid; r=$(zen ask --json -m faux/smoke "split the work"); sid=$(echo "$r" | jq -r .session_id)
+  check "two delegations" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" delegate:false,delegate:false
+  local res; res=$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='delegate'")
+  check "named model, then the policy's" bash -c 'grep -q "on faux/smoke (asked, asked)" <<<"$1" && grep -q "(unknown, policy)" <<<"$1"' _ "$res"
+  check "the subagents' answers come back" eq "$(grep -c '^Done\.$' <<<"${res//|/$'\n'}")" 2
+  check "the subagents ran their task" eq "$(q "SELECT count(*) FROM sessions WHERE parent='$sid' AND kind='subagent'")" 2
+  local child; child=$(q "SELECT id FROM sessions WHERE parent='$sid' AND kind='subagent' LIMIT 1")
+  local tools; tools=$(q "SELECT string_agg(t->>'name', ',') FROM turns, envelopes e, jsonb_array_elements(e.tools) t WHERE turns.session_id='$child' AND e.hash = turns.envelope")
+  check "a subagent can't ask or delegate" bash -c '! grep -qE "(^|,)(ask|delegate)(,|$)" <<<"$1" && grep -q "save_skill" <<<"$1"' _ "$tools"
+  check "choices logged with their probability" eq "$(q "SELECT string_agg(chosen || '@' || probability, ',' ORDER BY id) FROM decisions WHERE point='model'")" faux/smoke@1,faux/smoke@1
+  zen sessions decide "$sid" accept >/dev/null
+  check "the owner's verdict is the evidence" grep -q '"accepted": 2' <<<"$(zen policy --json | jq '{accepted: ([.stats[].accepted] | add)}')"
+  zen policy undo >/dev/null
+  check "undo restores the earlier policy" eq "$(zen policy --json | jq -c .policy)" '{"routes":{}}'
+  r=$(zen ask --json -m faux/smoke "waitless")
+  check "ask with wait=false keeps working" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" ask:false,bash:false
+}
+
 # remember: a memory saved in one session is in the next session's instructions, not the current one's.
 memory_across_sessions() {
   local ws; ws=$(new_workspace memory)
@@ -407,6 +432,7 @@ run web web_tools
 run search search_recall
 run wiki wiki_capture
 run workshop workshop
+run delegation delegation
 run memory-across-sessions memory_across_sessions
 run memory-sleep memory_sleep
 run ask ask_and_gone_tools

@@ -130,7 +130,7 @@ Changes to the worker protocol must update `docs/worker-protocol.md` and every w
 
 `scripts/e2e.sh` builds (unless `ZEN_E2E_NO_BUILD=1`), then runs each scenario on a kernel built from this checkout with the scripted faux model. It uses a throwaway database (`zen_e2e_<pid>`), throwaway git workspaces and a throwaway `HOME`, on port 18377 (`ZEN_E2E_PORT`). No subscription is used, nothing reaches the internet and the live service isn't touched. It needs Postgres running, plus `git`, `curl`, `jq`, `bubblewrap` and `python3`.
 
-There are 17 scenarios (`run …` lines at the bottom of the script). Some start small test servers from `scripts/e2e/`:
+There are 18 scenarios (`run …` lines at the bottom of the script). Some start small test servers from `scripts/e2e/`:
 
 | Server | Started by | What it is |
 |---|---|---|
@@ -359,6 +359,19 @@ git -C ~/.zenbot/dev/skills log --oneline    # every change the dev kernel made 
 ```
 
 A draft also becomes active when the owner accepts a session that loaded it (`zen sessions decide <id> accept`), unless it opens a new domain. Unapproved tools run in bubblewrap with the filesystem read-only and no network; approval is stored in the `made_tools` table. The nightly sleep flags skills unused for 30 days and archives them at 90. To test without a subscription, see the `workshop` e2e scenario and `scripts/e2e/workshop.json`.
+
+## Delegation and the routing policy
+
+`delegate` runs subtasks as subagent sessions (`kind = 'subagent'`, hidden from `zen sessions`), several at once with `tasks`. Unless a task names a model, the routing policy picks one per kind of work; the kind comes from System One, so without `ZEN_S1_MODEL` every task is `unknown` and uses the `default` route (else the parent's model).
+
+```bash
+zen policy                                        # routes, evidence per kind and model, suggestions
+zen policy set default faux/smoke                 # route a kind of work (here every unknown one)
+zen policy set build claude/claude-opus-5-5 --candidates codex/gpt-5.5 --explore 0.1
+zen policy undo                                   # a new version with the previous data
+```
+
+Every choice is a `decisions` row (`point = 'model'`); the owner's verdict on the parent session is the evidence. The nightly sleep switches a route only on clear evidence (`ZEN_POLICY_MIN_JUDGED` judged subtasks per model, default 20), as a new policy version. The `delegation` e2e scenario (`scripts/e2e/delegate.json`) shows it without a subscription.
 
 ## Engine updates
 

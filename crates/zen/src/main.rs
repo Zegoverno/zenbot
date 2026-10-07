@@ -96,6 +96,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<ReviewCmd>,
     },
+    /// The routing policy for subagents (which model per kind of work) and the evidence for it
+    Policy {
+        #[command(subcommand)]
+        cmd: Option<PolicyCmd>,
+    },
     /// Approve or reject a tool zenbot made (`zen skills` lists them)
     Tools {
         #[command(subcommand)]
@@ -150,6 +155,23 @@ enum SessionsCmd {
         #[arg(short, long)]
         note: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum PolicyCmd {
+    /// Route a kind of work (understand, shape, build, verify, maintain, reflect, reach, bet, default) to a model
+    Set {
+        kind: String,
+        model: String,
+        /// Other models to try now and then, comma-separated
+        #[arg(long)]
+        candidates: Option<String>,
+        /// Share of subtasks that try a candidate (default 0.1)
+        #[arg(long)]
+        explore: Option<f64>,
+    },
+    /// Go back to the policy before the latest change
+    Undo,
 }
 
 #[derive(Subcommand)]
@@ -788,6 +810,45 @@ async fn run(cli: Cli) -> Result<()> {
             };
             let res = c.post("/api/skills/review", json!({ "name": name, "decision": decision })).await?;
             if cli.json { out(&res) } else { println!("{}", res["result"].as_str().unwrap_or("")) }
+        }
+        Cmd::Policy { cmd: None } => {
+            let p = c.get("/api/policy").await?;
+            if cli.json {
+                out(&p);
+            } else {
+                println!("policy v{}: {}", p["version"], serde_json::to_string(&p["policy"]).unwrap_or_default());
+                for s in p["stats"].as_array().into_iter().flatten() {
+                    println!(
+                        "  {:<10} {:<34} {}",
+                        s["kind"].as_str().unwrap_or("?"),
+                        s["model"].as_str().unwrap_or("?"),
+                        dim(&format!("{} subtasks, {} of {} judged accepted, ${:.3} each", s["subtasks"], s["accepted"], s["judged"], s["mean_cost"].as_f64().unwrap_or(0.0)))
+                    );
+                }
+                for s in p["suggestions"].as_array().into_iter().flatten() {
+                    println!("suggests {} -> {} ({})", s["kind"].as_str().unwrap_or(""), s["model"].as_str().unwrap_or(""), s["why"].as_str().unwrap_or(""));
+                }
+            }
+        }
+        Cmd::Policy { cmd: Some(PolicyCmd::Undo) } => {
+            let r = c.post("/api/policy/undo", json!({})).await?;
+            if cli.json { out(&r) } else { println!("policy v{}", r["version"]) }
+        }
+        Cmd::Policy { cmd: Some(PolicyCmd::Set { kind, model, candidates, explore }) } => {
+            let mut p = c.get("/api/policy").await?["policy"].clone();
+            if !p["routes"].is_object() {
+                p["routes"] = json!({});
+            }
+            let mut route = json!({ "model": model });
+            if let Some(cands) = candidates {
+                route["candidates"] = json!(cands.split(',').map(str::trim).filter(|x| !x.is_empty()).collect::<Vec<_>>());
+            }
+            p["routes"][&kind] = route;
+            if let Some(e) = explore {
+                p["explore"] = json!(e);
+            }
+            let r = c.post("/api/policy", json!({ "policy": p, "reason": format!("owner: {kind} -> {model}") })).await?;
+            if cli.json { out(&r) } else { println!("policy v{}", r["version"]) }
         }
         Cmd::Tools { cmd } => {
             let (name, decision) = match cmd {

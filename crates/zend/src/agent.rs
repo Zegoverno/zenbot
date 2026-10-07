@@ -36,12 +36,13 @@ fn spec(name: &str, description: &str, parameters: Value) -> Value {
 fn ask_spec() -> Value {
     spec(
         "ask",
-        "Ask the owner up to 3 questions only they can answer (taste, the bet, anything public, costly or hard to reverse), then end your turn; answers arrive as the next message. Never ask what you can look up or decide yourself. 2 to 4 options each, your recommendation first; if a question goes unanswered, take your recommendation and say so.",
+        "Ask the owner up to 3 questions only they can answer (taste, the bet, anything public, costly or hard to reverse), then end your turn; answers arrive as the next message. With wait=false you keep working on what doesn't depend on the answers. Never ask what you can look up or decide yourself. 2 to 4 options each, your recommendation first; if a question goes unanswered, take your recommendation and say so.",
         json!({ "type": "object", "properties": { "questions": { "type": "array", "description": "1 to 3 questions",
             "items": { "type": "object", "properties": {
                 "question": { "type": "string" },
                 "options": { "type": "array", "items": { "type": "string" }, "description": "2 to 4 options, recommended first" } },
-              "required": ["question", "options"] } } }, "required": ["questions"] }),
+              "required": ["question", "options"] } },
+            "wait": { "type": "boolean", "description": "End the turn and wait for the answers (default true)" } }, "required": ["questions"] }),
     )
 }
 
@@ -103,10 +104,14 @@ pub fn specs(kind: Option<&str>) -> Value {
         picked.push(verdict_spec());
         return Value::Array(picked);
     }
+    let subagent = kind == Some(crate::delegate::SUBAGENT);
     let mut all = builtins;
     all.push(crate::compact::tool_spec());
     all.push(crate::search::spec());
-    all.push(ask_spec());
+    // A subagent can't ask the owner or delegate further.
+    if !subagent {
+        all.push(ask_spec());
+    }
     all.push(crate::memory::spec());
     all.push(crate::wiki::spec());
     all.push(crate::web::search_spec());
@@ -119,6 +124,9 @@ pub fn specs(kind: Option<&str>) -> Value {
     all.push(crate::mcp::call_spec());
     all.push(crate::workshop::save_tool_spec());
     all.push(verify_spec());
+    if !subagent {
+        all.push(crate::delegate::spec());
+    }
     if decide_on() {
         all.push(decide_spec());
     }
@@ -129,6 +137,8 @@ pub fn specs(kind: Option<&str>) -> Value {
 pub fn system_for(base: &str, kind: Option<&str>) -> String {
     if read_only(kind) {
         VERIFY_PROMPT.trim_end().to_string()
+    } else if kind == Some(crate::delegate::SUBAGENT) {
+        crate::delegate::system_for(base)
     } else {
         base.to_string()
     }
@@ -168,6 +178,11 @@ pub async fn run_tool(app: &AppState, session: Uuid, workspace: &Path, name: &st
                 return out(format!("couldn't record the questions: {e}"), true);
             }
             app.emit(session, json!({ "type": "questions", "questions": qs })).await;
+            if args["wait"] == false {
+                return out("The questions are shown to the owner. Carry on with what doesn't depend on them; their answers arrive as \
+a later message. Until then, don't act on anything that does."
+                    .into(), false);
+            }
             *ending = Some("questions asked");
             out("The questions are shown to the owner. End your turn now; the answers arrive as the next message. \
 If a question goes unanswered, take your recommended option and say it was an assumption."
@@ -193,6 +208,7 @@ If a question goes unanswered, take your recommended option and say it was an as
         "search" => crate::search::run_tool(app, session, name, args).await,
         "capture" => crate::wiki::run_tool(app, session, name, args).await,
         "save_skill" | "save_tool" => crate::workshop::run_tool(app, session, name, args).await,
+        "delegate" => crate::delegate::run_tool(app, session, workspace, name, args).await,
         "find_tools" | "load_tool" | "call_tool" => crate::mcp::run_tool(app, session, name, args).await,
         "decide" => {
             let res = crate::score::decide(app, &args["state"], &args["questions"]).await;
@@ -419,7 +435,7 @@ mod tests {
         let names = |v: Value| v.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         assert_eq!(names(specs(Some(VERIFIER))), ["bash", "read", "submit_verdict"]);
         let all = names(specs(None));
-        for t in ["bash", "read", "write", "edit", "history", "search", "ask", "remember", "capture", "web_search", "web_fetch", "find_skills", "load_skill", "save_skill", "find_tools", "load_tool", "call_tool", "save_tool", "verify"] {
+        for t in ["bash", "read", "write", "edit", "history", "search", "ask", "remember", "capture", "web_search", "web_fetch", "find_skills", "load_skill", "save_skill", "find_tools", "load_tool", "call_tool", "save_tool", "verify", "delegate"] {
             assert!(all.contains(&t.to_string()), "{t} offered");
         }
         assert!(!all.contains(&"move".to_string()) && !all.contains(&"propose_brief".to_string()));

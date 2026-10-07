@@ -6,6 +6,21 @@
 
 ---
 
+## 2026-10-07 — Phase 6 built: delegation and model choice
+
+- **delegate** (D-038): subagents with a fresh context and the same tools except `ask` and
+  `delegate`; several `tasks` in one call run in parallel in the kernel; their answers come back
+  (untrusted when the subagent read the web).
+- **Model choice from usage:** System One classifies the kind of work; the versioned policy routes
+  it; 10% exploration with the choice probability logged; the owner's verdicts are the evidence;
+  the sleep switches a route only on clear evidence. `zen policy`, `zen policy set|undo`.
+- **ask** with `wait: false` keeps the turn going.
+- Fixed: Claude Code ran two separate `delegate` calls back to back, so one call now takes several
+  tasks; measured on a real run: two Haiku subagents, same 5 seconds, both answers right.
+- Phase 3 merged (#19) after its eval: 12/12 → 12/12, cost −6%.
+- Tested: unit tests (route choice and exploration, switching on clear evidence only), e2e
+  `delegation`, real runs on Sonnet with Haiku subagents.
+
 ## 2026-10-07 — Phase 5 built: skills and tools the agent improves itself
 
 - **save_skill** (D-037): reason required, format and size checked, near-duplicates refused

@@ -86,6 +86,8 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                             tools::ToolOutput { content: why, is_error: true }
                         } else if read_only && !matches!(name.as_str(), "bash" | "read" | "submit_verdict") {
                             tools::ToolOutput { content: format!("`{name}` isn't available to a verifier"), is_error: true }
+                        } else if kind.as_deref() == Some(crate::delegate::SUBAGENT) && matches!(name.as_str(), "ask" | "delegate") {
+                            tools::ToolOutput { content: format!("`{name}` isn't available to a subagent: decide yourself and say what you assumed"), is_error: true }
                         } else if let Some(out) = agent::run_tool(app, id, &workspace, &name, &args, &mut ending).await {
                             out
                         } else {

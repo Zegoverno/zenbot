@@ -21,12 +21,12 @@ steps (old "Phase 2b", "Phase 3 memory", "Phase 4 search", "Phase 5 wiki").
 | 0 | Ground | Research the reference projects in their code; merge the open fix PRs | done (`docs/research/`) |
 | 1 | Foundation | Prompt files, tool descriptions, short-term memory with sleep, skills, workflow into skills | done (#17): 12/12 → 12/12, cost +27% |
 | 2 | Reach | `web_search`, `web_fetch`, MCP client, `find_tools` / `load_tool` / `call_tool` | built (#18) |
-| 3 | Recall | `search` (exact, full-text and semantic) over sessions and memories; long-term memory acts | built (#19) |
+| 3 | Recall | `search` (exact, full-text and semantic) over sessions and memories; long-term memory acts | done (#19): 12/12, cost −6% |
 
 | 4 | Knowledge | The wiki and `capture` | built |
 
 | 5 | Self-improvement | The agent creates and improves skills and tools, without sprawl | built |
-| 6 | Delegation | `delegate`: subagents; model choice from real usage | **ACTIVE** next |
+| 6 | Delegation | `delegate`: subagents; model choice from real usage | built |
 
 ---
 
@@ -93,13 +93,21 @@ owner approves (`made_tools`, out of the agent's reach). A default `work/close` 
 remember, capture and improve skills. `zen skills`, `zen skills accept|reject`, `zen tools
 accept|reject`.
 
-## Phase 6 — Delegation and model choice
+## Phase 6 — Delegation and model choice `[ built ]`
 
-`delegate`: subtasks in fresh contexts, each with a chosen model, results back to the parent; `ask`
-with `wait: false`. Model choice from real usage (D-030): System One classifies, a versioned policy
-maps to a model, a small share of subtasks explore, outcomes decide.
+`delegate` (D-038): subagents are child sessions with a fresh context and the same instructions,
+memory and tools, except `ask` and `delegate`; one call can hand out several `tasks`, which the
+kernel runs at the same time (engines may serialize separate tool calls). Taint flows both ways.
+Model choice from real usage (D-030): System One classifies the kind of work, the versioned policy
+(`zen policy`, `zen policy set|undo`) maps it to a model, a share of subtasks (ZEN_EXPLORE, 0.1)
+tries the route's other candidates with the choice probability logged, outcomes are the owner's
+verdict on the parent and cost, and the nightly sleep switches a route only when the evidence is
+clear (lower bound beats upper bound, 20 judged subtasks each). `ask` takes `wait: false`.
 
----
+## What's next
+
+The redesign's phases are built. Next: install, dogfood on the other VM, and let real sessions,
+verdicts and the owner's reviews (memory promotions, skill drafts, tools, routes) drive what changes.
 
 ## Open decisions
 
