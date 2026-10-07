@@ -402,6 +402,8 @@ async fn catalog() -> (Vec<ToolEntry>, Vec<String>) {
         }
         tools.extend(s.tools.iter().cloned());
     }
+    // The agent's own tools (workshop.rs), found and called the same way.
+    tools.extend(crate::workshop::made_entries());
     (tools, problems)
 }
 
@@ -495,6 +497,9 @@ async fn call(app: &App, session: Uuid, full: &str, args: &Value) -> Result<(Str
     let args = if args.is_null() { json!({}) } else { args.clone() };
     let missing = missing_args(&t.schema, &args);
     anyhow::ensure!(missing.is_empty(), "missing required arguments: {} (load_tool shows the parameters)", missing.join(", "));
+    if t.server == "made" {
+        return crate::workshop::run_made(&app.db, &t.name, &args).await;
+    }
     let (result, untrusted) = {
         let reg = REGISTRY.lock().await;
         let mut s = reg.servers.get(&t.server).context("the server went away")?.lock().await;
@@ -521,7 +526,7 @@ async fn call(app: &App, session: Uuid, full: &str, args: &Value) -> Result<(Str
 pub fn find_spec() -> Value {
     json!({
         "name": "find_tools",
-        "description": "Find tools from the owner's connected services (MCP servers: mail, calendar, documents, …) by what you need; returns names and one-liners. Then load_tool shows a tool's parameters and call_tool runs it.",
+        "description": "Find tools from the owner's connected services (MCP servers: mail, calendar, documents, …) and tools you made (made_…) by what you need; returns names and one-liners. Then load_tool shows a tool's parameters and call_tool runs it.",
         "parameters": { "type": "object", "properties": {
             "query": { "type": "string", "description": "What you need to do, in a few words (e.g. \"list calendar events\")" } },
           "required": ["query"] }

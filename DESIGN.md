@@ -124,6 +124,11 @@ with questions for the owner. The kernel-enforced workflow (`flow.rs`) was remov
   one) and catches duplicates and sensitive notes, the kernel appends, masks, labels web-sourced
   notes, keeps `index.md` and `log.md`, and commits; the agent writes the summary. Indexed for
   `search`; linted and committed by the nightly sleep.
+- **Workshop** (`workshop.rs`, D-037): `save_skill` (reason required, format and size checked,
+  near-duplicates refused, drafts in `skills/_proposed` until the owner or an accepted session
+  vouches, new domains the owner's call, commits; the sleep flags and archives unused skills) and
+  `save_tool` (made tools in `~/.zenbot/tools/`, called as `made_<name>`, sandboxed without network
+  until approved in `made_tools`).
 - **Skills** (`skills.rs`): folders in `~/.zenbot/skills/<domain>/<name>/` in the agentskills.io
   format, validated when scanned (invalid ones are skipped and logged). The instructions carry an
   index; `find_skills` matches names, descriptions and bodies; `load_skill` returns a SKILL.md or a

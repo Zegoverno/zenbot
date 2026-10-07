@@ -6,6 +6,31 @@
 
 ---
 
+## D-037 — The workshop: rules the kernel enforces for skills and tools the agent makes
+
+**Decision:** The agent changes skills only through `save_skill` and makes tools only through
+`save_tool`. A skill needs a reason (the evidence), fits the agentskills.io format and 10,000
+characters, and isn't a near-duplicate of one in its domain (refused with "extend X instead"). New
+skills are drafts until the owner accepts them or a session that used them is accepted; a new
+domain always needs the owner; changes to active skills apply at once, each a commit. Unused skills
+are flagged at 30 days and archived (never deleted) at 90. A made tool is found and called like an
+MCP tool, never gets the kernel's environment, and runs with no network and read-only files until
+the owner approves it; the approval is in the database, out of the agent's reach.
+
+**Why:** Hermes sprawled because creating a skill was cheaper than improving one, a background fork
+was told to save something, and nothing was retired (`docs/research/hermes-openclaw.md`). Voyager
+adds a skill only after a critic confirms success; here that's a verified use or the owner. The agent
+has a shell, so rules that matter for safety (a tool reaching the network) live where it can't
+write.
+
+**Considered:** a background "reflect" fork after busy turns (Hermes; rejected: that's the sprawl), the
+owner approving every skill change (too much of the owner's attention), tools as MCP servers (more
+moving parts for the same result).
+
+**Date:** 2026-10-07
+
+---
+
 ## D-036 — The wiki: pages over timelines; System One routes, the agent writes
 
 **Decision:** Knowledge lives in markdown pages in `~/.zenbot/wiki/` (git), one per concept,

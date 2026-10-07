@@ -91,6 +91,16 @@ enum Cmd {
     },
     /// Check that the kernel, database, worker and model sign-in are healthy
     Status,
+    /// zenbot's skills (active and drafts) with how often they're used, and the tools it made
+    Skills {
+        #[command(subcommand)]
+        cmd: Option<ReviewCmd>,
+    },
+    /// Approve or reject a tool zenbot made (`zen skills` lists them)
+    Tools {
+        #[command(subcommand)]
+        cmd: ReviewCmd,
+    },
     /// Show zenbot's memory (short-term by default) and the last sleep; `zen memory sleep` tidies it now
     Memory {
         #[command(subcommand)]
@@ -140,6 +150,14 @@ enum SessionsCmd {
         #[arg(short, long)]
         note: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum ReviewCmd {
+    /// Accept: activate a draft skill (domain/name), or let a tool use the network
+    Accept { name: String },
+    /// Reject: archive a draft skill, or stop a tool from running
+    Reject { name: String },
 }
 
 #[derive(Subcommand)]
@@ -742,6 +760,43 @@ async fn run(cli: Cli) -> Result<()> {
                     p["lower_bound"].as_f64().unwrap_or(0.0)
                 );
             }
+        }
+        Cmd::Skills { cmd: None } => {
+            let s = c.get("/api/skills").await?;
+            if cli.json {
+                out(&s);
+            } else {
+                for x in s["skills"].as_array().into_iter().flatten() {
+                    let draft = if x["status"] == "draft" { " (draft)" } else { "" };
+                    let last = x["last_load"].as_str().map(|t| format!(", last {}", &t[..t.len().min(10)])).unwrap_or_default();
+                    println!(
+                        "{}{draft}  {}",
+                        x["skill"].as_str().unwrap_or(""),
+                        dim(&format!("{} loads{last}; accepted {} of {} judged sessions", x["loads"], x["sessions_accepted"], x["sessions_judged"]))
+                    );
+                }
+                for t in s["tools"].as_array().into_iter().flatten() {
+                    let state = if t["approved"] == true { "approved" } else { "sandboxed until approved" };
+                    println!("tool made_{}  {}", t["tool"].as_str().unwrap_or(""), dim(state));
+                }
+            }
+        }
+        Cmd::Skills { cmd: Some(r) } => {
+            let (name, decision) = match r {
+                ReviewCmd::Accept { name } => (name, "accept"),
+                ReviewCmd::Reject { name } => (name, "reject"),
+            };
+            let res = c.post("/api/skills/review", json!({ "name": name, "decision": decision })).await?;
+            if cli.json { out(&res) } else { println!("{}", res["result"].as_str().unwrap_or("")) }
+        }
+        Cmd::Tools { cmd } => {
+            let (name, decision) = match cmd {
+                ReviewCmd::Accept { name } => (name, "accept"),
+                ReviewCmd::Reject { name } => (name, "reject"),
+            };
+            let name = name.trim_start_matches("made_").to_string();
+            let res = c.post(&format!("/api/tools/{name}/review"), json!({ "decision": decision })).await?;
+            if cli.json { out(&res) } else { println!("{}", res["result"].as_str().unwrap_or("")) }
         }
         Cmd::Memory { cmd: None, tier } => {
             let m = c.get(&format!("/api/memory?tier={tier}")).await?;

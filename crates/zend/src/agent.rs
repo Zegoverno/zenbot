@@ -113,9 +113,11 @@ pub fn specs(kind: Option<&str>) -> Value {
     all.push(crate::web::fetch_spec());
     all.push(crate::skills::find_spec());
     all.push(crate::skills::load_spec());
+    all.push(crate::workshop::save_skill_spec());
     all.push(crate::mcp::find_spec());
     all.push(crate::mcp::load_spec());
     all.push(crate::mcp::call_spec());
+    all.push(crate::workshop::save_tool_spec());
     all.push(verify_spec());
     if decide_on() {
         all.push(decide_spec());
@@ -190,6 +192,7 @@ If a question goes unanswered, take your recommended option and say it was an as
         "web_search" | "web_fetch" => crate::web::run_tool(app, session, name, args).await,
         "search" => crate::search::run_tool(app, session, name, args).await,
         "capture" => crate::wiki::run_tool(app, session, name, args).await,
+        "save_skill" | "save_tool" => crate::workshop::run_tool(app, session, name, args).await,
         "find_tools" | "load_tool" | "call_tool" => crate::mcp::run_tool(app, session, name, args).await,
         "decide" => {
             let res = crate::score::decide(app, &args["state"], &args["questions"]).await;
@@ -387,8 +390,8 @@ async fn verify(app: &AppState, session: Uuid, workspace: &Path, args: &Value) -
             dir.display(),
             diff_from(&dir, &base).await
         );
-        match crate::run_child(app, session, VERIFIER, &prompt, &dir).await {
-            Ok(v) => v,
+        match crate::run_child(app, session, VERIFIER, &prompt, &dir, None).await {
+            Ok(child) => crate::tape::load(&app.db, child, &["verdict"]).await.ok().and_then(|b| b.last().map(|b| b.payload.clone())).unwrap_or(Value::Null),
             Err(e) => {
                 tracing::warn!("verifier for {session}: {e:#}");
                 Value::Null
@@ -416,7 +419,7 @@ mod tests {
         let names = |v: Value| v.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         assert_eq!(names(specs(Some(VERIFIER))), ["bash", "read", "submit_verdict"]);
         let all = names(specs(None));
-        for t in ["bash", "read", "write", "edit", "history", "search", "ask", "remember", "capture", "web_search", "web_fetch", "find_skills", "load_skill", "find_tools", "load_tool", "call_tool", "verify"] {
+        for t in ["bash", "read", "write", "edit", "history", "search", "ask", "remember", "capture", "web_search", "web_fetch", "find_skills", "load_skill", "save_skill", "find_tools", "load_tool", "call_tool", "save_tool", "verify"] {
             assert!(all.contains(&t.to_string()), "{t} offered");
         }
         assert!(!all.contains(&"move".to_string()) && !all.contains(&"propose_brief".to_string()));

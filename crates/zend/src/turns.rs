@@ -285,19 +285,22 @@ pub(crate) async fn start_kernel_turn(app: &AppState, id: Uuid, text: String) ->
     begin_turn(app, id, text, Origin::Kernel).await
 }
 
-/// Run a child session of `kind` (e.g. a verifier) with one kernel prompt and wait for it to end.
-/// Returns the verdict it recorded (its latest `verdict` block), or null.
-pub(crate) async fn run_child(app: &AppState, parent: Uuid, kind: &str, prompt: &str, dir: &std::path::Path) -> Result<Value> {
+/// Run a child session of `kind` (a verifier, a subagent) with one kernel prompt, on `model` (the
+/// parent's when None), and wait for it to end (30 minutes at most). It inherits the parent's
+/// taint. Returns the child's id; the caller reads what it needs from its tape.
+pub(crate) async fn run_child(app: &AppState, parent: Uuid, kind: &str, prompt: &str, dir: &std::path::Path, model: Option<&str>) -> Result<Uuid> {
     let child = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO sessions (id, title, model, effort, state, parent, kind, workspace)
-         SELECT $1, $2 || ': ' || title, model, effort, $3, id, $3, $5 FROM sessions WHERE id = $4",
+        "INSERT INTO sessions (id, title, model, effort, state, parent, kind, workspace, tainted_at)
+         SELECT $1, $2 || ': ' || title, COALESCE($6, model), CASE WHEN $6 IS NULL THEN effort END, $3, id, $3, $5, tainted_at
+         FROM sessions WHERE id = $4",
     )
     .bind(child)
     .bind(kind)
     .bind(kind)
     .bind(parent)
     .bind(dir.display().to_string())
+    .bind(model)
     .execute(&app.db)
     .await?;
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -311,7 +314,7 @@ pub(crate) async fn run_child(app: &AppState, parent: Uuid, kind: &str, prompt: 
         abort_turn(app, child).await;
     }
     app.waiters.lock().await.remove(&child);
-    Ok(tape::load(&app.db, child, &["verdict"]).await?.last().map(|b| b.payload.clone()).unwrap_or(Value::Null))
+    Ok(child)
 }
 
 pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: Origin) -> Result<()> {

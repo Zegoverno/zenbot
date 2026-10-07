@@ -113,7 +113,7 @@ The owner's name is E2E Owner." >"$TMP/home/.zenbot/USER.md"
   check "the skills index is in the instructions" grep -q "work/verify:" <<<"$base"
   check "memory starts empty" grep -q "(empty)" <<<"$base"
   local tools; tools=$(q "SELECT string_agg(t->>'name', ',') FROM turns, envelopes e, jsonb_array_elements(e.tools) t WHERE turns.session_id='$sid' AND e.hash = turns.envelope")
-  check "the system tools, in order, no workflow tools" eq "$tools" bash,read,write,edit,history,search,ask,remember,capture,web_search,web_fetch,find_skills,load_skill,find_tools,load_tool,call_tool,verify
+  check "the system tools, in order, no workflow tools" eq "$tools" bash,read,write,edit,history,search,ask,remember,capture,web_search,web_fetch,find_skills,load_skill,save_skill,find_tools,load_tool,call_tool,save_tool,verify
 }
 
 # Skills load on demand, as tool results; nothing outside a skill's folder can be read through them.
@@ -233,6 +233,42 @@ wiki_capture() {
   local note; note=$(zen memory sleep --json | jq -r .note)
   check "the sleep reports pages without a summary" grep -q "wiki: dom-smoothie: no summary yet" <<<"$note"
   kill "$srv" 2>/dev/null || true
+}
+
+# Workshop: a new skill is a draft, a near-duplicate is refused, a reason is required, a new domain
+# waits for the owner; drafts can be found and loaded; accepting a session that loaded a draft
+# activates it; a made tool runs sandboxed (files read-only) until the owner approves it.
+workshop() {
+  local ws; ws=$(new_workspace workshop)
+  start_kernel "$ws" "$(script workshop.json)"
+  local sk="$TMP/home/.zenbot/skills"
+  local r; r=$(zen ask --json -m faux/smoke "make")
+  check "draft saved, duplicate refused, reason required, new domain, tool saved" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" \
+    save_skill:false,save_skill:true,save_skill:true,save_skill:false,save_tool:false
+  local sid; sid=$(echo "$r" | jq -r .session_id)
+  local res; res=$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult'")
+  check "the duplicate is told to extend the existing skill" grep -q "work/release-notes already does this job: extend it instead" <<<"$res"
+  check "a new domain needs the owner" grep -q "finance\` is a new domain" <<<"$res"
+  check "drafts live under _proposed" test -s "$sk/_proposed/work/release-notes/SKILL.md" -a -s "$sk/_proposed/finance/budget-review/SKILL.md"
+  r=$(zen ask --json -m faux/smoke "use"); sid=$(echo "$r" | jq -r .session_id)
+  check "find, load a draft, find and run a made tool" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" find_skills:false,load_skill:false,find_tools:false,call_tool:false
+  res=$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult'")
+  check "the draft is marked" grep -q "work/release-notes: (draft)" <<<"$res"
+  check "the made tool is found" grep -q "made_word-count: Count the words" <<<"$res"
+  check "it ran, sandboxed: files read-only" bash -c 'grep -q "^3" <<<"$1" && grep -q "write: refused" <<<"$1" && grep -q "ran sandboxed" <<<"$1"' _ "$res"
+  zen sessions decide "$sid" accept >/dev/null; sleep 2
+  check "an accepted session activates the draft it used" test -s "$sk/work/release-notes/SKILL.md"
+  check "a new domain stays a draft" test -s "$sk/_proposed/finance/budget-review/SKILL.md"
+  zen skills accept finance/budget-review >/dev/null
+  check "the owner activates the new domain's skill" test -s "$sk/finance/budget-review/SKILL.md"
+  zen tools accept word-count >/dev/null
+  r=$(zen ask --json -m faux/smoke "again"); sid=$(echo "$r" | jq -r .session_id)
+  check "approved: it can write" grep -q "write: ok" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='call_tool'")"
+  echo "# changed after approval" >>"$TMP/home/.zenbot/tools/word-count/run.py"
+  r=$(zen ask --json -m faux/smoke "again"); sid=$(echo "$r" | jq -r .session_id)
+  check "changed after approval: sandboxed again" grep -q "changed since the owner approved it" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='call_tool'")"
+  check "skills and tools are in git" bash -c '[ "$(git -C "$1" log --oneline | wc -l)" -ge 4 ] && [ "$(git -C "$2" log --oneline | wc -l)" -ge 1 ]' _ "$sk" "$TMP/home/.zenbot/tools"
+  check "zen skills lists use" grep -q "work/release-notes" <<<"$(zen skills)"
 }
 
 # remember: a memory saved in one session is in the next session's instructions, not the current one's.
@@ -370,6 +406,7 @@ run mcp mcp_tools
 run web web_tools
 run search search_recall
 run wiki wiki_capture
+run workshop workshop
 run memory-across-sessions memory_across_sessions
 run memory-sleep memory_sleep
 run ask ask_and_gone_tools
