@@ -16,11 +16,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use zen_proto::text_of;
-use crossterm::event::{
-    MouseButton, DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-    KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-};
-use crossterm::{execute, terminal};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
+use crossterm::terminal;
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -42,6 +39,11 @@ const ALT_SCREEN_OFF: &str = "\x1b[?1049l";
 /// Report mouse buttons and the wheel (SGR encoding), but not motion.
 const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1006h";
 const MOUSE_OFF: &str = "\x1b[?1006l\x1b[?1000l";
+const PASTE_ON: &str = "\x1b[?2004h";
+const PASTE_OFF: &str = "\x1b[?2004l";
+/// Kitty keyboard protocol: report modified keys distinctly (DISAMBIGUATE_ESCAPE_CODES), and undo it.
+const KEYS_PUSH: &str = "\x1b[>1u";
+const KEYS_POP: &str = "\x1b[<1u";
 
 struct Command {
     name: &'static str,
@@ -452,25 +454,17 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
 
     terminal::enable_raw_mode()?;
     let enhanced = terminal::supports_keyboard_enhancement().unwrap_or(false);
-    let mut out = std::io::stdout();
-    execute!(out, EnableBracketedPaste)?;
-    if enhanced {
-        execute!(out, PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))?;
-    }
     app.enhanced = enhanced;
-    if !inline {
-        // Full screen: the alternate screen leaves the terminal's own scrollback untouched.
-        let _ = out.write_all(format!("{ALT_SCREEN_ON}{MOUSE_ON}").as_bytes());
-        let _ = out.flush();
-    }
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        if !inline {
-            let _ = std::io::stdout().write_all(format!("{MOUSE_OFF}{ALT_SCREEN_OFF}\x1b[?25h").as_bytes());
-        }
-        let _ = terminal::disable_raw_mode();
+        restore_terminal(inline, enhanced);
         default_hook(info);
     }));
+    let mut out = std::io::stdout();
+    if let Err(e) = out.write_all(setup_sequence(inline, enhanced).as_bytes()).and_then(|_| out.flush()) {
+        restore_terminal(inline, enhanced);
+        return Err(e.into());
+    }
 
     let result = async {
         app.commit(vec![
@@ -549,28 +543,21 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
     }
     .await;
 
-    // Restore the terminal.
-    let mut s = String::from("\x1b[?2026h");
     if inline {
+        let mut s = String::new();
         app.erase(&mut s);
+        let _ = out.write_all(s.as_bytes());
+    }
+    restore_terminal(inline, enhanced);
+    let bye = if app.restart {
+        Some("restarting zen…".to_string())
     } else {
-        s.push_str(&format!("{MOUSE_OFF}{ALT_SCREEN_OFF}"));
+        app.session.as_deref().map(|id| format!("session {} · resume with: zen -r {}", short(id), short(id)))
+    };
+    if let Some(bye) = bye {
+        let _ = out.write_all(format!("{}\r\n", md::to_ansi(&line(bye, Sty::Dim))).as_bytes());
+        let _ = out.flush();
     }
-    if app.restart {
-        s.push_str(&md::to_ansi(&line("restarting zen…", Sty::Dim)));
-        s.push_str("\r\n");
-    } else if let Some(id) = &app.session {
-        s.push_str(&md::to_ansi(&line(format!("session {} · resume with: zen -r {}", short(id), short(id)), Sty::Dim)));
-        s.push_str("\r\n");
-    }
-    s.push_str("\x1b[?25h\x1b[?2026l");
-    let _ = out.write_all(s.as_bytes());
-    let _ = out.flush();
-    if enhanced {
-        let _ = execute!(out, PopKeyboardEnhancementFlags);
-    }
-    let _ = execute!(out, DisableBracketedPaste);
-    let _ = terminal::disable_raw_mode();
     if result.is_ok() && app.restart {
         let bin = installed_zen().context("can't find the zen binary to restart")?;
         let mut cmd = std::process::Command::new(&bin);
@@ -580,6 +567,44 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
         return Err(anyhow::anyhow!("couldn't restart {}: {err}", bin.display()));
     }
     result
+}
+
+/// Escape codes that set the terminal up for zen: bracketed paste, modified keys when the
+/// terminal reports them, and in full screen the alternate screen (which leaves the terminal's
+/// own scrollback untouched) with mouse reporting.
+fn setup_sequence(inline: bool, enhanced: bool) -> String {
+    let mut s = String::from(PASTE_ON);
+    if enhanced {
+        s.push_str(KEYS_PUSH);
+    }
+    if !inline {
+        s.push_str(ALT_SCREEN_ON);
+        s.push_str(MOUSE_ON);
+    }
+    s
+}
+
+/// Escape codes that undo `setup_sequence`, and show the caret.
+fn restore_sequence(inline: bool, enhanced: bool) -> String {
+    let mut s = String::new();
+    if !inline {
+        s.push_str(MOUSE_OFF);
+        s.push_str(ALT_SCREEN_OFF);
+    }
+    if enhanced {
+        s.push_str(KEYS_POP);
+    }
+    s.push_str(PASTE_OFF);
+    s.push_str("\x1b[?25h");
+    s
+}
+
+/// Give the terminal back as zen found it: on a normal exit, an error, or a panic.
+fn restore_terminal(inline: bool, enhanced: bool) {
+    let mut out = std::io::stdout();
+    let _ = out.write_all(restore_sequence(inline, enhanced).as_bytes());
+    let _ = out.flush();
+    let _ = terminal::disable_raw_mode();
 }
 
 /// The zen to restart into: the installed one (`~/.zenbot/bin/zen`, where upgrades put it), else
@@ -2530,6 +2555,18 @@ mod tests {
         a.on_key(ctrl_b).await.unwrap();
         a.draw();
         assert_eq!(a.columns().1, 0);
+    }
+
+    #[test]
+    fn restoring_the_terminal_undoes_every_setup_step() {
+        for (inline, enhanced) in [(false, false), (false, true), (true, false), (true, true)] {
+            let (on, off) = (setup_sequence(inline, enhanced), restore_sequence(inline, enhanced));
+            for (set, unset) in [(PASTE_ON, PASTE_OFF), (KEYS_PUSH, KEYS_POP), (ALT_SCREEN_ON, ALT_SCREEN_OFF), (MOUSE_ON, MOUSE_OFF)] {
+                assert_eq!(on.contains(set), off.contains(unset), "inline={inline} enhanced={enhanced}: {set:?} vs {unset:?}");
+            }
+            assert!(off.ends_with("\x1b[?25h"), "the caret is shown again");
+        }
+        assert!(setup_sequence(false, true).contains(KEYS_PUSH) && !setup_sequence(true, false).contains(ALT_SCREEN_ON));
     }
 
     #[tokio::test]
