@@ -2651,6 +2651,43 @@ mod tests {
         assert_eq!(a.session_tokens, 50 * 15, "every message counts, shown or not");
     }
 
+    /// CPU time this thread has used, in seconds (Linux: /proc/thread-self/schedstat, in ns).
+    fn thread_cpu() -> f64 {
+        let s = std::fs::read_to_string("/proc/thread-self/schedstat").unwrap_or_default();
+        s.split_whitespace().next().and_then(|n| n.parse::<f64>().ok()).unwrap_or(0.0) / 1e9
+    }
+
+    /// A long markdown reply: paragraphs, a list and a code block, repeated to `bytes` bytes.
+    fn long_reply(bytes: usize) -> String {
+        let block = "## A heading\n\nSome **bold** text and `code` in a paragraph that is long enough to wrap \
+                     at the chat width, as model replies usually are.\n\n- a list item\n- another item with `code`\n\n\
+                     ```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n\n";
+        let mut s = String::new();
+        while s.len() < bytes {
+            s.push_str(block);
+        }
+        s.truncate(bytes);
+        s
+    }
+
+    /// Streaming cost in full screen: a 43 KB reply in 20-byte deltas, each drawn as it arrives.
+    /// Run with `cargo test --release -p zen -- --ignored --nocapture streaming_cost`.
+    #[test]
+    #[ignore]
+    fn streaming_cost() {
+        let reply = long_reply(43_000);
+        let mut a = app(120, 40);
+        a.busy = true;
+        let t0 = thread_cpu();
+        let chars: Vec<char> = reply.chars().collect();
+        for chunk in chars.chunks(20) {
+            a.on_event(json!({ "type": "delta", "delta": chunk.iter().collect::<String>() }));
+            a.capture = Some(String::new());
+        }
+        let secs = thread_cpu() - t0;
+        println!("streaming {} bytes in 20-byte deltas: {secs:.3} s CPU", reply.len());
+    }
+
     #[tokio::test]
     async fn done_opens_the_decision_picker_or_explains_itself() {
         let mut a = app(80, 20);
