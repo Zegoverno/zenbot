@@ -12,7 +12,7 @@ change: briefs on every job gave the same pass rate at about twice the cost (D-0
 
 ## The `work/brief` skill
 
-`~/.zenbot/skills/work/brief/SKILL.md` (default in `crates/zend/defaults/`). For a job that is big,
+`~/.zenbot/global/skills/work/brief/SKILL.md` (default in `crates/zend/defaults/`). For a job that is big,
 risky or unclear:
 
 1. **Find the real job.** Say the route: `quick` (just answer), `bounded` (a change with a clear

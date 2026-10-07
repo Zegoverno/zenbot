@@ -103,17 +103,46 @@ prompt_files() {
 The owner's name is E2E Owner." >"$TMP/home/.zenbot/USER.md"
   start_kernel "$ws" ""
   local zh="$TMP/home/.zenbot"
-  check "defaults installed" test -s "$zh/SOUL.md" -a -s "$zh/AGENTS.md" -a -s "$zh/skills/work/verify/SKILL.md" -a -s "$zh/skills/work/brief/references/template.md"
+  check "defaults installed, scoped" test -s "$zh/agents/zenbot/SOUL.md" -a -s "$zh/AGENTS.md" -a -s "$zh/global/skills/work/verify/SKILL.md" -a -s "$zh/global/skills/work/brief/references/template.md"
+  check "a fresh home has no old-layout paths" test ! -e "$zh/SOUL.md" -a ! -e "$zh/skills"
   check "the owner's USER.md was kept" grep -q "E2E Owner" "$zh/USER.md"
   local sid; sid=$(zen ask --json -m faux/smoke "hi" | jq -r .session_id)
   local base; base=$(q "SELECT payload->>'text' FROM tape_events WHERE session_id='$sid' AND kind='base'")
-  check "SOUL.md is in the instructions" grep -q "<soul" <<<"$base"
+  check "SOUL.md is in the instructions, from the agent's folder" grep -qF '<soul file="~/.zenbot/agents/zenbot/SOUL.md">' <<<"$base"
   check "AGENTS.md is the environment, placeholders filled" grep -qF "Working directory for tools: $ws" <<<"$base"
   check "USER.md is in the instructions" grep -q "E2E Owner" <<<"$base"
   check "the skills index is in the instructions" grep -q "work/verify:" <<<"$base"
   check "memory starts empty" grep -q "(empty)" <<<"$base"
   local tools; tools=$(q "SELECT string_agg(t->>'name', ',') FROM turns, envelopes e, jsonb_array_elements(e.tools) t WHERE turns.session_id='$sid' AND e.hash = turns.envelope")
   check "the system tools, in order, no workflow tools" eq "$tools" bash,read,write,edit,history,search,ask,remember,capture,web_search,web_fetch,find_skills,load_skill,save_skill,find_tools,load_tool,call_tool,save_tool,verify,delegate
+}
+
+# A home in the old flat layout moves into the scoped one (layout.rs) when the kernel starts, once:
+# the owner's files keep their content and history, nothing is overwritten by a default, and a
+# symlink at each old path still leads to the file (what a rolled-back build reads).
+layout_move() {
+  local ws; ws=$(new_workspace layout)
+  local zh="$TMP/old-home"
+  mkdir -p "$zh/wiki" "$zh/skills/work/verify"
+  printf '# SOUL.md\nI am the E2E soul, moved.\n' >"$zh/SOUL.md"
+  echo "old memory copy" >"$zh/MEMORY.md"
+  echo "my own verify" >"$zh/skills/work/verify/SKILL.md"
+  (cd "$zh/wiki" && git init -q && echo "# A page" >page.md && git add . && git -c user.email=e2e@zen -c user.name=e2e commit -qm "a page")
+  start_kernel "$ws" "" ZEN_HOME="$zh"
+  check "moved to the scoped layout" test -s "$zh/agents/zenbot/SOUL.md" -a -d "$zh/global/wiki/.git" -a -d "$zh/global/skills/work/verify"
+  check "the soul kept its content" grep -q "E2E soul, moved" "$zh/agents/zenbot/SOUL.md"
+  check "the wiki kept its history" eq "$(git -C "$zh/global/wiki" log --format=%s)" "a page"
+  check "the agent's own skill wasn't overwritten" eq "$(cat "$zh/global/skills/work/verify/SKILL.md")" "my own verify"
+  check "missing defaults went to the new layout" test -s "$zh/global/skills/work/brief/SKILL.md"
+  check "old paths are symlinks to the new ones" eq "$(readlink "$zh/SOUL.md") $(readlink "$zh/wiki") $(readlink "$zh/skills") $(readlink "$zh/MEMORY.md")" \
+    "agents/zenbot/SOUL.md global/wiki global/skills global/MEMORY.md"
+  check "and still read through" grep -q "E2E soul, moved" "$zh/SOUL.md"
+  local sid; sid=$(zen ask --json -m faux/smoke "hi" | jq -r .session_id)
+  check "the moved soul is in the instructions" grep -q "E2E soul, moved" <<<"$(q "SELECT payload->>'text' FROM tape_events WHERE session_id='$sid' AND kind='base'")"
+  stop_kernel
+  start_kernel "$ws" "" ZEN_HOME="$zh"
+  check "a second start changes nothing" eq "$(grep -c 'moved ' "$TMP/kernel.log") $(readlink "$zh/SOUL.md") $(cat "$zh/agents/zenbot/SOUL.md" | tail -1)" \
+    "0 agents/zenbot/SOUL.md I am the E2E soul, moved."
 }
 
 # Skills load on demand, as tool results; nothing outside a skill's folder can be read through them.
@@ -216,7 +245,7 @@ wiki_capture() {
   local port=$((PORT + 2))
   python3 "$REPO/scripts/e2e/searxng_stub.py" "$port" & local srv=$!
   start_kernel "$ws" "$(script wiki.json)" ZEN_SEARXNG_URL="http://127.0.0.1:$port"
-  local w="$TMP/home/.zenbot/wiki"
+  local w="$TMP/home/.zenbot/global/wiki"
   local r; r=$(zen ask --json -m faux/smoke "first")
   check "a new page" bash -c 'grep -q "Captured to \[\[dom-smoothie\]\] (new page" <<<"$1"' _ "$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE payload->>'toolName'='capture' ORDER BY id DESC LIMIT 1")"
   check "it has a dated entry with its source" grep -q "(verified) — dom_smoothie ports readability.js" "$w/dom-smoothie.md"
@@ -241,7 +270,7 @@ wiki_capture() {
 workshop() {
   local ws; ws=$(new_workspace workshop)
   start_kernel "$ws" "$(script workshop.json)"
-  local sk="$TMP/home/.zenbot/skills"
+  local sk="$TMP/home/.zenbot/global/skills"
   local r; r=$(zen ask --json -m faux/smoke "make")
   check "draft saved, duplicate refused, reason required, new domain, tool saved" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" \
     save_skill:false,save_skill:true,save_skill:true,save_skill:false,save_tool:false
@@ -264,10 +293,10 @@ workshop() {
   zen tools accept word-count >/dev/null
   r=$(zen ask --json -m faux/smoke "again"); sid=$(echo "$r" | jq -r .session_id)
   check "approved: it can write" grep -q "write: ok" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='call_tool'")"
-  echo "# changed after approval" >>"$TMP/home/.zenbot/tools/word-count/run.py"
+  echo "# changed after approval" >>"$TMP/home/.zenbot/global/tools/word-count/run.py"
   r=$(zen ask --json -m faux/smoke "again"); sid=$(echo "$r" | jq -r .session_id)
   check "changed after approval: sandboxed again" grep -q "changed since the owner approved it" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='call_tool'")"
-  check "skills and tools are in git" bash -c '[ "$(git -C "$1" log --oneline | wc -l)" -ge 4 ] && [ "$(git -C "$2" log --oneline | wc -l)" -ge 1 ]' _ "$sk" "$TMP/home/.zenbot/tools"
+  check "skills and tools are in git" bash -c '[ "$(git -C "$1" log --oneline | wc -l)" -ge 4 ] && [ "$(git -C "$2" log --oneline | wc -l)" -ge 1 ]' _ "$sk" "$TMP/home/.zenbot/global/tools"
   check "zen skills lists use" grep -q "work/release-notes" <<<"$(zen skills)"
 }
 
@@ -302,7 +331,7 @@ memory_across_sessions() {
   start_kernel "$ws" "$(script agent.json)"
   local s1; s1=$(zen ask --json -m faux/smoke "remember this" | jq -r .session_id)
   check "saved with its source" eq "$(q "SELECT source || '/' || tier FROM memories")" owner/short
-  check "exported to MEMORY.md" grep -q "\[m1\] The owner prefers tabs" "$TMP/home/.zenbot/MEMORY.md"
+  check "exported to MEMORY.md" grep -q "\[m1\] The owner prefers tabs" "$TMP/home/.zenbot/global/MEMORY.md"
   zen ask --json -s "$s1" "and now" >/dev/null
   check "frozen for the session that wrote it" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$s1' AND kind='base' AND payload->>'text' LIKE '%prefers tabs%'")" 0
   local s2; s2=$(zen ask --json -m faux/smoke "hello" | jq -r .session_id)
@@ -426,6 +455,7 @@ slow_summary() {
 run open-loop open_loop
 run restart-recovery restart_recovery
 run prompt-files prompt_files
+run layout-move layout_move
 run skills skills_on_demand
 run mcp mcp_tools
 run web web_tools

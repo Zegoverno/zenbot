@@ -6,6 +6,49 @@
 
 ---
 
+## 2026-10-07 — zenbot's home laid out by scope (D-040)
+
+- `~/.zenbot` is split by scope: `USER.md` and `AGENTS.md` stay at the top (system-wide),
+  `agents/zenbot/SOUL.md` is the agent's own, and `global/` holds what every agent shares
+  (`MEMORY.md`, `wiki/`, `skills/`, `tools/`). New module `crates/zend/src/layout.rs`.
+- The kernel moves an existing flat layout at startup, once, before writing defaults, never
+  overwriting; each old path becomes a relative symlink so a rolled-back build still finds the
+  owner's files. The `zen` Files tree hides symlinks (`.` shows them).
+- Tested: unit tests for the move (once, no overwrite, fresh home), e2e scenario `layout-move`
+  (content, wiki history, an agent-edited skill kept, symlinks, the moved soul in the instructions,
+  a second start changes nothing), the full e2e suite and the other scenarios on the new paths.
+- Why: the owner wants the multi-agent layout in place now, with one agent for the moment.
+
+## 2026-10-07 — Terminal app: restart onto a new version
+
+- `/restart` restarts zen on the installed binary (`~/.zenbot/bin/zen`), back in the same session
+  and display mode: the terminal is restored, then the process `exec`s the new zen (same PID, so
+  the terminal tab stays). The kernel URL and token pass through the environment, not argv.
+- `/upgrade` restarts zen by itself when the upgrade installed a new zen. When zen is upgraded some
+  other way (e.g. zenbot runs `scripts/upgrade.sh` in a session), zen notices the binary changed
+  (checked every 5 s) and says `/restart` loads it.
+- Why: after an upgrade the owner had to quit and relaunch zen by hand to get the new client.
+
+## 2026-10-07 — Terminal app: a navigable side panel
+
+- The side panel is now a small dashboard: a tab strip, a **Files** tab (folder tree) and a **Viewer** tab (the open file). Ctrl+B or `/files` opens and
+  closes it; Tab moves the keys between chat and panel; ↑↓ move, →/Enter open or expand, ← fold or
+  go to the parent, `.` shows dotfiles, Esc/Tab return to chat, typing returns to chat too. Mouse
+  clicks work on tabs and rows. `/open <file>` and `/close` still work.
+- Tree logic is in `crates/zen/src/files.rs` (listing is lazy, noise folders skipped).
+- The tree starts at zenbot's home, `~/.zenbot` (prompt files, wiki, skills), not the directory zen
+  started in; `/files <dir>` re-roots it (`~` works). Why: the owner browses zenbot's own files from
+  the panel, and launching zen from `~` showed the whole home folder.
+- Not built yet: a Changes (diff) tab, other tabs (wiki, sessions).
+
+## 2026-10-07 — Terminal app: tool work folds into one line
+
+- In full screen, a run of tool calls between pieces of text is one line (`▸ <latest step> · N steps ·
+  ctrl+o`), so only the current step shows. Ctrl+O unfolds every step with its result, and folds
+  them again. Inline mode is unchanged (it prints into scrollback and can't fold).
+- The status line counts the running turn's tool calls and distinct files written or edited.
+- Why: a long turn buried the answer under tool output; Claude Code's own TUI folds the same way.
+
 ## 2026-10-07 — Terminal app: no flicker, a side panel for files
 
 - **No flicker** (D-039): full screen now draws each frame whole and writes only the rows that

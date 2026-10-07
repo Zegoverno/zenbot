@@ -14,10 +14,10 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use zen_proto::text_of;
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    MouseButton, DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
     KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::{execute, terminal};
@@ -30,6 +30,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::client::{short, tool_summary, Client, NewSession, Ws};
 use crate::editor::Editor;
+use crate::files::Files;
 use crate::md::{self, line, Line, Md, Sty};
 use crate::screen::{self, Screen};
 
@@ -60,11 +61,13 @@ const COMMANDS: &[Command] = &[
     cmd("/effort", "choose the thinking level", false),
     cmd("/done", "judge the work so far: accept, more, reshape or drop", false),
     cmd("/rename", "rename this session: /rename <title>", true),
+    cmd("/files", "show or hide the folder tree (also ctrl+b); /files <dir> shows that folder instead of ~/.zenbot", false),
     cmd("/open", "show a file next to the chat: /open <path> (no path: the last file zenbot touched)", true),
     cmd("/close", "close the side panel", false),
     cmd("/mouse", "mouse wheel scrolling on/off (off lets the terminal select text)", false),
     cmd("/archive", "archive this session and start a new one", false),
     cmd("/upgrade", "update zenbot to the latest version and restart it", false),
+    cmd("/restart", "restart zen on the installed version, back in this session", false),
     cmd("/help", "keys and commands", false),
     cmd("/exit", "quit zen", false),
 ];
@@ -108,6 +111,46 @@ enum Entry {
     ToolResult { head: Vec<String>, more: usize, error: bool },
     /// Already styled lines (notes, help, end-of-turn lines); re-wrapped when too wide.
     Raw(Vec<Line>),
+    /// Full screen: a run of tool calls between pieces of text, shown as one line until expanded.
+    Work(Vec<Step>),
+}
+
+/// One tool call in a `Work` run, with its result once it arrives.
+struct Step {
+    name: String,
+    args: Value,
+    /// First lines, how many more, and whether it failed.
+    result: Option<(Vec<String>, usize, bool)>,
+}
+
+/// Fold a tool call or result into a trailing `Work` run (full screen); anything else is added as is.
+fn absorb(list: &mut Vec<Entry>, e: Entry) {
+    match e {
+        Entry::ToolCall(name, args) => {
+            let step = Step { name, args, result: None };
+            match list.last_mut() {
+                Some(Entry::Work(steps)) => steps.push(step),
+                _ => list.push(Entry::Work(vec![step])),
+            }
+        }
+        Entry::ToolResult { head, more, error } => {
+            if let Some(Entry::Work(steps)) = list.last_mut() {
+                if let Some(step) = steps.iter_mut().find(|s| s.result.is_none()) {
+                    step.result = Some((head, more, error));
+                    return;
+                }
+            }
+            list.push(Entry::ToolResult { head, more, error });
+        }
+        e => list.push(e),
+    }
+}
+
+/// Which tab of the side panel is showing.
+#[derive(Clone, Copy, PartialEq)]
+enum Tab {
+    Files,
+    Viewer,
 }
 
 /// Narrowest terminal (columns) that fits the chat and the side panel next to each other.
@@ -248,6 +291,13 @@ struct App {
     ctrl_c_at: Option<Instant>,
     upgrading: bool,
     quit: bool,
+    /// Quit, then start the installed zen again on this session (`/restart`, or after `/upgrade`).
+    restart: bool,
+    /// The installed zen binary and its modification time when this one started, to notice a newer
+    /// install (zenbot can upgrade itself from inside a session).
+    installed: Option<(PathBuf, std::time::SystemTime)>,
+    /// A newer install has already been announced.
+    newer_noted: bool,
     /// Full screen: the conversation, and its lines rendered at `view_w` columns.
     entries: Vec<Entry>,
     view: Vec<Line>,
@@ -264,6 +314,30 @@ struct App {
     mouse: bool,
     /// When the running tool started, for its elapsed time in the status line.
     tool_since: Option<Instant>,
+    /// The side panel is open (it is also open whenever a file is).
+    side: bool,
+    /// The folder tree of the Files tab, created when first shown.
+    files: Option<Files>,
+    /// Where the folder tree starts: zenbot's home (~/.zenbot) unless `/files <dir>` changes it.
+    files_root: PathBuf,
+    tab: Tab,
+    /// Keys go to the side panel, not the input (tab switches).
+    side_focus: bool,
+    /// Show every step of each run of tool calls (ctrl+o) instead of one line per run.
+    expand_work: bool,
+    /// Tool calls and distinct files written or edited in the running turn, for the status line.
+    turn_tools: usize,
+    turn_files: std::collections::HashSet<String>,
+}
+
+/// A path the owner typed, with a leading `~` meaning the home folder.
+fn expand_home(raw: &str) -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    match raw.strip_prefix("~/") {
+        Some(rest) => PathBuf::from(&home).join(rest),
+        None if raw == "~" => PathBuf::from(&home),
+        None => PathBuf::from(raw),
+    }
 }
 
 fn banner(version_path: Option<&std::path::Path>) -> Line {
@@ -326,6 +400,9 @@ impl App {
             ctrl_c_at: None,
             upgrading: false,
             quit: false,
+            restart: false,
+            installed: None,
+            newer_noted: false,
             entries: Vec::new(),
             view: Vec::new(),
             view_w: 0,
@@ -336,6 +413,14 @@ impl App {
             last_file: None,
             mouse: !inline,
             tool_since: None,
+            side: false,
+            files: None,
+            files_root: std::env::current_dir().unwrap_or_default(),
+            tab: Tab::Files,
+            side_focus: false,
+            expand_work: false,
+            turn_tools: 0,
+            turn_files: Default::default(),
         }
     }
 }
@@ -355,6 +440,10 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
     let model = new.model.unwrap_or_else(|| default_model.clone());
     let mut app = App::new(c, tx, model, default_model, catalog, history, terminal_size(), inline);
     app.effort = new.effort;
+    app.installed = installed_zen().and_then(|p| Some((p.clone(), std::fs::metadata(&p).ok()?.modified().ok()?)));
+    if let Some(home) = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".zenbot")).filter(|p| p.is_dir()) {
+        app.files_root = home;
+    }
 
     terminal::enable_raw_mode()?;
     let enhanced = terminal::supports_keyboard_enhancement().unwrap_or(false);
@@ -417,6 +506,7 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
         let mut events = EventStream::new();
         let mut tick = tokio::time::interval(Duration::from_millis(90));
         let mut watch = tokio::time::interval(Duration::from_millis(500));
+        let mut install_check = tokio::time::interval(Duration::from_secs(5));
         while !app.quit {
             tokio::select! {
                 ev = events.next() => match ev {
@@ -441,6 +531,13 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
                         app.draw();
                     }
                 }
+                _ = install_check.tick(), if !app.newer_noted && !app.upgrading => {
+                    if app.newer_installed() {
+                        app.newer_noted = true;
+                        app.commit(vec![line("a new zen is installed · /restart to load it (this session continues)", Sty::Warn), Vec::new()]);
+                        app.draw();
+                    }
+                }
             }
         }
         Ok::<(), anyhow::Error>(())
@@ -454,7 +551,10 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
     } else {
         s.push_str(&format!("{MOUSE_OFF}{ALT_SCREEN_OFF}"));
     }
-    if let Some(id) = &app.session {
+    if app.restart {
+        s.push_str(&md::to_ansi(&line("restarting zen…", Sty::Dim)));
+        s.push_str("\r\n");
+    } else if let Some(id) = &app.session {
         s.push_str(&md::to_ansi(&line(format!("session {} · resume with: zen -r {}", short(id), short(id)), Sty::Dim)));
         s.push_str("\r\n");
     }
@@ -466,7 +566,40 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
     }
     let _ = execute!(out, DisableBracketedPaste);
     let _ = terminal::disable_raw_mode();
+    if result.is_ok() && app.restart {
+        let bin = installed_zen().context("can't find the zen binary to restart")?;
+        let mut cmd = std::process::Command::new(&bin);
+        cmd.args(restart_args(app.session.as_deref(), inline)).env("ZEN_URL", &app.c.url).env("ZEN_TOKEN", &app.c.token);
+        // exec only returns on failure: on success this process becomes the new zen.
+        let err = std::os::unix::process::CommandExt::exec(&mut cmd);
+        return Err(anyhow::anyhow!("couldn't restart {}: {err}", bin.display()));
+    }
     result
+}
+
+/// The zen to restart into: the installed one (`~/.zenbot/bin/zen`, where upgrades put it), else
+/// this binary's own path (on Linux, a replaced binary's path ends in " (deleted)").
+fn installed_zen() -> Option<PathBuf> {
+    let installed = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".zenbot/bin/zen"));
+    if let Some(p) = installed.filter(|p| p.is_file()) {
+        return Some(p);
+    }
+    let exe = std::env::current_exe().ok()?;
+    let s = exe.to_string_lossy();
+    Some(PathBuf::from(s.strip_suffix(" (deleted)").unwrap_or(&s)))
+}
+
+/// Arguments for the restarted zen: back in the same session (or a new one), same display mode.
+/// The kernel URL and token go in the environment, so the token never shows in `ps`.
+fn restart_args(session: Option<&str>, inline: bool) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(id) = session {
+        args.extend(["--resume".to_string(), id.to_string()]);
+    }
+    if inline {
+        args.push("--inline".into());
+    }
+    args
 }
 
 fn fmt_tokens(n: i64) -> String {
@@ -557,10 +690,212 @@ impl App {
         self.flush(out);
     }
 
+    fn side_open(&self) -> bool {
+        self.side || self.panel.is_some()
+    }
+
+    /// Open the side panel on the Files tab with the keys, or close it (and the file in it).
+    fn toggle_side(&mut self) {
+        if self.inline {
+            self.note("the side panel needs full screen: run zen without --inline", Sty::Warn);
+        } else if self.side_open() {
+            self.side = false;
+            self.panel = None;
+            self.side_focus = false;
+        } else {
+            if self.width() < SPLIT_MIN {
+                self.note(format!("the terminal is too narrow for the side panel (needs {SPLIT_MIN} columns)"), Sty::Warn);
+            }
+            self.side = true;
+            self.tab = Tab::Files;
+            self.side_focus = true;
+        }
+    }
+
+    fn open_file(&mut self, path: PathBuf) {
+        match Panel::open(path) {
+            Ok(p) => {
+                self.panel = Some(p);
+                self.tab = Tab::Viewer;
+            }
+            Err(e) => self.note(e, Sty::Err),
+        }
+    }
+
+    /// Open or fold the selected row of the tree, as Enter and a click do.
+    fn activate_row(&mut self) {
+        let Some(f) = &mut self.files else { return };
+        let Some(r) = f.selected() else { return };
+        if r.dir {
+            if !f.expand() {
+                f.collapse_or_parent();
+            }
+        } else {
+            let p = r.path.clone();
+            self.open_file(p);
+        }
+    }
+
+    /// A key while the side panel has the keys; false lets it through to the input.
+    fn side_key(&mut self, k: KeyEvent) -> bool {
+        if k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+            return false;
+        }
+        if k.code == KeyCode::Esc {
+            self.side_focus = false;
+            return true;
+        }
+        let page = self.viewport_rows().saturating_sub(3).max(1) as isize;
+        if self.tab == Tab::Viewer && self.panel.is_none() {
+            self.tab = Tab::Files;
+        }
+        match self.tab {
+            Tab::Files => {
+                if self.files.is_none() {
+                    self.files = Some(Files::new(self.files_root.clone()));
+                }
+                match k.code {
+                    KeyCode::Up => self.files.as_mut().unwrap().move_by(-1),
+                    KeyCode::Down => self.files.as_mut().unwrap().move_by(1),
+                    KeyCode::PageUp => self.files.as_mut().unwrap().move_by(-page),
+                    KeyCode::PageDown => self.files.as_mut().unwrap().move_by(page),
+                    KeyCode::Home => self.files.as_mut().unwrap().sel = 0,
+                    KeyCode::End => {
+                        let f = self.files.as_mut().unwrap();
+                        f.sel = f.rows.len().saturating_sub(1);
+                    }
+                    KeyCode::Right => {
+                        let f = self.files.as_mut().unwrap();
+                        if !f.expand() && f.selected().is_some_and(|r| !r.dir) {
+                            self.activate_row();
+                        }
+                    }
+                    KeyCode::Enter => self.activate_row(),
+                    KeyCode::Left => self.files.as_mut().unwrap().collapse_or_parent(),
+                    KeyCode::Char('.') => self.files.as_mut().unwrap().toggle_hidden(),
+                    KeyCode::Char('r') => self.files.as_mut().unwrap().rebuild(),
+                    KeyCode::Char(_) => {
+                        self.side_focus = false; // typing goes to the input
+                        return false;
+                    }
+                    _ => {}
+                }
+            }
+            Tab::Viewer => match k.code {
+                KeyCode::Up => self.scroll_panel(true, 1),
+                KeyCode::Down => self.scroll_panel(false, 1),
+                KeyCode::PageUp => self.scroll_panel(true, page as usize),
+                KeyCode::PageDown => self.scroll_panel(false, page as usize),
+                KeyCode::Home => self.scroll_panel(true, usize::MAX / 2),
+                KeyCode::Left | KeyCode::Backspace => self.tab = Tab::Files,
+                KeyCode::Char('x') => {
+                    self.panel = None;
+                    self.tab = Tab::Files;
+                }
+                KeyCode::Char(_) => {
+                    self.side_focus = false;
+                    return false;
+                }
+                _ => {}
+            },
+        }
+        true
+    }
+
+    /// A click at (`x`, `row`) inside the side panel: a tab, or a row of the tree.
+    fn click_side(&mut self, x: usize, row: usize) {
+        if row == 0 {
+            if x < 7 {
+                self.tab = Tab::Files;
+            } else if self.panel.is_some() {
+                self.tab = Tab::Viewer;
+            }
+            self.side_focus = true;
+            return;
+        }
+        if self.tab != Tab::Files {
+            self.side_focus = true;
+            return;
+        }
+        if let Some(f) = &mut self.files {
+            let idx = f.scroll + row.saturating_sub(2); // row 1 is the folder's path
+            if row >= 2 && idx < f.rows.len() {
+                f.sel = idx;
+                self.side_focus = true;
+                self.activate_row();
+            }
+        }
+    }
+
+    /// The tab strip: Files, and the open file when there is one.
+    fn tab_bar(&self) -> Line {
+        let style = |on: bool| if on { Sty::Accent } else { Sty::Dim };
+        let mut bar = vec![(" Files ".to_string(), style(self.tab == Tab::Files))];
+        if let Some(p) = &self.panel {
+            bar.push((format!(" {} ", p.name()), style(self.tab == Tab::Viewer)));
+        }
+        if self.side_focus {
+            bar.push(("  ●".to_string(), Sty::Accent));
+        }
+        bar
+    }
+
+    /// The side panel's rows (`vh` of them) at `pw` columns.
+    fn side_lines(&mut self, pw: usize, vh: usize) -> Vec<Line> {
+        if self.tab == Tab::Viewer && self.panel.is_none() {
+            self.tab = Tab::Files;
+        }
+        let mut out = vec![self.tab_bar()];
+        let body = vh.saturating_sub(2); // below the tab strip, above the hint row
+        match self.tab {
+            Tab::Files => {
+                if self.files.is_none() {
+                    self.files = Some(Files::new(self.files_root.clone()));
+                }
+                let focus = self.side_focus;
+                let f = self.files.as_mut().unwrap();
+                f.follow(body);
+                let root = f.root.to_string_lossy().into_owned();
+                out.push(vec![(root, Sty::Dim)]);
+                for (i, r) in f.rows.iter().enumerate().skip(f.scroll).take(body.saturating_sub(1)) {
+                    let name = r.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let mark = if !r.dir { "  " } else if f.is_open(r) { "▾ " } else { "▸ " };
+                    let text = format!("{}{mark}{name}{}", "  ".repeat(r.depth), if r.dir { "/" } else { "" });
+                    let sty = if i == f.sel && focus { Sty::Accent } else if i == f.sel { Sty::Bold } else if r.dir { Sty::Plain } else { Sty::Dim };
+                    out.push(vec![(if i == f.sel { "› " } else { "  " }.to_string(), sty), (text, sty)]);
+                }
+            }
+            Tab::Viewer => {
+                if let Some(p) = &mut self.panel {
+                    let rows = body.saturating_sub(1);
+                    let n = p.lines(pw).len();
+                    p.scroll = p.scroll.min(n.saturating_sub(rows));
+                    let s = p.scroll;
+                    let pos = if n > rows { format!(" · {}-{} of {n}", s + 1, (s + rows).min(n)) } else { String::new() };
+                    out.push(vec![(p.path.display().to_string(), Sty::Bold), (pos, Sty::Dim)]);
+                    out.extend(p.lines(pw).iter().skip(s).take(rows).cloned());
+                }
+            }
+        }
+        if vh >= 3 {
+            out.truncate(vh - 1);
+            while out.len() < vh - 1 {
+                out.push(Vec::new());
+            }
+            let hint = match (self.side_focus, self.tab) {
+                (false, _) => "tab: use this panel · ctrl+b: close",
+                (true, Tab::Files) => "↑↓ move · →/enter open · ← fold · . hidden · esc/tab chat",
+                (true, Tab::Viewer) => "↑↓ scroll · ← files · x close file · esc/tab chat",
+            };
+            out.push(vec![(hint.to_string(), Sty::Dim)]);
+        }
+        out
+    }
+
     /// Columns for the chat and for the side panel (0 when it's closed or the screen is too narrow).
     fn columns(&self) -> (usize, usize) {
         let total = self.width();
-        if self.panel.is_some() && !self.inline && total >= SPLIT_MIN {
+        if self.side_open() && !self.inline && total >= SPLIT_MIN {
             let panel = (total - 3) / 2;
             (total - 3 - panel, panel)
         } else {
@@ -568,7 +903,7 @@ impl App {
         }
     }
 
-    fn render_entry(e: &Entry, w: usize) -> Vec<Line> {
+    fn render_entry(e: &Entry, w: usize, expanded: bool) -> Vec<Line> {
         match e {
             Entry::User(text) => Self::render_user(text, w),
             Entry::Md(text) => {
@@ -578,6 +913,7 @@ impl App {
             }
             Entry::ToolCall(name, args) => Self::render_tool_call(name, args, w),
             Entry::ToolResult { head, more, error } => Self::render_tool_result(head, *more, *error, w),
+            Entry::Work(steps) => Self::render_work(steps, w, expanded),
             Entry::Raw(lines) => lines
                 .iter()
                 .flat_map(|l| {
@@ -600,7 +936,8 @@ impl App {
     fn sync_view(&mut self) {
         let w = self.columns().0;
         if self.view_w != w {
-            self.view = self.entries.iter().flat_map(|e| Self::render_entry(e, w)).collect();
+            let x = self.expand_work;
+            self.view = self.entries.iter().flat_map(|e| Self::render_entry(e, w, x)).collect();
             self.view_w = w;
         }
     }
@@ -616,6 +953,12 @@ impl App {
     }
 
     fn scroll_panel(&mut self, up: bool, n: usize) {
+        if self.tab == Tab::Files {
+            if let Some(f) = &mut self.files {
+                f.move_by(if up { -(n.min(1000) as isize) } else { n.min(1000) as isize });
+            }
+            return;
+        }
         if let Some(p) = &mut self.panel {
             p.scroll = if up { p.scroll.saturating_sub(n) } else { p.scroll + n };
         }
@@ -653,22 +996,8 @@ impl App {
             chat[last] = line(format!("↓ {} more lines · PgDn", self.scroll), Sty::Accent);
         }
 
-        // The side panel: a title row, then the file from its scroll position.
-        let mut side: Vec<Line> = Vec::new();
-        if pw > 0 {
-            if let Some(p) = &mut self.panel {
-                let name = p.name();
-                let rows = vh.saturating_sub(1);
-                let lines = p.lines(pw);
-                let n = lines.len();
-                p.scroll = p.scroll.min(n.saturating_sub(rows));
-                let s = p.scroll;
-                let lines = p.lines(pw);
-                let pos = if n > rows { format!(" · {}-{} of {n}", s + 1, (s + rows).min(n)) } else { String::new() };
-                side.push(vec![(name, Sty::Bold), (format!("{pos} · alt+↑↓ scroll · /close"), Sty::Dim)]);
-                side.extend(lines.iter().skip(s).take(rows).cloned());
-            }
-        }
+        // The side panel: tabs on top, the folder tree or the open file below.
+        let side: Vec<Line> = if pw > 0 { self.side_lines(pw, vh) } else { Vec::new() };
 
         let mut rows: Vec<String> = (0..vh)
             .map(|r| screen::row(chat.get(r), (pw > 0).then(|| (side.get(r), pw)), cw))
@@ -764,10 +1093,17 @@ impl App {
             let secs = self.turn_started.elapsed().as_secs();
             // How long the running tool has taken, so a long one (a subagent) visibly progresses.
             let tool = self.tool_since.map(|t| t.elapsed().as_secs()).filter(|s| *s > 0).map(|s| format!(" ({s}s)")).unwrap_or_default();
+            let mut work = String::new();
+            if self.turn_tools > 0 {
+                work.push_str(&format!(" · {} tool{}", self.turn_tools, if self.turn_tools == 1 { "" } else { "s" }));
+            }
+            if !self.turn_files.is_empty() {
+                work.push_str(&format!(" · {} file{} edited", self.turn_files.len(), if self.turn_files.len() == 1 { "" } else { "s" }));
+            }
             lines.push(vec![
                 (format!("{} ", SPINNER[self.spin % SPINNER.len()]), Sty::Accent),
-                (self.status.chars().take(w.saturating_sub(40)).collect(), Sty::Plain),
-                (format!("{tool}  ·  turn {secs}s · esc to interrupt"), Sty::Dim),
+                (self.status.chars().take(w.saturating_sub(60)).collect(), Sty::Plain),
+                (format!("{tool}  ·  turn {secs}s{work} · esc to interrupt"), Sty::Dim),
             ]);
         } else if let Some((n, s)) = &self.notice {
             lines.push(line(n.chars().take(w).collect::<String>(), *s));
@@ -891,15 +1227,15 @@ impl App {
     fn push_all(&mut self, entries: Vec<Entry>) {
         if self.inline {
             let w = self.width();
-            let lines = entries.iter().flat_map(|e| Self::render_entry(e, w)).collect();
+            let lines = entries.iter().flat_map(|e| Self::render_entry(e, w, true)).collect();
             self.print(lines);
             return;
         }
-        if self.view_w == self.columns().0 {
-            let w = self.view_w;
-            self.view.extend(entries.iter().flat_map(|e| Self::render_entry(e, w)));
+        // Tool calls fold into the run before them, which changes lines already rendered.
+        for e in entries {
+            absorb(&mut self.entries, e);
         }
-        self.entries.extend(entries);
+        self.view_w = 0;
         self.draw();
     }
 
@@ -917,6 +1253,36 @@ impl App {
         let summary = tool_summary(name, args);
         let detail = summary.strip_prefix(name).unwrap_or(&summary).trim().to_string();
         md::wrap(vec![(name.to_string(), Sty::Bold), (format!(" {detail}"), Sty::Dim)], w, ("• ".into(), Sty::Accent), ("  ".into(), Sty::Plain))
+    }
+
+    /// A run of tool calls: one line (the latest step and a count) or, expanded, every step with its result.
+    fn render_work(steps: &[Step], w: usize, expanded: bool) -> Vec<Line> {
+        let failed = steps.iter().filter(|s| s.result.as_ref().is_some_and(|r| r.2)).count();
+        let n = steps.len();
+        let count = format!("{n} step{}", if n == 1 { "" } else { "s" });
+        if expanded {
+            let mut out = vec![vec![("▾ ".to_string(), Sty::Accent), (format!("{count} · ctrl+o to fold"), Sty::Dim)]];
+            for s in steps {
+                out.extend(Self::render_tool_call(&s.name, &s.args, w));
+                if let Some((head, more, error)) = &s.result {
+                    out.extend(Self::render_tool_result(head, *more, *error, w));
+                }
+            }
+            return out;
+        }
+        let last = &steps[n - 1];
+        let summary = tool_summary(&last.name, &last.args);
+        let mut tail = format!("  · {count}");
+        if failed > 0 {
+            tail.push_str(&format!(" · {failed} failed"));
+        }
+        tail.push_str(" · ctrl+o");
+        let room = w.saturating_sub(UnicodeWidthStr::width(tail.as_str()) + 3).max(8);
+        let mut text: String = summary.chars().take(room).collect();
+        while UnicodeWidthStr::width(text.as_str()) > room {
+            text.pop();
+        }
+        vec![vec![("▸ ".to_string(), Sty::Accent), (text, Sty::Plain), (tail, if failed > 0 { Sty::Err } else { Sty::Dim })], Vec::new()]
     }
 
     /// A tool result as shown: its first three non-empty lines and how many more there are.
@@ -1106,12 +1472,19 @@ impl App {
             }
             Event::Mouse(m) => {
                 // The wheel scrolls whichever side is under the pointer.
+                let (cw, pw) = self.columns();
+                if m.kind == MouseEventKind::Down(MouseButton::Left) {
+                    if pw > 0 && m.column as usize >= cw + 3 && (m.row as usize) < self.viewport_rows() {
+                        self.click_side(m.column as usize - (cw + 3), m.row as usize);
+                    }
+                    self.draw();
+                    return Ok(());
+                }
                 let up = match m.kind {
                     MouseEventKind::ScrollUp => true,
                     MouseEventKind::ScrollDown => false,
                     _ => return Ok(()),
                 };
-                let (cw, pw) = self.columns();
                 if pw > 0 && m.column as usize > cw + 1 && (m.row as usize) < self.viewport_rows() {
                     self.scroll_panel(up, 3);
                 } else {
@@ -1141,6 +1514,28 @@ impl App {
                 _ => {}
             }
             return Ok(());
+        }
+
+        if !self.inline && ctrl && k.code == KeyCode::Char('o') {
+            self.expand_work = !self.expand_work;
+            self.view_w = 0;
+            self.draw();
+            return Ok(());
+        }
+
+        if !self.inline {
+            let plain = !ctrl && !alt && !shift;
+            if ctrl && k.code == KeyCode::Char('b') {
+                self.toggle_side();
+                return Ok(());
+            }
+            if k.code == KeyCode::Tab && plain && self.side_open() && (self.side_focus || (self.editor.is_empty() && self.menu().is_empty())) {
+                self.side_focus = !self.side_focus;
+                return Ok(());
+            }
+            if self.side_focus && self.side_open() && self.side_key(k) {
+                return Ok(());
+            }
         }
 
         // Scrolling (full screen): PgUp/PgDn move the chat, alt+↑↓ and alt+PgUp/PgDn the side panel.
@@ -1321,6 +1716,8 @@ impl App {
         self.status = "Working".into();
         self.turn_started = Instant::now();
         self.turn_tokens = 0;
+        self.turn_tools = 0;
+        self.turn_files.clear();
         self.aborting = false;
         self.stream.clear();
         self.committed = 0;
@@ -1383,6 +1780,8 @@ impl App {
                     ("↑ ↓", "previous prompts; in the / menu, choose a command (tab completes)"),
                     ("ctrl+←/→", "move by word (also alt+b / alt+f); ctrl+a/e line start/end"),
                     ("ctrl+u/k", "delete to line start / end; ctrl+w deletes a word"),
+                    ("ctrl+b", "open or close the side panel; tab moves the keys between chat and panel"),
+                    ("ctrl+o", "show or fold the steps of tool calls (full screen)"),
                     ("PgUp/PgDn", "scroll the conversation (also the mouse wheel)"),
                     ("alt+↑↓", "scroll the side panel (alt+PgUp/PgDn by page; or the wheel over it)"),
                     ("ctrl+c", "clear input; twice to exit"),
@@ -1394,9 +1793,15 @@ impl App {
                 self.commit(out);
             }
             Some("/open") => self.open_panel(arg),
+            Some("/files") if arg.is_empty() => self.toggle_side(),
+            Some("/files") => self.show_folder(arg),
             Some("/close") => {
-                if self.panel.take().is_none() {
-                    self.note("no file is open", Sty::Dim);
+                if self.side_open() {
+                    self.side = false;
+                    self.panel = None;
+                    self.side_focus = false;
+                } else {
+                    self.note("no side panel is open", Sty::Dim);
                 }
             }
             Some("/mouse") if !self.inline => {
@@ -1407,6 +1812,10 @@ impl App {
             }
             Some("/mouse") => self.note("inline mode leaves the mouse to the terminal", Sty::Dim),
             Some("/upgrade") => self.start_upgrade(),
+            Some("/restart") => {
+                self.restart = true;
+                self.quit = true;
+            }
             Some("/exit") => self.quit = true,
             _ => self.note(format!("unknown command {input}; try /help"), Sty::Warn),
         }
@@ -1425,24 +1834,45 @@ impl App {
             self.note("usage: /open <path> (no file touched yet in this session)", Sty::Warn);
             return;
         };
-        let home = std::env::var("HOME").unwrap_or_default();
-        let path = match raw.strip_prefix("~/") {
-            Some(rest) => PathBuf::from(&home).join(rest),
-            None if raw == "~" => PathBuf::from(&home),
-            None => PathBuf::from(&raw),
-        };
-        match Panel::open(path) {
+        match Panel::open(expand_home(&raw)) {
             Ok(p) => {
                 if self.width() < SPLIT_MIN {
                     self.note(format!("the terminal is too narrow for the side panel (needs {SPLIT_MIN} columns)"), Sty::Warn);
                 }
                 self.panel = Some(p);
+                self.tab = Tab::Viewer;
             }
             Err(e) => self.note(e, Sty::Err),
         }
     }
 
+    /// `/files <dir>`: root the folder tree at `dir` and show it.
+    fn show_folder(&mut self, arg: &str) {
+        if self.inline {
+            self.note("the side panel needs full screen: run zen without --inline", Sty::Warn);
+            return;
+        }
+        let dir = expand_home(arg);
+        if !dir.is_dir() {
+            self.note(format!("not a folder: {arg}"), Sty::Err);
+            return;
+        }
+        self.files_root = dir.clone();
+        self.files = Some(Files::new(dir));
+        if !self.side_open() {
+            self.toggle_side();
+        }
+        self.tab = Tab::Files;
+        self.side_focus = true;
+    }
+
     // ---------- upgrade ----------
+
+    /// The installed zen changed since this one started.
+    fn newer_installed(&self) -> bool {
+        let Some((path, started)) = &self.installed else { return false };
+        std::fs::metadata(path).and_then(|m| m.modified()).is_ok_and(|now| now != *started)
+    }
 
     fn start_upgrade(&mut self) {
         if self.upgrading {
@@ -1475,6 +1905,12 @@ impl App {
                 self.upgrading = false;
                 let ok = ev["ok"] == true;
                 self.commit(vec![line(text, if ok { Sty::Accent } else { Sty::Err }), Vec::new()]);
+                // The upgrade installed a new zen too: load it, back in this session.
+                if ok && self.newer_installed() {
+                    self.restart = true;
+                    self.quit = true;
+                    return;
+                }
                 if let Some(id) = self.session.clone() {
                     if self.sink.is_none() && self.connect(&id).await.is_err() {
                         self.note("lost connection to zenbot; send a message to reconnect", Sty::Warn);
@@ -1577,6 +2013,8 @@ impl App {
                     self.busy = true;
                     self.turn_started = std::time::Instant::now();
                     self.turn_tokens = 0;
+                    self.turn_tools = 0;
+                    self.turn_files.clear();
                 }
                 self.turn_effort = ev["effort"].as_str().map(String::from);
             }
@@ -1611,6 +2049,12 @@ impl App {
                 let name = ev["name"].as_str().unwrap_or("");
                 self.status = format!("Running {}", tool_summary(name, &ev["args"]));
                 self.tool_since = Some(Instant::now());
+                self.turn_tools += 1;
+                if matches!(name.rsplit("__").next(), Some("write" | "edit")) {
+                    if let Some(path) = ev["args"]["path"].as_str() {
+                        self.turn_files.insert(path.to_string());
+                    }
+                }
                 // Remember the file, for `/open` with no path.
                 if matches!(name.rsplit("__").next(), Some("read" | "write" | "edit")) {
                     if let Some(path) = ev["args"]["path"].as_str() {
@@ -1935,6 +2379,40 @@ mod tests {
         assert_eq!(rows.matches("line 12").count(), 1, "{rows}");
     }
 
+    fn tool_turn(a: &mut App, n: usize) {
+        for i in 0..n {
+            a.on_event(json!({ "type": "tool_start", "name": "bash", "args": { "command": format!("step {i}") } }));
+            a.on_event(json!({ "type": "message", "message": { "role": "assistant", "content": [{ "type": "toolCall", "name": "bash", "arguments": { "command": format!("step {i}") } }] } }));
+            a.on_event(json!({ "type": "tool_end" }));
+            a.on_event(json!({ "type": "message", "message": { "role": "toolResult", "content": [{ "type": "text", "text": format!("out {i}a\nout {i}b") }] } }));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_run_of_tool_calls_folds_into_one_line_and_ctrl_o_unfolds_it() {
+        let mut a = app(80, 30);
+        a.busy = true;
+        tool_turn(&mut a, 4);
+        let rows = a.screen.rows().join("\n");
+        assert!(rows.contains("step 3") && rows.contains("4 steps"), "{rows}");
+        assert!(!rows.contains("step 1") && !rows.contains("out 3a"), "earlier steps and results are hidden: {rows}");
+        assert!(rows.contains("4 tools"), "the status line counts tools: {rows}");
+        a.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)).await.unwrap();
+        let rows = a.screen.rows().join("\n");
+        assert!(rows.contains("step 1") && rows.contains("out 3a"), "{rows}");
+    }
+
+    #[test]
+    fn edits_count_distinct_files_in_the_status_line() {
+        let mut a = app(100, 30);
+        a.busy = true;
+        for p in ["a.rs", "b.rs", "a.rs"] {
+            a.on_event(json!({ "type": "tool_start", "name": "edit", "args": { "path": p } }));
+        }
+        let rows = a.screen.rows().join("\n");
+        assert!(rows.contains("3 tools") && rows.contains("2 files edited"), "{rows}");
+    }
+
     #[test]
     fn a_delta_rewrites_only_the_rows_that_changed() {
         let mut a = app(80, 30);
@@ -1998,6 +2476,130 @@ mod tests {
         a.command("/open /no/such/file").await.unwrap();
         assert!(a.notice.as_ref().is_some_and(|(t, s)| t.starts_with("can't open") && *s == Sty::Err), "{:?}", a.notice);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_files_tab_is_a_tree_you_walk_with_the_keyboard() {
+        let dir = std::env::temp_dir().join(format!("zen-dash-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/guide.md"), "# The guide\n\nhello from the guide\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "plain notes\n").unwrap();
+        let mut a = app(110, 24);
+        a.files = Some(Files::new(dir.clone()));
+        let ctrl_b = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        a.on_key(ctrl_b).await.unwrap();
+        a.draw();
+        let rows = a.screen.rows().join("\n");
+        assert!(rows.contains("Files") && rows.contains("docs/") && rows.contains("notes.txt"), "{rows}");
+        assert!(a.side_focus && a.columns().1 > 0);
+        // Right opens the folder, down walks into it, enter opens the file in the Viewer tab.
+        key(&mut a, KeyCode::Right).await;
+        key(&mut a, KeyCode::Down).await;
+        a.draw();
+        assert!(a.screen.rows().join("\n").contains("guide.md"));
+        key(&mut a, KeyCode::Enter).await;
+        a.draw();
+        let rows = a.screen.rows().join("\n");
+        assert!(a.tab == Tab::Viewer && rows.contains("hello from the guide"), "{rows}");
+        // Left goes back to the tree, which keeps its place; the file stays a tab.
+        key(&mut a, KeyCode::Left).await;
+        a.draw();
+        assert!(a.tab == Tab::Files && a.screen.rows().join("\n").contains("guide.md"));
+        // Tab hands the keys back to the chat, where typing reaches the input again.
+        key(&mut a, KeyCode::Tab).await;
+        assert!(!a.side_focus);
+        typed(&mut a, "hi").await;
+        assert_eq!(a.editor.buf, "hi");
+        // ctrl+b closes the whole panel.
+        a.on_key(ctrl_b).await.unwrap();
+        a.draw();
+        assert_eq!(a.columns().1, 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn restart_quits_to_start_the_installed_zen_on_this_session() {
+        let mut a = app(80, 24);
+        a.command("/restart").await.unwrap();
+        assert!(a.quit && a.restart);
+        assert_eq!(restart_args(Some("abc"), false), ["--resume", "abc"]);
+        assert_eq!(restart_args(None, true), ["--inline"]);
+        assert!(restart_args(None, false).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_newer_install_is_noticed_and_an_upgrade_that_brings_one_restarts() {
+        let dir = std::env::temp_dir().join(format!("zen-install-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("zen");
+        std::fs::write(&bin, "old").unwrap();
+        let mut a = app(80, 24);
+        let started = std::fs::metadata(&bin).unwrap().modified().unwrap();
+        a.installed = Some((bin.clone(), started));
+        assert!(!a.newer_installed());
+        // An upgrade that didn't change zen itself doesn't restart it.
+        a.on_app_event(json!({ "type": "upgrade_done", "ok": true, "text": "zenbot upgraded" })).await;
+        assert!(!a.restart && !a.quit);
+        let f = std::fs::File::options().write(true).open(&bin).unwrap();
+        f.set_modified(started + Duration::from_secs(60)).unwrap();
+        assert!(a.newer_installed());
+        // A failed upgrade doesn't restart; a successful one that installed a new zen does.
+        a.on_app_event(json!({ "type": "upgrade_done", "ok": false, "text": "rolled back" })).await;
+        assert!(!a.restart);
+        a.on_app_event(json!({ "type": "upgrade_done", "ok": true, "text": "zenbot upgraded" })).await;
+        assert!(a.restart && a.quit);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_tree_starts_at_its_root_and_files_dir_moves_it() {
+        let base = std::env::temp_dir().join(format!("zen-root-{}", std::process::id()));
+        std::fs::create_dir_all(base.join("home/skills")).unwrap();
+        std::fs::create_dir_all(base.join("other/elsewhere")).unwrap();
+        let mut a = app(110, 24);
+        a.files_root = base.join("home");
+        a.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)).await.unwrap();
+        a.draw();
+        let rows = a.screen.rows().join("\n");
+        assert!(rows.contains("skills/") && !rows.contains("elsewhere"), "{rows}");
+        // `/files <dir>` re-roots the tree; the panel stays open on the Files tab.
+        a.command(&format!("/files {}", base.join("other").display())).await.unwrap();
+        a.draw();
+        let rows = a.screen.rows().join("\n");
+        assert!(rows.contains("elsewhere/") && !rows.contains("skills/"), "{rows}");
+        assert!(a.tab == Tab::Files && a.side_focus && a.columns().1 > 0);
+        // A missing folder is refused and the tree stays where it was.
+        a.command("/files /no/such/dir").await.unwrap();
+        assert_eq!(a.files.as_ref().unwrap().root, base.join("other"));
+        // Closed and reopened, the tree keeps its new root.
+        a.command("/files").await.unwrap();
+        assert_eq!(a.columns().1, 0);
+        a.command("/files").await.unwrap();
+        a.draw();
+        assert!(a.screen.rows().join("\n").contains("elsewhere/"));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn clicking_a_tree_row_opens_it_and_a_tab_switches() {
+        let dir = std::env::temp_dir().join(format!("zen-click-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), "alpha text\n").unwrap();
+        let mut a = app(110, 24);
+        a.files = Some(Files::new(dir.clone()));
+        a.toggle_side();
+        a.draw();
+        let (cw, _) = a.columns();
+        let x = cw + 3;
+        // Row 0 is the tabs, row 1 the folder's path, row 2 the first entry (sub/), row 3 a.txt.
+        let click = |row: u16| Event::Mouse(crossterm::event::MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x as u16 + 2, row, modifiers: KeyModifiers::NONE });
+        a.on_terminal(click(3)).await.unwrap();
+        let rows = a.screen.rows().join("\n");
+        assert!(a.tab == Tab::Viewer && rows.contains("alpha text"), "{rows}");
+        let files_tab = Event::Mouse(crossterm::event::MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x as u16 + 1, row: 0, modifiers: KeyModifiers::NONE });
+        a.on_terminal(files_tab).await.unwrap();
+        assert!(a.tab == Tab::Files);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

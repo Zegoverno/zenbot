@@ -6,6 +6,29 @@
 
 ---
 
+## D-040 — zenbot's home is laid out by scope; agents are thin definitions
+
+**Date:** 2026-10-07 · **Status:** accepted (owner) · **Supersedes:** the flat `~/.zenbot` layout (paths in D-027, D-028, D-036, D-037)
+
+**Decision:** Under the zen home, system-wide files stay at the top (`USER.md`, `AGENTS.md`,
+`mcp.json`, runtime), each agent's own files go in `agents/<name>/` (only `SOUL.md` today; one agent,
+`zenbot`), and knowledge every agent shares goes in `global/` (`MEMORY.md`, `wiki/`, `skills/`,
+`tools/`). Projects get `projects/<id>/` with the same folders when the first one exists. The kernel
+moves an old flat layout once at startup (before writing defaults, never overwriting) and leaves a
+relative symlink at each old path; a later release removes them. Runtime files (`bin`, `env`,
+`token`, `engine`, …) stay where they are for now; moving them into `system/` is a separate step.
+
+**Why:** The owner wants the layout ready for more agents now, while it's cheap. Knowledge belongs
+to a scope, not to an agent: most of it is about the owner and their projects, so per-agent copies
+would drift and every agent would relearn it (Claude Code subagents, the OpenAI Agents SDK and CrewAI
+share project context and memory across agents; Letta, which keeps memory per agent, adds shared
+blocks for this). The symlinks make a rollback safe: an older build reads the old paths, and without
+them it would write a fresh default `SOUL.md` and ignore the owner's.
+
+**Rejected:** a folder per agent holding its own memory, skills and wiki (drift, duplicated
+learning); moving runtime files in the same change (the systemd unit, the `zen` link, upgrade and
+rollback scripts and the installer all point at them).
+
 ## D-039 — Full screen owns the screen: diffed frames, scrolling, a side panel
 
 **Decision:** The full-screen terminal app runs on the alternate screen and keeps the conversation

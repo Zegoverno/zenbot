@@ -25,9 +25,9 @@ pub struct Skill {
     pub dir: PathBuf,
 }
 
-/// Where skills live: `ZEN_SKILLS_DIR`, else `~/.zenbot/skills`.
+/// Where skills live: `ZEN_SKILLS_DIR`, else `~/.zenbot/global/skills` (shared by every agent).
 pub fn root() -> PathBuf {
-    std::env::var("ZEN_SKILLS_DIR").map(PathBuf::from).unwrap_or_else(|_| crate::zen_home().join("skills"))
+    std::env::var("ZEN_SKILLS_DIR").map(PathBuf::from).unwrap_or_else(|_| crate::layout::global_dir().join("skills"))
 }
 
 /// The frontmatter of a SKILL.md: simple `key: value` lines between `---` fences (a folded `>`

@@ -25,13 +25,15 @@ Config lives in `~/.zenbot/`:
 | `backups/` | database dumps taken before migrations (last 10) |
 | `evals/` | eval runs and cached base builds |
 | `history` | prompt history |
-| `SOUL.md`, `AGENTS.md`, `USER.md` | prompt files: who zenbot is, its environment, the owner (defaults written when missing, never overwritten) |
-| `MEMORY.md` | a copy of short-term memory, for reading |
-| `skills/` | skills, `<domain>/<name>/SKILL.md`; drafts in `_proposed/`, retired ones in `_archived/`; a git repository once `save_skill` first commits |
-| `tools/` | tools the agent made (`save_tool`): `<name>/tool.json` and files; a git repository (`ZEN_TOOLS_DIR`) |
+| `AGENTS.md`, `USER.md` | system-wide prompt files: zenbot's environment, the owner (defaults written when missing, never overwritten) |
+| `agents/zenbot/SOUL.md` | the agent's own prompt file: who zenbot is (one agent today; D-040) |
+| `global/MEMORY.md` | a copy of short-term memory, for reading |
+| `global/skills/` | skills, `<domain>/<name>/SKILL.md`; drafts in `_proposed/`, retired ones in `_archived/`; a git repository once `save_skill` first commits |
+| `global/tools/` | tools the agent made (`save_tool`): `<name>/tool.json` and files; a git repository (`ZEN_TOOLS_DIR`) |
 | `mcp.json` | the owner's MCP servers (`mcpServers`; `${VAR}` filled from `env`), reached through `find_tools` / `load_tool` / `call_tool` |
 | `outputs/` | full text of cut tool output, PDFs saved by `web_fetch`, MCP output over 50 KB |
-| `wiki/` | the wiki (`ZEN_WIKI_DIR`): markdown pages, `index.md`, `log.md`, its own git repository; written by the `capture` tool |
+| `global/wiki/` | the wiki (`ZEN_WIKI_DIR`): markdown pages, `index.md`, `log.md`, its own git repository; written by the `capture` tool |
+| `SOUL.md`, `MEMORY.md`, `wiki`, `skills`, `tools` | symlinks to the paths above, left by the move from the old flat layout so a rolled-back build still finds the files; removed in a later release |
 | `dev/` | the dev kernel's own home (`scripts/dev.sh`) |
 
 Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
@@ -190,9 +192,9 @@ It:
 - runs `npm ci` in `packages/mind` when `pi` is enabled and the lockfile is newer than the install;
 - runs `cargo build --release -q`, then `exec`s `./target/release/zend` on port **18100** (override with `ZEN_DEV_PORT`);
 - sets `ZEN_HARNESS` to this checkout's commit, so its turns record this build;
-- uses its own zenbot home, `~/.zenbot/dev` (`ZEN_DEV_HOME`), for prompt files, skills, `mcp.json` and `MEMORY.md`: it starts with the defaults, and the dev database's memory never overwrites the live `~/.zenbot/MEMORY.md`. Copy your prompt files (or an `mcp.json`) there to try them.
+- uses its own zenbot home, `~/.zenbot/dev` (`ZEN_DEV_HOME`), for prompt files, skills, `mcp.json` and `MEMORY.md`: it starts with the defaults, and the dev database's memory never overwrites the live `~/.zenbot/global/MEMORY.md`. Copy your prompt files (or an `mcp.json`) there to try them.
 
-Every non-live kernel gets its own `ZEN_HOME`: the dev kernel `~/.zenbot/dev`, the upgrade smoke kernel `<smoke workspace>/.zenbot`, eval kernels `<task workspace>.zenbot` (so evals run on the default prompt files and skills, not the owner's), and e2e kernels a throwaway `HOME`. Cut tool output, web PDFs and the wiki follow `ZEN_HOME` too (`<zen home>/outputs`, `<zen home>/wiki`).
+Every non-live kernel gets its own `ZEN_HOME`: the dev kernel `~/.zenbot/dev`, the upgrade smoke kernel `<smoke workspace>/.zenbot`, eval kernels `<task workspace>.zenbot` (so evals run on the default prompt files and skills, not the owner's), and e2e kernels a throwaway `HOME`. Cut tool output, web PDFs and the wiki follow `ZEN_HOME` too (`<zen home>/outputs`, `<zen home>/global/wiki`).
 
 `web_search` in the dev kernel needs SearXNG running (above) or a search key in `~/.zenbot/env`; `web_fetch` reaches only public addresses, so it can't fetch the dev kernel or anything else on this VM.
 
@@ -340,11 +342,11 @@ docker compose -f deploy/compose.yaml exec -T postgres psql -U zen -d zen_dev \
 
 ## Wiki
 
-The `capture` tool writes the wiki: markdown pages in `ZEN_WIKI_DIR` (default `<zen home>/wiki`, so `~/.zenbot/dev/wiki` for the dev kernel), a git repository the kernel creates and commits to (`index.md` lists the pages, `log.md` records each capture). The agent edits page summaries itself; those edits are committed by the next capture or the nightly sleep, which also lists wiki problems (pages with no summary, links to missing pages) in its note. Pages are indexed for `search` (scope `wiki`) by file modification time.
+The `capture` tool writes the wiki: markdown pages in `ZEN_WIKI_DIR` (default `<zen home>/global/wiki`, so `~/.zenbot/dev/global/wiki` for the dev kernel), a git repository the kernel creates and commits to (`index.md` lists the pages, `log.md` records each capture). The agent edits page summaries itself; those edits are committed by the next capture or the nightly sleep, which also lists wiki problems (pages with no summary, links to missing pages) in its note. Pages are indexed for `search` (scope `wiki`) by file modification time.
 
 ```bash
-git -C ~/.zenbot/dev/wiki log --oneline | head   # what the dev kernel captured
-cat ~/.zenbot/dev/wiki/index.md
+git -C ~/.zenbot/dev/global/wiki log --oneline | head   # what the dev kernel captured
+cat ~/.zenbot/dev/global/wiki/index.md
 ```
 
 ## Workshop: skills and tools the agent makes

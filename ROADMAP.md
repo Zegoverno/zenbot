@@ -72,7 +72,7 @@ descriptions for `verify`, `remember` and `decide`.
 
 ## Phase 4 — Knowledge `[ built ]`
 
-The wiki (`~/.zenbot/wiki/`, in git): one page per concept, entity, decision, playbook, project or
+The wiki (`~/.zenbot/global/wiki/`, in git): one page per concept, entity, decision, playbook, project or
 person, in gbrain's shape (a summary over an append-only, dated timeline with sources), plus
 `index.md` and `log.md` kept by the kernel. `capture` (D-036): search finds candidate pages, System
 One picks the page (or a new one) and catches notes already recorded or sensitive, the kernel
@@ -87,7 +87,7 @@ a reason (the evidence) required, a near-duplicate in the domain refused with "e
 (System One, or word overlap), new skills as drafts (`skills/_proposed`) that become active when the
 owner accepts them or a session that used them is accepted, a new domain always the owner's call,
 every change a commit; the sleep flags skills unused for 30 days and archives them at 90. Tools: a
-manifest and files in `~/.zenbot/tools/<name>/`, found and called like MCP tools (`made_<name>`),
+manifest and files in `~/.zenbot/global/tools/<name>/`, found and called like MCP tools (`made_<name>`),
 JSON on stdin, never the kernel's secrets, sandboxed with no network and read-only files until the
 owner approves (`made_tools`, out of the agent's reach). A default `work/close` skill says when to
 remember, capture and improve skills. `zen skills`, `zen skills accept|reject`, `zen tools

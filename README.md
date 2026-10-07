@@ -32,15 +32,15 @@ zen login      # signs in to Claude Code (Claude plan) and Codex (ChatGPT plan)
 zen status
 ```
 
-Update with `zen upgrade` (or `/upgrade` inside zen); zen tells you when a new version is on GitHub (see [INSTALL.md](INSTALL.md#updating)). The Claude Code and Codex CLIs update themselves daily, tested, with rollback ([engines](INSTALL.md#engines)).
+Update with `zen upgrade` (or `/upgrade` inside zen, which then restarts zen itself on the new version, back in the same session); `/restart` loads a version installed some other way (zen notices it). zen tells you when a new version is on GitHub (see [INSTALL.md](INSTALL.md#updating)). The Claude Code and Codex CLIs update themselves daily, tested, with rollback ([engines](INSTALL.md#engines)).
 
 For development: `./scripts/dev.sh` runs a kernel from the checkout next to the service, on port 18100 with its own `zen_dev` database (`ZEN_FAUX=1 ./scripts/dev.sh` adds `faux/smoke`, a scripted test model). See [DEVELOPMENT.md](DEVELOPMENT.md).
 
-Every session starts from the prompt files in `~/.zenbot/`: `SOUL.md` (who zenbot is), `AGENTS.md` (its environment), `USER.md` (you: fill it in), and its short-term memory; then `AGENTS.md` (or `CLAUDE.md`) in each directory from `/` down to the workspace. zenbot writes default versions of its files when they're missing and never overwrites yours.
+Every session starts from the prompt files in `~/.zenbot/`: `agents/zenbot/SOUL.md` (who zenbot is), `AGENTS.md` (its environment), `USER.md` (you: fill it in), and its short-term memory; then `AGENTS.md` (or `CLAUDE.md`) in each directory from `/` down to the workspace. zenbot writes default versions of its files when they're missing and never overwrites yours. The home is split by scope, ready for more agents: system-wide files at the top, each agent's own under `agents/<name>/`, and the knowledge they share (memory copy, wiki, skills, tools) under `global/`.
 
 ## Using zen
 
-Run `zen` for an interactive session in your terminal. It's full screen: the conversation scrolls with PgUp/PgDn or the mouse wheel, and `/open <file>` shows a file next to the chat (reloaded as it changes; `/close` hides it).
+Run `zen` for an interactive session in your terminal. It's full screen: the conversation scrolls with PgUp/PgDn or the mouse wheel, and a side panel sits next to the chat: Ctrl+B opens it on a folder tree of `~/.zenbot` (`/files <dir>` shows another folder; ↑↓ move, →/Enter open a folder or file, ← fold, `.` dotfiles, Tab moves the keys between chat and panel, or click), and `/open <file>` shows a file there (reloaded as it changes; `/close` hides it). Runs of tool calls show as one line; Ctrl+O unfolds them.
 
 ```bash
 zen              # new session
@@ -51,7 +51,7 @@ zen -e xhigh     # thinking level (default: the model's; `zen models` lists them
 zen --inline     # no full screen: the conversation goes to terminal scrollback, like Claude Code (or ZEN_INLINE=1)
 ```
 
-Inside: `/new`, `/resume`, `/model`, `/effort`, `/done`, `/rename <title>`, `/open [file]`, `/close`, `/mouse` (wheel scrolling off, so the terminal can select text), `/archive`, `/upgrade`, `/help`, `/exit`. Enter sends; Shift+Enter (or Alt+Enter, Ctrl+J) starts a new line or paragraph; Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
+Inside: `/new`, `/resume`, `/model`, `/effort`, `/done`, `/rename <title>`, `/files`, `/open [file]`, `/close`, `/mouse` (wheel scrolling off, so the terminal can select text), `/archive`, `/upgrade`, `/restart`, `/help`, `/exit`. Enter sends; Shift+Enter (or Alt+Enter, Ctrl+J) starts a new line or paragraph; Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
 
 For scripts, every command accepts `--json` and exits non-zero on failure:
 
@@ -73,16 +73,16 @@ zen upgrade [--check]
 
 A session is one job. zenbot gets tools, skills and memory rather than a fixed procedure ([docs/brief.md](docs/brief.md)):
 
-- **Skills** are how to do a kind of work well: `~/.zenbot/skills/<domain>/<name>/SKILL.md` ([agentskills.io](https://agentskills.io) format). Only their names and descriptions are in the instructions; zenbot loads one when a job matches it. It starts with `work/brief` (frame a big, risky or unclear job: the real goal, scope, assumptions, criteria as commands) and `work/verify` (prove it before saying it's done).
+- **Skills** are how to do a kind of work well: `~/.zenbot/global/skills/<domain>/<name>/SKILL.md` ([agentskills.io](https://agentskills.io) format). Only their names and descriptions are in the instructions; zenbot loads one when a job matches it. It starts with `work/brief` (frame a big, risky or unclear job: the real goal, scope, assumptions, criteria as commands) and `work/verify` (prove it before saying it's done).
 - **`verify`**: the kernel runs the criteria's commands itself, and when some need judgment a fresh verifier (no history, read-only) reads the diff and judges them.
 - **`ask`**: up to three questions only you can answer, each with options and a recommendation; the turn ends until you reply.
-- **Memory**: zenbot saves what will matter again with `remember` (`MEMORY.md`, a fixed size, shown from the next session). Every night (`zen-sleep.timer`) a sleep keeps what's most likely needed, archives the rest (never deletes) and proposes the few lasting, impactful memories for long-term memory. `zen memory` shows it; `~/.zenbot/MEMORY.md` is a copy to read. Long-term memories are found through `search`, which also finds anything said or done in earlier sessions; `zen memory --tier proposed` lists what the sleep wants to keep for good, and `zen memory accept|reject <id>` decides (after enough agreeing decisions, promotion runs on its own). Settings: `ZEN_MEMORY_CHARS` (size, default 4000), `ZEN_S1_PRIVATE=0` (keep memories away from the System One model; the sleep then ranks by recency).
+- **Memory**: zenbot saves what will matter again with `remember` (`MEMORY.md`, a fixed size, shown from the next session). Every night (`zen-sleep.timer`) a sleep keeps what's most likely needed, archives the rest (never deletes) and proposes the few lasting, impactful memories for long-term memory. `zen memory` shows it; `~/.zenbot/global/MEMORY.md` is a copy to read. Long-term memories are found through `search`, which also finds anything said or done in earlier sessions; `zen memory --tier proposed` lists what the sleep wants to keep for good, and `zen memory accept|reject <id>` decides (after enough agreeing decisions, promotion runs on its own). Settings: `ZEN_MEMORY_CHARS` (size, default 4000), `ZEN_S1_PRIVATE=0` (keep memories away from the System One model; the sleep then ranks by recency).
 
 `/done` records your verdict on the work so far.
 
 ## Skills and tools zenbot improves itself
 
-zenbot keeps its know-how as skills (`~/.zenbot/skills/`, a git repository) and can write tools of its own (`~/.zenbot/tools/`). It improves a skill when a job shows what works, rather than adding near-duplicates; a new skill stays a draft until you accept it (or a session that used it is accepted), and a new kind of work needs your OK. A tool it makes runs sandboxed, with no network, until you approve it. `zen skills` shows each skill's use; `zen skills accept|reject <domain/name>` and `zen tools accept|reject <name>` decide.
+zenbot keeps its know-how as skills (`~/.zenbot/global/skills/`, a git repository) and can write tools of its own (`~/.zenbot/global/tools/`). It improves a skill when a job shows what works, rather than adding near-duplicates; a new skill stays a draft until you accept it (or a session that used it is accepted), and a new kind of work needs your OK. A tool it makes runs sandboxed, with no network, until you approve it. `zen skills` shows each skill's use; `zen skills accept|reject <domain/name>` and `zen tools accept|reject <name>` decide.
 
 ## Subagents
 
@@ -90,7 +90,7 @@ zenbot hands side tasks to subagents (fresh sessions with its tools and memory) 
 
 ## The wiki
 
-zenbot keeps lasting knowledge in `~/.zenbot/wiki/` (a git repository of markdown pages you can read and edit): one page per concept, project, decision or person, each a short summary over a dated timeline with sources. It adds to it with `capture` (System One finds the right page and skips what's already there) and finds pages with `search`. `index.md` lists the pages; `log.md` lists every capture.
+zenbot keeps lasting knowledge in `~/.zenbot/global/wiki/` (a git repository of markdown pages you can read and edit): one page per concept, project, decision or person, each a short summary over a dated timeline with sources. It adds to it with `capture` (System One finds the right page and skips what's already there) and finds pages with `search`. `index.md` lists the pages; `log.md` lists every capture.
 
 ## The web and connected services
 

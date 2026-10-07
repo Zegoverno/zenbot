@@ -3,6 +3,7 @@
 
 mod client;
 mod editor;
+mod files;
 mod md;
 mod screen;
 mod tui;
