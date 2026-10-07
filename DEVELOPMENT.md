@@ -28,6 +28,8 @@ Config lives in `~/.zenbot/`:
 | `SOUL.md`, `AGENTS.md`, `USER.md` | prompt files: who zenbot is, its environment, the owner (defaults written when missing, never overwritten) |
 | `MEMORY.md` | a copy of short-term memory, for reading |
 | `skills/` | skills, `<domain>/<name>/SKILL.md` |
+| `mcp.json` | the owner's MCP servers (`mcpServers`; `${VAR}` filled from `env`), reached through `find_tools` / `load_tool` / `call_tool` |
+| `outputs/` | full text of cut tool output, PDFs saved by `web_fetch`, MCP output over 50 KB |
 | `dev/` | the dev kernel's own home (`scripts/dev.sh`) |
 
 Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
@@ -38,8 +40,10 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 |---|---|---|
 | Rust (stable) with clippy | `rustup` (`ensure_rust` in `scripts/lib.sh` installs a minimal toolchain; add clippy with `rustup component add clippy`) | building and linting |
 | `build-essential`, `pkg-config` | apt | compiling |
-| Docker with `docker compose` | `install.sh` | Postgres (`deploy/compose.yaml`) |
+| Docker with `docker compose` | `install.sh` | Postgres and SearXNG (`deploy/compose.yaml`) |
 | `git`, `curl`, `jq` | apt | every script |
+| `python3` | preinstalled on Ubuntu | the e2e test servers (`scripts/e2e/*.py`) |
+| `pdftotext` (`poppler-utils`) | apt; **not** installed by `install.sh` | reading PDFs that `web_fetch` saves (optional) |
 | `bubblewrap` | apt | the read-only shell; the e2e scenarios need it |
 | Node.js 22+ | `install.sh` puts it in `~/.local/node` | the `pi` worker only |
 | `gh` | GitHub CLI | pull requests, checking CI |
@@ -53,6 +57,15 @@ docker compose -f deploy/compose.yaml up -d --wait postgres
 ```
 
 It listens on `127.0.0.1:5432`, user and password `zen`, live database `zen`. The database helpers run `psql`, `pg_dump` and `pg_restore` inside the container, so nothing else is needed on the host.
+
+`web_search` without an API key uses SearXNG, the second compose service (settings in `deploy/searxng/settings.yml`). Start it for keyless web search in a dev or real kernel:
+
+```bash
+docker compose -f deploy/compose.yaml up -d searxng
+curl -s 'http://127.0.0.1:8888/search?q=test&format=json' | jq '.results | length'
+```
+
+It listens on `127.0.0.1:8888` only (`ZEN_SEARXNG_URL` points elsewhere). The service starts it before `zend` (a failure there is ignored: `web_search` then returns an error naming the command above), and `apply-upgrade.sh` runs `docker compose … up -d` after a healthy upgrade. With `BRAVE_API_KEY` or `TAVILY_API_KEY` in `~/.zenbot/env`, that provider is used instead (`ZEN_SEARCH_PROVIDER` forces one) and SearXNG only rescues a failed call. The e2e scenarios and CI don't need it: they use a stub.
 
 ## The loop at a glance
 
@@ -94,6 +107,8 @@ ZEN_E2E_NO_BUILD=1 scripts/e2e.sh
 
 Run the same four locally before a pull request. `--locked` fails if `Cargo.lock` would change; don't add dependencies without a good reason.
 
+**Limit build parallelism on this VM.** It has 2 CPUs and 7.7 GB of RAM, and parallel release builds have been OOM-killed. Set `CARGO_BUILD_JOBS=2` (e.g. `export CARGO_BUILD_JOBS=2` in your shell) and don't run two release builds at once (for example `cargo build` while `scripts/e2e.sh` or `scripts/upgrade.sh` is building).
+
 UI changes (`crates/zen/src/tui.rs`, `editor.rs`) come with render or key tests: build an `App` at a fixed size with output captured (see the tests at the bottom of `tui.rs`).
 
 ### The Pi worker
@@ -111,7 +126,15 @@ Changes to the worker protocol must update `docs/worker-protocol.md` and every w
 
 ## End-to-end scenarios
 
-`scripts/e2e.sh` builds (unless `ZEN_E2E_NO_BUILD=1`), then runs each scenario on a kernel built from this checkout with the scripted faux model. It uses a throwaway database (`zen_e2e_<pid>`), throwaway git workspaces and a throwaway `HOME`, on port 18377 (`ZEN_E2E_PORT`). No subscription is used and the live service isn't touched. It needs Postgres running, plus `git`, `curl`, `jq` and `bubblewrap`.
+`scripts/e2e.sh` builds (unless `ZEN_E2E_NO_BUILD=1`), then runs each scenario on a kernel built from this checkout with the scripted faux model. It uses a throwaway database (`zen_e2e_<pid>`), throwaway git workspaces and a throwaway `HOME`, on port 18377 (`ZEN_E2E_PORT`). No subscription is used, nothing reaches the internet and the live service isn't touched. It needs Postgres running, plus `git`, `curl`, `jq`, `bubblewrap` and `python3`.
+
+There are 14 scenarios (`run …` lines at the bottom of the script). Some start small test servers from `scripts/e2e/`:
+
+| Server | Started by | What it is |
+|---|---|---|
+| `slow_worker.py` | `slow-summary` (`ZEN_WORKER_SLOW_CMD`) | a worker whose `complete` is deliberately slow (`ZEN_SLOW_SECS`) |
+| `mcp_server.py` | `mcp` | an MCP server with `echo` and `add`: over stdio, and with `--http PORT` as streamable HTTP on the e2e port + 1 |
+| `searxng_stub.py` | `web` (`ZEN_SEARXNG_URL`) | answers `/search?format=json` with fixed results, on the e2e port + 2 |
 
 ```bash
 scripts/e2e.sh                # build, then every scenario
@@ -147,7 +170,7 @@ With `ZEN_FAUX=1`, `zen-engine` also lists `faux/smoke`, a scripted model that d
 {"exit": 1}
 ```
 
-Use them to test tools, abort, the watchdog and crash recovery. See `docs/worker-protocol.md` ("Testing without a model") and the scripts in `scripts/e2e/`.
+A step can also carry `"when": "text"` (run only if the prompt contains the text, so one script serves several prompts, as `scripts/e2e/reach.json` does for `mcp` and `web`) or `"ignore_abort": true`. Use them to test tools, abort, the watchdog and crash recovery. See `docs/worker-protocol.md` ("Testing without a model") and the scripts in `scripts/e2e/`.
 
 ## The dev kernel
 
@@ -165,7 +188,11 @@ It:
 - runs `npm ci` in `packages/mind` when `pi` is enabled and the lockfile is newer than the install;
 - runs `cargo build --release -q`, then `exec`s `./target/release/zend` on port **18100** (override with `ZEN_DEV_PORT`);
 - sets `ZEN_HARNESS` to this checkout's commit, so its turns record this build;
-- uses its own zenbot home, `~/.zenbot/dev` (`ZEN_DEV_HOME`), for prompt files, skills and `MEMORY.md`: it starts with the defaults, and the dev database's memory never overwrites the live `~/.zenbot/MEMORY.md`. Copy your prompt files there to try them. (Eval and smoke kernels get a throwaway home too.)
+- uses its own zenbot home, `~/.zenbot/dev` (`ZEN_DEV_HOME`), for prompt files, skills, `mcp.json` and `MEMORY.md`: it starts with the defaults, and the dev database's memory never overwrites the live `~/.zenbot/MEMORY.md`. Copy your prompt files (or an `mcp.json`) there to try them.
+
+Every non-live kernel gets its own `ZEN_HOME`: the dev kernel `~/.zenbot/dev`, the upgrade smoke kernel `<smoke workspace>/.zenbot`, eval kernels `<task workspace>.zenbot` (so evals run on the default prompt files and skills, not the owner's), and e2e kernels a throwaway `HOME`. Note that `bash` output cut at 50 KB still goes to `$HOME/.zenbot/outputs` (`tools.rs` doesn't read `ZEN_HOME`).
+
+`web_search` in the dev kernel needs SearXNG running (above) or a search key in `~/.zenbot/env`; `web_fetch` reaches only public addresses, so it can't fetch the dev kernel or anything else on this VM.
 
 Local endpoints:
 
@@ -177,6 +204,7 @@ Local endpoints:
 | e2e kernel | `http://127.0.0.1:18377` (`ZEN_E2E_PORT`), database `zen_e2e_<pid>` |
 | Eval kernels | `http://127.0.0.1:18301` (`ZEN_EVAL_PORT`), databases `zen_eval_*` |
 | Postgres | `127.0.0.1:5432`, user/password `zen` |
+| SearXNG | `http://127.0.0.1:8888` (`ZEN_SEARXNG_URL`) |
 | Health | `GET /health` on any kernel: `ok`, `db`, `mind`, `workers`, `busy` |
 
 Talk to the dev kernel with the CLI you just built:
@@ -218,7 +246,7 @@ What it does, in order:
 1. **Hooks.** Sets `git config core.hooksPath scripts/git-hooks`.
 2. **Build.** Runs `npm ci` in `packages/mind` when `pi` is enabled. Then tries `scripts/fetch-release.sh`: if nothing under `crates/`, `Cargo.toml` or `Cargo.lock` differs from `HEAD` (and no untracked files under `crates/`), on x86_64 Linux, and CI published binaries for this commit, it downloads them (checksum verified) into `target/release`. Otherwise it runs `cargo build --release`, installing Rust first if missing. `ZEN_BUILD_FROM_SOURCE=1` forces a local build.
 3. **Check.** `cargo test --release -q` (skipped for prebuilt binaries: CI already ran it). `zen-engine` must answer a JSON-RPC `ping`; so must `zen-mind` when `pi` is enabled. `zen --version` must run. It does **not** run clippy or the e2e scenarios: run those yourself.
-4. **Smoke.** Copies the live database into `zen_smoke_<pid>` and starts the new `zend` on port 18199 with `ZEN_FAUX=1` and the service's settings. Any pending migrations are applied to that copy, not to the live database. It runs one scripted turn on `faux/smoke` (and one on `faux/faux-1` with `pi`); each must answer "Smoke test passed" with a successful tool call. The copy is dropped afterwards. It lists migrations pending on the live database.
+4. **Smoke.** Copies the live database into `zen_smoke_<pid>` and starts the new `zend` on port 18199 with `ZEN_FAUX=1`, the service's settings and its own `ZEN_HOME` in the smoke workspace. Any pending migrations are applied to that copy, not to the live database. It runs one scripted turn on `faux/smoke` (and one on `faux/faux-1` with `pi`); each must answer "Smoke test passed" with a successful tool call. The copy is dropped afterwards. It lists migrations pending on the live database.
 5. **`--check` stops here** and prints `Check OK (<commit>[, uncommitted changes]); nothing installed.`
 6. **Schedule.** Starts `scripts/apply-upgrade.sh` detached via `sudo systemd-run` and returns.
 
@@ -227,7 +255,7 @@ What it does, in order:
 1. Waits until the service's `/health` says `"busy":0` (no session working). After 30 minutes it goes ahead anyway and logs that it did.
 2. If migrations are pending, backs up the live database to `~/.zenbot/backups/<UTC time>-<previous version>.dump` (last 10 kept). If the backup fails, it aborts and changes nothing.
 3. Keeps the old binaries as `~/.zenbot/bin/<name>.prev`, installs `zend`, `zen` and `zen-engine` from `target/release`, writes the commit to `~/.zenbot/version`, and runs `sudo systemctl restart zenbot`. The kernel applies migrations at start.
-4. Waits up to 45 seconds for `/health` to say `"ok":true`. If it doesn't, it logs the last 30 service log lines, puts the `.prev` binaries and the old version back, and restarts again. **A rollback does not restore the database.** When there was a backup, the log prints the exact command to restore it.
+4. Waits up to 45 seconds for `/health` to say `"ok":true`. If it is healthy, it refreshes the timers from `deploy/` (`install_timers`) and runs `docker compose -f deploy/compose.yaml up -d`, so a new timer or compose service (such as SearXNG) arrives with the upgrade; a failure there is logged, not rolled back. If it isn't healthy, it logs the last 30 service log lines, puts the `.prev` binaries and the old version back, and restarts again. **A rollback does not restore the database.** When there was a backup, the log prints the exact command to restore it.
 
 The restart ends the current turn's connection. In a zen session, the owner reconnects by sending the next message.
 
@@ -279,7 +307,7 @@ scripts/eval-report.sh ~/.zenbot/evals/<run>       # print a run's report again
 
 Other options: `--base-model`, `--base-effort`, `--only new|base`, `--keep`. Without `--model` it asks the running service (`/api/models`) for its default model, so the service must be up.
 
-Each run gets a fresh copy of the task's files, its own kernel on port 18301 and its own database (`zen_eval_*`). The new side is this checkout, uncommitted changes included. The base side is cached in `~/.zenbot/evals/builds/`. Results and `report.md` go to `~/.zenbot/evals/<run>/`. Real models use the owner's subscription.
+Each run gets a fresh copy of the task's files, its own kernel on port 18301, its own database (`zen_eval_*`) and its own `ZEN_HOME` (default prompt files and skills, not the owner's). The new side is this checkout, uncommitted changes included. The base side is cached in `~/.zenbot/evals/builds/`. Results and `report.md` go to `~/.zenbot/evals/<run>/`. Real models use the owner's subscription.
 
 Tasks live in `evals/tasks/<name>/` (`task.json` plus `files/`). See `evals/README.md` for the format and what makes a good task.
 
@@ -340,7 +368,7 @@ gh run list --limit 5
 
 - **Never** run `systemctl restart zenbot` (or stop/start) or kill `zend` from inside a session. Use `scripts/upgrade.sh`.
 - Migrations are **expand-only**, in new files; never edit an applied one.
-- No secrets in the repo, logs or tool output. **Never print `~/.zenbot/auth.json`**, `~/.zenbot/token` or `~/.zenbot/env` (it holds the token and API keys).
+- No secrets in the repo, logs or tool output. **Never print `~/.zenbot/auth.json`**, `~/.zenbot/token` or `~/.zenbot/env` (it holds the token and API keys, such as search keys). Put secrets an MCP server needs in `env` and refer to them as `${VAR}` in `mcp.json`.
 - Keep engines' own tools switched off; every action goes through the kernel.
 - Don't add dependencies without a good reason.
 
@@ -366,6 +394,10 @@ scripts/db.sh pending               # migrations not yet applied
 | `ROLLBACK ALSO UNHEALTHY` | `journalctl -u zenbot -n 50`; tell the owner |
 | e2e `kernel did not start` | the kernel log path it printed; check the port isn't taken and Postgres is up |
 | e2e check fails on the read-only shell | `bubblewrap` missing |
+| e2e `mcp` or `web` fails to start its server | `python3` missing, or the e2e port + 1 / + 2 is taken |
+| `web_search failed: … searxng at http://127.0.0.1:8888` | SearXNG not running: `docker compose -f deploy/compose.yaml up -d searxng` |
+| `find_tools` lists problems | `~/.zenbot/mcp.json` (invalid JSON, a server with both or neither of `command`/`url`, an unset `${VAR}`); `GET /api/mcp` shows the same |
+| A build is killed with no compiler error | out of memory: `CARGO_BUILD_JOBS=2`, one build at a time |
 | Upgrade compiles instead of downloading | local changes under `crates/` or `Cargo.*`, or CI hasn't published this commit yet (`scripts/fetch-release.sh --check HEAD`) |
 | `zen` says `no token` | `~/.zenbot/token` missing; `install.sh` creates it |
 | Engine shows `rolled back` or `skipped` in `zen status` | `engines:` lines in `upgrade.log`; `skipped: check fails before updating` usually means signed out (`zen login`, needs the owner) |

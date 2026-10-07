@@ -10,6 +10,8 @@ WorkingDirectory=__REPO__
 EnvironmentFile=__HOME__/.zenbot/env
 # "+" runs as root so the user doesn't need to be in the docker group.
 ExecStartPre=+/usr/bin/docker compose -f __REPO__/deploy/compose.yaml up -d --wait postgres
+# Keyless web search (web_search falls back to an error if it isn't there; "-" ignores a failure).
+ExecStartPre=-+/usr/bin/docker compose -f __REPO__/deploy/compose.yaml up -d searxng
 ExecStart=__HOME__/.zenbot/bin/zend
 Restart=always
 RestartSec=3

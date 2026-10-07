@@ -175,6 +175,9 @@ async fn remember(app: &crate::AppState, session: Uuid, args: &Value) -> Result<
         s @ ("owner" | "verified" | "inferred") => s,
         other => anyhow::bail!("source must be owner, verified or inferred, not `{other}`"),
     };
+    // A session that read web content can't vouch for what it saves: web text could have put it
+    // there, so it never counts as the owner's words or a checked result (and can't be promoted).
+    let source = if source != "inferred" && crate::web::tainted(db, session).await { "inferred" } else { source };
     let text = args["text"].as_str().map(str::trim).unwrap_or("");
     let text = crate::secrets::mask(text);
     let done = match action {

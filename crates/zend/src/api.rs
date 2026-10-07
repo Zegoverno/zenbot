@@ -339,3 +339,8 @@ pub(crate) async fn run_sleep(State(app): State<AppState>, Query(q): Query<Sleep
     let res = job.await.map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("sleep task: {e}")))?;
     Ok(Json(res.map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?))
 }
+
+/// MCP servers from ~/.zenbot/mcp.json: tools per server and problems (connecting the servers).
+pub(crate) async fn mcp_status() -> Json<Value> {
+    Json(mcp::status().await)
+}

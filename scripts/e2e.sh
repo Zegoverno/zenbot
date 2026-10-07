@@ -113,7 +113,7 @@ The owner's name is E2E Owner." >"$TMP/home/.zenbot/USER.md"
   check "the skills index is in the instructions" grep -q "work/verify:" <<<"$base"
   check "memory starts empty" grep -q "(empty)" <<<"$base"
   local tools; tools=$(q "SELECT string_agg(t->>'name', ',') FROM turns, envelopes e, jsonb_array_elements(e.tools) t WHERE turns.session_id='$sid' AND e.hash = turns.envelope")
-  check "the system tools, in order, no workflow tools" eq "$tools" bash,read,write,edit,history,ask,remember,find_skills,load_skill,verify
+  check "the system tools, in order, no workflow tools" eq "$tools" bash,read,write,edit,history,ask,remember,web_search,web_fetch,find_skills,load_skill,find_tools,load_tool,call_tool,verify
 }
 
 # Skills load on demand, as tool results; nothing outside a skill's folder can be read through them.
@@ -127,6 +127,54 @@ skills_on_demand() {
   check "load_skill returns SKILL.md" grep -q "Decide whether a fresh verifier adds something" <<<"$res"
   check "and a reference file" grep -q "## Criteria" <<<"$res"
   check "the instructions didn't change mid-session" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND kind='envelope'")" 1
+}
+
+# MCP: tools from a local (stdio) and a remote (HTTP) server, found, loaded and called through the
+# three fixed tools; a call missing a required argument is refused by the kernel.
+mcp_tools() {
+  local ws; ws=$(new_workspace mcp)
+  local port=$((PORT + 1))
+  python3 "$REPO/scripts/e2e/mcp_server.py" --http "$port" & local srv=$!
+  mkdir -p "$TMP/home/.zenbot"
+  cat >"$TMP/home/.zenbot/mcp.json" <<JSON
+{ "mcpServers": {
+  "local": { "command": "python3", "args": ["$REPO/scripts/e2e/mcp_server.py"] },
+  "remote": { "url": "http://127.0.0.1:$port/mcp", "headers": { "Authorization": "Bearer \${ZEN_E2E_MCP_TOKEN}" } } } }
+JSON
+  start_kernel "$ws" "$(script reach.json)" ZEN_E2E_MCP_TOKEN=e2e
+  local r sid; r=$(zen ask --json -m faux/smoke "mcp please"); sid=$(echo "$r" | jq -r .session_id)
+  check "find, load, call local, call remote, refused without an argument" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" \
+    find_tools:false,load_tool:false,call_tool:false,call_tool:false,call_tool:true
+  local res; res=$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult'")
+  check "find_tools lists namespaced tools" grep -q "local_echo: Echo a message back." <<<"$res"
+  check "load_tool shows the schema" grep -q '"required"' <<<"$res"
+  check "the local server answered" grep -q "echo: hi" <<<"$res"
+  check "the remote server answered (event stream), wrapped as untrusted" grep -q 'source="mcp" about="remote_add"' <<<"$res"
+  check "a missing argument is named" grep -q "missing required arguments: b" <<<"$res"
+  check "the remote call tainted the session" eq "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")" t
+  check "the tool list is still fixed" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND kind='envelope'")" 1
+  kill "$srv" 2>/dev/null || true
+}
+
+# Web: private addresses are refused; search results come back numbered and wrapped as untrusted,
+# with markers inside them defused; what a tainted session saves to memory counts as inference.
+web_tools() {
+  local ws; ws=$(new_workspace web)
+  local port=$((PORT + 2))
+  python3 "$REPO/scripts/e2e/searxng_stub.py" "$port" & local srv=$!
+  start_kernel "$ws" "$(script reach.json)" ZEN_SEARXNG_URL="http://127.0.0.1:$port"
+  local r sid; r=$(zen ask --json -m faux/smoke "web please"); sid=$(echo "$r" | jq -r .session_id)
+  check "localhost and metadata refused, search ran, remember ran" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" \
+    web_fetch:true,web_fetch:true,web_search:false,remember:false
+  local res; res=$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult'")
+  check "loopback refused" grep -q "127.0.0.1 is not a public address" <<<"$res"
+  check "metadata refused" grep -q "169.254.169.254 is not a public address" <<<"$res"
+  check "results numbered, non-http dropped" bash -c 'grep -q "\[2\] Another" <<<"$1" && ! grep -q "javascript:" <<<"$1"' _ "$res"
+  check "one envelope, its marker defused" eq "$(grep -o '</untrusted>' <<<"$res" | wc -l)" 1
+  check "the session is tainted" eq "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")" t
+  check "its memory counts as inference" eq "$(q "SELECT source FROM memories WHERE text LIKE 'Something read on the web.%'")" inferred
+  q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART" >/dev/null  # the memory scenarios start from none
+  kill "$srv" 2>/dev/null || true
 }
 
 # remember: a memory saved in one session is in the next session's instructions, not the current one's.
@@ -260,6 +308,8 @@ run open-loop open_loop
 run restart-recovery restart_recovery
 run prompt-files prompt_files
 run skills skills_on_demand
+run mcp mcp_tools
+run web web_tools
 run memory-across-sessions memory_across_sessions
 run memory-sleep memory_sleep
 run ask ask_and_gone_tools

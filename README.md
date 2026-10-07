@@ -80,6 +80,17 @@ A session is one job. zenbot gets tools, skills and memory rather than a fixed p
 
 `/done` records your verdict on the work so far.
 
+## The web and connected services
+
+- **Web**: `web_search` and `web_fetch` work out of the box. Search goes through a SearXNG container the installer starts next to Postgres (only reachable from the VM); set `BRAVE_API_KEY` or `TAVILY_API_KEY` in `~/.zenbot/env` to use those instead. Fetching reaches public addresses only. Everything read from the web is marked untrusted, and a session that read it can't save memories that count as the owner's words.
+- **MCP servers** (email, calendar, documents, your own services): list them in `~/.zenbot/mcp.json`, the same shape Claude Code uses. zenbot finds their tools with `find_tools` and runs them with `call_tool`, so its tool list (and the prompt cache) never changes. Secrets go in `~/.zenbot/env` and are referenced as `${VAR}`:
+  ```json
+  { "mcpServers": {
+      "files": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/docs"] },
+      "issues": { "url": "https://mcp.example.com/mcp", "headers": { "Authorization": "Bearer ${ISSUES_TOKEN}" } } } }
+  ```
+  Per server: `enabled`, `timeout_s`, `include` / `exclude` (tool names), `untrusted` (default true for remote servers). `curl -H "Authorization: Bearer $(cat ~/.zenbot/token)" localhost:8100/api/mcp` shows what loaded.
+
 ## Context
 
 How zen builds what the model reads each turn is in [docs/context.md](docs/context.md). In short: the instructions are fixed for the session (an edited AGENTS.md applies from the next session), history is only ever appended to, and each session keeps a matching Claude Code or Codex session so earlier turns come from the provider's cache. When a session passes 70% of its context budget, older turns are summarized; the model can still read any of them with its `history` tool. Secrets in tool output are masked.

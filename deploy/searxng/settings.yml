@@ -1,0 +1,16 @@
+# SearXNG for zenbot's web_search when no search API key is set (crates/zend/src/web.rs).
+# Bound to 127.0.0.1 only (deploy/compose.yaml); JSON output is what the kernel reads.
+use_default_settings: true
+general:
+  instance_name: zenbot-search
+server:
+  # Only reachable from this VM; set SEARXNG_SECRET in the environment to override.
+  secret_key: "zenbot-local-only-change-me"
+  limiter: false
+  image_proxy: false
+  public_instance: false
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json

@@ -12,110 +12,50 @@ decides; every load and call is recorded per turn; System One is built into each
 ## Where things stand
 
 Built and installed: the kernel, the `zen` terminal app, the Claude Code / Codex engines (and Pi)
-and context v2 (`docs/context.md`). Built on `feat/foundation`, not yet evaluated or installed:
-Phase 1 (prompt files, memory with sleep, skills, the workflow replaced by skills and tools). See
-PROGRESS.md. The phases below replace the old next steps (old "Phase 2b", "Phase 3 memory",
-"Phase 4 search", "Phase 5 wiki").
+and context v2 (`docs/context.md`). Phase 1 is merged (#17); Phase 2 is built on `feat/reach`. Both
+are installed together once Phase 2 merges. See PROGRESS.md. The phases below replace the old next
+steps (old "Phase 2b", "Phase 3 memory", "Phase 4 search", "Phase 5 wiki").
 
 | Phase | Name | Delivers | Status |
 |---|---|---|---|
-| 0 | Ground | Research the reference projects in their code; merge the open fix PRs | PRs merged; research still to record |
-| 1 | Foundation | Prompt files, tool descriptions, short-term memory with sleep, skills, workflow into skills | **ACTIVE**: built, eval and dogfooding next |
-| 2 | Reach | `web_search`, `web_fetch`, MCP client, `find_tools` / `load_tool` | |
-| 3 | Recall | `search` (full-text, then semantic) over sessions and memories; long-term memory acts | |
+| 0 | Ground | Research the reference projects in their code; merge the open fix PRs | done (`docs/research/`) |
+| 1 | Foundation | Prompt files, tool descriptions, short-term memory with sleep, skills, workflow into skills | done (#17): 12/12 → 12/12, cost +27% |
+| 2 | Reach | `web_search`, `web_fetch`, MCP client, `find_tools` / `load_tool` / `call_tool` | built, PR next |
+| 3 | Recall | `search` (full-text, then semantic) over sessions and memories; long-term memory acts | **ACTIVE** next |
 | 4 | Knowledge | The wiki and `capture` | |
 | 5 | Self-improvement | The agent creates and improves skills and tools, without sprawl | |
 | 6 | Delegation | `delegate`: subagents; model choice from real usage | |
 
 ---
 
-## Phase 0 — Ground `[ research outstanding ]`
+## Phase 0 — Ground `[ done ]`
 
-**Goal:** every part of the target design checked against the best reference projects before code.
+The reference projects were studied in their code (2026-10-06); the reports, with file paths, are in
+`docs/research/`: `hermes-openclaw.md` (prompt files, memory caps, frozen snapshot, skill sprawl),
+`skills-tools-mcp.md` (agentskills.io, deferred tools and the cache, FastMCP, rmcp, Voyager; with a
+spike on Claude Code), `memory-search-web.md` (Letta, LLM Wiki and gbrain, hybrid search in
+Postgres, web search providers, web fetch safety). DESIGN.md's target design cites them. The fix
+PRs (#8, #9, #10, #13) were merged on 2026-10-06 without an eval.
 
-1. Research, **in their code, not their READMEs**, and record in DESIGN.md where zenbot follows each
-   and where it goes further (security included):
-   - Hermes (nousresearch/hermes-agent): SOUL/MEMORY/USER files, frozen memory snapshot, memory caps,
-     skill creation and why it sprawls.
-   - OpenClaw: workspace files (`AGENTS.md`, `SOUL.md`, `USER.md`, `MEMORY.md`, …) and how they load.
-   - agentskills.io and Anthropic's skills: the format, progressive disclosure.
-   - FastMCP: composition, tool transformation, middleware, client.
-   - Letta (MemGPT): memory tiers, eviction, sleep-time compute.
-   - Anthropic's tool search / deferred tool loading, and Claude Code's deferred tools.
-   - Voyager: a composable skill library that grows.
-   - The owner's earlier list for memory and context: gbrain, Karpathy's LLM Wiki, eggshell, qm,
-     memvid, goose, caveman.
-2. ~~Merge the open fix PRs~~ (#8, #9, #10, #13 merged 2026-10-06, without an eval; see PROGRESS.md).
-   Install them with `scripts/upgrade.sh` and run `scripts/eval.sh` against the previous install.
+## Phase 1 — Foundation `[ done ]`
 
-**Done when** DESIGN.md's target design cites its sources and the owner has reviewed it.
+Merged in #17. Eval against the installed build: 12/12 → 12/12 passed; cost +27% and tokens +37%
+on these short tasks (long sessions +16%), cache hit unchanged, time −4%. The extra cost is the
+larger fixed prefix (prompt files, memory, skills index, richer tool descriptions: about 7.9k →
+16k characters), paid once per session before the cache takes over. Lever if wanted: shorter
+descriptions for `verify`, `remember` and `decide`.
 
-Phase 1 was built before this research was recorded; its choices cite sources in the code and
-docs where known (OpenClaw's prompt-file cut, Hermes' refused writes when memory is full,
-agentskills.io's rules), but the code-level comparison is still owed and may change Phase 1.
+## Phase 2 — Reach `[ built ]`
 
----
-
-## Phase 1 — Foundation `[ ACTIVE ]`
-
-**Goal:** sessions start from the prompt files and system tools, load only the skills they use, keep
-short-term memory across sessions, and frame and verify through skills instead of kernel gates.
-
-1. **Prompt files.** `~/.zenbot/` gets `SOUL.md`, `AGENTS.md`, `USER.md`, loaded at session start into
-   the session's fixed envelope (`crates/zend/src/compile.rs`, `Envelope`). `~/.zenbot/AGENTS.md`
-   already loads as a global instruction file; it becomes the environment file. The text hardcoded in
-   `compile::system_prompt` moves into default versions of the files (installed by `install.sh` if
-   missing, never overwritten). A repo's `AGENTS.md` still loads as project context. Each file has a
-   size cap; sizes are recorded per session.
-2. **Tool descriptions.** Rewrite each: what it does, when to use it and when not, what it returns, an
-   example. The `<tool_guidelines>` block moves into them. `decide` gets a description that makes it
-   used. Measure the prefix's tool-description size.
-3. **Short-term memory.** A `memories` table (new, expand-only migration): text, source, kind, state
-   (short, long, archived), created and last used, scores. The `remember` tool (add, replace, remove).
-   `MEMORY.md` rendered at session start and frozen; exported to `~/.zenbot/MEMORY.md`. A hard ceiling
-   (about 2× the size) triggers an immediate tidy-up.
-4. **Sleep hygiene.** A nightly systemd timer (like `zen-engines.timer`) starts a kernel job: System One
-   scores every entry; keep, drop and promote (DESIGN.md "Memory"), logged in `decisions`; a morning
-   note in `zen status` and the next session. **Promotion runs in shadow mode**: nothing reads
-   long-term memory until Phase 3, so its proposals calibrate the threshold first. Fixed nightly
-   budget, cost recorded.
-5. **Skills.** `~/.zenbot/skills/<domain>/<skill>/SKILL.md` in git; the domain index in the prefix;
-   `find_skills` (name and description match, System One ranking when configured) and `load_skill`
-   (appended as a tool result). Loads recorded per turn. First skills, written by hand: `brief`
-   (framing a job, writing a brief file) and `verify` (when and how to call the `verify` tool).
-6. **Workflow out of the kernel.** Remove the gates in `crates/zend/src/flow.rs`: session states, the
-   forced frame → approve → work order, `propose_brief`, `submit_work`, approvals, `ZEN_BRIEFS`. Keep
-   `verify` (the fresh verifier) and `ask`. Database columns stay (expand-only); `move` goes; `history`
-   stays until Phase 3. Update `docs/brief.md`, `docs/client-protocol.md` and the CLI's `/brief`,
-   `/go`, `/quick`, `/verify`.
-7. **Check and ship.** New e2e scenarios: the files load; a skill loads on demand; memory carries
-   across sessions; sleep keeps memory within its size. Eval against the installed version (pass
-   rate, cost, prefix size); the owner decides. Install and dogfood.
-
-**Status (2026-10-07):** steps 1–7 built on `feat/foundation`, with unit tests and 12 e2e scenarios
-passing. Left: the eval against the installed version and the owner's call; install and dogfood;
-and the smaller parts not built yet: prompt-file and tool-description sizes recorded per session
-(they're in `envelopes`, not yet measured), System One ranking in `find_skills`, skills kept in git.
-
-**Done when** every session starts from the four files and the system tools, the agent loads only
-the skills it uses, framing and verification happen through skills with no kernel gates, memory
-carries across sessions and stays within its size every night, and the eval shows no loss in pass
-rate.
-
----
-
-## Phase 2 — Reach
-
-1. **Spike first:** `load_tool` changes the tool list mid-session. Claude Code gets zenbot's tools
-   through the MCP bridge (`crates/zen-engine/src/bridge.rs`); test whether it picks up a changed list
-   (MCP `tools/list_changed`) without breaking the cache, and the same for Codex and Pi. Where it
-   can't, the fallback is a generic `call_tool(name, args)`, which keeps the list fixed at some cost in
-   reliability.
-2. `web_search` behind one provider contract (Brave, Exa, Tavily, … swappable), results ranked by
-   System One; `web_fetch` with readable-text extraction, link following and optional extraction of
-   the relevant parts. Web content is marked untrusted (taint rule, SPEC.md §5.18).
-3. MCP client (`rmcp`), with namespacing, tool transformation and middleware (audit, permissions,
-   secret injection); `find_tools` / `load_tool`.
+1. **Spike** (`docs/research/skills-tools-mcp.md`): a changed tool list reaches Claude Code
+   mid-turn but rewrites the whole cached prefix, on every engine. So the tool list stays fixed:
+   `find_tools` (names and one-liners), `load_tool` (the schema, as a tool result) and `call_tool`.
+2. `web_search` (Brave or Tavily with a key; SearXNG in `deploy/compose.yaml` without one, which
+   also rescues a failed keyed call; System One reranks) and `web_fetch` (readable markdown, public
+   addresses only, paging, `focus` through System One, PDFs for pdftotext). Web content is wrapped
+   as untrusted and taints the session.
+3. MCP client written against the spec (stdio and streamable HTTP; not `rmcp`, D-033), configured
+   in `~/.zenbot/mcp.json`.
 
 ## Phase 3 — Recall
 

@@ -8,6 +8,7 @@ mod context;
 mod defaults;
 mod dispatch;
 mod git;
+mod mcp;
 mod measure;
 mod memory;
 mod mind;
@@ -18,6 +19,7 @@ mod tape;
 mod tools;
 mod turns;
 mod update;
+mod web;
 mod workers;
 
 use std::collections::{HashMap, HashSet};
@@ -78,6 +80,15 @@ type AppState = Arc<App>;
 /// zenbot's home on the host: ZEN_HOME, else `~/.zenbot` (prompt files, skills, outputs, …).
 pub(crate) fn zen_home() -> PathBuf {
     std::env::var("ZEN_HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())).join(".zenbot"))
+}
+
+/// Where full outputs too long for a tool result are kept (`<zen home>/outputs`), created readable
+/// only by the owner. None when it can't be created.
+pub(crate) fn outputs_dir() -> Option<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = zen_home().join("outputs");
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).ok()?;
+    Some(dir)
 }
 
 /// A number from a setting, or the default when it's unset or not a number.
@@ -189,6 +200,7 @@ async fn main() -> Result<()> {
         .route("/sessions/{id}/ws", get(session_ws))
         .route("/sessions/{id}/decision", axum::routing::post(decide))
         .route("/memory", get(list_memory))
+        .route("/mcp", get(mcp_status))
         .route("/memory/sleep", axum::routing::post(run_sleep))
         .route("/version", get(version))
         .route("/upgrade", get(upgrade_status).post(upgrade_start))
