@@ -509,7 +509,7 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
         while !app.quit {
             tokio::select! {
                 ev = events.next() => match ev {
-                    Some(Ok(ev)) => app.on_terminal(ev).await?,
+                    Some(Ok(ev)) => app.handle_terminal(ev).await,
                     Some(Err(e)) => return Err(e.into()),
                     None => break,
                 },
@@ -1489,6 +1489,15 @@ impl App {
 
     // ---------- input ----------
 
+    /// A terminal event. A failed request or send (a timeout, a 5xx, a dropped connection) is
+    /// shown as a note; only losing the terminal itself ends zen.
+    async fn handle_terminal(&mut self, ev: Event) {
+        if let Err(e) = self.on_terminal(ev).await {
+            self.note(format!("{e:#}"), Sty::Err);
+            self.draw();
+        }
+    }
+
     async fn on_terminal(&mut self, ev: Event) -> Result<()> {
         match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => self.on_key(k).await?,
@@ -1753,7 +1762,13 @@ impl App {
         self.committed = 0;
         self.md = Md::default();
         if let Some(sink) = &mut self.sink {
-            sink.send(Message::text(json!({ "type": "prompt", "text": text }).to_string())).await?;
+            if let Err(e) = sink.send(Message::text(json!({ "type": "prompt", "text": text }).to_string())).await {
+                // The connection is gone: the next send reconnects.
+                self.sink = None;
+                self.busy = false;
+                self.pending_prompt = None;
+                anyhow::bail!("couldn't send to zenbot ({e}); press ↑ to get the prompt back and send it again");
+            }
         }
         Ok(())
     }
@@ -2555,6 +2570,19 @@ mod tests {
         a.on_key(ctrl_b).await.unwrap();
         a.draw();
         assert_eq!(a.columns().1, 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_request_becomes_a_note_and_zen_keeps_running() {
+        let mut a = app(80, 20); // its kernel address refuses connections
+        a.session = Some("s1".into());
+        for ch in "/rename new title".chars() {
+            a.handle_terminal(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))).await;
+        }
+        a.handle_terminal(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))).await;
+        assert!(!a.quit);
+        assert!(a.notice.as_ref().is_some_and(|(t, s)| t.contains("cannot reach zenbot") && *s == Sty::Err), "{:?}", a.notice);
+        assert!(a.screen.rows().join("\n").contains("cannot reach zenbot"), "the note is drawn");
     }
 
     #[test]
