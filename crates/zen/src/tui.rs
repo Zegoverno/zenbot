@@ -14,7 +14,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use zen_proto::text_of;
 use crossterm::event::{
     MouseButton, DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
@@ -67,6 +67,7 @@ const COMMANDS: &[Command] = &[
     cmd("/mouse", "mouse wheel scrolling on/off (off lets the terminal select text)", false),
     cmd("/archive", "archive this session and start a new one", false),
     cmd("/upgrade", "update zenbot to the latest version and restart it", false),
+    cmd("/restart", "restart zen on the installed version, back in this session", false),
     cmd("/help", "keys and commands", false),
     cmd("/exit", "quit zen", false),
 ];
@@ -290,6 +291,13 @@ struct App {
     ctrl_c_at: Option<Instant>,
     upgrading: bool,
     quit: bool,
+    /// Quit, then start the installed zen again on this session (`/restart`, or after `/upgrade`).
+    restart: bool,
+    /// The installed zen binary and its modification time when this one started, to notice a newer
+    /// install (zenbot can upgrade itself from inside a session).
+    installed: Option<(PathBuf, std::time::SystemTime)>,
+    /// A newer install has already been announced.
+    newer_noted: bool,
     /// Full screen: the conversation, and its lines rendered at `view_w` columns.
     entries: Vec<Entry>,
     view: Vec<Line>,
@@ -392,6 +400,9 @@ impl App {
             ctrl_c_at: None,
             upgrading: false,
             quit: false,
+            restart: false,
+            installed: None,
+            newer_noted: false,
             entries: Vec::new(),
             view: Vec::new(),
             view_w: 0,
@@ -429,6 +440,7 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
     let model = new.model.unwrap_or_else(|| default_model.clone());
     let mut app = App::new(c, tx, model, default_model, catalog, history, terminal_size(), inline);
     app.effort = new.effort;
+    app.installed = installed_zen().and_then(|p| Some((p.clone(), std::fs::metadata(&p).ok()?.modified().ok()?)));
     if let Some(home) = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".zenbot")).filter(|p| p.is_dir()) {
         app.files_root = home;
     }
@@ -494,6 +506,7 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
         let mut events = EventStream::new();
         let mut tick = tokio::time::interval(Duration::from_millis(90));
         let mut watch = tokio::time::interval(Duration::from_millis(500));
+        let mut install_check = tokio::time::interval(Duration::from_secs(5));
         while !app.quit {
             tokio::select! {
                 ev = events.next() => match ev {
@@ -518,6 +531,13 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
                         app.draw();
                     }
                 }
+                _ = install_check.tick(), if !app.newer_noted && !app.upgrading => {
+                    if app.newer_installed() {
+                        app.newer_noted = true;
+                        app.commit(vec![line("a new zen is installed · /restart to load it (this session continues)", Sty::Warn), Vec::new()]);
+                        app.draw();
+                    }
+                }
             }
         }
         Ok::<(), anyhow::Error>(())
@@ -531,7 +551,10 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
     } else {
         s.push_str(&format!("{MOUSE_OFF}{ALT_SCREEN_OFF}"));
     }
-    if let Some(id) = &app.session {
+    if app.restart {
+        s.push_str(&md::to_ansi(&line("restarting zen…", Sty::Dim)));
+        s.push_str("\r\n");
+    } else if let Some(id) = &app.session {
         s.push_str(&md::to_ansi(&line(format!("session {} · resume with: zen -r {}", short(id), short(id)), Sty::Dim)));
         s.push_str("\r\n");
     }
@@ -543,7 +566,40 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
     }
     let _ = execute!(out, DisableBracketedPaste);
     let _ = terminal::disable_raw_mode();
+    if result.is_ok() && app.restart {
+        let bin = installed_zen().context("can't find the zen binary to restart")?;
+        let mut cmd = std::process::Command::new(&bin);
+        cmd.args(restart_args(app.session.as_deref(), inline)).env("ZEN_URL", &app.c.url).env("ZEN_TOKEN", &app.c.token);
+        // exec only returns on failure: on success this process becomes the new zen.
+        let err = std::os::unix::process::CommandExt::exec(&mut cmd);
+        return Err(anyhow::anyhow!("couldn't restart {}: {err}", bin.display()));
+    }
     result
+}
+
+/// The zen to restart into: the installed one (`~/.zenbot/bin/zen`, where upgrades put it), else
+/// this binary's own path (on Linux, a replaced binary's path ends in " (deleted)").
+fn installed_zen() -> Option<PathBuf> {
+    let installed = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".zenbot/bin/zen"));
+    if let Some(p) = installed.filter(|p| p.is_file()) {
+        return Some(p);
+    }
+    let exe = std::env::current_exe().ok()?;
+    let s = exe.to_string_lossy();
+    Some(PathBuf::from(s.strip_suffix(" (deleted)").unwrap_or(&s)))
+}
+
+/// Arguments for the restarted zen: back in the same session (or a new one), same display mode.
+/// The kernel URL and token go in the environment, so the token never shows in `ps`.
+fn restart_args(session: Option<&str>, inline: bool) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(id) = session {
+        args.extend(["--resume".to_string(), id.to_string()]);
+    }
+    if inline {
+        args.push("--inline".into());
+    }
+    args
 }
 
 fn fmt_tokens(n: i64) -> String {
@@ -1756,6 +1812,10 @@ impl App {
             }
             Some("/mouse") => self.note("inline mode leaves the mouse to the terminal", Sty::Dim),
             Some("/upgrade") => self.start_upgrade(),
+            Some("/restart") => {
+                self.restart = true;
+                self.quit = true;
+            }
             Some("/exit") => self.quit = true,
             _ => self.note(format!("unknown command {input}; try /help"), Sty::Warn),
         }
@@ -1808,6 +1868,12 @@ impl App {
 
     // ---------- upgrade ----------
 
+    /// The installed zen changed since this one started.
+    fn newer_installed(&self) -> bool {
+        let Some((path, started)) = &self.installed else { return false };
+        std::fs::metadata(path).and_then(|m| m.modified()).is_ok_and(|now| now != *started)
+    }
+
     fn start_upgrade(&mut self) {
         if self.upgrading {
             self.note("an upgrade is already running", Sty::Warn);
@@ -1839,6 +1905,12 @@ impl App {
                 self.upgrading = false;
                 let ok = ev["ok"] == true;
                 self.commit(vec![line(text, if ok { Sty::Accent } else { Sty::Err }), Vec::new()]);
+                // The upgrade installed a new zen too: load it, back in this session.
+                if ok && self.newer_installed() {
+                    self.restart = true;
+                    self.quit = true;
+                    return;
+                }
                 if let Some(id) = self.session.clone() {
                     if self.sink.is_none() && self.connect(&id).await.is_err() {
                         self.note("lost connection to zenbot; send a message to reconnect", Sty::Warn);
@@ -2442,6 +2514,40 @@ mod tests {
         a.on_key(ctrl_b).await.unwrap();
         a.draw();
         assert_eq!(a.columns().1, 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn restart_quits_to_start_the_installed_zen_on_this_session() {
+        let mut a = app(80, 24);
+        a.command("/restart").await.unwrap();
+        assert!(a.quit && a.restart);
+        assert_eq!(restart_args(Some("abc"), false), ["--resume", "abc"]);
+        assert_eq!(restart_args(None, true), ["--inline"]);
+        assert!(restart_args(None, false).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_newer_install_is_noticed_and_an_upgrade_that_brings_one_restarts() {
+        let dir = std::env::temp_dir().join(format!("zen-install-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("zen");
+        std::fs::write(&bin, "old").unwrap();
+        let mut a = app(80, 24);
+        let started = std::fs::metadata(&bin).unwrap().modified().unwrap();
+        a.installed = Some((bin.clone(), started));
+        assert!(!a.newer_installed());
+        // An upgrade that didn't change zen itself doesn't restart it.
+        a.on_app_event(json!({ "type": "upgrade_done", "ok": true, "text": "zenbot upgraded" })).await;
+        assert!(!a.restart && !a.quit);
+        let f = std::fs::File::options().write(true).open(&bin).unwrap();
+        f.set_modified(started + Duration::from_secs(60)).unwrap();
+        assert!(a.newer_installed());
+        // A failed upgrade doesn't restart; a successful one that installed a new zen does.
+        a.on_app_event(json!({ "type": "upgrade_done", "ok": false, "text": "rolled back" })).await;
+        assert!(!a.restart);
+        a.on_app_event(json!({ "type": "upgrade_done", "ok": true, "text": "zenbot upgraded" })).await;
+        assert!(a.restart && a.quit);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

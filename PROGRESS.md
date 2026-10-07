@@ -6,6 +6,16 @@
 
 ---
 
+## 2026-10-07 — Terminal app: restart onto a new version
+
+- `/restart` restarts zen on the installed binary (`~/.zenbot/bin/zen`), back in the same session
+  and display mode: the terminal is restored, then the process `exec`s the new zen (same PID, so
+  the terminal tab stays). The kernel URL and token pass through the environment, not argv.
+- `/upgrade` restarts zen by itself when the upgrade installed a new zen. When zen is upgraded some
+  other way (e.g. zenbot runs `scripts/upgrade.sh` in a session), zen notices the binary changed
+  (checked every 5 s) and says `/restart` loads it.
+- Why: after an upgrade the owner had to quit and relaunch zen by hand to get the new client.
+
 ## 2026-10-07 — Terminal app: a navigable side panel
 
 - The side panel is now a small dashboard: a tab strip, a **Files** tab (folder tree) and a **Viewer** tab (the open file). Ctrl+B or `/files` opens and
