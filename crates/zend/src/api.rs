@@ -139,7 +139,7 @@ pub(crate) async fn create_session(State(app): State<AppState>, Json(body): Json
     .bind(body.title.unwrap_or_default())
     .bind(model)
     .bind(body.effort)
-    .bind(flow::initial_state())
+    .bind(Option::<String>::None)
     .fetch_one(&app.db)
     .await?;
     Ok(Json(session_json(&row)))
@@ -210,46 +210,6 @@ pub(crate) async fn get_session(State(app): State<AppState>, Path(id): Path<Uuid
     Ok(Json(session))
 }
 
-#[derive(Deserialize)]
-pub(crate) struct FlowAction {
-    action: String,
-}
-
-/// The owner takes a step of the workflow himself (docs/brief.md): `brief` (frame the next request),
-/// `quick` (skip the brief: one open loop with every tool), `go` (approve the waiting brief),
-/// `verify` (verify the work now).
-pub(crate) async fn flow_action(State(app): State<AppState>, Path(id): Path<Uuid>, Json(body): Json<FlowAction>) -> ApiResult<Json<Value>> {
-    if app.is_busy(id).await {
-        return Err(ApiError(StatusCode::CONFLICT, "the session is working; wait or abort first".into()));
-    }
-    let state = flow::state(&app.db, id).await?;
-    let conflict = |m: &str| Err(ApiError(StatusCode::CONFLICT, m.to_string()));
-    match body.action.as_str() {
-        "brief" => {
-            flow::set_state(&app, id, "framing", "owner", "owner asked for a brief", false).await?;
-            flow::resolve_shadow(&app.db, id, "route", Some("bounded"), "owner").await;
-        }
-        "quick" => {
-            flow::set_state(&app, id, "open", "owner", "owner skipped the brief", false).await?;
-            flow::resolve_shadow(&app.db, id, "route", Some("quick"), "owner").await;
-        }
-        "go" => match flow::latest_brief(&app.db, id).await? {
-            Some((_, false)) => {
-                tokio::spawn(flow::approve(app.clone(), id, "owner"));
-            }
-            _ => return conflict("there is no brief waiting for approval"),
-        },
-        "verify" => {
-            if state != "working" || !flow::latest_brief(&app.db, id).await?.is_some_and(|(_, a)| a) {
-                return conflict("verify needs approved work in progress");
-            }
-            tokio::spawn(flow::verify(app.clone(), id));
-        }
-        other => return Err(ApiError(StatusCode::BAD_REQUEST, format!("unknown action `{other}`: brief, quick, go or verify"))),
-    }
-    Ok(Json(json!({ "state": flow::state(&app.db, id).await? })))
-}
-
 /// What the owner decides about the work so far (see migrations/0005).
 pub(crate) const DECISIONS: [&str; 4] = ["accept", "more", "reshape", "drop"];
 
@@ -276,15 +236,6 @@ pub(crate) async fn decide(State(app): State<AppState>, Path(id): Path<Uuid>, Js
     .fetch_optional(&app.db)
     .await?
     .ok_or_else(not_found)?;
-    // The verdict moves briefed work on: more work, a new brief, or done.
-    if flow::enabled() && flow::state(&app.db, id).await? != "open" {
-        let to = match body.decision.as_str() {
-            "more" => "working",
-            "reshape" => "framing",
-            _ => "closed",
-        };
-        flow::set_state(&app, id, to, "owner", &format!("owner: {}", body.decision), false).await?;
-    }
     // Score the work the decision covers, so each decision has a score to compare it with.
     let scoring = app.clone();
     tokio::spawn(async move {
@@ -362,4 +313,29 @@ mod tests {
         assert!(!same_secret(b"zen-token-12", b"zen-token-123"));
         assert!(!same_secret(b"", b"x"));
     }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct MemoryQuery {
+    tier: Option<String>,
+}
+
+/// Memories (short-term by default; `?tier=long|archived|all`) and the latest sleep.
+pub(crate) async fn list_memory(State(app): State<AppState>, Query(q): Query<MemoryQuery>) -> ApiResult<Json<Value>> {
+    let tier = q.tier.unwrap_or_else(|| "short".into());
+    Ok(Json(json!({ "memories": memory::list(&app.db, &tier).await?, "last_sleep": memory::last_run(&app.db).await?, "size": memory::cap() })))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct SleepQuery {
+    trigger: Option<String>,
+}
+
+/// Tidy short-term memory now: `?trigger=nightly` from the timer (scripts/sleep.sh), else the
+/// owner. The sleep runs in its own task, so a client that stops waiting doesn't cut it short.
+pub(crate) async fn run_sleep(State(app): State<AppState>, Query(q): Query<SleepQuery>) -> ApiResult<Json<Value>> {
+    let trigger = if q.trigger.as_deref() == Some("nightly") { "nightly" } else { "owner" };
+    let job = tokio::spawn(async move { memory::sleep(&app, trigger).await });
+    let res = job.await.map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("sleep task: {e}")))?;
+    Ok(Json(res.map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?))
 }

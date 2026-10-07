@@ -21,30 +21,80 @@ pub struct Envelope {
     pub tools: Value,
 }
 
-/// The system prompt: zenbot's rules and the owner's instruction files from `/` down to the workspace.
-pub fn system_prompt(workspace: &Path, repo: &str) -> String {
-    let mut s = format!(
-        "You are zenbot, the owner's personal agent running on their Linux VM.\n\
-         You can run shell commands and read, write, edit and move files using your tools.\n\
-         Be concise and direct. Show file paths clearly. Prefer doing the work over describing it.\n\
-         The user sees every tool call and its full output in the interface, so never repeat raw tool output; \
-         summarize what matters and quote only the relevant lines.\n\
-         Ask before destructive or outward-facing actions (deleting data, pushing, publishing, sending messages, spending money).\n\
-         Your own source code (zenbot) is at {repo}. Before changing yourself, read {repo}/AGENTS.md and follow it; \
-         never restart your own service directly, use the upgrade script it describes.\n\
-         \n\
-         <tool_guidelines>\n\
-         - Use read to look at files (not cat or sed), and read a file before editing it.\n\
-         - Use edit for changes to existing files and write for new files or complete rewrites. Edits to the same file are applied one at a time, so several in one step are safe.\n\
-         - Use bash for searching (rg, grep, find), git, builds, tests and running programs.\n\
-         - Start servers and other long-running processes in the background with output redirected to a file.\n\
-         - When output is cut, the result says where the full output was saved or which offset to read next.\n\
-         - Messages in this session are numbered (#n). In a long session, older turns are replaced by a summary; the history tool reads any earlier message back by number or searches them.\n\
-         </tool_guidelines>\n"
-    );
+/// Largest size of each prompt file in the instructions (characters): SOUL.md 4000
+/// (ZEN_SOUL_CHARS), AGENTS.md 12000 (ZEN_AGENTS_CHARS), USER.md 3000 (ZEN_USER_CHARS). Sizes from
+/// Hermes and OpenClaw (DESIGN.md, Target design).
+fn file_cap(name: &str) -> usize {
+    let (key, default) = match name {
+        "SOUL.md" => ("ZEN_SOUL_CHARS", 4000.0),
+        "AGENTS.md" => ("ZEN_AGENTS_CHARS", 12000.0),
+        _ => ("ZEN_USER_CHARS", 3000.0),
+    };
+    crate::env_num(key, default) as usize
+}
+
+/// Text over `cap` characters, cut as OpenClaw does: the first 70% and the last 20% kept, with a
+/// marker saying where to read the rest.
+pub fn cut_middle(text: &str, cap: usize, path: &str) -> String {
+    if text.len() <= cap {
+        return text.to_string();
+    }
+    let head = text.floor_char_boundary(cap * 7 / 10);
+    let tail = text.ceil_char_boundary(text.len() - cap * 2 / 10);
+    format!(
+        "{}\n\n[... {} characters left out here (the file is over {cap}); read {path} for all of it ...]\n\n{}",
+        &text[..head],
+        tail - head,
+        &text[tail..]
+    )
+}
+
+/// A prompt file's text with its placeholders filled in, cut to its size.
+fn prompt_file(name: &str, vars: &[(&str, String)]) -> Option<String> {
+    let path = crate::zen_home().join(name);
+    let mut text = std::fs::read_to_string(&path).ok()?;
+    for (k, v) in vars {
+        text = text.replace(&format!("{{{{{k}}}}}"), v);
+    }
+    Some(cut_middle(text.trim(), file_cap(name), &path.display().to_string()))
+}
+
+/// The system prompt, fixed for the session: who the agent is (SOUL.md), its environment
+/// (AGENTS.md), the owner (USER.md), its short-term memory (MEMORY.md, rendered by the kernel), the
+/// skills index, and the instruction files of the workspace's projects (from `/` down). How to use
+/// each tool is in the tool's own description; how to do a kind of work, in skills.
+pub fn system_prompt(workspace: &Path, repo: &str, memory: &str, sleep_note: Option<&str>, skills_index: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let vars = [
+        ("workspace", workspace.display().to_string()),
+        ("home", home),
+        ("zen_home", crate::zen_home().display().to_string()),
+        ("repo", repo.to_string()),
+    ];
+    let mut s = String::new();
+    let soul = prompt_file("SOUL.md", &vars).unwrap_or_else(|| "You are zenbot, the owner's agent on their Linux VM.".into());
+    s.push_str(&format!("<soul file=\"~/.zenbot/SOUL.md\">\n{soul}\n</soul>\n"));
+    if let Some(env) = prompt_file("AGENTS.md", &vars) {
+        s.push_str(&format!("\n<environment file=\"~/.zenbot/AGENTS.md\">\n{env}\n</environment>\n"));
+    }
+    if let Some(user) = prompt_file("USER.md", &vars) {
+        s.push_str(&format!("\n<owner file=\"~/.zenbot/USER.md\">\n{user}\n</owner>\n"));
+    }
+    s.push_str(&format!(
+        "\n<memory size=\"{}/{}\">\nYour short-term memory as of this session's start (entries by id; change them with the remember tool).\n{}{}</memory>\n",
+        memory.len(),
+        crate::memory::cap(),
+        if memory.is_empty() { "(empty)\n".to_string() } else { memory.to_string() },
+        sleep_note.map(|n| format!("\n{n}\n")).unwrap_or_default()
+    ));
+    if !skills_index.is_empty() {
+        s.push_str(&format!(
+            "\n<skills>\nHow to do kinds of work well. When a job matches one, load it with load_skill and follow it; find_skills searches them.\n{skills_index}</skills>\n"
+        ));
+    }
     let files = context::always(workspace);
     if !files.is_empty() {
-        s.push_str("\n<project_context>\nInstructions the owner keeps for agents. Follow them.\n");
+        s.push_str("\n<project_context>\nInstructions the owner keeps for agents in these projects. Follow them.\n");
         for (path, text) in files {
             s.push_str(&format!("<file path=\"{}\">\n{}\n</file>\n", path.display(), text.trim_end()));
         }
@@ -68,7 +118,10 @@ pub async fn base_prompt(db: &PgPool, session: Uuid, blocks: &[Block], workspace
             return Ok(env.system);
         }
     }
-    let text = system_prompt(workspace, repo);
+    let memory = crate::memory::render(db).await?;
+    let note = crate::memory::morning_note(db).await?;
+    let skills = crate::skills::index_text(&crate::skills::scan(&crate::skills::root()));
+    let text = system_prompt(workspace, repo, &memory, note.as_deref(), &skills);
     tape::append(db, session, "base", &json!({ "text": text })).await?;
     Ok(text)
 }
@@ -187,13 +240,25 @@ mod tests {
         std::fs::write(root.join("CLAUDE.md"), "outer rule").unwrap();
         std::fs::write(ws.join("AGENTS.md"), "inner rule").unwrap();
         std::fs::write(ws.join("CLAUDE.md"), "shadowed by AGENTS.md").unwrap();
-        let prompt = system_prompt(&ws, "/repo");
+        let prompt = system_prompt(&ws, "/repo", "- [m1] a memory\n", Some("Last sleep: 1 kept."), "- work/verify: Check work.\n");
         let outer = prompt.find("outer rule").expect("parent CLAUDE.md loaded");
         let inner = prompt.find("inner rule").expect("workspace AGENTS.md loaded");
         assert!(outer < inner, "files are ordered from the root down");
         assert!(!prompt.contains("shadowed"));
         assert!(prompt.contains(&format!("Working directory for tools: {}", ws.display())));
         assert!(!prompt.contains("Today is"), "the date changes daily, so it is not in the instructions");
+        assert!(prompt.contains("[m1] a memory") && prompt.contains("- work/verify: Check work."));
+        assert!(prompt.find("Last sleep: 1 kept.").unwrap() < prompt.find("</memory>").unwrap());
+        assert!(prompt.find("<memory").unwrap() < prompt.find("<skills>").unwrap());
+        assert!(prompt.find("<skills>").unwrap() < prompt.find("<project_context>").unwrap());
+    }
+
+    #[test]
+    fn long_files_keep_their_start_and_end() {
+        let text = format!("START{}END", "x".repeat(1000));
+        let cut = cut_middle(&text, 100, "/p");
+        assert!(cut.starts_with("START") && cut.ends_with("END") && cut.contains("read /p"));
+        assert_eq!(cut_middle("short", 100, "/p"), "short");
     }
 
     #[test]
