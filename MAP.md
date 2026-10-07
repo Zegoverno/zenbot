@@ -268,7 +268,7 @@ the kernel's environment.
 | `ZEN_MEMORY_PROMOTE_BAR` | `0.95` | `memory.rs` | Durable and impactful bar for long-term, on the lowest of three samples |
 | `ZEN_DECIDE_TOOL` | on | `agent.rs` | `0` hides the `decide` tool |
 | `ZEN_S1_MODEL` | unset (off) | `score.rs` | System One classifier: scoring, `decide`, the sleep |
-| `ZEN_S1_PRIVATE` | off | `score.rs` | `1`: System One may see private content (today: memories, in the sleep) |
+| `ZEN_S1_PRIVATE` | on | `score.rs` | `0`: System One sees only the conversation, not private content (today: memories, in the sleep) |
 | `ZEN_SCORE_IDLE_SECS` | `7200` | `score.rs` | Idle time before a session is scored |
 | `ZEN_CONTEXT_TOKENS` | `200000` | `compact.rs` | Context budget (capped by the model's window) |
 | `ZEN_COMPACT_SOFT` / `_HARD` / `_KEEP` | `0.7` / `0.9` / `0.3` | `compact.rs` | Fractions of the budget: prepare a summary / apply now / keep verbatim |

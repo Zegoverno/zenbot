@@ -6,6 +6,24 @@
 
 ---
 
+## D-032 — System One may see private content
+
+**Decision:** System One (Jev on OpenRouter) may see private content: file contents, tool output,
+memories, search results, not only the owner's messages and final answers. `ZEN_S1_PRIVATE=0`
+turns it off, and the tools that would send it more then do without System One.
+
+**Why:** Heavy use of System One inside tools (ranking, filtering, the memory sleep) needs the
+material it judges. The main model's provider already sees the same content, and secrets are
+masked before anything leaves the kernel. Proposed to the owner with the redesign; they went ahead
+with it.
+
+**Considered:** Only web and public content (limits the memory sleep and search ranking); waiting
+for a local System One model (delays every System One use in tools).
+
+**Date:** 2026-10-07
+
+---
+
 ## D-031 — Docs: one file per kind of fact
 
 **Decision:** The repo's docs are split like this: `CONTEXT.md` (what zenbot is for, success,

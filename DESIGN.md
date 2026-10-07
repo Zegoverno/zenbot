@@ -108,7 +108,7 @@ with questions for the owner. The kernel-enforced workflow (`flow.rs`) was remov
   long-term the entries from the owner or a check that System One judges durable and impactful at
   ≥ 0.95 on the lowest of three samples (shadow: `ZEN_MEMORY_PROMOTE=on` acts). Every entry's fate
   is a `decisions` row; the run is a `sleep_runs` row; the next sessions get a one-line note. System
-  One sees memories only with `ZEN_S1_PRIVATE=1` (the open decision in ROADMAP.md).
+  One sees memories unless `ZEN_S1_PRIVATE=0` (D-032).
 - **Skills** (`skills.rs`): folders in `~/.zenbot/skills/<domain>/<name>/` in the agentskills.io
   format, validated when scanned (invalid ones are skipped and logged). The instructions carry an
   index; `find_skills` matches names, descriptions and bodies; `load_skill` returns a SKILL.md or a
@@ -119,7 +119,7 @@ with questions for the owner. The kernel-enforced workflow (`flow.rs`) was remov
 A fast typed-decision model (Jev via OpenRouter, through Pi's `s1.decide`): choice, score or bool
 questions, answered with probabilities. Used today for live scoring of sessions (from the owner's
 messages and final answers only, never tool output; `session_scores`), the model's `decide` tool,
-and the memory sleep when `ZEN_S1_PRIVATE=1`. Configured
+and the memory sleep (private content allowed unless `ZEN_S1_PRIVATE=0`, D-032). Configured
 by `ZEN_S1_MODEL` and `OPENROUTER_API_KEY`; needs the `pi` worker.
 
 ### Measurement

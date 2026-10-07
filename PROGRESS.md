@@ -20,7 +20,7 @@ version and the owner's call come before merging.
   session and exported to `~/.zenbot/MEMORY.md`, a hard ceiling that refuses writes and starts a
   sleep. The sleep (nightly `zen-sleep.timer`, or `zen memory sleep`) keeps what fits, archives the
   rest, proposes long-term promotions in shadow, logs every fate in `decisions`, and leaves a note
-  for the next sessions. System One judges memories only with `ZEN_S1_PRIVATE=1` (open decision).
+  for the next sessions. System One judges memories unless `ZEN_S1_PRIVATE=0` (D-032).
 - **Skills**: `~/.zenbot/skills/<domain>/<name>/` (agentskills.io), `find_skills`, `load_skill`;
   first skills `work/brief` and `work/verify`.
 - **Workflow out of the kernel** (D-026): `flow.rs` (1,043 lines) replaced by `agent.rs` (433):

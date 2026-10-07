@@ -146,11 +146,8 @@ maps to a model, a small share of subtasks explore, outcomes decide.
 
 ## Open decisions
 
-1. **What System One may see.** Heavy use sends private content (files, search results, wiki text) to
-   Jev on OpenRouter, ending the rule that tool output never leaves the VM for scoring. Recommended:
-   allow everything except content marked sensitive (secrets are masked; the main model's provider
-   already sees the same content). Waiting on the owner. Until then `ZEN_S1_PRIVATE` is off by
-   default: the memory sleep ranks by recency and proposes nothing for long-term.
+1. ~~What System One may see~~: decided (D-032): private content allowed by default,
+   `ZEN_S1_PRIVATE=0` turns it off.
 2. **Dogfooding data.** Real use runs on another VM. A `zen export` (sessions, verdicts, cost, model
    choices; secrets masked) would bring it here for evals and, later, Phase 6. Not yet scheduled.
 3. **Pilot project.** Which side project zenbot serves after zenbot itself.

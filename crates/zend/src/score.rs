@@ -30,11 +30,12 @@ pub fn scorer() -> Option<String> {
 }
 
 /// Whether System One may see private content (file contents, tool output, memories, search
-/// results), not only the owner's messages and final answers: ZEN_S1_PRIVATE=1. Off by default
-/// until the owner decides (ROADMAP.md, open decisions); the tools that would send it more do
-/// without it (the sleep ranks by recency).
+/// results), not only the owner's messages and final answers: on by default (D-032; the main
+/// model's provider already sees the same content, and secrets are masked). ZEN_S1_PRIVATE=0 keeps
+/// System One to the conversation; the tools that would send it more then do without it (the
+/// sleep ranks by recency).
 pub fn private_ok() -> bool {
-    std::env::var("ZEN_S1_PRIVATE").is_ok_and(|v| v.trim() == "1")
+    std::env::var("ZEN_S1_PRIVATE").map(|v| v.trim() != "0").unwrap_or(true)
 }
 
 /// Ask the configured System One model typed questions about `state` (`s1.decide`,
