@@ -3,3 +3,6 @@ node_modules/
 .env
 *.log
 data/
+
+# Eval task files are fixtures, logs included.
+!evals/tasks/*/files/**
