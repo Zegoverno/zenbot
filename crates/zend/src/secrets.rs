@@ -1,12 +1,13 @@
 //! Masking secrets in tool output before the model or the tape sees it (SPEC 5.18, docs/context.md).
 //!
 //! Two kinds are masked: the values of the kernel's own secrets (environment variables named like a
-//! token, key, secret or password, zenbot's API token, Pi's sign-in), and text in well-known token
+//! token, key, secret or password, zenbot's API token, the old Pi sign-in and the Claude Code and
+//! Codex sign-ins, reloaded when those files change), and text in well-known token
 //! formats (API keys, GitHub, GitLab, Slack, AWS, Google and Hugging Face tokens, private key blocks).
 //! The prefix stays visible so the model knows what was there. A model that needs a secret's value
 //! should move it with the shell without printing it.
 
-use std::sync::LazyLock;
+use std::sync::{Arc, Mutex};
 
 /// Token prefixes and the shortest run of token characters that must follow.
 const PREFIXES: [(&str, usize); 18] = [
@@ -51,23 +52,50 @@ pub fn secret_files() -> Vec<std::path::PathBuf> {
     ["token", "auth.json", "env"].iter().map(|f| home.join(f)).filter(|p| p.exists()).collect()
 }
 
-/// Secret values the kernel knows, longest first (so a value containing another is masked whole).
-static KNOWN: LazyLock<Vec<String>> = LazyLock::new(|| {
-    let mut values: Vec<String> = std::env::vars().filter(|(k, _)| is_secret_var(k)).map(|(_, v)| v).collect();
+/// Files whose secret values are masked: zenbot's token and old sign-in, and the engines' sign-ins.
+fn known_files() -> Vec<std::path::PathBuf> {
     let home = crate::zen_home();
-    if let Ok(t) = std::fs::read_to_string(home.join("token")) {
+    let user = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    vec![home.join("token"), home.join("auth.json"), user.join(".codex/auth.json"), user.join(".claude/.credentials.json")]
+}
+
+/// Secret values the kernel knows, longest first (so a value containing another is masked whole).
+fn load_known(files: &[std::path::PathBuf]) -> Vec<String> {
+    let mut values: Vec<String> = std::env::vars().filter(|(k, _)| is_secret_var(k)).map(|(_, v)| v).collect();
+    if let Ok(t) = std::fs::read_to_string(&files[0]) {
         values.push(t.trim().to_string());
     }
-    if let Ok(auth) = std::fs::read_to_string(home.join("auth.json")) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&auth) {
-            collect_strings(&v, &mut values);
+    for f in &files[1..] {
+        if let Ok(text) = std::fs::read_to_string(f) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                collect_strings(&v, &mut values);
+            }
         }
     }
     values.retain(|v| v.len() >= 12 && !v.contains(char::is_whitespace));
     values.sort_by_key(|v| std::cmp::Reverse(v.len()));
     values.dedup();
     values
-});
+}
+
+type Known = (Vec<Option<std::time::SystemTime>>, Arc<Vec<String>>);
+
+/// The known values, read again whenever one of their files changes (a new sign-in or a rotated
+/// token is masked without a restart).
+fn known() -> Arc<Vec<String>> {
+    static KNOWN: Mutex<Option<Known>> = Mutex::new(None);
+    let files = known_files();
+    let stamps: Vec<_> = files.iter().map(|f| std::fs::metadata(f).and_then(|m| m.modified()).ok()).collect();
+    let mut cache = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
+    match cache.as_ref() {
+        Some((at, values)) if *at == stamps => values.clone(),
+        _ => {
+            let values = Arc::new(load_known(&files));
+            *cache = Some((stamps, values.clone()));
+            values
+        }
+    }
+}
 
 fn collect_strings(v: &serde_json::Value, out: &mut Vec<String>) {
     match v {
@@ -80,7 +108,7 @@ fn collect_strings(v: &serde_json::Value, out: &mut Vec<String>) {
 
 /// `text` with known secret values and token-shaped strings masked.
 pub fn mask(text: &str) -> String {
-    mask_with(text, &KNOWN)
+    mask_with(text, &known())
 }
 
 /// `mask` for text that may be large (up to 16 MB of command output), off the runtime's threads.
