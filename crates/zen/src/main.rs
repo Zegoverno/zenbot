@@ -186,6 +186,16 @@ enum ReviewCmd {
     Reject { name: String },
 }
 
+impl ReviewCmd {
+    /// The name and the decision to send.
+    fn parts(self) -> (String, &'static str) {
+        match self {
+            ReviewCmd::Accept { name } => (name, "accept"),
+            ReviewCmd::Reject { name } => (name, "reject"),
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum MemoryCmd {
     /// Tidy short-term memory now (what the nightly sleep does)
@@ -624,11 +634,12 @@ async fn run(cli: Cli) -> Result<()> {
         return login(which.as_deref());
     }
     let c = Client::new(cli.url, cli.token)?;
-    let out = |v: &Value| println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+    let json = cli.json;
+    let out = |v: &Value| emit(true, v, String::new);
     let Some(cmd) = cli.cmd else {
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
             // Piped use without a command behaves like `zen ask`.
-            return ask(&c, cli.json, None, None, NewSession { model: cli.model, effort: cli.effort }, false).await;
+            return ask(&c, json, None, None, NewSession { model: cli.model, effort: cli.effort }, false).await;
         }
         let start = match (cli.cont, cli.resume) {
             (_, Some(id)) if !id.is_empty() => tui::Start::Resume(Some(id)),
@@ -639,7 +650,7 @@ async fn run(cli: Cli) -> Result<()> {
         return tui::run(c, start, NewSession { model: cli.model, effort: cli.effort }, cli.inline).await;
     };
     match cmd {
-        Cmd::Ask { prompt, session, model, effort, quiet } => ask(&c, cli.json, prompt, session, NewSession { model, effort }, quiet).await?,
+        Cmd::Ask { prompt, session, model, effort, quiet } => ask(&c, json, prompt, session, NewSession { model, effort }, quiet).await?,
         Cmd::Chat { session, model, effort } => {
             let new = NewSession { model, effort };
             if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
@@ -652,7 +663,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Login { .. } => unreachable!(),
         Cmd::Models => {
             let m = c.get("/api/models").await?;
-            if cli.json {
+            if json {
                 out(&m);
             } else {
                 for x in m["models"].as_array().into_iter().flatten() {
@@ -665,7 +676,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Upgrade { check } => {
             if check {
                 let v = c.get("/api/version?refresh=true").await?;
-                if cli.json {
+                if json {
                     out(&v);
                 } else {
                     println!("{}", describe_update(&v));
@@ -675,11 +686,7 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             } else {
                 let msg = c.upgrade(|l| eprintln!("{}", dim(&l))).await?;
-                if cli.json {
-                    out(&json!({ "ok": true, "message": msg }));
-                } else {
-                    println!("{msg}");
-                }
+                emit(json, &json!({ "ok": true, "message": msg }), || msg.clone());
             }
         }
         Cmd::Status => {
@@ -706,7 +713,7 @@ async fn run(cli: Cli) -> Result<()> {
                 "default_model": models["default"],
                 "scorer": models["scorer"],
             });
-            if cli.json {
+            if json {
                 out(&status);
             } else {
                 let mark = |b: bool| if b { "ok" } else { "FAIL" };
@@ -755,7 +762,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Memory { cmd: Some(MemoryCmd::Sleep), .. } => {
             let r = c.post("/api/memory/sleep", json!({})).await?;
-            if cli.json {
+            if json {
                 out(&r);
             } else {
                 println!("{}", sleep_counts(&r));
@@ -764,31 +771,11 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Cmd::Memory { cmd: Some(c2 @ (MemoryCmd::Accept { .. } | MemoryCmd::Reject { .. })), .. } => {
-            let (id, decision) = match c2 {
-                MemoryCmd::Accept { id } => (id, "accept"),
-                MemoryCmd::Reject { id } => (id, "reject"),
-                MemoryCmd::Sleep => unreachable!(),
-            };
-            let r = c.post(&format!("/api/memory/{}/review", enc(&id)), json!({ "decision": decision })).await?;
-            if cli.json {
-                out(&r);
-            } else {
-                let p = &r["promotion"];
-                println!(
-                    "{} is now {}-term. Promotion: {} ({} of {} proposals accepted; acts on its own at 0.95, now {:.2})",
-                    r["id"].as_str().unwrap_or(""),
-                    r["tier"].as_str().unwrap_or(""),
-                    p["mode"].as_str().unwrap_or(""),
-                    p["accepted"],
-                    p["reviewed"],
-                    p["lower_bound"].as_f64().unwrap_or(0.0)
-                );
-            }
-        }
+        Cmd::Memory { cmd: Some(MemoryCmd::Accept { id }), .. } => review_memory(&c, json, &id, "accept").await?,
+        Cmd::Memory { cmd: Some(MemoryCmd::Reject { id }), .. } => review_memory(&c, json, &id, "reject").await?,
         Cmd::Skills { cmd: None } => {
             let s = c.get("/api/skills").await?;
-            if cli.json {
+            if json {
                 out(&s);
             } else {
                 for x in s["skills"].as_array().into_iter().flatten() {
@@ -807,16 +794,13 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Skills { cmd: Some(r) } => {
-            let (name, decision) = match r {
-                ReviewCmd::Accept { name } => (name, "accept"),
-                ReviewCmd::Reject { name } => (name, "reject"),
-            };
+            let (name, decision) = r.parts();
             let res = c.post("/api/skills/review", json!({ "name": name, "decision": decision })).await?;
-            if cli.json { out(&res) } else { println!("{}", res["result"].as_str().unwrap_or("")) }
+            emit(json, &res, || res["result"].as_str().unwrap_or("").to_string());
         }
         Cmd::Policy { cmd: None } => {
             let p = c.get("/api/policy").await?;
-            if cli.json {
+            if json {
                 out(&p);
             } else {
                 println!("policy v{}: {}", p["version"], serde_json::to_string(&p["policy"]).unwrap_or_default());
@@ -835,7 +819,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Policy { cmd: Some(PolicyCmd::Undo) } => {
             let r = c.post("/api/policy/undo", json!({})).await?;
-            if cli.json { out(&r) } else { println!("policy v{}", r["version"]) }
+            emit(json, &r, || format!("policy v{}", r["version"]));
         }
         Cmd::Policy { cmd: Some(PolicyCmd::Set { kind, model, candidates, explore }) } => {
             let mut p = c.get("/api/policy").await?["policy"].clone();
@@ -851,20 +835,16 @@ async fn run(cli: Cli) -> Result<()> {
                 p["explore"] = json!(e);
             }
             let r = c.post("/api/policy", json!({ "policy": p, "reason": format!("owner: {kind} -> {model}") })).await?;
-            if cli.json { out(&r) } else { println!("policy v{}", r["version"]) }
+            emit(json, &r, || format!("policy v{}", r["version"]));
         }
         Cmd::Tools { cmd } => {
-            let (name, decision) = match cmd {
-                ReviewCmd::Accept { name } => (name, "accept"),
-                ReviewCmd::Reject { name } => (name, "reject"),
-            };
-            let name = name.trim_start_matches("made_").to_string();
-            let res = c.post(&format!("/api/tools/{}/review", enc(&name)), json!({ "decision": decision })).await?;
-            if cli.json { out(&res) } else { println!("{}", res["result"].as_str().unwrap_or("")) }
+            let (name, decision) = cmd.parts();
+            let res = c.post(&format!("/api/tools/{}/review", enc(name.trim_start_matches("made_"))), json!({ "decision": decision })).await?;
+            emit(json, &res, || res["result"].as_str().unwrap_or("").to_string());
         }
         Cmd::Memory { cmd: None, tier } => {
             let m = c.get(&format!("/api/memory?tier={}", enc(&tier))).await?;
-            if cli.json {
+            if json {
                 out(&m);
             } else {
                 for x in m["memories"].as_array().into_iter().flatten() {
@@ -877,39 +857,69 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Sessions(cmd) => match cmd {
             SessionsCmd::Ls { archived } => {
                 let list = c.get(&format!("/api/sessions?archived={archived}")).await?;
-                if cli.json { out(&list) } else { print_sessions(&list) }
+                if json { out(&list) } else { print_sessions(&list) }
             }
             SessionsCmd::New { model, effort, title } => {
                 let s = c.post("/api/sessions", json!({ "model": model, "effort": effort, "title": title })).await?;
-                if cli.json { out(&s) } else { println!("{}", s["id"].as_str().unwrap_or("")) }
+                emit(json, &s, || s["id"].as_str().unwrap_or("").to_string());
             }
             SessionsCmd::Show { id } => {
-                let id = c.resolve(&id).await?;
-                let s = c.get(&format!("/api/sessions/{id}")).await?;
-                if cli.json { out(&s) } else { print_messages(&s) }
+                let (_, s) = session_op(&c, &id, reqwest::Method::GET, None).await?;
+                if json { out(&s) } else { print_messages(&s) }
             }
             SessionsCmd::Archive { id } => {
-                let id = c.resolve(&id).await?;
-                let s = c.patch(&format!("/api/sessions/{id}"), json!({ "archived": true })).await?;
-                if cli.json { out(&s) } else { println!("archived {}", short(&id)) }
+                let (id, s) = session_op(&c, &id, reqwest::Method::PATCH, Some(json!({ "archived": true }))).await?;
+                emit(json, &s, || format!("archived {}", short(&id)));
             }
             SessionsCmd::Restore { id } => {
-                let id = c.resolve(&id).await?;
-                let s = c.patch(&format!("/api/sessions/{id}"), json!({ "archived": false })).await?;
-                if cli.json { out(&s) } else { println!("restored {}", short(&id)) }
+                let (id, s) = session_op(&c, &id, reqwest::Method::PATCH, Some(json!({ "archived": false }))).await?;
+                emit(json, &s, || format!("restored {}", short(&id)));
             }
             SessionsCmd::Decide { id, decision, note } => {
                 let id = c.resolve(&id).await?;
                 let d = c.post(&format!("/api/sessions/{id}/decision"), json!({ "decision": decision, "note": note })).await?;
-                if cli.json { out(&d) } else { println!("recorded {} for {}", d["decision"].as_str().unwrap_or(""), short(&id)) }
+                emit(json, &d, || format!("recorded {} for {}", d["decision"].as_str().unwrap_or(""), short(&id)));
             }
             SessionsCmd::Rename { id, title } => {
-                let id = c.resolve(&id).await?;
-                let s = c.patch(&format!("/api/sessions/{id}"), json!({ "title": title })).await?;
-                if cli.json { out(&s) } else { println!("renamed {}", short(&id)) }
+                let (id, s) = session_op(&c, &id, reqwest::Method::PATCH, Some(json!({ "title": title }))).await?;
+                emit(json, &s, || format!("renamed {}", short(&id)));
             }
         },
     }
+    Ok(())
+}
+
+/// Print `v` as JSON with `--json`, else the human-readable `text`.
+fn emit(json: bool, v: &Value, text: impl FnOnce() -> String) {
+    if json {
+        println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+    } else {
+        println!("{}", text());
+    }
+}
+
+/// Resolve a session id or unique prefix, then call `/api/sessions/<id>` with `method`.
+async fn session_op(c: &Client, id: &str, method: reqwest::Method, body: Option<Value>) -> Result<(String, Value)> {
+    let id = c.resolve(id).await?;
+    let v = c.call(method, &format!("/api/sessions/{id}"), body).await?;
+    Ok((id, v))
+}
+
+/// `zen memory accept|reject <id>`: decide on a memory the sleep proposed for long-term memory.
+async fn review_memory(c: &Client, json: bool, id: &str, decision: &str) -> Result<()> {
+    let r = c.post(&format!("/api/memory/{}/review", enc(id)), json!({ "decision": decision })).await?;
+    let p = &r["promotion"];
+    emit(json, &r, || {
+        format!(
+            "{} is now {}-term. Promotion: {} ({} of {} proposals accepted; acts on its own at 0.95, now {:.2})",
+            r["id"].as_str().unwrap_or(""),
+            r["tier"].as_str().unwrap_or(""),
+            p["mode"].as_str().unwrap_or(""),
+            p["accepted"],
+            p["reviewed"],
+            p["lower_bound"].as_f64().unwrap_or(0.0)
+        )
+    });
     Ok(())
 }
 
