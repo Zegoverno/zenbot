@@ -280,6 +280,14 @@ struct App {
     spin: usize,
     turn_started: Instant,
     stream: String,
+    /// Full screen: the stream's complete lines rendered at `stream_w` columns, how many bytes of
+    /// it they cover (up to and including its last newline), and the markdown state after them;
+    /// so a delta renders only the unfinished last line, not the whole reply again.
+    stream_lines: Vec<Line>,
+    stream_done: usize,
+    stream_md: Md,
+    stream_w: usize,
+    /// Inline: bytes of the stream already printed into scrollback, and the markdown state after them.
     committed: usize,
     md: Md,
     turn_tokens: i64,
@@ -395,6 +403,10 @@ impl App {
             spin: 0,
             turn_started: Instant::now(),
             stream: String::new(),
+            stream_lines: Vec::new(),
+            stream_done: 0,
+            stream_md: Md::default(),
+            stream_w: 0,
             committed: 0,
             md: Md::default(),
             turn_tokens: 0,
@@ -1010,8 +1022,10 @@ impl App {
         let vh = h - region.len();
 
         // The conversation, with the streaming reply at the end: all of it, as it arrives.
-        let live = if self.busy && !self.stream.is_empty() { Md::default().render(&self.stream, cw) } else { Vec::new() };
-        let total = self.view.len() + live.len();
+        let streaming = self.busy && !self.stream.is_empty();
+        let tail = if streaming { self.stream_tail(cw) } else { Vec::new() };
+        let done: &[Line] = if streaming { &self.stream_lines } else { &[] };
+        let total = self.view.len() + done.len() + tail.len();
         if self.scroll > 0 && total > self.last_total {
             self.scroll += total - self.last_total; // scrolled up: keep the view where it is
         }
@@ -1019,7 +1033,8 @@ impl App {
         self.scroll = self.scroll.min(total.saturating_sub(vh));
         let end = total - self.scroll;
         let start = end.saturating_sub(vh);
-        let at = |i: usize| if i < self.view.len() { &self.view[i] } else { &live[i - self.view.len()] };
+        let (v, d) = (self.view.len(), done.len());
+        let at = |i: usize| if i < v { &self.view[i] } else if i < v + d { &done[i - v] } else { &tail[i - v - d] };
         let mut chat: Vec<Line> = (start..end).map(|i| at(i).clone()).collect();
         if self.scroll > 0 && !chat.is_empty() {
             let last = chat.len() - 1;
@@ -1779,6 +1794,30 @@ impl App {
         self.stream.clear();
         self.committed = 0;
         self.md = Md::default();
+        self.stream_lines.clear();
+        self.stream_done = 0;
+        self.stream_md = Md::default();
+    }
+
+    /// Full screen: render the stream's newly completed lines at `w` columns (all of them again
+    /// when the width changed) and return its unfinished last line, rendered in the state the
+    /// complete lines left (e.g. inside a code fence).
+    fn stream_tail(&mut self, w: usize) -> Vec<Line> {
+        if self.stream_w != w {
+            self.stream_lines.clear();
+            self.stream_done = 0;
+            self.stream_md = Md::default();
+            self.stream_w = w;
+        }
+        if let Some(pos) = self.stream[self.stream_done..].rfind('\n') {
+            let end = self.stream_done + pos;
+            for l in self.stream[self.stream_done..end].split('\n') {
+                self.stream_lines.extend(self.stream_md.render_line(l, w));
+            }
+            self.stream_done = end + 1;
+        }
+        let mut md = self.stream_md;
+        md.render(&self.stream[self.stream_done..], w)
     }
 
     async fn command(&mut self, input: &str) -> Result<()> {
@@ -2746,6 +2785,27 @@ mod tests {
 
     /// Streaming cost in full screen: a 43 KB reply in 20-byte deltas, each drawn as it arrives.
     /// Run with `cargo test --release -p zen -- --ignored --nocapture streaming_cost`.
+    #[test]
+    fn the_cached_stream_renders_like_the_whole_reply() {
+        let reply = long_reply(1_500);
+        for step in [3, 20, 300] {
+            let mut a = app(70, 30);
+            a.busy = true;
+            let chars: Vec<char> = reply.chars().collect();
+            for chunk in chars.chunks(step) {
+                a.on_event(json!({ "type": "delta", "delta": chunk.iter().collect::<String>() }));
+                let tail = a.stream_tail(a.columns().0);
+                let lines = [a.stream_lines.clone(), tail].concat();
+                assert_eq!(lines, Md::default().render(&a.stream, a.columns().0), "{step}-char deltas, at {} bytes", a.stream.len());
+            }
+            // A resize renders it again at the new width.
+            a.size = (50, 30);
+            let tail = a.stream_tail(a.columns().0);
+            let lines = [a.stream_lines.clone(), tail].concat();
+            assert_eq!(lines, Md::default().render(&a.stream, a.columns().0));
+        }
+    }
+
     #[test]
     #[ignore]
     fn streaming_cost() {
