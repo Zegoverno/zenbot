@@ -21,9 +21,16 @@ ZEN_TOKEN="$(cat "$HOME/.zenbot/token")"
 DATABASE_URL="$(db_url_for "$DB")"
 ZEN_HARNESS="$(git rev-parse --short HEAD)" # turns record this checkout, not the installed version
 export ZEN_TOKEN DATABASE_URL ZEN_HARNESS ZEN_PORT=$PORT ZEN_MIND_DIR="$REPO/packages/mind"
-# Its own zenbot home (prompt files, skills, MEMORY.md), so the dev database's memory never
-# overwrites the live one's export. Copy your prompt files there to try them.
-export ZEN_HOME=${ZEN_DEV_HOME:-$HOME/.zenbot/dev}
+# Keep the dev kernel outside the live home so the live file tree never exposes its prompt files.
+# Move an existing dev home once without replacing anything at the new path.
+if [ -z "${ZEN_DEV_HOME:-}" ] && [ -d "$HOME/.zenbot/dev" ]; then
+  if [ -e "$HOME/.zenbot-dev" ]; then
+    echo "Both ~/.zenbot/dev and ~/.zenbot-dev exist; move the old dev home by hand before starting" >&2
+    exit 1
+  fi
+  mv "$HOME/.zenbot/dev" "$HOME/.zenbot-dev"
+fi
+export ZEN_HOME=${ZEN_DEV_HOME:-$HOME/.zenbot-dev}
 
 docker compose -f deploy/compose.yaml up -d --wait postgres
 [ "$(db_psql -d postgres -c "SELECT 1 FROM pg_database WHERE datname = '$DB'")" = 1 ] ||
