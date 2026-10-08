@@ -74,14 +74,31 @@ pub fn clean_sessions() {
     }
 }
 
+/// Tools in Claude Code's `system/init` event that aren't zenbot's (`mcp__zen__*`), if any.
+fn unmediated_tools(init: &Value) -> Option<String> {
+    let bad: Vec<&str> = init["tools"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|t| !t.starts_with(PREFIX)).collect();
+    (!bad.is_empty()).then(|| bad.join(", "))
+}
+
 pub fn available() -> bool {
     std::process::Command::new("claude").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bool>) -> Result<Option<String>> {
     let model = input.model.as_str();
-    let socket = format!("{}/zen-engine-{}-{}.sock", std::env::temp_dir().display(), std::process::id(), now_ms());
-    let server = ctx.serve_socket(&socket).context("opening tool socket")?;
+    let (socket_dir, socket) = crate::turn::socket_dir().context("creating the tool socket's folder")?;
+    let system_file = socket_dir.join("system.md");
+    if let Err(e) = crate::turn::private_file(&system_file, &input.system) {
+        let _ = std::fs::remove_dir_all(&socket_dir);
+        return Err(anyhow::Error::new(e).context("writing the system prompt file"));
+    }
+    let server = match ctx.serve_socket(&socket) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&socket_dir);
+            return Err(anyhow::Error::new(e).context("opening tool socket"));
+        }
+    };
     let exe = std::env::current_exe()?.display().to_string();
     let mcp = json!({ "mcpServers": { "zen": { "command": exe, "args": ["mcp-bridge", socket] } } }).to_string();
     let allowed: Vec<String> = ctx.tools.iter().filter_map(|t| t["name"].as_str()).map(|n| format!("{PREFIX}{n}")).collect();
@@ -115,7 +132,9 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
         .args(["--tools", "", "--strict-mcp-config", "--mcp-config", &mcp, "--setting-sources", ""])
         .args(["--allowedTools", &allowed.join(",")])
         .args(["--permission-mode", "bypassPermissions"])
-        .args(["--system-prompt", &input.system, "--model", model])
+        .arg("--system-prompt-file")
+        .arg(&system_file)
+        .args(["--model", model])
         .current_dir(&dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -170,7 +189,16 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
                     sent += 1;
                 }
                 match ev["type"].as_str() {
-                    Some("system") if ev["subtype"] == "init" => usage["engine_version"] = ev["claude_code_version"].clone(),
+                    Some("system") if ev["subtype"] == "init" => {
+                        usage["engine_version"] = ev["claude_code_version"].clone();
+                        // Every action must go through the kernel: if a CLI release stops honoring
+                        // `--tools ""`, stop before the model can use a built-in tool.
+                        if let Some(bad) = unmediated_tools(&ev) {
+                            let _ = child.start_kill();
+                            outcome = Some(Ok(Some(format!("claude offered tools zenbot doesn't control ({bad}); refusing the turn (does the CLI still honor --tools \"\"?)"))));
+                            break;
+                        }
+                    }
                     Some("result") => {
                         turn_usage(&ev, &mut usage);
                         let answered = ev["result"].as_str().is_some_and(|t| !t.trim().is_empty());
@@ -199,7 +227,7 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
     drop(stdin);
     let status = child.wait().await.ok();
     server.abort();
-    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_dir_all(&socket_dir);
     if !sessions {
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -222,9 +250,22 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
 pub async fn complete(model: &str, system: &str, prompt: &str) -> Result<Value> {
     // A fixed, empty directory: Claude Code tells the model its working directory.
     let dir = crate::turn::engine_dir("complete")?;
+    let (prompt_dir, _) = crate::turn::socket_dir()?;
+    let system_file = prompt_dir.join("system.md");
+    // Removed however this call ends.
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(prompt_dir);
+    crate::turn::private_file(&system_file, system)?;
     let mut child = Command::new("claude")
         .args(["-p", "--output-format", "json", "--tools", "", "--setting-sources", "", "--no-session-persistence"])
-        .args(["--strict-mcp-config", "--effort", DEFAULT_EFFORT, "--system-prompt", system, "--model", model])
+        .args(["--strict-mcp-config", "--effort", DEFAULT_EFFORT, "--system-prompt-file"])
+        .arg(&system_file)
+        .args(["--model", model])
         .current_dir(&dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -425,6 +466,13 @@ mod tests {
         let m = calls.flush("aborted").unwrap();
         assert_eq!(m["stopReason"], "aborted");
         assert_eq!(m["content"][0]["text"], "partial");
+    }
+
+    #[test]
+    fn only_zen_tools_may_be_offered() {
+        assert_eq!(unmediated_tools(&json!({ "tools": [format!("{PREFIX}bash"), format!("{PREFIX}read")] })), None);
+        assert_eq!(unmediated_tools(&json!({ "tools": [] })), None);
+        assert_eq!(unmediated_tools(&json!({ "tools": [format!("{PREFIX}bash"), "Bash", "Read"] })).as_deref(), Some("Bash, Read"));
     }
 
     #[test]

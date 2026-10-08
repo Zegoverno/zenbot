@@ -216,6 +216,29 @@ pub fn engine_dir(name: &str) -> std::io::Result<std::path::PathBuf> {
     Ok(dir)
 }
 
+/// A fresh folder only the owner can use, holding one turn's tool socket (not a shared /tmp path,
+/// where another local user could connect and run tools). Under the engine home when the socket path
+/// fits the 108-byte Unix socket limit, else an exclusively created folder in the temp dir.
+/// Returns the folder (remove it when the turn ends) and the socket path.
+pub fn socket_dir() -> std::io::Result<(std::path::PathBuf, String)> {
+    use std::os::unix::fs::DirBuilderExt;
+    let leaf = format!("{}-{}", std::process::id(), &new_uuid()[..8]);
+    let under_home = engine_dir("sockets")?.join(&leaf);
+    let dir = if under_home.join("t.sock").as_os_str().len() < 100 { under_home } else { std::env::temp_dir().join(format!("zen-engine-{leaf}")) };
+    // Not recursive: creating it must fail if it already exists (someone else's folder).
+    std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+    let socket = dir.join("t.sock").display().to_string();
+    Ok((dir, socket))
+}
+
+/// Write `text` to a new file only the owner can read (for a system prompt: on argv it would be
+/// visible to every local user in `ps` and limited to 128 KB).
+pub fn private_file(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?.write_all(text.as_bytes())
+}
+
 /// Whether an engine feature is on: `var` unset or anything but "0".
 pub fn enabled(var: &str) -> bool {
     std::env::var(var).map(|v| v.trim() != "0").unwrap_or(true)
