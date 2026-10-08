@@ -87,7 +87,7 @@ async fn kind_of(app: &App, task: &str) -> String {
 }
 
 /// The last thing a session's agent said.
-async fn final_answer(db: &sqlx::PgPool, session: Uuid) -> String {
+pub(crate) async fn final_answer(db: &sqlx::PgPool, session: Uuid) -> String {
     let rows = crate::tape::load(db, session, &["message"]).await.unwrap_or_default();
     rows.iter()
         .rev()

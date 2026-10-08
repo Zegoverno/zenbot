@@ -303,18 +303,39 @@ pub(crate) async fn run_child(app: &AppState, parent: Uuid, kind: &str, prompt: 
     .bind(model)
     .execute(&app.db)
     .await?;
+    run_and_wait(app, child, kind, prompt).await?;
+    Ok(child)
+}
+
+/// Run a session the kernel starts on its own, with no parent (the sleep compacting a prompt file),
+/// with one kernel prompt, and wait for it to end (30 minutes at most). Returns its id.
+pub(crate) async fn run_kernel_session(app: &AppState, kind: &str, title: &str, prompt: &str, dir: &std::path::Path, model: &str) -> Result<Uuid> {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO sessions (id, title, model, kind, workspace) VALUES ($1, $2, $3, $4, $5)")
+        .bind(id)
+        .bind(title)
+        .bind(model)
+        .bind(kind)
+        .bind(dir.display().to_string())
+        .execute(&app.db)
+        .await?;
+    run_and_wait(app, id, kind, prompt).await?;
+    Ok(id)
+}
+
+async fn run_and_wait(app: &AppState, id: Uuid, kind: &str, prompt: &str) -> Result<()> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    app.waiters.lock().await.insert(child, tx);
-    if let Err(e) = begin_turn(app, child, prompt.to_string(), Origin::Kernel).await {
-        app.waiters.lock().await.remove(&child);
+    app.waiters.lock().await.insert(id, tx);
+    if let Err(e) = begin_turn(app, id, prompt.to_string(), Origin::Kernel).await {
+        app.waiters.lock().await.remove(&id);
         return Err(e);
     }
     if tokio::time::timeout(Duration::from_secs(1800), rx).await.is_err() {
-        tracing::warn!("{kind} session {child} took over 30 minutes; stopping it");
-        abort_turn(app, child).await;
+        tracing::warn!("{kind} session {id} took over 30 minutes; stopping it");
+        abort_turn(app, id).await;
     }
-    app.waiters.lock().await.remove(&child);
-    Ok(child)
+    app.waiters.lock().await.remove(&id);
+    Ok(())
 }
 
 pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: Origin) -> Result<()> {

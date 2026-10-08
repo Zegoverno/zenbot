@@ -59,14 +59,13 @@ pub fn prompt_file_target(home: &Path, workspace: &Path, name: &str, args: &Valu
     PROMPT_FILES.iter().any(|rel| real(&home.join(rel)).as_ref() == Some(&target)).then_some(target)
 }
 
-/// Why this session may not change a prompt file with this call, if it may not (D-045). Edits to
-/// `IDENTITY.md` and `USER.md` are proposed to the owner and made once they approve in the
-/// conversation; underneath that rule, a subagent or a session that has read untrusted content (web,
-/// MCP, a tainted subagent) is refused outright, so text from outside can't rewrite the agent's
-/// instructions. `bash` can still write files as the owner's Unix user (ROADMAP.md, debt).
+/// Why this session may not change a prompt file with this call, if it may not (D-045). The agent
+/// writes what's really important straight into `IDENTITY.md` and `USER.md`; a subagent (any child
+/// or kernel session) or a session that has read untrusted content (web, MCP, a tainted subagent)
+/// is refused, so text from outside can't rewrite the agent's instructions. `bash` can still write files as the owner's Unix user (ROADMAP.md, debt).
 pub async fn prompt_file_refusal(db: &PgPool, session: Uuid, kind: Option<&str>, workspace: &Path, name: &str, args: &Value) -> Option<String> {
     let path = prompt_file_target(&crate::zen_home(), workspace, name, args)?;
-    let who = if kind == Some(crate::delegate::SUBAGENT) {
+    let who = if kind.is_some() {
         "A subagent"
     } else if crate::taint::tainted(db, session).await {
         "A session that has read untrusted content"
@@ -77,6 +76,22 @@ pub async fn prompt_file_refusal(db: &PgPool, session: Uuid, kind: Option<&str>,
         "{who} can't change {}: it steers every session. Give the exact edit in your answer instead; the owner can approve it in a fresh session.",
         path.display()
     ))
+}
+
+/// What to tell the agent after it changed a prompt file that is now over its size in the
+/// instructions: compact it now.
+pub fn over_cap_note(path: &Path) -> Option<String> {
+    let n = std::fs::read_to_string(path).ok()?.chars().count();
+    let cap = crate::compile::file_cap(&path.display().to_string());
+    let file = path.file_name()?.to_string_lossy();
+    (n > cap).then(|| {
+        format!(
+            "\n\n{file} is now {n} characters, over the {cap} that fit in your instructions (the middle gets cut there). Compact it now: \
+rewrite it with `write` to under {} characters, keeping only what really matters, merging what overlaps and dropping what's stale. \
+A backup of every version is in ~/.zenbot/backups/prompt-files/.",
+            cap * 8 / 10
+        )
+    })
 }
 
 fn spec(name: &str, description: &str, parameters: Value) -> Value {

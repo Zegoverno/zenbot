@@ -411,7 +411,8 @@ system_one_direct() {
   local ws; ws=$(new_workspace systemone)
   local port=$((PORT + 3))
   python3 "$REPO/scripts/e2e/systemone_stub.py" "$port" & local srv=$!
-  start_kernel "$ws" "$(script systemone.json)" ZEN_WORKERS=engine,pi ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone"
+  start_kernel "$ws" "$(script systemone.json)" ZEN_WORKERS=engine,pi ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone" \
+    ZEN_DEFAULT_MODEL=faux/smoke ZEN_USER_CHARS=1200
   check "a stale pi worker setting is ignored" bash -c '! grep -q "worker `pi` started" "$1"' _ "$TMP/kernel.log"
   check "the kernel reports its own OpenRouter key" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/models" | jq -r .authenticated.openrouter)" true
   local sid; sid=$(zen ask --json -m faux/smoke "decide directly" | jq -r .session_id)
@@ -421,12 +422,12 @@ system_one_direct() {
   check "the decision was logged" eq "$(q "SELECT count(*) FROM decisions WHERE session_id='$sid' AND point='tool' AND error IS NULL")" 1
   # The sleep promotes on its own: the owner's lasting fact moves to USER.md (backup first), an
   # inference stays out of it, lasting knowledge is copied into the wiki.
-  local zh="$TMP/home/.zenbot"; rm -rf "$zh/backups"
+  local zh="$TMP/home/.zenbot"; rm -rf "$zh/backups"; printf '# USER.md\n\nE2E Owner.\n' >"$zh/USER.md"
   q "DELETE FROM memories; INSERT INTO memories (text, source) VALUES ('PROMOTE-USER the owner swims every morning', 'owner'), ('PROMOTE-USER the owner likes web gossip', 'inferred'), ('PROMOTE-WIKI the purple service retries three times', 'verified')" >/dev/null
   local r; r=$(zen memory sleep --json)
   check "the sleep reports its promotions" eq "$(echo "$r" | jq -r .promoted)" 2
   check "the owner's fact is in USER.md, under Learned" bash -c 'sed -n "/^## Learned/,\$p" "$1" | grep -q "PROMOTE-USER the owner swims every morning (from memory m"' _ "$zh/USER.md"
-  check "with a backup of the old USER.md" bash -c 'ls "$1"/USER-*.md >/dev/null && ! grep -q "swims every morning" "$1"/USER-*.md' _ "$zh/backups"
+  check "with a backup of the old USER.md" bash -c 'ls "$1"/USER-*.md >/dev/null && ! grep -q "swims every morning" "$1"/USER-*.md' _ "$zh/backups/prompt-files"
   check "and it left memory" eq "$(q "SELECT tier || '/' || reason FROM memories WHERE text LIKE '%swims%'")" "archived/promoted to USER.md"
   check "an inference doesn't reach USER.md" bash -c '! grep -q "web gossip" "$1" && grep -q "it.s an inference" <<<"$2"' _ "$zh/USER.md" "$(echo "$r" | jq -r .note)"
   check "knowledge is copied into the wiki, by the sleep" grep -rq "memory m[0-9]*, the sleep (verified) — PROMOTE-WIKI the purple service" "$zh/global/wiki"
@@ -434,6 +435,16 @@ system_one_direct() {
   r=$(zen memory sleep --json)
   check "a second sleep promotes nothing again" eq "$(echo "$r" | jq -r .promoted)" 0
   q "DELETE FROM memories" >/dev/null
+  # The agent writes USER.md itself: backed up first, told to compact it when it's over its size;
+  # then the sleep compacts it through a session of its own, and checks and backs up the result.
+  local before; before=$(ls "$zh/backups/prompt-files" | wc -l)
+  sid=$(zen ask --json -m faux/smoke "grow the profile" | jq -r .session_id)
+  check "an agent's edit of USER.md is backed up" eq "$(ls "$zh/backups/prompt-files" | wc -l)" $((before + 1))
+  check "and over its size the agent is told to compact it" grep -q "over the 1200 that fit in your instructions" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='write'")"
+  r=$(zen memory sleep --json)
+  check "the sleep compacted USER.md" bash -c 'grep -q "Compacted by the e2e" "$1" && test "$(wc -c <"$1")" -le 1200' _ "$zh/USER.md"
+  check "said so in its note, with a backup of the long version" bash -c 'grep -q "compacted USER.md from" <<<"$1" && grep -l "agent will have to compact" "$2"/USER-*.md >/dev/null' _ "$(echo "$r" | jq -r .note)" "$zh/backups/prompt-files"
+  check "through a session of the kernel's own" eq "$(q "SELECT kind || '/' || coalesce(parent::text, 'none') FROM sessions WHERE title = 'sleep: compact USER.md'")" subagent/none
   stop_kernel
   start_kernel "$ws" "$(script systemone.json)" ZEN_WORKERS=pi ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone"
   check "pi-only legacy setting falls back to engine" grep -q 'worker `engine` started' "$TMP/kernel.log"

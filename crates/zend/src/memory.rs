@@ -9,7 +9,7 @@
 //!
 //! Promotion out of short-term memory (D-045, automatic): a lasting entry about the owner moves to
 //! `USER.md`, lasting guidance on how the agent acts moves to `IDENTITY.md` (each under `## Learned`,
-//! after a dated backup in `<zen home>/backups/`), and lasting knowledge is copied into the wiki
+//! after a dated backup in `<zen home>/backups/prompt-files/`), and lasting knowledge is copied into the wiki
 //! (the entry stays while it's still needed). Only the owner's words and verified results reach the
 //! prompt files. There is no long-term tier any more (old `long` rows stay searchable).
 
@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::App;
+use crate::AppState;
 
 /// The size of MEMORY.md the sleep tidies to, in characters (ZEN_MEMORY_CHARS, default 4000).
 pub fn cap() -> usize {
@@ -133,7 +133,7 @@ pub async fn export(db: &PgPool) {
 pub fn spec() -> Value {
     json!({
         "name": "remember",
-        "description": "Save where things stand to your short-term memory, which every new session starts with (it shows from the next session): the owner's decisions, open questions, the state of their projects and jobs, where things are; not what's in the code, docs or git. Not traits, guidance or preferences (how you should act, what the owner likes): those aren't memory; propose the exact edit to IDENTITY.md (about you) or USER.md (about the owner) in the conversation, and make it once the owner approves. Write facts, not orders to yourself. Space is fixed and tidied nightly: `replace` an entry by id (m12) rather than adding a near-duplicate; `remove` one that's wrong. `source`: owner (their words), verified (you checked it) or inferred (default).",
+        "description": "Save where things stand to your short-term memory, which every new session starts with (it shows from the next session): the owner's decisions, open questions, the state of their projects and jobs, where things are; not what's in the code, docs or git. Not traits, guidance or preferences (how you should act, what the owner likes): when one is really important and lasting, write it straight into IDENTITY.md (about you) or USER.md (about the owner), keeping the file compact; when it isn't, leave it out. The nightly sleep also promotes lasting entries there and into the wiki. Write facts, not orders to yourself. Space is fixed and tidied nightly: `replace` an entry by id (m12) rather than adding a near-duplicate; `remove` one that's wrong. `source`: owner (their words), verified (you checked it) or inferred (default).",
         "parameters": {
             "type": "object",
             "properties": {
@@ -394,25 +394,77 @@ pub fn with_learned(text: &str, line: &str) -> String {
     }
 }
 
-/// Move a memory into a prompt file (`rel` under the zen home): a dated backup first, then the
-/// entry as a dated line under `## Learned`. Refused when the file would pass its size in the
-/// instructions. Returns the backup's path.
-fn promote_to_file(home: &std::path::Path, rel: &str, id: i64, text: &str) -> Result<std::path::PathBuf> {
+/// Save a copy of a prompt file in `<zen home>/backups/prompt-files/<name>-<time>.md` before it changes (by the
+/// sleep or an agent's edit); returns the copy's path. Kept 90 days.
+pub(crate) fn backup_file(home: &std::path::Path, path: &std::path::Path) -> Result<std::path::PathBuf> {
+    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+    let dir = home.join(BACKUPS);
+    std::fs::create_dir_all(&dir)?;
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+    // Never over an earlier backup (two changes in the same millisecond).
+    let mut backup = dir.join(format!("{name}-{stamp}.md"));
+    let mut n = 2;
+    while backup.exists() {
+        backup = dir.join(format!("{name}-{stamp}-{n}.md"));
+        n += 1;
+    }
+    std::fs::write(&backup, std::fs::read(path).unwrap_or_default())?;
+    Ok(backup)
+}
+
+/// Replace a prompt file's text (backup first, then an atomic rename); returns the backup.
+fn replace_file(home: &std::path::Path, rel: &str, new: &str) -> Result<std::path::PathBuf> {
     let path = home.join(rel);
-    let old = std::fs::read_to_string(&path).unwrap_or_default();
-    let now = chrono::Utc::now();
-    let line = format!("- {}: {} (from memory m{id})", now.format("%Y-%m-%d"), crate::secrets::mask(text).replace('\n', " "));
-    let new = with_learned(&old, &line);
-    let cap = crate::compile::file_cap(rel);
-    anyhow::ensure!(new.chars().count() <= cap, "{rel} would pass its {cap} characters: trim it, or raise its cap");
-    let name = std::path::Path::new(rel).file_stem().and_then(|s| s.to_str()).unwrap_or("file");
-    let backup = home.join("backups").join(format!("{name}-{}.md", now.format("%Y%m%dT%H%M%SZ")));
-    std::fs::create_dir_all(backup.parent().unwrap())?;
-    std::fs::write(&backup, &old)?;
+    let backup = backup_file(home, &path)?;
     let tmp = path.with_extension("md.tmp");
     std::fs::write(&tmp, new)?;
     std::fs::rename(&tmp, &path)?;
     Ok(backup)
+}
+
+/// Move a memory into a prompt file (`rel` under the zen home) as a dated line under `## Learned`,
+/// after a backup. Returns the backup's path. A file pushed over its size is compacted next.
+fn promote_to_file(home: &std::path::Path, rel: &str, id: i64, text: &str) -> Result<std::path::PathBuf> {
+    let old = std::fs::read_to_string(home.join(rel)).unwrap_or_default();
+    let line = format!("- {}: {} (from memory m{id})", chrono::Utc::now().format("%Y-%m-%d"), crate::secrets::mask(text).replace('\n', " "));
+    replace_file(home, rel, &with_learned(&old, &line))
+}
+
+/// What a prompt file over its size is cut to when compacted: 80% of its cap, room to grow.
+fn compact_target(cap: usize) -> usize {
+    cap * 8 / 10
+}
+
+/// The new text from a compaction session's answer, if it is a usable file: between the markers,
+/// starting with a heading, within `cap`, and not gutted (at least a quarter of the target).
+pub fn compacted_text(answer: &str, cap: usize) -> Option<String> {
+    let start = answer.find("<<<FILE")? + "<<<FILE".len();
+    let end = start + answer[start..].find("FILE>>>")?;
+    let text = answer[start..end].trim();
+    let n = text.chars().count();
+    (text.starts_with('#') && n <= cap && n >= compact_target(cap) / 4).then(|| format!("{text}\n"))
+}
+
+/// Compact a prompt file over its size: a session of the kernel's own (a subagent: it can't write
+/// prompt files itself) rewrites it, keeping only what really matters; the kernel checks the
+/// answer, backs the file up and writes it. Returns what it did, for the morning note.
+async fn compact_file(app: &AppState, home: &std::path::Path, rel: &str) -> Result<String> {
+    let old = std::fs::read_to_string(home.join(rel))?;
+    let (n, cap) = (old.chars().count(), crate::compile::file_cap(rel));
+    let target = compact_target(cap);
+    let file = std::path::Path::new(rel).file_name().and_then(|s| s.to_str()).unwrap_or(rel);
+    let prompt = format!(
+        "Compact {file}. It is {n} characters; only {cap} fit in your instructions. Rewrite it to at most {target} characters. \
+Keep only what really matters across jobs; merge what overlaps; drop what is stale or no longer needed (finished projects, \
+superseded decisions, old dated details). Keep its title, its section headings, its voice and every hard rule. Fold the dated \
+lines under `## Learned` into the sections they belong to, or keep the few that still matter there, shortened. Don't use tools \
+and don't write the file: answer with the whole new file only, between a line `<<<FILE` and a line `FILE>>>`.\n\n<<<FILE\n{old}\nFILE>>>"
+    );
+    let id = crate::turns::run_kernel_session(app, crate::delegate::SUBAGENT, &format!("sleep: compact {file}"), &prompt, home, &app.default_model).await?;
+    let answer = crate::delegate::final_answer(&app.db, id).await;
+    let new = compacted_text(&answer, cap).ok_or_else(|| anyhow::anyhow!("session {} gave no usable file (between the markers, a heading first, {} to {cap} characters)", &id.to_string()[..8], target / 4))?;
+    let backup = replace_file(home, rel, &new)?;
+    Ok(format!("compacted {file} from {n} to {} characters (session {}, backup {})", new.chars().count(), &id.to_string()[..8], backup.display()))
 }
 
 /// The material System One judges an entry by: the entry, the other entries and the owner's
@@ -432,7 +484,7 @@ fn state_for(e: &Entry, all: &[Entry], user_md: &str, identity_md: &str) -> Valu
 
 /// Tidy short-term memory: promote lasting entries (to `USER.md`, `IDENTITY.md` or the wiki), rank
 /// the rest, keep what fits and archive the others. Records a `sleep_runs` row and one `decisions` row per entry.
-pub async fn sleep(app: &App, trigger: &str) -> Result<Value> {
+pub async fn sleep(app: &AppState, trigger: &str) -> Result<Value> {
     // One sleep at a time: a second one (the timer while a ceiling sleep runs) waits, then finds
     // memory already tidied.
     static ONE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -451,7 +503,7 @@ pub async fn sleep(app: &App, trigger: &str) -> Result<Value> {
     res
 }
 
-async fn sleep_inner(app: &App, run: i64) -> Result<Value> {
+async fn sleep_inner(app: &AppState, run: i64) -> Result<Value> {
     let db = &app.db;
     let entries = short_entries(db).await?;
     let home = crate::zen_home();
@@ -521,6 +573,22 @@ async fn sleep_inner(app: &App, run: i64) -> Result<Value> {
             },
             _ => {}
         }
+    }
+    // A prompt file over its size (after promotions, or edited past it) is compacted, not cut.
+    if scorer.is_some() {
+        for rel in ["USER.md", crate::layout::IDENTITY] {
+            let size = std::fs::read_to_string(home.join(rel)).map(|t| t.chars().count()).unwrap_or(0);
+            if size > crate::compile::file_cap(rel) {
+                match compact_file(app, &home, rel).await {
+                    Ok(done) => notes.push(done),
+                    Err(err) => notes.push(format!("{rel} is over its size and wasn't compacted (the middle is cut from the instructions): {err:#}")),
+                }
+            }
+        }
+    }
+    let pruned_backups = prune_backups(&home.join(BACKUPS), BACKUP_DAYS);
+    if pruned_backups > 0 {
+        notes.push(format!("backups: removed {pruned_backups} prompt-file backup(s) older than {BACKUP_DAYS} days"));
     }
     // What stays competes for the space; moved entries don't count.
     let rest: Vec<usize> = (0..entries.len()).filter(|&i| moved[i].is_none()).collect();
@@ -592,6 +660,23 @@ async fn sleep_inner(app: &App, run: i64) -> Result<Value> {
         .execute(db)
         .await?;
     Ok(json!({ "run": run, "entries": entries.len(), "kept": kept, "dropped": dropped, "promoted": promoted, "scorer": scorer, "note": note }))
+}
+
+/// Where prompt-file backups go, under the zen home (its own folder: `backups/` holds other things).
+pub(crate) const BACKUPS: &str = "backups/prompt-files";
+
+/// Days a prompt file's backup is kept in `<zen home>/backups/prompt-files`.
+const BACKUP_DAYS: u64 = 90;
+
+/// Remove backups (`*.md` directly in `dir`) not modified for `days` days; returns how many.
+fn prune_backups(dir: &std::path::Path, days: u64) -> usize {
+    let Ok(read) = std::fs::read_dir(dir) else { return 0 };
+    let limit = std::time::Duration::from_secs(days * 86_400);
+    read.flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && e.file_name().to_string_lossy().ends_with(".md"))
+        .filter(|e| e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > limit))
+        .filter(|e| std::fs::remove_file(e.path()).is_ok())
+        .count()
 }
 
 /// Days a saved tool output (cut bash/MCP output, fetched PDFs) is kept in `<zen home>/outputs`.
@@ -718,15 +803,24 @@ mod tests {
     }
 
     #[test]
-    fn promoting_to_a_file_backs_it_up_and_respects_its_size() {
+    fn promoting_to_a_file_backs_it_up() {
         let home = crate::test_util::TestDir::new("promote");
         std::fs::write(home.join("USER.md"), "# USER.md\n\nJose.\n").unwrap();
         let backup = promote_to_file(&home, "USER.md", 8, "Jose needs stronger distribution.").unwrap();
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), "# USER.md\n\nJose.\n");
         let now = std::fs::read_to_string(home.join("USER.md")).unwrap();
         assert!(now.contains("## Learned\n\n- ") && now.contains("Jose needs stronger distribution. (from memory m8)"), "{now}");
-        assert!(promote_to_file(&home, "USER.md", 9, &"x".repeat(4000)).is_err(), "over USER.md's 3000 characters");
-        assert_eq!(std::fs::read_to_string(home.join("USER.md")).unwrap(), now, "a refused move changes nothing");
+        assert_ne!(promote_to_file(&home, "USER.md", 9, "again").unwrap(), backup, "each change gets its own backup");
+    }
+
+    #[test]
+    fn a_compaction_answer_is_used_only_when_it_is_a_whole_file_that_fits() {
+        let file = format!("# USER.md\n\n{}", "x".repeat(900));
+        assert_eq!(compacted_text(&format!("Here it is:\n<<<FILE\n{file}\nFILE>>>\n"), 3000), Some(format!("{file}\n")));
+        assert_eq!(compacted_text(&file, 3000), None, "no markers");
+        assert_eq!(compacted_text("<<<FILE\nno heading\nFILE>>>", 3000), None);
+        assert_eq!(compacted_text("<<<FILE\n# USER.md\n\nme\nFILE>>>", 3000), None, "gutted");
+        assert_eq!(compacted_text(&format!("<<<FILE\n# U\n{}\nFILE>>>", "x".repeat(3001)), 3000), None, "too long");
     }
 
     #[test]
