@@ -6,6 +6,16 @@
 
 ---
 
+## 2026-10-08 — Bound kernel reads and refresh routing
+
+- The `read` tool refuses files over 16 MiB before loading them; `edit` no longer adds a newline
+  after a loose match; files under the zen home no longer attach its environment AGENTS.md as
+  project instructions. Invalid or ended-turn tool requests receive errors instead of hanging.
+- Worker model metadata and routes rebuild on refresh; update prebuilt probes time out and use the
+  active zen home; compaction planning uses one suffix pass instead of repeated tail sums.
+- Added a kernel-tools end-to-end scenario for the file-tool/context regressions. Why: prevent
+  avoidable OOMs, stale model capabilities, stalls and misleading context.
+
 ## 2026-10-08 — Stop test scratch and output leaks
 
 - Kernel unit tests now use an owner-private scratch-directory guard that removes files on drop,
