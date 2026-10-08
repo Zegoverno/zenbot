@@ -210,7 +210,15 @@ pub(crate) async fn update_session(State(app): State<AppState>, Path(id): Path<U
     Ok(Json(session_json(&row)))
 }
 
-pub(crate) async fn get_session(State(app): State<AppState>, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
+#[derive(Deserialize)]
+pub(crate) struct MessagesQuery {
+    /// Only messages after this block number (to catch up after a reconnect).
+    after: Option<i32>,
+    /// At most this many, the most recent (a long session's tail).
+    last: Option<i64>,
+}
+
+pub(crate) async fn get_session(State(app): State<AppState>, Path(id): Path<Uuid>, Query(q): Query<MessagesQuery>) -> ApiResult<Json<Value>> {
     let row = sqlx::query(&format!(
         "SELECT {SESSION_COLUMNS}, {} AS cost
          FROM sessions WHERE id = $1",
@@ -221,7 +229,29 @@ pub(crate) async fn get_session(State(app): State<AppState>, Path(id): Path<Uuid
     .await?
     .ok_or_else(not_found)?;
     let mut session = session_json(&row);
-    session["messages"] = Value::Array(load_messages(&app.db, id).await?);
+    session["messages"] = Value::Array(match (q.after, q.last) {
+        (None, None) => load_messages(&app.db, id).await?,
+        (after, last) => {
+            // Newest first to apply `last`, then back in order. Uses the (session, kind, seq) index.
+            let rows = sqlx::query(
+                "SELECT seq, payload FROM tape_events WHERE session_id = $1 AND kind = 'message' AND seq > $2
+                 ORDER BY seq DESC LIMIT $3",
+            )
+            .bind(id)
+            .bind(after.unwrap_or(0))
+            .bind(last.unwrap_or(i64::MAX).max(0))
+            .fetch_all(&app.db)
+            .await?;
+            rows.iter()
+                .rev()
+                .map(|r| {
+                    let mut m: Value = r.get("payload");
+                    m["seq"] = json!(r.get::<i32, _>("seq"));
+                    m
+                })
+                .collect()
+        }
+    });
     session["busy"] = json!(app.is_busy(id).await);
     Ok(Json(session))
 }
