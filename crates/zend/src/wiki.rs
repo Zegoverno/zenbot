@@ -374,7 +374,6 @@ pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value) -> Opt
     })
 }
 
-/// Every page, for the search index: (slug, title, ident, body, modified).
 /// The pages (slug and modification time) without reading them: a cheap check for what changed.
 pub fn page_times(dir: &Path) -> Vec<(String, std::time::SystemTime)> {
     let mut out = Vec::new();
