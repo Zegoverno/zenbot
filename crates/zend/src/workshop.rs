@@ -160,7 +160,7 @@ async fn save_skill(app: &App, session: Uuid, args: &Value) -> Result<String> {
     let draft = drafts.iter().find(|x| x.domain == domain && x.name == name).cloned();
     // An active skill's description reaches every session's instructions: text from a web page must
     // not rewrite it without the owner. Drafts and new skills still go through review.
-    if current.is_some() && crate::web::tainted(&app.db, session).await {
+    if current.is_some() && crate::taint::tainted(&app.db, session).await {
         bail!("this session read web content, so it can't change an active skill; tell the owner what you'd change and why");
     }
     let (dir, what) = match (&current, &draft) {

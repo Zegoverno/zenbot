@@ -457,34 +457,29 @@ pub async fn query(db: &PgPool, q: &str, kinds: &[&str], session: Option<Uuid>, 
 /// Reorder results by how relevant System One judges them to the query. None when it isn't
 /// available.
 async fn rerank(app: &App, q: &str, found: &[Found]) -> Option<Vec<(Found, f64)>> {
-    if crate::score::scorer().is_none() || !crate::score::private_ok() || found.len() < 3 {
+    if found.len() < 3 {
         return None;
     }
-    let mut state = serde_json::Map::new();
-    let mut questions = serde_json::Map::new();
-    state.insert("query".into(), json!(q));
-    for (i, f) in found.iter().enumerate() {
-        state.insert(format!("result_{i}"), json!({ "kind": f.kind, "title": f.title, "text": zen_proto::head(&f.snippet, 500) }));
-        questions.insert(
-            format!("r{i}"),
-            json!({ "type": "bool", "instructions": format!("Does result_{i} help answer `query`?"), "criteria": { "true": "Relevant", "false": "Not relevant" } }),
-        );
-    }
-    let res = crate::score::decide(app, &Value::Object(state), &Value::Object(questions)).await.ok()?;
-    if !res["error"].is_null() {
-        return None;
-    }
+    let judge = crate::score::Relevance {
+        point: "search_rerank",
+        need: ("query", q),
+        item: "result",
+        question: "Does {item} help answer `query`?",
+        yes: "Relevant",
+        no: "Not relevant",
+    };
+    let items = found.iter().map(|f| json!({ "kind": f.kind, "title": f.title, "text": zen_proto::head(&f.snippet, 500) })).collect();
+    let probs = judge.judge(app, items).await?;
     let mut ranked: Vec<(Found, f64)> = found
         .iter()
-        .enumerate()
-        .map(|(i, f)| {
+        .zip(probs)
+        .map(|(f, p)| {
             // An exact name or path hit stays on top whatever System One says.
-            let p = res["answers"][format!("r{i}")]["probability"].as_f64().unwrap_or(0.5);
+            let p = p.unwrap_or(0.5);
             (f.clone(), if f.exact { 2.0 + p } else { p })
         })
         .collect();
     ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    crate::agent::log_decision(&app.db, None, "search_rerank", &json!({ "query": q, "results": found.len() }), &res["answers"], None, None, true, None).await;
     Some(ranked)
 }
 
@@ -589,8 +584,8 @@ async fn run(app: &App, session: Uuid, args: &Value) -> Result<String> {
     .fetch_one(&app.db)
     .await?;
     if tainted {
-        crate::web::taint(app, session, "search", "results from a session that read web content").await;
-        return Ok(format!("{header}{}", crate::web::untrusted("search", q, &render(&listed))));
+        crate::taint::taint(app, session, "search", "results from a session that read web content").await;
+        return Ok(format!("{header}{}", crate::taint::untrusted("search", q, &render(&listed))));
     }
     Ok(format!("{header}{}", render(&listed)))
 }

@@ -176,8 +176,8 @@ pub async fn run_tool(app: &AppState, session: Uuid, workspace: &Path, name: &st
                     .await
                     .unwrap_or(true);
                 if tainted {
-                    crate::web::taint(app, session, "history", other).await;
-                    return out(crate::web::untrusted("history", other, &content), false);
+                    crate::taint::taint(app, session, "history", other).await;
+                    return out(crate::taint::untrusted("history", other, &content), false);
                 }
             }
             out(content, is_error)
