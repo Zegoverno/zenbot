@@ -31,6 +31,7 @@ const MAX_BYTES: usize = 5 * 1024 * 1024;
 const PAGE_CHARS: usize = 20_000;
 const MAX_TEXT: usize = 2_000_000;
 const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
+const CACHE_ENTRIES: usize = 32; // at most 64 MB of cached page text
 const UA: &str = concat!("zenbot/", env!("CARGO_PKG_VERSION"), " (+https://github.com/Zegoverno/zenbot)");
 
 // ---------- address checks ----------
@@ -219,6 +220,16 @@ struct Page {
     note: Option<String>,
 }
 
+/// Insert into either web cache, evicting the oldest entry before it can grow without bound.
+fn cache_insert<K: std::hash::Hash + Eq + Clone, V>(cache: &mut HashMap<K, V>, key: K, value: V, at: impl Fn(&V) -> Instant) {
+    if !cache.contains_key(&key) && cache.len() >= CACHE_ENTRIES {
+        if let Some(oldest) = cache.iter().min_by_key(|(_, value)| at(value)).map(|(key, _)| key.clone()) {
+            cache.remove(&oldest);
+        }
+    }
+    cache.insert(key, value);
+}
+
 static PAGES: LazyLock<Mutex<HashMap<String, (Instant, Page)>>> = LazyLock::new(Default::default);
 
 fn cached(url: &str) -> Option<Page> {
@@ -374,7 +385,7 @@ async fn fetch(app: &App, session: Uuid, args: &Value) -> tools::ToolOutput {
         Some(p) => p,
         None => match download(&url).await {
             Ok(p) => {
-                PAGES.lock().unwrap().insert(url.clone(), (Instant::now(), p.clone()));
+                cache_insert(&mut PAGES.lock().unwrap(), url.clone(), (Instant::now(), p.clone()), |entry| entry.0);
                 p
             }
             Err(e) => return err(format!("web_fetch {url}: {e}")),
@@ -610,7 +621,7 @@ async fn search(app: &App, session: Uuid, args: &Value) -> tools::ToolOutput {
             match res {
                 Ok((h, p, rescued)) => {
                     if !rescued {
-                        SEARCHES.lock().unwrap().insert(key, (Instant::now(), h.clone(), p.clone()));
+                        cache_insert(&mut SEARCHES.lock().unwrap(), key, (Instant::now(), h.clone(), p.clone()), |entry| entry.0);
                     }
                     (h, p)
                 }
@@ -726,6 +737,21 @@ mod tests {
         assert_eq!(c[0], format!("{}\n\n{}", "a".repeat(100), "b".repeat(100)));
         assert!(c.iter().all(|x| x.len() <= 500));
         assert_eq!(c.concat().matches('c').count(), 5000);
+    }
+
+    #[test]
+    fn web_caches_evict_the_oldest_entry_at_the_limit() {
+        let mut cache = HashMap::new();
+        let now = Instant::now();
+        for i in 0..CACHE_ENTRIES {
+            cache_insert(&mut cache, i, (now + Duration::from_secs(i as u64), i), |entry| entry.0);
+        }
+        cache_insert(&mut cache, CACHE_ENTRIES, (now + Duration::from_secs(100), 100), |entry| entry.0);
+        assert_eq!(cache.len(), CACHE_ENTRIES);
+        assert!(!cache.contains_key(&0));
+        assert!(cache.contains_key(&CACHE_ENTRIES));
+        cache_insert(&mut cache, 1, (now + Duration::from_secs(101), 101), |entry| entry.0);
+        assert_eq!(cache.len(), CACHE_ENTRIES, "updating a key does not evict another entry");
     }
 
     #[test]
