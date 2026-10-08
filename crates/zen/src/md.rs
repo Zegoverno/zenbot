@@ -35,15 +35,39 @@ pub fn line(text: impl Into<String>, sty: Sty) -> Line {
     vec![(text.into(), sty)]
 }
 
+/// Text made safe for the terminal: control characters (C0 except newline, DEL, C1) are dropped
+/// and tabs become four spaces. Model replies, tool output, files and kernel messages can carry
+/// escape sequences that would otherwise set the window title, move the cursor, clear the screen
+/// or write to the clipboard; they would also throw off width-based layout.
+pub fn sanitize(s: &str) -> std::borrow::Cow<'_, str> {
+    let unsafe_char = |c: char| c.is_control() && c != '\n'; // C0, DEL and C1
+    if !s.contains(unsafe_char) {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\t' => out.push_str("    "),
+            c if unsafe_char(c) => {}
+            c => out.push(c),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
 
+/// A styled line as ANSI text, for one terminal row. Every segment is sanitized here, the one
+/// place all styled text passes through on its way to the terminal, and a stray newline becomes
+/// a space so a line stays one row.
 pub fn to_ansi(l: &Line) -> String {
     let mut out = String::new();
     for (t, s) in l {
+        let t = sanitize(t);
+        let t = if t.contains('\n') { std::borrow::Cow::Owned(t.replace('\n', " ")) } else { t };
         if *s == Sty::Plain {
-            out.push_str(t);
+            out.push_str(&t);
         } else {
             out.push_str(s.ansi());
-            out.push_str(t);
+            out.push_str(&t);
             out.push_str("\x1b[0m");
         }
     }
@@ -234,5 +258,20 @@ impl Md {
             return wrap(inline(q.trim_start(), Sty::Dim), width, ("│ ".into(), Sty::Dim), ("│ ".into(), Sty::Dim));
         }
         wrap(inline(t, Sty::Plain), width, none(), none())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_sequences_never_reach_the_terminal() {
+        let evil = "title\x1b]0;pwned\x07 \x1b[2J\x1b[5A\u{9b}31m\x7f\ttab\r";
+        assert_eq!(sanitize(evil), "title]0;pwned [2J[5A31m    tab");
+        assert_eq!(sanitize("line one\nline two"), "line one\nline two", "newlines stay in text");
+        assert!(matches!(sanitize("plain"), std::borrow::Cow::Borrowed(_)));
+        let out = to_ansi(&vec![(evil.to_string(), Sty::Err), ("a\nb".to_string(), Sty::Plain)]);
+        assert_eq!(out, "\x1b[31mtitle]0;pwned [2J[5A31m    tab\x1b[0ma b", "only our own styling escapes are left");
     }
 }

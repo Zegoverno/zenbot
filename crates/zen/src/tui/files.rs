@@ -130,15 +130,14 @@ impl Files {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::test_util::TempDir;
 
-    fn tree() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("zen-files-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        std::fs::create_dir_all(d.join("src/deep")).unwrap();
+    fn tree() -> TempDir {
+        let d = TempDir::new("files");
         std::fs::create_dir_all(d.join("target")).unwrap();
-        std::fs::write(d.join("README.md"), "x").unwrap();
-        std::fs::write(d.join(".env"), "x").unwrap();
-        std::fs::write(d.join("src/main.rs"), "x").unwrap();
-        std::fs::write(d.join("src/deep/a.rs"), "x").unwrap();
+        for f in ["README.md", ".env", "src/main.rs", "src/deep/a.rs"] {
+            d.file(f, "x");
+        }
         d
     }
 
@@ -149,26 +148,24 @@ mod tests {
     #[test]
     fn lists_folders_first_and_skips_noise_and_dotfiles() {
         let d = tree();
-        let f = Files::new(d.clone());
+        let f = Files::new(d.path().to_path_buf());
         assert_eq!(names(&f), ["src", "README.md"]);
-        std::fs::remove_dir_all(d).unwrap();
     }
 
     #[test]
     fn symlinks_are_hidden_like_dotfiles() {
         let d = tree();
         std::os::unix::fs::symlink("README.md", d.join("OLD.md")).unwrap();
-        let mut f = Files::new(d.clone());
+        let mut f = Files::new(d.path().to_path_buf());
         assert_eq!(names(&f), ["src", "README.md"]);
         f.toggle_hidden();
         assert!(names(&f).contains(&"OLD.md".to_string()));
-        std::fs::remove_dir_all(d).unwrap();
     }
 
     #[test]
     fn arrows_expand_collapse_and_walk_to_the_parent() {
         let d = tree();
-        let mut f = Files::new(d.clone());
+        let mut f = Files::new(d.path().to_path_buf());
         assert!(f.expand());
         assert_eq!(names(&f), ["src", "  deep", "  main.rs", "README.md"]);
         f.move_by(1);
@@ -185,13 +182,12 @@ mod tests {
         assert_eq!(f.sel, 3, "clamped at the bottom");
         f.toggle_hidden();
         assert!(names(&f).contains(&".env".to_string()));
-        std::fs::remove_dir_all(d).unwrap();
     }
 
     #[test]
     fn follow_keeps_the_selection_in_view() {
         let d = tree();
-        let mut f = Files::new(d.clone());
+        let mut f = Files::new(d.path().to_path_buf());
         f.expand();
         f.sel = 3;
         f.follow(2);
@@ -199,6 +195,5 @@ mod tests {
         f.sel = 0;
         f.follow(2);
         assert_eq!(f.scroll, 0);
-        std::fs::remove_dir_all(d).unwrap();
     }
 }

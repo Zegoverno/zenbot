@@ -3,7 +3,21 @@
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::io::IsTerminal;
+use std::path::PathBuf;
 use std::time::Duration;
+
+/// zenbot's home: `ZEN_HOME`, else `~/.zenbot` (as the kernel decides it). The token, the prompt
+/// history, the installed binaries, `env` and `engines.json` live there.
+pub fn zen_home() -> PathBuf {
+    home_from(std::env::var_os("ZEN_HOME"), std::env::var_os("HOME"))
+}
+
+fn home_from(zen_home: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> PathBuf {
+    match zen_home.filter(|h| !h.is_empty()) {
+        Some(h) => PathBuf::from(h),
+        None => PathBuf::from(home.unwrap_or_default()).join(".zenbot"),
+    }
+}
 
 /// How long to wait for the kernel to accept a connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -23,13 +37,13 @@ impl Client {
         let token = match token {
             Some(t) => t,
             None => {
-                let home = std::env::var("HOME").context("HOME not set")?;
-                std::fs::read_to_string(format!("{home}/.zenbot/token"))
-                    .context("no token: set ZEN_TOKEN or create ~/.zenbot/token")?
-                    .trim()
-                    .to_string()
+                let path = zen_home().join("token");
+                std::fs::read_to_string(&path).with_context(|| format!("no token: set ZEN_TOKEN or create {}", path.display()))?.trim().to_string()
             }
         };
+        if let Some(host) = cleartext_remote(&url) {
+            eprintln!("warning: the zenbot token goes to {host} unencrypted (plain http); use https or an SSH tunnel");
+        }
         let http = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT).timeout(REQUEST_TIMEOUT).build()?;
         Ok(Client { http, url: url.trim_end_matches('/').to_string(), token })
     }
@@ -87,7 +101,7 @@ impl Client {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         use tokio_tungstenite::tungstenite::http::{header::AUTHORIZATION, HeaderValue};
         // The token goes in a header, not the URL, where it could end up in logs.
-        let mut req = format!("{}/api/sessions/{id}/ws", self.url.replacen("http", "ws", 1)).into_client_request()?;
+        let mut req = format!("{}/api/sessions/{}/ws", self.url.replacen("http", "ws", 1), enc(id)).into_client_request()?;
         req.headers_mut().insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", self.token)).context("token is not a valid header value")?);
         let (ws, _) = tokio::time::timeout(REQUEST_TIMEOUT, tokio_tungstenite::connect_async(req))
             .await
@@ -95,6 +109,34 @@ impl Client {
             .context("opening session stream")?;
         Ok(ws)
     }
+}
+
+/// Text as one URL path segment or query value: everything but unreserved characters
+/// (RFC 3986: letters, digits, `-._~`) percent-encoded, so a `/`, `?` or `#` in a name typed on
+/// the command line can't change which route it reaches.
+pub fn enc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// The host a plain-http URL points to, when it isn't this machine: the token would cross the
+/// network in clear text.
+fn cleartext_remote(url: &str) -> Option<String> {
+    let u = reqwest::Url::parse(url).ok()?;
+    if u.scheme() != "http" {
+        return None;
+    }
+    let host = u.host_str()?;
+    let ip = host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>();
+    let local = host == "localhost" || host.ends_with(".localhost") || ip.is_ok_and(|ip| ip.is_loopback());
+    (!local).then(|| host.to_string())
 }
 
 /// Settings for a session created from the command line; unset means the kernel's default.
@@ -184,16 +226,32 @@ impl Client {
 
 pub type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+/// The first 8 bytes of an id (all of it if shorter, or if 8 bytes would split a character).
 pub fn short(id: &str) -> &str {
-    &id[..id.len().min(8)]
+    id.get(..8).unwrap_or(id)
 }
 
 pub fn dim(s: &str) -> String {
     if std::io::stderr().is_terminal() {
-        format!("\x1b[2m{s}\x1b[0m")
+        format!("\x1b[2m{}\x1b[0m", crate::md::sanitize(s))
     } else {
         s.to_string()
     }
+}
+
+/// Tokens of one model call, from an assistant message's `usage` (cache reads and writes included).
+pub fn usage_total(u: &Value) -> i64 {
+    ["input", "output", "cacheRead", "cacheWrite"].iter().map(|k| u[*k].as_i64().unwrap_or(0)).sum()
+}
+
+/// Tokens of a whole turn, from the kernel's record of it (side calls included).
+pub fn record_total(r: &Value) -> i64 {
+    ["input_tokens", "output_tokens", "cache_read", "cache_write"].iter().map(|k| r[*k].as_i64().unwrap_or(0)).sum()
+}
+
+/// An assistant message's text blocks, joined (its tool calls left out).
+pub fn assistant_text(m: &Value) -> String {
+    m["content"].as_array().into_iter().flatten().filter(|c| c["type"] == "text").filter_map(|c| c["text"].as_str()).collect()
 }
 
 pub fn tool_summary(name: &str, args: &Value) -> String {
@@ -204,13 +262,51 @@ pub fn tool_summary(name: &str, args: &Value) -> String {
         .or_else(|| args["from"].as_str().map(|f| format!("{f} → {}", args["to"].as_str().unwrap_or(""))))
         .unwrap_or_else(|| args.to_string());
     let detail: String = detail.lines().next().unwrap_or("").chars().take(120).collect();
-    format!("{name} {detail}")
+    crate::md::sanitize(&format!("{name} {detail}")).into_owned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+
+    #[test]
+    fn path_segments_are_encoded() {
+        assert_eq!(enc("web_fetch-2.x~"), "web_fetch-2.x~");
+        assert_eq!(enc("../skills?x=1#y z/é"), "..%2Fskills%3Fx%3D1%23y%20z%2F%C3%A9");
+    }
+
+    #[test]
+    fn plain_http_is_flagged_only_off_this_machine() {
+        for local in ["http://127.0.0.1:8100", "http://localhost:8100", "http://[::1]:8100", "https://zen.example.com", "http://127.0.0.5"] {
+            assert_eq!(cleartext_remote(local), None, "{local}");
+        }
+        assert_eq!(cleartext_remote("http://10.0.0.7:8100").as_deref(), Some("10.0.0.7"));
+        assert_eq!(cleartext_remote("http://zen.example.com").as_deref(), Some("zen.example.com"));
+    }
+
+    #[test]
+    fn short_ids_never_split_a_character() {
+        assert_eq!(short("0123456789abcdef"), "01234567");
+        assert_eq!(short("abc"), "abc");
+        assert_eq!(short("ééééé"), "éééé");
+        assert_eq!(short("1234567é"), "1234567é", "byte 8 is inside é: the whole id");
+    }
+
+    #[test]
+    fn zen_home_follows_zen_home_then_home() {
+        assert_eq!(home_from(Some("/srv/zen".into()), Some("/home/x".into())), PathBuf::from("/srv/zen"));
+        assert_eq!(home_from(None, Some("/home/x".into())), PathBuf::from("/home/x/.zenbot"));
+        assert_eq!(home_from(Some("".into()), Some("/home/x".into())), PathBuf::from("/home/x/.zenbot"), "empty means unset");
+    }
+
+    #[test]
+    fn token_totals_and_assistant_text() {
+        assert_eq!(usage_total(&json!({ "input": 10, "output": 5, "cacheRead": 100, "cacheWrite": 1 })), 116);
+        assert_eq!(record_total(&json!({ "input_tokens": 1000, "output_tokens": 200, "cache_read": 3000 })), 4200);
+        let m = json!({ "content": [{ "type": "text", "text": "a" }, { "type": "toolCall", "name": "x" }, { "type": "text", "text": "b" }] });
+        assert_eq!(assistant_text(&m), "ab");
+    }
 
     #[tokio::test]
     async fn the_session_stream_sends_the_token_in_a_header_not_the_url() {

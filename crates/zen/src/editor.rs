@@ -1,8 +1,49 @@
 //! A small multi-line input editor with prompt history.
 
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::Path;
+
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::md::{Line, Sty};
+
+/// Most prompts kept in the history file.
+const HISTORY_MAX: usize = 1000;
+
+/// Read the prompt history: one JSON string per line. A file in the old format (one prompt per
+/// line, newlines written as a literal `\n`, so a typed `\n` came back as a newline) is read
+/// once and rewritten in the new one. Only the last `HISTORY_MAX` prompts are kept, and the
+/// file is made private to the owner.
+fn load_history(path: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+    let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+    let parsed: Option<Vec<String>> = lines.iter().map(|l| serde_json::from_str::<String>(l).ok()).collect();
+    let (mut history, old) = match parsed {
+        Some(h) => (h, false),
+        None => (lines.iter().map(|l| l.replace("\\n", "\n")).collect::<Vec<_>>(), true),
+    };
+    let cut = history.len().saturating_sub(HISTORY_MAX);
+    history.drain(..cut);
+    if old || cut > 0 {
+        rewrite_history(path, &history);
+    }
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    history
+}
+
+fn rewrite_history(path: &Path, history: &[String]) {
+    let body: String = history.iter().map(|h| serde_json::to_string(h).unwrap_or_default() + "\n").collect();
+    let tmp = path.with_extension("tmp");
+    if private_file(&tmp, false).and_then(|mut f| f.write_all(body.as_bytes())).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+/// Open a file only the owner can read (mode 0600 when it is created): truncated, or appended to.
+fn private_file(path: &Path, append: bool) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().create(true).write(true).append(append).truncate(!append).mode(0o600).open(path)
+}
 
 pub struct Editor {
     pub buf: String,
@@ -15,11 +56,7 @@ pub struct Editor {
 
 impl Editor {
     pub fn new(history_file: Option<std::path::PathBuf>) -> Self {
-        let history = history_file
-            .as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .map(|s| s.lines().filter(|l| !l.is_empty()).map(|l| l.replace("\\n", "\n")).collect())
-            .unwrap_or_default();
+        let history = history_file.as_deref().map(load_history).unwrap_or_default();
         Editor { buf: String::new(), cursor: 0, history, hist_idx: None, draft: String::new(), history_file }
     }
 
@@ -124,25 +161,36 @@ impl Editor {
         self.cursor += skip + word;
     }
 
+    /// Delete back to the start of the previous word (the same words `word_left` moves by).
     pub fn delete_word(&mut self) {
-        let before = &self.buf[..self.cursor];
-        let trimmed = before.trim_end_matches(' ');
-        let start = trimmed.rfind([' ', '\n']).map(|i| i + 1).unwrap_or(0);
-        self.buf.replace_range(start..self.cursor, "");
-        self.cursor = start;
+        let end = self.cursor;
+        self.word_left();
+        self.buf.replace_range(self.cursor..end, "");
     }
 
-    /// Move up a line; at the first line, recall older history. Returns true if handled.
+    /// Display column of the caret in its line.
+    fn column(&self) -> usize {
+        UnicodeWidthStr::width(&self.buf[self.line_start()..self.cursor])
+    }
+
+    /// The byte offset in the line `start..end` closest to display column `col`, never past it.
+    fn at_column(&self, start: usize, end: usize, col: usize) -> usize {
+        let mut w = 0;
+        for (i, ch) in self.buf[start..end].char_indices() {
+            w += ch.width().unwrap_or(0);
+            if w > col {
+                return start + i;
+            }
+        }
+        end
+    }
+
+    /// Move up a line, keeping the display column; at the first line, recall older history.
     pub fn up(&mut self) {
         let start = self.line_start();
         if start > 0 {
-            let col = self.cursor - start;
             let prev_start = self.buf[..start - 1].rfind('\n').map(|i| i + 1).unwrap_or(0);
-            let prev_len = start - 1 - prev_start;
-            self.cursor = prev_start + col.min(prev_len);
-            while !self.buf.is_char_boundary(self.cursor) {
-                self.cursor -= 1;
-            }
+            self.cursor = self.at_column(prev_start, start - 1, self.column());
             return;
         }
         if self.history.is_empty() {
@@ -164,13 +212,9 @@ impl Editor {
     pub fn down(&mut self) {
         let end = self.line_end();
         if end < self.buf.len() {
-            let col = self.cursor - self.line_start();
             let next_start = end + 1;
             let next_end = self.buf[next_start..].find('\n').map(|i| next_start + i).unwrap_or(self.buf.len());
-            self.cursor = next_start + col.min(next_end - next_start);
-            while !self.buf.is_char_boundary(self.cursor) {
-                self.cursor -= 1;
-            }
+            self.cursor = self.at_column(next_start, next_end, self.column());
             return;
         }
         match self.hist_idx {
@@ -195,10 +239,15 @@ impl Editor {
         self.hist_idx = None;
         if !text.trim().is_empty() && self.history.last() != Some(&text) {
             self.history.push(text.clone());
+            let excess = self.history.len().saturating_sub(HISTORY_MAX);
+            if excess > 0 {
+                self.history.drain(..excess);
+            }
             if let Some(p) = &self.history_file {
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
-                    let _ = writeln!(f, "{}", text.replace('\n', "\\n"));
+                if excess > 0 {
+                    rewrite_history(p, &self.history);
+                } else if let (Ok(mut f), Ok(json)) = (private_file(p, true), serde_json::to_string(&text)) {
+                    let _ = writeln!(f, "{json}");
                 }
             }
         }
@@ -370,6 +419,67 @@ mod tests {
         assert!(text(&lines[1]).contains('1'));
         assert!(text(&lines[4]).contains("↓ 3 more"));
         assert_eq!(row, 1);
+    }
+
+    #[test]
+    fn up_and_down_keep_the_display_column() {
+        let mut e = Editor::new(None);
+        e.insert("日本語テキスト\nabcdefgh\nxy");
+        e.up(); // from the end of "xy" (column 2) to column 2 of "abcdefgh"
+        assert_eq!(&e.buf[e.line_start()..e.cursor], "ab");
+        e.right();
+        e.right(); // column 4
+        e.up();
+        assert_eq!(&e.buf[e.line_start()..e.cursor], "日本", "two wide characters are four columns");
+        e.right(); // column 6
+        e.down();
+        assert_eq!(&e.buf[e.line_start()..e.cursor], "abcdef");
+        e.down();
+        assert_eq!(&e.buf[e.line_start()..e.cursor], "xy", "clamped to a shorter line");
+    }
+
+    #[test]
+    fn delete_word_uses_the_same_words_as_word_left() {
+        let mut e = Editor::new(None);
+        e.insert("one\ttwo  ");
+        e.delete_word();
+        assert_eq!(e.buf, "one    ", "a tab is inserted as spaces, and the word before the spaces goes");
+        e.set("first line\nsecond\n");
+        e.delete_word();
+        assert_eq!(e.buf, "first line\n", "the newline before the caret goes with the word");
+    }
+
+    #[test]
+    fn history_keeps_prompts_exactly_and_reads_the_old_format_once() {
+        let dir = crate::tui::test_util::TempDir::new("history");
+        let path = dir.file("history", "first\\nsecond line\nplain\n");
+        let mut e = Editor::new(Some(path.clone()));
+        assert_eq!(e.history, ["first\nsecond line", "plain"], "old format: \\n was a newline");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "\"first\\nsecond line\"\n\"plain\"\n", "rewritten as JSON lines");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        e.set("println!(\"a\\nb\");\nnext line");
+        e.take();
+        let e = Editor::new(Some(path.clone()));
+        assert_eq!(e.history.last().unwrap(), "println!(\"a\\nb\");\nnext line", "a typed \\n stays a backslash and an n");
+        // Only the last 1000 are kept.
+        let many: String = (0..1200).map(|i| format!("\"p{i}\"\n")).collect();
+        std::fs::write(&path, many).unwrap();
+        let e = Editor::new(Some(path.clone()));
+        assert_eq!((e.history.len(), e.history[0].as_str()), (1000, "p200"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1000);
+        // A new file is created private.
+        let fresh = dir.join("fresh");
+        let mut e = Editor::new(Some(fresh.clone()));
+        e.set("hi");
+        e.take();
+        assert_eq!(std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777, 0o600);
+        for i in 0..HISTORY_MAX {
+            e.set(&format!("next-{i}"));
+            e.take();
+        }
+        assert_eq!(e.history.len(), HISTORY_MAX);
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap().lines().count(), HISTORY_MAX);
+        assert_eq!(e.history.first().unwrap(), "next-0");
     }
 
     #[test]

@@ -119,6 +119,9 @@ verdicts and the owner's reviews (memory promotions, skill drafts, tools, routes
 
 ## Technical debt
 
+- The terminal client was split into focused modules; incremental streaming/transcript rendering,
+  reconnect recovery and bounded private prompt history are in place. A future client event contract
+  should replace the remaining untyped JSON.
 - Settings are read from the environment in ~25 places (no single config).
 - Client events are untyped JSON.
 - The old workflow's schema stays (expand-only): `sessions.state` and old tape block kinds.

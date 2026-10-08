@@ -6,6 +6,16 @@
 
 ---
 
+## 2026-10-08 — Make the terminal client resilient and incremental
+
+- Kept both TUI modes and `zen chat`, while splitting the interactive client into focused modules.
+  Sanitize terminal text, restore terminal state on errors, report request failures without exiting,
+  reload sessions after reconnect, and reset transcript state on `/new` and `/resume`.
+- Full-screen rendering now caches finished stream lines and unchanged transcript entries. A 43 KB
+  reply in 20-byte deltas used 0.082 s CPU in the release benchmark (previous audit: 2.08 s).
+  Prompt history uses private, bounded JSON lines; client paths honor `ZEN_HOME`.
+- Render/key tests cover the fixes; full release checks and the harness eval are recorded in the PR.
+
 ## 2026-10-08 — Retire Pi; System One in the kernel (D-043)
 
 - `zend` now calls OpenRouter's System One endpoint directly, mapping bool questions to `noul`
@@ -69,7 +79,7 @@
   closes it; Tab moves the keys between chat and panel; ↑↓ move, →/Enter open or expand, ← fold or
   go to the parent, `.` shows dotfiles, Esc/Tab return to chat, typing returns to chat too. Mouse
   clicks work on tabs and rows. `/open <file>` and `/close` still work.
-- Tree logic is in `crates/zen/src/files.rs` (listing is lazy, noise folders skipped).
+- Tree logic is in `crates/zen/src/tui/files.rs` (listing is lazy, noise folders skipped).
 - The tree starts at zenbot's home, `~/.zenbot` (prompt files, wiki, skills), not the directory zen
   started in; `/files <dir>` re-roots it (`~` works). Why: the owner browses zenbot's own files from
   the panel, and launching zen from `~` showed the whole home folder.

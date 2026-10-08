@@ -3,14 +3,13 @@
 
 mod client;
 mod editor;
-mod files;
 mod md;
 mod screen;
 mod tui;
 
 use std::io::{IsTerminal, Read, Write};
 
-use client::{describe_update, dim, short, tool_summary, Client, NewSession, Ws};
+use client::{assistant_text, describe_update, dim, enc, record_total, short, tool_summary, usage_total, zen_home, Client, NewSession, Ws};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -25,7 +24,7 @@ struct Cli {
     /// Kernel URL
     #[arg(long, env = "ZEN_URL", default_value = "http://127.0.0.1:8100", global = true)]
     url: String,
-    /// Access token (default: contents of ~/.zenbot/token)
+    /// Access token (default: contents of $ZEN_HOME/token, ~/.zenbot/token)
     #[arg(long, env = "ZEN_TOKEN", hide_env_values = true, global = true)]
     token: Option<String>,
     /// Print machine-readable JSON
@@ -184,6 +183,16 @@ enum ReviewCmd {
     Reject { name: String },
 }
 
+impl ReviewCmd {
+    /// The name and the decision to send.
+    fn parts(self) -> (String, &'static str) {
+        match self {
+            ReviewCmd::Accept { name } => (name, "accept"),
+            ReviewCmd::Reject { name } => (name, "reject"),
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum MemoryCmd {
     /// Tidy short-term memory now (what the nightly sleep does)
@@ -249,18 +258,18 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
                         match m["role"].as_str() {
                             Some("user") if text_of(&m["content"]) == prompt => started = true,
                             Some("assistant") if started => {
-                                let text: String = m["content"].as_array().into_iter().flatten()
-                                    .filter(|c| c["type"] == "text").filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("");
+                                let text = assistant_text(m);
                                 if !text.is_empty() {
                                     if !turn.text.is_empty() { turn.text.push_str("\n\n"); }
                                     turn.text.push_str(&text);
-                                    if show && !streamed { print!("{text}"); }
+                                    if show && !streamed { print!("{}", for_stdout(&text)); }
                                     if show { println!(); }
                                 }
                                 streamed = false;
                                 let u = &m["usage"];
-                                turn.input_tokens += u["input"].as_i64().unwrap_or(0) + u["cacheRead"].as_i64().unwrap_or(0) + u["cacheWrite"].as_i64().unwrap_or(0);
-                                turn.output_tokens += u["output"].as_i64().unwrap_or(0);
+                                let output = u["output"].as_i64().unwrap_or(0);
+                                turn.input_tokens += usage_total(u) - output;
+                                turn.output_tokens += output;
                                 turn.cost += u["cost"]["total"].as_f64().unwrap_or(0.0);
                                 turn.model = m["model"].as_str().unwrap_or("").to_string();
                                 if m["stopReason"] == "error" {
@@ -271,7 +280,7 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
                         }
                     }
                     "delta" if started && show => {
-                        print!("{}", ev["delta"].as_str().unwrap_or(""));
+                        print!("{}", for_stdout(ev["delta"].as_str().unwrap_or("")));
                         stdout.flush().ok();
                         streamed = true;
                     }
@@ -286,7 +295,12 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
                         }
                         if show_tools && ev["is_error"] == true { eprintln!("{}", dim("    (failed)")); }
                     }
-                    "busy" if started => turn.effort = ev["effort"].as_str().map(str::to_string),
+                    // The turn starts with the first `busy` after the prompt was sent, or with the
+                    // prompt's echo, whichever comes first (the echo may not match exactly).
+                    "busy" => {
+                        started = true;
+                        turn.effort = ev["effort"].as_str().map(str::to_string);
+                    }
                     "end" | "child_end" if started => {
                         if let Some(e) = ev["error"].as_str() { turn.error = Some(e.to_string()); }
                         let r = &ev["turn"];
@@ -295,9 +309,8 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
                             turn.records.push(r.clone());
                             add_record(&mut turn.record, r);
                             let t = &turn.record;
-                            let n = |k: &str| t[k].as_i64().unwrap_or(0);
-                            turn.input_tokens = n("input_tokens") + n("cache_read") + n("cache_write");
-                            turn.output_tokens = n("output_tokens");
+                            turn.output_tokens = t["output_tokens"].as_i64().unwrap_or(0);
+                            turn.input_tokens = record_total(t) - turn.output_tokens;
                             turn.cost = t["cost_usd"].as_f64().unwrap_or(turn.cost);
                         }
                         // A turn may be followed by another the kernel starts itself (`next`): wait for `idle`.
@@ -312,7 +325,7 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
                             format!("{}\n  {}", q["question"].as_str().unwrap_or(""), opts.join(" / "))
                         }).collect();
                         let text = qs.join("\n");
-                        if show { println!("\n── Questions\n{text}\n"); }
+                        if show { println!("\n── Questions\n{}\n", for_stdout(&text)); }
                         if !turn.text.is_empty() { turn.text.push_str("\n\n"); }
                         turn.text.push_str(&format!("Questions:\n{text}"));
                     }
@@ -411,7 +424,7 @@ async fn ask(c: &Client, json_out: bool, prompt: Option<String>, session: Option
     }
     if let Some(e) = turn.error {
         if !json_out {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", for_stderr(&e));
         }
         std::process::exit(1);
     }
@@ -445,21 +458,31 @@ async fn chat(c: &Client, session: Option<String>, new: NewSession) -> Result<()
         println!();
         let turn = run_turn(&mut ws, line, true, true).await?;
         if let Some(e) = turn.error {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", for_stderr(&e));
         }
     }
     eprintln!("{}", dim(&format!("session {id}")));
     Ok(())
 }
 
-/// Values from ~/.zenbot/env (written by the installer).
-fn zen_env() -> std::collections::HashMap<String, String> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    std::fs::read_to_string(format!("{home}/.zenbot/env"))
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| l.split_once('='))
-        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+/// Values from `<zen home>/env` (written by the installer), read once.
+fn zen_env() -> &'static std::collections::HashMap<String, String> {
+    static ENV: std::sync::OnceLock<std::collections::HashMap<String, String>> = std::sync::OnceLock::new();
+    ENV.get_or_init(|| parse_env(&std::fs::read_to_string(zen_home().join("env")).unwrap_or_default()))
+}
+
+/// `KEY=value` lines as a shell would read them: comments and blank lines skipped, an `export `
+/// prefix and matching quotes around the value removed.
+fn parse_env(text: &str) -> std::collections::HashMap<String, String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|l| l.strip_prefix("export ").unwrap_or(l).split_once('='))
+        .map(|(k, v)| {
+            let v = v.trim();
+            let unquoted = [('"', '"'), ('\'', '\'')].iter().find_map(|(a, b)| v.strip_prefix(*a)?.strip_suffix(*b));
+            (k.trim().to_string(), unquoted.unwrap_or(v).to_string())
+        })
         .collect()
 }
 
@@ -479,10 +502,9 @@ fn git_identity() -> Option<String> {
     Some(format!("{} <{}>", get("user.name")?, get("user.email")?))
 }
 
-/// The engines' state as `scripts/update-engines.sh` last left it (~/.zenbot/engines.json).
+/// The engines' state as `scripts/update-engines.sh` last left it (`<zen home>/engines.json`).
 fn engines_state() -> Value {
-    let home = std::env::var("HOME").unwrap_or_default();
-    std::fs::read_to_string(format!("{home}/.zenbot/engines.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null)
+    std::fs::read_to_string(zen_home().join("engines.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null)
 }
 
 /// The `zen status` line for the engines: "claude 2.1.291, codex 0.160.1 (checked …)",
@@ -563,22 +585,32 @@ fn print_sessions(list: &Value) {
         println!(
             "{}  {:<16}  {}  {}",
             short(s["id"].as_str().unwrap_or("")),
-            model.split('/').next_back().unwrap_or(model),
+            for_stdout(model.split('/').next_back().unwrap_or(model)),
             s["updated_at"].as_str().unwrap_or("").get(..16).unwrap_or("").replace('T', " "),
-            s["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("(untitled)")
+            for_stdout(s["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("(untitled)"))
         );
     }
 }
 
+/// Text for stdout: sanitized when it is a terminal (escape sequences in a model's reply or a
+/// tool's output must not reach it), as is when piped.
+fn for_stdout(s: &str) -> std::borrow::Cow<'_, str> {
+    if std::io::stdout().is_terminal() { md::sanitize(s) } else { s.into() }
+}
+
+fn for_stderr(s: &str) -> std::borrow::Cow<'_, str> {
+    if std::io::stderr().is_terminal() { md::sanitize(s) } else { s.into() }
+}
+
 fn print_messages(s: &Value) {
-    println!("{}  ({})", s["title"].as_str().unwrap_or(""), s["model"].as_str().unwrap_or(""));
+    println!("{}  ({})", for_stdout(s["title"].as_str().unwrap_or("")), for_stdout(s["model"].as_str().unwrap_or("")));
     for m in s["messages"].as_array().into_iter().flatten() {
         match m["role"].as_str() {
-            Some("user") => println!("\n› {}", text_of(&m["content"])),
+            Some("user") => println!("\n› {}", for_stdout(&text_of(&m["content"]))),
             Some("assistant") => {
                 for c in m["content"].as_array().into_iter().flatten() {
                     match c["type"].as_str() {
-                        Some("text") => println!("\n{}", c["text"].as_str().unwrap_or("")),
+                        Some("text") => println!("\n{}", for_stdout(c["text"].as_str().unwrap_or(""))),
                         Some("toolCall") => println!("{}", dim(&format!("  ▸ {}", tool_summary(c["name"].as_str().unwrap_or(""), &c["arguments"])))),
                         _ => {}
                     }
@@ -593,7 +625,8 @@ fn print_messages(s: &Value) {
 async fn main() {
     let cli = Cli::parse();
     if let Err(e) = run(cli).await {
-        eprintln!("error: {e:#}");
+        let message = format!("{e:#}");
+        eprintln!("error: {}", for_stderr(&message));
         std::process::exit(1);
     }
 }
@@ -603,11 +636,12 @@ async fn run(cli: Cli) -> Result<()> {
         return login(which.as_deref());
     }
     let c = Client::new(cli.url, cli.token)?;
-    let out = |v: &Value| println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+    let json = cli.json;
+    let out = |v: &Value| emit(true, v, String::new);
     let Some(cmd) = cli.cmd else {
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
             // Piped use without a command behaves like `zen ask`.
-            return ask(&c, cli.json, None, None, NewSession { model: cli.model, effort: cli.effort }, false).await;
+            return ask(&c, json, None, None, NewSession { model: cli.model, effort: cli.effort }, false).await;
         }
         let start = match (cli.cont, cli.resume) {
             (_, Some(id)) if !id.is_empty() => tui::Start::Resume(Some(id)),
@@ -618,7 +652,7 @@ async fn run(cli: Cli) -> Result<()> {
         return tui::run(c, start, NewSession { model: cli.model, effort: cli.effort }, cli.inline).await;
     };
     match cmd {
-        Cmd::Ask { prompt, session, model, effort, quiet } => ask(&c, cli.json, prompt, session, NewSession { model, effort }, quiet).await?,
+        Cmd::Ask { prompt, session, model, effort, quiet } => ask(&c, json, prompt, session, NewSession { model, effort }, quiet).await?,
         Cmd::Chat { session, model, effort } => {
             let new = NewSession { model, effort };
             if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
@@ -631,34 +665,30 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Login { .. } => unreachable!(),
         Cmd::Models => {
             let m = c.get("/api/models").await?;
-            if cli.json {
+            if json {
                 out(&m);
             } else {
                 for x in m["models"].as_array().into_iter().flatten() {
                     let id = x["id"].as_str().unwrap_or("");
                     let default = if Some(id) == m["default"].as_str() { "  (default)" } else { "" };
-                    println!("{id}{default}{}", dim(&effort_list(x)));
+                    println!("{}{default}{}", for_stdout(id), dim(&effort_list(x)));
                 }
             }
         }
         Cmd::Upgrade { check } => {
             if check {
                 let v = c.get("/api/version?refresh=true").await?;
-                if cli.json {
+                if json {
                     out(&v);
                 } else {
-                    println!("{}", describe_update(&v));
+                    println!("{}", for_stdout(&describe_update(&v)));
                     for x in v["commits"].as_array().into_iter().flatten() {
-                        println!("  · {}", x.as_str().unwrap_or(""));
+                        println!("  · {}", for_stdout(x.as_str().unwrap_or("")));
                     }
                 }
             } else {
                 let msg = c.upgrade(|l| eprintln!("{}", dim(&l))).await?;
-                if cli.json {
-                    out(&json!({ "ok": true, "message": msg }));
-                } else {
-                    println!("{msg}");
-                }
+                emit(json, &json!({ "ok": true, "message": msg }), || msg.clone());
             }
         }
         Cmd::Status => {
@@ -685,42 +715,43 @@ async fn run(cli: Cli) -> Result<()> {
                 "default_model": models["default"],
                 "scorer": models["scorer"],
             });
-            if cli.json {
+            if json {
                 out(&status);
             } else {
                 let mark = |b: bool| if b { "ok" } else { "FAIL" };
-                println!("kernel    {}  ({})", mark(true), c.url);
+                println!("kernel    {}  ({})", mark(true), for_stdout(&c.url));
                 println!("database  {}", mark(health["db"] == true));
                 for (name, ok) in health["workers"].as_object().into_iter().flatten() {
-                    println!("{:<9} {}", format!("worker:{name}"), mark(*ok == true));
+                    println!("{:<9} {}", format!("worker:{}", for_stdout(name)), mark(*ok == true));
                 }
                 // OpenRouter is only used for live scoring; it's shown with the scorer below.
                 for (name, ok) in models["authenticated"].as_object().into_iter().flatten().filter(|(n, _)| *n != "openrouter") {
-                    println!("{:<9} {}", name, if *ok == true { "signed in" } else { "NOT signed in" });
+                    println!("{:<9} {}", for_stdout(name), if *ok == true { "signed in" } else { "NOT signed in" });
                 }
                 match engines_line(&engines) {
-                    Some(line) => println!("engines   {line}"),
+                    Some(line) => println!("engines   {}", for_stdout(&line)),
                     None => println!("engines   not checked yet (scripts/update-engines.sh, daily via zen-engines.timer)"),
                 }
-                println!("model     {}", models["default"].as_str().unwrap_or(""));
+                println!("model     {}", for_stdout(models["default"].as_str().unwrap_or("")));
                 if !memory.is_null() {
-                    println!("memory    {}", memory_line(&memory));
+                    println!("memory    {}", for_stdout(&memory_line(&memory)));
                 }
                 match models["scorer"].as_str() {
                     None => println!("scorer    off (set ZEN_S1_MODEL to score sessions)"),
                     Some(s) if s.starts_with("openrouter/") && models["authenticated"]["openrouter"] != true => {
-                        println!("scorer    {s}  (NO key: set OPENROUTER_API_KEY)")
+                        println!("scorer    {}  (NO key: set OPENROUTER_API_KEY)", for_stdout(s))
                     }
-                    Some(s) => println!("scorer    {s}"),
+                    Some(s) => println!("scorer    {}", for_stdout(s)),
                 }
                 match &git_identity {
-                    Some(id) => println!("git       {id}"),
+                    Some(id) => println!("git       {}", for_stdout(id)),
                     None => println!("git       no identity: zen's commits get a placeholder author (git config --global user.name/user.email)"),
                 }
-                let commit = health["commit"].as_str().filter(|c| !c.is_empty()).unwrap_or("unknown");
+                let commit = for_stdout(health["commit"].as_str().filter(|c| !c.is_empty()).unwrap_or("unknown"));
                 match (version["available"].as_bool(), version["latest"].as_str()) {
                     (Some(true), Some(latest)) => println!(
-                        "version   {commit}  (update available: {latest}, {} new commit{}; run `zen upgrade`)",
+                        "version   {commit}  (update available: {}, {} new commit{}; run `zen upgrade`)",
+                        for_stdout(latest),
                         version["behind"],
                         if version["behind"] == 1 { "" } else { "s" }
                     ),
@@ -734,87 +765,64 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Memory { cmd: Some(MemoryCmd::Sleep), .. } => {
             let r = c.post("/api/memory/sleep", json!({})).await?;
-            if cli.json {
+            if json {
                 out(&r);
             } else {
-                println!("{}", sleep_counts(&r));
+                println!("{}", for_stdout(&sleep_counts(&r)));
                 if let Some(note) = r["note"].as_str() {
-                    println!("{note}");
+                    println!("{}", for_stdout(note));
                 }
             }
         }
-        Cmd::Memory { cmd: Some(c2 @ (MemoryCmd::Accept { .. } | MemoryCmd::Reject { .. })), .. } => {
-            let (id, decision) = match c2 {
-                MemoryCmd::Accept { id } => (id, "accept"),
-                MemoryCmd::Reject { id } => (id, "reject"),
-                MemoryCmd::Sleep => unreachable!(),
-            };
-            let r = c.post(&format!("/api/memory/{id}/review"), json!({ "decision": decision })).await?;
-            if cli.json {
-                out(&r);
-            } else {
-                let p = &r["promotion"];
-                println!(
-                    "{} is now {}-term. Promotion: {} ({} of {} proposals accepted; acts on its own at 0.95, now {:.2})",
-                    r["id"].as_str().unwrap_or(""),
-                    r["tier"].as_str().unwrap_or(""),
-                    p["mode"].as_str().unwrap_or(""),
-                    p["accepted"],
-                    p["reviewed"],
-                    p["lower_bound"].as_f64().unwrap_or(0.0)
-                );
-            }
-        }
+        Cmd::Memory { cmd: Some(MemoryCmd::Accept { id }), .. } => review_memory(&c, json, &id, "accept").await?,
+        Cmd::Memory { cmd: Some(MemoryCmd::Reject { id }), .. } => review_memory(&c, json, &id, "reject").await?,
         Cmd::Skills { cmd: None } => {
             let s = c.get("/api/skills").await?;
-            if cli.json {
+            if json {
                 out(&s);
             } else {
                 for x in s["skills"].as_array().into_iter().flatten() {
                     let draft = if x["status"] == "draft" { " (draft)" } else { "" };
-                    let last = x["last_load"].as_str().map(|t| format!(", last {}", &t[..t.len().min(10)])).unwrap_or_default();
+                    let last = x["last_load"].as_str().map(|t| format!(", last {}", t.get(..10).unwrap_or(t))).unwrap_or_default();
                     println!(
                         "{}{draft}  {}",
-                        x["skill"].as_str().unwrap_or(""),
+                        for_stdout(x["skill"].as_str().unwrap_or("")),
                         dim(&format!("{} loads{last}; accepted {} of {} judged sessions", x["loads"], x["sessions_accepted"], x["sessions_judged"]))
                     );
                 }
                 for t in s["tools"].as_array().into_iter().flatten() {
                     let state = if t["approved"] == true { "approved" } else { "sandboxed until approved" };
-                    println!("tool made_{}  {}", t["tool"].as_str().unwrap_or(""), dim(state));
+                    println!("tool made_{}  {}", for_stdout(t["tool"].as_str().unwrap_or("")), dim(state));
                 }
             }
         }
         Cmd::Skills { cmd: Some(r) } => {
-            let (name, decision) = match r {
-                ReviewCmd::Accept { name } => (name, "accept"),
-                ReviewCmd::Reject { name } => (name, "reject"),
-            };
+            let (name, decision) = r.parts();
             let res = c.post("/api/skills/review", json!({ "name": name, "decision": decision })).await?;
-            if cli.json { out(&res) } else { println!("{}", res["result"].as_str().unwrap_or("")) }
+            emit(json, &res, || res["result"].as_str().unwrap_or("").to_string());
         }
         Cmd::Policy { cmd: None } => {
             let p = c.get("/api/policy").await?;
-            if cli.json {
+            if json {
                 out(&p);
             } else {
-                println!("policy v{}: {}", p["version"], serde_json::to_string(&p["policy"]).unwrap_or_default());
+                println!("policy v{}: {}", p["version"], for_stdout(&serde_json::to_string(&p["policy"]).unwrap_or_default()));
                 for s in p["stats"].as_array().into_iter().flatten() {
                     println!(
                         "  {:<10} {:<34} {}",
-                        s["kind"].as_str().unwrap_or("?"),
-                        s["model"].as_str().unwrap_or("?"),
+                        for_stdout(s["kind"].as_str().unwrap_or("?")),
+                        for_stdout(s["model"].as_str().unwrap_or("?")),
                         dim(&format!("{} subtasks, {} of {} judged accepted, ${:.3} each", s["subtasks"], s["accepted"], s["judged"], s["mean_cost"].as_f64().unwrap_or(0.0)))
                     );
                 }
                 for s in p["suggestions"].as_array().into_iter().flatten() {
-                    println!("suggests {} -> {} ({})", s["kind"].as_str().unwrap_or(""), s["model"].as_str().unwrap_or(""), s["why"].as_str().unwrap_or(""));
+                    println!("suggests {} -> {} ({})", for_stdout(s["kind"].as_str().unwrap_or("")), for_stdout(s["model"].as_str().unwrap_or("")), for_stdout(s["why"].as_str().unwrap_or("")));
                 }
             }
         }
         Cmd::Policy { cmd: Some(PolicyCmd::Undo) } => {
             let r = c.post("/api/policy/undo", json!({})).await?;
-            if cli.json { out(&r) } else { println!("policy v{}", r["version"]) }
+            emit(json, &r, || format!("policy v{}", r["version"]));
         }
         Cmd::Policy { cmd: Some(PolicyCmd::Set { kind, model, candidates, explore }) } => {
             let mut p = c.get("/api/policy").await?["policy"].clone();
@@ -830,25 +838,21 @@ async fn run(cli: Cli) -> Result<()> {
                 p["explore"] = json!(e);
             }
             let r = c.post("/api/policy", json!({ "policy": p, "reason": format!("owner: {kind} -> {model}") })).await?;
-            if cli.json { out(&r) } else { println!("policy v{}", r["version"]) }
+            emit(json, &r, || format!("policy v{}", r["version"]));
         }
         Cmd::Tools { cmd } => {
-            let (name, decision) = match cmd {
-                ReviewCmd::Accept { name } => (name, "accept"),
-                ReviewCmd::Reject { name } => (name, "reject"),
-            };
-            let name = name.trim_start_matches("made_").to_string();
-            let res = c.post(&format!("/api/tools/{name}/review"), json!({ "decision": decision })).await?;
-            if cli.json { out(&res) } else { println!("{}", res["result"].as_str().unwrap_or("")) }
+            let (name, decision) = cmd.parts();
+            let res = c.post(&format!("/api/tools/{}/review", enc(name.trim_start_matches("made_"))), json!({ "decision": decision })).await?;
+            emit(json, &res, || res["result"].as_str().unwrap_or("").to_string());
         }
         Cmd::Memory { cmd: None, tier } => {
-            let m = c.get(&format!("/api/memory?tier={tier}")).await?;
-            if cli.json {
+            let m = c.get(&format!("/api/memory?tier={}", enc(&tier))).await?;
+            if json {
                 out(&m);
             } else {
                 for x in m["memories"].as_array().into_iter().flatten() {
                     let tier = if x["tier"] == "short" { String::new() } else { format!(", {}", x["tier"].as_str().unwrap_or("")) };
-                    println!("{:<6} {}  {}", x["id"].as_str().unwrap_or(""), x["text"].as_str().unwrap_or(""), dim(&format!("({}{tier})", x["source"].as_str().unwrap_or(""))));
+                    println!("{:<6} {}  {}", for_stdout(x["id"].as_str().unwrap_or("")), for_stdout(x["text"].as_str().unwrap_or("")), dim(&format!("({}{tier})", x["source"].as_str().unwrap_or(""))));
                 }
                 println!("{}", dim(&memory_line(&m)));
             }
@@ -856,39 +860,69 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Sessions(cmd) => match cmd {
             SessionsCmd::Ls { archived } => {
                 let list = c.get(&format!("/api/sessions?archived={archived}")).await?;
-                if cli.json { out(&list) } else { print_sessions(&list) }
+                if json { out(&list) } else { print_sessions(&list) }
             }
             SessionsCmd::New { model, effort, title } => {
                 let s = c.post("/api/sessions", json!({ "model": model, "effort": effort, "title": title })).await?;
-                if cli.json { out(&s) } else { println!("{}", s["id"].as_str().unwrap_or("")) }
+                emit(json, &s, || s["id"].as_str().unwrap_or("").to_string());
             }
             SessionsCmd::Show { id } => {
-                let id = c.resolve(&id).await?;
-                let s = c.get(&format!("/api/sessions/{id}")).await?;
-                if cli.json { out(&s) } else { print_messages(&s) }
+                let (_, s) = session_op(&c, &id, reqwest::Method::GET, None).await?;
+                if json { out(&s) } else { print_messages(&s) }
             }
             SessionsCmd::Archive { id } => {
-                let id = c.resolve(&id).await?;
-                let s = c.patch(&format!("/api/sessions/{id}"), json!({ "archived": true })).await?;
-                if cli.json { out(&s) } else { println!("archived {}", short(&id)) }
+                let (id, s) = session_op(&c, &id, reqwest::Method::PATCH, Some(json!({ "archived": true }))).await?;
+                emit(json, &s, || format!("archived {}", short(&id)));
             }
             SessionsCmd::Restore { id } => {
-                let id = c.resolve(&id).await?;
-                let s = c.patch(&format!("/api/sessions/{id}"), json!({ "archived": false })).await?;
-                if cli.json { out(&s) } else { println!("restored {}", short(&id)) }
+                let (id, s) = session_op(&c, &id, reqwest::Method::PATCH, Some(json!({ "archived": false }))).await?;
+                emit(json, &s, || format!("restored {}", short(&id)));
             }
             SessionsCmd::Decide { id, decision, note } => {
                 let id = c.resolve(&id).await?;
                 let d = c.post(&format!("/api/sessions/{id}/decision"), json!({ "decision": decision, "note": note })).await?;
-                if cli.json { out(&d) } else { println!("recorded {} for {}", d["decision"].as_str().unwrap_or(""), short(&id)) }
+                emit(json, &d, || format!("recorded {} for {}", d["decision"].as_str().unwrap_or(""), short(&id)));
             }
             SessionsCmd::Rename { id, title } => {
-                let id = c.resolve(&id).await?;
-                let s = c.patch(&format!("/api/sessions/{id}"), json!({ "title": title })).await?;
-                if cli.json { out(&s) } else { println!("renamed {}", short(&id)) }
+                let (id, s) = session_op(&c, &id, reqwest::Method::PATCH, Some(json!({ "title": title }))).await?;
+                emit(json, &s, || format!("renamed {}", short(&id)));
             }
         },
     }
+    Ok(())
+}
+
+/// Print `v` as JSON with `--json`, else the human-readable `text`.
+fn emit(json: bool, v: &Value, text: impl FnOnce() -> String) {
+    if json {
+        println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+    } else {
+        println!("{}", for_stdout(&text()));
+    }
+}
+
+/// Resolve a session id or unique prefix, then call `/api/sessions/<id>` with `method`.
+async fn session_op(c: &Client, id: &str, method: reqwest::Method, body: Option<Value>) -> Result<(String, Value)> {
+    let id = c.resolve(id).await?;
+    let v = c.call(method, &format!("/api/sessions/{id}"), body).await?;
+    Ok((id, v))
+}
+
+/// `zen memory accept|reject <id>`: decide on a memory the sleep proposed for long-term memory.
+async fn review_memory(c: &Client, json: bool, id: &str, decision: &str) -> Result<()> {
+    let r = c.post(&format!("/api/memory/{}/review", enc(id)), json!({ "decision": decision })).await?;
+    let p = &r["promotion"];
+    emit(json, &r, || {
+        format!(
+            "{} is now {}-term. Promotion: {} ({} of {} proposals accepted; acts on its own at 0.95, now {:.2})",
+            r["id"].as_str().unwrap_or(""),
+            r["tier"].as_str().unwrap_or(""),
+            p["mode"].as_str().unwrap_or(""),
+            p["accepted"],
+            p["reviewed"],
+            p["lower_bound"].as_f64().unwrap_or(0.0)
+        )
+    });
     Ok(())
 }
 
@@ -931,6 +965,46 @@ mod tests {
             "last_sleep": { "ended_at": "2026-10-07T04:01:02Z", "entries": 3, "kept": 2, "dropped": 1, "promoted": 0, "proposed": 0, "scorer": null } });
         assert_eq!(memory_line(&m), "2 entries, 28/4000 characters; last sleep 2026-10-07 04:01 UTC: 3 entries: 2 kept, 1 archived, 0 promoted, 0 proposed for long-term (by recency: no System One model)");
         assert!(memory_line(&json!({ "size": 4000, "memories": [], "last_sleep": null })).ends_with("no sleep yet"));
+    }
+
+    #[test]
+    fn the_env_file_is_read_like_a_shell_would() {
+        let env = parse_env("# zenbot\nexport PATH=\"/a/bin:/b\"\nZEN_REPO='/home/x/zenbot'\n\nPLAIN = v \nBAD\n");
+        assert_eq!(env["PATH"], "/a/bin:/b");
+        assert_eq!(env["ZEN_REPO"], "/home/x/zenbot");
+        assert_eq!(env["PLAIN"], "v");
+        assert_eq!(env.len(), 3);
+    }
+
+    /// A fake kernel session stream: reads the prompt, then sends `events`.
+    async fn fake_stream(events: Vec<Value>) -> (Client, tokio::task::JoinHandle<String>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(sock).await.unwrap();
+            let prompt = ws.next().await.unwrap().unwrap().into_text().unwrap().to_string();
+            for e in events {
+                ws.send(Message::text(e.to_string())).await.unwrap();
+            }
+            prompt
+        });
+        (Client::new(url, Some("t".into())).unwrap(), server)
+    }
+
+    #[tokio::test]
+    async fn ask_starts_on_busy_even_if_the_echo_differs() {
+        let (c, server) = fake_stream(vec![
+            json!({ "type": "busy", "busy": true, "effort": "high" }),
+            json!({ "type": "message", "message": { "role": "user", "content": "do it" } }),
+            json!({ "type": "message", "message": { "role": "assistant", "content": [{ "type": "text", "text": "done" }], "model": "faux/smoke" } }),
+            json!({ "type": "end", "error": null }),
+        ])
+        .await;
+        let mut ws = c.connect("s1").await.unwrap();
+        let turn = tokio::time::timeout(std::time::Duration::from_secs(5), run_turn(&mut ws, "  do it  ", false, false)).await.expect("no hang").unwrap();
+        assert_eq!((turn.text.as_str(), turn.effort.as_deref()), ("done", Some("high")));
+        assert!(server.await.unwrap().contains("  do it  "));
     }
 
     #[test]

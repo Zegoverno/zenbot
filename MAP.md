@@ -212,14 +212,13 @@ Code that depends on a CLI's flags or output should fail loudly, so the daily en
 | File | Lines | Role | Depends on | Used by |
 |---|---|---|---|---|
 | `src/main.rs` | 968 | clap commands: `ask`, `chat`, `sessions {ls,new,show,archive,restore,rename,decide}`, `memory [--tier short\|long\|archived\|proposed\|all] [sleep\|accept <id>\|reject <id>]`, `skills [accept\|reject <domain/name>]` (use per skill and the made tools), `tools accept\|reject <name>` (a `made_` prefix is dropped), `policy [set <kind> <model> [--candidates a,b] [--explore x] \| undo]` (the routing policy and its evidence), `models`, `login [claude\|codex]`, `status` (with a memory line), `upgrade [--check]` (the workflow commands are gone); flags `--url` (`ZEN_URL`), `--token` (`ZEN_TOKEN`), `--json`, `-c`, `-r`, `-m`, `-e`, `--inline` (`ZEN_INLINE`). Reads `~/.zenbot/env` (for `ZEN_REPO`, `PATH`) and `~/.zenbot/engines.json` | `client`, `tui`, `md` | owner, scripts (`zen ask --json`), e2e, evals |
-| `src/client.rs` | 232 | HTTP + WebSocket client; token from `--token`/`ZEN_TOKEN` or `~/.zenbot/token`; upgrade wait/poll messages | reqwest, tungstenite | `main.rs`, `tui.rs` |
-| `src/tui.rs` | 2503 | **Largest file in the repo.** Interactive app. Full screen: conversation entries re-rendered at the chat width in a scrolled viewport (PgUp/PgDn, wheel), the side panel (Files tab: folder tree with arrows, Enter, mouse; Viewer tab: the open file, reloaded on change; ctrl+b, tab, `/files`), runs of tool calls folded to one line (Ctrl+O), live region below. Inline: scrollback + live region. Pickers, slash commands (`/new /resume /model /effort /done /rename /open /close /mouse /archive /upgrade /help /exit`), the `ask` tool's questions, history in `~/.zenbot/history`, banner from `~/.zenbot/version`. Render/key tests at the bottom | `client`, `editor`, `md` | `main.rs` |
-| `src/screen.rs` | 124 | Full-screen frames: writes only the rows that changed, in place (no clearing, so no flicker); `fit` cuts/pads styled lines; `row` joins chat and panel | `md` | `tui.rs` |
-| `src/files.rs` | 175 | Folder tree of the side panel's Files tab: lazy listing (skips .git, target, node_modules; dotfiles toggle), expand/fold, selection and scroll. Unit tests inside | — | `tui.rs` |
-| `src/editor.rs` | 391 | Multi-line input editor with prompt history | — | `tui.rs` |
-| `src/md.rs` | 238 | Styled lines, word wrap, line-oriented markdown renderer | — | `tui.rs`, `main.rs` |
+| `src/client.rs` | ~330 | HTTP + WebSocket client; token from `--token`/`ZEN_TOKEN` or `~/.zenbot/token`; upgrade wait/poll messages | reqwest, tungstenite | `main.rs`, `tui/` |
+| `src/tui/` | ~3,200 | Interactive app split into `mod` (lifecycle), `state` (sessions/reconnect), `events`, `input`, `render`, `transcript` (incremental streaming and view), `panel`, `pickers`, `inline`, `files` and `test_util`. Full screen has a diffed, scrollable view and side panel; inline keeps scrollback. Terminal text is sanitized, requests fail into notices rather than exiting, and reconnect rebuilds from the server. Prompt history is private JSON lines under `ZEN_HOME`. Render/key tests live beside the modules | `client`, `editor`, `md` | `main.rs` |
+| `src/screen.rs` | 124 | Full-screen frames: writes only changed rows in place; `fit` cuts/pads styled lines; `row` joins chat and panel | `md` | `tui/render.rs` |
+| `src/editor.rs` | ~490 | Multi-line input editor with prompt history | — | `tui/` |
+| `src/md.rs` | ~280 | Styled lines, word wrap, line-oriented markdown renderer, terminal text sanitizer | — | `tui/`, `main.rs` |
 
-UI changes to `tui.rs` / `editor.rs` come with render or key tests (AGENTS.md).
+UI changes to `tui/` / `editor.rs` come with render or key tests (AGENTS.md).
 
 ## Shared: `zen-proto` (`crates/zen-proto`, 48 lines)
 
