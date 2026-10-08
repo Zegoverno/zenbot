@@ -1,7 +1,7 @@
 //! Pieces shared by every engine: the per-turn tool socket and the history transcript.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc};
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -44,7 +44,76 @@ impl TurnInput {
     }
 }
 
-/// Everything a running turn needs to talk to the kernel and execute tools through it.
+/// Whether a tool call has no matching result in the captured transcript.
+fn has_unanswered_tool(messages: &[Value]) -> bool {
+    let mut pending = std::collections::HashSet::new();
+    for message in messages {
+        if message["role"] == "assistant" {
+            for block in message["content"].as_array().into_iter().flatten() {
+                if block["type"] == "toolCall" {
+                    if let Some(id) = block["id"].as_str() {
+                        pending.insert(id.to_string());
+                    } else {
+                        return true;
+                    }
+                }
+            }
+        } else if message["role"] == "toolResult" {
+            if let Some(id) = message["toolCallId"].as_str() {
+                pending.remove(id);
+            }
+        }
+    }
+    !pending.is_empty()
+}
+
+#[derive(Default)]
+struct Captured {
+    messages: Vec<Value>,
+    partial: String,
+    bytes: usize,
+    overflow: bool,
+    uncertain_tool: bool,
+    usage: Vec<Value>,
+}
+
+impl Captured {
+    fn transcript(&self) -> Option<(Vec<Value>, String)> {
+        if self.overflow || self.uncertain_tool || has_unanswered_tool(&self.messages) {
+            return None;
+        }
+        Some((self.messages.clone(), self.partial.clone()))
+    }
+}
+
+/// Counts a tool request from before it can run until it has a recorded result. The guard is
+/// decremented even when its task is cancelled while the kernel may be executing the request.
+struct ToolFlight {
+    count: Arc<AtomicUsize>,
+    uncertain: Arc<AtomicBool>,
+    complete: bool,
+}
+
+impl ToolFlight {
+    fn new(count: &Arc<AtomicUsize>, uncertain: &Arc<AtomicBool>) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self { count: count.clone(), uncertain: uncertain.clone(), complete: false }
+    }
+
+    fn complete(&mut self) {
+        self.complete = true;
+    }
+}
+
+impl Drop for ToolFlight {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.uncertain.store(true, Ordering::SeqCst);
+        }
+        self.count.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 #[derive(Clone)]
 pub struct TurnCtx {
     pub rpc: Rpc,
@@ -55,18 +124,88 @@ pub struct TurnCtx {
     pub tools: Vec<Value>,
     /// Tool calls the model announced and that haven't been executed yet: (call id, name, args).
     pub announced: Arc<Mutex<VecDeque<(String, String, Value)>>>,
+    captured: Arc<Mutex<Captured>>,
+    tool_flights: Arc<AtomicUsize>,
+    tool_uncertain: Arc<AtomicBool>,
 }
 
 impl TurnCtx {
     pub fn new(rpc: Rpc, session_id: String, turn_id: String, tools: Vec<Value>) -> Self {
-        TurnCtx { rpc, session_id, turn_id, tools, announced: Arc::default() }
+        TurnCtx { rpc, session_id, turn_id, tools, announced: Arc::default(), captured: Arc::default(), tool_flights: Arc::default(), tool_uncertain: Arc::default() }
     }
 
     /// Send a notification for this turn: `params` with the session and turn ids added.
     pub async fn notify(&self, method: &str, mut params: Value) {
+        match method {
+            "turn.message" => {
+                let message = params["message"].clone();
+                let encoded = message.to_string();
+                let mut captured = self.captured.lock().await;
+                if message["role"] == "assistant" {
+                    captured.partial.clear();
+                }
+                if captured.bytes.saturating_add(encoded.len()) <= 2 * 1024 * 1024 {
+                    captured.bytes += encoded.len();
+                    captured.messages.push(message);
+                } else {
+                    captured.overflow = true;
+                }
+            }
+            "turn.delta" => {
+                let delta = params["delta"].as_str().unwrap_or("");
+                let mut captured = self.captured.lock().await;
+                if captured.bytes.saturating_add(delta.len()) <= 2 * 1024 * 1024 {
+                    captured.bytes += delta.len();
+                    captured.partial.push_str(delta);
+                } else {
+                    captured.overflow = true;
+                }
+            }
+            "turn.usage" => {
+                self.captured.lock().await.usage.push(params);
+                return;
+            }
+            _ => {}
+        }
         params["session_id"] = json!(self.session_id);
         params["turn_id"] = json!(self.turn_id);
         self.rpc.notify(method, params).await;
+    }
+
+    /// The full current-turn transcript for one safe continuation; too much state or an
+    /// uncertain tool outcome disables failover.
+    pub async fn captured_transcript(&self) -> Option<(Vec<Value>, String)> {
+        if self.tool_flights.load(Ordering::SeqCst) != 0 || self.tool_uncertain.load(Ordering::SeqCst) || !self.announced.lock().await.is_empty() {
+            return None;
+        }
+        self.captured.lock().await.transcript()
+    }
+
+    /// Publish one cumulative report. Cross-provider fallback is one kernel turn but several model
+    /// runs, so totals must include every provider without claiming either provider's engine session.
+    pub async fn combined_usage(&self) -> Option<Value> {
+        let captured = self.captured.lock().await;
+        let mut reports = captured.usage.iter();
+        let mut combined = reports.next()?.clone();
+        let rest: Vec<&Value> = captured.usage.iter().skip(1).collect();
+        if rest.is_empty() {
+            return Some(combined);
+        }
+        // A resumed Claude session reports cumulative usage, whereas Codex reports per-turn
+        // usage. Their raw totals cannot be added safely. Let the kernel derive this mixed
+        // turn's totals from its individual model-call records instead.
+        for key in ["input", "output", "cache_read", "cache_write"] {
+            combined[key] = Value::Null;
+        }
+        combined["provider_reports"] = json!(captured.usage);
+        combined["engine"] = json!("zen-engine");
+        combined["engine_version"] = json!(env!("CARGO_PKG_VERSION"));
+        combined["provider"] = json!("mixed");
+        combined["model"] = json!("mixed");
+        combined["render"] = json!("failover");
+        combined["engine_session"] = Value::Null;
+        combined["cost_usd"] = Value::Null;
+        Some(combined)
     }
 
     pub async fn announce(&self, id: &str, name: &str, args: &Value) {
@@ -85,6 +224,7 @@ impl TurnCtx {
 
     /// Execute a tool through the kernel and report the result as a toolResult message.
     pub async fn call_tool(&self, name: &str, args: Value, call_id: Option<String>) -> (String, bool) {
+        let mut flight = ToolFlight::new(&self.tool_flights, &self.tool_uncertain);
         let call_id = match call_id {
             Some(id) => id,
             None => self.claim(name, &args).await,
@@ -95,13 +235,23 @@ impl TurnCtx {
             .await;
         let (content, is_error) = match res {
             Ok(v) => (v["content"].as_str().unwrap_or("").to_string(), v["is_error"].as_bool().unwrap_or(false)),
-            Err(e) => (e.to_string(), true),
+            Err(e) => {
+                // The request may have executed before the RPC connection failed. Even though
+                // the model receives an error-shaped result, a second provider must not retry it.
+                self.captured.lock().await.uncertain_tool = true;
+                (e.to_string(), true)
+            },
         };
+        if is_error {
+            // A failed command or tool may still have changed external state before failing.
+            self.captured.lock().await.uncertain_tool = true;
+        }
         let message = json!({
             "role": "toolResult", "toolCallId": call_id, "toolName": name,
             "content": [{ "type": "text", "text": content }], "isError": is_error, "timestamp": now_ms()
         });
         self.notify("turn.message", json!({ "message": message })).await;
+        flight.complete();
         (content, is_error)
     }
 
@@ -113,6 +263,9 @@ impl TurnCtx {
         Ok(tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let ctx = ctx.clone();
+                // Count the accepted connection before spawning: an already-accepted call may
+                // otherwise begin running after the quota snapshot was taken.
+                let mut flight = ToolFlight::new(&ctx.tool_flights, &ctx.tool_uncertain);
                 tokio::spawn(async move {
                     let (r, mut w) = stream.into_split();
                     let mut line = String::new();
@@ -132,7 +285,9 @@ impl TurnCtx {
                     };
                     let mut out = resp.to_string();
                     out.push('\n');
-                    let _ = w.write_all(out.as_bytes()).await;
+                    if w.write_all(out.as_bytes()).await.is_ok() {
+                        flight.complete();
+                    }
                 });
             }
         }))
@@ -345,6 +500,36 @@ pub fn seed_blocks(history: &[Value], prompt: &str, context: Option<&str>) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_tool_marks_the_turn_uncertain() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let uncertain = Arc::new(AtomicBool::new(false));
+        {
+            let _flight = ToolFlight::new(&count, &uncertain);
+            assert_eq!(count.load(Ordering::SeqCst), 1);
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        assert!(uncertain.load(Ordering::SeqCst));
+        let known = Arc::new(AtomicBool::new(false));
+        {
+            let mut flight = ToolFlight::new(&count, &known);
+            flight.complete();
+        }
+        assert!(!known.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn unanswered_tool_blocks_cross_provider_continuation() {
+        let call = json!({ "role": "assistant", "content": [{ "type": "toolCall", "id": "c1", "name": "bash", "arguments": {} }] });
+        let result = json!({ "role": "toolResult", "toolCallId": "c1", "content": [{ "type": "text", "text": "done" }] });
+        assert!(has_unanswered_tool(std::slice::from_ref(&call)));
+        assert!(!has_unanswered_tool(&[call, result]));
+        let mut captured = Captured::default();
+        assert!(captured.transcript().is_some());
+        captured.uncertain_tool = true;
+        assert!(captured.transcript().is_none(), "an RPC error is not proof a tool had no side effect");
+    }
 
     #[test]
     fn transcript_numbers_messages_and_puts_the_summary_first() {
