@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use unicode_width::UnicodeWidthStr;
 
-use crate::client::{short, tool_summary, Client, NewSession, Ws};
+use crate::client::{assistant_text, record_total, short, tool_summary, usage_total, Client, NewSession, Ws};
 use crate::editor::Editor;
 use crate::files::Files;
 use crate::md::{self, line, Line, Md, Sty};
@@ -1243,13 +1243,11 @@ impl App {
         }
         // The footer's total covers the whole session, not only the messages shown.
         for m in msgs.iter().filter(|m| m["role"] == "assistant") {
-            self.session_tokens += ["input", "output", "cacheRead", "cacheWrite"].iter().map(|k| m["usage"][*k].as_i64().unwrap_or(0)).sum::<i64>();
+            self.session_tokens += usage_total(&m["usage"]);
         }
         self.push_all(entries);
         if s["busy"] == true {
-            self.busy = true;
-            self.status = "Working".into();
-            self.turn_started = Instant::now();
+            self.begin_turn();
         }
     }
 
@@ -1751,16 +1749,9 @@ impl App {
         self.scroll = 0; // back to the latest when you send
         self.push(Entry::User(text.clone()));
         self.pending_prompt = Some(text.clone());
-        self.busy = true;
-        self.status = "Working".into();
-        self.turn_started = Instant::now();
-        self.turn_tokens = 0;
-        self.turn_tools = 0;
-        self.turn_files.clear();
+        self.begin_turn();
         self.aborting = false;
-        self.stream.clear();
-        self.committed = 0;
-        self.md = Md::default();
+        self.reset_stream();
         if let Some(sink) = &mut self.sink {
             if let Err(e) = sink.send(Message::text(json!({ "type": "prompt", "text": text }).to_string())).await {
                 // The connection is gone: the next send reconnects.
@@ -1771,6 +1762,23 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// A turn starts (sent from here, or started by the kernel): reset its counters.
+    fn begin_turn(&mut self) {
+        self.busy = true;
+        self.status = "Working".into();
+        self.turn_started = Instant::now();
+        self.turn_tokens = 0;
+        self.turn_tools = 0;
+        self.turn_files.clear();
+    }
+
+    /// Forget the streamed text (it was shown in full, or the turn ended).
+    fn reset_stream(&mut self) {
+        self.stream.clear();
+        self.committed = 0;
+        self.md = Md::default();
     }
 
     async fn command(&mut self, input: &str) -> Result<()> {
@@ -1992,7 +2000,7 @@ impl App {
                     }
                     Some("assistant") => {
                         let mut entries = Vec::new();
-                        let full = clean(&m["content"].as_array().into_iter().flatten().filter(|c| c["type"] == "text").filter_map(|c| c["text"].as_str()).collect::<String>());
+                        let full = clean(&assistant_text(m));
                         if self.inline {
                             // Inline, the streamed lines are already in scrollback: print the rest.
                             let mut out = Vec::new();
@@ -2014,17 +2022,14 @@ impl App {
                                 entries.push(Entry::Md(text));
                             }
                         }
-                        self.stream.clear();
-                        self.committed = 0;
-                        self.md = Md::default();
+                        self.reset_stream();
                         for c in m["content"].as_array().into_iter().flatten().filter(|c| c["type"] == "toolCall") {
                             entries.push(Entry::ToolCall(c["name"].as_str().unwrap_or("").to_string(), c["arguments"].clone()));
                         }
                         if m["stopReason"] == "error" && !self.aborting {
                             entries.push(Entry::Raw(vec![line(clean(m["errorMessage"].as_str().unwrap_or("error")), Sty::Err)]));
                         }
-                        let u = &m["usage"];
-                        self.turn_tokens += ["input", "output", "cacheRead", "cacheWrite"].iter().map(|k| u[*k].as_i64().unwrap_or(0)).sum::<i64>();
+                        self.turn_tokens += usage_total(&m["usage"]);
                         self.turn_model = m["model"].as_str().unwrap_or("").to_string();
                         self.push_all(entries);
                     }
@@ -2055,11 +2060,7 @@ impl App {
             "busy" => {
                 // A turn the kernel started also counts.
                 if !self.busy {
-                    self.busy = true;
-                    self.turn_started = std::time::Instant::now();
-                    self.turn_tokens = 0;
-                    self.turn_tools = 0;
-                    self.turn_files.clear();
+                    self.begin_turn();
                 }
                 self.turn_effort = ev["effort"].as_str().map(String::from);
             }
@@ -2080,8 +2081,7 @@ impl App {
                 self.draw();
             }
             "child_end" => {
-                let r = &ev["turn"];
-                self.session_tokens += ["input_tokens", "output_tokens", "cache_read", "cache_write"].iter().map(|k| r[*k].as_i64().unwrap_or(0)).sum::<i64>();
+                self.session_tokens += record_total(&ev["turn"]);
             }
             "idle" => {
                 self.busy = false;
@@ -2140,12 +2140,11 @@ impl App {
                     out.push(line(clean(e), Sty::Err));
                 }
                 self.aborting = false;
-                self.stream.clear();
-                self.committed = 0;
+                self.reset_stream();
                 // The kernel's totals cover the whole turn, including calls the stream never showed.
                 let r = &ev["turn"];
                 if r.is_object() {
-                    self.turn_tokens = ["input_tokens", "output_tokens", "cache_read", "cache_write"].iter().map(|k| r[*k].as_i64().unwrap_or(0)).sum();
+                    self.turn_tokens = record_total(r);
                 }
                 let secs = self.turn_started.elapsed().as_secs_f32();
                 let effort = self.turn_effort.take().map(|e| format!(" · {e}")).unwrap_or_default();

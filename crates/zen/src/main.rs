@@ -12,7 +12,7 @@ mod tui;
 
 use std::io::{IsTerminal, Read, Write};
 
-use client::{describe_update, dim, short, tool_summary, Client, NewSession, Ws};
+use client::{assistant_text, describe_update, dim, record_total, short, tool_summary, usage_total, Client, NewSession, Ws};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -251,8 +251,7 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
                         match m["role"].as_str() {
                             Some("user") if text_of(&m["content"]) == prompt => started = true,
                             Some("assistant") if started => {
-                                let text: String = m["content"].as_array().into_iter().flatten()
-                                    .filter(|c| c["type"] == "text").filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("");
+                                let text = assistant_text(m);
                                 if !text.is_empty() {
                                     if !turn.text.is_empty() { turn.text.push_str("\n\n"); }
                                     turn.text.push_str(&text);
@@ -261,8 +260,9 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
                                 }
                                 streamed = false;
                                 let u = &m["usage"];
-                                turn.input_tokens += u["input"].as_i64().unwrap_or(0) + u["cacheRead"].as_i64().unwrap_or(0) + u["cacheWrite"].as_i64().unwrap_or(0);
-                                turn.output_tokens += u["output"].as_i64().unwrap_or(0);
+                                let output = u["output"].as_i64().unwrap_or(0);
+                                turn.input_tokens += usage_total(u) - output;
+                                turn.output_tokens += output;
                                 turn.cost += u["cost"]["total"].as_f64().unwrap_or(0.0);
                                 turn.model = m["model"].as_str().unwrap_or("").to_string();
                                 if m["stopReason"] == "error" {
@@ -297,9 +297,8 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
                             turn.records.push(r.clone());
                             add_record(&mut turn.record, r);
                             let t = &turn.record;
-                            let n = |k: &str| t[k].as_i64().unwrap_or(0);
-                            turn.input_tokens = n("input_tokens") + n("cache_read") + n("cache_write");
-                            turn.output_tokens = n("output_tokens");
+                            turn.output_tokens = t["output_tokens"].as_i64().unwrap_or(0);
+                            turn.input_tokens = record_total(t) - turn.output_tokens;
                             turn.cost = t["cost_usd"].as_f64().unwrap_or(turn.cost);
                         }
                         // A turn may be followed by another the kernel starts itself (`next`): wait for `idle`.

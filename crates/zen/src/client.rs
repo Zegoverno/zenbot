@@ -196,6 +196,21 @@ pub fn dim(s: &str) -> String {
     }
 }
 
+/// Tokens of one model call, from an assistant message's `usage` (cache reads and writes included).
+pub fn usage_total(u: &Value) -> i64 {
+    ["input", "output", "cacheRead", "cacheWrite"].iter().map(|k| u[*k].as_i64().unwrap_or(0)).sum()
+}
+
+/// Tokens of a whole turn, from the kernel's record of it (side calls included).
+pub fn record_total(r: &Value) -> i64 {
+    ["input_tokens", "output_tokens", "cache_read", "cache_write"].iter().map(|k| r[*k].as_i64().unwrap_or(0)).sum()
+}
+
+/// An assistant message's text blocks, joined (its tool calls left out).
+pub fn assistant_text(m: &Value) -> String {
+    m["content"].as_array().into_iter().flatten().filter(|c| c["type"] == "text").filter_map(|c| c["text"].as_str()).collect()
+}
+
 pub fn tool_summary(name: &str, args: &Value) -> String {
     let detail = args["command"]
         .as_str()
@@ -211,6 +226,14 @@ pub fn tool_summary(name: &str, args: &Value) -> String {
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+
+    #[test]
+    fn token_totals_and_assistant_text() {
+        assert_eq!(usage_total(&json!({ "input": 10, "output": 5, "cacheRead": 100, "cacheWrite": 1 })), 116);
+        assert_eq!(record_total(&json!({ "input_tokens": 1000, "output_tokens": 200, "cache_read": 3000 })), 4200);
+        let m = json!({ "content": [{ "type": "text", "text": "a" }, { "type": "toolCall", "name": "x" }, { "type": "text", "text": "b" }] });
+        assert_eq!(assistant_text(&m), "ab");
+    }
 
     #[tokio::test]
     async fn the_session_stream_sends_the_token_in_a_header_not_the_url() {
