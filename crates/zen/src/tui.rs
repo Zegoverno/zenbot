@@ -367,6 +367,15 @@ fn expand_home(raw: &str) -> PathBuf {
     }
 }
 
+/// A styled line as is when it fits `w` columns, else word-wrapped.
+fn fit_or_wrap(l: &Line, w: usize) -> Vec<Line> {
+    if l.iter().map(|(t, _)| UnicodeWidthStr::width(t.as_str())).sum::<usize>() <= w {
+        vec![l.clone()]
+    } else {
+        md::wrap(l.clone(), w, (String::new(), Sty::Plain), (String::new(), Sty::Plain))
+    }
+}
+
 /// Text from outside (the kernel, a model, a tool, a file) made safe to show: see `md::sanitize`.
 fn clean(s: &str) -> String {
     md::sanitize(s).into_owned()
@@ -767,32 +776,65 @@ impl App {
         self.side || self.panel.is_some()
     }
 
-    /// Open the side panel on the Files tab with the keys, or close it (and the file in it).
-    fn toggle_side(&mut self) {
+    /// The side panel shows only in full screen: say so inline. True when it can show.
+    fn side_allowed(&mut self) -> bool {
         if self.inline {
             self.note("the side panel needs full screen: run zen without --inline", Sty::Warn);
-        } else if self.side_open() {
-            self.side = false;
-            self.panel = None;
-            self.side_focus = false;
+        }
+        !self.inline
+    }
+
+    /// The side panel is about to open: warn when the terminal is too narrow to show it.
+    fn warn_if_narrow(&mut self) {
+        if !self.side_open() && self.width() < SPLIT_MIN {
+            self.note(format!("the terminal is too narrow for the side panel (needs {SPLIT_MIN} columns)"), Sty::Warn);
+        }
+    }
+
+    fn close_side(&mut self) {
+        self.side = false;
+        self.panel = None;
+        self.side_focus = false;
+    }
+
+    /// Open the side panel on the Files tab with the keys, or close it (and the file in it).
+    fn toggle_side(&mut self) {
+        if !self.side_allowed() {
+            return;
+        }
+        if self.side_open() {
+            self.close_side();
         } else {
-            if self.width() < SPLIT_MIN {
-                self.note(format!("the terminal is too narrow for the side panel (needs {SPLIT_MIN} columns)"), Sty::Warn);
-            }
+            self.warn_if_narrow();
             self.side = true;
             self.tab = Tab::Files;
             self.side_focus = true;
         }
     }
 
+    /// Show a file in the Viewer tab.
     fn open_file(&mut self, path: PathBuf) {
         match Panel::open(path) {
             Ok(p) => {
+                self.warn_if_narrow();
                 self.panel = Some(p);
                 self.tab = Tab::Viewer;
             }
             Err(e) => self.note(e, Sty::Err),
         }
+    }
+
+    /// The folder tree, listed the first time it's needed.
+    fn files(&mut self) -> &mut Files {
+        self.files.get_or_insert_with(|| Files::new(self.files_root.clone()))
+    }
+
+    /// The tab showing: the Viewer only while a file is open.
+    fn current_tab(&mut self) -> Tab {
+        if self.tab == Tab::Viewer && self.panel.is_none() {
+            self.tab = Tab::Files;
+        }
+        self.tab
     }
 
     /// Open or fold the selected row of the tree, as Enter and a click do.
@@ -819,34 +861,25 @@ impl App {
             return true;
         }
         let page = self.viewport_rows().saturating_sub(3).max(1) as isize;
-        if self.tab == Tab::Viewer && self.panel.is_none() {
-            self.tab = Tab::Files;
-        }
-        match self.tab {
+        match self.current_tab() {
             Tab::Files => {
-                if self.files.is_none() {
-                    self.files = Some(Files::new(self.files_root.clone()));
-                }
+                let f = self.files();
                 match k.code {
-                    KeyCode::Up => self.files.as_mut().unwrap().move_by(-1),
-                    KeyCode::Down => self.files.as_mut().unwrap().move_by(1),
-                    KeyCode::PageUp => self.files.as_mut().unwrap().move_by(-page),
-                    KeyCode::PageDown => self.files.as_mut().unwrap().move_by(page),
-                    KeyCode::Home => self.files.as_mut().unwrap().sel = 0,
-                    KeyCode::End => {
-                        let f = self.files.as_mut().unwrap();
-                        f.sel = f.rows.len().saturating_sub(1);
-                    }
+                    KeyCode::Up => f.move_by(-1),
+                    KeyCode::Down => f.move_by(1),
+                    KeyCode::PageUp => f.move_by(-page),
+                    KeyCode::PageDown => f.move_by(page),
+                    KeyCode::Home => f.sel = 0,
+                    KeyCode::End => f.sel = f.rows.len().saturating_sub(1),
                     KeyCode::Right => {
-                        let f = self.files.as_mut().unwrap();
                         if !f.expand() && f.selected().is_some_and(|r| !r.dir) {
                             self.activate_row();
                         }
                     }
                     KeyCode::Enter => self.activate_row(),
-                    KeyCode::Left => self.files.as_mut().unwrap().collapse_or_parent(),
-                    KeyCode::Char('.') => self.files.as_mut().unwrap().toggle_hidden(),
-                    KeyCode::Char('r') => self.files.as_mut().unwrap().rebuild(),
+                    KeyCode::Left => f.collapse_or_parent(),
+                    KeyCode::Char('.') => f.toggle_hidden(),
+                    KeyCode::Char('r') => f.rebuild(),
                     KeyCode::Char(_) => {
                         self.side_focus = false; // typing goes to the input
                         return false;
@@ -915,18 +948,13 @@ impl App {
 
     /// The side panel's rows (`vh` of them) at `pw` columns.
     fn side_lines(&mut self, pw: usize, vh: usize) -> Vec<Line> {
-        if self.tab == Tab::Viewer && self.panel.is_none() {
-            self.tab = Tab::Files;
-        }
+        let tab = self.current_tab();
         let mut out = vec![self.tab_bar()];
         let body = vh.saturating_sub(2); // below the tab strip, above the hint row
-        match self.tab {
+        match tab {
             Tab::Files => {
-                if self.files.is_none() {
-                    self.files = Some(Files::new(self.files_root.clone()));
-                }
                 let focus = self.side_focus;
-                let f = self.files.as_mut().unwrap();
+                let f = self.files();
                 f.follow(body);
                 let root = f.root.to_string_lossy().into_owned();
                 out.push(vec![(root, Sty::Dim)]);
@@ -987,16 +1015,7 @@ impl App {
             Entry::ToolCall(name, args) => Self::render_tool_call(name, args, w),
             Entry::ToolResult { head, more, error } => Self::render_tool_result(head, *more, *error, w),
             Entry::Work(steps) => Self::render_work(steps, w, expanded),
-            Entry::Raw(lines) => lines
-                .iter()
-                .flat_map(|l| {
-                    if l.iter().map(|(t, _)| UnicodeWidthStr::width(t.as_str())).sum::<usize>() <= w {
-                        vec![l.clone()]
-                    } else {
-                        md::wrap(l.clone(), w, (String::new(), Sty::Plain), (String::new(), Sty::Plain))
-                    }
-                })
-                .collect(),
+            Entry::Raw(lines) => lines.iter().flat_map(|l| fit_or_wrap(l, w)).collect(),
         }
     }
 
@@ -1143,16 +1162,7 @@ impl App {
             return;
         }
         let w = self.width();
-        let lines: Vec<Line> = lines
-            .into_iter()
-            .flat_map(|l| {
-                if l.iter().map(|(t, _)| UnicodeWidthStr::width(t.as_str())).sum::<usize>() <= w {
-                    vec![l]
-                } else {
-                    md::wrap(l, w, (String::new(), Sty::Plain), (String::new(), Sty::Plain))
-                }
-            })
-            .collect();
+        let lines: Vec<Line> = lines.iter().flat_map(|l| fit_or_wrap(l, w)).collect();
         let mut out = String::from("\x1b[?2026h");
         self.erase(&mut out);
         for l in &lines {
@@ -1992,9 +2002,7 @@ impl App {
             Some("/files") => self.show_folder(arg),
             Some("/close") => {
                 if self.side_open() {
-                    self.side = false;
-                    self.panel = None;
-                    self.side_focus = false;
+                    self.close_side();
                 } else {
                     self.note("no side panel is open", Sty::Dim);
                 }
@@ -2021,30 +2029,19 @@ impl App {
 
     /// `/open [path]`: show a file next to the chat; with no path, the last file a tool touched.
     fn open_panel(&mut self, arg: &str) {
-        if self.inline {
-            self.note("the side panel needs full screen: run zen without --inline", Sty::Warn);
+        if !self.side_allowed() {
             return;
         }
         let Some(raw) = (if arg.is_empty() { self.last_file.clone() } else { Some(arg.to_string()) }) else {
             self.note("usage: /open <path> (no file touched yet in this session)", Sty::Warn);
             return;
         };
-        match Panel::open(expand_home(&raw)) {
-            Ok(p) => {
-                if self.width() < SPLIT_MIN {
-                    self.note(format!("the terminal is too narrow for the side panel (needs {SPLIT_MIN} columns)"), Sty::Warn);
-                }
-                self.panel = Some(p);
-                self.tab = Tab::Viewer;
-            }
-            Err(e) => self.note(e, Sty::Err),
-        }
+        self.open_file(expand_home(&raw));
     }
 
     /// `/files <dir>`: root the folder tree at `dir` and show it.
     fn show_folder(&mut self, arg: &str) {
-        if self.inline {
-            self.note("the side panel needs full screen: run zen without --inline", Sty::Warn);
+        if !self.side_allowed() {
             return;
         }
         let dir = expand_home(arg);
