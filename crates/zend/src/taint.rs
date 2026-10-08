@@ -39,10 +39,23 @@ pub async fn taint(app: &App, session: Uuid, source: &str, about: &str) {
     }
 }
 
-/// Whether the session has read untrusted content.
+/// Whether a session has read untrusted content.
 pub async fn tainted(db: &sqlx::PgPool, session: Uuid) -> bool {
     sqlx::query_scalar::<_, bool>("SELECT tainted_at IS NOT NULL FROM sessions WHERE id = $1")
         .bind(session).fetch_optional(db).await.ok().flatten().unwrap_or(false)
+}
+
+/// Whether any of these sessions has read untrusted content.
+pub async fn any_tainted(db: &sqlx::PgPool, sessions: &[Uuid]) -> bool {
+    if sessions.is_empty() { return false; }
+    sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM sessions WHERE id = ANY($1) AND tainted_at IS NOT NULL)")
+        .bind(sessions).fetch_one(db).await.unwrap_or(true)
+}
+
+/// Whether any session matching a history tool's unique-prefix lookup is tainted.
+pub async fn prefix_tainted(db: &sqlx::PgPool, prefix: &str) -> bool {
+    sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM sessions WHERE starts_with(id::text, $1) AND tainted_at IS NOT NULL)")
+        .bind(prefix).fetch_one(db).await.unwrap_or(true)
 }
 
 #[cfg(test)]

@@ -575,14 +575,9 @@ async fn run(app: &App, session: Uuid, args: &Value) -> Result<String> {
     let sources: Vec<Uuid> = listed.iter().filter(|(f, _)| f.kind == "turn").filter_map(|(f, _)| f.reference.split(':').next().and_then(|s| s.parse().ok())).collect();
     let pages: Vec<String> = listed.iter().filter(|(f, _)| f.kind == "wiki").map(|(f, _)| f.reference.clone()).collect();
     // So may a wiki page with entries captured after reading the web (labelled `web`).
-    let tainted: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM sessions WHERE id = ANY($1) AND tainted_at IS NOT NULL)
-             OR EXISTS (SELECT 1 FROM search_docs WHERE kind = 'wiki' AND ref = ANY($2) AND body LIKE '%(web) —%')",
-    )
-    .bind(&sources)
-    .bind(&pages)
-    .fetch_one(&app.db)
-    .await?;
+    let tainted = crate::taint::any_tainted(&app.db, &sources).await
+        || sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM search_docs WHERE kind = 'wiki' AND ref = ANY($1) AND body LIKE '%(web) —%')")
+            .bind(&pages).fetch_one(&app.db).await?;
     if tainted {
         crate::taint::taint(app, session, "search", "results from a session that read web content").await;
         return Ok(format!("{header}{}", crate::taint::untrusted("search", q, &render(&listed))));
