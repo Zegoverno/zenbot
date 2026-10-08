@@ -384,15 +384,13 @@ pub(crate) struct MemoryQuery {
     tier: Option<String>,
 }
 
-/// Memories (short-term by default; `?tier=long|archived|all`) and the latest sleep.
+/// Memories (short-term by default; `?tier=archived|long|all`) and the latest sleep.
 pub(crate) async fn list_memory(State(app): State<AppState>, Query(q): Query<MemoryQuery>) -> ApiResult<Json<Value>> {
     let tier = q.tier.unwrap_or_else(|| "short".into());
-    let (mode, acts, k, n, lcb) = memory::promotion(&app.db).await;
     Ok(Json(json!({
         "memories": memory::list(&app.db, &tier).await?,
         "last_sleep": memory::last_run(&app.db).await?,
         "size": memory::cap(),
-        "promotion": { "mode": mode, "acts": acts, "accepted": k, "reviewed": n, "lower_bound": lcb },
     })))
 }
 
@@ -413,11 +411,6 @@ fn accept_or_reject(decision: &str) -> ApiResult<bool> {
 /// A failed owner action as a 400 with its reason.
 fn bad_request(e: anyhow::Error) -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, format!("{e:#}"))
-}
-
-/// The owner accepts or rejects a promotion the sleep proposed (`zen memory accept|reject`).
-pub(crate) async fn review_memory(State(app): State<AppState>, Path(id): Path<String>, Json(body): Json<Review>) -> ApiResult<Json<Value>> {
-    Ok(Json(memory::review(&app.db, &id, &body.decision).await.map_err(bad_request)?))
 }
 
 #[derive(Deserialize)]

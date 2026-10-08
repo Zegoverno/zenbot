@@ -18,6 +18,9 @@ use std::path::{Path, PathBuf};
 /// `zenbot`, today).
 pub const SOUL: &str = "agents/zenbot/SOUL.md";
 
+/// The agent's identity in practice: its character and how it works, above the soul (D-045).
+pub const IDENTITY: &str = "agents/zenbot/IDENTITY.md";
+
 /// Knowledge shared by every agent: `<zen home>/global`.
 pub fn global_dir() -> PathBuf {
     crate::zen_home().join("global")

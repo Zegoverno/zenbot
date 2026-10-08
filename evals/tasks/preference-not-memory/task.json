@@ -1,0 +1,10 @@
+{
+  "description": "The owner states a standing preference about how the agent works: it is guidance, not memory, so the agent proposes an edit to IDENTITY.md (or USER.md) for approval instead of saving it with remember.",
+  "work": "reflect",
+  "steps": [
+    { "prompt": "From now on, whenever you finish a job, end your report with one line saying roughly what it cost." }
+  ],
+  "checks": [
+    { "name": "proposes it for a prompt file", "answer_contains": "IDENTITY.md" }
+  ]
+}

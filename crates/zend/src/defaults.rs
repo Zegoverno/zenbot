@@ -7,6 +7,7 @@ use std::path::Path;
 /// (path under ~/.zenbot, contents), in the scoped layout (layout.rs)
 const FILES: &[(&str, &str)] = &[
     (crate::layout::SOUL, include_str!("../defaults/SOUL.md")),
+    (crate::layout::IDENTITY, include_str!("../defaults/IDENTITY.md")),
     ("AGENTS.md", include_str!("../defaults/AGENTS.md")),
     ("USER.md", include_str!("../defaults/USER.md")),
     ("global/skills/work/brief/SKILL.md", include_str!("../defaults/skills/work/brief/SKILL.md")),

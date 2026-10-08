@@ -344,7 +344,7 @@ pub fn spec() -> Value {
         "name": "capture",
         "description": "Put a piece of knowledge into the wiki: your structured, lasting notes (one page per concept, entity, \
 decision, playbook, project or person, each a summary over a dated timeline). Use it for what's worth knowing later and isn't \
-about how the owner wants you to act (that's remember): what a library does, how a system works, why a decision was made, \
+about how you should act (that's IDENTITY.md or USER.md, by approved edit): what a library does, how a system works, why a decision was made, \
 what a project's state is. The kernel picks the page (or makes one), skips what's already recorded and appends a dated entry \
 with its source; you then keep the page's summary current with edit. Find pages with search (scope wiki); they live in \
 ~/.zenbot/global/wiki/. Never put secrets in the wiki.",

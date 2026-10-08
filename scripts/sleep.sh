@@ -12,4 +12,4 @@ wait_healthy "http://127.0.0.1:$PORT/health" 300 || { echo "sleep: zenbot is not
 # The token goes to curl on stdin, not argv (argv is visible to every user in `ps`).
 printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" | curl -fsS --max-time 3600 -X POST -K - \
   "http://127.0.0.1:$PORT/api/memory/sleep?trigger=nightly" |
-  jq -r '"sleep: \(.entries) entries, \(.kept) kept, \(.dropped) archived, \(.promoted) promoted, \(.proposed) proposed (scorer: \(.scorer // "none, by recency"))"'
+  jq -r '"sleep: \(.entries) entries, \(.kept) kept, \(.dropped) archived (scorer: \(.scorer // "none, by recency"))"'

@@ -156,6 +156,8 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                             tools::ToolOutput { content: why, is_error: true }
                         } else if let Some(why) = agent::refusal(kind.as_deref(), &name) {
                             tools::ToolOutput { content: why, is_error: true }
+                        } else if let Some(why) = agent::prompt_file_refusal(&app.db, id, kind.as_deref(), &workspace, &name, &args).await {
+                            tools::ToolOutput { content: why, is_error: true }
                         } else if let Some(out) = agent::run_tool(app, id, &workspace, &name, &args, &mut ending).await {
                             out
                         } else {
