@@ -18,7 +18,7 @@
 - Workers no longer inherit the kernel's API token, database URL, OpenRouter or search keys.
 - Scripts: the upgrade smoke kernel drops the OpenRouter and search keys (it ran on a copy of the
   live database and could spend money); `sleep.sh` sends the token on stdin; engine rollbacks
-  quote paths with `printf %q`; SearXNG and the CI actions are pinned by digest/SHA.
+  quote paths with `printf %q`; SearXNG is pinned by digest (pinning the CI actions needs a token with `workflow` scope; left to the owner).
 - Tested live on a dev kernel: a Claude Haiku turn with a bash tool call and a `complete`.
 
 ## 2026-10-08 — Kernel correctness: MCP, wiki, memory, workers, files
