@@ -285,7 +285,7 @@ async fn download(url: &str) -> Result<Page, String> {
     let note = cut.then(|| format!("the page is over {} MB; only the start was read", MAX_BYTES / 1024 / 1024));
     let kind = content_type.split(';').next().unwrap_or("").trim().to_string();
     let (title, text) = if kind.is_empty() || kind.contains("html") || kind.contains("xhtml") {
-        let html = String::from_utf8_lossy(&body).into_owned();
+        let html = decode_page(&body, &content_type);
         tokio::task::spawn_blocking({
             let final_url = final_url.clone();
             move || readable(&html, &final_url)
@@ -293,7 +293,7 @@ async fn download(url: &str) -> Result<Page, String> {
         .await
         .map_err(|e| format!("converting the page: {e}"))?
     } else if kind.starts_with("text/") || kind.contains("json") || kind.contains("xml") || kind.contains("markdown") || kind.contains("javascript") {
-        (String::new(), String::from_utf8_lossy(&body).into_owned())
+        (String::new(), decode_page(&body, &content_type))
     } else if kind == "application/pdf" {
         let dir = crate::outputs_dir().ok_or("couldn't create the outputs folder")?;
         let path = dir.join(format!("web-{}.pdf", Uuid::new_v4()));
@@ -307,6 +307,34 @@ async fn download(url: &str) -> Result<Page, String> {
         text.truncate(text.floor_char_boundary(MAX_TEXT));
     }
     Ok(Page { final_url, status, content_type: kind, title, text, note })
+}
+
+/// Bytes 0x80..=0x9F in Windows-1252 (the rest of the high half is the same as Latin-1).
+const CP1252_HIGH: [char; 32] = [
+    '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž', '\u{8f}',
+    '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}', 'ž', 'Ÿ',
+];
+
+/// Page bytes as text. UTF-8 unless the Content-Type or a `<meta charset>` near the start says
+/// ISO-8859-1 / Windows-1252 (browsers treat them as one), or the bytes aren't valid UTF-8 and no
+/// charset is declared (the web's legacy default). Common on older Brazilian and European sites.
+fn decode_page(body: &[u8], content_type: &str) -> String {
+    let declared = |s: &str| -> Option<String> {
+        let s = s.to_ascii_lowercase();
+        let i = s.find("charset=")? + 8;
+        Some(s[i..].trim_start_matches(['"', '\'']).chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect())
+    };
+    let head = String::from_utf8_lossy(&body[..body.len().min(2048)]);
+    let charset = declared(content_type).or_else(|| declared(&head));
+    let legacy = match charset.as_deref() {
+        Some("iso-8859-1" | "latin1" | "iso_8859-1" | "windows-1252" | "cp1252" | "us-ascii") => true,
+        Some(_) => false,
+        None => std::str::from_utf8(body).is_err(),
+    };
+    if !legacy {
+        return String::from_utf8_lossy(body).into_owned();
+    }
+    body.iter().map(|&b| if (0x80..0xA0).contains(&b) { CP1252_HIGH[(b - 0x80) as usize] } else { b as char }).collect()
 }
 
 fn error_chain(e: &dyn std::error::Error) -> String {
@@ -752,6 +780,17 @@ mod tests {
         assert!(cache.contains_key(&CACHE_ENTRIES));
         cache_insert(&mut cache, 1, (now + Duration::from_secs(101), 101), |entry| entry.0);
         assert_eq!(cache.len(), CACHE_ENTRIES, "updating a key does not evict another entry");
+    }
+
+    #[test]
+    fn legacy_pages_decode_from_their_charset() {
+        let latin1 = b"<p>S\xe3o Paulo \x96 cora\xe7\xe3o</p>";
+        assert_eq!(decode_page(latin1, "text/html; charset=ISO-8859-1"), "<p>São Paulo – coração</p>");
+        assert_eq!(decode_page(latin1, "text/html"), "<p>São Paulo – coração</p>", "invalid UTF-8, nothing declared");
+        let meta = b"<meta charset=\"windows-1252\"><p>\x93ok\x94</p>";
+        assert_eq!(decode_page(meta, "text/html"), "<meta charset=\"windows-1252\"><p>“ok”</p>");
+        assert_eq!(decode_page("São".as_bytes(), "text/html; charset=utf-8"), "São");
+        assert_eq!(decode_page("São".as_bytes(), ""), "São");
     }
 
     #[test]
