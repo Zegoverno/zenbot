@@ -68,10 +68,12 @@ pub(crate) async fn health(State(app): State<AppState>) -> Json<Value> {
     let db = sqlx::query("SELECT 1").execute(&app.db).await.is_ok();
     let mut workers = serde_json::Map::new();
     for w in &app.workers {
-        workers.insert(w.name.clone(), json!(w.mind().request("ping", json!({})).await.is_ok()));
+        // Unauthenticated and polled by upgrades: a hung worker must not hold it for 30 s.
+        let ping = w.mind().request_within("ping", json!({}), Duration::from_secs(3)).await.is_ok();
+        workers.insert(w.name.clone(), json!(ping));
     }
     let mind = workers.values().all(|v| v == true);
-    let busy = app.turns.lock().await.len() + app.background.lock().await.len();
+    let busy = app.turns.lock().await.len() + app.background.load(std::sync::atomic::Ordering::SeqCst);
     Json(json!({ "ok": db && mind, "db": db, "mind": mind, "workers": workers, "busy": busy,
                  "version": env!("CARGO_PKG_VERSION"), "commit": app.updater.running() }))
 }
@@ -253,11 +255,17 @@ pub(crate) async fn decide(State(app): State<AppState>, Path(id): Path<Uuid>, Js
     // Accepted work vouches for the draft skills it used (workshop.rs).
     if body.decision == "accept" {
         let app2 = app.clone();
-        tokio::spawn(async move { workshop::on_accept(&app2, id).await });
+        let work = app.background_work();
+        tokio::spawn(async move {
+            let _work = work;
+            workshop::on_accept(&app2, id).await
+        });
     }
     // Score the work the decision covers, so each decision has a score to compare it with.
     let scoring = app.clone();
+    let work = app.background_work();
     tokio::spawn(async move {
+        let _work = work;
         if let Err(e) = score::score_session(&scoring, id, "decision").await {
             tracing::warn!("scoring session {id} after a decision: {e:#}");
         }

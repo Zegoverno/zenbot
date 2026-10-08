@@ -309,8 +309,19 @@ async fn embed_pending(db: &PgPool) -> Result<usize> {
     Ok(rows.len())
 }
 
+/// One index pass at a time: the background loop, `search`'s pre-index and `capture` would
+/// otherwise move the same watermarks concurrently and redo each other's work.
+static INDEXING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Index changed wiki pages only (no embeddings, no network): for `capture`.
+pub(crate) async fn refresh_wiki(db: &PgPool) -> Result<usize> {
+    let _one = INDEXING.lock().await;
+    index_wiki(db).await
+}
+
 /// One indexing pass (turns, memories, embeddings).
 pub async fn index_once(db: &PgPool) -> Result<(usize, usize, usize)> {
+    let _one = INDEXING.lock().await;
     let t = index_turns(db).await?;
     let m = index_memories(db).await? + index_wiki(db).await?;
     let e = match embed_pending(db).await {
@@ -527,7 +538,11 @@ async fn run(app: &App, session: Uuid, args: &Value) -> Result<String> {
         _ => (vec!["turn", "memory", "wiki"], None),
     };
     // Make sure the latest turns and memories are in (a pass is cheap when nothing changed).
-    if let Err(e) = index_turns(&app.db).await.and(index_memories(&app.db).await).and(index_wiki(&app.db).await) {
+    let indexed = {
+        let _one = INDEXING.lock().await;
+        index_turns(&app.db).await.and(index_memories(&app.db).await).and(index_wiki(&app.db).await)
+    };
+    if let Err(e) = indexed {
         tracing::warn!("indexing before a search: {e:#}");
     }
     let found = query(&app.db, q, &kinds, only, (limit * 2).max(12)).await?;

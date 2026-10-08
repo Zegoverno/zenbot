@@ -19,7 +19,9 @@ pub struct Incoming {
 
 pub struct Mind {
     stdin: Mutex<ChildStdin>,
-    pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
+    /// Requests waiting for their answer. A plain mutex: it is never held across an await, and a
+    /// dropped request removes its own entry (`Waiting`), which needs a lock usable in `Drop`.
+    pending: std::sync::Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
     next_id: AtomicU64,
 }
 
@@ -40,14 +42,27 @@ impl Mind {
         let command_owned = command.to_string();
         let stdin = child.stdin.take().context("mind stdin")?;
         let stdout = child.stdout.take().context("mind stdout")?;
-        let mind = Arc::new(Mind { stdin: Mutex::new(stdin), pending: Mutex::new(HashMap::new()), next_id: AtomicU64::new(1) });
+        let mind = Arc::new(Mind { stdin: Mutex::new(stdin), pending: std::sync::Mutex::new(HashMap::new()), next_id: AtomicU64::new(1) });
         let (tx, rx) = mpsc::unbounded_channel();
 
         let reader_mind = mind.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let Ok(msg) = serde_json::from_str::<Value>(&line) else {
+            // Read bytes, not `String` lines: one invalid UTF-8 line must not stop the reader while
+            // the process lives on (every request would then fail and nothing restarts it).
+            let mut reader = BufReader::new(stdout);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let line = String::from_utf8_lossy(&buf);
+                let line = line.trim_end();
+                if line.is_empty() {
+                    continue;
+                }
+                let Ok(msg) = serde_json::from_str::<Value>(line) else {
                     tracing::warn!("mind sent invalid json: {line}");
                     continue;
                 };
@@ -58,7 +73,7 @@ impl Mind {
                         params: msg.get("params").cloned().unwrap_or(Value::Null),
                     });
                 } else if let Some(id) = msg.get("id").and_then(Value::as_u64) {
-                    if let Some(waiter) = reader_mind.pending.lock().await.remove(&id) {
+                    if let Some(waiter) = reader_mind.pending.lock().unwrap().remove(&id) {
                         let res = match msg.get("error") {
                             Some(e) => Err(e.get("message").and_then(Value::as_str).unwrap_or("error").to_string()),
                             None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
@@ -81,7 +96,8 @@ impl Mind {
     }
 
     async fn fail_pending(&self) {
-        for (_, waiter) in self.pending.lock().await.drain() {
+        let waiters: Vec<_> = self.pending.lock().unwrap().drain().collect();
+        for (_, waiter) in waiters {
             let _ = waiter.send(Err("worker exited".into()));
         }
     }
@@ -103,22 +119,32 @@ impl Mind {
     pub async fn request_within(&self, method: &str, params: Value, limit: std::time::Duration) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
-        if let Err(e) = self.write(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })).await {
-            self.pending.lock().await.remove(&id);
-            return Err(e.context("worker is not running"));
-        }
+        self.pending.lock().unwrap().insert(id, tx);
+        // Removes the entry however this future ends: answered, timed out, failed or dropped
+        // (a caller that stops waiting must not leak its entry).
+        let _waiting = Waiting { mind: self, id };
+        self.write(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })).await.context("worker is not running")?;
         match tokio::time::timeout(limit, rx).await {
             Ok(Ok(res)) => res.map_err(|e| anyhow!(e)),
             Ok(Err(_)) => Err(anyhow!("mind dropped request")),
-            Err(_) => {
-                self.pending.lock().await.remove(&id);
-                Err(anyhow!("mind request `{method}` timed out"))
-            }
+            Err(_) => Err(anyhow!("mind request `{method}` timed out")),
         }
     }
 
     pub async fn respond(&self, id: Value, result: Value) -> Result<()> {
         self.write(json!({ "jsonrpc": "2.0", "id": id, "result": result })).await
+    }
+}
+
+struct Waiting<'a> {
+    mind: &'a Mind,
+    id: u64,
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.mind.pending.lock() {
+            pending.remove(&self.id);
+        }
     }
 }

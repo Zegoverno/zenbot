@@ -123,7 +123,7 @@ verdicts and the owner's reviews (memory promotions, skill drafts, tools, routes
   15 minutes. The untrusted-content boundary and SSRF filtering remain security-critical.
 - The kernel `read` tool now caps files at 16 MiB before loading them; it should eventually stream
   bounded lines so large text files can be paged without `bash`. New test scratch directories are
-  cleaned on drop; `outputs/` still needs retention.
+  cleaned on drop; the nightly sleep removes saved outputs older than 30 days.
 - The terminal client was split into focused modules; incremental streaming/transcript rendering,
   reconnect recovery and bounded private prompt history are in place. A future client event contract
   should replace the remaining untyped JSON (below).
@@ -134,9 +134,8 @@ verdicts and the owner's reviews (memory promotions, skill drafts, tools, routes
 - Tools run as the same Unix user as the owner. Shell subprocesses no longer inherit kernel secrets,
   and the verifier hides token files, but an ordinary agent shell can still read the owner's files.
   Strong isolation requires a separate Unix user and a credential the agent cannot read.
-- Secret masking's known-value cache is loaded once per kernel start, so newly rotated credentials
-  are not known until restart. `~/.zenbot/outputs` needs owner-approved retention/pruning;
-  the historical test logs and `/tmp/zend-*` directories are not deleted by the test fix.
+- Historical `/tmp/zend-*` test directories from before the scratch guard are not deleted
+  automatically; remove them by hand when convenient.
 - Verify criteria use a read-only bubblewrap shell; future work should centralize all tool
   permissions and taint rules at the dispatch boundary.
 - Paths never run with real models: the new tools (`remember`, `load_skill`, `verify`, `ask`) on
