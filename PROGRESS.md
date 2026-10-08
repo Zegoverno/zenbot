@@ -6,6 +6,14 @@
 
 ---
 
+## 2026-10-08 — `zen status` sees the kernel's OpenRouter key
+
+- `zen status` said "NO key: set OPENROUTER_API_KEY" while the key was set and the sleep was
+  using it: OpenRouter's sign-in used to be reported by the retired Pi worker, and workers now
+  run without the key. The kernel now reports it itself in `/api/models`.
+- An OpenRouter key alone no longer counts as a signed-in engine in `zen status` or the terminal
+  app (it can't run a turn). Unit test, and two e2e checks (key set and not set).
+
 ## 2026-10-08 — One System One relevance helper; taint is its own module
 
 - The three almost-identical System One calls for web-page focus, web-search reranking and

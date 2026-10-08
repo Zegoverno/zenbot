@@ -418,6 +418,7 @@ system_one_direct() {
   python3 "$REPO/scripts/e2e/systemone_stub.py" "$port" & local srv=$!
   start_kernel "$ws" "$(script systemone.json)" ZEN_WORKERS=engine,pi ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone"
   check "a stale pi worker setting is ignored" bash -c '! grep -q "worker `pi` started" "$1"' _ "$TMP/kernel.log"
+  check "the kernel reports its own OpenRouter key" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/models" | jq -r .authenticated.openrouter)" true
   local sid; sid=$(zen ask --json -m faux/smoke "decide directly" | jq -r .session_id)
   local answer; answer=$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='decide' ORDER BY seq DESC LIMIT 1")
   check "System One bool mapped from noul" grep -q '"probability": 0.82' <<<"$answer"
@@ -437,6 +438,7 @@ kernel_tools() {
   start_kernel "$ws" "$(script kernel-tools.json "s|ZENHOME|$TMP/home/.zenbot|" "s|ZENALIAS|$TMP/home/sub/../.zenbot|")"
   local sid; sid=$(zen ask --json -m faux/smoke "check kernel tools" | jq -r .session_id)
   check "the zen home environment file is not attached as project context" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND kind='context'")" 0
+  check "no OpenRouter key is reported as not signed in" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/models" | jq -r .authenticated.openrouter)" false
   check "a loose edit keeps exactly one trailing newline" cmp -s "$ws/a.txt" <(printf 'baz\nbar\n')
   check "a huge read is refused before loading" grep -q "16 MiB limit" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='read' ORDER BY seq DESC LIMIT 1")"
 }
