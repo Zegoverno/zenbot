@@ -111,8 +111,7 @@ pub(crate) struct ListQuery {
 
 pub(crate) async fn list_sessions(State(app): State<AppState>, Query(q): Query<ListQuery>) -> ApiResult<Json<Value>> {
     let rows = sqlx::query(&format!(
-        "SELECT s.id, s.title, s.model, s.effort, s.archived, s.created_at, s.updated_at, s.state,
-                {} AS cost
+        "SELECT {SESSION_COLUMNS}, {} AS cost
          FROM sessions s WHERE s.archived = $1 AND s.kind IS NULL ORDER BY s.updated_at DESC",
         session_cost("s.id")
     ))
@@ -121,6 +120,9 @@ pub(crate) async fn list_sessions(State(app): State<AppState>, Query(q): Query<L
     .await?;
     Ok(Json(Value::Array(rows.iter().map(session_json).collect())))
 }
+
+/// The columns `session_json` reads, without the cost (each query computes it its own way).
+const SESSION_COLUMNS: &str = "id, title, model, effort, archived, created_at, updated_at";
 
 pub(crate) fn session_json(r: &sqlx::postgres::PgRow) -> Value {
     json!({
@@ -132,7 +134,6 @@ pub(crate) fn session_json(r: &sqlx::postgres::PgRow) -> Value {
         "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
         "updated_at": r.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
         "cost": r.try_get::<f64, _>("cost").unwrap_or(0.0),
-        "state": r.try_get::<Option<String>, _>("state").ok().flatten().unwrap_or_else(|| "open".into()),
     })
 }
 
@@ -147,15 +148,14 @@ pub(crate) async fn create_session(State(app): State<AppState>, Json(body): Json
     let id = Uuid::new_v4();
     let model = body.model.unwrap_or_else(|| app.default_model.clone());
     check_effort(&app, &model, body.effort.as_deref()).await?;
-    let row = sqlx::query(
-        "INSERT INTO sessions (id, title, model, effort, state) VALUES ($1, $2, $3, $4, $5)
-         RETURNING id, title, model, effort, archived, created_at, updated_at, state, 0::float8 AS cost",
-    )
+    let row = sqlx::query(&format!(
+        "INSERT INTO sessions (id, title, model, effort) VALUES ($1, $2, $3, $4)
+         RETURNING {SESSION_COLUMNS}, 0::float8 AS cost"
+    ))
     .bind(id)
     .bind(body.title.unwrap_or_default())
     .bind(model)
     .bind(body.effort)
-    .bind(Option::<String>::None)
     .fetch_one(&app.db)
     .await?;
     Ok(Json(session_json(&row)))
@@ -196,7 +196,7 @@ pub(crate) async fn update_session(State(app): State<AppState>, Path(id): Path<U
         "UPDATE sessions SET title = COALESCE($2, title), model = COALESCE($3, model), effort = $5,
                 archived = COALESCE($4, archived), updated_at = now()
          WHERE id = $1
-         RETURNING id, title, model, effort, archived, created_at, updated_at, state, {} AS cost",
+         RETURNING {SESSION_COLUMNS}, {} AS cost",
         session_cost("$1")
     ))
     .bind(id)
@@ -212,7 +212,7 @@ pub(crate) async fn update_session(State(app): State<AppState>, Path(id): Path<U
 
 pub(crate) async fn get_session(State(app): State<AppState>, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
     let row = sqlx::query(&format!(
-        "SELECT id, title, model, effort, archived, created_at, updated_at, state, {} AS cost
+        "SELECT {SESSION_COLUMNS}, {} AS cost
          FROM sessions WHERE id = $1",
         session_cost("$1")
     ))
@@ -371,15 +371,23 @@ pub(crate) struct Review {
     decision: String,
 }
 
-impl Review {
-    fn decision(&self) -> &str {
-        &self.decision
+/// `accept` → true, `reject` → false, anything else a 400.
+fn accept_or_reject(decision: &str) -> ApiResult<bool> {
+    match decision {
+        "accept" => Ok(true),
+        "reject" => Ok(false),
+        _ => Err(ApiError(StatusCode::BAD_REQUEST, "decision must be accept or reject".into())),
     }
+}
+
+/// A failed owner action as a 400 with its reason.
+fn bad_request(e: anyhow::Error) -> ApiError {
+    ApiError(StatusCode::BAD_REQUEST, format!("{e:#}"))
 }
 
 /// The owner accepts or rejects a promotion the sleep proposed (`zen memory accept|reject`).
 pub(crate) async fn review_memory(State(app): State<AppState>, Path(id): Path<String>, Json(body): Json<Review>) -> ApiResult<Json<Value>> {
-    Ok(Json(memory::review(&app.db, &id, &body.decision).await.map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{e:#}")))?))
+    Ok(Json(memory::review(&app.db, &id, &body.decision).await.map_err(bad_request)?))
 }
 
 #[derive(Deserialize)]
@@ -414,23 +422,15 @@ pub(crate) struct SkillReview {
 
 /// The owner accepts (activates) or rejects (archives) a draft skill.
 pub(crate) async fn review_skill(Json(body): Json<SkillReview>) -> ApiResult<Json<Value>> {
-    let accept = match body.decision.as_str() {
-        "accept" => true,
-        "reject" => false,
-        _ => return Err(ApiError(StatusCode::BAD_REQUEST, "decision must be accept or reject".into())),
-    };
-    let msg = workshop::decide_draft(&body.name, accept, "the owner").await.map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+    let accept = accept_or_reject(&body.decision)?;
+    let msg = workshop::decide_draft(&body.name, accept, "the owner").await.map_err(bad_request)?;
     Ok(Json(json!({ "result": msg })))
 }
 
 /// The owner approves (network allowed) or rejects a tool the agent made.
 pub(crate) async fn review_tool(State(app): State<AppState>, Path(name): Path<String>, Json(body): Json<Review>) -> ApiResult<Json<Value>> {
-    let accept = match body.decision() {
-        "accept" => true,
-        "reject" => false,
-        _ => return Err(ApiError(StatusCode::BAD_REQUEST, "decision must be accept or reject".into())),
-    };
-    let msg = workshop::decide_tool(&app.db, &name, accept).await.map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+    let accept = accept_or_reject(&body.decision)?;
+    let msg = workshop::decide_tool(&app.db, &name, accept).await.map_err(bad_request)?;
     Ok(Json(json!({ "result": msg })))
 }
 
