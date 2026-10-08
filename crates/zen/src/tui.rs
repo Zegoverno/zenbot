@@ -247,11 +247,18 @@ impl Region {
     }
 }
 
+/// An event for the app: (session id, connection number, event). Events not tied to a session
+/// (update checks, upgrade progress) have an empty id.
+type Incoming = (String, u64, Value);
+
 struct App {
     c: Client,
-    tx: mpsc::UnboundedSender<(String, Value)>,
+    tx: mpsc::UnboundedSender<Incoming>,
     sink: Option<SplitSink<Ws, Message>>,
     reader: Option<tokio::task::JoinHandle<()>>,
+    /// Counts connections to the kernel; events read on an older connection are dropped (they
+    /// may still be queued after a reconnect or a switch back to the same session).
+    conn: u64,
     session: Option<String>,
     title: String,
     model: String,
@@ -375,7 +382,7 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     fn new(
         c: Client,
-        tx: mpsc::UnboundedSender<(String, Value)>,
+        tx: mpsc::UnboundedSender<Incoming>,
         model: String,
         default_model: String,
         models: Vec<Value>,
@@ -388,6 +395,7 @@ impl App {
             tx,
             sink: None,
             reader: None,
+            conn: 0,
             session: None,
             title: String::new(),
             model,
@@ -501,7 +509,7 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
             if let Ok(v) = c.get("/api/version").await {
                 if v["available"] == true {
                     let text = format!("{} · /upgrade to install", crate::client::describe_update(&v));
-                    let _ = tx.send((String::new(), json!({ "type": "update_available", "text": text })));
+                    let _ = tx.send((String::new(), 0, json!({ "type": "update_available", "text": text })));
                 }
             }
         });
@@ -533,13 +541,7 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
                     Some(Err(e)) => return Err(e.into()),
                     None => break,
                 },
-                Some((sid, ev)) = rx.recv() => {
-                    if sid.is_empty() {
-                        app.on_app_event(ev).await;
-                    } else if app.session.as_deref() == Some(sid.as_str()) {
-                        app.on_event(ev);
-                    }
-                },
+                Some(msg) = rx.recv() => app.on_incoming(msg).await,
                 _ = tick.tick(), if app.busy => {
                     app.spin = app.spin.wrapping_add(1);
                     app.draw();
@@ -1237,11 +1239,13 @@ impl App {
         let (sink, mut stream) = ws.split();
         let tx = self.tx.clone();
         let sid = id.to_string();
+        self.conn += 1;
+        let conn = self.conn;
         self.reader = Some(tokio::spawn(async move {
             while let Some(Ok(msg)) = stream.next().await {
                 if let Message::Text(t) = msg {
                     if let Ok(v) = serde_json::from_str::<Value>(&t) {
-                        if tx.send((sid.clone(), v)).is_err() {
+                        if tx.send((sid.clone(), conn, v)).is_err() {
                             break;
                         }
                     }
@@ -1249,7 +1253,7 @@ impl App {
                     break;
                 }
             }
-            let _ = tx.send((sid, json!({ "type": "disconnected" })));
+            let _ = tx.send((sid, conn, json!({ "type": "disconnected" })));
         }));
         self.sink = Some(sink);
         Ok(())
@@ -1803,19 +1807,24 @@ impl App {
             self.editor.take();
             return self.command(&text).await;
         }
-        if self.busy {
-            self.note("zenbot is still working; press esc to interrupt first", Sty::Warn);
+        if self.still_working() {
             return Ok(());
         }
-        self.editor.take();
+        // The prompt stays in the input until it can be sent.
         if self.session.is_none() {
             let id = self.c.new_session(Some(self.model.clone()), self.effort.clone()).await?;
             self.session = Some(id.clone());
             self.connect(&id).await?;
         } else if self.sink.is_none() {
+            // Reconnecting: fetch the session again, so what happened while disconnected shows
+            // and a turn that is still running is known before sending another prompt.
             let id = self.session.clone().unwrap_or_default();
-            self.connect(&id).await?;
+            self.switch_session(id).await?;
+            if self.still_working() {
+                return Ok(());
+            }
         }
+        self.editor.take();
         if self.title.is_empty() {
             self.title = text.chars().take(40).collect::<String>().trim().to_string();
         }
@@ -2032,14 +2041,24 @@ impl App {
         tokio::spawn(async move {
             let log_tx = tx.clone();
             let res = c.upgrade(move |l| {
-                let _ = log_tx.send((String::new(), json!({ "type": "upgrade_log", "line": l })));
+                let _ = log_tx.send((String::new(), 0, json!({ "type": "upgrade_log", "line": l })));
             });
             let ev = match res.await {
                 Ok(msg) => json!({ "type": "upgrade_done", "ok": true, "text": msg }),
                 Err(e) => json!({ "type": "upgrade_done", "ok": false, "text": format!("{e:#}") }),
             };
-            let _ = tx.send((String::new(), ev));
+            let _ = tx.send((String::new(), 0, ev));
         });
+    }
+
+    /// An event from the kernel or a background task. Session events count only for the current
+    /// session on the current connection.
+    async fn on_incoming(&mut self, (sid, conn, ev): Incoming) {
+        if sid.is_empty() {
+            self.on_app_event(ev).await;
+        } else if self.session.as_deref() == Some(sid.as_str()) && conn == self.conn {
+            self.on_event(ev);
+        }
     }
 
     /// Events that aren't tied to a session (sent with an empty session id).
@@ -2058,8 +2077,9 @@ impl App {
                     self.quit = true;
                     return;
                 }
+                // Back on the restarted kernel: fetch the session again, with what happened meanwhile.
                 if let Some(id) = self.session.clone() {
-                    if self.sink.is_none() && self.connect(&id).await.is_err() {
+                    if self.sink.is_none() && self.switch_session(id).await.is_err() {
                         self.note("lost connection to zenbot; send a message to reconnect", Sty::Warn);
                     }
                 }
@@ -2853,6 +2873,33 @@ mod tests {
         assert_eq!(a.entries.len(), 1, "only the new-session line");
         let rows = a.screen.rows().join("\n");
         assert!(rows.contains("new session") && !rows.contains("old question") && !rows.contains("half an answ"), "{rows}");
+    }
+
+    #[tokio::test]
+    async fn events_from_an_old_connection_are_dropped() {
+        let mut a = app(80, 20);
+        a.session = Some("s1".into());
+        a.conn = 2;
+        a.busy = true;
+        a.on_incoming(("s1".into(), 1, json!({ "type": "delta", "delta": "stale" }))).await;
+        a.on_incoming(("s2".into(), 2, json!({ "type": "delta", "delta": "other session" }))).await;
+        assert!(a.stream.is_empty());
+        a.on_incoming(("s1".into(), 2, json!({ "type": "delta", "delta": "live" }))).await;
+        assert_eq!(a.stream, "live");
+        // A disconnect seen on the old connection doesn't drop the new one.
+        a.on_incoming(("s1".into(), 1, json!({ "type": "disconnected" }))).await;
+        assert!(a.busy);
+    }
+
+    #[tokio::test]
+    async fn a_prompt_that_cant_reconnect_stays_in_the_input() {
+        let mut a = app(80, 20); // its kernel address refuses connections
+        a.session = Some("s1".into()); // and the connection was lost (no sink)
+        typed(&mut a, "hello").await;
+        a.handle_terminal(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))).await;
+        assert_eq!(a.editor.buf, "hello");
+        assert!(!a.busy && a.entries.is_empty(), "nothing was sent");
+        assert!(a.notice.as_ref().is_some_and(|(_, s)| *s == Sty::Err));
     }
 
     #[test]
