@@ -16,7 +16,7 @@ accepted for ordinary HTTP requests. The token is in `~/.zenbot/token`. The serv
 | `GET /api/models` | | `{ models, authenticated, default, scorer }` |
 | `GET /api/sessions?archived=` | | sessions (not child sessions): `{ id, title, model, effort, archived, cost, created_at, updated_at }` |
 | `POST /api/sessions` | `{ title?, model?, effort? }` | the session |
-| `GET /api/sessions/{id}` | | the session with `messages` (each with its `seq`) and `busy` |
+| `GET /api/sessions/{id}?last=&after=` | | the session with `messages` (each with its `seq`; all of them, or the `last` N, or those after block `after`) and `busy` |
 | `PATCH /api/sessions/{id}` | `{ title?, model?, effort? ("default" clears), archived? }` | the session |
 | `POST /api/sessions/{id}/decision` | `{ decision: accept\|more\|reshape\|drop, note? }` | the recorded verdict (source `owner`) |
 | `GET /api/memory?tier=` | | `{ memories, last_sleep, size }`: memories of a tier (`short`, the default; `long`, `archived`, `all`), each `{ id: "m12", text, source, tier, proposed, reason, created_at, updated_at }`; the latest `sleep_runs` row; short-term memory's size in characters |

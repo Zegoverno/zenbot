@@ -94,6 +94,14 @@ open_loop() {
   local r; r=$(zen ask --json -m faux/smoke "run the smoke command")
   check "answer" eq "$(echo "$r" | jq -r .error)" null
   check "the bash tool ran" eq "$(echo "$r" | jq -r '[.tools[].name] | join(",")')" bash
+  local sid; sid=$(echo "$r" | jq -r .session_id)
+  local all; all=$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/sessions/$sid" | jq '.messages | length')
+  local last; last=$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/sessions/$sid" | jq '.messages[-1].seq')
+  local first; first=$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/sessions/$sid" | jq '.messages[0].seq')
+  check "a session's messages page by last and after" bash -c '[ "$1" -gt 2 ] && [ "$2" = 1 ] && [ "$3" = 0 ] && [ "$4" = "$5" ]' _ "$all" \
+    "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/sessions/$sid?last=1" | jq '.messages | length')" \
+    "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/sessions/$sid?after=$last" | jq '.messages | length')" \
+    "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/sessions/$sid?after=$first" | jq '.messages | length')" "$((all - 1))"
 }
 
 # The prompt files: installed when missing, never overwritten, read at session start.

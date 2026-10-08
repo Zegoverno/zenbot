@@ -12,6 +12,7 @@
 //! results when it's configured. A memory a search returns counts as used (the sleep's recency).
 //! Every search is logged in `searches`.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -244,24 +245,28 @@ async fn index_memories(db: &PgPool) -> Result<usize> {
     Ok(rows.len())
 }
 
-/// Index wiki pages changed since the last pass, and take out pages that are gone.
+/// Index wiki pages whose file changed since they were indexed (by each page's own time, so a page
+/// restored with an older time is indexed too), and take out pages that are gone. Only changed
+/// pages are read.
 async fn index_wiki(db: &PgPool) -> Result<usize> {
     let dir = crate::wiki::root();
     if !dir.is_dir() {
         return Ok(0);
     }
-    let wm: u64 = state_get(db, "wiki").await.and_then(|v| v.parse().ok()).unwrap_or(0);
-    let docs = crate::wiki::documents(&dir);
-    let slugs: Vec<String> = docs.iter().map(|d| d.0.clone()).collect();
+    let times = crate::wiki::page_times(&dir);
+    let slugs: Vec<String> = times.iter().map(|t| t.0.clone()).collect();
     sqlx::query("DELETE FROM search_docs WHERE kind = 'wiki' AND NOT (ref = ANY($1))").bind(&slugs).execute(db).await?;
-    let mut newest = wm;
+    let indexed: HashMap<String, chrono::DateTime<chrono::Utc>> = sqlx::query("SELECT ref, at FROM search_docs WHERE kind = 'wiki'")
+        .fetch_all(db)
+        .await?
+        .iter()
+        .map(|r| (r.get("ref"), r.get("at")))
+        .collect();
+    // Stored times are microseconds; compare at that precision.
+    let micros = |t: std::time::SystemTime| chrono::DateTime::<chrono::Utc>::from(t).timestamp_micros();
+    let docs = crate::wiki::documents_where(&dir, |slug, modified| indexed.get(slug).is_none_or(|at| at.timestamp_micros() != micros(modified)));
     let mut changed = 0;
     for (slug, title, ident, body, modified) in docs {
-        let secs = modified.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-        if secs <= wm {
-            continue;
-        }
-        newest = newest.max(secs);
         let at = chrono::DateTime::<chrono::Utc>::from(modified);
         sqlx::query(
             "INSERT INTO search_docs (kind, ref, ident, title, body, at) VALUES ('wiki', $1, $2, $3, $4, $5)
@@ -276,9 +281,6 @@ async fn index_wiki(db: &PgPool) -> Result<usize> {
         .execute(db)
         .await?;
         changed += 1;
-    }
-    if newest > wm {
-        state_set(db, "wiki", &newest.to_string()).await?;
     }
     Ok(changed)
 }

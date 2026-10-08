@@ -374,16 +374,35 @@ pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value) -> Opt
     })
 }
 
-/// Every page, for the search index: (slug, title, ident, body, modified).
-pub fn documents(dir: &Path) -> Vec<(String, String, String, String, std::time::SystemTime)> {
+/// The pages (slug and modification time) without reading them: a cheap check for what changed.
+pub fn page_times(dir: &Path) -> Vec<(String, std::time::SystemTime)> {
     let mut out = Vec::new();
-    for p in pages(dir) {
-        let path = dir.join(format!("{}.md", p.slug));
-        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        let name = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        if p.extension().is_some_and(|x| x == "md") && name != "index" && name != "log" {
+            let modified = e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+            out.push((name, modified));
+        }
+    }
+    out
+}
+
+/// Search documents (slug, title, identifiers, body, modified) for the pages `wanted(slug, modified)`
+/// picks; only those are read and parsed.
+pub fn documents_where(dir: &Path, wanted: impl Fn(&str, std::time::SystemTime) -> bool) -> Vec<(String, String, String, String, std::time::SystemTime)> {
+    let mut out = Vec::new();
+    for (slug, modified) in page_times(dir) {
+        if !wanted(&slug, modified) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(dir.join(format!("{slug}.md"))) else { continue };
+        let p = parse(&slug, &text);
         let body = format!("{}\n{}", p.summary, p.entries.join("\n"));
         let ident = std::iter::once(p.slug.clone()).chain(p.aliases.iter().cloned()).collect::<Vec<_>>().join(" ");
         out.push((p.slug, p.title, ident, body, modified));
     }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
 

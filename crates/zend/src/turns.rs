@@ -58,10 +58,15 @@ pub(crate) async fn watchdog(app: AppState) {
                 _ => {}
             }
         }
-        for (id, worker) in to_abort {
-            tracing::warn!("turn in session {id} stalled; aborting");
-            let _ = app.workers[worker].mind().request("turn.abort", json!({ "session_id": id })).await;
-        }
+        // All at once: each request may wait up to 30 s for a worker that is itself stuck.
+        futures_util::future::join_all(to_abort.into_iter().map(|(id, worker)| {
+            let app = &app;
+            async move {
+                tracing::warn!("turn in session {id} stalled; aborting");
+                let _ = app.workers[worker].mind().request("turn.abort", json!({ "session_id": id })).await;
+            }
+        }))
+        .await;
         for id in to_end {
             tracing::warn!("turn in session {id} did not stop after abort; ending it");
             finish_turn(&app, id, json!("the turn stopped responding and was ended")).await;
@@ -382,7 +387,17 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
                     // turn, and an abort stops the wait.
                     hold(app, id, turn_id, true).await;
                     let made = tokio::select! {
-                        made = compact::prepare(app, id, settings.keep_tokens(), &model) => Some(made),
+                        made = async {
+                            // A summary already being prepared in the background is waited for, not
+                            // made a second time (both would be paid; one would be thrown away).
+                            while app.compacting.lock().await.contains(&id) {
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                            }
+                            match compact::pending(&app.db, id).await {
+                                Ok(Some(c)) => Ok(Some(c)),
+                                _ => compact::prepare(app, id, settings.keep_tokens(), &model).await,
+                            }
+                        } => Some(made),
                         _ = stopped.wait_for(|s| *s) => None,
                     };
                     hold(app, id, turn_id, false).await;
