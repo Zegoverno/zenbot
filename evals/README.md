@@ -45,7 +45,8 @@ the comparison isn't clean.
   or change files the way the world would).
 - `checks` run after the last step. `run` is a bash command in the workspace that must exit 0
   (`$TASK_DIR` is the task's directory, for comparing with the original files; shell steps have it
-  too). `answer_contains` looks for text in the last answer, ignoring case, and `answer_lacks`
+  too; `$ANSWER` is the last answer and `$TURNS` a file with one JSON line per turn, its `tools`
+  included, for checks on what the agent did). `answer_contains` looks for text in the last answer, ignoring case, and `answer_lacks`
   checks it isn't there; with `"step": n` they look at the answer to the n-th prompt instead.
 - `work` is the kind of work (understand, shape, bet, build, verify, maintain, reflect, reach).
 - `env` sets kernel settings for the task's runs on both sides (e.g. `{"ZEN_CONTEXT_TOKENS": "12000"}`
