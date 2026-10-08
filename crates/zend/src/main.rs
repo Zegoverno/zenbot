@@ -228,8 +228,10 @@ async fn main() -> Result<()> {
         .nest("/api", api)
         .with_state(app);
 
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
-    tracing::info!("zend listening on :{port}");
+    // Localhost only unless ZEN_BIND says otherwise (D-041): anyone with the token can run commands.
+    let bind = std::env::var("ZEN_BIND").ok().filter(|b| !b.trim().is_empty()).unwrap_or_else(|| "127.0.0.1".into());
+    let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
+    tracing::info!("zend listening on {bind}:{port}");
     axum::serve(listener, router).await?;
     Ok(())
 }

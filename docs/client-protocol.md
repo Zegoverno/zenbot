@@ -3,8 +3,10 @@
 How a client (the `zen` terminal app and CLI, the web UI, scripts) talks to the kernel. Workers use
 a different protocol (docs/worker-protocol.md).
 
-Every request carries the owner's token: `Authorization: Bearer <token>` (or `?token=` for the web
-UI). The token is in `~/.zenbot/token`.
+Every request carries the owner's token in `Authorization: Bearer <token>`. Only a WebSocket
+upgrade accepts `?token=` (the browser WebSocket API cannot set that header); URL tokens are not
+accepted for ordinary HTTP requests. The token is in `~/.zenbot/token`. The server listens on
+`127.0.0.1:8100` by default; `ZEN_BIND` and `ZEN_PORT` change the address and port.
 
 ## HTTP
 

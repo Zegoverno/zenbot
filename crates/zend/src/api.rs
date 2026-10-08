@@ -35,10 +35,10 @@ pub(crate) async fn auth(State(app): State<AppState>, req: Request, next: Next) 
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| same_secret(v.strip_prefix("Bearer ").unwrap_or(v).as_bytes(), token));
-    let query_ok = req
-        .uri()
-        .query()
-        .is_some_and(|q| q.split('&').filter_map(|kv| kv.strip_prefix("token=")).any(|t| same_secret(t.as_bytes(), token)));
+    // A token in the URL ends up in logs and history: accepted only where browsers can't send a
+    // header, the WebSocket upgrade.
+    let query_ok = req.uri().path().ends_with("/ws")
+        && req.uri().query().is_some_and(|q| q.split('&').filter_map(|kv| kv.strip_prefix("token=")).any(|t| same_secret(t.as_bytes(), token)));
     if header_ok || query_ok {
         next.run(req).await
     } else {
