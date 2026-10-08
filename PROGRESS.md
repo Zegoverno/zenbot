@@ -11,7 +11,8 @@
 - Claude Code: the turn is refused if the CLI offers any tool that isn't zenbot's (checked on its
   `system/init` event; a live probe confirmed `--tools ""` lists none). The system prompt goes in a
   private file (`--system-prompt-file`) instead of argv, and the tool socket in a private per-turn
-  folder instead of shared `/tmp`.
+  folder instead of shared `/tmp`, removed however the turn ends. Model listing runs its
+  `--version` probes off the async runtime.
 - Codex: an abort stops a hung app-server start or thread setup; an aborted turn still reports its
   tokens; `codex --version` is asked once per process; history call ids never split a character.
 - Workers no longer inherit the kernel's API token, database URL, OpenRouter or search keys.

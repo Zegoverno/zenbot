@@ -231,6 +231,15 @@ pub fn socket_dir() -> std::io::Result<(std::path::PathBuf, String)> {
     Ok((dir, socket))
 }
 
+/// Removes a folder when dropped, however the scope ends (an early `?` included).
+pub struct RemoveOnDrop(pub std::path::PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Write `text` to a new file only the owner can read (for a system prompt: on argv it would be
 /// visible to every local user in `ps` and limited to 128 KB).
 pub fn private_file(path: &std::path::Path, text: &str) -> std::io::Result<()> {

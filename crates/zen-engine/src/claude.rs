@@ -87,18 +87,11 @@ pub fn available() -> bool {
 pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bool>) -> Result<Option<String>> {
     let model = input.model.as_str();
     let (socket_dir, socket) = crate::turn::socket_dir().context("creating the tool socket's folder")?;
+    // The socket and the prompt file go when the turn ends, on every path.
+    let _turn_dir = crate::turn::RemoveOnDrop(socket_dir.clone());
     let system_file = socket_dir.join("system.md");
-    if let Err(e) = crate::turn::private_file(&system_file, &input.system) {
-        let _ = std::fs::remove_dir_all(&socket_dir);
-        return Err(anyhow::Error::new(e).context("writing the system prompt file"));
-    }
-    let server = match ctx.serve_socket(&socket) {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = std::fs::remove_dir_all(&socket_dir);
-            return Err(anyhow::Error::new(e).context("opening tool socket"));
-        }
-    };
+    crate::turn::private_file(&system_file, &input.system).context("writing the system prompt file")?;
+    let server = ctx.serve_socket(&socket).context("opening tool socket")?;
     let exe = std::env::current_exe()?.display().to_string();
     let mcp = json!({ "mcpServers": { "zen": { "command": exe, "args": ["mcp-bridge", socket] } } }).to_string();
     let allowed: Vec<String> = ctx.tools.iter().filter_map(|t| t["name"].as_str()).map(|n| format!("{PREFIX}{n}")).collect();
@@ -227,7 +220,6 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
     drop(stdin);
     let status = child.wait().await.ok();
     server.abort();
-    let _ = std::fs::remove_dir_all(&socket_dir);
     if !sessions {
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -252,14 +244,7 @@ pub async fn complete(model: &str, system: &str, prompt: &str) -> Result<Value> 
     let dir = crate::turn::engine_dir("complete")?;
     let (prompt_dir, _) = crate::turn::socket_dir()?;
     let system_file = prompt_dir.join("system.md");
-    // Removed however this call ends.
-    struct Cleanup(std::path::PathBuf);
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-    let _cleanup = Cleanup(prompt_dir);
+    let _cleanup = crate::turn::RemoveOnDrop(prompt_dir);
     crate::turn::private_file(&system_file, system)?;
     let mut child = Command::new("claude")
         .args(["-p", "--output-format", "json", "--tools", "", "--setting-sources", "", "--no-session-persistence"])
