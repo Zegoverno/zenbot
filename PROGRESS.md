@@ -6,6 +6,20 @@
 
 ---
 
+## 2026-10-08 — Engines and scripts: fail loud, keep secrets off argv
+
+- Claude Code: the turn is refused if the CLI offers any tool that isn't zenbot's (checked on its
+  `system/init` event; a live probe confirmed `--tools ""` lists none). The system prompt goes in a
+  private file (`--system-prompt-file`) instead of argv, and the tool socket in a private per-turn
+  folder instead of shared `/tmp`.
+- Codex: an abort stops a hung app-server start or thread setup; an aborted turn still reports its
+  tokens; `codex --version` is asked once per process; history call ids never split a character.
+- Workers no longer inherit the kernel's API token, database URL, OpenRouter or search keys.
+- Scripts: the upgrade smoke kernel drops the OpenRouter and search keys (it ran on a copy of the
+  live database and could spend money); `sleep.sh` sends the token on stdin; engine rollbacks
+  quote paths with `printf %q`; SearXNG and the CI actions are pinned by digest/SHA.
+- Tested live on a dev kernel: a Claude Haiku turn with a bash tool call and a `complete`.
+
 ## 2026-10-08 — Kernel correctness: MCP, wiki, memory, workers, files
 
 - MCP: a server whose pipe broke or that exited reconnects on the next call; a server that is down
