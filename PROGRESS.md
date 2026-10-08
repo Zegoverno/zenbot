@@ -21,7 +21,8 @@
 - Files: `write` and `edit` are atomic and keep permissions and symlinks; files with mixed line
   endings keep them. `history` search matches message text, not JSON; session prefixes are not
   wildcards. Skill frontmatter keeps a body's leading list dash. Secret masking reloads rotated
-  sign-ins without a restart. Delegation draws are random and models refresh once per call.
+  sign-ins without a restart. Delegation draws are random and models refresh once per call. Child sessions (verifiers,
+  subagents) no longer write their kind into the legacy `sessions.state` column.
 
 ## 2026-10-08 — Bound web caches
 
