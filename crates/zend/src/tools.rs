@@ -390,8 +390,24 @@ fn is_binary(bytes: &[u8]) -> bool {
 }
 
 async fn read(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> {
+    const MAX_READ_FILE: u64 = 16 * 1024 * 1024;
     let path = resolve(workspace, str_arg(args, "path")?);
-    let bytes = tokio::fs::read(&path).await.map_err(|e| err(format!("cannot read {}: {e}", path.display())))?;
+    let file = tokio::fs::File::open(&path).await.map_err(|e| err(format!("cannot read {}: {e}", path.display())))?;
+    let size = file.metadata().await.map_err(|e| err(format!("cannot stat {}: {e}", path.display())))?.len();
+    if size > MAX_READ_FILE {
+        return Err(err(format!("{} is {} bytes, over read's 16 MiB limit; use bash to inspect a range", path.display(), size)));
+    }
+    // The same open file may grow after stat, and procfs files often report size zero.
+    let mut bytes = Vec::with_capacity(size as usize);
+    let mut limited = file.take(MAX_READ_FILE);
+    limited.read_to_end(&mut bytes).await.map_err(|e| err(format!("cannot read {}: {e}", path.display())))?;
+    if bytes.len() as u64 == MAX_READ_FILE {
+        let mut file = limited.into_inner();
+        let mut extra = [0_u8; 1];
+        if file.read(&mut extra).await.map_err(|e| err(format!("cannot read {}: {e}", path.display())))? > 0 {
+            return Err(err(format!("{} exceeds read's 16 MiB limit; use bash to inspect a range", path.display())));
+        }
+    }
     if is_binary(&bytes) {
         return Err(err(format!(
             "{} is a binary file ({} bytes), not text; inspect it with bash (e.g. `file`, `xxd | head`)",
@@ -502,7 +518,7 @@ fn find_matches(hay: &str, needle: &str) -> (Vec<(usize, usize)>, bool) {
     }
     let h = normalize(hay);
     let n = normalize(needle);
-    let needle = n.text.trim_end_matches('\n');
+    let needle = n.text.as_str();
     if needle.trim().is_empty() {
         return (Vec::new(), false);
     }
@@ -617,6 +633,44 @@ mod tests {
         assert!(r.content.contains("normalizing"));
         // Untouched lines keep their original bytes.
         assert_eq!(std::fs::read_to_string(ws.join("q.md")).unwrap(), "replaced\nkeep \u{2019}this\u{2019}\n");
+    }
+
+    #[tokio::test]
+    async fn read_refuses_a_huge_file_before_loading_it() {
+        let ws = scratch("huge-read");
+        let file = std::fs::File::create(ws.join("huge.txt")).unwrap();
+        file.set_len(16 * 1024 * 1024 + 1).unwrap();
+        let r = run(&ws, "read", json!({ "path": "huge.txt" })).await;
+        assert!(r.is_error);
+        assert!(r.content.contains("16 MiB limit"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn read_caps_a_zero_size_stream_too() {
+        use std::io::Write;
+        let ws = scratch("fifo-read");
+        let path = ws.join("stream.txt");
+        assert!(std::process::Command::new("mkfifo").arg(&path).status().unwrap().success());
+        let writer = std::thread::spawn(move || {
+            let mut f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            let chunk = [b'a'; 8192];
+            for _ in 0..(16 * 1024 * 1024 / chunk.len() + 1) {
+                if f.write_all(&chunk).is_err() { break; }
+            }
+        });
+        let r = run(&ws, "read", json!({ "path": "stream.txt" })).await;
+        writer.join().unwrap();
+        assert!(r.is_error);
+        assert!(r.content.contains("16 MiB limit"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn loose_edit_preserves_the_needles_trailing_newline() {
+        let ws = scratch("loose-newline");
+        std::fs::write(ws.join("a.txt"), "foo  \nbar\n").unwrap();
+        let r = run(&ws, "edit", json!({ "path": "a.txt", "old_text": "foo \n", "new_text": "baz\n" })).await;
+        assert!(!r.is_error, "{}", r.content);
+        assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "baz\nbar\n");
     }
 
     #[tokio::test]

@@ -52,8 +52,21 @@ pub fn always(workspace: &Path) -> Vec<(PathBuf, String)> {
 /// Instruction files that govern `paths` but aren't covered by `always` (they live below the
 /// workspace), ordered from the outermost directory in.
 pub fn governing(workspace: &Path, paths: &[PathBuf]) -> Vec<PathBuf> {
+    governing_except(workspace, paths, &crate::zen_home())
+}
+
+fn governing_except(workspace: &Path, paths: &[PathBuf], zen_home: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
+    let real_zen_home = zen_home.canonicalize().unwrap_or_else(|_| zen_home.to_path_buf());
     for path in paths {
+        // Lexical `..` or a symlink can point into the zen home; avoid attaching its
+        // environment AGENTS.md as project instructions even through such aliases.
+        let real_path = path.canonicalize().or_else(|_| {
+            path.parent().unwrap_or(path).canonicalize().map(|parent| parent.join(path.file_name().unwrap_or_default()))
+        });
+        if path.starts_with(zen_home) || real_path.is_ok_and(|p| p.starts_with(&real_zen_home)) {
+            continue;
+        }
         let start = if path.is_dir() { path.as_path() } else { path.parent().unwrap_or(path) };
         let mut here = Vec::new();
         for dir in start.ancestors() {
@@ -61,7 +74,9 @@ pub fn governing(workspace: &Path, paths: &[PathBuf]) -> Vec<PathBuf> {
                 break; // the workspace and its parents are already in the system prompt
             }
             if let Some(f) = in_dir(dir) {
-                here.push(f);
+                if !f.canonicalize().is_ok_and(|real| real.starts_with(&real_zen_home)) {
+                    here.push(f);
+                }
             }
         }
         for f in here.into_iter().rev() {
@@ -129,6 +144,15 @@ mod tests {
         // The workspace's own file is in the system prompt already; outside paths add nothing.
         assert!(governing(&ws, &[ws.join("x.txt")]).is_empty());
         assert!(governing(&ws, &[PathBuf::from("/etc/hostname")]).is_empty());
+        let zen_home = ws.join(".zenbot");
+        std::fs::create_dir_all(&zen_home).unwrap();
+        std::fs::write(zen_home.join("AGENTS.md"), "environment rules").unwrap();
+        assert!(governing_except(&ws, &[zen_home.join("token")], &zen_home).is_empty());
+        std::fs::create_dir_all(ws.join("sub")).unwrap();
+        let alias = ws.join("sub/../.zenbot/AGENTS.md");
+        assert!(governing_except(&ws, &[alias], &zen_home).is_empty());
+        std::os::unix::fs::symlink(&zen_home, ws.join("link")).unwrap();
+        assert!(governing_except(&ws, &[ws.join("link/missing/deep/file")], &zen_home).is_empty());
     }
 
     #[test]
