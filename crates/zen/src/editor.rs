@@ -1,8 +1,45 @@
 //! A small multi-line input editor with prompt history.
 
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::Path;
+
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::md::{Line, Sty};
+
+/// Most prompts kept in the history file.
+const HISTORY_MAX: usize = 1000;
+
+/// Read the prompt history: one JSON string per line. A file in the old format (one prompt per
+/// line, newlines written as a literal `\n`, so a typed `\n` came back as a newline) is read
+/// once and rewritten in the new one. Only the last `HISTORY_MAX` prompts are kept, and the
+/// file is made private to the owner.
+fn load_history(path: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+    let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+    let parsed: Option<Vec<String>> = lines.iter().map(|l| serde_json::from_str::<String>(l).ok()).collect();
+    let (mut history, old) = match parsed {
+        Some(h) => (h, false),
+        None => (lines.iter().map(|l| l.replace("\\n", "\n")).collect::<Vec<_>>(), true),
+    };
+    let cut = history.len().saturating_sub(HISTORY_MAX);
+    history.drain(..cut);
+    if old || cut > 0 {
+        let body: String = history.iter().map(|h| serde_json::to_string(h).unwrap_or_default() + "\n").collect();
+        let tmp = path.with_extension("tmp");
+        if private_file(&tmp, false).and_then(|mut f| f.write_all(body.as_bytes())).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    history
+}
+
+/// Open a file only the owner can read (mode 0600 when it is created): truncated, or appended to.
+fn private_file(path: &Path, append: bool) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().create(true).write(true).append(append).truncate(!append).mode(0o600).open(path)
+}
 
 pub struct Editor {
     pub buf: String,
@@ -15,11 +52,7 @@ pub struct Editor {
 
 impl Editor {
     pub fn new(history_file: Option<std::path::PathBuf>) -> Self {
-        let history = history_file
-            .as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .map(|s| s.lines().filter(|l| !l.is_empty()).map(|l| l.replace("\\n", "\n")).collect())
-            .unwrap_or_default();
+        let history = history_file.as_deref().map(load_history).unwrap_or_default();
         Editor { buf: String::new(), cursor: 0, history, hist_idx: None, draft: String::new(), history_file }
     }
 
@@ -203,9 +236,8 @@ impl Editor {
         if !text.trim().is_empty() && self.history.last() != Some(&text) {
             self.history.push(text.clone());
             if let Some(p) = &self.history_file {
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
-                    let _ = writeln!(f, "{}", text.replace('\n', "\\n"));
+                if let (Ok(mut f), Ok(json)) = (private_file(p, true), serde_json::to_string(&text)) {
+                    let _ = writeln!(f, "{json}");
                 }
             }
         }
@@ -405,6 +437,32 @@ mod tests {
         e.set("first line\nsecond\n");
         e.delete_word();
         assert_eq!(e.buf, "first line\n", "the newline before the caret goes with the word");
+    }
+
+    #[test]
+    fn history_keeps_prompts_exactly_and_reads_the_old_format_once() {
+        let dir = crate::test_util::TempDir::new("history");
+        let path = dir.file("history", "first\\nsecond line\nplain\n");
+        let mut e = Editor::new(Some(path.clone()));
+        assert_eq!(e.history, ["first\nsecond line", "plain"], "old format: \\n was a newline");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "\"first\\nsecond line\"\n\"plain\"\n", "rewritten as JSON lines");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        e.set("println!(\"a\\nb\");\nnext line");
+        e.take();
+        let e = Editor::new(Some(path.clone()));
+        assert_eq!(e.history.last().unwrap(), "println!(\"a\\nb\");\nnext line", "a typed \\n stays a backslash and an n");
+        // Only the last 1000 are kept.
+        let many: String = (0..1200).map(|i| format!("\"p{i}\"\n")).collect();
+        std::fs::write(&path, many).unwrap();
+        let e = Editor::new(Some(path.clone()));
+        assert_eq!((e.history.len(), e.history[0].as_str()), (1000, "p200"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1000);
+        // A new file is created private.
+        let fresh = dir.join("fresh");
+        let mut e = Editor::new(Some(fresh.clone()));
+        e.set("hi");
+        e.take();
+        assert_eq!(std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777, 0o600);
     }
 
     #[test]
