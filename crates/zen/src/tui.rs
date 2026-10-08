@@ -689,7 +689,11 @@ impl App {
     }
 
     fn paint_region(&mut self, out: &mut String) {
-        let (mut lines, mut caret_row, caret_col, show_caret) = self.compose();
+        let (lines, mut caret_row, caret_col, show_caret) = self.compose();
+        // Every line exactly fits a row: a wrapped one would make `region.height` wrong, and
+        // `erase` would leave its extra rows behind.
+        let w = self.width();
+        let mut lines: Vec<Line> = lines.iter().map(|l| screen::fit(l, w, false)).collect();
         let h = self.height();
         let max = h.saturating_sub(1);
         if lines.len() > max {
@@ -1137,7 +1141,8 @@ impl App {
         COMMANDS.iter().filter(|c| c.name.starts_with(buf.as_str())).collect()
     }
 
-    /// Build the live region: (lines, caret row, caret col, show caret).
+    /// Build the live region: (lines, caret row, caret col, show caret). Lines may be wider than
+    /// the screen; whoever paints them cuts them to fit.
     fn compose(&self) -> (Vec<Line>, usize, usize, bool) {
         let w = self.width();
         let mut lines: Vec<Line> = Vec::new();
@@ -1147,12 +1152,8 @@ impl App {
             let window = 10.min(p.items.len().max(1));
             let start = p.selected.saturating_sub(window - 1).min(p.items.len().saturating_sub(window));
             for (i, (label, _)) in p.items.iter().enumerate().skip(start).take(window) {
-                let label: String = label.chars().take(w.saturating_sub(4)).collect();
-                if i == p.selected {
-                    lines.push(vec![("› ".into(), Sty::Accent), (label, Sty::Accent)]);
-                } else {
-                    lines.push(vec![("  ".into(), Sty::Plain), (label, Sty::Plain)]);
-                }
+                let (mark, sty) = if i == p.selected { ("› ", Sty::Accent) } else { ("  ", Sty::Plain) };
+                lines.push(vec![(mark.into(), sty), (label.clone(), sty)]);
             }
             if p.items.is_empty() {
                 lines.push(line("  (nothing here)", Sty::Dim));
@@ -1182,13 +1183,15 @@ impl App {
             if !self.turn_files.is_empty() {
                 work.push_str(&format!(" · {} file{} edited", self.turn_files.len(), if self.turn_files.len() == 1 { "" } else { "s" }));
             }
-            lines.push(vec![
-                (format!("{} ", SPINNER[self.spin % SPINNER.len()]), Sty::Accent),
-                (self.status.chars().take(w.saturating_sub(60)).collect(), Sty::Plain),
-                (format!("{tool}  ·  turn {secs}s{work} · esc to interrupt"), Sty::Dim),
-            ]);
+            // The status gives way first, so the timing and the interrupt hint stay in view.
+            let tail = format!("{tool}  ·  turn {secs}s{work} · esc to interrupt");
+            let room = w.saturating_sub(2 + UnicodeWidthStr::width(tail.as_str())).max(10);
+            let mut status = vec![(format!("{} ", SPINNER[self.spin % SPINNER.len()]), Sty::Accent)];
+            status.extend(screen::fit(&line(self.status.clone(), Sty::Plain), room, false));
+            status.push((tail, Sty::Dim));
+            lines.push(status);
         } else if let Some((n, s)) = &self.notice {
-            lines.push(line(n.chars().take(w).collect::<String>(), *s));
+            lines.push(line(n.clone(), *s));
         }
 
         let hint = if self.editor.is_empty() {
@@ -1208,8 +1211,7 @@ impl App {
             for (i, c) in menu.iter().enumerate() {
                 let mark = if i == sel { "› " } else { "  " };
                 let help_sty = if i == sel { Sty::Plain } else { Sty::Dim };
-                let help: String = c.help.chars().take(w.saturating_sub(12)).collect();
-                lines.push(vec![(format!("{mark}{:<10}", c.name), Sty::Accent), (help, help_sty)]);
+                lines.push(vec![(format!("{mark}{:<10}", c.name), Sty::Accent), (c.help.to_string(), help_sty)]);
             }
         } else {
             let model = self.model.split('/').next_back().unwrap_or(&self.model);
@@ -1224,7 +1226,7 @@ impl App {
             };
             let effort = self.shown_effort().map(|e| format!(" · {e}")).unwrap_or_default();
             let footer = format!("  {model}{effort} · {session} · {} tokens", fmt_tokens(self.session_tokens));
-            lines.push(line(footer.chars().take(w).collect::<String>(), Sty::Dim));
+            lines.push(line(footer, Sty::Dim));
         }
         (lines, caret_row, ccol, true)
     }
@@ -2339,10 +2341,12 @@ mod tests {
 
     #[test]
     fn region_fits_the_screen_and_shows_the_input_box() {
-        let a = app(40, 12);
+        let mut a = app(40, 12);
         let (lines, caret_row, _, _) = a.compose();
         let t = texts(&lines);
-        assert!(t.iter().all(|l| width(l) <= a.width()), "{t:#?}");
+        a.inline = true;
+        a.draw();
+        assert!(a.region.widths.iter().all(|&w| w <= a.width()), "{t:#?}");
         assert!(t.iter().any(|l| l.starts_with('╭')) && t.iter().any(|l| l.starts_with('╰')));
         assert!(t[caret_row].contains(PLACEHOLDER.chars().take(10).collect::<String>().as_str()));
     }
@@ -2394,6 +2398,26 @@ mod tests {
         b.inline = true;
         b.draw();
         assert!(b.region.height < 20);
+    }
+
+    #[test]
+    fn inline_region_lines_fit_the_width_even_with_wide_text() {
+        let mut a = app_with_models(50, 20);
+        a.inline = true;
+        a.session = Some("0123456789".into());
+        a.title = "会議の議事録をまとめてください、それから".into();
+        a.busy = true;
+        a.turn_tools = 12;
+        a.turn_files.extend(["a".to_string(), "b".to_string()]);
+        a.status = "Running bash 「長いコマンド」 with a very long status that would not fit".into();
+        a.draw();
+        assert!(a.region.widths.iter().all(|&w| w <= a.width()), "{:?}", a.region.widths);
+        let status = texts(&a.compose().0).into_iter().find(|l| l.contains("esc to interrupt")).expect("status line");
+        assert!(status.contains("Running"), "the status keeps its start: {status}");
+        a.busy = false;
+        a.picker = Some(Picker { title: "pick".into(), items: vec![("😀".repeat(40), "x".into())], selected: 0, kind: PickKind::Session });
+        a.draw();
+        assert!(a.region.widths.iter().all(|&w| w <= a.width()), "{:?}", a.region.widths);
     }
 
     #[test]
