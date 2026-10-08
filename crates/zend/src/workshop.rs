@@ -419,8 +419,19 @@ pub async fn decide_tool(db: &sqlx::PgPool, name: &str, accept: bool) -> Result<
     Ok(format!("{} {name}", if accept { "Approved" } else { "Rejected" }))
 }
 
-/// How much of a made tool's stdout and stderr is read (each); the rest is dropped.
+/// How much of a made tool's stdout and stderr is kept (each); the rest is drained and dropped.
 const MADE_CAP: usize = 256 * 1024;
+
+async fn drain_capped(mut pipe: impl tokio::io::AsyncRead + Unpin, cap: usize) -> Vec<u8> {
+    use tokio::io::AsyncReadExt;
+    let mut kept = Vec::new();
+    let mut chunk = [0u8; 8192];
+    while let Ok(n) = pipe.read(&mut chunk).await {
+        if n == 0 { break; }
+        kept.extend_from_slice(&chunk[..n.min(cap.saturating_sub(kept.len()))]);
+    }
+    kept
+}
 
 /// Run a tool the agent made: arguments as JSON on stdin, output from stdout and stderr. Sandboxed
 /// (no network, read-only files, an empty home folder) until the owner approves it; never with the
@@ -478,26 +489,17 @@ pub async fn run_made(db: &sqlx::PgPool, name: &str, args: &Value) -> Result<(St
     let input = args.to_string();
     let mut stdin = child.stdin.take();
     let run = async move {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         // Write the arguments in their own task, so a tool that prints before reading can't deadlock.
         let writer = tokio::spawn(async move {
             if let Some(mut s) = stdin.take() {
                 let _ = s.write_all(input.as_bytes()).await;
             }
         });
-        let (mut out, mut err) = (Vec::new(), Vec::new());
         let (so, se) = (child.stdout.take(), child.stderr.take());
-        let read_out = async {
-            if let Some(p) = so {
-                let _ = p.take(MADE_CAP as u64).read_to_end(&mut out).await;
-            }
-        };
-        let read_err = async {
-            if let Some(p) = se {
-                let _ = p.take(MADE_CAP as u64).read_to_end(&mut err).await;
-            }
-        };
-        tokio::join!(read_out, read_err);
+        let read_out = async { match so { Some(p) => drain_capped(p, MADE_CAP).await, None => Vec::new() } };
+        let read_err = async { match se { Some(p) => drain_capped(p, MADE_CAP).await, None => Vec::new() } };
+        let (out, err) = tokio::join!(read_out, read_err);
         let status = child.wait().await;
         writer.abort();
         (out, err, status)
@@ -580,6 +582,16 @@ mod tests {
         assert!(valid_name("rust-release") && !valid_name("Rust") && !valid_name("a--b") && !valid_name("-a"));
         assert!(overlap("verify work before reporting it done", "verify the work before reporting done") > 0.6);
         assert!(overlap("verify work before reporting", "deploy a rust binary to the server") < 0.2);
+    }
+
+    #[tokio::test]
+    async fn made_tool_output_is_drained_after_cap() {
+        use tokio::io::AsyncWriteExt;
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let writing = tokio::spawn(async move { writer.write_all(&vec![b'x'; MADE_CAP * 2]).await.unwrap(); });
+        let kept = tokio::time::timeout(Duration::from_secs(2), drain_capped(reader, MADE_CAP)).await.unwrap();
+        writing.await.unwrap();
+        assert_eq!(kept.len(), MADE_CAP);
     }
 
     #[test]

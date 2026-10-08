@@ -176,6 +176,7 @@ JSON
     find_tools:false,load_tool:false,call_tool:false,call_tool:false,call_tool:true
   local res; res=$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult'")
   check "find_tools lists namespaced tools" grep -q "local_echo: Echo a message back." <<<"$res"
+  check "find_tools wraps untrusted descriptions" grep -q 'source="mcp" about="remote_add"' <<<"$res"
   check "load_tool shows the schema" grep -q '"required"' <<<"$res"
   check "the local server answered" grep -q "echo: hi" <<<"$res"
   check "the remote server answered (event stream), wrapped as untrusted" grep -q 'source="mcp" about="remote_add"' <<<"$res"
@@ -412,6 +413,8 @@ secrets_masked() {
   check "the token is masked on the tape" grep -q 'ghp_…\[masked\]' <<<"$out"
   # (The command the model typed still contains it: masking applies to what tools return.)
   check "no tool output holds the token's value" eq "$(q "SELECT count(*) FROM tape_events WHERE payload->>'role'='toolResult' AND payload::text LIKE '%AbCdEfGhIjKlMnOp%'")" 0
+  check "URL tokens are rejected for HTTP" eq "$(curl -s -o /dev/null -w '%{http_code}' "$URL/api/models?token=$TOKEN")" 401
+  check "URL tokens need a WebSocket upgrade" eq "$(curl -s -o /dev/null -w '%{http_code}' "$URL/api/sessions/$sid/ws?token=$TOKEN")" 401
 }
 
 # A turn the kernel ended (the watchdog, after an abort the worker ignored) keeps running in the
