@@ -6,6 +6,16 @@
 
 ---
 
+## 2026-10-08 — Make the terminal client resilient and incremental
+
+- Kept both TUI modes and `zen chat`, while splitting the interactive client into focused modules.
+  Sanitize terminal text, restore terminal state on errors, report request failures without exiting,
+  reload sessions after reconnect, and reset transcript state on `/new` and `/resume`.
+- Full-screen rendering now caches finished stream lines and unchanged transcript entries. A 43 KB
+  reply in 20-byte deltas used 0.082 s CPU in the release benchmark (previous audit: 2.08 s).
+  Prompt history uses private, bounded JSON lines; client paths honor `ZEN_HOME`.
+- Render/key tests cover the fixes; full release checks and the harness eval are recorded in the PR.
+
 ## 2026-10-08 — Retire Pi; System One in the kernel (D-043)
 
 - `zend` now calls OpenRouter's System One endpoint directly, mapping bool questions to `noul`

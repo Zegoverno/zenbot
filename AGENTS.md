@@ -75,7 +75,7 @@ Refer to the owner as "the owner".
 - One concern per commit. The subject says what changed; the body says why, and what was tested.
 - Design decisions (DECISIONS.md, DESIGN.md, SPEC.md, or a module's header comment) change only with
   the owner's OK. If a change needs one, ask first, then update the doc in the same pull request.
-- UI changes (`crates/zen/src/tui.rs`, `editor.rs`) come with render or key tests: build an `App` at a
+- UI changes (`crates/zen/src/tui/`, `editor.rs`) come with render or key tests: build an `App` at a
   fixed size with output captured (see the tests at the bottom of `tui.rs`).
 - Keep doc comments attached to the item they describe, and update them when behavior changes.
 - Commits made in a zen session get `Zen-Session` and `Co-Authored-By` trailers automatically
