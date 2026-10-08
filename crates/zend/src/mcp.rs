@@ -470,18 +470,18 @@ async fn find(app: &App, session: Uuid, query: &str) -> (String, bool) {
             for t in found {
                 let line = format!("{}: {}", t.full(), one_line(&t.description));
                 if t.untrusted {
-                    out.push_str(&format!("- {}\n", crate::web::untrusted("mcp", &t.full(), &line)));
+                    out.push_str(&format!("- {}\n", crate::taint::untrusted("mcp", &t.full(), &line)));
                 } else {
                     out.push_str(&format!("- {line}\n"));
                 }
             }
-            if has_untrusted { crate::web::taint(app, session, "mcp", "find_tools").await; }
+            if has_untrusted { crate::taint::taint(app, session, "mcp", "find_tools").await; }
         }
     }
     if !problems.is_empty() {
         // A remote server controls its error text too. Treat all catalog errors conservatively.
-        crate::web::taint(app, session, "mcp", "catalog errors").await;
-        out.push_str(&format!("\nProblems: {}", crate::web::untrusted("mcp", "catalog errors", &problems.join("; "))));
+        crate::taint::taint(app, session, "mcp", "catalog errors").await;
+        out.push_str(&format!("\nProblems: {}", crate::taint::untrusted("mcp", "catalog errors", &problems.join("; "))));
     }
     (out, false)
 }
@@ -531,8 +531,8 @@ async fn call(app: &App, session: Uuid, full: &str, args: &Value) -> Result<(Str
     if !missing.is_empty() {
         let error = format!("missing required arguments: {} (load_tool shows the parameters)", missing.join(", "));
         if t.untrusted {
-            crate::web::taint(app, session, "mcp", &t.full()).await;
-            return Ok((crate::web::untrusted("mcp", &t.full(), &error), true));
+            crate::taint::taint(app, session, "mcp", &t.full()).await;
+            return Ok((crate::taint::untrusted("mcp", &t.full(), &error), true));
         }
         anyhow::bail!("{error}");
     }
@@ -540,8 +540,8 @@ async fn call(app: &App, session: Uuid, full: &str, args: &Value) -> Result<(Str
         let (text, is_error, networked) = crate::workshop::run_made(&app.db, &t.name, &args).await?;
         // An approved tool can reach the network: what it returns may be web content.
         if networked {
-            crate::web::taint(app, session, "made", &t.full()).await;
-            return Ok((crate::web::untrusted("made", &t.full(), &text), is_error));
+            crate::taint::taint(app, session, "made", &t.full()).await;
+            return Ok((crate::taint::untrusted("made", &t.full(), &text), is_error));
         }
         return Ok((text, is_error));
     }
@@ -558,8 +558,8 @@ async fn call(app: &App, session: Uuid, full: &str, args: &Value) -> Result<(Str
     let result = match result {
         Ok(result) => result,
         Err(e) if untrusted => {
-            crate::web::taint(app, session, "mcp", &t.full()).await;
-            return Ok((crate::web::untrusted("mcp", &t.full(), &format!("call failed: {e:#}")), true));
+            crate::taint::taint(app, session, "mcp", &t.full()).await;
+            return Ok((crate::taint::untrusted("mcp", &t.full(), &format!("call failed: {e:#}")), true));
         }
         Err(e) => return Err(e),
     };
@@ -569,8 +569,8 @@ async fn call(app: &App, session: Uuid, full: &str, args: &Value) -> Result<(Str
         text = format!("{}\n[... cut at 50 KB; {saved} ...]", &text[..text.floor_char_boundary(MAX_OUTPUT)]);
     }
     if untrusted {
-        crate::web::taint(app, session, "mcp", &t.full()).await;
-        text = crate::web::untrusted("mcp", &t.full(), &text);
+        crate::taint::taint(app, session, "mcp", &t.full()).await;
+        text = crate::taint::untrusted("mcp", &t.full(), &text);
     }
     Ok((text, result["isError"] == true))
 }
@@ -616,8 +616,8 @@ pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value) -> Opt
                     t.full(), t.description.trim(), serde_json::to_string_pretty(&t.schema).unwrap_or_default());
                 // Name, description and schema all come from the server: wrap the entire spec.
                 let spec = if t.untrusted {
-                    crate::web::taint(app, session, "mcp", &t.full()).await;
-                    crate::web::untrusted("mcp", &t.full(), &spec)
+                    crate::taint::taint(app, session, "mcp", &t.full()).await;
+                    crate::taint::untrusted("mcp", &t.full(), &spec)
                 } else {
                     spec
                 };

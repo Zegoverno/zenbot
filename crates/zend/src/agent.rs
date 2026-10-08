@@ -170,14 +170,10 @@ pub async fn run_tool(app: &AppState, session: Uuid, workspace: &Path, name: &st
             // Another session's messages may carry web content it read: then they're untrusted here too.
             let other = args["session"].as_str().map(str::trim).filter(|s| !s.is_empty());
             if let (Some(other), false) = (other, is_error) {
-                let tainted: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sessions WHERE starts_with(id::text, $1) AND tainted_at IS NOT NULL)")
-                    .bind(other.to_lowercase())
-                    .fetch_one(&app.db)
-                    .await
-                    .unwrap_or(true);
+                let tainted = crate::taint::prefix_tainted(&app.db, &other.to_lowercase()).await;
                 if tainted {
-                    crate::web::taint(app, session, "history", other).await;
-                    return out(crate::web::untrusted("history", other, &content), false);
+                    crate::taint::taint(app, session, "history", other).await;
+                    return out(crate::taint::untrusted("history", other, &content), false);
                 }
             }
             out(content, is_error)

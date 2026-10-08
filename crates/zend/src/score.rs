@@ -106,6 +106,53 @@ pub async fn decide(_app: &App, state: &Value, questions: &Value) -> Result<Valu
     decide_with_model(&model, state, questions).await
 }
 
+/// One bool question per item, asked in a single System One call: does item `i` bear on the need?
+/// Used to rerank search results and keep the relevant parts of a page.
+pub struct Relevance<'a> {
+    /// The decision point it's logged under (`web_rerank`, `search_rerank`, `web_focus`).
+    pub point: &'a str,
+    /// The state key and text of what's needed (`query`, `need`).
+    pub need: (&'a str, &'a str),
+    /// The state key prefix of each item (`result` gives `result_0`, `result_1`, …).
+    pub item: &'a str,
+    /// The question, with `{item}` standing for the item's key.
+    pub question: &'a str,
+    pub yes: &'a str,
+    pub no: &'a str,
+}
+
+impl Relevance<'_> {
+    /// Each item's probability of bearing on the need (None where the answer is missing). None when
+    /// System One isn't configured, private content isn't allowed (ZEN_S1_PRIVATE=0), or the call
+    /// failed. The call is logged in `decisions`.
+    pub async fn judge(&self, app: &App, items: Vec<Value>) -> Option<Vec<Option<f64>>> {
+        if scorer().is_none() || !private_ok() || items.is_empty() {
+            return None;
+        }
+        let n = items.len();
+        let mut state = Map::new();
+        let mut questions = Map::new();
+        state.insert(self.need.0.into(), json!(self.need.1));
+        for (i, item) in items.into_iter().enumerate() {
+            let key = format!("{}_{i}", self.item);
+            questions.insert(
+                format!("q{i}"),
+                json!({ "type": "bool", "instructions": self.question.replace("{item}", &key), "criteria": { "true": self.yes, "false": self.no } }),
+            );
+            state.insert(key, item);
+        }
+        let res = decide(app, &Value::Object(state), &Value::Object(questions)).await.ok()?;
+        if !res["error"].is_null() {
+            return None;
+        }
+        let probs: Vec<Option<f64>> = (0..n).map(|i| res["answers"][format!("q{i}")]["probability"].as_f64()).collect();
+        let relevant = probs.iter().filter(|p| p.is_some_and(|p| p >= 0.5)).count();
+        let input = json!({ self.need.0: self.need.1, "items": n });
+        crate::agent::log_decision(&app.db, None, self.point, &input, &res["answers"], Some(&format!("{relevant} of {n} relevant")), None, true, None).await;
+        Some(probs)
+    }
+}
+
 /// The v1 questions. Each is atomic; a choice has an `unknown` option because the model can't abstain.
 pub fn questions() -> Value {
     json!({

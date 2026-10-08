@@ -6,6 +6,16 @@
 
 ---
 
+## 2026-10-08 — One System One relevance helper; taint is its own module
+
+- The three almost-identical System One calls for web-page focus, web-search reranking and
+  knowledge-search reranking now share `score::Relevance`; result ordering, thresholds, and
+  decision points stay as before.
+- Untrusted-content wrapping and session taint moved from `web.rs` to `taint.rs`, because MCP,
+  subagents, history and web all use it. The envelope now correctly calls all of these an external
+  source (not just web). Marker defusing and the one-envelope security invariant have dedicated
+  taint-module tests.
+
 ## 2026-10-08 — `web_fetch` reads Latin-1 pages
 
 - Pages declared ISO-8859-1 / Windows-1252 (header or `<meta charset>`), or not valid UTF-8 with

@@ -19,6 +19,7 @@ mod search;
 mod secrets;
 mod skills;
 mod tape;
+mod taint;
 #[cfg(test)]
 mod test_util;
 mod tools;

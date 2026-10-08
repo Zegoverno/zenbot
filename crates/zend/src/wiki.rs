@@ -291,7 +291,7 @@ async fn capture(app: &App, session: Uuid, args: &Value) -> Result<String> {
         anyhow::bail!("Not captured: System One judged the note sensitive (secrets or private data). Leave those out of the wiki; rephrase without them if the rest is worth keeping.");
     }
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let tainted = crate::web::tainted(&app.db, session).await;
+    let tainted = crate::taint::tainted(&app.db, session).await;
     let source = match args["source"].as_str().unwrap_or("inferred") {
         _ if tainted => "web",
         s @ ("owner" | "verified" | "inferred") => s,
