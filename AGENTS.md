@@ -76,7 +76,7 @@ Refer to the owner as "the owner".
 - Design decisions (DECISIONS.md, DESIGN.md, SPEC.md, or a module's header comment) change only with
   the owner's OK. If a change needs one, ask first, then update the doc in the same pull request.
 - UI changes (`crates/zen/src/tui/`, `editor.rs`) come with render or key tests: build an `App` at a
-  fixed size with output captured (see the tests at the bottom of `tui.rs`).
+  fixed size with output captured (see the tests beside the modules in `tui/`).
 - Keep doc comments attached to the item they describe, and update them when behavior changes.
 - Commits made in a zen session get `Zen-Session` and `Co-Authored-By` trailers automatically
   (`scripts/git-hooks`); don't remove them.

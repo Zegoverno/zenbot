@@ -585,7 +585,7 @@ fn print_sessions(list: &Value) {
         println!(
             "{}  {:<16}  {}  {}",
             short(s["id"].as_str().unwrap_or("")),
-            model.split('/').next_back().unwrap_or(model),
+            for_stdout(model.split('/').next_back().unwrap_or(model)),
             s["updated_at"].as_str().unwrap_or("").get(..16).unwrap_or("").replace('T', " "),
             for_stdout(s["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("(untitled)"))
         );
@@ -599,7 +599,7 @@ fn for_stdout(s: &str) -> std::borrow::Cow<'_, str> {
 }
 
 fn print_messages(s: &Value) {
-    println!("{}  ({})", for_stdout(s["title"].as_str().unwrap_or("")), s["model"].as_str().unwrap_or(""));
+    println!("{}  ({})", for_stdout(s["title"].as_str().unwrap_or("")), for_stdout(s["model"].as_str().unwrap_or("")));
     for m in s["messages"].as_array().into_iter().flatten() {
         match m["role"].as_str() {
             Some("user") => println!("\n› {}", for_stdout(&text_of(&m["content"]))),
@@ -667,7 +667,7 @@ async fn run(cli: Cli) -> Result<()> {
                 for x in m["models"].as_array().into_iter().flatten() {
                     let id = x["id"].as_str().unwrap_or("");
                     let default = if Some(id) == m["default"].as_str() { "  (default)" } else { "" };
-                    println!("{id}{default}{}", dim(&effort_list(x)));
+                    println!("{}{default}{}", for_stdout(id), dim(&effort_list(x)));
                 }
             }
         }
@@ -677,7 +677,7 @@ async fn run(cli: Cli) -> Result<()> {
                 if json {
                     out(&v);
                 } else {
-                    println!("{}", describe_update(&v));
+                    println!("{}", for_stdout(&describe_update(&v)));
                     for x in v["commits"].as_array().into_iter().flatten() {
                         println!("  · {}", for_stdout(x.as_str().unwrap_or("")));
                     }
@@ -715,38 +715,39 @@ async fn run(cli: Cli) -> Result<()> {
                 out(&status);
             } else {
                 let mark = |b: bool| if b { "ok" } else { "FAIL" };
-                println!("kernel    {}  ({})", mark(true), c.url);
+                println!("kernel    {}  ({})", mark(true), for_stdout(&c.url));
                 println!("database  {}", mark(health["db"] == true));
                 for (name, ok) in health["workers"].as_object().into_iter().flatten() {
-                    println!("{:<9} {}", format!("worker:{name}"), mark(*ok == true));
+                    println!("{:<9} {}", format!("worker:{}", for_stdout(name)), mark(*ok == true));
                 }
                 // OpenRouter is only used for live scoring; it's shown with the scorer below.
                 for (name, ok) in models["authenticated"].as_object().into_iter().flatten().filter(|(n, _)| *n != "openrouter") {
-                    println!("{:<9} {}", name, if *ok == true { "signed in" } else { "NOT signed in" });
+                    println!("{:<9} {}", for_stdout(name), if *ok == true { "signed in" } else { "NOT signed in" });
                 }
                 match engines_line(&engines) {
-                    Some(line) => println!("engines   {line}"),
+                    Some(line) => println!("engines   {}", for_stdout(&line)),
                     None => println!("engines   not checked yet (scripts/update-engines.sh, daily via zen-engines.timer)"),
                 }
-                println!("model     {}", models["default"].as_str().unwrap_or(""));
+                println!("model     {}", for_stdout(models["default"].as_str().unwrap_or("")));
                 if !memory.is_null() {
-                    println!("memory    {}", memory_line(&memory));
+                    println!("memory    {}", for_stdout(&memory_line(&memory)));
                 }
                 match models["scorer"].as_str() {
                     None => println!("scorer    off (set ZEN_S1_MODEL to score sessions)"),
                     Some(s) if s.starts_with("openrouter/") && models["authenticated"]["openrouter"] != true => {
-                        println!("scorer    {s}  (NO key: set OPENROUTER_API_KEY)")
+                        println!("scorer    {}  (NO key: set OPENROUTER_API_KEY)", for_stdout(s))
                     }
-                    Some(s) => println!("scorer    {s}"),
+                    Some(s) => println!("scorer    {}", for_stdout(s)),
                 }
                 match &git_identity {
-                    Some(id) => println!("git       {id}"),
+                    Some(id) => println!("git       {}", for_stdout(id)),
                     None => println!("git       no identity: zen's commits get a placeholder author (git config --global user.name/user.email)"),
                 }
-                let commit = health["commit"].as_str().filter(|c| !c.is_empty()).unwrap_or("unknown");
+                let commit = for_stdout(health["commit"].as_str().filter(|c| !c.is_empty()).unwrap_or("unknown"));
                 match (version["available"].as_bool(), version["latest"].as_str()) {
                     (Some(true), Some(latest)) => println!(
-                        "version   {commit}  (update available: {latest}, {} new commit{}; run `zen upgrade`)",
+                        "version   {commit}  (update available: {}, {} new commit{}; run `zen upgrade`)",
+                        for_stdout(latest),
                         version["behind"],
                         if version["behind"] == 1 { "" } else { "s" }
                     ),
@@ -765,7 +766,7 @@ async fn run(cli: Cli) -> Result<()> {
             } else {
                 println!("{}", sleep_counts(&r));
                 if let Some(note) = r["note"].as_str() {
-                    println!("{note}");
+                    println!("{}", for_stdout(note));
                 }
             }
         }
@@ -781,13 +782,13 @@ async fn run(cli: Cli) -> Result<()> {
                     let last = x["last_load"].as_str().map(|t| format!(", last {}", t.get(..10).unwrap_or(t))).unwrap_or_default();
                     println!(
                         "{}{draft}  {}",
-                        x["skill"].as_str().unwrap_or(""),
+                        for_stdout(x["skill"].as_str().unwrap_or("")),
                         dim(&format!("{} loads{last}; accepted {} of {} judged sessions", x["loads"], x["sessions_accepted"], x["sessions_judged"]))
                     );
                 }
                 for t in s["tools"].as_array().into_iter().flatten() {
                     let state = if t["approved"] == true { "approved" } else { "sandboxed until approved" };
-                    println!("tool made_{}  {}", t["tool"].as_str().unwrap_or(""), dim(state));
+                    println!("tool made_{}  {}", for_stdout(t["tool"].as_str().unwrap_or("")), dim(state));
                 }
             }
         }
@@ -801,17 +802,17 @@ async fn run(cli: Cli) -> Result<()> {
             if json {
                 out(&p);
             } else {
-                println!("policy v{}: {}", p["version"], serde_json::to_string(&p["policy"]).unwrap_or_default());
+                println!("policy v{}: {}", p["version"], for_stdout(&serde_json::to_string(&p["policy"]).unwrap_or_default()));
                 for s in p["stats"].as_array().into_iter().flatten() {
                     println!(
                         "  {:<10} {:<34} {}",
-                        s["kind"].as_str().unwrap_or("?"),
-                        s["model"].as_str().unwrap_or("?"),
+                        for_stdout(s["kind"].as_str().unwrap_or("?")),
+                        for_stdout(s["model"].as_str().unwrap_or("?")),
                         dim(&format!("{} subtasks, {} of {} judged accepted, ${:.3} each", s["subtasks"], s["accepted"], s["judged"], s["mean_cost"].as_f64().unwrap_or(0.0)))
                     );
                 }
                 for s in p["suggestions"].as_array().into_iter().flatten() {
-                    println!("suggests {} -> {} ({})", s["kind"].as_str().unwrap_or(""), s["model"].as_str().unwrap_or(""), s["why"].as_str().unwrap_or(""));
+                    println!("suggests {} -> {} ({})", for_stdout(s["kind"].as_str().unwrap_or("")), for_stdout(s["model"].as_str().unwrap_or("")), for_stdout(s["why"].as_str().unwrap_or("")));
                 }
             }
         }
@@ -847,7 +848,7 @@ async fn run(cli: Cli) -> Result<()> {
             } else {
                 for x in m["memories"].as_array().into_iter().flatten() {
                     let tier = if x["tier"] == "short" { String::new() } else { format!(", {}", x["tier"].as_str().unwrap_or("")) };
-                    println!("{:<6} {}  {}", x["id"].as_str().unwrap_or(""), x["text"].as_str().unwrap_or(""), dim(&format!("({}{tier})", x["source"].as_str().unwrap_or(""))));
+                    println!("{:<6} {}  {}", for_stdout(x["id"].as_str().unwrap_or("")), for_stdout(x["text"].as_str().unwrap_or("")), dim(&format!("({}{tier})", x["source"].as_str().unwrap_or(""))));
                 }
                 println!("{}", dim(&memory_line(&m)));
             }

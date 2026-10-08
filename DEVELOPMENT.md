@@ -113,7 +113,7 @@ Run the same four locally before a pull request. `--locked` fails if `Cargo.lock
 
 **Limit build parallelism on this VM.** It has 2 CPUs and 7.7 GB of RAM, and parallel release builds have been OOM-killed. Set `CARGO_BUILD_JOBS=2` (e.g. `export CARGO_BUILD_JOBS=2` in your shell) and don't run two release builds at once (for example `cargo build` while `scripts/e2e.sh` or `scripts/upgrade.sh` is building).
 
-UI changes (`crates/zen/src/tui.rs`, `editor.rs`) come with render or key tests: build an `App` at a fixed size with output captured (see the tests at the bottom of `tui.rs`).
+UI changes (`crates/zen/src/tui/`, `editor.rs`) come with render or key tests: build an `App` at a fixed size with output captured (see tests beside the modules in `tui/`).
 
 ### Model workers and System One
 
