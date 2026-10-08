@@ -52,7 +52,7 @@ fn config_dir() -> std::path::PathBuf {
 /// The fixed directory engine sessions run in. Claude Code files sessions by directory and puts the
 /// directory in every request, so it must not change between turns.
 fn session_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())).join(".zenbot/engine/claude")
+    crate::turn::engine_dir("claude").unwrap_or_else(|_| std::env::temp_dir())
 }
 
 /// Whether Claude Code still has a session on disk (it may have been cleaned up).
@@ -221,8 +221,7 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
 /// One completion without tools, in a throwaway session (summaries). Returns `{ text, usage, model }`.
 pub async fn complete(model: &str, system: &str, prompt: &str) -> Result<Value> {
     // A fixed, empty directory: Claude Code tells the model its working directory.
-    let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())).join(".zenbot/engine/complete");
-    std::fs::create_dir_all(&dir)?;
+    let dir = crate::turn::engine_dir("complete")?;
     let mut child = Command::new("claude")
         .args(["-p", "--output-format", "json", "--tools", "", "--setting-sources", "", "--no-session-persistence"])
         .args(["--strict-mcp-config", "--effort", DEFAULT_EFFORT, "--system-prompt", system, "--model", model])

@@ -1,9 +1,10 @@
 //! Codex engine: runs each turn through `codex app-server` on the owner's ChatGPT plan.
-//! Codex's own shell, browser, apps and plugins are switched off; zenbot's tools are given as
-//! dynamic tools and executed by the kernel. Threads are ephemeral: zenbot's tape is the history,
-//! given to each thread as native items (`thread/inject_items`, as qm does), so the model sees its
-//! own earlier turns as messages and tool calls, not as a quoted transcript. ZEN_CODEX_INJECT=0
-//! (or an app-server that refuses the items) falls back to the transcript.
+//! Codex's own tools, MCP servers and project instruction files are switched off (`config`);
+//! zenbot's tools are given as dynamic tools and executed by the kernel. Threads persist, like
+//! Claude Code's sessions, unless ZEN_CODEX_RESUME=0 (Codex ties its prompt cache to the thread). A
+//! new thread gets zenbot's tape as native items (`thread/inject_items`, as qm does), so the model
+//! sees its own earlier turns as messages and tool calls; ZEN_CODEX_INJECT=0 (or an app-server that
+//! refuses the items) falls back to a transcript.
 
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,6 +16,20 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{watch, Mutex};
 
 use crate::turn::{enabled, now_ms, prompt_blocks, seed_blocks, StderrTail, TurnCtx, TurnInput};
+
+/// Codex's settings for every zen thread: no tool of its own (shell, browser, apps, plugins, hooks,
+/// subagents, image tools, …), no MCP servers and no project instruction files from the owner's
+/// Codex setup. Every action goes through the kernel's dynamic tools. A Codex release that adds a
+/// tool feature on by default needs it added here (the daily engine check lists them).
+fn config() -> Value {
+    json!({ "web_search": "disabled", "mcp_servers": {}, "project_doc_max_bytes": 0, "features": {
+        "shell_tool": false, "unified_exec": false, "shell_snapshot": false, "apps": false, "plugins": false, "remote_plugin": false,
+        "browser_use": false, "browser_use_external": false, "computer_use": false, "image_generation": false, "view_image": false,
+        "in_app_browser": false, "in_app_local_automation": false, "multi_agent": false, "request_permissions_tool": false,
+        "tool_suggest": false, "hooks": false, "goals": false, "code_mode_host": false, "sleep_tool": false, "skill_search": false,
+        "skill_mcp_dependency_install": false, "worktrees": false, "workspace_dependencies": false, "realtime_conversation": false
+    }})
+}
 
 pub fn available() -> bool {
     version().is_some()
@@ -38,8 +53,20 @@ struct AppServer {
 
 impl AppServer {
     async fn start(cwd: &std::path::Path) -> Result<Self> {
+        // A private CODEX_HOME prevents the owner's config, plugins, skills and MCP servers from
+        // entering zen turns. Only the ChatGPT sign-in is shared; Codex keeps its own session data.
+        let isolated_home = cwd.join("home");
+        std::fs::create_dir_all(&isolated_home)?;
+        let source_home = std::env::var("CODEX_HOME").map(std::path::PathBuf::from).unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".codex")
+        });
+        let auth = isolated_home.join("auth.json");
+        if auth.symlink_metadata().is_err() && source_home.join("auth.json").exists() {
+            std::os::unix::fs::symlink(source_home.join("auth.json"), &auth)?;
+        }
         let mut child = Command::new("codex")
             .arg("app-server")
+            .env("CODEX_HOME", &isolated_home)
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -155,8 +182,8 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
     // Threads are kept (engine sessions, like Claude Code's) unless ZEN_CODEX_RESUME=0: Codex ties its
     // prompt cache to the thread, so a new thread per turn never reuses the cache.
     let sessions = enabled("ZEN_CODEX_RESUME");
-    let jail = std::env::temp_dir().join("zen-codex");
-    std::fs::create_dir_all(&jail)?;
+    // An empty folder only the owner can read (a shared /tmp path would let others plant files).
+    let jail = crate::turn::engine_dir("codex")?;
     let result = async {
         let mut s = AppServer::start(&jail).await?;
         let tools: Vec<Value> = ctx
@@ -164,11 +191,7 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
             .iter()
             .map(|t| json!({ "type": "function", "name": t["name"], "description": t["description"], "inputSchema": t["parameters"] }))
             .collect();
-        let config = json!({ "web_search": "disabled", "features": {
-            "shell_tool": false, "unified_exec": false, "shell_snapshot": false, "apps": false, "plugins": false,
-            "browser_use": false, "browser_use_external": false, "computer_use": false, "image_generation": false,
-            "in_app_browser": false, "multi_agent": false, "request_permissions_tool": false, "tool_suggest": false
-        }});
+        let config = config();
         let developer = "Use the supplied dynamic tools for all commands and file operations. Your own working directory is an empty, read-only placeholder, not the user's workspace.";
         let mut early = Vec::new();
         // Continue the thread the kernel says is in sync with the tape; if Codex no longer has it,
@@ -323,12 +346,11 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
 
 /// One completion without tools, in an ephemeral thread (summaries). Returns `{ text, usage, model }`.
 pub async fn complete(model: &str, system: &str, prompt: &str) -> Result<Value> {
-    let dir = std::env::temp_dir().join("zen-codex");
-    std::fs::create_dir_all(&dir)?;
+    let dir = crate::turn::engine_dir("codex")?;
     let mut s = AppServer::start(&dir).await?;
     let thread = s
         .call("thread/start", json!({ "model": model, "cwd": dir, "approvalPolicy": "never", "sandbox": "read-only", "ephemeral": true,
-            "baseInstructions": system, "config": { "web_search": "disabled", "features": { "shell_tool": false, "unified_exec": false } } }), None)
+            "baseInstructions": system, "config": config() }), None)
         .await?;
     let thread_id = thread["thread"]["id"].as_str().context("codex thread id")?.to_string();
     let mut pending = Vec::new();
