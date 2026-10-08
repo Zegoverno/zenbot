@@ -3,9 +3,18 @@
 
 use super::*;
 
+/// A session's ordered queue of worker notifications.
+type Queues = Arc<std::sync::Mutex<HashMap<Uuid, tokio::sync::mpsc::UnboundedSender<(usize, Incoming)>>>>;
+
+/// How long a session's queue task waits for more messages before it ends.
+const QUEUE_IDLE: Duration = Duration::from_secs(60);
+
 pub(crate) async fn dispatch(app: AppState, mut incoming: tokio::sync::mpsc::UnboundedReceiver<(usize, Incoming)>) {
-    // Notifications are handled in arrival order so streams and the tape stay ordered.
-    // Tool calls run concurrently; the worker already emitted the assistant message that requested them.
+    // Notifications are handled in arrival order per session, so each session's stream and tape
+    // stay ordered, while one session's slow write (a turn's end, a model refresh) doesn't hold up
+    // the others. Tool calls run concurrently; the worker already emitted the assistant message
+    // that requested them. Messages without a session are handled here, in order.
+    let queues: Queues = Arc::default();
     while let Some((worker, msg)) = incoming.recv().await {
         if msg.method == "tool.call" {
             let app = app.clone();
@@ -14,10 +23,57 @@ pub(crate) async fn dispatch(app: AppState, mut incoming: tokio::sync::mpsc::Unb
                     tracing::error!("handling tool call: {e:#}");
                 }
             });
-        } else if let Err(e) = handle_incoming(&app, worker, msg).await {
-            tracing::error!("handling mind message: {e:#}");
+            continue;
+        }
+        match session_id(&msg.params) {
+            Ok(id) => enqueue(&app, &queues, id, (worker, msg)),
+            Err(_) => {
+                if let Err(e) = handle_incoming(&app, worker, msg).await {
+                    tracing::error!("handling mind message: {e:#}");
+                }
+            }
         }
     }
+}
+
+/// Hand a message to its session's queue, starting the queue's task if there is none (or it just
+/// ended). Sending under the map's lock keeps the order: a task only ends after it found its
+/// queue empty while holding the same lock, and then removes itself from the map.
+fn enqueue(app: &AppState, queues: &Queues, id: Uuid, item: (usize, Incoming)) {
+    let mut map = queues.lock().unwrap_or_else(|e| e.into_inner());
+    let item = match map.get(&id) {
+        Some(tx) => match tx.send(item) {
+            Ok(()) => return,
+            Err(e) => e.0,
+        },
+        None => item,
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(usize, Incoming)>();
+    let _ = tx.send(item);
+    map.insert(id, tx);
+    let (app, queues) = (app.clone(), queues.clone());
+    tokio::spawn(async move {
+        loop {
+            let next = match tokio::time::timeout(QUEUE_IDLE, rx.recv()).await {
+                Ok(Some(m)) => Some(m),
+                Ok(None) => None,
+                Err(_) => {
+                    let mut map = queues.lock().unwrap_or_else(|e| e.into_inner());
+                    match rx.try_recv() {
+                        Ok(m) => Some(m),
+                        Err(_) => {
+                            map.remove(&id);
+                            None
+                        }
+                    }
+                }
+            };
+            let Some((worker, msg)) = next else { break };
+            if let Err(e) = handle_incoming(&app, worker, msg).await {
+                tracing::error!("handling mind message for {id}: {e:#}");
+            }
+        }
+    });
 }
 
 pub(crate) fn session_id(params: &Value) -> Result<Uuid> {
@@ -112,7 +168,9 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             let ms = started.elapsed().as_millis() as i64;
             // First time this session touches a project with its own instructions: attach them.
             let new_context: Vec<PathBuf> = {
-                let candidates = context::governing(&workspace, &context::paths_in_call(&workspace, &name, &args));
+                // Up to 20 file checks: off the runtime's threads.
+                let (ws, n, a) = (workspace.clone(), name.clone(), args.clone());
+                let candidates = tokio::task::spawn_blocking(move || context::governing(&ws, &context::paths_in_call(&ws, &n, &a))).await.unwrap_or_default();
                 let mut turns = app.turns.lock().await;
                 match turns.get_mut(&id) {
                     Some(t) => {
