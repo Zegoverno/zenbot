@@ -124,25 +124,36 @@ impl Editor {
         self.cursor += skip + word;
     }
 
+    /// Delete back to the start of the previous word (the same words `word_left` moves by).
     pub fn delete_word(&mut self) {
-        let before = &self.buf[..self.cursor];
-        let trimmed = before.trim_end_matches(' ');
-        let start = trimmed.rfind([' ', '\n']).map(|i| i + 1).unwrap_or(0);
-        self.buf.replace_range(start..self.cursor, "");
-        self.cursor = start;
+        let end = self.cursor;
+        self.word_left();
+        self.buf.replace_range(self.cursor..end, "");
     }
 
-    /// Move up a line; at the first line, recall older history. Returns true if handled.
+    /// Display column of the caret in its line.
+    fn column(&self) -> usize {
+        UnicodeWidthStr::width(&self.buf[self.line_start()..self.cursor])
+    }
+
+    /// The byte offset in the line `start..end` closest to display column `col`, never past it.
+    fn at_column(&self, start: usize, end: usize, col: usize) -> usize {
+        let mut w = 0;
+        for (i, ch) in self.buf[start..end].char_indices() {
+            w += ch.width().unwrap_or(0);
+            if w > col {
+                return start + i;
+            }
+        }
+        end
+    }
+
+    /// Move up a line, keeping the display column; at the first line, recall older history.
     pub fn up(&mut self) {
         let start = self.line_start();
         if start > 0 {
-            let col = self.cursor - start;
             let prev_start = self.buf[..start - 1].rfind('\n').map(|i| i + 1).unwrap_or(0);
-            let prev_len = start - 1 - prev_start;
-            self.cursor = prev_start + col.min(prev_len);
-            while !self.buf.is_char_boundary(self.cursor) {
-                self.cursor -= 1;
-            }
+            self.cursor = self.at_column(prev_start, start - 1, self.column());
             return;
         }
         if self.history.is_empty() {
@@ -164,13 +175,9 @@ impl Editor {
     pub fn down(&mut self) {
         let end = self.line_end();
         if end < self.buf.len() {
-            let col = self.cursor - self.line_start();
             let next_start = end + 1;
             let next_end = self.buf[next_start..].find('\n').map(|i| next_start + i).unwrap_or(self.buf.len());
-            self.cursor = next_start + col.min(next_end - next_start);
-            while !self.buf.is_char_boundary(self.cursor) {
-                self.cursor -= 1;
-            }
+            self.cursor = self.at_column(next_start, next_end, self.column());
             return;
         }
         match self.hist_idx {
@@ -370,6 +377,34 @@ mod tests {
         assert!(text(&lines[1]).contains('1'));
         assert!(text(&lines[4]).contains("↓ 3 more"));
         assert_eq!(row, 1);
+    }
+
+    #[test]
+    fn up_and_down_keep_the_display_column() {
+        let mut e = Editor::new(None);
+        e.insert("日本語テキスト\nabcdefgh\nxy");
+        e.up(); // from the end of "xy" (column 2) to column 2 of "abcdefgh"
+        assert_eq!(&e.buf[e.line_start()..e.cursor], "ab");
+        e.right();
+        e.right(); // column 4
+        e.up();
+        assert_eq!(&e.buf[e.line_start()..e.cursor], "日本", "two wide characters are four columns");
+        e.right(); // column 6
+        e.down();
+        assert_eq!(&e.buf[e.line_start()..e.cursor], "abcdef");
+        e.down();
+        assert_eq!(&e.buf[e.line_start()..e.cursor], "xy", "clamped to a shorter line");
+    }
+
+    #[test]
+    fn delete_word_uses_the_same_words_as_word_left() {
+        let mut e = Editor::new(None);
+        e.insert("one\ttwo  ");
+        e.delete_word();
+        assert_eq!(e.buf, "one    ", "a tab is inserted as spaces, and the word before the spaces goes");
+        e.set("first line\nsecond\n");
+        e.delete_word();
+        assert_eq!(e.buf, "first line\n", "the newline before the caret goes with the word");
     }
 
     #[test]
