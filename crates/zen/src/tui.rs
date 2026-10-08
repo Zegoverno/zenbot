@@ -2261,12 +2261,14 @@ impl App {
                 }
             }
             "end" => {
+                let mut entries = Vec::new();
                 let mut out = Vec::new();
                 self.tool_since = None;
                 if self.aborting {
                     if !self.inline {
+                        // The text so far stays markdown, so it re-wraps at the chat width.
                         if !self.stream.trim().is_empty() {
-                            out.extend(Md::default().render(self.stream.trim_end(), w));
+                            entries.push(Entry::Md(self.stream.clone()));
                         }
                     } else if self.committed < self.stream.len() {
                         let rest = self.stream[self.committed..].to_string();
@@ -2293,7 +2295,8 @@ impl App {
                 if self.busy {
                     self.status = "Continuing".into();
                 }
-                self.commit(out);
+                entries.push(Entry::Raw(out));
+                self.push_all(entries);
             }
             "error" => {
                 self.busy = false;
@@ -2547,6 +2550,21 @@ mod tests {
         let out = a.capture.take().unwrap();
         assert!(out.contains(" · xhigh · "), "{out}");
         assert_eq!(a.session_tokens, 4200, "the kernel's turn totals replace the streamed estimate");
+    }
+
+    #[test]
+    fn an_interrupted_reply_stays_markdown_and_rewraps_at_the_chat_width() {
+        let mut a = app(100, 30);
+        a.busy = true;
+        a.on_event(json!({ "type": "delta", "delta": "Some **bold** words ".repeat(8) }));
+        a.aborting = true;
+        a.on_event(json!({ "type": "end", "error": null, "turn": {} }));
+        assert!(matches!(&a.entries[0], Entry::Md(t) if t.starts_with("Some **bold**")));
+        assert!(texts(&a.view).iter().any(|l| l == "interrupted"));
+        a.panel = Some(Panel { path: "x.txt".into(), text: "x".into(), modified: None, scroll: 0, lines: Vec::new(), lines_w: 0 });
+        a.draw();
+        assert!(a.view.iter().all(|l| l.iter().map(|(t, _)| width(t)).sum::<usize>() <= a.columns().0), "re-wrapped to the chat");
+        assert!(a.view[0].iter().any(|(t, s)| t == "bold" && *s == Sty::Bold), "still rendered as markdown");
     }
 
     #[test]
