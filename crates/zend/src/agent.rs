@@ -29,6 +29,21 @@ pub fn read_only(kind: Option<&str>) -> bool {
     kind == Some(VERIFIER)
 }
 
+/// Why a session of this kind may not call `name`, if it may not. The one place the kernel enforces
+/// what each kind of session may do (what it is offered is `specs`, which follows the same rules).
+pub fn refusal(kind: Option<&str>, name: &str) -> Option<String> {
+    if read_only(kind) && !matches!(name, "bash" | "read" | "submit_verdict") {
+        return Some(format!("`{name}` isn't available to a verifier"));
+    }
+    if !read_only(kind) && name == "submit_verdict" {
+        return Some("`submit_verdict` is only for a verifier session".into());
+    }
+    if kind == Some(crate::delegate::SUBAGENT) && matches!(name, "ask" | "delegate") {
+        return Some(format!("`{name}` isn't available to a subagent: decide yourself and say what you assumed"));
+    }
+    None
+}
+
 fn spec(name: &str, description: &str, parameters: Value) -> Value {
     json!({ "name": name, "description": description, "parameters": parameters })
 }
@@ -436,6 +451,13 @@ mod tests {
     fn verifier_sessions_get_their_own_small_tool_list() {
         let names = |v: Value| v.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         assert_eq!(names(specs(Some(VERIFIER))), ["bash", "read", "submit_verdict"]);
+        // What each kind is offered is exactly what it may call.
+        for kind in [None, Some(VERIFIER), Some(crate::delegate::SUBAGENT)] {
+            let offered = names(specs(kind));
+            for t in names(specs(None)).into_iter().chain(["submit_verdict".to_string()]) {
+                assert_eq!(refusal(kind, &t).is_none(), offered.contains(&t), "{kind:?} {t}");
+            }
+        }
         let all = names(specs(None));
         for t in ["bash", "read", "write", "edit", "history", "search", "ask", "remember", "capture", "web_search", "web_fetch", "find_skills", "load_skill", "save_skill", "find_tools", "load_tool", "call_tool", "save_tool", "verify", "delegate"] {
             assert!(all.contains(&t.to_string()), "{t} offered");
