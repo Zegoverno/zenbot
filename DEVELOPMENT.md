@@ -319,7 +319,7 @@ zen memory --tier archived                   # what the sleeps archived
 systemctl list-timers zen-sleep.timer        # next run
 ```
 
-Nothing is promoted to long-term memory (D-045). The sleep's note flags lasting entries that belong in `USER.md` or `IDENTITY.md`, so the agent proposes them in the conversation.
+The sleep promotes on its own (D-045): lasting entries about the owner move to `USER.md`, lasting guidance to `IDENTITY.md` (under `## Learned`; the file's previous version is saved to `~/.zenbot/backups/<name>-<time>.md`; only `owner`/`verified` entries), lasting knowledge is copied into the wiki. `ZEN_PROMOTE_BAR` (0.9) sets the bar. To undo a move, copy the backup back.
 
 ## Search index
 

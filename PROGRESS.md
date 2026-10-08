@@ -14,9 +14,11 @@
 - Traits, guidance and preferences are not memory: the agent proposes the edit to `IDENTITY.md` or
   `USER.md` in the conversation and makes it once the owner approves. The `remember` and `capture`
   descriptions say so.
-- The sleep no longer promotes to long-term memory (there were no long-term rows); it flags lasting
-  entries that belong in those files. One System One question fewer per entry and no repeat samples.
-  `zen memory accept|reject` and `POST /api/memory/{id}/review` are gone.
+- No more long-term tier (there were no long-term rows). The sleep promotes on its own instead: a
+  lasting entry about the owner moves to `USER.md`, lasting guidance to `IDENTITY.md` (under
+  `## Learned`, dated backup in `~/.zenbot/backups/`, only the owner's words or verified results,
+  lowest of three samples ≥ `ZEN_PROMOTE_BAR` 0.9), and lasting knowledge is copied into the wiki.
+  The morning note lists each. `zen memory accept|reject` and `POST /api/memory/{id}/review` are gone.
 - The kernel refuses `edit`/`write` on SOUL, IDENTITY, AGENTS and USER from subagents and from
   sessions that read untrusted content. New e2e checks and an eval task (`preference-not-memory`).
 

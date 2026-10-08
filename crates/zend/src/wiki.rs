@@ -246,7 +246,13 @@ async fn route(app: &App, note: &str, candidates: &[Page]) -> Option<(String, f6
     Some((page, p, a["known"]["probability"].as_f64().unwrap_or(0.0), a["sensitive"]["probability"].as_f64().unwrap_or(0.0)))
 }
 
-async fn capture(app: &App, session: Uuid, args: &Value) -> Result<String> {
+/// Copy a memory into the wiki (the sleep's promotion), as a capture with the memory's source.
+pub async fn capture_memory(app: &App, id: i64, text: &str, source: &str) -> Result<String> {
+    capture(app, None, &json!({ "note": text, "source": source, "from": format!("memory m{id}") })).await
+}
+
+/// A capture from a session (the `capture` tool) or, with no session, from the sleep.
+async fn capture(app: &App, session: Option<Uuid>, args: &Value) -> Result<String> {
     let note = args["note"].as_str().map(str::trim).filter(|n| !n.is_empty()).context("capture needs a `note`")?;
     let note = crate::secrets::mask(note).replace('\n', " ");
     let title_masked = args["title"].as_str().map(|t| crate::secrets::mask(t.trim()));
@@ -291,14 +297,18 @@ async fn capture(app: &App, session: Uuid, args: &Value) -> Result<String> {
         anyhow::bail!("Not captured: System One judged the note sensitive (secrets or private data). Leave those out of the wiki; rephrase without them if the rest is worth keeping.");
     }
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let tainted = crate::taint::tainted(&app.db, session).await;
+    let tainted = match session {
+        Some(s) => crate::taint::tainted(&app.db, s).await,
+        None => false,
+    };
     let source = match args["source"].as_str().unwrap_or("inferred") {
         _ if tainted => "web",
         s @ ("owner" | "verified" | "inferred") => s,
         _ => "inferred",
     };
     let from = args["from"].as_str().map(|f| format!("{}, ", crate::secrets::mask(f))).unwrap_or_default();
-    let entry = format!("- **{today}** | {from}session {} ({source}) — {note}", &session.to_string()[..8]);
+    let by = session.map(|s| format!("session {}", &s.to_string()[..8])).unwrap_or_else(|| "the sleep".into());
+    let entry = format!("- **{today}** | {from}{by} ({source}) — {note}");
     // Parallel captures (subagents) read-modify-write the same page, log.md and index.md.
     static WRITING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _writing = WRITING.lock().await;
@@ -368,7 +378,7 @@ pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value) -> Opt
     if name != "capture" {
         return None;
     }
-    Some(match capture(app, session, args).await {
+    Some(match capture(app, Some(session), args).await {
         Ok(content) => tools::ToolOutput { content, is_error: false },
         Err(e) => tools::ToolOutput { content: format!("{e:#}"), is_error: true },
     })

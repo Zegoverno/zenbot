@@ -111,9 +111,10 @@ with questions for the owner. The kernel-enforced workflow (`flow.rs`) was remov
 - **Sleep** (`memory::sleep`, `scripts/sleep.sh` from `zen-sleep.timer` nightly, `zen memory
   sleep`): ranks entries (System One's "needed soon" when allowed, else recency; the owner's words
   and verified results a little higher), keeps what fits and archives the rest (out of the search
-  index). Nothing is promoted (D-045): an entry System One judges lasting and about the owner, or
-  guidance on how the agent acts, is flagged in the note so the agent proposes it for `USER.md` or
-  `IDENTITY.md` in the conversation. Every entry's fate
+  index). First it promotes on its own (D-045, bar `ZEN_PROMOTE_BAR` 0.9): lasting and about the
+  owner → `USER.md`, lasting guidance on how the agent acts → `IDENTITY.md` (under `## Learned`,
+  backup in `~/.zenbot/backups/`, lowest of three samples, only `owner`/`verified` entries; the
+  entry leaves memory), lasting knowledge → copied into the wiki. Every entry's fate
   is a `decisions` row; the run is a `sleep_runs` row; the next sessions get a one-line note. System
   One sees memories unless `ZEN_S1_PRIVATE=0` (D-032).
 - **Search** (`search.rs`, D-035): an indexer keeps `search_docs` current: one document per turn of
@@ -327,14 +328,15 @@ budget, cost recorded) asks System One about every entry:
 | Will it still be true in months? | probability |
 | Is it guidance on how the agent should act (a trait, a preference)? | probability |
 | Is it about the owner as a person? | probability |
+| Is it lasting knowledge (a decision and why, how something works, a lesson)? | probability |
 | Is it already covered (another memory, a skill, `USER.md`)? | probability |
 
 - **Keep:** rank by likely need, adjusted for recent use; fill the fixed size from the top.
-- **Not memory:** a lasting entry about the owner, or guidance on how the agent acts, is flagged so
-  the agent proposes it for `USER.md` or `IDENTITY.md` in the conversation (D-045; nothing is
-  promoted to a long-term tier).
+- **Promote (automatic, D-045):** about the owner → `USER.md`; guidance → `IDENTITY.md` (both with
+  a backup, only from the owner's words or verified results); knowledge → the wiki. No long-term
+  tier.
 - **Drop:** everything else leaves short-term memory, archived, never deleted.
-- Every decision goes to `decisions`; a short morning note says what was kept, dropped and flagged;
+- Every decision goes to `decisions`; a short morning note says what was kept, dropped and promoted, and where;
   anything can be undone.
 
 **Knowledge.** The wiki holds structured notes: each page an append-only timeline plus a summary

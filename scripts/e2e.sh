@@ -419,6 +419,21 @@ system_one_direct() {
   check "System One bool mapped from noul" grep -q '"probability": 0.82' <<<"$answer"
   check "System One choice and score parsed" bash -c 'grep -q "\"choice\": \"build\"" <<<"$1" && grep -q "\"score\": 1" <<<"$1"' _ "$answer"
   check "the decision was logged" eq "$(q "SELECT count(*) FROM decisions WHERE session_id='$sid' AND point='tool' AND error IS NULL")" 1
+  # The sleep promotes on its own: the owner's lasting fact moves to USER.md (backup first), an
+  # inference stays out of it, lasting knowledge is copied into the wiki.
+  local zh="$TMP/home/.zenbot"; rm -rf "$zh/backups"
+  q "DELETE FROM memories; INSERT INTO memories (text, source) VALUES ('PROMOTE-USER the owner swims every morning', 'owner'), ('PROMOTE-USER the owner likes web gossip', 'inferred'), ('PROMOTE-WIKI the purple service retries three times', 'verified')" >/dev/null
+  local r; r=$(zen memory sleep --json)
+  check "the sleep reports its promotions" eq "$(echo "$r" | jq -r .promoted)" 2
+  check "the owner's fact is in USER.md, under Learned" bash -c 'sed -n "/^## Learned/,\$p" "$1" | grep -q "PROMOTE-USER the owner swims every morning (from memory m"' _ "$zh/USER.md"
+  check "with a backup of the old USER.md" bash -c 'ls "$1"/USER-*.md >/dev/null && ! grep -q "swims every morning" "$1"/USER-*.md' _ "$zh/backups"
+  check "and it left memory" eq "$(q "SELECT tier || '/' || reason FROM memories WHERE text LIKE '%swims%'")" "archived/promoted to USER.md"
+  check "an inference doesn't reach USER.md" bash -c '! grep -q "web gossip" "$1" && grep -q "it.s an inference" <<<"$2"' _ "$zh/USER.md" "$(echo "$r" | jq -r .note)"
+  check "knowledge is copied into the wiki, by the sleep" grep -rq "memory m[0-9]*, the sleep (verified) — PROMOTE-WIKI the purple service" "$zh/global/wiki"
+  check "and marked so it isn't copied twice" eq "$(q "SELECT proposed FROM memories WHERE text LIKE 'PROMOTE-WIKI%'")" wiki
+  r=$(zen memory sleep --json)
+  check "a second sleep promotes nothing again" eq "$(echo "$r" | jq -r .promoted)" 0
+  q "DELETE FROM memories" >/dev/null
   stop_kernel
   start_kernel "$ws" "$(script systemone.json)" ZEN_WORKERS=pi ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone"
   check "pi-only legacy setting falls back to engine" grep -q 'worker `engine` started' "$TMP/kernel.log"

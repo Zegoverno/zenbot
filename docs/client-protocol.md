@@ -20,7 +20,7 @@ accepted for ordinary HTTP requests. The token is in `~/.zenbot/token`. The serv
 | `PATCH /api/sessions/{id}` | `{ title?, model?, effort? ("default" clears), archived? }` | the session |
 | `POST /api/sessions/{id}/decision` | `{ decision: accept\|more\|reshape\|drop, note? }` | the recorded verdict (source `owner`) |
 | `GET /api/memory?tier=` | | `{ memories, last_sleep, size }`: memories of a tier (`short`, the default; `archived`, `all`; `long` holds only rows from before D-045), each `{ id: "m12", text, source, tier, proposed, reason, created_at, updated_at }`; the latest `sleep_runs` row; short-term memory's size in characters |
-| `POST /api/memory/sleep?trigger=` | | tidy short-term memory now (`trigger=nightly` from the timer, else the owner): `{ run, entries, kept, dropped, scorer, note }` |
+| `POST /api/memory/sleep?trigger=` | | tidy short-term memory now (`trigger=nightly` from the timer, else the owner): `{ run, entries, kept, dropped, promoted, scorer, note }` |
 | `GET /api/version?refresh=` | | the running commit and whether `main` is ahead |
 | `GET /api/upgrade`, `POST /api/upgrade` | | upgrade progress / start one |
 

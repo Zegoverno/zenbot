@@ -36,4 +36,5 @@ the owner approves there.
 
 ## Learned
 
-Dated guidance the owner approved in sessions, newest last.
+Dated guidance, newest last: approved by the owner in sessions, or promoted from memory by the
+nightly sleep.

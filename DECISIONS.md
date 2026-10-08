@@ -6,7 +6,7 @@
 
 ---
 
-## D-045 — IDENTITY.md; traits and guidance are not memory
+## D-045 — IDENTITY.md; memory is promoted into the prompt files and the wiki
 
 **Date:** 2026-10-08 · **Status:** accepted (owner) · **Supersedes:** D-035's promotion to
 long-term memory and D-028's long-term tier (search over memories stays)
@@ -17,20 +17,30 @@ agent is for, what it holds to and the lines it doesn't cross; only the owner ed
 and how it works. `USER.md` is the owner; `AGENTS.md` the environment; `MEMORY.md` where things
 stand. Traits, standing guidance and preferences are not memory: the agent proposes the exact edit
 to `IDENTITY.md` (about itself) or `USER.md` (about the owner) in the conversation and makes it once
-the owner approves there. The nightly sleep no longer promotes anything to long-term memory; it
-keeps or archives, and flags lasting entries that belong in those files so the agent proposes them.
+the owner approves there. The separate long-term tier is gone; the nightly sleep promotes on its own
+(owner, 2026-10-08) into the places lasting things really live: a lasting entry about the owner
+moves to `USER.md`, lasting guidance on how the agent acts to `IDENTITY.md` (a dated line under
+`## Learned`, after a dated backup in `~/.zenbot/backups/`; refused if the file would pass its size
+cap), and lasting knowledge is copied into the wiki (a capture by "the sleep"; the entry stays in
+short-term memory while it's needed). The bar is 0.9 (`ZEN_PROMOTE_BAR`), on the lowest of three
+samples for a prompt file; only the owner's words and verified results reach the prompt files (an
+inference, which may come from the web, is flagged for the agent to propose instead). The morning
+note lists every promotion.
 Archived memories leave the search index (as before). The kernel refuses `edit`/`write` on the four
 prompt files from subagents and from sessions that have read untrusted content.
 
 **Why:** A promoted memory left the always-loaded instructions for search, so the most lasting,
 high-impact guidance became the hardest to reach; and "how to act" is identity, not recollection.
+A long-term tier of loose sentences duplicated the wiki, which has pages, timelines and git. The
+owner wants promotion automatic; backups and the morning note keep it reviewable and undoable.
 Approval in the conversation is faster and clearer than a review queue. The guard keeps text from
 the web or an MCP server from rewriting the agent's instructions. OpenClaw loads the same files in
 the same order (`SOUL`, `IDENTITY`, `USER`; `docs/research/hermes-openclaw.md`), with a much
 smaller `IDENTITY.md` (name, vibe, emoji).
 
 **Considered:** keeping the long-term tier for durable facts (the wiki already holds lasting
-knowledge); adding identity to `SOUL.md` (the owner wants the soul as a stable guiding layer); a
+knowledge); promotion into prompt files only after the owner's yes in the chat (the agent's
+recommendation; the owner chose automatic with backups); adding identity to `SOUL.md` (the owner wants the soul as a stable guiding layer); a
 review queue for proposed edits (`zen memory accept`), slower than approving in the conversation.
 
 **Known limit:** `bash` runs as the owner's Unix user and can still write the files (ROADMAP.md,

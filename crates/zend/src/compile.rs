@@ -24,7 +24,7 @@ pub struct Envelope {
 /// Largest size of each prompt file in the instructions (characters): SOUL.md 4000
 /// (ZEN_SOUL_CHARS), IDENTITY.md 4000 (ZEN_IDENTITY_CHARS), AGENTS.md 12000 (ZEN_AGENTS_CHARS), USER.md 3000 (ZEN_USER_CHARS). Sizes from
 /// Hermes and OpenClaw (DESIGN.md, Target design).
-fn file_cap(path: &str) -> usize {
+pub(crate) fn file_cap(path: &str) -> usize {
     let (key, default) = match path.rsplit('/').next().unwrap_or(path) {
         "SOUL.md" => ("ZEN_SOUL_CHARS", 4000.0),
         "IDENTITY.md" => ("ZEN_IDENTITY_CHARS", 4000.0),

@@ -915,7 +915,7 @@ fn sleep_counts(r: &Value) -> String {
     }
     let n = |k: &str| r[k].as_i64().unwrap_or(0);
     let scorer = r["scorer"].as_str().map(|s| format!(" (judged by {s})")).unwrap_or_else(|| " (by recency: no System One model)".into());
-    format!("{} entries: {} kept, {} archived{scorer}", n("entries"), n("kept"), n("dropped"))
+    format!("{} entries: {} kept, {} archived, {} promoted{scorer}", n("entries"), n("kept"), n("dropped"), n("promoted"))
 }
 
 /// Short-term memory's size and the last sleep, from `/api/memory`.
@@ -952,7 +952,7 @@ mod tests {
     fn memory_line_shows_size_and_the_last_sleep() {
         let m = json!({ "size": 4000, "memories": [{ "text": "abc" }, { "text": "defgh" }],
             "last_sleep": { "ended_at": "2026-10-07T04:01:02Z", "entries": 3, "kept": 2, "dropped": 1, "promoted": 0, "proposed": 0, "scorer": null } });
-        assert_eq!(memory_line(&m), "2 entries, 28/4000 characters; last sleep 2026-10-07 04:01 UTC: 3 entries: 2 kept, 1 archived (by recency: no System One model)");
+        assert_eq!(memory_line(&m), "2 entries, 28/4000 characters; last sleep 2026-10-07 04:01 UTC: 3 entries: 2 kept, 1 archived, 0 promoted (by recency: no System One model)");
         assert!(memory_line(&json!({ "size": 4000, "memories": [], "last_sleep": null })).ends_with("no sleep yet"));
     }
 
