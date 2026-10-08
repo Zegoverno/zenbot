@@ -6,6 +6,23 @@
 
 ---
 
+## 2026-10-08 — Kernel correctness: MCP, wiki, memory, workers, files
+
+- MCP: a server whose pipe broke or that exited reconnects on the next call; a server that is down
+  is retried after 60 s instead of costing its timeout on every call; a bare tool name runs only
+  when exactly one server has it.
+- Wiki `capture`: parallel captures are serialized; a note is skipped as "already recorded" only
+  for the page System One judged; the pre-capture index covers the wiki only (no embedding call);
+  new page titles and aliases stay on one line. Index passes run one at a time.
+- Memory: the sleep applies all fates and decisions in one transaction, a panicking sleep no longer
+  blocks later ones, sizes count characters, and the sleep removes saved outputs older than 30 days.
+- Workers: a dropped request no longer leaks its entry; an invalid UTF-8 line no longer stops the
+  reader; `/health` pings time out after 3 s; post-verdict work counts as busy for upgrades.
+- Files: `write` and `edit` are atomic and keep permissions and symlinks; files with mixed line
+  endings keep them. `history` search matches message text, not JSON; session prefixes are not
+  wildcards. Skill frontmatter keeps a body's leading list dash. Secret masking reloads rotated
+  sign-ins without a restart. Delegation draws are random and models refresh once per call.
+
 ## 2026-10-08 — Bound web caches
 
 - `web_fetch` pages and `web_search` results now evict the oldest entry when a cache reaches 32
