@@ -9,6 +9,7 @@ PORT=$(zen_env ZEN_PORT); PORT=${PORT:-8100}
 TOKEN=$(cat "$HOME/.zenbot/token")
 # The kernel may be restarting (an upgrade): wait for it first.
 wait_healthy "http://127.0.0.1:$PORT/health" 300 || { echo "sleep: zenbot is not healthy; skipped" >&2; exit 1; }
-curl -fsS --max-time 3600 -X POST -H "Authorization: Bearer $TOKEN" \
+# The token goes to curl on stdin, not argv (argv is visible to every user in `ps`).
+printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" | curl -fsS --max-time 3600 -X POST -K - \
   "http://127.0.0.1:$PORT/api/memory/sleep?trigger=nightly" |
   jq -r '"sleep: \(.entries) entries, \(.kept) kept, \(.dropped) archived, \(.promoted) promoted, \(.proposed) proposed (scorer: \(.scorer // "none, by recency"))"'

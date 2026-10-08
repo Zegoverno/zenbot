@@ -33,6 +33,13 @@ impl Mind {
             .arg("-lc")
             .arg(command)
             .current_dir(dir)
+            // Workers run model CLIs, not the kernel's tools: they get none of the kernel's own
+            // credentials (engine sign-ins such as ANTHROPIC_API_KEY pass through).
+            .env_remove("ZEN_TOKEN")
+            .env_remove("DATABASE_URL")
+            .env_remove("OPENROUTER_API_KEY")
+            .env_remove("BRAVE_API_KEY")
+            .env_remove("TAVILY_API_KEY")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())

@@ -105,6 +105,9 @@ claude_platform() {
   if [ -f /lib/libc.musl-x86_64.so.1 ] || [ -f /lib/libc.musl-aarch64.so.1 ] || ldd /bin/ls 2>&1 | grep -q musl; then echo "linux-$arch-musl"; else echo "linux-$arch"; fi
 }
 
+# A word quoted for the shell: ROLLBACK and CLEANUP are run with eval, and a path may contain quotes.
+q() { printf '%q' "$1"; }
+
 # Install Claude Code $1 in place of the current one; sets ROLLBACK to the command that undoes it.
 claude_install() {
   local new=$1 path real platform sum bin dir old
@@ -124,13 +127,13 @@ claude_install() {
     old=$(readlink "$path")
     as_owner "$dir" install -m 755 "$bin" "$dir/$new" || return 1
     relink "$path" "$dir/$new" || return 1
-    ROLLBACK="relink '$path' '$old'"
-    CLEANUP="claude_prune '$dir' '$new' '$(basename "$real")'"
+    ROLLBACK="relink $(q "$path") $(q "$old")"
+    CLEANUP="claude_prune $(q "$dir") $(q "$new") $(q "$(basename "$real")")"
   else
     # A plain binary: keep the old one as .prev; rename over it so running sessions keep theirs.
     as_owner "$dir" cp -f "$real" "$real.prev" || return 1
     as_owner "$dir" install -m 755 "$bin" "$real.new" && as_owner "$dir" mv -f "$real.new" "$real" || return 1
-    ROLLBACK="as_owner '$dir' cp -f '$real.prev' '$real.new' && as_owner '$dir' mv -f '$real.new' '$real'"
+    ROLLBACK="as_owner $(q "$dir") cp -f $(q "$real.prev") $(q "$real.new") && as_owner $(q "$dir") mv -f $(q "$real.new") $(q "$real")"
     CLEANUP=:
   fi
 }
@@ -158,7 +161,7 @@ codex_install() {
       # Global npm install (install.sh on a fresh VM).
       local npmroot; npmroot=$(npm root -g)
       as_owner "$npmroot" npm install -g --no-audit --no-fund --silent "@openai/codex@$new" >/dev/null 2>&1 || { echo "npm install failed"; return 1; }
-      ROLLBACK="as_owner '$npmroot' npm install -g --no-audit --no-fund --silent '@openai/codex@$old' >/dev/null 2>&1"
+      ROLLBACK="as_owner $(q "$npmroot") npm install -g --no-audit --no-fund --silent $(q "@openai/codex@$old") >/dev/null 2>&1"
       CLEANUP=:
       return 0 ;;
     */releases/*/bin/codex | */releases/*/codex) ;;
@@ -190,11 +193,11 @@ codex_install() {
   for l in "${links[@]}"; do
     t=$(readlink "$l")
     if [ "$l" = "$root/current" ]; then relink "$l" "$newrel"; else relink "$l" "$newrel/${t#"$rel"/}"; fi || return 1
-    undo+="relink '$l' '$t'; "
+    undo+="relink $(q "$l") $(q "$t"); "
     ROLLBACK="$undo"
   done
   [ ${#links[@]} -gt 0 ] || { echo "found no links to $rel to switch"; return 1; }
-  CLEANUP="codex_prune '$releases' '$newrel' '$rel'"
+  CLEANUP="codex_prune $(q "$releases") $(q "$newrel") $(q "$rel")"
 }
 # Keep only the current and previous release.
 codex_prune() { local d; for d in "$1"/*/; do d=${d%/}; [ "$d" = "$2" ] || [ "$d" = "$3" ] || as_owner "$1" rm -rf "$d"; done; }

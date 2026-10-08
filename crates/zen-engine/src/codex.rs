@@ -36,9 +36,15 @@ pub fn available() -> bool {
 }
 
 /// The installed Codex CLI version ("codex-cli 0.155.1" -> "0.155.1").
+/// Asked once per engine process (the daily engine update restarts it), not on every turn.
 fn version() -> Option<String> {
-    let out = std::process::Command::new("codex").arg("--version").output().ok()?;
-    String::from_utf8_lossy(&out.stdout).split_whitespace().last().map(String::from)
+    static VERSION: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    VERSION
+        .get_or_init(|| {
+            let out = std::process::Command::new("codex").arg("--version").output().ok()?;
+            String::from_utf8_lossy(&out.stdout).split_whitespace().last().map(String::from)
+        })
+        .clone()
 }
 
 struct AppServer {
@@ -184,7 +190,9 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
     let sessions = enabled("ZEN_CODEX_RESUME");
     // An empty folder only the owner can read (a shared /tmp path would let others plant files).
     let jail = crate::turn::engine_dir("codex")?;
-    let result = async {
+    // Starting the app-server and the thread can hang; an abort must stop that too.
+    let mut setup_abort = abort.clone();
+    let setup = async {
         let mut s = AppServer::start(&jail).await?;
         let tools: Vec<Value> = ctx
             .tools
@@ -251,12 +259,20 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
             prompt_blocks(&input.prompt, input.context.as_deref())
         };
         s.call("turn/start", json!({ "threadId": thread_id, "input": items, "effort": effort }), Some(&mut early)).await?;
+        Ok::<_, anyhow::Error>((s, thread_id, render, fallback, early))
+    };
+    let (mut s, thread_id, render, fallback, early) = tokio::select! {
+        r = setup => r?,
+        _ = setup_abort.changed() => return Ok(Some("interrupted".into())),
+    };
+    async {
 
         if let Some(reason) = &fallback {
             eprintln!("[engine] codex: {reason}");
         }
         let mut usage = json!({ "input": 0, "output": 0, "cacheRead": 0 });
         let mut error: Option<String> = None;
+        let mut interrupted = false;
         // Messages sent to the tape: a turn that completes without any means the stream has changed.
         let mut sent = 0;
         let mut pending = early.into_iter();
@@ -268,7 +284,8 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
                         Ok(v) => v,
                         Err(e) => { error.get_or_insert_with(|| e.to_string()); break; }
                     },
-                    _ = abort.changed() => { let _ = s.child.start_kill(); return Ok(Some("interrupted".into())); }
+                    // Stop, but still report what the turn used (its tokens count toward cost).
+                    _ = abort.changed() => { interrupted = true; break; }
                 },
             };
             let p = &msg["params"];
@@ -335,13 +352,15 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
         ctx
             .notify("turn.usage", json!({ "engine": "codex", "engine_version": version(),
                 "provider": "codex", "model": model, "render": render, "fallback_reason": fallback,
-                "engine_session": if sessions { json!({ "id": thread_id, "resumable": error.is_none() }) } else { Value::Null },
+                "engine_session": if sessions { json!({ "id": thread_id, "resumable": error.is_none() && !interrupted }) } else { Value::Null },
                 "input": usage["input"], "output": usage["output"], "cache_read": usage["cacheRead"], "cost_usd": null }))
             .await;
+        if interrupted {
+            return Ok(Some("interrupted".into()));
+        }
         Ok(error)
     }
-    .await;
-    result
+    .await
 }
 
 /// One completion without tools, in an ephemeral thread (summaries). Returns `{ text, usage, model }`.
@@ -388,7 +407,8 @@ pub async fn complete(model: &str, system: &str, prompt: &str) -> Result<Value> 
 /// tool calls and results as function calls and outputs (call ids longer than the API allows are
 /// shortened the same way everywhere). Thinking is left out: it can't be replayed to another model.
 fn history_items(history: &[Value]) -> Vec<Value> {
-    let call_id = |id: &str| if id.len() > 64 { id[id.len() - 64..].to_string() } else { id.to_string() };
+    // The last 64 bytes, moved forward to a character boundary (ids are ASCII today; never panic).
+    let call_id = |id: &str| if id.len() > 64 { id[id.ceil_char_boundary(id.len() - 64)..].to_string() } else { id.to_string() };
     let text = |t: &str, kind: &str| json!({ "type": kind, "text": t });
     let mut items = Vec::new();
     for m in history {

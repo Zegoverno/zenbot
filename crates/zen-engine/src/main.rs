@@ -70,8 +70,9 @@ async fn handle(rpc: &Rpc, running: &Running, method: &str, p: Value) -> Result<
     match method {
         "ping" => Ok(json!({ "pong": true })),
         "models.list" => {
-            let claude = claude::available();
-            let codex = codex::available();
+            // `--version` probes are blocking process runs: off the runtime's threads. "authenticated"
+            // means the CLI is installed and answers; the sign-in itself is checked when a turn runs.
+            let (claude, codex) = tokio::task::spawn_blocking(|| (claude::available(), codex::available())).await.unwrap_or((false, false));
             let mut models: Vec<Value> = if claude { claude::models() } else { vec![] };
             if codex {
                 models.extend(codex::models().await);
