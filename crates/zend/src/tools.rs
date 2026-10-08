@@ -455,6 +455,31 @@ async fn read(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> 
 
 // ---------- write / edit ----------
 
+/// Replace a file's content all at once: a temporary file next to it, then a rename, so a crash or a
+/// concurrent reader never sees it half written. A symlink is followed (its target is replaced, not
+/// the link), and an existing file keeps its permissions.
+async fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let target = match tokio::fs::canonicalize(path).await {
+        Ok(real) => real,
+        Err(_) => path.to_path_buf(),
+    };
+    let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = target.with_file_name(format!(".{name}.zen-{}", uuid::Uuid::new_v4().simple()));
+    let perms = tokio::fs::metadata(&target).await.ok().map(|m| m.permissions());
+    let result = async {
+        tokio::fs::write(&tmp, content).await?;
+        if let Some(p) = perms {
+            tokio::fs::set_permissions(&tmp, p).await?;
+        }
+        tokio::fs::rename(&tmp, &target).await
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+    result
+}
+
 async fn write(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> {
     let path = resolve(workspace, str_arg(args, "path")?);
     let content = str_arg(args, "content")?;
@@ -462,7 +487,7 @@ async fn write(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput>
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(|e| err(format!("cannot create {}: {e}", parent.display())))?;
     }
-    tokio::fs::write(&path, content).await.map_err(|e| err(format!("cannot write {}: {e}", path.display())))?;
+    write_atomic(&path, content.as_bytes()).await.map_err(|e| err(format!("cannot write {}: {e}", path.display())))?;
     Ok(ok(format!("wrote {} bytes to {}", content.len(), path.display())))
 }
 
@@ -550,8 +575,12 @@ async fn edit(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> 
         Some(rest) => ("\u{feff}", rest),
         None => ("", original.as_str()),
     };
-    let crlf = body.find('\n').is_some_and(|i| i > 0 && body.as_bytes()[i - 1] == b'\r');
-    let text = body.replace("\r\n", "\n");
+    // CRLF only when every line ends so; a file with mixed endings is edited as it is, so lines the
+    // edit doesn't touch keep their own endings.
+    let newlines = body.matches('\n').count();
+    let crlf_lines = body.matches("\r\n").count();
+    let crlf = newlines > 0 && crlf_lines == newlines;
+    let text = if crlf { body.replace("\r\n", "\n") } else { body.to_string() };
 
     let (matches, loose) = find_matches(&text, &old);
     if matches.is_empty() {
@@ -575,7 +604,7 @@ async fn edit(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> 
         return Err(err("the replacement produced identical content; nothing changed"));
     }
     let updated = if crlf { updated.replace('\n', "\r\n") } else { updated };
-    tokio::fs::write(&path, format!("{bom}{updated}"))
+    write_atomic(&path, format!("{bom}{updated}").as_bytes())
         .await
         .map_err(|e| err(format!("cannot write {}: {e}", path.display())))?;
     let n = if all { matches.len() } else { 1 };
@@ -671,6 +700,22 @@ mod tests {
         let r = run(&ws, "edit", json!({ "path": "a.txt", "old_text": "foo \n", "new_text": "baz\n" })).await;
         assert!(!r.is_error, "{}", r.content);
         assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "baz\nbar\n");
+    }
+
+    #[tokio::test]
+    async fn edit_keeps_mixed_line_endings_and_writes_through_symlinks() {
+        use std::os::unix::fs::PermissionsExt;
+        let ws = scratch("mixed");
+        std::fs::write(ws.join("m.txt"), "a\r\nb\nc\r\n").unwrap();
+        std::fs::set_permissions(ws.join("m.txt"), std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::os::unix::fs::symlink(ws.join("m.txt"), ws.join("link.txt")).unwrap();
+        let r = run(&ws, "edit", json!({ "path": "link.txt", "old_text": "b", "new_text": "B" })).await;
+        assert!(!r.is_error, "{}", r.content);
+        assert_eq!(std::fs::read_to_string(ws.join("m.txt")).unwrap(), "a\r\nB\nc\r\n");
+        assert!(std::fs::symlink_metadata(ws.join("link.txt")).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::metadata(ws.join("m.txt")).unwrap().permissions().mode() & 0o777, 0o640);
+        let leftovers = std::fs::read_dir(&*ws).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().contains(".zen-")).count();
+        assert_eq!(leftovers, 0);
     }
 
     #[tokio::test]
