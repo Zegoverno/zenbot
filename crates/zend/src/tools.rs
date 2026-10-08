@@ -393,7 +393,11 @@ async fn read(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> 
     const MAX_READ_FILE: u64 = 16 * 1024 * 1024;
     let path = resolve(workspace, str_arg(args, "path")?);
     let file = tokio::fs::File::open(&path).await.map_err(|e| err(format!("cannot read {}: {e}", path.display())))?;
-    let size = file.metadata().await.map_err(|e| err(format!("cannot stat {}: {e}", path.display())))?.len();
+    let meta = file.metadata().await.map_err(|e| err(format!("cannot stat {}: {e}", path.display())))?;
+    if meta.is_dir() {
+        return Err(err(format!("{} is a directory; list it with bash (e.g. `ls -la {}`)", path.display(), path.display())));
+    }
+    let size = meta.len();
     if size > MAX_READ_FILE {
         return Err(err(format!("{} is {} bytes, over read's 16 MiB limit; use bash to inspect a range", path.display(), size)));
     }
@@ -753,6 +757,8 @@ mod tests {
         assert_eq!(next, last_shown + 1);
         let r = run(&ws, "read", json!({ "path": "big.txt", "offset": 9999 })).await;
         assert!(r.is_error && r.content.contains("past the end"));
+        let r = run(&ws, "read", json!({ "path": "." })).await;
+        assert!(r.is_error && r.content.contains("is a directory"), "{}", r.content);
         std::fs::write(ws.join("bin"), [0u8, 1, 2, 3]).unwrap();
         let r = run(&ws, "read", json!({ "path": "bin" })).await;
         assert!(r.is_error && r.content.contains("binary"));
