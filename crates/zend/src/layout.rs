@@ -67,11 +67,8 @@ pub fn migrate(home: &Path) -> Vec<String> {
 mod tests {
     use super::*;
 
-    fn home(name: &str) -> PathBuf {
-        let h = std::env::temp_dir().join(format!("zen-layout-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&h);
-        std::fs::create_dir_all(&h).unwrap();
-        h
+    fn home(name: &str) -> crate::test_util::TestDir {
+        crate::test_util::TestDir::new(&format!("layout-{name}"))
     }
 
     #[test]
@@ -93,7 +90,6 @@ mod tests {
         // System-wide files stay; a second start changes nothing.
         assert_eq!(std::fs::read_to_string(h.join("USER.md")).unwrap(), "me");
         assert!(migrate(&h).is_empty());
-        std::fs::remove_dir_all(h).unwrap();
     }
 
     #[test]
@@ -105,7 +101,6 @@ mod tests {
         assert!(migrate(&h).is_empty());
         assert_eq!(std::fs::read_to_string(h.join("SOUL.md")).unwrap(), "old soul");
         assert_eq!(std::fs::read_to_string(h.join("agents/zenbot/SOUL.md")).unwrap(), "new soul");
-        std::fs::remove_dir_all(h).unwrap();
     }
 
     #[test]
@@ -113,6 +108,5 @@ mod tests {
         let h = home("fresh");
         assert!(migrate(&h).is_empty());
         assert!(!h.join("agents").exists() && !h.join("global").exists());
-        std::fs::remove_dir_all(h).unwrap();
     }
 }

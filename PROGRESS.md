@@ -6,6 +6,14 @@
 
 ---
 
+## 2026-10-08 — Stop test scratch and output leaks
+
+- Kernel unit tests now use an owner-private scratch-directory guard that removes files on drop,
+  including after a failed assertion. The large-output test saves its file in that scratch home,
+  not the live `~/.zenbot/outputs` folder. No production data was deleted.
+- Why: repeated test runs had left hundreds of directories under `/tmp` and test logs in the live
+  output folder; new runs leave neither.
+
 ## 2026-10-08 — Make the terminal client resilient and incremental
 
 - Kept both TUI modes and `zen chat`, while splitting the interactive client into focused modules.

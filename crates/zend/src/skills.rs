@@ -347,9 +347,8 @@ pub fn run_tool(name: &str, args: &Value) -> Option<(String, bool)> {
 mod tests {
     use super::*;
 
-    fn tree() -> PathBuf {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let root = std::env::temp_dir().join(format!("zend-skills-{nanos}"));
+    fn tree() -> crate::test_util::TestDir {
+        let root = crate::test_util::TestDir::new("skills");
         let mk = |domain: &str, name: &str, desc: &str, body: &str| {
             let d = root.join(domain).join(name);
             std::fs::create_dir_all(d.join("references")).unwrap();
@@ -407,7 +406,8 @@ mod tests {
 
     #[test]
     fn load_returns_the_skill_or_a_file_inside_it_only() {
-        let all = scan(&tree());
+        let root = tree();
+        let all = scan(&root);
         let brief = lookup(&all, "work/brief").unwrap();
         let text = load(brief, None).unwrap();
         assert!(text.contains("Write the goal.") && text.contains("references/template.md"));

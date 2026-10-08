@@ -19,6 +19,8 @@ mod search;
 mod secrets;
 mod skills;
 mod tape;
+#[cfg(test)]
+mod test_util;
 mod tools;
 mod turns;
 mod update;

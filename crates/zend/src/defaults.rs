@@ -56,8 +56,7 @@ mod tests {
 
     #[test]
     fn writes_missing_files_and_never_overwrites() {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let home = std::env::temp_dir().join(format!("zend-defaults-{nanos}"));
+        let home = crate::test_util::TestDir::new("defaults");
         std::fs::create_dir_all(home.join("global/skills/work/verify")).unwrap();
         std::fs::write(home.join("global/skills/work/verify/SKILL.md"), "the agent's own version").unwrap();
         std::fs::write(home.join("USER.md"), "mine").unwrap();
