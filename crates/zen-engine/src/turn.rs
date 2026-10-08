@@ -204,6 +204,18 @@ pub fn new_uuid() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// An engine's own folder, `<zen home>/engine/<name>` (ZEN_HOME, else ~/.zenbot), created readable
+/// only by the owner. Dev, eval and smoke kernels set ZEN_HOME, so they never share the live one's.
+pub fn engine_dir(name: &str) -> std::io::Result<std::path::PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let home = std::env::var("ZEN_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())).join(".zenbot"));
+    let dir = home.join("engine").join(name);
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+    Ok(dir)
+}
+
 /// Whether an engine feature is on: `var` unset or anything but "0".
 pub fn enabled(var: &str) -> bool {
     std::env::var(var).map(|v| v.trim() != "0").unwrap_or(true)

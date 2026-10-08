@@ -158,6 +158,11 @@ async fn save_skill(app: &App, session: Uuid, args: &Value) -> Result<String> {
     let root = skills::root();
     let current = active.iter().find(|x| x.domain == domain && x.name == name).cloned();
     let draft = drafts.iter().find(|x| x.domain == domain && x.name == name).cloned();
+    // An active skill's description reaches every session's instructions: text from a web page must
+    // not rewrite it without the owner. Drafts and new skills still go through review.
+    if current.is_some() && crate::web::tainted(&app.db, session).await {
+        bail!("this session read web content, so it can't change an active skill; tell the owner what you'd change and why");
+    }
     let (dir, what) = match (&current, &draft) {
         (Some(c), _) => (c.dir.clone(), "Updated the active skill"),
         (None, Some(d)) => (d.dir.clone(), "Updated the draft"),
@@ -172,9 +177,10 @@ async fn save_skill(app: &App, session: Uuid, args: &Value) -> Result<String> {
     };
     // Validate in a scratch copy first, so a bad save never replaces a good skill.
     let scratch = std::env::temp_dir().join(format!("zen-skill-{}", Uuid::new_v4())).join(&name);
-    write_skill(&scratch, &md, &args["files"])?;
-    let errs = skills::validate(&scratch);
+    let written = write_skill(&scratch, &md, &args["files"]);
+    let errs = if written.is_ok() { skills::validate(&scratch) } else { Vec::new() };
     let _ = std::fs::remove_dir_all(scratch.parent().unwrap_or(&scratch));
+    written?;
     if !errs.is_empty() {
         bail!("not saved: {}", errs.join("; "));
     }
@@ -307,7 +313,7 @@ pub fn made_entries() -> Vec<crate::mcp::ToolEntry> {
         if name.is_empty() || name != e.file_name().to_string_lossy() {
             continue;
         }
-        out.push(crate::mcp::ToolEntry { server: "made".into(), name, description: v["description"].as_str().unwrap_or("").to_string(), schema: v["parameters"].clone() });
+        out.push(crate::mcp::ToolEntry { server: "made".into(), name, description: v["description"].as_str().unwrap_or("").to_string(), schema: v["parameters"].clone(), untrusted: false });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
@@ -362,10 +368,18 @@ fn content(dir: &Path) -> Vec<u8> {
             if e.file_name() == ".git" {
                 continue;
             }
-            if p.is_dir() {
+            let kind = match e.file_type() { Ok(k) => k, Err(_) => continue };
+            if kind.is_dir() {
                 walk(&p, base, out);
-            } else if let Ok(bytes) = std::fs::read(&p) {
-                out.push((p.strip_prefix(base).unwrap_or(&p).display().to_string(), bytes));
+            } else if kind.is_symlink() {
+                // Hash the link itself, never follow it outside this tool or into a cycle.
+                if let Ok(target) = std::fs::read_link(&p) {
+                    out.push((p.strip_prefix(base).unwrap_or(&p).display().to_string(), target.as_os_str().as_encoded_bytes().to_vec()));
+                }
+            } else if kind.is_file() {
+                if let Ok(bytes) = std::fs::read(&p) {
+                    out.push((p.strip_prefix(base).unwrap_or(&p).display().to_string(), bytes));
+                }
             }
         }
     }
@@ -405,9 +419,25 @@ pub async fn decide_tool(db: &sqlx::PgPool, name: &str, accept: bool) -> Result<
     Ok(format!("{} {name}", if accept { "Approved" } else { "Rejected" }))
 }
 
+/// How much of a made tool's stdout and stderr is kept (each); the rest is drained and dropped.
+const MADE_CAP: usize = 256 * 1024;
+
+async fn drain_capped(mut pipe: impl tokio::io::AsyncRead + Unpin, cap: usize) -> Vec<u8> {
+    use tokio::io::AsyncReadExt;
+    let mut kept = Vec::new();
+    let mut chunk = [0u8; 8192];
+    while let Ok(n) = pipe.read(&mut chunk).await {
+        if n == 0 { break; }
+        kept.extend_from_slice(&chunk[..n.min(cap.saturating_sub(kept.len()))]);
+    }
+    kept
+}
+
 /// Run a tool the agent made: arguments as JSON on stdin, output from stdout and stderr. Sandboxed
-/// (no network, read-only files) until the owner approves it; never with the kernel's environment.
-pub async fn run_made(db: &sqlx::PgPool, name: &str, args: &Value) -> Result<(String, bool)> {
+/// (no network, read-only files, an empty home folder) until the owner approves it; never with the
+/// kernel's environment; its process group is killed after 120 s.
+/// Returns the output, whether it failed, and whether it ran with the network (approved).
+pub async fn run_made(db: &sqlx::PgPool, name: &str, args: &Value) -> Result<(String, bool, bool)> {
     let dir = tools_root().join(name);
     let m: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("tool.json")).context("no such tool")?)?;
     let command = m["command"].as_str().context("the manifest has no command")?.to_string();
@@ -422,12 +452,18 @@ pub async fn run_made(db: &sqlx::PgPool, name: &str, args: &Value) -> Result<(St
     let approved = approved && !changed;
     let keep = ["PATH", "HOME", "USER", "LANG", "LC_ALL", "TZ"];
     let mut cmd = if approved {
+        // `bash -c`, not a login shell: a profile could export secrets.
         let mut c = tokio::process::Command::new("bash");
-        c.arg("-lc").arg(&command);
+        c.arg("-c").arg(&command);
         c
     } else {
+        // Read-only, no network, and the home folder replaced by an empty one, so the tool can't
+        // read the owner's keys or tokens; only its own folder is bound back.
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home".into());
         let mut c = tokio::process::Command::new("bwrap");
-        c.args(["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--unshare-net", "--die-with-parent"])
+        c.args(["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--unshare-net", "--unshare-pid", "--new-session", "--die-with-parent"])
+            .arg("--tmpfs")
+            .arg(&home)
             .arg("--ro-bind")
             .arg(&dir)
             .arg(&dir)
@@ -444,16 +480,34 @@ pub async fn run_made(db: &sqlx::PgPool, name: &str, args: &Value) -> Result<(St
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .process_group(0)
         .kill_on_drop(true)
         .spawn()
         .context("starting the tool")?;
-    if let Some(mut stdin) = child.stdin.take() {
+    // Kill the whole group on a timeout or an abort, not just bash.
+    let _group = crate::tools::GroupKill(child.id().map(|p| p as i32));
+    let input = args.to_string();
+    let mut stdin = child.stdin.take();
+    let run = async move {
         use tokio::io::AsyncWriteExt;
-        stdin.write_all(args.to_string().as_bytes()).await?;
-    }
-    let out = tokio::time::timeout(Duration::from_secs(120), child.wait_with_output()).await.context("the tool took over 120 s")??;
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let err = String::from_utf8_lossy(&out.stderr);
+        // Write the arguments in their own task, so a tool that prints before reading can't deadlock.
+        let writer = tokio::spawn(async move {
+            if let Some(mut s) = stdin.take() {
+                let _ = s.write_all(input.as_bytes()).await;
+            }
+        });
+        let (so, se) = (child.stdout.take(), child.stderr.take());
+        let read_out = async { match so { Some(p) => drain_capped(p, MADE_CAP).await, None => Vec::new() } };
+        let read_err = async { match se { Some(p) => drain_capped(p, MADE_CAP).await, None => Vec::new() } };
+        let (out, err) = tokio::join!(read_out, read_err);
+        let status = child.wait().await;
+        writer.abort();
+        (out, err, status)
+    };
+    let (out, err, status) = tokio::time::timeout(Duration::from_secs(120), run).await.context("the tool took over 120 s")?;
+    let status = status.context("waiting for the tool")?;
+    let mut text = String::from_utf8_lossy(&out).into_owned();
+    let err = String::from_utf8_lossy(&err);
     if !err.trim().is_empty() {
         text.push_str(&format!("\n[stderr]\n{}", err.trim_end()));
     }
@@ -465,7 +519,7 @@ pub async fn run_made(db: &sqlx::PgPool, name: &str, args: &Value) -> Result<(St
     } else {
         "\n[ran sandboxed: no network, files read-only, until the owner approves it]"
     };
-    Ok((format!("{}{note}", text.trim_end()), !out.status.success()))
+    Ok((format!("{}{note}", text.trim_end()), !status.success(), approved))
 }
 
 // ---------- the tools ----------
@@ -528,6 +582,28 @@ mod tests {
         assert!(valid_name("rust-release") && !valid_name("Rust") && !valid_name("a--b") && !valid_name("-a"));
         assert!(overlap("verify work before reporting it done", "verify the work before reporting done") > 0.6);
         assert!(overlap("verify work before reporting", "deploy a rust binary to the server") < 0.2);
+    }
+
+    #[tokio::test]
+    async fn made_tool_output_is_drained_after_cap() {
+        use tokio::io::AsyncWriteExt;
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let writing = tokio::spawn(async move { writer.write_all(&vec![b'x'; MADE_CAP * 2]).await.unwrap(); });
+        let kept = tokio::time::timeout(Duration::from_secs(2), drain_capped(reader, MADE_CAP)).await.unwrap();
+        writing.await.unwrap();
+        assert_eq!(kept.len(), MADE_CAP);
+    }
+
+    #[test]
+    fn fingerprint_does_not_follow_symlinks() {
+        let dir = std::env::temp_dir().join(format!("zend-fingerprint-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tool.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(".", dir.join("cycle")).unwrap();
+        let bytes = content(&dir);
+        assert!(bytes.windows(5).any(|w| w == b"cycle"));
+        assert!(bytes.len() < 100, "a symlink cycle must not expand");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

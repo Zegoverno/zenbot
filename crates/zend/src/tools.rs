@@ -186,7 +186,7 @@ fn truncate(s: &str) -> Option<String> {
 /// Save the full text of an oversized output so the model can page through it with `read`. Kept in
 /// `<zen home>/outputs` (crate::outputs_dir), readable only by the owner (not /tmp, which every user can read and a reboot
 /// clears while the history still points at it). Secrets are masked first.
-fn save_full_output(text: &str) -> Option<PathBuf> {
+pub(crate) fn save_full_output(text: &str) -> Option<PathBuf> {
     use std::os::unix::fs::OpenOptionsExt;
     let dir = crate::outputs_dir()?;
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
@@ -209,9 +209,8 @@ pub async fn execute(workspace: &Path, name: &str, args: &Value, env: &[(&str, &
         "edit" => edit(workspace, args).await,
         _ => Err(err(format!("unknown tool `{name}`"))),
     };
-    let mut out = result.unwrap_or_else(|e| e);
-    out.content = crate::secrets::mask(&out.content);
-    out
+    // Secrets are masked once for every tool, where the dispatcher hands the result back.
+    result.unwrap_or_else(|e| e)
 }
 
 // ---------- bash ----------
@@ -223,7 +222,7 @@ const SIGKILL: i32 = 9;
 
 /// Kills a command's whole process group (bash and everything it started) unless disarmed.
 /// Dropping the tool future (on abort) therefore cleans up grandchildren too.
-struct GroupKill(Option<i32>);
+pub(crate) struct GroupKill(pub(crate) Option<i32>);
 
 impl GroupKill {
     fn kill_now(&mut self) {
@@ -251,21 +250,30 @@ pub struct Shell {
     pub status: Option<std::io::Result<std::process::ExitStatus>>,
 }
 
-/// Run `command` with `bash -lc` in `dir`, in a process group of its own: on a timeout, or when the
+/// Run `command` with `bash -c` in `dir`, in a process group of its own: on a timeout, or when the
 /// future is dropped (an abort), the whole group is killed. A command that finishes leaves the
 /// background processes it started running. `read_only` runs it in a read-only sandbox (bubblewrap).
-/// Errors when it can't be started. Used by the bash tool and the workflow's criteria checks.
+/// Errors when it can't be started. The kernel's secret variables are removed from the environment and
+/// the sandbox hides the secret files. Used by the bash tool and `verify`'s criteria checks.
 pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], read_only: bool, timeout: Duration) -> Result<Shell, String> {
     let mut cmd = if read_only {
         let mut c = Command::new("bwrap");
         // The workspace is bound again after the private /tmp, in case it lives under /tmp.
-        c.args(READ_ONLY_SANDBOX).arg("--ro-bind").arg(dir).arg(dir).arg("--chdir").arg(dir).args(["bash", "-lc"]);
+        c.args(READ_ONLY_SANDBOX).arg("--ro-bind").arg(dir).arg(dir);
+        for f in crate::secrets::secret_files() {
+            c.arg("--ro-bind").arg("/dev/null").arg(f);
+        }
+        c.arg("--chdir").arg(dir).args(["bash", "-c"]);
         c
     } else {
         let mut c = Command::new("bash");
-        c.arg("-lc");
+        c.arg("-c");
         c
     };
+    // The kernel's secrets (API keys, its token, the database URL) stay out of the agent's shell.
+    for (k, _) in std::env::vars().filter(|(k, _)| crate::secrets::is_secret_var(k)) {
+        cmd.env_remove(k);
+    }
     let mut child = cmd
         .arg(command)
         .current_dir(dir)
@@ -340,6 +348,8 @@ async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], read_only: b
         text
     } else {
         let cut = tokio::task::spawn_blocking(move || {
+            // Mask before cutting, so a secret split by the cut can't show half in clear.
+            let text = crate::secrets::mask(&text);
             let cut = truncate(&text).unwrap_or_default();
             match save_full_output(&text) {
                 Some(path) => format!("{cut}\n[output truncated; full output ({} bytes) saved to {}]", text.len(), path.display()),

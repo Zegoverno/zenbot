@@ -6,6 +6,20 @@
 
 ---
 
+## 2026-10-08 — Narrow the default network and tool-output trust boundaries (D-041)
+
+- `zend` binds loopback unless `ZEN_BIND` opts in; URL tokens work only for WebSocket upgrades.
+- Shell subprocesses no longer inherit kernel secret variables; verifier token files are hidden.
+  Unapproved made tools get an empty home, bounded I/O and a process-group timeout. The agent still
+  runs as the owner's Unix user, so file isolation remains debt, not a solved claim.
+- All tool results are masked at dispatch, after instruction-file attachments; web/MCP text is
+  wrapped, and web-tainted sessions cannot rewrite active skills. Codex turns and completions use
+  the same no-tools config and a private `CODEX_HOME` (only the sign-in is linked). Slow MCP calls no longer hold the
+  registry lock.
+- Tested: release build, unit tests, clippy with warnings denied, 19 e2e scenarios including a new
+  secret-variable check; a live Codex completion with the new config. Why: reduce the blast radius
+  of prompt injection before broadening agent capabilities.
+
 ## 2026-10-07 — zenbot's home laid out by scope (D-040)
 
 - `~/.zenbot` is split by scope: `USER.md` and `AGENTS.md` stay at the top (system-wide),

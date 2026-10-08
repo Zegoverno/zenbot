@@ -127,7 +127,8 @@ pub fn turn_text(messages: &[Value]) -> String {
         out.truncate(out.floor_char_boundary(BODY_MAX));
         out.push_str("\n[…]");
     }
-    out
+    // Commands and the owner's words can carry secrets: they go to the embeddings provider.
+    crate::secrets::mask(&out)
 }
 
 /// Index the turns that got new messages since the last pass. Returns how many documents changed.

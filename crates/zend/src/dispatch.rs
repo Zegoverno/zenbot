@@ -122,6 +122,8 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                     out.content.push_str(&context::attachment(&path, &text));
                 }
             }
+            // Every tool's output, instruction files included, is masked before the model or the tape sees it.
+            out.content = crate::secrets::mask_off_thread(std::mem::take(&mut out.content)).await;
             // Answer the worker first: a recording failure must not leave the model waiting.
             if let Some(req_id) = msg.id {
                 mind.respond(req_id, json!({ "content": out.content, "is_error": out.is_error })).await?;

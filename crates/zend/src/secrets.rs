@@ -36,20 +36,29 @@ fn token_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
 
+/// Whether an environment variable holds a secret: named like a token, key, secret or password, or
+/// a connection URL (which carries a password). Its value is masked in output and kept out of the
+/// shells the agent runs.
+pub fn is_secret_var(name: &str) -> bool {
+    let k = name.to_uppercase();
+    k == "DATABASE_URL" || ["TOKEN", "KEY", "SECRET", "PASSWORD", "PASSWD"].iter().any(|w| k.contains(w))
+}
+
+/// The files under the zen home that hold secrets: zenbot's API token, Pi's old sign-in, the
+/// settings file. Hidden from sandboxed shells and tools.
+pub fn secret_files() -> Vec<std::path::PathBuf> {
+    let home = crate::zen_home();
+    ["token", "auth.json", "env"].iter().map(|f| home.join(f)).filter(|p| p.exists()).collect()
+}
+
 /// Secret values the kernel knows, longest first (so a value containing another is masked whole).
 static KNOWN: LazyLock<Vec<String>> = LazyLock::new(|| {
-    let mut values: Vec<String> = std::env::vars()
-        .filter(|(k, _)| {
-            let k = k.to_uppercase();
-            ["TOKEN", "KEY", "SECRET", "PASSWORD", "PASSWD"].iter().any(|w| k.contains(w))
-        })
-        .map(|(_, v)| v)
-        .collect();
-    let home = std::env::var("HOME").unwrap_or_default();
-    if let Ok(t) = std::fs::read_to_string(format!("{home}/.zenbot/token")) {
+    let mut values: Vec<String> = std::env::vars().filter(|(k, _)| is_secret_var(k)).map(|(_, v)| v).collect();
+    let home = crate::zen_home();
+    if let Ok(t) = std::fs::read_to_string(home.join("token")) {
         values.push(t.trim().to_string());
     }
-    if let Ok(auth) = std::fs::read_to_string(format!("{home}/.zenbot/auth.json")) {
+    if let Ok(auth) = std::fs::read_to_string(home.join("auth.json")) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&auth) {
             collect_strings(&v, &mut values);
         }
@@ -86,7 +95,7 @@ fn mask_with(text: &str, known: &[String]) -> String {
     let mut out = text.to_string();
     for v in known {
         if out.contains(v.as_str()) {
-            out = out.replace(v.as_str(), &format!("{}{MASK}", &v[..4.min(v.len())]));
+            out = out.replace(v.as_str(), &format!("{}{MASK}", &v[..v.floor_char_boundary(4)]));
         }
     }
     out = mask_private_keys(&out);
@@ -177,6 +186,18 @@ mod tests {
         assert!(masked.starts_with("é→ ghp_…[masked] ü"), "{masked}");
         assert_eq!(masked.matches("[masked]").count(), 2, "a token after a non-token character is masked");
         assert!(masked.ends_with(&"ß".repeat(1000)));
+    }
+
+    #[test]
+    fn secret_variables_by_name() {
+        for k in ["ZEN_TOKEN", "OPENROUTER_API_KEY", "DATABASE_URL", "aws_secret_access_key", "PGPASSWORD"] {
+            assert!(is_secret_var(k), "{k}");
+        }
+        for k in ["PATH", "HOME", "ZEN_PORT", "LANG"] {
+            assert!(!is_secret_var(k), "{k}");
+        }
+        // A known value starting with a multibyte character is masked without panicking.
+        assert_eq!(mask_with("x ééééééééééééé y", &["ééééééééééééé".into()]), "x éé…[masked] y");
     }
 
     #[test]

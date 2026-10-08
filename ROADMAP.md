@@ -121,12 +121,15 @@ verdicts and the owner's reviews (memory promotions, skill drafts, tools, routes
 
 - Settings are read from the environment in ~25 places (no single config).
 - Client events are untyped JSON.
-- The old workflow's schema stays (expand-only): `sessions.state`, `policies` (never written),
-  old tape block kinds. Drop them in a later release.
-- `verify`'s criteria commands run on the bash tool's shell, not in the read-only bubblewrap
-  sandbox; instruction files attached to a tool result are added after secret masking runs. Both
-  to settle with the sandbox and masking work.
-- Stale header comment: `codex.rs` (threads persist unless `ZEN_CODEX_RESUME=0`).
+- The old workflow's schema stays (expand-only): `sessions.state` and old tape block kinds.
+  Drop them in a later release; `policies` is in use by model routing.
+- Tools run as the same Unix user as the owner. Shell subprocesses no longer inherit kernel secrets,
+  and the verifier hides token files, but an ordinary agent shell can still read the owner's files.
+  Strong isolation requires a separate Unix user and a credential the agent cannot read.
+- Secret masking's known-value cache is loaded once per kernel start, so newly rotated credentials
+  are not known until restart. `~/.zenbot/outputs` needs retention/pruning.
+- Verify criteria use a read-only bubblewrap shell; future work should centralize all tool
+  permissions and taint rules at the dispatch boundary.
 - Paths never run with real models: the new tools (`remember`, `load_skill`, `verify`, `ask`) on
   Codex and Pi, a model switch mid-session, a failed verification followed by a real fix.
 

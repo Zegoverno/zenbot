@@ -87,9 +87,10 @@ fn decide_spec() -> Value {
     )
 }
 
-/// Whether the `decide` tool is offered: a System One model is configured and ZEN_DECIDE_TOOL isn't 0.
+/// Whether the `decide` tool is offered: a System One model is configured, private material may go
+/// to it (ZEN_S1_PRIVATE), and ZEN_DECIDE_TOOL isn't 0.
 fn decide_on() -> bool {
-    std::env::var("ZEN_DECIDE_TOOL").map(|v| v.trim() != "0").unwrap_or(true) && crate::score::scorer().is_some()
+    std::env::var("ZEN_DECIDE_TOOL").map(|v| v.trim() != "0").unwrap_or(true) && crate::score::scorer().is_some() && crate::score::private_ok()
 }
 
 /// The tools a session of this kind is offered, in a fixed order.
@@ -154,7 +155,7 @@ pub async fn run_tool(app: &AppState, session: Uuid, workspace: &Path, name: &st
             // Another session's messages may carry web content it read: then they're untrusted here too.
             let other = args["session"].as_str().map(str::trim).filter(|s| !s.is_empty());
             if let (Some(other), false) = (other, is_error) {
-                let tainted: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sessions WHERE id::text LIKE $1 || '%' AND tainted_at IS NOT NULL)")
+                let tainted: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sessions WHERE starts_with(id::text, $1) AND tainted_at IS NOT NULL)")
                     .bind(other.to_lowercase())
                     .fetch_one(&app.db)
                     .await
@@ -281,7 +282,8 @@ async fn diff_from(repo: &Path, base: &str) -> String {
     }
     // Read a little past the cap, so a secret at the cut is still whole when it is masked.
     let read = |out: Option<(bool, String)>| out.map(|(_, text)| text).unwrap_or_default();
-    let mut d = read(crate::git::output(repo, &["diff", base], CAP + 4096).await);
+    // `--end-of-options`: a base like `--output=/x` is a revision, never an option.
+    let mut d = read(crate::git::output(repo, &["diff", "--end-of-options", base], CAP + 4096).await);
     let untracked = read(crate::git::output(repo, &["ls-files", "--others", "--exclude-standard"], CAP + 4096).await);
     if !untracked.trim().is_empty() {
         d.push_str(&format!("\nUntracked files:\n{untracked}"));

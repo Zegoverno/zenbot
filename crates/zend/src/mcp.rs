@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -56,6 +56,8 @@ pub struct ToolEntry {
     pub name: String,
     pub description: String,
     pub schema: Value,
+    /// From a server marked untrusted: its description and schema are wrapped and taint the session.
+    pub untrusted: bool,
 }
 
 impl ToolEntry {
@@ -167,7 +169,7 @@ struct Server {
 
 /// The servers, keyed by name, with the config they were started from and when it was read.
 struct Registry {
-    servers: HashMap<String, Mutex<Server>>,
+    servers: HashMap<String, Arc<Mutex<Server>>>,
     loaded: Option<SystemTime>,
     problems: Vec<String>,
 }
@@ -189,17 +191,11 @@ async fn refresh() {
         Ok(text) => parse_config(&text),
         Err(_) => (Vec::new(), Vec::new()),
     };
-    let names: Vec<String> = cfgs.iter().map(|c| c.name.clone()).collect();
-    reg.servers.retain(|n, _| names.contains(n));
-    for cfg in cfgs {
-        let same = match reg.servers.get(&cfg.name) {
-            Some(s) => s.lock().await.cfg == cfg,
-            None => false,
-        };
-        if !same {
-            reg.servers.insert(cfg.name.clone(), Mutex::new(Server { cfg, conn: None, next_id: 1, tools: Vec::new(), error: None }));
-        }
-    }
+    // A config change replaces the handles without waiting for active calls. Those calls finish on
+    // their old Arc; subsequent calls use the new server. Never hold the registry lock over I/O.
+    reg.servers = cfgs.into_iter().map(|cfg| {
+        (cfg.name.clone(), Arc::new(Mutex::new(Server { cfg, conn: None, next_id: 1, tools: Vec::new(), error: None })))
+    }).collect();
     reg.loaded = mtime;
     reg.problems = problems;
 }
@@ -252,6 +248,7 @@ impl Server {
                     name,
                     description: t["description"].as_str().unwrap_or("").to_string(),
                     schema: t["inputSchema"].clone(),
+                    untrusted: self.cfg.untrusted,
                 });
             }
             cursor = page["nextCursor"].as_str().map(String::from);
@@ -389,13 +386,14 @@ pub fn sse_messages(text: &str) -> Vec<Value> {
 /// Every server's tools (connecting the ones not yet connected), and what went wrong.
 async fn catalog() -> (Vec<ToolEntry>, Vec<String>) {
     refresh().await;
-    let reg = REGISTRY.lock().await;
+    let (mut servers, mut problems) = {
+        let reg = REGISTRY.lock().await;
+        (reg.servers.iter().map(|(n, s)| (n.clone(), Arc::clone(s))).collect::<Vec<_>>(), reg.problems.clone())
+    };
+    servers.sort_by(|a, b| a.0.cmp(&b.0));
     let mut tools = Vec::new();
-    let mut problems = reg.problems.clone();
-    let mut names: Vec<&String> = reg.servers.keys().collect();
-    names.sort();
-    for name in names {
-        let mut s = reg.servers[name].lock().await;
+    for (name, handle) in servers {
+        let mut s = handle.lock().await;
         if let Err(e) = s.ensure().await {
             problems.push(format!("server `{name}`: {e:#}"));
             continue;
@@ -433,7 +431,7 @@ fn one_line(d: &str) -> String {
     zen_proto::head(first, 200)
 }
 
-async fn find(query: &str) -> (String, bool) {
+async fn find(app: &App, session: Uuid, query: &str) -> (String, bool) {
     let (tools, problems) = catalog().await;
     let mut out = String::new();
     if tools.is_empty() {
@@ -450,23 +448,29 @@ async fn find(query: &str) -> (String, bool) {
             out.push_str(&format!("No tool matches. Servers: {} ({} tools); try other words.", servers.join(", "), tools.len()));
         } else {
             out.push_str("Load one with load_tool to see its parameters, then run it with call_tool.\n");
+            let has_untrusted = found.iter().any(|t| t.untrusted);
             for t in found {
-                out.push_str(&format!("- {}: {}\n", t.full(), one_line(&t.description)));
+                let line = format!("{}: {}", t.full(), one_line(&t.description));
+                if t.untrusted {
+                    out.push_str(&format!("- {}\n", crate::web::untrusted("mcp", &t.full(), &line)));
+                } else {
+                    out.push_str(&format!("- {line}\n"));
+                }
             }
+            if has_untrusted { crate::web::taint(app, session, "mcp", "find_tools").await; }
         }
     }
     if !problems.is_empty() {
-        out.push_str(&format!("\nProblems: {}", problems.join("; ")));
+        // A remote server controls its error text too. Treat all catalog errors conservatively.
+        crate::web::taint(app, session, "mcp", "catalog errors").await;
+        out.push_str(&format!("\nProblems: {}", crate::web::untrusted("mcp", "catalog errors", &problems.join("; "))));
     }
     (out, false)
 }
 
 async fn lookup(full: &str) -> Result<ToolEntry> {
-    let (tools, problems) = catalog().await;
-    tools.into_iter().find(|t| t.full() == full || t.name == full).ok_or_else(|| {
-        let extra = if problems.is_empty() { String::new() } else { format!(" ({})", problems.join("; ")) };
-        anyhow!("no MCP tool `{full}`; use find_tools{extra}")
-    })
+    let (tools, _) = catalog().await;
+    tools.into_iter().find(|t| t.full() == full || t.name == full).ok_or_else(|| anyhow!("no MCP tool `{full}`; use find_tools"))
 }
 
 /// The required arguments a call is missing, by the tool's input schema.
@@ -496,28 +500,48 @@ async fn call(app: &App, session: Uuid, full: &str, args: &Value) -> Result<(Str
     let t = lookup(full).await?;
     let args = if args.is_null() { json!({}) } else { args.clone() };
     let missing = missing_args(&t.schema, &args);
-    anyhow::ensure!(missing.is_empty(), "missing required arguments: {} (load_tool shows the parameters)", missing.join(", "));
-    if t.server == "made" {
-        return crate::workshop::run_made(&app.db, &t.name, &args).await;
+    if !missing.is_empty() {
+        let error = format!("missing required arguments: {} (load_tool shows the parameters)", missing.join(", "));
+        if t.untrusted {
+            crate::web::taint(app, session, "mcp", &t.full()).await;
+            return Ok((crate::web::untrusted("mcp", &t.full(), &error), true));
+        }
+        anyhow::bail!("{error}");
     }
+    if t.server == "made" {
+        let (text, is_error, networked) = crate::workshop::run_made(&app.db, &t.name, &args).await?;
+        // An approved tool can reach the network: what it returns may be web content.
+        if networked {
+            crate::web::taint(app, session, "made", &t.full()).await;
+            return Ok((crate::web::untrusted("made", &t.full(), &text), is_error));
+        }
+        return Ok((text, is_error));
+    }
+    let handle = { REGISTRY.lock().await.servers.get(&t.server).cloned().context("the server went away")? };
     let (result, untrusted) = {
-        let reg = REGISTRY.lock().await;
-        let mut s = reg.servers.get(&t.server).context("the server went away")?.lock().await;
-        s.ensure().await?;
+        let mut s = handle.lock().await;
         let untrusted = s.cfg.untrusted;
-        (s.request("tools/call", json!({ "name": t.name, "arguments": args })).await?, untrusted)
+        let result = async {
+            s.ensure().await?;
+            s.request("tools/call", json!({ "name": t.name, "arguments": args })).await
+        }.await;
+        (result, untrusted)
+    };
+    let result = match result {
+        Ok(result) => result,
+        Err(e) if untrusted => {
+            crate::web::taint(app, session, "mcp", &t.full()).await;
+            return Ok((crate::web::untrusted("mcp", &t.full(), &format!("call failed: {e:#}")), true));
+        }
+        Err(e) => return Err(e),
     };
     let mut text = crate::secrets::mask_off_thread(result_text(&result)).await;
     if text.len() > MAX_OUTPUT {
-        let path = crate::outputs_dir().unwrap_or_else(std::env::temp_dir).join(format!("mcp-{}.txt", Uuid::new_v4()));
-        let _ = std::fs::write(&path, &text);
-        text = format!("{}\n[... cut at 50 KB; the full output is in {} ...]", &text[..text.floor_char_boundary(MAX_OUTPUT)], path.display());
+        let saved = crate::tools::save_full_output(&text).map(|p| format!("the full output is in {}", p.display())).unwrap_or_else(|| "the rest was dropped".into());
+        text = format!("{}\n[... cut at 50 KB; {saved} ...]", &text[..text.floor_char_boundary(MAX_OUTPUT)]);
     }
     if untrusted {
-        let first = sqlx::query("UPDATE sessions SET tainted_at = now() WHERE id = $1 AND tainted_at IS NULL").bind(session).execute(&app.db).await.map(|r| r.rows_affected() == 1).unwrap_or(false);
-        if first {
-            let _ = crate::tape::append(&app.db, session, "taint", &json!({ "source": "mcp", "about": t.full() })).await;
-        }
+        crate::web::taint(app, session, "mcp", &t.full()).await;
         text = crate::web::untrusted("mcp", &t.full(), &text);
     }
     Ok((text, result["isError"] == true))
@@ -557,12 +581,20 @@ match its parameters. Ask the owner before calls that send, publish, delete or s
 /// Run `find_tools`, `load_tool` or `call_tool`. None for other tools.
 pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value) -> Option<tools::ToolOutput> {
     let (content, is_error) = match name {
-        "find_tools" => find(args["query"].as_str().unwrap_or("")).await,
+        "find_tools" => find(app, session, args["query"].as_str().unwrap_or("")).await,
         "load_tool" => match lookup(args["name"].as_str().unwrap_or("")).await {
-            Ok(t) => (
-                format!("<tool name=\"{}\">\n{}\n\nParameters (JSON schema):\n{}\n</tool>\nRun it with call_tool.", t.full(), t.description.trim(), serde_json::to_string_pretty(&t.schema).unwrap_or_default()),
-                false,
-            ),
+            Ok(t) => {
+                let spec = format!("<tool name=\"{}\">\n{}\n\nParameters (JSON schema):\n{}\n</tool>\nRun it with call_tool.",
+                    t.full(), t.description.trim(), serde_json::to_string_pretty(&t.schema).unwrap_or_default());
+                // Name, description and schema all come from the server: wrap the entire spec.
+                let spec = if t.untrusted {
+                    crate::web::taint(app, session, "mcp", &t.full()).await;
+                    crate::web::untrusted("mcp", &t.full(), &spec)
+                } else {
+                    spec
+                };
+                (spec, false)
+            }
             Err(e) => (format!("{e:#}"), true),
         },
         "call_tool" => match call(app, session, args["name"].as_str().unwrap_or(""), &args["arguments"]).await {
@@ -623,7 +655,7 @@ mod tests {
 
     #[test]
     fn tools_rank_by_name_then_description_and_args_are_checked() {
-        let t = |server: &str, name: &str, d: &str| ToolEntry { server: server.into(), name: name.into(), description: d.into(), schema: json!({}) };
+        let t = |server: &str, name: &str, d: &str| ToolEntry { server: server.into(), name: name.into(), description: d.into(), schema: json!({}), untrusted: false };
         let all = vec![t("cal", "list_events", "List calendar events"), t("mail", "send_email", "Send an email"), t("mail", "search", "Search email by sender")];
         let r = rank(&all, "send email", 5);
         assert_eq!(r[0].full(), "mail_send_email");

@@ -6,6 +6,26 @@
 
 ---
 
+## D-041 — Loopback listener and one boundary for untrusted tool results
+
+**Date:** 2026-10-08 · **Status:** accepted (owner)
+
+**Decision:** `zend` listens on `127.0.0.1` by default (`ZEN_BIND` can opt into another address).
+Only WebSocket upgrades accept a token in the URL. Every tool result, including attached project
+instructions, is secret-masked at the dispatcher. Web pages, untrusted MCP tools and approved made
+tools are wrapped and taint their session; web-tainted sessions cannot rewrite an active skill.
+Codex turns and completions use a private `CODEX_HOME` (linking only the owner's ChatGPT sign-in)
+and disable its built-in tools, MCP servers and project docs. Worker shell
+subprocesses do not inherit the kernel's secret variables, and the verifier hides token files.
+
+**Why:** The bearer token grants command execution. A local-only listener and a single output
+boundary reduce accidental exposure and prompt-injection paths without changing the owner's tool
+workflow. These changes do **not** isolate the agent from the owner's files: a separate Unix user
+and an out-of-band owner credential are still required for that. See `DESIGN.md` “Security today”
+and the remaining debt in `ROADMAP.md`.
+
+---
+
 ## D-040 — zenbot's home is laid out by scope; agents are thin definitions
 
 **Date:** 2026-10-07 · **Status:** accepted (owner) · **Supersedes:** the flat `~/.zenbot` layout (paths in D-027, D-028, D-036, D-037)

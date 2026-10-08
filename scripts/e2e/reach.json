@@ -1,5 +1,5 @@
 [
-  {"when": "mcp", "tool": "find_tools", "args": {"query": "echo a message"}},
+  {"when": "mcp", "tool": "find_tools", "args": {"query": "echo a message and add numbers"}},
   {"when": "mcp", "tool": "load_tool", "args": {"name": "local_echo"}},
   {"when": "mcp", "tool": "call_tool", "args": {"name": "local_echo", "arguments": {"message": "hi"}}},
   {"when": "mcp", "tool": "call_tool", "args": {"name": "remote_add", "arguments": {"a": 2, "b": 3}}},

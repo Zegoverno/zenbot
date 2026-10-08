@@ -174,11 +174,18 @@ harness versions with the same model on isolated kernels and databases (`evals/R
 
 ### Security today
 
-One owner token for the API. Every tool runs in the kernel; a verifier runs read-only in bubblewrap.
-Web pages and remote MCP output are untrusted and taint the session (above).
-Secrets are masked in tool output; full outputs stay under `~/.zenbot/outputs`. Commands run as the
-owner's user on the VM (no per-project sandbox yet). Outward-facing actions are covered by the system
-prompt ("ask before"), not enforced.
+One owner token for the API. The listener binds to loopback by default (`ZEN_BIND` opts into an
+external address); only a WebSocket upgrade accepts `?token=`. Every tool runs in the kernel; a
+verifier runs read-only in bubblewrap. Worker shells do not inherit kernel secret variables, and
+the verifier hides token files. Made tools run without network and with an empty home until approved.
+Codex turns and tool-free completions use a private `CODEX_HOME` (only the owner's sign-in is linked)
+and disable Codex's built-in tools, MCP servers and project docs.
+Web pages and untrusted MCP output (including tool descriptions) taint the session and are wrapped.
+All tool output is masked before reaching the model or tape; full outputs stay under
+`~/.zenbot/outputs`. **This is not a security boundary against the agent:** ordinary commands still
+run as the owner's Unix user and can read the owner's files, including `~/.zenbot/token`. Strong
+isolation needs a separate uid and an owner credential unavailable to it. Outward-facing actions
+are covered by the system prompt ("ask before"), not enforced.
 
 ### Deployment
 
