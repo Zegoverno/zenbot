@@ -405,8 +405,9 @@ summaries() {
 
 secrets_masked() {
   local ws; ws=$(new_workspace secret)
-  start_kernel "$ws" "$(script secret.json)"
+  start_kernel "$ws" "$(script secret.json)" E2E_PLANTED_KEY=planted-value-1234567890
   local sid; sid=$(zen ask --json -m faux/smoke "print the token" | jq -r .session_id)
+  check "the kernel's secret variables are not in the agent's shell" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult' AND payload::text LIKE '%vars: 0%'")" 1
   local out; out=$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult'")
   check "the token is masked on the tape" grep -q 'ghp_…\[masked\]' <<<"$out"
   # (The command the model typed still contains it: masking applies to what tools return.)
