@@ -1027,6 +1027,13 @@ impl App {
         self.height().saturating_sub(region).max(1)
     }
 
+    /// The pointer at column `x`, row `y` is over the side panel (not the divider between it and
+    /// the chat, nor the live region below).
+    fn in_panel(&self, x: usize, y: usize) -> bool {
+        let (cw, pw) = self.columns();
+        pw > 0 && x >= cw + 3 && y < self.viewport_rows()
+    }
+
     fn scroll_chat(&mut self, up: bool, n: usize) {
         self.scroll = if up { self.scroll + n } else { self.scroll.saturating_sub(n) };
     }
@@ -1609,10 +1616,10 @@ impl App {
             }
             Event::Mouse(m) => {
                 // The wheel scrolls whichever side is under the pointer.
-                let (cw, pw) = self.columns();
+                let (x, y) = (m.column as usize, m.row as usize);
                 if m.kind == MouseEventKind::Down(MouseButton::Left) {
-                    if pw > 0 && m.column as usize >= cw + 3 && (m.row as usize) < self.viewport_rows() {
-                        self.click_side(m.column as usize - (cw + 3), m.row as usize);
+                    if self.in_panel(x, y) {
+                        self.click_side(x - (self.columns().0 + 3), y);
                     }
                     self.draw();
                     return Ok(());
@@ -1622,7 +1629,7 @@ impl App {
                     MouseEventKind::ScrollDown => false,
                     _ => return Ok(()),
                 };
-                if pw > 0 && m.column as usize > cw + 1 && (m.row as usize) < self.viewport_rows() {
+                if self.in_panel(x, y) {
                     self.scroll_panel(up, 3);
                 } else {
                     self.scroll_chat(up, 3);
@@ -2872,6 +2879,14 @@ mod tests {
         let files_tab = Event::Mouse(crossterm::event::MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x as u16 + 1, row: 0, modifiers: KeyModifiers::NONE });
         a.on_terminal(files_tab).await.unwrap();
         assert!(a.tab == Tab::Files);
+        // Click and wheel agree on where the panel starts: the divider belongs to neither.
+        assert!(!a.in_panel(cw + 2, 5) && a.in_panel(cw + 3, 5) && !a.in_panel(cw + 3, 23));
+        let wheel_up = |column: usize| Event::Mouse(crossterm::event::MouseEvent { kind: MouseEventKind::ScrollUp, column: column as u16, row: 5, modifiers: KeyModifiers::NONE });
+        assert_eq!(a.files.as_ref().unwrap().sel, 1, "a.txt, clicked above");
+        a.on_terminal(wheel_up(cw + 2)).await.unwrap();
+        assert_eq!(a.files.as_ref().unwrap().sel, 1, "the wheel over the divider doesn't move the tree");
+        a.on_terminal(wheel_up(cw + 3)).await.unwrap();
+        assert_eq!(a.files.as_ref().unwrap().sel, 0);
     }
 
     #[test]
