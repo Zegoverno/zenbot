@@ -143,7 +143,7 @@ pub async fn render(db: &PgPool) -> Result<String, sqlx::Error> {
 }
 
 fn render_entries(entries: &[Entry], cap: usize) -> String {
-    let total: usize = entries.iter().map(|e| line(e).len()).sum();
+    let total: usize = entries.iter().map(|e| line(e).chars().count()).sum();
     if total <= cap {
         return entries.iter().map(line).collect();
     }
@@ -151,7 +151,7 @@ fn render_entries(entries: &[Entry], cap: usize) -> String {
     let mut kept: Vec<&Entry> = Vec::new();
     let mut size = 0;
     for e in entries.iter().rev() {
-        let l = line(e).len();
+        let l = line(e).chars().count();
         if size + l > cap {
             continue;
         }
@@ -172,7 +172,7 @@ pub async fn export(db: &PgPool) {
             let body: String = entries.iter().map(line).collect();
             let text = format!(
                 "# MEMORY.md\n\nzenbot's short-term memory ({} of {} characters). Written by the kernel; edit it with the `remember` tool, not here.\n\n{body}",
-                body.len(),
+                body.chars().count(),
                 cap()
             );
             if let Err(e) = std::fs::write(&path, text) {
@@ -235,9 +235,9 @@ async fn remember(app: &crate::AppState, session: Uuid, args: &Value) -> Result<
     let done = match action {
         "add" => {
             anyhow::ensure!(!text.is_empty(), "add needs `text`");
-            anyhow::ensure!(text.len() <= 600, "keep a memory under 600 characters; split it or say it shorter");
+            anyhow::ensure!(text.chars().count() <= 600, "keep a memory under 600 characters; split it or say it shorter");
             let used = used_chars(db).await as usize;
-            if used + text.len() + 10 > ceiling() {
+            if used + text.chars().count() + 10 > ceiling() {
                 start_sleep(app, "ceiling");
                 anyhow::bail!(
                     "Memory is full ({used}/{} characters). Free room first: replace or remove entries by id (they are in your \
@@ -256,7 +256,7 @@ instructions), or leave it; it is being tidied now. Then carry on with the owner
         "replace" => {
             let id = parse_id(&args["id"]).ok_or_else(|| anyhow::anyhow!("replace needs the entry's `id`, e.g. m12"))?;
             anyhow::ensure!(!text.is_empty(), "replace needs the new `text`");
-            anyhow::ensure!(text.len() <= 600, "keep a memory under 600 characters");
+            anyhow::ensure!(text.chars().count() <= 600, "keep a memory under 600 characters");
             let n = sqlx::query("UPDATE memories SET text = $2, source = $3, updated_at = now(), used_at = now(), uses = uses + 1 WHERE id = $1 AND tier = 'short'")
                 .bind(id)
                 .bind(&text)
@@ -290,12 +290,19 @@ fn start_sleep(app: &crate::AppState, trigger: &'static str) {
     if RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
+    // Reset even if the sleep panics, so later ceiling sleeps aren't blocked until a restart.
+    struct Done;
+    impl Drop for Done {
+        fn drop(&mut self) {
+            RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
     let app = app.clone();
     tokio::spawn(async move {
+        let _done = Done;
         if let Err(e) = sleep(&app, trigger).await {
             tracing::error!("memory sleep ({trigger}): {e:#}");
         }
-        RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
     });
 }
 
@@ -383,7 +390,7 @@ pub fn plan(entries: &[Entry], judged: &[Option<Judged>], lower: &[Option<(f64, 
     order.sort_by(|&a, &b| priority(&entries[b], judged[b].as_ref()).partial_cmp(&priority(&entries[a], judged[a].as_ref())).unwrap_or(std::cmp::Ordering::Equal));
     let mut size = 0;
     for &i in &order {
-        let l = line(&entries[i]).len();
+        let l = line(&entries[i]).chars().count();
         let promotable = matches!(entries[i].source.as_str(), "owner" | "verified") && lower[i].is_some_and(|(d, m)| d >= bar && m >= bar);
         if promotable {
             fates[i] = Fate::Promote;
@@ -479,6 +486,9 @@ async fn sleep_inner(app: &App, run: i64) -> Result<Value> {
     let promote_on = promotion(db).await.1;
     let (mut kept, mut dropped, mut promoted, mut proposed) = (0, 0, 0, 0);
     let mut notes: Vec<String> = Vec::new();
+    // All fates and their decisions apply together: a failure midway must not leave memory half
+    // tidied with only some decisions logged.
+    let mut tx = db.begin().await?;
     for (i, e) in entries.iter().enumerate() {
         let user_fact = judged[i].as_ref().is_some_and(|j| j.about_owner >= 0.8 && j.durable >= 0.8);
         let scores = if raw[i].is_null() { None } else { Some(json!({ "answers": raw[i], "lower": lower[i].map(|(d, m)| json!({ "durable": d, "impact": m })) })) };
@@ -511,7 +521,7 @@ async fn sleep_inner(app: &App, run: i64) -> Result<Value> {
             .bind(reason)
             .bind(proposal)
             .bind(&scores)
-            .execute(db)
+            .execute(&mut *tx)
             .await?;
         let p = judged[i].as_ref().map(|j| if chosen == "promote" { lower[i].map(|(d, m)| d.min(m)).unwrap_or(j.durable) } else { j.needed });
         sqlx::query("INSERT INTO decisions (point, model, input, answer, chosen, probability, acted) VALUES ('sleep', $1, $2, $3, $4, $5, $6)")
@@ -521,8 +531,13 @@ async fn sleep_inner(app: &App, run: i64) -> Result<Value> {
             .bind(chosen)
             .bind(p)
             .bind(chosen != "promote" || promote_on)
-            .execute(db)
+            .execute(&mut *tx)
             .await?;
+    }
+    tx.commit().await?;
+    let pruned = prune_outputs(&crate::zen_home().join("outputs"), OUTPUT_DAYS);
+    if pruned > 0 {
+        notes.push(format!("outputs: removed {pruned} saved tool output file(s) older than {OUTPUT_DAYS} days"));
     }
     // The wiki's nightly care: commit the agent's own edits since the last capture, report problems.
     let wiki = crate::wiki::root();
@@ -546,6 +561,22 @@ async fn sleep_inner(app: &App, run: i64) -> Result<Value> {
         .execute(db)
         .await?;
     Ok(json!({ "run": run, "entries": entries.len(), "kept": kept, "dropped": dropped, "promoted": promoted, "proposed": proposed, "scorer": scorer, "note": note }))
+}
+
+/// Days a saved tool output (cut bash/MCP output, fetched PDFs) is kept in `<zen home>/outputs`.
+const OUTPUT_DAYS: u64 = 30;
+
+/// Remove regular files directly in `dir` not modified for `days` days; returns how many. Only
+/// files the kernel saves (`*.log`, `mcp-*.txt`, `web-*.pdf`): anything else there is left alone.
+fn prune_outputs(dir: &std::path::Path, days: u64) -> usize {
+    let Ok(read) = std::fs::read_dir(dir) else { return 0 };
+    let limit = std::time::Duration::from_secs(days * 86_400);
+    let ours = |n: &str| n.ends_with(".log") || (n.starts_with("mcp-") && n.ends_with(".txt")) || (n.starts_with("web-") && n.ends_with(".pdf"));
+    read.flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && ours(&e.file_name().to_string_lossy()))
+        .filter(|e| e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > limit))
+        .filter(|e| std::fs::remove_file(e.path()).is_ok())
+        .count()
 }
 
 /// A line about the last sleep for a session's instructions, when it ran in the last day (the
@@ -642,7 +673,7 @@ mod tests {
         let judged = vec![j(0.9, 0.9), j(0.1, 0.0), j(0.9, 0.0), j(0.5, 0.0), j(0.5, 0.0)];
         // m4 and m5 cleared the bar on every sample; only m4 has a source that may be promoted.
         let lower = vec![None, None, None, Some((0.97, 0.96)), Some((0.99, 0.99))];
-        let room = line(&all[2]).len() + line(&all[4]).len();
+        let room = line(&all[2]).chars().count() + line(&all[4]).chars().count();
         let fates = plan(&all, &judged, &lower, room, 0.95);
         assert_eq!(fates, vec![Fate::Drop("already covered"), Fate::Drop("didn't fit"), Fate::Keep, Fate::Promote, Fate::Keep]);
         // One sample below the bar is enough to stay out of long-term memory.
@@ -653,8 +684,22 @@ mod tests {
     #[test]
     fn without_judgments_recency_decides() {
         let all = vec![e(1, "stale", "inferred", 30.0), e(2, "fresh", "inferred", 0.0)];
-        let fates = plan(&all, &[None, None], &[None, None], line(&all[1]).len(), 0.95);
+        let fates = plan(&all, &[None, None], &[None, None], line(&all[1]).chars().count(), 0.95);
         assert_eq!(fates, vec![Fate::Drop("didn't fit"), Fate::Keep]);
+    }
+
+    #[test]
+    fn old_saved_outputs_are_pruned_and_others_kept() {
+        let dir = crate::test_util::TestDir::new("outputs");
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86_400);
+        for name in ["1.log", "mcp-a.txt", "web-a.pdf", "notes.md", "fresh.log"] {
+            std::fs::write(dir.join(name), "x").unwrap();
+            if name != "fresh.log" {
+                std::fs::File::options().write(true).open(dir.join(name)).unwrap().set_modified(old).unwrap();
+            }
+        }
+        assert_eq!(prune_outputs(&dir, 30), 3);
+        assert!(dir.join("notes.md").exists() && dir.join("fresh.log").exists());
     }
 
     #[test]
