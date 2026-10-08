@@ -308,10 +308,13 @@ struct App {
     installed: Option<(PathBuf, std::time::SystemTime)>,
     /// A newer install has already been announced.
     newer_noted: bool,
-    /// Full screen: the conversation, and its lines rendered at `view_w` columns.
+    /// Full screen: the conversation, and its lines rendered at `view_w` columns (0: render all
+    /// again), with the first line of each entry. Entries from `view_dirty` on changed since.
     entries: Vec<Entry>,
     view: Vec<Line>,
     view_w: usize,
+    view_start: Vec<usize>,
+    view_dirty: usize,
     /// Full screen: lines scrolled up from the bottom of the conversation (0 follows it).
     scroll: usize,
     /// Conversation lines at the last frame, to keep a scrolled-up view still as lines arrive.
@@ -425,6 +428,8 @@ impl App {
             entries: Vec::new(),
             view: Vec::new(),
             view_w: 0,
+            view_start: Vec::new(),
+            view_dirty: usize::MAX,
             scroll: 0,
             last_total: 0,
             screen: Screen::default(),
@@ -974,14 +979,23 @@ impl App {
         self.push_all(vec![e]);
     }
 
-    /// Render the transcript again when the chat width changed.
+    /// Bring the rendered transcript up to date: all of it when the chat width changed (or
+    /// `view_w` was reset), otherwise only the entries from the first one that changed.
     fn sync_view(&mut self) {
         let w = self.columns().0;
-        if self.view_w != w {
-            let x = self.expand_work;
-            self.view = self.entries.iter().flat_map(|e| Self::render_entry(e, w, x)).collect();
-            self.view_w = w;
+        let from = if self.view_w != w { 0 } else { self.view_dirty.min(self.entries.len()) };
+        self.view_dirty = usize::MAX;
+        if from == self.entries.len() && self.view_start.len() == from {
+            return;
         }
+        let keep = if from == 0 { 0 } else { self.view_start.get(from).copied().unwrap_or(self.view.len()) };
+        self.view.truncate(keep);
+        self.view_start.truncate(from);
+        for e in &self.entries[from..] {
+            self.view_start.push(self.view.len());
+            self.view.extend(Self::render_entry(e, w, self.expand_work));
+        }
+        self.view_w = w;
     }
 
     /// Rows the conversation gets above the live region at the current size.
@@ -1274,11 +1288,11 @@ impl App {
             self.print(lines);
             return;
         }
-        // Tool calls fold into the run before them, which changes lines already rendered.
+        // Tool calls fold into the run before them, which changes the last entry already rendered.
+        self.view_dirty = self.view_dirty.min(self.entries.len().saturating_sub(1));
         for e in entries {
             absorb(&mut self.entries, e);
         }
-        self.view_w = 0;
         self.draw();
     }
 
@@ -2785,6 +2799,26 @@ mod tests {
 
     /// Streaming cost in full screen: a 43 KB reply in 20-byte deltas, each drawn as it arrives.
     /// Run with `cargo test --release -p zen -- --ignored --nocapture streaming_cost`.
+    #[test]
+    fn the_transcript_renders_only_what_changed_and_matches_a_full_render() {
+        let mut a = app(80, 20);
+        let full = |a: &App| a.entries.iter().flat_map(|e| App::render_entry(e, a.columns().0, a.expand_work)).collect::<Vec<_>>();
+        a.commit(vec![line("hello", Sty::Plain)]);
+        a.push(Entry::User("a question".into()));
+        tool_turn(&mut a, 3); // folds into one Work entry, changing the last entry each time
+        a.push(Entry::Md("an **answer**".into()));
+        assert_eq!(a.view, full(&a));
+        assert_eq!(a.view_start.len(), a.entries.len());
+        // Earlier entries are not rendered again: a marker in their lines survives a push.
+        a.view[0] = line("marker", Sty::Plain);
+        a.push(Entry::User("more".into()));
+        assert_eq!(texts(&a.view[..1]), ["marker"]);
+        // A width change renders everything again.
+        a.size = (60, 20);
+        a.draw();
+        assert_eq!(a.view, full(&a));
+    }
+
     #[test]
     fn the_cached_stream_renders_like_the_whole_reply() {
         let reply = long_reply(1_500);
