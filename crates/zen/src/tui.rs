@@ -331,6 +331,8 @@ struct App {
     /// still as lines arrive, entries fold, or the conversation re-wraps.
     last_total: usize,
     top_line: usize,
+    /// Rows the conversation got in the last frame (0: none drawn yet).
+    last_vh: usize,
     screen: Screen,
     panel: Option<Panel>,
     /// The last file a tool read or changed: what `/open` with no path shows.
@@ -446,6 +448,7 @@ impl App {
             scroll: 0,
             last_total: 0,
             top_line: 0,
+            last_vh: 0,
             screen: Screen::default(),
             panel: None,
             last_file: None,
@@ -1021,8 +1024,12 @@ impl App {
         self.view_w = w;
     }
 
-    /// Rows the conversation gets above the live region at the current size.
+    /// Rows the conversation gets above the live region: as in the last frame (every event
+    /// redraws), so keys and clicks don't build the live region again just to measure it.
     fn viewport_rows(&self) -> usize {
+        if self.last_vh > 0 {
+            return self.last_vh;
+        }
         let region = self.compose().0.len().min(self.height().saturating_sub(1));
         self.height().saturating_sub(region).max(1)
     }
@@ -1056,6 +1063,7 @@ impl App {
         if self.too_small() {
             let mut rows = vec![md::to_ansi(&self.too_small_line())];
             rows.resize(self.size.1.max(1), String::new());
+            self.last_vh = 0;
             let out = self.screen.frame(rows, None);
             self.flush(out);
             return;
@@ -1076,6 +1084,7 @@ impl App {
             caret_row = caret_row.saturating_sub(cut);
         }
         let vh = h - region.len();
+        self.last_vh = vh;
 
         // The conversation, with the streaming reply at the end: all of it, as it arrives.
         let streaming = self.busy && !self.stream.is_empty();
@@ -2380,6 +2389,10 @@ mod tests {
         assert!(a.region.widths.iter().all(|&w| w <= a.width()), "{t:#?}");
         assert!(t.iter().any(|l| l.starts_with('╭')) && t.iter().any(|l| l.starts_with('╰')));
         assert!(t[caret_row].contains(PLACEHOLDER.chars().take(10).collect::<String>().as_str()));
+        // The viewport size measured by the last frame matches the region it drew.
+        let mut b = app(40, 12);
+        b.draw();
+        assert_eq!(b.viewport_rows(), 12 - lines.len());
     }
 
     #[tokio::test]
@@ -2458,6 +2471,7 @@ mod tests {
             a.commit(vec![line("some conversation", Sty::Plain)]);
             let shown = a.screen.rows().to_vec();
             assert_eq!(shown.len(), rows, "exactly the real rows");
+            assert_eq!(a.last_vh, 0, "no conversation viewport while too small");
             assert!(shown[0].contains("zen: enlarge"[..(cols - 1).min(12)].trim()), "{shown:?}");
             assert!(shown.iter().skip(1).all(|r| r.is_empty()));
             let mut b = app(cols, rows);
