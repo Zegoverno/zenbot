@@ -138,7 +138,7 @@ Each module lists what it does, its contract, the default implementation and pos
 - Records `{id, scope, text, kind: preference|fact|lesson|directive, sensitivity, source, created_by, revision}`; rendered to markdown for humans.
 - Written explicitly (`memory.remember`) or by post-session extraction. Only the owner's own statements and verified outcomes count; directives are quoted verbatim.
 - Loaded as a capped index per session; the rest via search.
-- Refined (D-028, DESIGN.md "Memory and knowledge"): a fixed-size short-term `MEMORY.md`; a nightly sleep keeps, drops or promotes; only really impactful memories reach long-term.
+- Refined (D-028, DESIGN.md "Memory and knowledge"): a fixed-size short-term `MEMORY.md`; a nightly sleep keeps or drops. Superseded in part by D-045: traits, guidance and preferences live in `IDENTITY.md` / `USER.md` by approved edit, not in memory.
 
 #### 5.11 Taste
 The core of the moat: learning the owner's judgment and applying it everywhere.
@@ -160,7 +160,7 @@ The core of the moat: learning the owner's judgment and applying it everywhere.
 - **On disk** (under the zen home, `~/.zenbot`; the first step is built, D-040):
   ```
   USER.md AGENTS.md mcp.json   system-wide: one owner, one environment
-  agents/<name>/               each agent's own files: SOUL.md now; later agent.md (frontmatter below)
+  agents/<name>/               each agent's own files: SOUL.md and IDENTITY.md now; later agent.md (frontmatter below)
   global/                      MEMORY.md wiki/ skills/ tools/ now; later taste/ scripts/ workflows/ sources/
   projects/<id>/               the same folders as global/, plus project.yaml (made with the first project)
   ```

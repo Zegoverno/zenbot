@@ -6,6 +6,20 @@
 
 ---
 
+## 2026-10-08 — IDENTITY.md; traits and guidance leave memory (D-045)
+
+- New prompt file `agents/zenbot/IDENTITY.md`, loaded right after `SOUL.md`: the agent's character
+  and how it works. `SOUL.md` is now the deep layer only (what the agent is for, what it holds to,
+  the lines it doesn't cross); the default files are split the same way.
+- Traits, guidance and preferences are not memory: the agent proposes the edit to `IDENTITY.md` or
+  `USER.md` in the conversation and makes it once the owner approves. The `remember` and `capture`
+  descriptions say so.
+- The sleep no longer promotes to long-term memory (there were no long-term rows); it flags lasting
+  entries that belong in those files. One System One question fewer per entry and no repeat samples.
+  `zen memory accept|reject` and `POST /api/memory/{id}/review` are gone.
+- The kernel refuses `edit`/`write` on SOUL, IDENTITY, AGENTS and USER from subagents and from
+  sessions that read untrusted content. New e2e checks and an eval task (`preference-not-memory`).
+
 ## 2026-10-08 — `zen status` sees the kernel's OpenRouter key
 
 - `zen status` said "NO key: set OPENROUTER_API_KEY" while the key was set and the sleep was

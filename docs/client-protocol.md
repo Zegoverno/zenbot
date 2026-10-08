@@ -19,8 +19,8 @@ accepted for ordinary HTTP requests. The token is in `~/.zenbot/token`. The serv
 | `GET /api/sessions/{id}?last=&after=` | | the session with `messages` (each with its `seq`; all of them, or the `last` N, or those after block `after`) and `busy` |
 | `PATCH /api/sessions/{id}` | `{ title?, model?, effort? ("default" clears), archived? }` | the session |
 | `POST /api/sessions/{id}/decision` | `{ decision: accept\|more\|reshape\|drop, note? }` | the recorded verdict (source `owner`) |
-| `GET /api/memory?tier=` | | `{ memories, last_sleep, size }`: memories of a tier (`short`, the default; `long`, `archived`, `all`), each `{ id: "m12", text, source, tier, proposed, reason, created_at, updated_at }`; the latest `sleep_runs` row; short-term memory's size in characters |
-| `POST /api/memory/sleep?trigger=` | | tidy short-term memory now (`trigger=nightly` from the timer, else the owner): `{ run, entries, kept, dropped, promoted, proposed, scorer, note }` |
+| `GET /api/memory?tier=` | | `{ memories, last_sleep, size }`: memories of a tier (`short`, the default; `archived`, `all`; `long` holds only rows from before D-045), each `{ id: "m12", text, source, tier, proposed, reason, created_at, updated_at }`; the latest `sleep_runs` row; short-term memory's size in characters |
+| `POST /api/memory/sleep?trigger=` | | tidy short-term memory now (`trigger=nightly` from the timer, else the owner): `{ run, entries, kept, dropped, scorer, note }` |
 | `GET /api/version?refresh=` | | the running commit and whether `main` is ahead |
 | `GET /api/upgrade`, `POST /api/upgrade` | | upgrade progress / start one |
 

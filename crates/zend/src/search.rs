@@ -2,7 +2,7 @@
 //!
 //! An indexer keeps `search_docs` current in the background: one document per turn of every session
 //! (the owner's message, the agent's answers and the tools it called; tool output is left out), and
-//! one per short- or long-term memory (archived ones are taken out). Embeddings are filled in
+//! one per short-term memory and each `long` row from before D-045 (archived ones are taken out). Embeddings are filled in
 //! afterwards when an embedding model is reachable (OpenRouter, `ZEN_EMBED_MODEL`, default
 //! `openai/text-embedding-3-small`, 1536 dimensions); until then a document is found by text.
 //!

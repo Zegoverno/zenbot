@@ -172,7 +172,7 @@ async fn remember(app: &crate::AppState, session: Uuid, args: &Value) -> Result<
         other => anyhow::bail!("source must be owner, verified or inferred, not `{other}`"),
     };
     // A session that read web content can't vouch for what it saves: web text could have put it
-    // there, so it never counts as the owner's words or a checked result (and can't be promoted).
+    // there, so it never counts as the owner's words or a checked result.
     let source = if source != "inferred" && crate::taint::tainted(db, session).await { "inferred" } else { source };
     let text = args["text"].as_str().map(str::trim).unwrap_or("");
     let text = crate::secrets::mask(text);
@@ -370,8 +370,8 @@ fn state_for(e: &Entry, all: &[Entry], user_md: &str) -> Value {
     })
 }
 
-/// Tidy short-term memory: rank, keep what fits, archive the rest, promote (or propose) the few
-/// that clear the bar. Records a `sleep_runs` row and one `decisions` row per entry.
+/// Tidy short-term memory: rank, keep what fits, archive the rest, flag the entries that belong in
+/// `USER.md` or `IDENTITY.md`. Records a `sleep_runs` row and one `decisions` row per entry.
 pub async fn sleep(app: &App, trigger: &str) -> Result<Value> {
     // One sleep at a time: a second one (the timer while a ceiling sleep runs) waits, then finds
     // memory already tidied.
