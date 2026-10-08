@@ -165,7 +165,12 @@ struct Server {
     next_id: i64,
     tools: Vec<ToolEntry>,
     error: Option<String>,
+    /// When connecting last failed: a server that is down isn't retried for `RETRY_AFTER`, so it
+    /// doesn't cost its connect timeout on every find_tools / call_tool.
+    failed_at: Option<std::time::Instant>,
 }
+
+const RETRY_AFTER: Duration = Duration::from_secs(60);
 
 /// The servers, keyed by name, with the config they were started from and when it was read.
 struct Registry {
@@ -194,7 +199,7 @@ async fn refresh() {
     // A config change replaces the handles without waiting for active calls. Those calls finish on
     // their old Arc; subsequent calls use the new server. Never hold the registry lock over I/O.
     reg.servers = cfgs.into_iter().map(|cfg| {
-        (cfg.name.clone(), Arc::new(Mutex::new(Server { cfg, conn: None, next_id: 1, tools: Vec::new(), error: None })))
+        (cfg.name.clone(), Arc::new(Mutex::new(Server { cfg, conn: None, next_id: 1, tools: Vec::new(), error: None, failed_at: None })))
     }).collect();
     reg.loaded = mtime;
     reg.problems = problems;
@@ -263,11 +268,18 @@ impl Server {
 
     async fn ensure(&mut self) -> Result<()> {
         if self.conn.is_none() {
+            if let (Some(at), Some(e)) = (self.failed_at, &self.error) {
+                if at.elapsed() < RETRY_AFTER {
+                    bail!("{e} (tried {}s ago; retrying after {}s)", at.elapsed().as_secs(), RETRY_AFTER.as_secs());
+                }
+            }
             if let Err(e) = self.connect().await {
                 self.conn = None;
                 self.error = Some(format!("{e:#}"));
+                self.failed_at = Some(std::time::Instant::now());
                 return Err(e);
             }
+            self.failed_at = None;
         }
         Ok(())
     }
@@ -304,7 +316,7 @@ impl Server {
                         }
                         let Ok(v) = serde_json::from_str::<Value>(line.trim()) else { continue };
                         if v["id"] == json!(id) && v.get("method").is_none() {
-                            return answer(v);
+                            return Ok(v);
                         }
                         // A request from the server (sampling, roots, …): not supported.
                         if v.get("method").is_some() && v.get("id").is_some() {
@@ -319,14 +331,20 @@ impl Server {
                     if let (Some(s), Some(Conn::Http { session })) = (new_session, self.conn.as_mut()) {
                         *session = Some(s);
                     }
-                    let found = body.into_iter().find(|v| v["id"] == json!(id)).context("the server's answer had no response for the request")?;
-                    answer(found)
+                    body.into_iter().find(|v| v["id"] == json!(id)).context("the server's answer had no response for the request")
                 }
             }
         })
         .await;
         match res {
-            Ok(r) => r,
+            // The server answered (perhaps with a JSON-RPC error): the connection is fine.
+            Ok(Ok(v)) => answer(v),
+            // A broken pipe, an exited server, a failed HTTP call: connect again next time instead of
+            // failing every later call until the config changes.
+            Ok(Err(e)) => {
+                self.conn = None;
+                Err(e)
+            }
             Err(_) => {
                 // A stdio server that didn't answer may answer late; start it again next time.
                 self.conn = None;
@@ -470,7 +488,17 @@ async fn find(app: &App, session: Uuid, query: &str) -> (String, bool) {
 
 async fn lookup(full: &str) -> Result<ToolEntry> {
     let (tools, _) = catalog().await;
-    tools.into_iter().find(|t| t.full() == full || t.name == full).ok_or_else(|| anyhow!("no MCP tool `{full}`; use find_tools"))
+    if let Some(t) = tools.iter().find(|t| t.full() == full) {
+        return Ok(t.clone());
+    }
+    // A bare tool name only when exactly one server has it: otherwise it could run another
+    // server's tool (or a made tool) of the same name.
+    let mut bare = tools.into_iter().filter(|t| t.name == full);
+    match (bare.next(), bare.next()) {
+        (Some(t), None) => Ok(t),
+        (Some(_), Some(_)) => Err(anyhow!("several servers have a tool `{full}`; use its full name from find_tools")),
+        _ => Err(anyhow!("no MCP tool `{full}`; use find_tools")),
+    }
 }
 
 /// The required arguments a call is missing, by the tool's input schema.
