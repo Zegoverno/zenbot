@@ -123,6 +123,7 @@ verdicts and the owner's reviews (memory promotions, skill drafts, tools, routes
   reconnect recovery and bounded private prompt history are in place. A future client event contract
   should replace the remaining untyped JSON.
 - Settings are read from the environment in ~25 places (no single config).
+- Client events are untyped JSON.
 - The old workflow's schema stays (expand-only): `sessions.state` and old tape block kinds.
   Drop them in a later release; `policies` is in use by model routing.
 - Tools run as the same Unix user as the owner. Shell subprocesses no longer inherit kernel secrets,
