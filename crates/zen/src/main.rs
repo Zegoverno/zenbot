@@ -424,7 +424,7 @@ async fn ask(c: &Client, json_out: bool, prompt: Option<String>, session: Option
     }
     if let Some(e) = turn.error {
         if !json_out {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", for_stderr(&e));
         }
         std::process::exit(1);
     }
@@ -458,7 +458,7 @@ async fn chat(c: &Client, session: Option<String>, new: NewSession) -> Result<()
         println!();
         let turn = run_turn(&mut ws, line, true, true).await?;
         if let Some(e) = turn.error {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", for_stderr(&e));
         }
     }
     eprintln!("{}", dim(&format!("session {id}")));
@@ -598,6 +598,10 @@ fn for_stdout(s: &str) -> std::borrow::Cow<'_, str> {
     if std::io::stdout().is_terminal() { md::sanitize(s) } else { s.into() }
 }
 
+fn for_stderr(s: &str) -> std::borrow::Cow<'_, str> {
+    if std::io::stderr().is_terminal() { md::sanitize(s) } else { s.into() }
+}
+
 fn print_messages(s: &Value) {
     println!("{}  ({})", for_stdout(s["title"].as_str().unwrap_or("")), for_stdout(s["model"].as_str().unwrap_or("")));
     for m in s["messages"].as_array().into_iter().flatten() {
@@ -622,7 +626,7 @@ async fn main() {
     let cli = Cli::parse();
     if let Err(e) = run(cli).await {
         let message = format!("{e:#}");
-        eprintln!("error: {}", if std::io::stderr().is_terminal() { md::sanitize(&message) } else { message.into() });
+        eprintln!("error: {}", for_stderr(&message));
         std::process::exit(1);
     }
 }
@@ -764,7 +768,7 @@ async fn run(cli: Cli) -> Result<()> {
             if json {
                 out(&r);
             } else {
-                println!("{}", sleep_counts(&r));
+                println!("{}", for_stdout(&sleep_counts(&r)));
                 if let Some(note) = r["note"].as_str() {
                     println!("{}", for_stdout(note));
                 }
