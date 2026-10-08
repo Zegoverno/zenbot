@@ -6,6 +6,17 @@
 
 ---
 
+## 2026-10-08 — Remove dead code; one place for tool permissions
+
+- One `agent::refusal(kind, name)` decides what each kind of session may call (verifiers,
+  subagents); a unit test checks it matches what each kind is offered. It also closes a gap: a
+  non-verifier session could call `submit_verdict` (not offered, but not refused).
+- The API no longer returns the legacy `sessions.state` (no reader); the column stays
+  (expand-only). One session column list and one accept/reject parser in `api.rs`.
+- Removed the unused workflow `phase` of the turn context (same text as before), the `move` arm
+  for a tool that doesn't exist, and thin wrappers (`start_kernel_turn`, `append_tape`). The
+  agent's SOUL path is one constant. Stale header comments and MAP notes corrected.
+
 ## 2026-10-08 — Engines and scripts: fail loud, keep secrets off argv
 
 - Claude Code: the turn is refused if the CLI offers any tool that isn't zenbot's (checked on its

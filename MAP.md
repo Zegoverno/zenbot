@@ -84,7 +84,7 @@ prompt and the web UI.
 | `src/update.rs` | 176 | Self-update: compares `~/.zenbot/version` with `origin/main` (hourly by default), asks `scripts/fetch-release.sh --check` whether binaries exist (30-second timeout), starts `scripts/self-update.sh` on request | `Updater` (`running`, `info`, `check`, `check_periodically`, `start`, `status`) | `git`, scripts | `api`, `main.rs` |
 | `src/git.rs` | 64 | Async git with a 60 s limit and an output cap (git is stopped once the cap is reached) | `output`, `git` | — | `update`, `agent` (the verifier's diff) |
 | `steps/verify.md` | 9 | The verifier's whole system prompt (`include_str!` in `agent.rs`) | — | — | `agent::system_for` |
-| `src/layout.rs` | 120 | Where files live under the zen home, by scope (D-040): system-wide prompt files at the top, `agents/<name>/` (the agent's `SOUL.md`), `global/` (`MEMORY.md`, wiki, skills, tools). `migrate` moves an old flat layout once at startup, before the defaults, never overwriting, and leaves a relative symlink at each old path for rollbacks | `AGENT`, `global_dir`, `migrate` | — | `main.rs`, `compile`, `defaults`, `memory`, `wiki`, `skills`, `workshop` |
+| `src/layout.rs` | 120 | Where files live under the zen home, by scope (D-040): system-wide prompt files at the top, `agents/<name>/` (the agent's `SOUL.md`), `global/` (`MEMORY.md`, wiki, skills, tools). `migrate` moves an old flat layout once at startup, before the defaults, never overwriting, and leaves a relative symlink at each old path for rollbacks | `SOUL`, `global_dir`, `migrate` | — | `main.rs`, `compile`, `defaults`, `memory`, `wiki`, `skills`, `workshop` |
 | `defaults/` | — | Default `SOUL.md`, `AGENTS.md` (with `{{workspace}}`, `{{home}}`, `{{zen_home}}`, `{{repo}}`), `USER.md`, and the skills `work/brief` (with `references/template.md`), `work/verify` and `work/close` (keep what a job taught: memory, wiki, skills, tools) (`include_str!` in `defaults.rs`) | — | — | `defaults::install` |
 | `web/index.html` | 493 | Browser UI, served at `/` (`include_str!`). **Frozen** (AGENTS.md). Uses `/api/models` and `/api/sessions…` | — | API | owner |
 | `migrations/*.sql` | — | Schema (see Database) | — | — | `sqlx::migrate!` in `main.rs` |
@@ -129,7 +129,7 @@ From `main.rs` (router) and `api.rs`. Everything under `/api` needs the token.
 | GET | `/health` | `health` | No auth. `{ok, db, mind, workers:{name:bool}, busy, version, commit}`; pings every worker. `busy` = running turns + kernel work outside them. Used by `wait_healthy` and `apply-upgrade.sh` (`"busy":0`) |
 | GET | `/api/models` | `list_models` | Asks every worker for `models.list`, refreshes routes, returns the curated list (`ZEN_MODELS` order, plus any `faux/*`), `authenticated`, `default`, `scorer` |
 | GET | `/api/sessions?archived=` | `list_sessions` | Top-level sessions only (`kind IS NULL`, so verifiers are hidden), with cost |
-| POST | `/api/sessions` | `create_session` | `{title?, model?, effort?}` (`state` stays null) |
+| POST | `/api/sessions` | `create_session` | `{title?, model?, effort?}` |
 | GET | `/api/sessions/{id}` | `get_session` | Session, its `message` blocks (with `seq`) and `busy` |
 | PATCH | `/api/sessions/{id}` | `update_session` | Title, model, effort (`"default"` clears it), archived |
 | GET | `/api/sessions/{id}/ws` | `session_ws` | WebSocket; its session's event hub is created on connect and freed when the last client leaves. Client sends `{type:"prompt",text}` or `{type:"abort"}`. Server events: `message`, `delta`, `thinking`, `tool_start`, `tool_end`, `busy`, `end`, `idle`, `status`, `questions`, `child_end`, `error`, `resync` |
@@ -176,7 +176,7 @@ session states and no state-dependent tools.
 | `decide` | `agent.rs` → `score.rs` → OpenRouter `/systemone`, logged in `decisions` (`point = 'tool'`) | when `ZEN_S1_MODEL` is set and `ZEN_DECIDE_TOOL` isn't `0` |
 | `submit_verdict` | `agent.rs` (`verdict` block; ends the turn) | verifiers only |
 
-`sessions.state` is no longer written (null for new sessions; old sessions keep theirs; see Notes).
+`sessions.state` is no longer written or returned (old sessions keep theirs; see Notes).
 
 ---
 
@@ -458,24 +458,17 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 ## Notes and known gaps
 
 - **Columns and tables of the old workflow stay** (expand-only): `sessions.state` and old tape
-  blocks (`policies` is in use again: the routing policy, `delegate.rs`). `run_child` still sets a child session's `state` to its kind (`verifier`, `subagent`); otherwise nothing writes them, and two readers remain: `api::list_sessions` still returns
-  `state` (`"open"` when null), and `compile::history` still honours an old `state` block with
-  `fresh: true` (history starts after it), so old sessions replay as before. Drop them in a later
-  release once nothing needs them.
+  blocks. Nothing writes `state` any more and the API no longer returns it; `compile::history`
+  still honours an old `state` block with `fresh: true` (history starts after it), so old sessions
+  replay as before. Drop them in a later release.
 - **Criteria commands run unsandboxed.** `verify` runs a criterion's `run` command on the bash
   tool's core (`tools::run_shell`: own process group, 600 s timeout, output masked) with
   `read_only = false`, so outside bubblewrap and able to write, even though the verifier's own
   shell is read-only.
 - **Workers start through a login shell** (`bash -lc` in `mind.rs`), so the service user's
   profile can change their environment.
-- Instruction files attached to tool results (`dispatch.rs`) are appended after masking, so they
-  are not masked.
-- **`codex.rs` header says threads are ephemeral**, but the code keeps them across turns unless
-  `ZEN_CODEX_RESUME=0`.
 - **`GET /api/mcp` connects every configured server** (starts stdio ones) to count their tools.
   Its doc comment says it is for `zen status`, but the CLI doesn't call it yet.
-- **`compile::turn_context` still takes a workflow `phase`**; the only production caller
-  (`turns.rs`) passes `None`.
 - **The skill rules apply only through `save_skill`.** The agent's `write`/`edit` can change any
   skill or tool file directly (including activating a draft by moving it); the next workshop commit
   records it. Changes to an active skill through `save_skill` apply at once, without review.
