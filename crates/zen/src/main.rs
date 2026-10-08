@@ -12,7 +12,7 @@ mod tui;
 
 use std::io::{IsTerminal, Read, Write};
 
-use client::{assistant_text, describe_update, dim, record_total, short, tool_summary, usage_total, Client, NewSession, Ws};
+use client::{assistant_text, describe_update, dim, record_total, short, tool_summary, usage_total, zen_home, Client, NewSession, Ws};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -27,7 +27,7 @@ struct Cli {
     /// Kernel URL
     #[arg(long, env = "ZEN_URL", default_value = "http://127.0.0.1:8100", global = true)]
     url: String,
-    /// Access token (default: contents of ~/.zenbot/token)
+    /// Access token (default: contents of $ZEN_HOME/token, ~/.zenbot/token)
     #[arg(long, env = "ZEN_TOKEN", hide_env_values = true, global = true)]
     token: Option<String>,
     /// Print machine-readable JSON
@@ -453,14 +453,24 @@ async fn chat(c: &Client, session: Option<String>, new: NewSession) -> Result<()
     Ok(())
 }
 
-/// Values from ~/.zenbot/env (written by the installer).
-fn zen_env() -> std::collections::HashMap<String, String> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    std::fs::read_to_string(format!("{home}/.zenbot/env"))
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| l.split_once('='))
-        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+/// Values from `<zen home>/env` (written by the installer), read once.
+fn zen_env() -> &'static std::collections::HashMap<String, String> {
+    static ENV: std::sync::OnceLock<std::collections::HashMap<String, String>> = std::sync::OnceLock::new();
+    ENV.get_or_init(|| parse_env(&std::fs::read_to_string(zen_home().join("env")).unwrap_or_default()))
+}
+
+/// `KEY=value` lines as a shell would read them: comments and blank lines skipped, an `export `
+/// prefix and matching quotes around the value removed.
+fn parse_env(text: &str) -> std::collections::HashMap<String, String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|l| l.strip_prefix("export ").unwrap_or(l).split_once('='))
+        .map(|(k, v)| {
+            let v = v.trim();
+            let unquoted = [('"', '"'), ('\'', '\'')].iter().find_map(|(a, b)| v.strip_prefix(*a)?.strip_suffix(*b));
+            (k.trim().to_string(), unquoted.unwrap_or(v).to_string())
+        })
         .collect()
 }
 
@@ -480,10 +490,9 @@ fn git_identity() -> Option<String> {
     Some(format!("{} <{}>", get("user.name")?, get("user.email")?))
 }
 
-/// The engines' state as `scripts/update-engines.sh` last left it (~/.zenbot/engines.json).
+/// The engines' state as `scripts/update-engines.sh` last left it (`<zen home>/engines.json`).
 fn engines_state() -> Value {
-    let home = std::env::var("HOME").unwrap_or_default();
-    std::fs::read_to_string(format!("{home}/.zenbot/engines.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null)
+    std::fs::read_to_string(zen_home().join("engines.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null)
 }
 
 /// The `zen status` line for the engines: "claude 2.1.291, codex 0.160.1 (checked …)",
@@ -938,6 +947,15 @@ mod tests {
             "last_sleep": { "ended_at": "2026-10-07T04:01:02Z", "entries": 3, "kept": 2, "dropped": 1, "promoted": 0, "proposed": 0, "scorer": null } });
         assert_eq!(memory_line(&m), "2 entries, 28/4000 characters; last sleep 2026-10-07 04:01 UTC: 3 entries: 2 kept, 1 archived, 0 promoted, 0 proposed for long-term (by recency: no System One model)");
         assert!(memory_line(&json!({ "size": 4000, "memories": [], "last_sleep": null })).ends_with("no sleep yet"));
+    }
+
+    #[test]
+    fn the_env_file_is_read_like_a_shell_would() {
+        let env = parse_env("# zenbot\nexport PATH=\"/a/bin:/b\"\nZEN_REPO='/home/x/zenbot'\n\nPLAIN = v \nBAD\n");
+        assert_eq!(env["PATH"], "/a/bin:/b");
+        assert_eq!(env["ZEN_REPO"], "/home/x/zenbot");
+        assert_eq!(env["PLAIN"], "v");
+        assert_eq!(env.len(), 3);
     }
 
     #[test]

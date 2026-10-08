@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use unicode_width::UnicodeWidthStr;
 
-use crate::client::{assistant_text, record_total, short, tool_summary, usage_total, Client, NewSession, Ws};
+use crate::client::{assistant_text, record_total, short, tool_summary, usage_total, zen_home, Client, NewSession, Ws};
 use crate::editor::Editor;
 use crate::files::Files;
 use crate::md::{self, line, Line, Md, Sty};
@@ -476,14 +476,14 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
     let catalog: Vec<Value> = models["models"].as_array().cloned().unwrap_or_default();
     let signed_in = models["authenticated"].as_object().is_some_and(|a| a.values().any(|v| v == true));
 
-    let history = std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join(".zenbot/history"));
+    let history = Some(zen_home().join("history"));
     let (tx, mut rx) = mpsc::unbounded_channel();
     let model = new.model.unwrap_or_else(|| default_model.clone());
     let mut app = App::new(c, tx, model, default_model, catalog, history, terminal_size(), inline);
     app.effort = new.effort;
     app.installed = installed_zen().and_then(|p| Some((p.clone(), std::fs::metadata(&p).ok()?.modified().ok()?)));
-    if let Some(home) = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".zenbot")).filter(|p| p.is_dir()) {
-        app.files_root = home;
+    if zen_home().is_dir() {
+        app.files_root = zen_home();
     }
 
     terminal::enable_raw_mode()?;
@@ -502,7 +502,7 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
 
     let result = async {
         app.commit(vec![
-            banner(std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".zenbot/version")).as_deref()),
+            banner(Some(&zen_home().join("version"))),
             line("type a task · /help for commands · esc interrupts · ctrl-d exits", Sty::Dim),
             Vec::new(),
         ]);
@@ -635,12 +635,12 @@ fn restore_terminal(inline: bool, enhanced: bool) {
     let _ = terminal::disable_raw_mode();
 }
 
-/// The zen to restart into: the installed one (`~/.zenbot/bin/zen`, where upgrades put it), else
+/// The zen to restart into: the installed one (`<zen home>/bin/zen`, where upgrades put it), else
 /// this binary's own path (on Linux, a replaced binary's path ends in " (deleted)").
 fn installed_zen() -> Option<PathBuf> {
-    let installed = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".zenbot/bin/zen"));
-    if let Some(p) = installed.filter(|p| p.is_file()) {
-        return Some(p);
+    let installed = zen_home().join("bin/zen");
+    if installed.is_file() {
+        return Some(installed);
     }
     let exe = std::env::current_exe().ok()?;
     let s = exe.to_string_lossy();

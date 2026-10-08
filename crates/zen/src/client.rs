@@ -3,7 +3,21 @@
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::io::IsTerminal;
+use std::path::PathBuf;
 use std::time::Duration;
+
+/// zenbot's home: `ZEN_HOME`, else `~/.zenbot` (as the kernel decides it). The token, the prompt
+/// history, the installed binaries, `env` and `engines.json` live there.
+pub fn zen_home() -> PathBuf {
+    home_from(std::env::var_os("ZEN_HOME"), std::env::var_os("HOME"))
+}
+
+fn home_from(zen_home: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> PathBuf {
+    match zen_home.filter(|h| !h.is_empty()) {
+        Some(h) => PathBuf::from(h),
+        None => PathBuf::from(home.unwrap_or_default()).join(".zenbot"),
+    }
+}
 
 /// How long to wait for the kernel to accept a connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -23,11 +37,8 @@ impl Client {
         let token = match token {
             Some(t) => t,
             None => {
-                let home = std::env::var("HOME").context("HOME not set")?;
-                std::fs::read_to_string(format!("{home}/.zenbot/token"))
-                    .context("no token: set ZEN_TOKEN or create ~/.zenbot/token")?
-                    .trim()
-                    .to_string()
+                let path = zen_home().join("token");
+                std::fs::read_to_string(&path).with_context(|| format!("no token: set ZEN_TOKEN or create {}", path.display()))?.trim().to_string()
             }
         };
         let http = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT).timeout(REQUEST_TIMEOUT).build()?;
@@ -226,6 +237,13 @@ pub fn tool_summary(name: &str, args: &Value) -> String {
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+
+    #[test]
+    fn zen_home_follows_zen_home_then_home() {
+        assert_eq!(home_from(Some("/srv/zen".into()), Some("/home/x".into())), PathBuf::from("/srv/zen"));
+        assert_eq!(home_from(None, Some("/home/x".into())), PathBuf::from("/home/x/.zenbot"));
+        assert_eq!(home_from(Some("".into()), Some("/home/x".into())), PathBuf::from("/home/x/.zenbot"), "empty means unset");
+    }
 
     #[test]
     fn token_totals_and_assistant_text() {
