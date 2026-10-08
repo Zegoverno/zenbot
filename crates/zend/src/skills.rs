@@ -37,9 +37,11 @@ pub fn frontmatter(text: &str) -> (Vec<(String, String)>, &str) {
         Some(r) => r,
         None => return (Vec::new(), text),
     };
-    let Some(end) = rest.find("\n---") else { return (Vec::new(), text) };
-    let head = &rest[..end];
-    let body = rest[end + 4..].trim_start_matches(['\r', '\n', '-']);
+    // The closing fence is a whole `---` line (not `---x`, and not a body's leading list dash).
+    let fence = |i: usize| rest[i + 4..].is_empty() || rest[i + 4..].starts_with('\n') || rest[i + 4..].starts_with("\r\n");
+    let Some(end) = rest.match_indices("\n---").map(|(i, _)| i).find(|&i| fence(i)) else { return (Vec::new(), text) };
+    let head = rest[..end].trim_end_matches('\r');
+    let body = rest[end + 4..].trim_start_matches(['\r', '\n']);
     let mut fields: Vec<(String, String)> = Vec::new();
     for line in head.lines() {
         if line.starts_with([' ', '\t']) {
@@ -372,6 +374,9 @@ mod tests {
         assert_eq!(field(&f, "name"), Some("verify"));
         assert_eq!(field(&f, "description"), Some("Check work before reporting."));
         assert_eq!(body, "# Verify\n");
+        let (f, body) = frontmatter("---\nname: x\nnote: a\n---x\n---\n- first item\n");
+        assert_eq!(field(&f, "note"), Some("a"));
+        assert_eq!(body, "- first item\n", "a leading list dash survives; `---x` is not a fence");
         let (f, body) = frontmatter("no frontmatter");
         assert!(f.is_empty() && body == "no frontmatter");
     }

@@ -78,8 +78,9 @@ struct App {
     compacting: Mutex<HashSet<Uuid>>,
     /// Kernel-started turns being waited for (verifier sessions), by session.
     waiters: Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<()>>>,
-    /// Sessions with kernel work running outside a turn, counted as busy so an upgrade waits for them.
-    pub(crate) background: Mutex<HashSet<Uuid>>,
+    /// Kernel tasks running outside a turn (after a verdict: skill activation, scoring), counted as
+    /// busy so an upgrade waits for them. Held through `Background` guards.
+    pub(crate) background: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 type AppState = Arc<App>;
@@ -103,7 +104,22 @@ pub(crate) fn env_num(key: &str, default: f64) -> f64 {
     std::env::var(key).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
 }
 
+/// One unit of background work in `App::background`, released when dropped (even on a panic).
+pub(crate) struct Background(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for Background {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 impl App {
+    /// Count kernel work that runs outside a turn until the guard is dropped.
+    pub(crate) fn background_work(&self) -> Background {
+        self.background.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Background(self.background.clone())
+    }
+
     /// Listen to a session's events (a client's WebSocket). Call `unsubscribe` when it closes.
     async fn subscribe(&self, id: Uuid) -> broadcast::Receiver<String> {
         self.hubs.lock().await.entry(id).or_insert_with(|| broadcast::channel(1024).0).subscribe()
@@ -194,7 +210,7 @@ async fn main() -> Result<()> {
         updater,
         compacting: Mutex::new(HashSet::new()),
         waiters: Mutex::new(HashMap::new()),
-        background: Mutex::new(HashSet::new()),
+        background: Arc::default(),
     });
     tokio::spawn(app.updater.clone().check_periodically());
     for (idx, exited) in exits.into_iter().enumerate() {

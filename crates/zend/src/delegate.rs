@@ -51,7 +51,9 @@ pub async fn set_policy(db: &sqlx::PgPool, data: &Value, reason: &str, by: &str)
 
 /// A number in [0, 1) from the clock: enough randomness to pick when to explore.
 fn draw() -> f64 {
-    (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0) % 1_000_000) as f64 / 1_000_000.0
+    // Random bits, not the clock: parallel tasks start in the same instant, and correlated draws
+    // would bias exploration and the logged probabilities.
+    (Uuid::new_v4().as_u128() >> 75) as f64 / (1u64 << 53) as f64
 }
 
 /// Pick the model for a subtask: `(model, kind, probability it had of being picked, how)`.
@@ -103,7 +105,10 @@ async fn delegate_all(app: &AppState, session: Uuid, workspace: &std::path::Path
     let jobs: Vec<Value> = jobs.into_iter().map(|j| if j.is_string() { json!({ "task": j }) } else { j }).collect();
     anyhow::ensure!(!jobs.is_empty(), "delegate needs a `task` (or `tasks`): the goal, what to read first, and when it's done");
     anyhow::ensure!(jobs.len() <= 8, "at most 8 tasks at a time");
-    let runs = jobs.iter().map(|j| delegate(app, session, workspace, j));
+    // One model refresh for the whole call, not one per task.
+    crate::collect_models(app).await;
+    let served: Vec<String> = app.routes.lock().await.keys().cloned().collect();
+    let runs = jobs.iter().map(|j| delegate(app, session, workspace, j, &served));
     let results = futures_util::future::join_all(runs).await;
     let mut out = Vec::new();
     let mut any_error = false;
@@ -122,13 +127,11 @@ async fn delegate_all(app: &AppState, session: Uuid, workspace: &std::path::Path
     Ok((out.join("\n\n"), any_error))
 }
 
-async fn delegate(app: &AppState, session: Uuid, workspace: &std::path::Path, args: &Value) -> Result<(String, bool)> {
+async fn delegate(app: &AppState, session: Uuid, workspace: &std::path::Path, args: &Value, served: &[String]) -> Result<(String, bool)> {
     let task = args["task"].as_str().map(str::trim).filter(|t| !t.is_empty()).context("each task needs its text: the goal, what to read first, and when it's done")?;
     let row = sqlx::query("SELECT model, kind FROM sessions WHERE id = $1").bind(session).fetch_one(&app.db).await?;
     anyhow::ensure!(row.get::<Option<String>, _>("kind").as_deref() != Some(SUBAGENT), "a subagent can't delegate further");
     let parent_model: String = row.get("model");
-    crate::collect_models(app).await;
-    let served: Vec<String> = app.routes.lock().await.keys().cloned().collect();
     let (model, kind, propensity, how) = match args["model"].as_str().map(str::trim).filter(|m| !m.is_empty()) {
         Some(m) => {
             anyhow::ensure!(served.iter().any(|s| s == m), "no worker serves `{m}`");
@@ -137,7 +140,7 @@ async fn delegate(app: &AppState, session: Uuid, workspace: &std::path::Path, ar
         None => {
             let kind = kind_of(app, task).await;
             let (_, p) = policy(&app.db).await;
-            let (m, prob, how) = pick(&p, &kind, &parent_model, &served, draw());
+            let (m, prob, how) = pick(&p, &kind, &parent_model, served, draw());
             (m, kind, prob, how)
         }
     };
