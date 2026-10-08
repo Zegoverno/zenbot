@@ -74,7 +74,9 @@ fn governing_except(workspace: &Path, paths: &[PathBuf], zen_home: &Path) -> Vec
                 break; // the workspace and its parents are already in the system prompt
             }
             if let Some(f) = in_dir(dir) {
-                here.push(f);
+                if !f.canonicalize().is_ok_and(|real| real.starts_with(&real_zen_home)) {
+                    here.push(f);
+                }
             }
         }
         for f in here.into_iter().rev() {
@@ -149,6 +151,8 @@ mod tests {
         std::fs::create_dir_all(ws.join("sub")).unwrap();
         let alias = ws.join("sub/../.zenbot/AGENTS.md");
         assert!(governing_except(&ws, &[alias], &zen_home).is_empty());
+        std::os::unix::fs::symlink(&zen_home, ws.join("link")).unwrap();
+        assert!(governing_except(&ws, &[ws.join("link/missing/deep/file")], &zen_home).is_empty());
     }
 
     #[test]

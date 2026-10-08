@@ -429,7 +429,7 @@ kernel_tools() {
   start_kernel "$ws" "$(script kernel-tools.json "s|ZENHOME|$TMP/home/.zenbot|" "s|ZENALIAS|$TMP/home/sub/../.zenbot|")"
   local sid; sid=$(zen ask --json -m faux/smoke "check kernel tools" | jq -r .session_id)
   check "the zen home environment file is not attached as project context" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND kind='context'")" 0
-  check "a loose edit keeps exactly one trailing newline" eq "$(cat "$ws/a.txt")" $'baz\nbar'
+  check "a loose edit keeps exactly one trailing newline" cmp -s "$ws/a.txt" <(printf 'baz\nbar\n')
   check "a huge read is refused before loading" grep -q "16 MiB limit" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='read' ORDER BY seq DESC LIMIT 1")"
 }
 

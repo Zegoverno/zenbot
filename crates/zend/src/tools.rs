@@ -399,9 +399,14 @@ async fn read(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> 
     }
     // The same open file may grow after stat, and procfs files often report size zero.
     let mut bytes = Vec::with_capacity(size as usize);
-    file.take(MAX_READ_FILE + 1).read_to_end(&mut bytes).await.map_err(|e| err(format!("cannot read {}: {e}", path.display())))?;
-    if bytes.len() as u64 > MAX_READ_FILE {
-        return Err(err(format!("{} exceeds read's 16 MiB limit; use bash to inspect a range", path.display())));
+    let mut limited = file.take(MAX_READ_FILE);
+    limited.read_to_end(&mut bytes).await.map_err(|e| err(format!("cannot read {}: {e}", path.display())))?;
+    if bytes.len() as u64 == MAX_READ_FILE {
+        let mut file = limited.into_inner();
+        let mut extra = [0_u8; 1];
+        if file.read(&mut extra).await.map_err(|e| err(format!("cannot read {}: {e}", path.display())))? > 0 {
+            return Err(err(format!("{} exceeds read's 16 MiB limit; use bash to inspect a range", path.display())));
+        }
     }
     if is_binary(&bytes) {
         return Err(err(format!(
@@ -636,6 +641,25 @@ mod tests {
         let file = std::fs::File::create(ws.join("huge.txt")).unwrap();
         file.set_len(16 * 1024 * 1024 + 1).unwrap();
         let r = run(&ws, "read", json!({ "path": "huge.txt" })).await;
+        assert!(r.is_error);
+        assert!(r.content.contains("16 MiB limit"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn read_caps_a_zero_size_stream_too() {
+        use std::io::Write;
+        let ws = scratch("fifo-read");
+        let path = ws.join("stream.txt");
+        assert!(std::process::Command::new("mkfifo").arg(&path).status().unwrap().success());
+        let writer = std::thread::spawn(move || {
+            let mut f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            let chunk = [b'a'; 8192];
+            for _ in 0..(16 * 1024 * 1024 / chunk.len() + 1) {
+                if f.write_all(&chunk).is_err() { break; }
+            }
+        });
+        let r = run(&ws, "read", json!({ "path": "stream.txt" })).await;
+        writer.join().unwrap();
         assert!(r.is_error);
         assert!(r.content.contains("16 MiB limit"), "{}", r.content);
     }
