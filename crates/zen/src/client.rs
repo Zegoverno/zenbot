@@ -233,7 +233,7 @@ pub fn short(id: &str) -> &str {
 
 pub fn dim(s: &str) -> String {
     if std::io::stderr().is_terminal() {
-        format!("\x1b[2m{s}\x1b[0m")
+        format!("\x1b[2m{}\x1b[0m", crate::md::sanitize(s))
     } else {
         s.to_string()
     }

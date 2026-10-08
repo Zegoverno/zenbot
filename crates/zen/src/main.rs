@@ -587,7 +587,7 @@ fn print_sessions(list: &Value) {
             short(s["id"].as_str().unwrap_or("")),
             model.split('/').next_back().unwrap_or(model),
             s["updated_at"].as_str().unwrap_or("").get(..16).unwrap_or("").replace('T', " "),
-            s["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("(untitled)")
+            for_stdout(s["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("(untitled)"))
         );
     }
 }
@@ -621,7 +621,8 @@ fn print_messages(s: &Value) {
 async fn main() {
     let cli = Cli::parse();
     if let Err(e) = run(cli).await {
-        eprintln!("error: {e:#}");
+        let message = format!("{e:#}");
+        eprintln!("error: {}", if std::io::stderr().is_terminal() { md::sanitize(&message) } else { message.into() });
         std::process::exit(1);
     }
 }
@@ -678,7 +679,7 @@ async fn run(cli: Cli) -> Result<()> {
                 } else {
                     println!("{}", describe_update(&v));
                     for x in v["commits"].as_array().into_iter().flatten() {
-                        println!("  · {}", x.as_str().unwrap_or(""));
+                        println!("  · {}", for_stdout(x.as_str().unwrap_or("")));
                     }
                 }
             } else {
@@ -891,7 +892,7 @@ fn emit(json: bool, v: &Value, text: impl FnOnce() -> String) {
     if json {
         println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
     } else {
-        println!("{}", text());
+        println!("{}", for_stdout(&text()));
     }
 }
 

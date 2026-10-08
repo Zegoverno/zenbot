@@ -26,14 +26,18 @@ fn load_history(path: &Path) -> Vec<String> {
     let cut = history.len().saturating_sub(HISTORY_MAX);
     history.drain(..cut);
     if old || cut > 0 {
-        let body: String = history.iter().map(|h| serde_json::to_string(h).unwrap_or_default() + "\n").collect();
-        let tmp = path.with_extension("tmp");
-        if private_file(&tmp, false).and_then(|mut f| f.write_all(body.as_bytes())).is_ok() {
-            let _ = std::fs::rename(&tmp, path);
-        }
+        rewrite_history(path, &history);
     }
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     history
+}
+
+fn rewrite_history(path: &Path, history: &[String]) {
+    let body: String = history.iter().map(|h| serde_json::to_string(h).unwrap_or_default() + "\n").collect();
+    let tmp = path.with_extension("tmp");
+    if private_file(&tmp, false).and_then(|mut f| f.write_all(body.as_bytes())).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
 }
 
 /// Open a file only the owner can read (mode 0600 when it is created): truncated, or appended to.
@@ -235,8 +239,14 @@ impl Editor {
         self.hist_idx = None;
         if !text.trim().is_empty() && self.history.last() != Some(&text) {
             self.history.push(text.clone());
+            let excess = self.history.len().saturating_sub(HISTORY_MAX);
+            if excess > 0 {
+                self.history.drain(..excess);
+            }
             if let Some(p) = &self.history_file {
-                if let (Ok(mut f), Ok(json)) = (private_file(p, true), serde_json::to_string(&text)) {
+                if excess > 0 {
+                    rewrite_history(p, &self.history);
+                } else if let (Ok(mut f), Ok(json)) = (private_file(p, true), serde_json::to_string(&text)) {
                     let _ = writeln!(f, "{json}");
                 }
             }
@@ -463,6 +473,13 @@ mod tests {
         e.set("hi");
         e.take();
         assert_eq!(std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777, 0o600);
+        for i in 0..HISTORY_MAX {
+            e.set(&format!("next-{i}"));
+            e.take();
+        }
+        assert_eq!(e.history.len(), HISTORY_MAX);
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap().lines().count(), HISTORY_MAX);
+        assert_eq!(e.history.first().unwrap(), "next-0");
     }
 
     #[test]
