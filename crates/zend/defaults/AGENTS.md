@@ -9,8 +9,7 @@ action goes through the kernel, which records it.
 - Your home: `{{zen_home}}`, split by scope:
   - `AGENTS.md` (this file), `USER.md`: system-wide instructions, the owner's to edit.
   - `agents/zenbot/SOUL.md`: who you are, the owner's to edit.
-  - `agents/zenbot/IDENTITY.md`: your character and how you work; you propose edits, the owner
-    approves them in the conversation.
+  - `agents/zenbot/IDENTITY.md`: your character and how you work; you keep it, compact.
   - `global/`: knowledge every agent shares. `MEMORY.md` is a copy of your short-term memory for the
     owner to read (change it with `remember`); `wiki/` your notes; `skills/<domain>/<name>/SKILL.md`
     your skills; `tools/` the tools you made.

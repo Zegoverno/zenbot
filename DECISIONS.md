@@ -6,7 +6,7 @@
 
 ---
 
-## D-045 — IDENTITY.md; memory is promoted into the prompt files and the wiki
+## D-045 — IDENTITY.md; the agent keeps its prompt files; memory is promoted into them and the wiki
 
 **Date:** 2026-10-08 · **Status:** accepted (owner) · **Supersedes:** D-035's promotion to
 long-term memory and D-028's long-term tier (search over memories stays)
@@ -15,13 +15,16 @@ long-term memory and D-028's long-term tier (search over memories stays)
 agent is for, what it holds to and the lines it doesn't cross; only the owner edits it.
 `agents/<name>/IDENTITY.md` (new, loaded right after the soul) is the agent's character in practice
 and how it works. `USER.md` is the owner; `AGENTS.md` the environment; `MEMORY.md` where things
-stand. Traits, standing guidance and preferences are not memory: the agent proposes the exact edit
-to `IDENTITY.md` (about itself) or `USER.md` (about the owner) in the conversation and makes it once
-the owner approves there. The separate long-term tier is gone; the nightly sleep promotes on its own
+stand. Traits, standing guidance and preferences are not memory: when one is really important and lasting,
+the agent writes it straight into `IDENTITY.md` (about itself) or `USER.md` (about the owner) and
+says so in one line (owner, 2026-10-08: no approval round, no detour through memory). Both files
+keep their size caps and are kept compact, never trimmed by hand: an edit that takes one over its
+cap tells the agent to compact it, and the sleep compacts any that is still over (a session of the
+kernel's own rewrites it; the kernel checks the answer and writes it). Every change by the agent or
+the sleep is backed up first in `~/.zenbot/backups/prompt-files/` (90 days). The separate long-term tier is gone; the nightly sleep promotes on its own
 (owner, 2026-10-08) into the places lasting things really live: a lasting entry about the owner
 moves to `USER.md`, lasting guidance on how the agent acts to `IDENTITY.md` (a dated line under
-`## Learned`, after a dated backup in `~/.zenbot/backups/`; refused if the file would pass its size
-cap), and lasting knowledge is copied into the wiki (a capture by "the sleep"; the entry stays in
+`## Learned`, after a backup; compacted afterwards if that takes it over its cap), and lasting knowledge is copied into the wiki (a capture by "the sleep"; the entry stays in
 short-term memory while it's needed). The bar is 0.9 (`ZEN_PROMOTE_BAR`), on the lowest of three
 samples for a prompt file; only the owner's words and verified results reach the prompt files (an
 inference, which may come from the web, is flagged for the agent to propose instead). The morning
@@ -40,7 +43,8 @@ smaller `IDENTITY.md` (name, vibe, emoji).
 
 **Considered:** keeping the long-term tier for durable facts (the wiki already holds lasting
 knowledge); promotion into prompt files only after the owner's yes in the chat (the agent's
-recommendation; the owner chose automatic with backups); adding identity to `SOUL.md` (the owner wants the soul as a stable guiding layer); a
+recommendation; the owner chose automatic with backups); refusing a promotion when the file is full
+(the owner wants compaction instead); adding identity to `SOUL.md` (the owner wants the soul as a stable guiding layer); a
 review queue for proposed edits (`zen memory accept`), slower than approving in the conversation.
 
 **Known limit:** `bash` runs as the owner's Unix user and can still write the files (ROADMAP.md,

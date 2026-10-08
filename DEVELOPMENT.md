@@ -27,7 +27,7 @@ Config lives in `~/.zenbot/`:
 | `history` | prompt history |
 | `AGENTS.md`, `USER.md` | system-wide prompt files: zenbot's environment, the owner (defaults written when missing, never overwritten) |
 | `agents/zenbot/SOUL.md` | the agent's own prompt file: who zenbot is (one agent today; D-040) |
-| `agents/zenbot/IDENTITY.md` | the agent's character and how it works, edited by approved proposal (D-045) |
+| `agents/zenbot/IDENTITY.md` | the agent's character and how it works, kept by the agent and the sleep, backed up on every change (D-045) |
 | `global/MEMORY.md` | a copy of short-term memory, for reading |
 | `global/skills/` | skills, `<domain>/<name>/SKILL.md`; drafts in `_proposed/`, retired ones in `_archived/`; a git repository once `save_skill` first commits |
 | `global/tools/` | tools the agent made (`save_tool`): `<name>/tool.json` and files; a git repository (`ZEN_TOOLS_DIR`) |
@@ -319,7 +319,7 @@ zen memory --tier archived                   # what the sleeps archived
 systemctl list-timers zen-sleep.timer        # next run
 ```
 
-The sleep promotes on its own (D-045): lasting entries about the owner move to `USER.md`, lasting guidance to `IDENTITY.md` (under `## Learned`; the file's previous version is saved to `~/.zenbot/backups/<name>-<time>.md`; only `owner`/`verified` entries), lasting knowledge is copied into the wiki. `ZEN_PROMOTE_BAR` (0.9) sets the bar. To undo a move, copy the backup back.
+The sleep promotes on its own (D-045): lasting entries about the owner move to `USER.md`, lasting guidance to `IDENTITY.md` (under `## Learned`; only `owner`/`verified` entries), lasting knowledge is copied into the wiki. `ZEN_PROMOTE_BAR` (0.9) sets the bar. A prompt file over its cap (`ZEN_USER_CHARS`, `ZEN_IDENTITY_CHARS`) is compacted by a session the sleep starts (`sleep: compact USER.md` in `zen sessions`). Every change to a prompt file, by the sleep or the agent, first saves the old version to `~/.zenbot/backups/prompt-files/<name>-<time>.md` (kept 90 days); to undo, copy it back.
 
 ## Search index
 

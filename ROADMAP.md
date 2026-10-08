@@ -67,7 +67,7 @@ descriptions for `verify`, `remember` and `decide`.
   fusion; System One reranks; a memory found counts as used; every search is logged. `history` stays
   for reading messages by number, now in any session.
 - Long-term promotion (D-035) was retired by D-045: traits and guidance go to `IDENTITY.md` or
-  `USER.md` by approved edit.
+  `USER.md`, which the agent writes and keeps compact.
 
 ## Phase 4 — Knowledge `[ built ]`
 

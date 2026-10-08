@@ -114,7 +114,10 @@ with questions for the owner. The kernel-enforced workflow (`flow.rs`) was remov
   index). First it promotes on its own (D-045, bar `ZEN_PROMOTE_BAR` 0.9): lasting and about the
   owner → `USER.md`, lasting guidance on how the agent acts → `IDENTITY.md` (under `## Learned`,
   backup in `~/.zenbot/backups/`, lowest of three samples, only `owner`/`verified` entries; the
-  entry leaves memory), lasting knowledge → copied into the wiki. Every entry's fate
+  entry leaves memory), lasting knowledge → copied into the wiki. A prompt file over its cap is then
+  compacted: `turns::run_kernel_session` starts a parentless subagent session on the default model
+  that answers with the rewritten file; the kernel checks it (markers, a heading, within the cap,
+  not under a quarter of the 80% target), backs up and writes it. Every entry's fate
   is a `decisions` row; the run is a `sleep_runs` row; the next sessions get a one-line note. System
   One sees memories unless `ZEN_S1_PRIVATE=0` (D-032).
 - **Search** (`search.rs`, D-035): an indexer keeps `search_docs` current: one document per turn of
@@ -173,7 +176,9 @@ harness versions with the same model on isolated kernels and databases (`evals/R
   defused) and the session is tainted (`sessions.tainted_at`, a `taint` block); `remember` from a
   tainted session records `inferred`, so web text can't pass as the owner's words, and its `edit` or
   `write` on a prompt file (`SOUL`, `IDENTITY`, `AGENTS`, `USER`) is refused, as for any subagent
-  (D-045).
+  or kernel session (D-045). A main session may write `IDENTITY.md` and `USER.md` itself; each
+  change is backed up first (`~/.zenbot/backups/prompt-files/`) and one that passes the file's cap
+  comes back with a request to compact it.
 - **MCP** (`mcp.rs`, D-033): servers in `~/.zenbot/mcp.json` (stdio or streamable HTTP, `${VAR}`
   from the environment, `include`/`exclude`, `timeout_s`, `untrusted`, default true for remote
   servers). The tool list never changes: `find_tools` ranks tools by name and description,
@@ -249,9 +254,9 @@ tape). A rule comes back only where measurement shows the agent needs it.
 | File in `~/.zenbot/` | Says | Owner |
 |---|---|---|
 | `SOUL.md` | the deep layer: what the agent is for, what it holds to, lines it doesn't cross | owner only; agent may suggest |
-| `IDENTITY.md` | the agent in practice: character, how it works, approved guidance (D-045) | agent proposes in the conversation; applied once the owner approves |
+| `IDENTITY.md` | the agent in practice: character, how it works, learned guidance (D-045) | agent writes what really matters, kept compact; the owner may edit |
 | `AGENTS.md` | its environment: the VM, its body, where things live, what it can reach | owner; agent proposes |
-| `USER.md` | the owner: who they are, their preferences, their context | agent proposes in the conversation; applied once the owner approves |
+| `USER.md` | the owner: who they are, their preferences, their context | owner; agent writes what really matters, kept compact |
 | `MEMORY.md` | where things stand (not traits or preferences) | agent, within a fixed size |
 
 **Who teaches what:** `AGENTS.md` the environment; each tool's own description how and when to use
@@ -309,7 +314,7 @@ save.
 | Working | `MEMORY.md`, fixed size | `memories` table, rendered into the prompt and exported as a file |
 | Episodic (what happened) | sessions, the tape | Postgres (built) |
 | Semantic (what's true) | the wiki | markdown in git |
-| Identity (who acts, for whom) | `SOUL.md`, `IDENTITY.md`, `USER.md` | prompt files, changed by approved edit (D-045) |
+| Identity (who acts, for whom) | `SOUL.md`, `IDENTITY.md`, `USER.md` | prompt files the agent keeps compact, backed up on every change (D-045) |
 | Procedural (how to do things) | skills, tools | markdown and scripts in git |
 | External | `web_search`, `web_fetch` | web content is untrusted input (taint rule, SPEC.md §5.18) |
 

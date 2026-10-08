@@ -19,8 +19,13 @@
   `## Learned`, dated backup in `~/.zenbot/backups/`, only the owner's words or verified results,
   lowest of three samples ≥ `ZEN_PROMOTE_BAR` 0.9), and lasting knowledge is copied into the wiki.
   The morning note lists each. `zen memory accept|reject` and `POST /api/memory/{id}/review` are gone.
-- The kernel refuses `edit`/`write` on SOUL, IDENTITY, AGENTS and USER from subagents and from
-  sessions that read untrusted content. New e2e checks and an eval task (`preference-not-memory`).
+- The agent writes what really matters straight into `USER.md` and `IDENTITY.md` (owner's call, no
+  approval round). Full files are compacted, not trimmed: the agent is told when its edit passes the
+  cap, and the sleep compacts any file still over it through a session of its own
+  (`turns::run_kernel_session`), checked by the kernel. Every change is backed up first in
+  `~/.zenbot/backups/prompt-files/` (90 days).
+- The kernel refuses `edit`/`write` on SOUL, IDENTITY, AGENTS and USER from subagents, kernel
+  sessions and sessions that read untrusted content. New e2e checks and an eval task (`preference-not-memory`).
 
 ## 2026-10-08 — `zen status` sees the kernel's OpenRouter key
 
