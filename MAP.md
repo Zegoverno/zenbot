@@ -359,7 +359,7 @@ Set by the kernel for every `bash` command: `ZEN_SESSION_ID`, `ZEN_MODEL` (read 
 | `ZEN_TOKEN` | `~/.zenbot/token` | `zen` | API token |
 | `ZEN_INLINE` | off | `zen` | Inline terminal app |
 | `ZEN_SMOKE_PORT` | `18199` | `upgrade.sh` | Smoke-test kernel port |
-| `ZEN_DEV_PORT` / `ZEN_DEV_DB` / `ZEN_DEV_HOME` | `18100` / `zen_dev` / `~/.zenbot/dev` | `dev.sh` | Dev kernel port, database and zenbot home |
+| `ZEN_DEV_PORT` / `ZEN_DEV_DB` / `ZEN_DEV_HOME` | `18100` / `zen_dev` / `~/.zenbot-dev` | `dev.sh` | Dev kernel port, database and zenbot home |
 | `ZEN_E2E_PORT` / `ZEN_E2E_KEEP` / `ZEN_E2E_NO_BUILD` | `18377` / – / – | `e2e.sh` | e2e kernel port (the test MCP and SearXNG servers use the next two ports); keep DB and files; skip the build (CI) |
 | `ZEN_SLOW_SECS` | `12` | `scripts/e2e/slow_worker.py` | How long the test summarizer's `complete` takes |
 | `ZEN_EVAL_PORT` / `ZEN_EVAL_KEEP_BUILDS` | `18301` / `5` | `eval.sh` | Eval kernel port; base builds kept |
@@ -392,7 +392,6 @@ Set by the kernel for every `bash` command: `ZEN_SESSION_ID`, `ZEN_MODEL` (read 
 | `global/wiki/` | `wiki.rs` (`capture`: pages, `index.md`, `log.md`, git commits), the agent (`edit` of summaries), the sleep (commits) | `search.rs` (indexer), the model (`read`), the owner | The wiki (`ZEN_WIKI_DIR`), its own git repository |
 | `mcp.json` | the owner | `mcp.rs` (re-read when it changes) | MCP servers (`mcpServers`); keep secrets in `env` and refer to them as `${VAR}` |
 | `SOUL.md`, `MEMORY.md`, `wiki`, `skills`, `tools` (symlinks) | `layout::migrate` | a rolled-back build | The old flat layout's paths, each a relative symlink to its new place (D-040); removed in a later release |
-| `dev/` | `scripts/dev.sh` | the dev kernel | The dev kernel's own `ZEN_HOME` (`ZEN_DEV_HOME`) |
 | `evals/<run>/` | `eval.sh` | `eval-report.sh` | Eval results |
 
 Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
@@ -412,7 +411,7 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 | `scripts/sleep.sh` | Nightly (timer): waits for a healthy kernel, `POST /api/memory/sleep?trigger=nightly`, prints the counts | live kernel |
 | `scripts/db.sh` | DB helpers run inside the Postgres container: `pending`, `backup`, copy/drop/restore helpers | live DB, `~/.zenbot/backups` |
 | `scripts/lib.sh` | `zen_env`, `pi_enabled`, `wait_healthy`, `ensure_rust`, `new_token`, `install_timers` (writes and enables the `deploy/` timers; `install.sh` and, after a healthy upgrade, `apply-upgrade.sh`) | `/etc/systemd/system` |
-| `scripts/dev.sh` | Dev kernel in the foreground on `:18100` with database `zen_dev` and `ZEN_HOME` `~/.zenbot/dev`, using `~/.zenbot/env` settings | `zen_dev` DB, `~/.zenbot/dev` |
+| `scripts/dev.sh` | Dev kernel in the foreground on `:18100` with database `zen_dev` and `ZEN_HOME` `~/.zenbot-dev`, using `~/.zenbot/env` settings | `zen_dev` DB, `~/.zenbot-dev` |
 | `scripts/e2e.sh` | End-to-end scenarios (below); scripts in `scripts/e2e/*.json`, plus test servers in Python: `slow_worker.py` (a worker serving `slow/summarizer`, a deliberately slow `complete`), `mcp_server.py` (an MCP server with `echo` and `add`, stdio or `--http PORT`), `searxng_stub.py` (answers `/search?format=json` with fixed results) | temp DB, workspace and `HOME` |
 | `scripts/eval.sh`, `scripts/eval-report.sh` | Harness eval: this checkout vs installed (or `--base REF`), same model; each kernel gets its own `ZEN_HOME` next to the task workspace (default prompt files and skills); report for the owner, never a gate | `zen_eval_*` DBs, `~/.zenbot/evals/` |
 | `scripts/git-hooks/prepare-commit-msg` | Adds `Zen-Session` / `Co-Authored-By` trailers when `ZEN_SESSION_ID` is set | commit messages |

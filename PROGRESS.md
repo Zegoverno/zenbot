@@ -6,6 +6,14 @@
 
 ---
 
+## 2026-10-08 — Separate the development kernel's home (D-042)
+
+- `scripts/dev.sh` now defaults the dev kernel to `~/.zenbot-dev` and moves an existing
+  `~/.zenbot/dev` there once, refusing to overwrite a destination. The live home has no nested
+  dev home; `ZEN_DEV_HOME` still works.
+- Why: prevent dev prompt files and knowledge from appearing as live files. Checked shell syntax,
+  migration behavior and the dev home contents after the move.
+
 ## 2026-10-08 — Narrow the default network and tool-output trust boundaries (D-041)
 
 - `zend` binds loopback unless `ZEN_BIND` opts in; URL tokens work only for WebSocket upgrades.

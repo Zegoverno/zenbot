@@ -192,9 +192,9 @@ It:
 - runs `npm ci` in `packages/mind` when `pi` is enabled and the lockfile is newer than the install;
 - runs `cargo build --release -q`, then `exec`s `./target/release/zend` on port **18100** (override with `ZEN_DEV_PORT`);
 - sets `ZEN_HARNESS` to this checkout's commit, so its turns record this build;
-- uses its own zenbot home, `~/.zenbot/dev` (`ZEN_DEV_HOME`), for prompt files, skills, `mcp.json` and `MEMORY.md`: it starts with the defaults, and the dev database's memory never overwrites the live `~/.zenbot/global/MEMORY.md`. Copy your prompt files (or an `mcp.json`) there to try them.
+- uses its own zenbot home, `~/.zenbot-dev` (`ZEN_DEV_HOME`), for prompt files, skills, `mcp.json` and `MEMORY.md`: it starts with the defaults, and the dev database's memory never overwrites the live `~/.zenbot/global/MEMORY.md`. Copy your prompt files (or an `mcp.json`) there to try them.
 
-Every non-live kernel gets its own `ZEN_HOME`: the dev kernel `~/.zenbot/dev`, the upgrade smoke kernel `<smoke workspace>/.zenbot`, eval kernels `<task workspace>.zenbot` (so evals run on the default prompt files and skills, not the owner's), and e2e kernels a throwaway `HOME`. Cut tool output, web PDFs and the wiki follow `ZEN_HOME` too (`<zen home>/outputs`, `<zen home>/global/wiki`).
+Every non-live kernel gets its own `ZEN_HOME`: the dev kernel `~/.zenbot-dev`, the upgrade smoke kernel `<smoke workspace>/.zenbot`, eval kernels `<task workspace>.zenbot` (so evals run on the default prompt files and skills, not the owner's), and e2e kernels a throwaway `HOME`. Cut tool output, web PDFs and the wiki follow `ZEN_HOME` too (`<zen home>/outputs`, `<zen home>/global/wiki`).
 
 `web_search` in the dev kernel needs SearXNG running (above) or a search key in `~/.zenbot/env`; `web_fetch` reaches only public addresses, so it can't fetch the dev kernel or anything else on this VM.
 
@@ -342,11 +342,11 @@ docker compose -f deploy/compose.yaml exec -T postgres psql -U zen -d zen_dev \
 
 ## Wiki
 
-The `capture` tool writes the wiki: markdown pages in `ZEN_WIKI_DIR` (default `<zen home>/global/wiki`, so `~/.zenbot/dev/global/wiki` for the dev kernel), a git repository the kernel creates and commits to (`index.md` lists the pages, `log.md` records each capture). The agent edits page summaries itself; those edits are committed by the next capture or the nightly sleep, which also lists wiki problems (pages with no summary, links to missing pages) in its note. Pages are indexed for `search` (scope `wiki`) by file modification time.
+The `capture` tool writes the wiki: markdown pages in `ZEN_WIKI_DIR` (default `<zen home>/global/wiki`, so `~/.zenbot-dev/global/wiki` for the dev kernel), a git repository the kernel creates and commits to (`index.md` lists the pages, `log.md` records each capture). The agent edits page summaries itself; those edits are committed by the next capture or the nightly sleep, which also lists wiki problems (pages with no summary, links to missing pages) in its note. Pages are indexed for `search` (scope `wiki`) by file modification time.
 
 ```bash
-git -C ~/.zenbot/dev/global/wiki log --oneline | head   # what the dev kernel captured
-cat ~/.zenbot/dev/global/wiki/index.md
+git -C ~/.zenbot-dev/global/wiki log --oneline | head   # what the dev kernel captured
+cat ~/.zenbot-dev/global/wiki/index.md
 ```
 
 ## Workshop: skills and tools the agent makes
@@ -357,7 +357,7 @@ cat ~/.zenbot/dev/global/wiki/index.md
 zen skills                                   # skills with their use, drafts marked; the made tools
 zen skills accept work/release-notes         # activate a draft (reject moves it to _archived)
 zen tools accept word-count                  # let a made tool run unsandboxed, with the network
-git -C ~/.zenbot/dev/skills log --oneline    # every change the dev kernel made to its skills
+git -C ~/.zenbot-dev/skills log --oneline    # every change the dev kernel made to its skills
 ```
 
 A draft also becomes active when the owner accepts a session that loaded it (`zen sessions decide <id> accept`), unless it opens a new domain. Unapproved tools run in bubblewrap with the filesystem read-only and no network; approval is stored in the `made_tools` table. The nightly sleep flags skills unused for 30 days and archives them at 90. To test without a subscription, see the `workshop` e2e scenario and `scripts/e2e/workshop.json`.

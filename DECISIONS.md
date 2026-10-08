@@ -6,6 +6,19 @@
 
 ---
 
+## D-042 — Keep the dev kernel home outside the live home
+
+**Date:** 2026-10-08 · **Status:** accepted (owner) · **Refines:** D-040
+
+**Decision:** `scripts/dev.sh` defaults `ZEN_HOME` to `~/.zenbot-dev`, not `~/.zenbot/dev`.
+On its first run it moves an existing dev home there if the destination is absent; when both
+exist it stops rather than guessing which data to keep. `ZEN_DEV_HOME` still overrides the path.
+
+**Why:** The dev kernel's prompt files, skills and memory should not appear inside the live
+kernel's file tree or be mistaken for live data. The move preserves the existing dev home.
+
+---
+
 ## D-041 — Loopback listener and one boundary for untrusted tool results
 
 **Date:** 2026-10-08 · **Status:** accepted (owner)
