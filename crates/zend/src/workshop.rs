@@ -596,20 +596,19 @@ mod tests {
 
     #[test]
     fn fingerprint_does_not_follow_symlinks() {
-        let dir = std::env::temp_dir().join(format!("zend-fingerprint-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_util::TestDir::new("fingerprint");
         std::fs::write(dir.join("tool.json"), "{}").unwrap();
         std::os::unix::fs::symlink(".", dir.join("cycle")).unwrap();
         let bytes = content(&dir);
         assert!(bytes.windows(5).any(|w| w == b"cycle"));
         assert!(bytes.len() < 100, "a symlink cycle must not expand");
-        std::fs::remove_dir_all(dir).unwrap();
+
     }
 
     #[test]
     fn skill_files_stay_inside_the_skill() {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("zend-ws-{nanos}")).join("x");
+        let scratch = crate::test_util::TestDir::new("ws");
+        let dir = scratch.join("x");
         assert!(write_skill(&dir, &skill_md("x", "Does x.", "Do it."), &json!({ "../escape.md": "no" })).is_err());
         write_skill(&dir, &skill_md("x", "Does x.", "Do it."), &json!({ "references/a.md": "ok" })).unwrap();
         assert!(dir.join("references/a.md").exists() && skills::validate(&dir).is_empty());

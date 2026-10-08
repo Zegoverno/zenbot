@@ -406,9 +406,7 @@ mod tests {
 
     #[test]
     fn lint_finds_missing_summaries_and_broken_links() {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("zend-wiki-{nanos}"));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_util::TestDir::new("wiki");
         let a = add_entry(&new_page("A", "concept", &[], "2026-10-07"), "- **2026-10-07** | x — y", "2026-10-07");
         std::fs::write(dir.join("a.md"), a).unwrap();
         std::fs::write(dir.join("b.md"), "---\ntype: concept\n---\n# B\n\n> B is fine. See [[a]] and [[nowhere]].\n\n---\n## Timeline\n").unwrap();

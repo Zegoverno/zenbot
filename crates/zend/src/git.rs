@@ -48,9 +48,7 @@ mod tests {
 
     #[tokio::test]
     async fn output_is_capped() {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let repo = std::env::temp_dir().join(format!("zend-git-{nanos}"));
-        std::fs::create_dir_all(&repo).unwrap();
+        let repo = crate::test_util::TestDir::new("git");
         assert!(git(&repo, &["init", "-q"]).await.is_some());
         for i in 0..50 {
             std::fs::write(repo.join(format!("file-{i:02}.txt")), "x").unwrap();

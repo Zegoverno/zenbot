@@ -110,9 +110,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn tree() -> PathBuf {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let root = std::env::temp_dir().join(format!("zend-context-{nanos}"));
+    fn tree() -> crate::test_util::TestDir {
+        let root = crate::test_util::TestDir::new("context");
         std::fs::create_dir_all(root.join("home/proj/src/deep")).unwrap();
         std::fs::write(root.join("home/AGENTS.md"), "home rules").unwrap();
         std::fs::write(root.join("home/proj/AGENTS.md"), "project rules").unwrap();

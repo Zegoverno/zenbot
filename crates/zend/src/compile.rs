@@ -235,8 +235,7 @@ mod tests {
 
     #[test]
     fn system_prompt_includes_context_files_from_ancestors() {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let root = std::env::temp_dir().join(format!("zend-ctx-{nanos}"));
+        let root = crate::test_util::TestDir::new("ctx");
         let ws = root.join("proj");
         std::fs::create_dir_all(&ws).unwrap();
         std::fs::write(root.join("CLAUDE.md"), "outer rule").unwrap();

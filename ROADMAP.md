@@ -130,7 +130,8 @@ verdicts and the owner's reviews (memory promotions, skill drafts, tools, routes
   and the verifier hides token files, but an ordinary agent shell can still read the owner's files.
   Strong isolation requires a separate Unix user and a credential the agent cannot read.
 - Secret masking's known-value cache is loaded once per kernel start, so newly rotated credentials
-  are not known until restart. `~/.zenbot/outputs` needs retention/pruning.
+  are not known until restart. `~/.zenbot/outputs` needs owner-approved retention/pruning;
+  the historical test logs and `/tmp/zend-*` directories are not deleted by the test fix.
 - Verify criteria use a read-only bubblewrap shell; future work should centralize all tool
   permissions and taint rules at the dispatch boundary.
 - Paths never run with real models: the new tools (`remember`, `load_skill`, `verify`, `ask`) on

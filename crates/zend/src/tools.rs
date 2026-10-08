@@ -187,8 +187,12 @@ fn truncate(s: &str) -> Option<String> {
 /// `<zen home>/outputs` (crate::outputs_dir), readable only by the owner (not /tmp, which every user can read and a reboot
 /// clears while the history still points at it). Secrets are masked first.
 pub(crate) fn save_full_output(text: &str) -> Option<PathBuf> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let dir = crate::outputs_dir()?;
+    save_full_output_in(&crate::outputs_dir()?, text)
+}
+
+fn save_full_output_in(dir: &Path, text: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).ok()?;
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
     let path = dir.join(format!("{nanos}.log"));
     let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).ok()?;
@@ -203,7 +207,7 @@ pub async fn execute(workspace: &Path, name: &str, args: &Value, env: &[(&str, &
         return err(format!("`{name}` can't run in a read-only session"));
     }
     let result = match name {
-        "bash" => bash(workspace, args, env, read_only).await,
+        "bash" => bash(workspace, args, env, read_only, None).await,
         "read" => read(workspace, args).await,
         "write" => write(workspace, args).await,
         "edit" => edit(workspace, args).await,
@@ -339,7 +343,7 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], read_onl
     Ok(Shell { text, status })
 }
 
-async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], read_only: bool) -> Result<ToolOutput, ToolOutput> {
+async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], read_only: bool, output_dir: Option<PathBuf>) -> Result<ToolOutput, ToolOutput> {
     let command = str_arg(args, "command")?;
     let timeout = args.get("timeout_secs").and_then(Value::as_u64).unwrap_or(120).clamp(1, 600);
     let Shell { text, status } = run_shell(workspace, command, env, read_only, Duration::from_secs(timeout)).await.map_err(err)?;
@@ -351,7 +355,11 @@ async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], read_only: b
             // Mask before cutting, so a secret split by the cut can't show half in clear.
             let text = crate::secrets::mask(&text);
             let cut = truncate(&text).unwrap_or_default();
-            match save_full_output(&text) {
+            let saved = match output_dir {
+                Some(dir) => save_full_output_in(&dir, &text),
+                None => save_full_output(&text),
+            };
+            match saved {
                 Some(path) => format!("{cut}\n[output truncated; full output ({} bytes) saved to {}]", text.len(), path.display()),
                 None => cut,
             }
@@ -564,15 +572,16 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
-    fn scratch(name: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("zend-test-{name}-{nanos}"));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(name: &str) -> crate::test_util::TestDir {
+        crate::test_util::TestDir::new(name)
     }
 
     async fn run(ws: &Path, name: &str, args: Value) -> ToolOutput {
-        execute(ws, name, &args, &[], false).await
+        if name == "bash" {
+            bash(ws, &args, &[], false, Some(ws.join("outputs"))).await.unwrap_or_else(|e| e)
+        } else {
+            execute(ws, name, &args, &[], false).await
+        }
     }
 
     #[tokio::test]
@@ -696,6 +705,7 @@ mod tests {
         assert!(r.content.starts_with("1\n2\n"));
         assert!(r.content.contains("100000\n"));
         let path = r.content.split("saved to ").nth(1).unwrap().split(']').next().unwrap();
+        assert!(Path::new(path).starts_with(ws.join("outputs")), "test output must stay in its scratch home");
         assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 100000);
     }
 
