@@ -313,7 +313,7 @@ pub struct Judged {
     pub about_owner: f64,
 }
 
-/// The questions the sleep asks about each entry (System One, `s1.decide`).
+/// The questions the sleep asks about each entry (System One via `score.rs`).
 pub fn questions() -> Value {
     json!({
         "needed": { "type": "score", "instructions": "How likely is the agent to need this memory in its work over the coming days?",

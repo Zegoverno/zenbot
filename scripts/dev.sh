@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run a development kernel from this checkout in the foreground: Postgres in Docker, zend (and,
-# with the `pi` worker, zen-mind) on the host. It uses the service's settings (~/.zenbot/env) but
+# Run a development kernel from this checkout in the foreground: Postgres in Docker and zend
+# on the host. It uses the service's settings (~/.zenbot/env) but
 # its own database (zen_dev) and port (ZEN_DEV_PORT, default 18100), so it runs next to the
 # installed service without touching its data.
 #
@@ -20,7 +20,7 @@ export PATH="$HOME/.local/node/bin:$HOME/.cargo/bin:$PATH"
 ZEN_TOKEN="$(cat "$HOME/.zenbot/token")"
 DATABASE_URL="$(db_url_for "$DB")"
 ZEN_HARNESS="$(git rev-parse --short HEAD)" # turns record this checkout, not the installed version
-export ZEN_TOKEN DATABASE_URL ZEN_HARNESS ZEN_PORT=$PORT ZEN_MIND_DIR="$REPO/packages/mind"
+export ZEN_TOKEN DATABASE_URL ZEN_HARNESS ZEN_PORT=$PORT
 # Keep the dev kernel outside the live home so the live file tree never exposes its prompt files.
 # Move an existing dev home once without replacing anything at the new path.
 if [ -z "${ZEN_DEV_HOME:-}" ] && [ -d "$HOME/.zenbot/dev" ]; then
@@ -35,10 +35,6 @@ export ZEN_HOME=${ZEN_DEV_HOME:-$HOME/.zenbot-dev}
 docker compose -f deploy/compose.yaml up -d --wait postgres
 [ "$(db_psql -d postgres -c "SELECT 1 FROM pg_database WHERE datname = '$DB'")" = 1 ] ||
   db_psql -d postgres -c "CREATE DATABASE $DB"
-# Pi's packages as packages/mind pins them (npm ci when the lockfile is newer than the install).
-if pi_enabled && [ ! packages/mind/node_modules/.package-lock.json -nt packages/mind/package-lock.json ]; then
-  (cd packages/mind && npm ci --no-audit --no-fund --silent)
-fi
 cargo build --release -q
 echo "dev kernel on http://127.0.0.1:$PORT (database $DB); use it with: ZEN_URL=http://127.0.0.1:$PORT ./target/release/zen"
 exec ./target/release/zend

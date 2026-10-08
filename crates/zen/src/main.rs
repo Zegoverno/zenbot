@@ -86,7 +86,7 @@ enum Cmd {
     Sessions(SessionsCmd),
     /// List available models
     Models,
-    /// Sign in to the model engines: Claude Code and Codex (default), or one of: claude, codex, pi
+    /// Sign in to the model engines: Claude Code and Codex (default), or one of: claude, codex
     Login {
         /// Which engine to sign in to (default: every engine that isn't signed in yet)
         which: Option<String>,
@@ -485,12 +485,12 @@ fn engines_state() -> Value {
     std::fs::read_to_string(format!("{home}/.zenbot/engines.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null)
 }
 
-/// The `zen status` line for the engines: "claude 2.1.291, codex 0.160.1, pi 1.0.4  (checked …)",
+/// The `zen status` line for the engines: "claude 2.1.291, codex 0.160.1 (checked …)",
 /// with any engine not left up to date (rolled back, skipped, failed) named with its status.
 fn engines_line(state: &Value) -> Option<String> {
     let engines = state["engines"].as_object().filter(|e| !e.is_empty())?;
-    let mut names: Vec<&String> = engines.keys().collect();
-    names.sort_by_key(|n| (["claude", "codex", "pi"].iter().position(|k| k == n).unwrap_or(9), n.to_string()));
+    let mut names: Vec<&String> = engines.keys().filter(|n| n.as_str() != "pi").collect();
+    names.sort_by_key(|n| (["claude", "codex"].iter().position(|k| k == n).unwrap_or(9), n.to_string()));
     let versions: Vec<String> = names.iter().map(|n| format!("{n} {}", engines[*n]["version"].as_str().filter(|v| !v.is_empty()).unwrap_or("?"))).collect();
     let problems: Vec<String> = names
         .iter()
@@ -516,12 +516,9 @@ fn signed_in(engine: &str) -> bool {
     }
 }
 
-fn run_login(cmd: &str, args: &[&str], dir: Option<&str>) -> Result<()> {
+fn run_login(cmd: &str, args: &[&str]) -> Result<()> {
     let mut c = std::process::Command::new(cmd);
     c.args(args).env("PATH", zen_path());
-    if let Some(d) = dir {
-        c.current_dir(d);
-    }
     let status = c.status().with_context(|| format!("running {cmd} (is it installed?)"))?;
     if !status.success() {
         bail!("{cmd} sign-in failed");
@@ -530,42 +527,25 @@ fn run_login(cmd: &str, args: &[&str], dir: Option<&str>) -> Result<()> {
 }
 
 fn login(which: Option<&str>) -> Result<()> {
-    let home = std::env::var("HOME").context("HOME not set")?;
     let targets: Vec<&str> = match which {
         Some(w) => vec![w],
         None => ["claude", "codex"].into_iter().filter(|e| !signed_in(e)).collect(),
     };
     if targets.is_empty() {
-        eprintln!("Claude Code and Codex are both signed in. (Use `zen login pi` for Pi's direct ChatGPT sign-in.)");
+        eprintln!("Claude Code and Codex are both signed in.");
         return Ok(());
     }
     for t in targets {
         match t {
             "claude" => {
                 eprintln!("\n== Claude (your Claude subscription)\nOpen the link, approve, and paste the code back here if asked.\n");
-                run_login("claude", &["auth", "login", "--claudeai"], None)?;
+                run_login("claude", &["auth", "login", "--claudeai"])?;
             }
             "codex" => {
                 eprintln!("\n== Codex (your ChatGPT subscription)\nOpen the link and enter the code shown.\n");
-                run_login("codex", &["login", "--device-auth"], None)?;
+                run_login("codex", &["login", "--device-auth"])?;
             }
-            "pi" => {
-                let mind = std::env::var("ZEN_MIND_DIR").ok().or_else(|| zen_env().get("ZEN_MIND_DIR").cloned()).unwrap_or(format!("{home}/zenbot/packages/mind"));
-                let cli = format!("{mind}/node_modules/@earendil-works/pi-ai/dist/cli.js");
-                if !std::path::Path::new(&cli).exists() {
-                    bail!("Pi isn't installed; install with ZEN_WORKERS=engine,pi ./install.sh");
-                }
-                let dir = format!("{home}/.zenbot");
-                std::fs::create_dir_all(&dir)?;
-                eprintln!("\n== Pi (direct ChatGPT sign-in)\nOpen the link and approve. Your browser then lands on a 127.0.0.1 page that won't load; copy that full address and paste it here.\n");
-                run_login("node", &[&cli, "login", "openai"], Some(&dir))?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(format!("{dir}/auth.json"), std::fs::Permissions::from_mode(0o600));
-                }
-            }
-            other => bail!("unknown engine `{other}`; use claude, codex or pi"),
+            other => bail!("unknown engine `{other}`; use claude or codex"),
         }
     }
     eprintln!("\nSigned in. Run `zen` to start.");
@@ -962,7 +942,7 @@ mod tests {
         }});
         assert_eq!(
             engines_line(&state).unwrap(),
-            "claude 2.1.284, codex 0.160.1, pi 1.0.4  (checked 2026-10-06 14:32:34 UTC; claude: rolled back from 2.1.291)"
+            "claude 2.1.284, codex 0.160.1  (checked 2026-10-06 14:32:34 UTC; claude: rolled back from 2.1.291)"
         );
         assert_eq!(engines_line(&Value::Null), None);
         assert_eq!(engines_line(&json!({ "engines": {} })), None);

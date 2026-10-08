@@ -71,16 +71,6 @@ for t in "${TASK_LIST[@]}"; do [ -f "evals/tasks/$t/task.json" ] || { echo "no t
 
 # ---------- harness builds ----------
 
-# The Pi packages installed in mind directory $1 are the versions its lockfile pins.
-mind_current() {
-  local p pin got
-  for p in pi-ai pi-agent-core; do
-    pin=$(jq -r --arg k "node_modules/@earendil-works/$p" '.packages[$k].version // ""' "$1/package-lock.json")
-    got=$(jq -r '.version // ""' "$1/node_modules/@earendil-works/$p/package.json" 2>/dev/null)
-    [ "$pin" = "$got" ] || return 1
-  done
-}
-
 # The new harness is this checkout as it is now, uncommitted changes included. Its label says so:
 # <commit>, or <commit>+<hash of the diff> when the tree has changes.
 build_new() {
@@ -89,20 +79,10 @@ build_new() {
   mkdir -p "$OUT/new-bin"
   cp target/release/zend target/release/zen-engine target/release/zen "$OUT/new-bin/"
   local label; label=$(git rev-parse --short HEAD)
-  if [ -n "$(git status --porcelain -- crates packages scripts Cargo.toml Cargo.lock)" ]; then
-    label="$label+$( (git diff HEAD -- crates packages scripts Cargo.toml Cargo.lock; git ls-files --others --exclude-standard -- crates packages scripts | xargs -r cat) | sha1sum | cut -c1-7)"
+  if [ -n "$(git status --porcelain -- crates scripts Cargo.toml Cargo.lock)" ]; then
+    label="$label+$( (git diff HEAD -- crates scripts Cargo.toml Cargo.lock; git ls-files --others --exclude-standard -- crates scripts | xargs -r cat) | sha1sum | cut -c1-7)"
   fi
   NEW_LABEL=$label
-  # Pi as this checkout pins it: when the installed node_modules hold another version (a bump not
-  # applied yet), the new side runs on its own copy of packages/mind.
-  NEW_MIND="$REPO/packages/mind"
-  if { pi_enabled || [[ $MODEL == openai/* ]]; } && ! mind_current "$NEW_MIND"; then
-    log "== installing the Pi this checkout pins (packages/mind differs from node_modules)"
-    mkdir -p "$OUT/new-mind"
-    cp -r "$NEW_MIND/src" "$NEW_MIND/package.json" "$NEW_MIND/package-lock.json" "$OUT/new-mind/"
-    (cd "$OUT/new-mind" && npm ci --no-audit --no-fund --silent)
-    NEW_MIND="$OUT/new-mind"
-  fi
 }
 
 # Keep the ZEN_EVAL_KEEP_BUILDS (default 5) most recently used base builds; remove the others
@@ -112,7 +92,6 @@ prune_builds() {
   { ls -1dt "$BUILDS"/*/ 2>/dev/null || true; } | tail -n +$((${ZEN_EVAL_KEEP_BUILDS:-5} + 1)) | while read -r d; do
     d=${d%/}
     log "== removing old base build $(basename "$d")"
-    [ -L "$d/src/packages/mind/node_modules" ] && rm -f "$d/src/packages/mind/node_modules"
     git worktree remove --force "$d/src" 2>/dev/null || true
     rm -rf "$d"
   done
@@ -139,20 +118,7 @@ build_base() {
   fi
   touch "$dir"
   prune_builds
-  # Pi as the base pins it: the checkout's node_modules when they hold the same versions,
-  # otherwise its own install (so a Pi bump shows up in the comparison).
-  local mind="$dir/src/packages/mind"
-  if ! mind_current "$mind"; then
-    rm -f "$mind/node_modules" 2>/dev/null || true
-    if [ -d "$REPO/packages/mind/node_modules" ] && cmp -s "$REPO/packages/mind/package-lock.json" "$mind/package-lock.json" && mind_current "$REPO/packages/mind"; then
-      ln -sfn "$REPO/packages/mind/node_modules" "$mind/node_modules"
-    elif [ -d "$REPO/packages/mind/node_modules" ]; then
-      log "== installing the Pi the base pins"
-      (cd "$mind" && npm ci --no-audit --no-fund --silent)
-    fi
-  fi
   BASE_BIN="$dir/bin"
-  BASE_MIND="$dir/src/packages/mind"
   BASE_LABEL=$(git rev-parse --short "$sha")
 }
 
@@ -165,37 +131,34 @@ stop_kernel() {
 }
 trap stop_kernel EXIT
 
-start_kernel() { # bin mind_dir workspace db label model log [task-env…]
-  # The live setup's workers (so System One models are served as in real use), at least the engine;
-  # Pi also for openai/* models.
-  local workers db_url; workers=$(zen_env ZEN_WORKERS); workers=${workers:-engine}; db_url=$(db_url_for "$4")
-  case "$6" in openai/*) [[ $workers == *pi* ]] || workers=$workers,pi ;; esac
-  local task_env=("${@:8}")
+start_kernel() { # bin workspace db label log [task-env…]
+  local db_url; db_url=$(db_url_for "$3")
+  local task_env=("${@:6}")
   (
     set -a; [ -f "$HOME/.zenbot/env" ] && . "$HOME/.zenbot/env"; set +a
     # Settings the task asks for (e.g. a small context budget); a build that doesn't know one ignores it.
     for kv in "${task_env[@]}"; do export "$kv"; done
     # Its own zenbot home: the default prompt files and skills, not the owner's, and memory exports
     # that never touch ~/.zenbot (a build that predates ZEN_HOME ignores it).
-    ZEN_TOKEN="$TOKEN" ZEN_PORT=$PORT ZEN_WORKSPACE="$3" ZEN_HARNESS="$5" ZEN_WORKERS=$workers ZEN_FAUX=1 \
-      ZEN_ENGINE_CMD="$1/zen-engine" ZEN_MIND_DIR="$2" DATABASE_URL="$db_url" ZEN_HOME="$3.zenbot" \
+    ZEN_TOKEN="$TOKEN" ZEN_PORT=$PORT ZEN_WORKSPACE="$2" ZEN_HARNESS="$4" ZEN_WORKERS=engine ZEN_FAUX=1 \
+      ZEN_ENGINE_CMD="$1/zen-engine" DATABASE_URL="$db_url" ZEN_HOME="$2.zenbot" \
       exec "$1/zend"
-  ) >"$7" 2>&1 &
+  ) >"$5" 2>&1 &
   KERNEL_PID=$!
   wait_healthy "http://127.0.0.1:$PORT/health" 60 "$KERNEL_PID" && return 0
-  log "kernel did not start; see $7"; return 1
+  log "kernel did not start; see $5"; return 1
 }
 
 # Run every step of a task, then its checks; print one JSON result line.
-run_task() { # name bin mind label model effort db task repeat
-  local name=$1 bin=$2 mind=$3 label=$4 model=$5 effort=$6 db=$7 task=$8 r=$9
+run_task() { # name bin label model effort db task repeat
+  local name=$1 bin=$2 label=$3 model=$4 effort=$5 db=$6 task=$7 r=$8
   local tdir="$REPO/evals/tasks/$task" ws="$WORK/$name/$task-$r" turns="$WORK/$name/$task-$r.turns.jsonl"
   mkdir -p "$ws"; : > "$turns"
   [ -d "$tdir/files" ] && cp -a "$tdir/files/." "$ws/"
   local started; started=$(date +%s%3N)
   local error="" sid=""
   local task_env=(); mapfile -t task_env < <(jq -r '.env // {} | to_entries[] | "\(.key)=\(.value)"' "$tdir/task.json")
-  if start_kernel "$bin" "$mind" "$ws" "$db" "$label" "$model" "$WORK/$name/$task-$r.kernel.log" "${task_env[@]}"; then
+  if start_kernel "$bin" "$ws" "$db" "$label" "$WORK/$name/$task-$r.kernel.log" "${task_env[@]}"; then
     local n; n=$(jq '.steps | length' "$tdir/task.json")
     for i in $(seq 0 $((n - 1))); do
       local step; step=$(jq -c ".steps[$i]" "$tdir/task.json")
@@ -249,14 +212,14 @@ run_task() { # name bin mind label model effort db task repeat
   true
 }
 
-run_harness() { # name bin mind label model effort
+run_harness() { # name bin label model effort
   local name=$1 db; db="zen_eval_$(echo "${RUN}_$1" | tr 'A-Z' 'a-z')"
   db_psql -d postgres -c "CREATE DATABASE $db" >/dev/null
   mkdir -p "$WORK/$name"
   for task in "${TASK_LIST[@]}"; do
     for r in $(seq 1 "$REPEAT"); do
       log "-- $name · $task · run $r"
-      run_task "$name" "$2" "$3" "$4" "$5" "$6" "$db" "$task" "$r" | tee -a "$OUT/$name.jsonl" | jq -r '"   " + (if .passed then "passed" else "FAILED" end) + (if .error then " (" + .error + ")" else "" end)' >&2
+      run_task "$name" "$2" "$3" "$4" "$5" "$db" "$task" "$r" | tee -a "$OUT/$name.jsonl" | jq -r '"   " + (if .passed then "passed" else "FAILED" end) + (if .error then " (" + .error + ")" else "" end)' >&2
     done
   done
   [ -z "$KEEP" ] && db_psql -d postgres -c "DROP DATABASE $db" >/dev/null
@@ -268,6 +231,6 @@ run_harness() { # name bin mind label model effort
 build_new
 [ "$ONLY" = new ] || build_base
 log "== model $MODEL${EFFORT:+ · effort $EFFORT} · ${#TASK_LIST[@]} tasks × $REPEAT · results in $OUT"
-[ "$ONLY" = new ] || run_harness base "$BASE_BIN" "$BASE_MIND" "$BASE_LABEL" "$BASE_MODEL" "$BASE_EFFORT"
-[ "$ONLY" = base ] || run_harness new "$OUT/new-bin" "$NEW_MIND" "$NEW_LABEL" "$MODEL" "$EFFORT"
+[ "$ONLY" = new ] || run_harness base "$BASE_BIN" "$BASE_LABEL" "$BASE_MODEL" "$BASE_EFFORT"
+[ "$ONLY" = base ] || run_harness new "$OUT/new-bin" "$NEW_LABEL" "$MODEL" "$EFFORT"
 "$REPO/scripts/eval-report.sh" "$OUT" | tee "$OUT/report.md"
