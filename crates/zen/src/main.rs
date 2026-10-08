@@ -288,7 +288,12 @@ async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: bool) -> Re
                         }
                         if show_tools && ev["is_error"] == true { eprintln!("{}", dim("    (failed)")); }
                     }
-                    "busy" if started => turn.effort = ev["effort"].as_str().map(str::to_string),
+                    // The turn starts with the first `busy` after the prompt was sent, or with the
+                    // prompt's echo, whichever comes first (the echo may not match exactly).
+                    "busy" => {
+                        started = true;
+                        turn.effort = ev["effort"].as_str().map(str::to_string);
+                    }
                     "end" | "child_end" if started => {
                         if let Some(e) = ev["error"].as_str() { turn.error = Some(e.to_string()); }
                         let r = &ev["turn"];
@@ -956,6 +961,37 @@ mod tests {
         assert_eq!(env["ZEN_REPO"], "/home/x/zenbot");
         assert_eq!(env["PLAIN"], "v");
         assert_eq!(env.len(), 3);
+    }
+
+    /// A fake kernel session stream: reads the prompt, then sends `events`.
+    async fn fake_stream(events: Vec<Value>) -> (Client, tokio::task::JoinHandle<String>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(sock).await.unwrap();
+            let prompt = ws.next().await.unwrap().unwrap().into_text().unwrap().to_string();
+            for e in events {
+                ws.send(Message::text(e.to_string())).await.unwrap();
+            }
+            prompt
+        });
+        (Client::new(url, Some("t".into())).unwrap(), server)
+    }
+
+    #[tokio::test]
+    async fn ask_starts_on_busy_even_if_the_echo_differs() {
+        let (c, server) = fake_stream(vec![
+            json!({ "type": "busy", "busy": true, "effort": "high" }),
+            json!({ "type": "message", "message": { "role": "user", "content": "do it" } }),
+            json!({ "type": "message", "message": { "role": "assistant", "content": [{ "type": "text", "text": "done" }], "model": "faux/smoke" } }),
+            json!({ "type": "end", "error": null }),
+        ])
+        .await;
+        let mut ws = c.connect("s1").await.unwrap();
+        let turn = tokio::time::timeout(std::time::Duration::from_secs(5), run_turn(&mut ws, "  do it  ", false, false)).await.expect("no hang").unwrap();
+        assert_eq!((turn.text.as_str(), turn.effort.as_deref()), ("done", Some("high")));
+        assert!(server.await.unwrap().contains("  do it  "));
     }
 
     #[test]
