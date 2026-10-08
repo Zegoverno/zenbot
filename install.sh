@@ -53,11 +53,10 @@ ENGINE_PIDS=()
 if ! command -v claude >/dev/null; then (curl -fsSL https://claude.ai/install.sh | bash >/tmp/zen-install-claude.log 2>&1) & ENGINE_PIDS+=($!); fi
 if ! command -v codex >/dev/null; then (npm install -g --no-audit --no-fund --silent @openai/codex >/tmp/zen-install-codex.log 2>&1) & ENGINE_PIDS+=($!); fi
 
-# Workers: `engine` (Claude Code + Codex on your subscriptions) and optionally `pi` (Pi agent loop).
-# ZEN_WORKERS and ZEN_PORT given to this run are saved in ~/.zenbot/env; a re-run without them
-# keeps the installed ones.
+# Keep configured model workers, but retire a stale `pi` entry from existing installations.
 WORKERS="${ZEN_WORKERS:-$(zen_env ZEN_WORKERS)}"; WORKERS=${WORKERS:-engine}
-if [[ ",$WORKERS," == *",pi,"* ]]; then (cd packages/mind && npm ci --no-audit --no-fund --silent); fi
+WORKERS=$(printf '%s' "$WORKERS" | tr ',' '\n' | awk '$0 != "pi"' | paste -sd, -)
+WORKERS=${WORKERS:-engine}
 if "$REPO/scripts/fetch-release.sh"; then
   say "Downloaded prebuilt zenbot $(git rev-parse --short HEAD)"
 else
@@ -79,14 +78,12 @@ ln -sf "$HOME/.zenbot/bin/zen" "$HOME/.local/bin/zen"
 new_token
 touch "$ENV_FILE"
 chmod 600 "$ENV_FILE"
-[ -z "${ZEN_WORKERS:-}" ] || env_set ZEN_WORKERS "$ZEN_WORKERS"
 [ -z "${ZEN_PORT:-}" ] || env_set ZEN_PORT "$ZEN_PORT"
 # The token file is the source of truth (the zen CLI reads it), so the service always gets it.
 env_set ZEN_TOKEN "$(cat "$HOME/.zenbot/token")"
 env_default ZEN_PORT 8100
 env_default ZEN_REPO "$REPO"
-env_default ZEN_WORKERS "$WORKERS"
-env_default ZEN_MIND_DIR "$REPO/packages/mind"
+env_set ZEN_WORKERS "$WORKERS"
 env_default HOME "$HOME"
 env_default PATH "$HOME/.local/bin:$NODE_DIR/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
 PORT=$(zen_env ZEN_PORT)

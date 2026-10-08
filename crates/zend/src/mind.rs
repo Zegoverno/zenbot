@@ -1,4 +1,4 @@
-//! Connection to the zen-mind worker: JSON-RPC 2.0, one JSON object per line over stdio.
+//! Connection to a model worker: JSON-RPC 2.0, one JSON object per line over stdio.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,7 +36,7 @@ impl Mind {
             .stderr(std::process::Stdio::inherit())
             .kill_on_drop(true)
             .spawn()
-            .context("spawning zen-mind")?;
+            .context("spawning model worker")?;
         let command_owned = command.to_string();
         let stdin = child.stdin.take().context("mind stdin")?;
         let stdout = child.stdout.take().context("mind stdout")?;

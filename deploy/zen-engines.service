@@ -1,5 +1,5 @@
 [Unit]
-Description=zenbot: update the Claude Code and Codex CLIs to their latest versions (Pi: report only)
+Description=zenbot: update the Claude Code and Codex CLIs to their latest versions
 After=network-online.target
 Wants=network-online.target
 

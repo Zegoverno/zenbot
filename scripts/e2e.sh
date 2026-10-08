@@ -404,6 +404,23 @@ summaries() {
   check "the history tool finds summarized messages" grep -q "Tool result (bash): FACT: the error code is E4127" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='history' ORDER BY seq DESC LIMIT 1")"
 }
 
+system_one_direct() {
+  local ws; ws=$(new_workspace systemone)
+  local port=$((PORT + 3))
+  python3 "$REPO/scripts/e2e/systemone_stub.py" "$port" & local srv=$!
+  start_kernel "$ws" "$(script systemone.json)" ZEN_WORKERS=engine,pi ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone"
+  check "a stale pi worker setting is ignored" bash -c '! grep -q "worker `pi` started" "$1"' _ "$TMP/kernel.log"
+  local sid; sid=$(zen ask --json -m faux/smoke "decide directly" | jq -r .session_id)
+  local answer; answer=$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='decide' ORDER BY seq DESC LIMIT 1")
+  check "System One bool mapped from noul" grep -q '"probability": 0.82' <<<"$answer"
+  check "System One choice and score parsed" bash -c 'grep -q "\"choice\": \"build\"" <<<"$1" && grep -q "\"score\": 1" <<<"$1"' _ "$answer"
+  check "the decision was logged" eq "$(q "SELECT count(*) FROM decisions WHERE session_id='$sid' AND point='tool' AND error IS NULL")" 1
+  stop_kernel
+  start_kernel "$ws" "$(script systemone.json)" ZEN_WORKERS=pi ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone"
+  check "pi-only legacy setting falls back to engine" grep -q 'worker `engine` started' "$TMP/kernel.log"
+  kill "$srv" 2>/dev/null || true
+}
+
 secrets_masked() {
   local ws; ws=$(new_workspace secret)
   start_kernel "$ws" "$(script secret.json)" E2E_PLANTED_KEY=planted-value-1234567890
@@ -472,6 +489,7 @@ run memory-sleep memory_sleep
 run ask ask_and_gone_tools
 run verifier verifier
 run summaries summaries
+run system-one system_one_direct
 run secrets secrets_masked
 run slow-summary slow_summary
 run stale-turn stale_turn

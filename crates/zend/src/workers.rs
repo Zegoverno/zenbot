@@ -1,5 +1,5 @@
-//! Workers: starting and supervising the worker processes, their models and classifiers, and
-//! routing a model to the worker that serves it (docs/worker-protocol.md).
+//! Workers: starting and supervising model workers, and routing models to them
+//! (docs/worker-protocol.md). System One runs in the kernel (score.rs).
 
 use super::*;
 
@@ -18,25 +18,18 @@ impl Worker {
     }
 }
 
-/// Workers to run, from ZEN_WORKERS (default: `engine`, plus `pi` when it's installed).
-/// - engine: zen-engine (Claude Code + Codex CLIs on the owner's subscriptions)
-/// - pi:     zen-mind (Pi agent loop; direct ChatGPT sign-in and API providers)
+/// Workers to run, from ZEN_WORKERS (default: `engine`). A stale `pi` entry is ignored so
+/// an existing installation can upgrade without editing its env file first.
 pub(crate) fn worker_configs() -> Vec<(String, String, String)> {
     let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_default();
-    let mind_dir = std::env::var("ZEN_MIND_DIR").unwrap_or_else(|_| "packages/mind".into());
-    let pi_installed = std::path::Path::new(&mind_dir).join("node_modules").exists();
-    let default = if pi_installed { "engine,pi" } else { "engine" };
-    std::env::var("ZEN_WORKERS")
-        .unwrap_or_else(|_| default.into())
-        .split(',')
-        .map(str::trim)
-        .filter(|n| !n.is_empty())
-        .map(|name| match name {
+    let configured = std::env::var("ZEN_WORKERS").unwrap_or_else(|_| "engine".into());
+    let mut names: Vec<&str> = configured.split(',').map(str::trim).filter(|n| !n.is_empty() && *n != "pi").collect();
+    if names.is_empty() { names.push("engine"); }
+    names.into_iter().map(|name| match name {
             "engine" => {
                 let cmd = std::env::var("ZEN_ENGINE_CMD").unwrap_or_else(|_| exe_dir.join("zen-engine").display().to_string());
                 (name.to_string(), cmd, ".".to_string())
             }
-            "pi" => (name.to_string(), std::env::var("ZEN_MIND_CMD").unwrap_or_else(|_| "node src/main.ts".into()), mind_dir.clone()),
             other => {
                 let var = format!("ZEN_WORKER_{}_CMD", other.to_uppercase());
                 (other.to_string(), std::env::var(&var).unwrap_or_else(|_| other.to_string()), ".".to_string())
@@ -104,9 +97,8 @@ pub(crate) async fn complete(app: &App, model: &str, system: &str, prompt: &str)
     Ok(res)
 }
 
-/// Models offered, in order of preference. Engines' models come first; Pi's direct models after.
-pub(crate) const DEFAULT_MODELS: &str = "claude/claude-opus-5-5,claude/claude-sonnet-5-5,claude/claude-haiku-4-5-20251001,codex/gpt-6-sol,codex/gpt-6-astra,codex/gpt-6-luna,codex/gpt-5.5,\
-openai/gpt-6.1-sol,openai/gpt-6-sol,openai/gpt-6-luna,openai/gpt-6-astra,openai/gpt-5.5";
+/// Models offered, in order of preference. All run through the Claude or Codex engine.
+pub(crate) const DEFAULT_MODELS: &str = "claude/claude-opus-5-5,claude/claude-sonnet-5-5,claude/claude-haiku-4-5-20251001,codex/gpt-6-sol,codex/gpt-6-astra,codex/gpt-6-luna,codex/gpt-5.5";
 
 /// Ask every worker for its models, refresh routing, and return the curated list.
 pub(crate) async fn collect_models(app: &App) -> Value {
@@ -117,12 +109,6 @@ pub(crate) async fn collect_models(app: &App) -> Value {
         if let Some(a) = res["authenticated"].as_object() {
             authenticated.extend(a.clone());
         }
-        // Classifiers (System One models) route like models; their ids don't overlap.
-        let mut routes = app.routes.lock().await;
-        for id in res["classifiers"].as_array().into_iter().flatten().filter_map(|c| c["id"].as_str()) {
-            routes.entry(id.to_string()).or_insert(i);
-        }
-        drop(routes);
         all.extend(res["models"].as_array().into_iter().flatten().map(|m| (i, m.clone())));
     }
     let mut routes = app.routes.lock().await;
@@ -149,7 +135,7 @@ pub(crate) async fn collect_models(app: &App) -> Value {
             "scorer": score::scorer() })
 }
 
-/// The worker that serves a model or a classifier (refreshing routes once if it's unknown).
+/// The worker that serves a model (refreshing routes once if it's unknown).
 pub(crate) async fn worker_for(app: &App, model: &str) -> Option<usize> {
     if let Some(i) = app.routes.lock().await.get(model) {
         return Some(*i);

@@ -5,9 +5,6 @@
 # A setting from the service's environment file, ~/.zenbot/env (empty when unset there).
 zen_env() { { grep -E "^$1=" "$HOME/.zenbot/env" 2>/dev/null || true; } | tail -1 | cut -d= -f2-; }
 
-# The installed service runs the `pi` worker (ZEN_WORKERS in ~/.zenbot/env includes it).
-pi_enabled() { [[ ",$(zen_env ZEN_WORKERS)," == *",pi,"* ]]; }
-
 # wait_healthy URL SECS [PID]: wait until URL (a kernel's /health) reports ok. Fails after SECS
 # seconds, or as soon as process PID, when given, has exited.
 wait_healthy() {

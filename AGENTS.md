@@ -19,7 +19,6 @@ fully before making changes.
 | Kernel `zend`: API, WebSocket, sessions, tools, auth, worker routing | `crates/zend` (Rust) | systemd service `zenbot`, binary `~/.zenbot/bin/zend` |
 | CLI `zen`: terminal app and script commands | `crates/zen` (Rust) | `~/.zenbot/bin/zen` (linked from `~/.local/bin/zen`) |
 | Worker `zen-engine`: turns on the Claude Code and Codex CLIs | `crates/zen-engine` (Rust) | child process of `zend` |
-| Worker `zen-mind` (optional, `pi`): Pi loop, ChatGPT sign-in, OpenRouter | `packages/mind` (TypeScript, Node 22 from source) | child process of `zend` when `ZEN_WORKERS` includes `pi` |
 | Web UI (frozen) | `crates/zend/web/index.html` | served by `zend` |
 | Database | `deploy/compose.yaml` | Postgres + pgvector in Docker |
 
@@ -27,8 +26,9 @@ The kernel owns all state and executes every tool call. Workers hold no state: t
 for a turn and ask the kernel to run tools. Engines run with their own tools switched off (Claude
 Code `--tools ""`, Codex shell disabled) so every action goes through the kernel. Keep it that way.
 
-Config lives in `~/.zenbot/` (MAP.md lists every file). `auth.json` holds Pi's ChatGPT sign-in: secret,
-never print it. This VM is a development box; the owner uses zenbot for real on another VM.
+Config lives in `~/.zenbot/` (MAP.md lists every file). `auth.json` may hold a retired Pi
+sign-in: secret, never print it. This VM is a development box; the owner uses zenbot for real on
+another VM.
 
 ## Making a change
 
@@ -37,9 +37,8 @@ never print it. This VM is a development box; the owner uses zenbot for real on 
 2. **Read the code you're changing.** Keep the existing style. Keep changes small.
 3. **Build and check** exactly as CI does: build, tests, clippy as errors, and `scripts/e2e.sh`
    (DEVELOPMENT.md). Add an e2e scenario when you change the kernel's behavior. Test kernel behavior
-   without a subscription with the scripted `faux/smoke` model. If you change the Pi worker,
-   `node packages/mind/src/main.ts` must start (Node strips types: no enums or constructor parameter
-   properties). Changes to the worker protocol update `docs/worker-protocol.md` and every worker.
+   without a subscription with the scripted `faux/smoke` model. Changes to the worker protocol
+   update `docs/worker-protocol.md` and every worker.
 4. **Test it for real** where you can, e.g. `./target/release/zen ask --json "…"` against the running
    service or a dev kernel.
 5. **Update the docs** in the same branch (table below). Docs are not a follow-up task.

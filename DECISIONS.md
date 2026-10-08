@@ -6,6 +6,24 @@
 
 ---
 
+## D-043 — Retire Pi; call System One directly from the kernel
+
+**Date:** 2026-10-08 · **Status:** accepted (owner) · **Supersedes in part:** D-002, D-012,
+D-018 and D-022 (their Pi worker and classifier transport choices)
+
+**Decision:** Remove the optional Node/Pi worker and direct ChatGPT sign-in. Claude Code and Codex
+remain the model engines. `zend` calls OpenRouter's `/api/v1/systemone` directly with
+`OPENROUTER_API_KEY` when `ZEN_S1_MODEL` is configured, mapping public `bool` to wire `noul` and
+back. OpenRouter's reported usage and cost are recorded. An existing `ZEN_WORKERS=engine,pi`
+setting is tolerated during upgrade: `pi` is ignored, then `install.sh` removes it.
+
+**Why:** Pi was an extra runtime and package tree for one fast-classifier call. The direct call
+keeps System One available without another process, the Node dependencies or a second ChatGPT
+sign-in. `zen chat` and both TUI modes remain unchanged. A local HTTP stub tests the transport;
+a GPT harness eval checks that model-work behavior remains sound.
+
+---
+
 ## D-042 — Keep the dev kernel home outside the live home
 
 **Date:** 2026-10-08 · **Status:** accepted (owner) · **Refines:** D-040

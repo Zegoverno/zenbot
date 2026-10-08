@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Keep the model engines' CLIs on their latest versions: Claude Code and Codex. Pi (the `pi`
-# worker's library in packages/mind) is only reported: it is pinned in the repo and bumped by a
-# commit with an eval, like any harness change.
+# Keep the model engines' CLIs on their latest versions: Claude Code and Codex.
 # Run daily by zen-engines.timer (deploy/); safe to run by hand, also from inside a zen session.
 #
 #   scripts/update-engines.sh           update what is behind, test it, roll back what fails
@@ -19,7 +17,7 @@
 #
 # Results go to ~/.zenbot/upgrade.log ("engines: …", one line per change) and the latest state
 # to ~/.zenbot/engines.json (shown by `zen status`).
-# ZEN_ENGINES=claude,codex,pi limits which engines are looked at. ZEN_ENGINES_FAIL=<engine> makes
+# ZEN_ENGINES=claude,codex limits which engines are looked at. ZEN_ENGINES_FAIL=<engine> makes
 # that engine's post-update check fail, to test the rollback.
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -236,34 +234,13 @@ update_cli() {
   fi
 }
 
-# ---- Pi: reported, not installed ----
-# Pi is part of the harness: the repo pins its exact version, and a bump is an ordinary commit
-# that gets an eval first (AGENTS.md). So this job only says when a newer Pi is out.
-
-check_pi() {
-  wanted pi || return 0
-  if [ -z "${ZEN_ENGINES:-}" ] && ! pi_enabled; then return 0; fi
-  local have latest
-  have=$(node -p "require('$REPO/packages/mind/node_modules/@earendil-works/pi-ai/package.json').version" 2>/dev/null)
-  [ -n "$have" ] || { record pi "" "not installed"; say "pi: not installed, skipped"; return 0; }
-  latest=$(npm view @earendil-works/pi-ai version 2>/dev/null)
-  if ! is_version "$latest"; then record pi "$have" "latest version unknown"; say "pi $have: could not find the latest version"; return 0; fi
-  if newer "$have" "$latest"; then
-    record pi "$have" "update available: $latest"
-    say "pi $have: $latest available (bump the pins in packages/mind and run scripts/eval.sh; see AGENTS.md)"
-  else
-    record pi "$have" "up to date"; say "pi $have: up to date"
-  fi
-}
-
 update_cli claude
 update_cli codex
-check_pi
 
 # ---- state for `zen status` ----
 if [ -z "$CHECK_ONLY" ]; then
   # Engines not looked at this time (ZEN_ENGINES) keep their last entry.
-  json=$(jq --arg at "$(date -u +%FT%TZ)" '{checked: $at, engines: (.engines // {})}' "$STATE" 2>/dev/null || jq -n --arg at "$(date -u +%FT%TZ)" '{checked: $at, engines: {}}')
+  json=$(jq --arg at "$(date -u +%FT%TZ)" '{checked: $at, engines: ((.engines // {}) | del(.pi))}' "$STATE" 2>/dev/null || jq -n --arg at "$(date -u +%FT%TZ)" '{checked: $at, engines: {}}')
   for e in "${!VERSION[@]}"; do
     json=$(echo "$json" | jq --arg e "$e" --arg v "${VERSION[$e]}" --arg s "${STATUS[$e]}" '.engines[$e] = {version: $v, status: $s}')
   done

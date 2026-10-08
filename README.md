@@ -1,6 +1,6 @@
 # zenbot
 
-A maker tool that works like a chief of staff: the owner hands it jobs, operational work and building software alike, and it carries them end to end with any model (Claude Code, Codex, Pi, API models), so the owner's attention goes to the decisions that matter. A personal tool, developed in public.
+A maker tool that works like a chief of staff: the owner hands it jobs, operational work and building software alike, and it carries them end to end with Claude Code, Codex and API classifiers, so the owner's attention goes to the decisions that matter. A personal tool, developed in public.
 
 Status: early. The kernel, the `zen` terminal app, Claude Code / Codex engines and context management are built and in use. The redesign around tools, skills and memory agreed on 2026-10-06 is being built ([ROADMAP.md](ROADMAP.md)): prompt files, short-term memory with a nightly sleep, skills, and briefs and verification as a skill and a tool are in.
 
@@ -24,7 +24,7 @@ Status: early. The kernel, the `zen` terminal app, Claude Code / Codex engines a
 
 Requirements: Debian/Ubuntu with systemd and sudo. The installer adds Docker, Node, and the Claude Code and Codex CLIs, and downloads prebuilt zenbot binaries (it installs Rust and compiles only when there are none for your platform or commit). See [INSTALL.md](INSTALL.md).
 
-Models run on your existing subscriptions: Claude (Opus, Sonnet, Haiku) through the Claude Code CLI and GPT through Codex, with zenbot's own prompt, tools and history ([how](docs/worker-protocol.md)). Pi is available as an optional worker (`ZEN_WORKERS=engine,pi`).
+Models run on your existing subscriptions: Claude (Opus, Sonnet, Haiku) through the Claude Code CLI and GPT through Codex, with zenbot's own prompt, tools and history ([how](docs/worker-protocol.md)). System One typed decisions call OpenRouter directly when configured.
 
 ```bash
 git clone https://github.com/Zegoverno/zenbot.git ~/zenbot && ~/zenbot/install.sh
@@ -119,7 +119,7 @@ Every turn is recorded in the `turns` table with what produced it: the zenbot bu
   ZEN_S1_MODEL=openrouter/typesafe/jev-1.13
   OPENROUTER_API_KEY=sk-or-…
   ```
-  It needs the `pi` worker. `ZEN_SCORE_IDLE_SECS` changes the quiet time (default 7200).
+  It calls OpenRouter directly; no extra worker is needed. `ZEN_SCORE_IDLE_SECS` changes the quiet time (default 7200).
 - **Evals** compare two harness versions on fixed tasks with the same model: `scripts/eval.sh` (see [evals/README.md](evals/README.md)). Run them before changing the harness; the report is for you to decide on.
 
 ## Web UI (on hold)

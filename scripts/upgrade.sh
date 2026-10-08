@@ -20,7 +20,6 @@ esac
 git config core.hooksPath scripts/git-hooks # commit trailers linking zen's commits to sessions
 
 echo "== build"
-if pi_enabled; then (cd packages/mind && npm ci --no-audit --no-fund --silent); fi
 # Use the binaries CI built for this commit when there are no local code changes;
 # otherwise compile here (installing Rust first on machines that never needed it).
 PREBUILT=
@@ -45,15 +44,11 @@ if [ -z "$PREBUILT" ]; then # CI already tested prebuilt binaries
 fi
 PONG=$(echo '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}' | timeout 15 ./target/release/zen-engine 2>/dev/null | head -1 || true)
 echo "$PONG" | grep -q pong || { echo "CHECK FAILED: zen-engine did not answer ping"; exit 1; }
-if pi_enabled; then
-  PONG=$(echo '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}' | timeout 15 node packages/mind/src/main.ts 2>/dev/null | head -1 || true)
-  echo "$PONG" | grep -q pong || { echo "CHECK FAILED: zen-mind (pi) did not answer ping"; exit 1; }
-fi
 ./target/release/zen --version >/dev/null
 
 echo "== smoke"
 # Run the new build as a second kernel on a spare port and drive one scripted turn
-# (faux engine -> kernel -> bash tool -> answer) through it, and one through Pi when it's enabled. It runs on a throwaway copy of
+# (faux engine -> kernel -> bash tool -> answer) through it. It runs on a throwaway copy of
 # the live database, so pending migrations are tried there and the live database is
 # untouched until the install (which backs it up first if migrations are pending).
 SMOKE_PORT=${ZEN_SMOKE_PORT:-18199}
@@ -62,8 +57,6 @@ SMOKE_LOG=$(mktemp)
 SMOKE_WS=$(mktemp -d)
 SMOKE_DB=zen_smoke_$$
 SMOKE_PID=
-SMOKE_WORKERS=engine
-pi_enabled && SMOKE_WORKERS=engine,pi
 trap '[ -n "$SMOKE_PID" ] && kill $SMOKE_PID 2>/dev/null; rm -rf "$SMOKE_WS"; db_drop $SMOKE_DB' EXIT
 if ! db_copy_live "$SMOKE_DB" >"$SMOKE_LOG" 2>&1; then
   echo "SMOKE TEST FAILED: could not copy the live database ($(db_live_name)) to $SMOKE_DB"
@@ -73,16 +66,16 @@ fi
 SMOKE_DB_URL=$(db_url_for "$SMOKE_DB")
 (
   set -a; [ -f "$HOME/.zenbot/env" ] && . "$HOME/.zenbot/env"; set +a
-  ZEN_TOKEN="$(cat "$HOME/.zenbot/token")" ZEN_PORT=$SMOKE_PORT ZEN_WORKERS=$SMOKE_WORKERS ZEN_MIND_DIR="$REPO/packages/mind" ZEN_FAUX=1 ZEN_WORKSPACE="$SMOKE_WS" ZEN_HOME="$SMOKE_WS/.zenbot" \
+  ZEN_TOKEN="$(cat "$HOME/.zenbot/token")" ZEN_PORT=$SMOKE_PORT ZEN_WORKERS=engine ZEN_FAUX=1 ZEN_WORKSPACE="$SMOKE_WS" ZEN_HOME="$SMOKE_WS/.zenbot" \
     ZEN_HARNESS="$(git rev-parse --short HEAD)" DATABASE_URL="$SMOKE_DB_URL" \
     exec ./target/release/zend
 ) >>"$SMOKE_LOG" 2>&1 &
 SMOKE_PID=$!
 # Not fatal by itself: a kernel that never comes up fails the turn below, which reports it with the log.
 wait_healthy "$SMOKE_URL/health" 30 "$SMOKE_PID" || true
-# One scripted turn per worker: zen-engine's faux/smoke and, with Pi enabled, Pi's faux/faux-1.
+# One scripted turn through zen-engine's faux/smoke.
 SMOKE_FAILED=
-for SMOKE_MODEL in faux/smoke $([ "$SMOKE_WORKERS" = engine,pi ] && echo faux/faux-1); do
+for SMOKE_MODEL in faux/smoke; do
   RESULT=$(ZEN_URL="$SMOKE_URL" timeout 60 ./target/release/zen ask --json -m "$SMOKE_MODEL" "upgrade smoke test" 2>/dev/null || true)
   if ! echo "$RESULT" | jq -e '.error == null and (.text | contains("Smoke test passed")) and .tools[0].is_error == false' >/dev/null 2>&1; then
     SMOKE_FAILED="$SMOKE_MODEL: ${RESULT:-none}"

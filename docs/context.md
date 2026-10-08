@@ -108,7 +108,6 @@ protocol, with a fallback zenbot owns and a switch to turn it off.
   measured: 6,016 cached tokens on a resumed turn, none on a new thread per turn). A new thread gets
   the history as native items (`thread/inject_items`, as qm does). `ZEN_CODEX_RESUME=0` and
   `ZEN_CODEX_INJECT=0` turn these off.
-- **Pi** gets the messages directly, with long cache retention and the session id.
 
 ## Measurement
 

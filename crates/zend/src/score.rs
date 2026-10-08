@@ -2,17 +2,18 @@
 //! answers fixed questions about it, and the answers are stored with the session
 //! (`session_scores`). The owner's decisions are the ground truth these are later compared with.
 //!
-//! - Off unless ZEN_S1_MODEL names a classifier a worker lists (e.g. `openrouter/typesafe/jev-1.13`,
-//!   served by the Pi worker with OPENROUTER_API_KEY).
+//! - Off unless ZEN_S1_MODEL names an OpenRouter classifier (e.g.
+//!   `openrouter/typesafe/jev-1.13`) and OPENROUTER_API_KEY is set.
 //! - Only the user's messages and the agent's final answer per turn are sent, never tool output.
 //! - Only sessions with traced turns are scored, and each turn once per trigger kind (a failed
 //!   score is retried after an hour).
 //! - Questions are versioned (QUESTIONS_VERSION): change the set, bump the version.
 
+use std::sync::LazyLock;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use anyhow::{bail, Context, Result};
+use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use crate::App;
@@ -38,13 +39,71 @@ pub fn private_ok() -> bool {
     std::env::var("ZEN_S1_PRIVATE").map(|v| v.trim() != "0").unwrap_or(true)
 }
 
-/// Ask the configured System One model typed questions about `state` (`s1.decide`,
-/// docs/worker-protocol.md). The answer is the worker's result; a model-side failure comes back
-/// in its `error` field.
-pub async fn decide(app: &App, state: &Value, questions: &Value) -> Result<Value> {
+/// A fast, typed classification through OpenRouter's System One API. The kernel owns this call;
+/// no model worker or Node process is needed. `bool` is `noul` on the wire, then mapped back.
+static SYSTEM_ONE: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder().timeout(Duration::from_secs(30)).build().expect("System One HTTP client")
+});
+
+fn wire_questions(questions: &Value) -> Result<Value> {
+    let entries = questions.as_object().context("System One questions must be an object")?;
+    let mut wire = Map::new();
+    for (id, question) in entries {
+        let kind = question["type"].as_str().context("each System One question needs a type")?;
+        if !matches!(kind, "choice" | "score" | "bool") { bail!("unsupported System One question type `{kind}`"); }
+        let mut q = question.as_object().context("each System One question must be an object")?.clone();
+        if kind == "bool" { q.insert("type".into(), json!("noul")); }
+        wire.insert(id.clone(), Value::Object(q));
+    }
+    Ok(Value::Object(wire))
+}
+
+fn parse_answers(body: &Value, questions: &Value) -> Result<Value> {
+    let mut answers = Map::new();
+    for (id, question) in questions.as_object().context("System One questions must be an object")? {
+        let a = &body["answers"][id];
+        let parsed = match question["type"].as_str().unwrap_or("") {
+            "bool" => {
+                let p = a["noul"].as_f64().with_context(|| format!("System One did not answer `{id}` as a bool"))?;
+                if a["type"] != "noul" || !p.is_finite() || !(0.0..=1.0).contains(&p) { bail!("invalid bool answer for `{id}`"); }
+                json!({ "type": "bool", "probability": p })
+            }
+            "choice" => {
+                let choice = a["choice"].as_str().with_context(|| format!("System One did not answer `{id}` as a choice"))?;
+                if a["type"] != "choice" || question["criteria"].get(choice).is_none() { bail!("invalid choice answer for `{id}`"); }
+                json!({ "type": "choice", "choice": choice, "probabilities": a["probabilities"], "confidence": a["confidence"] })
+            }
+            "score" => {
+                let score = a["score"].as_f64().with_context(|| format!("System One did not answer `{id}` as a score"))?;
+                if a["type"] != "score" || !score.is_finite() { bail!("invalid score answer for `{id}`"); }
+                json!({ "type": "score", "score": score, "confidence": a["confidence"] })
+            }
+            kind => bail!("unsupported System One question type `{kind}`"),
+        };
+        answers.insert(id.clone(), parsed);
+    }
+    Ok(Value::Object(answers))
+}
+
+async fn decide_with_model(model: &str, state: &Value, questions: &Value) -> Result<Value> {
+    let key = std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY is not set")?;
+    let model_id = model.strip_prefix("openrouter/").unwrap_or(model);
+    let url = std::env::var("ZEN_S1_URL").unwrap_or_else(|_| "https://openrouter.ai/api/v1/systemone".into());
+    let response = SYSTEM_ONE.post(url).bearer_auth(key).json(&json!({
+        "model": model_id, "state": state, "questions": wire_questions(questions)?
+    })).send().await.context("calling OpenRouter System One")?;
+    let status = response.status();
+    if !status.is_success() { bail!("OpenRouter System One returned HTTP {status}"); }
+    let body: Value = response.json().await.context("reading OpenRouter System One response")?;
+    if let Some(e) = body["error"].as_str() { bail!("OpenRouter System One: {e}"); }
+    Ok(json!({ "model": body["model"], "provider": body["provider"],
+        "answers": parse_answers(&body, questions)?, "usage": body["usage"], "error": null }))
+}
+
+/// Ask the configured System One model typed questions about `state`.
+pub async fn decide(_app: &App, state: &Value, questions: &Value) -> Result<Value> {
     let model = scorer().context("no System One model is configured (ZEN_S1_MODEL)")?;
-    let w = crate::worker_for(app, &model).await.with_context(|| format!("no worker serves classifier `{model}` (is the pi worker running?)"))?;
-    app.workers[w].mind().request("s1.decide", json!({ "model": model, "state": state, "questions": questions })).await
+    decide_with_model(&model, state, questions).await
 }
 
 /// The v1 questions. Each is atomic; a choice has an `unknown` option because the model can't abstain.
@@ -170,10 +229,7 @@ pub async fn score_session(app: &App, session: Uuid, trigger: &str) -> Result<()
     }
     let messages = crate::load_messages(&app.db, session).await?;
     let questions = questions();
-    let res = match crate::worker_for(app, &model).await {
-        Some(w) => app.workers[w].mind().request("s1.decide", json!({ "model": model, "state": state(&messages), "questions": questions })).await,
-        None => Err(anyhow::anyhow!("no worker serves classifier `{model}` (is the pi worker running?)")),
-    };
+    let res = decide_with_model(&model, &state(&messages), &questions).await;
     let (resolved, answers, usage, error) = match res {
         Ok(r) => (r["model"].as_str().map(String::from), r["answers"].clone(), r["usage"].clone(), r["error"].as_str().map(String::from)),
         Err(e) => (None, Value::Null, Value::Null, Some(e.to_string())),
@@ -194,7 +250,7 @@ pub async fn score_session(app: &App, session: Uuid, trigger: &str) -> Result<()
     .bind(trigger)
     .bind(has(&answers).then_some(&answers))
     .bind(has(&usage).then_some(&usage))
-    .bind(usage["cost"]["total"].as_f64())
+    .bind(usage["cost"].as_f64())
     .bind(error)
     .execute(&app.db)
     .await
@@ -270,6 +326,28 @@ mod tests {
         assert!(s.to_string().len() < MAX_STATE_CHARS + 2_000);
         assert!(kept.last().unwrap()["user"].as_str().unwrap().starts_with("q39"));
         assert_eq!(s["earlier_turns_left_out"].as_u64().unwrap() as usize, 40 - kept.len());
+    }
+
+    #[test]
+    fn system_one_maps_bool_to_noul_and_back() {
+        let qs = json!({
+            "ok": {"type": "bool", "instructions": "Did it pass?", "criteria": {"true": "yes", "false": "no"}},
+            "kind": {"type": "choice", "instructions": "What kind?", "criteria": {"build": "a build"}},
+            "rating": {"type": "score", "instructions": "How good?", "criteria": ["bad", "good"]}
+        });
+        let wire = wire_questions(&qs).unwrap();
+        assert_eq!(wire["ok"]["type"], "noul");
+        assert_eq!(wire["kind"]["type"], "choice");
+        let body = json!({"answers": {
+            "ok": {"type": "noul", "noul": 0.82},
+            "kind": {"type": "choice", "choice": "build", "probabilities": {"build": 1.0}, "confidence": 1.0},
+            "rating": {"type": "score", "score": 1, "confidence": 1.0}
+        }});
+        let parsed = parse_answers(&body, &qs).unwrap();
+        assert_eq!(parsed["ok"]["probability"], 0.82);
+        assert_eq!(parsed["kind"]["choice"], "build");
+        assert_eq!(parsed["rating"]["score"], 1.0);
+        assert!(parse_answers(&json!({"answers": {}}), &qs).is_err());
     }
 
     #[test]

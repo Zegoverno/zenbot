@@ -54,8 +54,8 @@ tools, skills, memory and knowledge; any model can do the work. Fixed rules exis
 2. **State of the art, grounded.** Every design choice follows the best known practice, checked in
    reference projects' code (not their READMEs), and says where it comes from, where zenbot goes
    further, and what it means for security.
-3. **Provider-free.** Claude Code and Codex on the owner's subscriptions, Pi through OpenRouter, API
-   models such as Jev; always the latest models. Engine-native features are used only behind a
+3. **Provider-free.** Claude Code and Codex on the owner's subscriptions, System One classifiers
+   such as Jev through OpenRouter; always the latest models. Engine-native features are used only behind a
    contract with a zenbot-owned fallback.
 4. **Only what the job needs enters the context.** Instructions and system tools are fixed per
    session; skills and other tools load on demand, appended so the prompt cache holds.

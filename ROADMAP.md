@@ -11,7 +11,7 @@ decides; every load and call is recorded per turn; System One is built into each
 
 ## Where things stand
 
-Built and installed: the kernel, the `zen` terminal app, the Claude Code / Codex engines (and Pi)
+Built and installed: the kernel, the `zen` terminal app, the Claude Code / Codex engines
 and context v2 (`docs/context.md`). Phase 1 is merged (#17); Phase 2 is built on `feat/reach`. Both
 are installed together once Phase 2 merges. See PROGRESS.md. The phases below replace the old next
 steps (old "Phase 2b", "Phase 3 memory", "Phase 4 search", "Phase 5 wiki").
@@ -131,7 +131,7 @@ verdicts and the owner's reviews (memory promotions, skill drafts, tools, routes
 - Verify criteria use a read-only bubblewrap shell; future work should centralize all tool
   permissions and taint rules at the dispatch boundary.
 - Paths never run with real models: the new tools (`remember`, `load_skill`, `verify`, `ask`) on
-  Codex and Pi, a model switch mid-session, a failed verification followed by a real fix.
+  Codex, a model switch mid-session, a failed verification followed by a real fix.
 
 ## Long-term milestones
 

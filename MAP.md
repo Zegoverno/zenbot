@@ -24,16 +24,13 @@
    │  owns all state, runs every tool call, keeps the tape
    │  web.rs ──HTTP──▶ SearXNG (Docker, 127.0.0.1:8888) or Brave / Tavily; public web pages
    │  mcp.rs ──stdio / streamable HTTP──▶ the owner's MCP servers (~/.zenbot/mcp.json)
-   │  search.rs ──HTTPS──▶ OpenRouter /embeddings (only with OPENROUTER_API_KEY)
+   │  search.rs / score.rs ──HTTPS──▶ OpenRouter /embeddings and /systemone (when configured)
    │  JSON-RPC 2.0 over stdio, one JSON object per line (docs/worker-protocol.md)
    ├──▶ zen-engine (crates/zen-engine)            default worker `engine`
    │      ├─ claude: `claude -p --tools ""` + MCP config pointing at
    │      │          `zen-engine mcp-bridge <socket>` ──Unix socket──▶ engine ──tool.call──▶ zend
    │      ├─ codex:  `codex app-server`, shell/apps/plugins off, zenbot tools as dynamic tools
    │      └─ faux:   scripted model `faux/smoke` (ZEN_FAUX=1), for tests
-   └──▶ zen-mind (packages/mind, Node 22)        optional worker `pi`
-          Pi agent loop: direct ChatGPT sign-in (~/.zenbot/auth.json), OpenRouter classifiers,
-          faux provider (ZEN_FAUX=1)
 ```
 
 - **The kernel owns all state and executes every tool call.** Workers are stateless: each
@@ -79,9 +76,9 @@ prompt and the web UI.
 | `src/compact.rs` | 471 | Summaries of older turns: prepared in the background past the soft limit, applied after a pause or at once past the hard limit (`compaction` block). Also the `history` tool, which reads old blocks back by number or search, in this session or another (`session`: a full id or a unique prefix, e.g. the 8 characters `search` shows) | `Settings`, `summary_model`, `plan`, `prepare`, `pending`, `apply`, `tool_spec`, `history_tool` | `tape`, `workers::complete` | `turns`, `dispatch`, `tools` |
 | `src/measure.rs` | 177 | Per-turn record of what was sent and why the prompt cache could or couldn't be reused (`cache_break`: `first`, `instructions`, `summary`, `model`, `engine_session`, `expired`; unexpected: `history`, `miss`) | `previous`, `record`, `break_at_start`, `break_at_end`, `cache_ttl_secs` | `compile` types | `turns` |
 | `src/tape.rs` | 70 | The tape: append (advisory lock per session, `seq` + parent + hash computed in SQL by `zen_block_hash`), load, repair (`zen_rechain`) | `Block`, `append`, `load`, `load_all`, `repair` | DB functions from migration 0007 | `compile`, `compact`, `agent`, `turns`, `web`, `mcp`, `main.rs` |
-| `src/workers.rs` | 189 | Worker configs from `ZEN_WORKERS`, supervision with backoff (ends orphaned turns on a crash), model and classifier routing, curated model list, effort checks, `complete` for summaries | `Worker`, `worker_configs`, `supervise`, `complete`, `DEFAULT_MODELS`, `collect_models`, `worker_for`, `model_info`, `check_effort` | `mind`, `score` | `main.rs`, `api`, `turns`, `agent`, `compact` |
+| `src/workers.rs` | 189 | Worker configs from `ZEN_WORKERS`, supervision with backoff (ends orphaned turns on a crash), model routing, curated model list, effort checks, `complete` for summaries | `Worker`, `worker_configs`, `supervise`, `complete`, `DEFAULT_MODELS`, `collect_models`, `worker_for`, `model_info`, `check_effort` | `mind`, `score` | `main.rs`, `api`, `turns`, `agent`, `compact` |
 | `src/mind.rs` | 124 | JSON-RPC client for one worker process (`bash -lc <cmd>`); 30 s default request timeout, `request_within` for longer | `Mind`, `Incoming`, `spawn`, `request`, `request_within`, `respond` | — | `workers`, `main.rs` |
-| `src/score.rs` | 283 | Live scoring: a System One classifier answers fixed, versioned questions (`QUESTIONS_VERSION = "v1"`) about a session after a decision or after it goes idle; stored in `session_scores`. Off unless `ZEN_S1_MODEL` is set. Also `decide` (any typed question to System One) and `private_ok` (`ZEN_S1_PRIVATE`) | `scorer`, `decide`, `private_ok`, `questions`, `state`, `score_session`, `idle_loop` | `workers` (`s1.decide`) | `api`, `agent`, `memory`, `web`, `search`, `workers`, `main.rs` |
+| `src/score.rs` | ~380 | Direct OpenRouter System One call and live scoring: a classifier answers fixed, versioned questions (`QUESTIONS_VERSION = "v1"`) about a session after a decision or after it goes idle; stored in `session_scores`. Off unless `ZEN_S1_MODEL` is set. Also `decide` (any typed question to System One) and `private_ok` (`ZEN_S1_PRIVATE`) | `scorer`, `decide`, `private_ok`, `questions`, `state`, `score_session`, `idle_loop` | OpenRouter `/api/v1/systemone` | `api`, `agent`, `memory`, `web`, `search`, `workers`, `main.rs` |
 | `src/secrets.rs` | 193 | Masks secrets in tool output: values of the kernel's own secret-looking env vars, `~/.zenbot/token`, `~/.zenbot/auth.json` values, and well-known token prefixes / private key blocks | `mask`, `mask_off_thread` (large text on a blocking thread) | — | `tools`, `agent` (check output, diff), `memory` (memories), `web` (pages), `mcp` (tool output) |
 | `src/update.rs` | 176 | Self-update: compares `~/.zenbot/version` with `origin/main` (hourly by default), asks `scripts/fetch-release.sh --check` whether binaries exist, starts `scripts/self-update.sh` on request | `Updater` (`running`, `info`, `check`, `check_periodically`, `start`, `status`) | `git`, scripts | `api`, `main.rs` |
 | `src/git.rs` | 64 | Async git with a 60 s limit and an output cap (git is stopped once the cap is reached) | `output`, `git` | — | `update`, `agent` (the verifier's diff) |
@@ -175,7 +172,7 @@ session states and no state-dependent tools.
 | `save_tool` | `workshop.rs` (make or update a tool in `ZEN_TOOLS_DIR`) | the owner's sessions |
 | `verify` | `agent.rs` (criteria commands on `run_shell`; a child verifier via `turns::run_child`; `verification` block) | the owner's sessions |
 | `delegate` | `delegate.rs` (subagent sessions, in parallel for `tasks`; model by the routing policy) | the owner's sessions (not subagents) |
-| `decide` | `agent.rs` → worker `s1.decide`, logged in `decisions` (`point = 'tool'`) | when `ZEN_S1_MODEL` is set and `ZEN_DECIDE_TOOL` isn't `0` |
+| `decide` | `agent.rs` → `score.rs` → OpenRouter `/systemone`, logged in `decisions` (`point = 'tool'`) | when `ZEN_S1_MODEL` is set and `ZEN_DECIDE_TOOL` isn't `0` |
 | `submit_verdict` | `agent.rs` (`verdict` block; ends the turn) | verifiers only |
 
 `sessions.state` is no longer written (null for new sessions; old sessions keep theirs; see Notes).
@@ -185,7 +182,7 @@ session states and no state-dependent tools.
 ## Layer 2 — Workers
 
 Protocol: `docs/worker-protocol.md`. Kernel → worker: `ping`, `models.list`, `turn.start`,
-`turn.abort`, `complete`, `s1.decide` (Pi only). Worker → kernel: `tool.call` (request) and the
+`turn.abort`, `complete`. Worker → kernel: `tool.call` (request) and the
 notifications `turn.delta`, `turn.thinking`, `turn.message`, `turn.usage`, `turn.end`.
 `turn.start` carries the kernel's `turn_id`; workers echo it on every message of the turn and key
 running turns by it (not by session), since the session's next turn can start while an ended one is
@@ -208,23 +205,13 @@ still stopping. `turn.abort` takes an optional `turn_id` (without it: every turn
 Code that depends on a CLI's flags or output should fail loudly, so the daily engine update check
 (`scripts/update-engines.sh`) catches a breaking CLI release.
 
-### `zen-mind` (`packages/mind`, optional worker `pi`, ~355 lines TypeScript)
-
-| File | Role | Notes |
-|---|---|---|
-| `src/main.ts` | Pi agent loop (`@earendil-works/pi-agent-core` / `pi-ai`, **pinned to 1.0.4** in `package.json`). Providers: OpenAI (ChatGPT sign-in), OpenRouter (classifiers for `s1.decide`), faux (`ZEN_FAUX=1`, model `faux/faux-1`). Kernel tools become Pi tools whose execute calls `tool.call`. Running turns keyed by `turn_id`, echoed on every message | Run from source with Node 22 type stripping: no enums, no constructor parameter properties. Must start with `node packages/mind/src/main.ts` |
-| `src/credentials.ts` | File-backed credential store in the `pi-ai login` format; file mode 0600 | Reads/writes `~/.zenbot/auth.json` (secret; never print it) |
-
-A Pi bump is a harness change: a normal commit with an eval. The daily engine job only reports a
-newer Pi.
-
 ---
 
 ## Layer 3 — CLI `zen` (`crates/zen`, ~3,370 lines)
 
 | File | Lines | Role | Depends on | Used by |
 |---|---|---|---|---|
-| `src/main.rs` | 968 | clap commands: `ask`, `chat`, `sessions {ls,new,show,archive,restore,rename,decide}`, `memory [--tier short\|long\|archived\|proposed\|all] [sleep\|accept <id>\|reject <id>]`, `skills [accept\|reject <domain/name>]` (use per skill and the made tools), `tools accept\|reject <name>` (a `made_` prefix is dropped), `policy [set <kind> <model> [--candidates a,b] [--explore x] \| undo]` (the routing policy and its evidence), `models`, `login [claude\|codex\|pi]`, `status` (with a memory line), `upgrade [--check]` (the workflow commands are gone); flags `--url` (`ZEN_URL`), `--token` (`ZEN_TOKEN`), `--json`, `-c`, `-r`, `-m`, `-e`, `--inline` (`ZEN_INLINE`). Reads `~/.zenbot/env` (for `ZEN_REPO`, `ZEN_MIND_DIR`, `PATH`) and `~/.zenbot/engines.json` | `client`, `tui`, `md` | owner, scripts (`zen ask --json`), e2e, evals |
+| `src/main.rs` | 968 | clap commands: `ask`, `chat`, `sessions {ls,new,show,archive,restore,rename,decide}`, `memory [--tier short\|long\|archived\|proposed\|all] [sleep\|accept <id>\|reject <id>]`, `skills [accept\|reject <domain/name>]` (use per skill and the made tools), `tools accept\|reject <name>` (a `made_` prefix is dropped), `policy [set <kind> <model> [--candidates a,b] [--explore x] \| undo]` (the routing policy and its evidence), `models`, `login [claude\|codex]`, `status` (with a memory line), `upgrade [--check]` (the workflow commands are gone); flags `--url` (`ZEN_URL`), `--token` (`ZEN_TOKEN`), `--json`, `-c`, `-r`, `-m`, `-e`, `--inline` (`ZEN_INLINE`). Reads `~/.zenbot/env` (for `ZEN_REPO`, `PATH`) and `~/.zenbot/engines.json` | `client`, `tui`, `md` | owner, scripts (`zen ask --json`), e2e, evals |
 | `src/client.rs` | 232 | HTTP + WebSocket client; token from `--token`/`ZEN_TOKEN` or `~/.zenbot/token`; upgrade wait/poll messages | reqwest, tungstenite | `main.rs`, `tui.rs` |
 | `src/tui.rs` | 2503 | **Largest file in the repo.** Interactive app. Full screen: conversation entries re-rendered at the chat width in a scrolled viewport (PgUp/PgDn, wheel), the side panel (Files tab: folder tree with arrows, Enter, mouse; Viewer tab: the open file, reloaded on change; ctrl+b, tab, `/files`), runs of tool calls folded to one line (Ctrl+O), live region below. Inline: scrollback + live region. Pickers, slash commands (`/new /resume /model /effort /done /rename /open /close /mouse /archive /upgrade /help /exit`), the `ask` tool's questions, history in `~/.zenbot/history`, banner from `~/.zenbot/version`. Render/key tests at the bottom | `client`, `editor`, `md` | `main.rs` |
 | `src/screen.rs` | 124 | Full-screen frames: writes only the rows that changed, in place (no clearing, so no flicker); `fit` cuts/pads styled lines; `row` joins chat and panel | `md` | `tui.rs` |
@@ -280,7 +267,7 @@ dumps it to `~/.zenbot/backups/` (last 10 kept).
 ## Environment variables
 
 The service reads `~/.zenbot/env` (systemd `EnvironmentFile`). `install.sh` writes `ZEN_TOKEN`,
-`ZEN_PORT`, `ZEN_REPO`, `ZEN_WORKERS`, `ZEN_MIND_DIR`, `HOME`, `PATH` there. Workers inherit
+`ZEN_PORT`, `ZEN_REPO`, `ZEN_WORKERS`, `HOME`, `PATH` there. Workers inherit
 the kernel's environment.
 
 ### Kernel (`zend`)
@@ -295,10 +282,8 @@ the kernel's environment.
 | `ZEN_REPO` | `$HOME/zenbot` | `main.rs`, `zen` CLI | zenbot's checkout: named in the system prompt; used by the updater |
 | `ZEN_DEFAULT_MODEL` | `claude/claude-opus-5-5` | `main.rs` | Model for new sessions |
 | `ZEN_HARNESS` | `~/.zenbot/version` | `main.rs` | Build id recorded with every turn (dev, smoke and eval kernels set it) |
-| `ZEN_WORKERS` | `engine` (+`pi` if `$ZEN_MIND_DIR/node_modules` exists) | `workers.rs`, scripts | Workers to start |
+| `ZEN_WORKERS` | `engine` | `workers.rs`, scripts | Workers to start; stale `pi` is ignored |
 | `ZEN_ENGINE_CMD` | `zen-engine` next to `zend` | `workers.rs` | Command for `engine` |
-| `ZEN_MIND_CMD` | `node src/main.ts` | `workers.rs` | Command for `pi` |
-| `ZEN_MIND_DIR` | `packages/mind` (relative to the service's cwd) | `workers.rs`, `zen login pi` | Pi worker directory |
 | `ZEN_WORKER_<NAME>_CMD` | the name | `workers.rs` | Command for any other worker name |
 | `ZEN_MODELS` | `workers::DEFAULT_MODELS` | `workers.rs` | Curated model list and order |
 | `ZEN_HOME` | `$HOME/.zenbot` | `main.rs`, `layout.rs` | Prompt files, `agents/`, `global/` (skills, wiki, tools, `MEMORY.md`), `mcp.json`, web PDFs and long MCP output in `outputs/` (dev, eval and smoke kernels set their own) |
@@ -317,7 +302,8 @@ the kernel's environment.
 | `ZEN_DECIDE_TOOL` | on | `agent.rs` | `0` hides the `decide` tool |
 | `ZEN_EXPLORE` | `0.1` | `delegate.rs` | Share of routed subtasks that try a candidate model when the policy sets no `explore` (at most 0.5) |
 | `ZEN_POLICY_MIN_JUDGED` | `20` | `delegate.rs`, `api.rs` | Judged subtasks each model needs before the sleep may switch a route |
-| `ZEN_S1_MODEL` | unset (off) | `score.rs` | System One classifier: scoring, `decide`, the sleep |
+| `ZEN_S1_MODEL` | unset (off) | `score.rs` | OpenRouter System One classifier: scoring, `decide`, the sleep |
+| `ZEN_S1_URL` | `https://openrouter.ai/api/v1/systemone` | `score.rs` | System One endpoint override (primarily for local tests) |
 | `ZEN_S1_PRIVATE` | on | `score.rs` | `0`: System One sees only the conversation, not private content (today: memories in the sleep, and page text for `web_fetch`'s `focus`) |
 | `ZEN_SEARCH_PROVIDER` | `brave` if `BRAVE_API_KEY` is set, else `tavily` if `TAVILY_API_KEY` is, else `searxng` | `web.rs` | Which search provider `web_search` uses |
 | `BRAVE_API_KEY` / `TAVILY_API_KEY` | unset | `web.rs` | Keys for Brave / Tavily search (secret-looking, so masked in tool output) |
@@ -342,14 +328,13 @@ Set by the kernel for every `bash` command: `ZEN_SESSION_ID`, `ZEN_MODEL` (read 
 
 | Var | Default | Read in | Effect |
 |---|---|---|---|
-| `ZEN_FAUX` | off | `faux.rs`, `mind/src/main.ts` | `1` lists the scripted models (`faux/smoke`, Pi's `faux/faux-1`) |
+| `ZEN_FAUX` | off | `faux.rs` | `1` lists the scripted model `faux/smoke` |
 | `ZEN_FAUX_SCRIPT` | built-in script | `faux.rs` | JSON file of faux steps |
 | `ZEN_CLAUDE_RESUME` | on | `claude.rs` | `0`: every turn in a fresh, unsaved Claude Code session |
 | `ZEN_CODEX_RESUME` | on | `codex.rs` | Keep Codex threads across turns (Codex ties its prompt cache to the thread); `0`: a new thread per turn |
 | `ZEN_CODEX_INJECT` | on | `codex.rs` | `0`: history as a transcript instead of native items |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | `claude.rs` | Where Claude Code keeps its sessions |
-| `ZEN_AUTH_FILE` | `~/.zenbot/auth.json` | `mind/src/main.ts` | Pi's sign-in file (secret) |
-| `OPENROUTER_API_KEY` | unset | pi-ai library; `zend`'s `search.rs` | Enables OpenRouter classifiers in the Pi worker, and the kernel's search embeddings (sent as the bearer token to `ZEN_EMBED_URL`) |
+| `OPENROUTER_API_KEY` | unset | `score.rs`, `search.rs` | Authenticates System One and search embeddings at OpenRouter |
 
 ### CLI and scripts
 
@@ -375,7 +360,7 @@ Set by the kernel for every `bash` command: `ZEN_SESSION_ID`, `ZEN_MODEL` (read 
 |---|---|---|---|
 | `env` | `install.sh` | systemd (`EnvironmentFile`), `zen` CLI, scripts (`lib.sh::zen_env`) | Service environment; mode 600 |
 | `token` | `lib.sh::new_token` (install, dev) | `zen` CLI, `install.sh` (copies into `env`), `secrets.rs`, scripts | **Secret.** API token |
-| `auth.json` | `zen login pi` (pi-ai CLI), `credentials.ts` | Pi worker, `secrets.rs` | **Secret. Never print it.** Pi's ChatGPT sign-in |
+| `auth.json` | legacy Pi sign-in, no longer used | `secrets.rs` | **Secret. Never print it.** Keep or remove only by owner decision |
 | `version` | `install.sh`, `apply-upgrade.sh` | `update.rs`, `zen` banner | Installed commit |
 | `upgrade.log` | `apply-upgrade.sh`, `update-engines.sh` | owner, `update.rs` (last line), `zen upgrade` | Upgrade and engine-update results |
 | `engines.json` | `update-engines.sh` | `zen status` | Engine versions from the last check |
@@ -402,17 +387,17 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 
 | Path | Does | Touches |
 |---|---|---|
-| `install.sh` | Fresh-VM install (safe to re-run): apt packages (git, curl, jq, bubblewrap, docker), Node 22 in `~/.local/node`, Claude Code and Codex CLIs, `npm ci` for Pi if enabled, binaries (download or build), `~/.zenbot/{bin,env,token,version}`, systemd units, git hooks path | system, `~/.zenbot`, `/etc/systemd/system` |
+| `install.sh` | Fresh-VM install (safe to re-run): apt packages (git, curl, jq, bubblewrap, docker), Node 22 in `~/.local/node`, Claude Code and Codex CLIs, binaries (download or build), `~/.zenbot/{bin,env,token,version}`, systemd units, git hooks path | system, `~/.zenbot`, `/etc/systemd/system` |
 | `scripts/upgrade.sh` | Build (or fetch) → `cargo test` (local builds) → ping workers → smoke turn per worker on a second kernel (`:18199`, throwaway copy of the live DB, so migrations are tried there; its own `ZEN_HOME` in the smoke workspace) → schedule `apply-upgrade.sh` via `systemd-run`. `--check` stops before scheduling | `target/`, temp DB `zen_smoke_*` |
 | `scripts/apply-upgrade.sh` | Detached: wait for `"busy":0` (up to 30 min, then goes ahead), back up DB if migrations are pending, swap binaries (keeps `.prev`), write `version`, restart, health check, roll back if unhealthy; when healthy, `install_timers` and `docker compose … up -d` (so new timers and compose services such as SearXNG arrive with an upgrade) | `~/.zenbot/{bin,version,upgrade.log,backups}`, service |
 | `scripts/self-update.sh` | `git pull` main then `upgrade.sh`; refuses a dirty checkout or another branch. Used by `zen upgrade`, `/upgrade`, `POST /api/upgrade` | checkout |
 | `scripts/fetch-release.sh` | Download CI's binaries for HEAD into `target/release` (checksum verified); fails (changing nothing) on local changes under `crates/`, `Cargo.*`, non-x86_64-Linux, or no build. `--check REF` only checks | `target/release` |
-| `scripts/update-engines.sh` | Daily (timer): update Claude Code / Codex CLIs, test with a real `complete` through `zen-engine`, roll back on failure; Pi only reported. `--check` reports only | CLI installs, `upgrade.log`, `engines.json` |
+| `scripts/update-engines.sh` | Daily (timer): update Claude Code / Codex CLIs, test with a real `complete` through `zen-engine`, roll back on failure; `--check` reports only | CLI installs, `upgrade.log`, `engines.json` |
 | `scripts/sleep.sh` | Nightly (timer): waits for a healthy kernel, `POST /api/memory/sleep?trigger=nightly`, prints the counts | live kernel |
 | `scripts/db.sh` | DB helpers run inside the Postgres container: `pending`, `backup`, copy/drop/restore helpers | live DB, `~/.zenbot/backups` |
-| `scripts/lib.sh` | `zen_env`, `pi_enabled`, `wait_healthy`, `ensure_rust`, `new_token`, `install_timers` (writes and enables the `deploy/` timers; `install.sh` and, after a healthy upgrade, `apply-upgrade.sh`) | `/etc/systemd/system` |
+| `scripts/lib.sh` | `zen_env`, `wait_healthy`, `ensure_rust`, `new_token`, `install_timers` (writes and enables the `deploy/` timers; `install.sh` and, after a healthy upgrade, `apply-upgrade.sh`) | `/etc/systemd/system` |
 | `scripts/dev.sh` | Dev kernel in the foreground on `:18100` with database `zen_dev` and `ZEN_HOME` `~/.zenbot-dev`, using `~/.zenbot/env` settings | `zen_dev` DB, `~/.zenbot-dev` |
-| `scripts/e2e.sh` | End-to-end scenarios (below); scripts in `scripts/e2e/*.json`, plus test servers in Python: `slow_worker.py` (a worker serving `slow/summarizer`, a deliberately slow `complete`), `mcp_server.py` (an MCP server with `echo` and `add`, stdio or `--http PORT`), `searxng_stub.py` (answers `/search?format=json` with fixed results) | temp DB, workspace and `HOME` |
+| `scripts/e2e.sh` | End-to-end scenarios (below); scripts in `scripts/e2e/*.json`, plus test servers in Python: `slow_worker.py` (a worker serving `slow/summarizer`, a deliberately slow `complete`), `mcp_server.py` (an MCP server with `echo` and `add`, stdio or `--http PORT`), `searxng_stub.py` (answers `/search?format=json`), `systemone_stub.py` (validates the direct classifier call) | temp DB, workspace and `HOME` |
 | `scripts/eval.sh`, `scripts/eval-report.sh` | Harness eval: this checkout vs installed (or `--base REF`), same model; each kernel gets its own `ZEN_HOME` next to the task workspace (default prompt files and skills); report for the owner, never a gate | `zen_eval_*` DBs, `~/.zenbot/evals/` |
 | `scripts/git-hooks/prepare-commit-msg` | Adds `Zen-Session` / `Co-Authored-By` trailers when `ZEN_SESSION_ID` is set | commit messages |
 | `deploy/compose.yaml` | `postgres` (pgvector, `127.0.0.1:5432`) and `searxng` (`searxng/searxng:latest`, `127.0.0.1:8888`, keyless search for `web_search`) | Docker volume `zen-pg` |
@@ -434,7 +419,7 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 - **End to end:** `scripts/e2e.sh [filter]` builds, then runs each scenario on a fresh kernel (port
   18377, `ZEN_FAUX=1`, `ZEN_WORKERS=engine`) with its own git workspace, all on one throwaway
   database (`zen_e2e_<pid>`), checking the database. At the end it checks every tape is numbered
-  without gaps and its hash chain recomputes. Scenarios (18): `open-loop`, `restart-recovery` (an old session in a workflow state still
+  without gaps and its hash chain recomputes. Scenarios (20): `open-loop`, `restart-recovery` (an old session in a workflow state still
   works), `prompt-files` (defaults installed, the owner's kept, all in the instructions, the tool
   list), `skills` (found and loaded on demand, nothing outside a skill), `wiki` (`capture` makes a
   page then appends to it newest first, masks a secret, commits, keeps `index.md` and `log.md`;
