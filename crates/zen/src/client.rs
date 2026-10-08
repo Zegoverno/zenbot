@@ -195,8 +195,9 @@ impl Client {
 
 pub type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+/// The first 8 bytes of an id (all of it if shorter, or if 8 bytes would split a character).
 pub fn short(id: &str) -> &str {
-    &id[..id.len().min(8)]
+    id.get(..8).unwrap_or(id)
 }
 
 pub fn dim(s: &str) -> String {
@@ -237,6 +238,14 @@ pub fn tool_summary(name: &str, args: &Value) -> String {
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+
+    #[test]
+    fn short_ids_never_split_a_character() {
+        assert_eq!(short("0123456789abcdef"), "01234567");
+        assert_eq!(short("abc"), "abc");
+        assert_eq!(short("ééééé"), "éééé");
+        assert_eq!(short("1234567é"), "1234567é", "byte 8 is inside é: the whole id");
+    }
 
     #[test]
     fn zen_home_follows_zen_home_then_home() {

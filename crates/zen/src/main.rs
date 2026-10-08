@@ -788,7 +788,7 @@ async fn run(cli: Cli) -> Result<()> {
             } else {
                 for x in s["skills"].as_array().into_iter().flatten() {
                     let draft = if x["status"] == "draft" { " (draft)" } else { "" };
-                    let last = x["last_load"].as_str().map(|t| format!(", last {}", &t[..t.len().min(10)])).unwrap_or_default();
+                    let last = x["last_load"].as_str().map(|t| format!(", last {}", t.get(..10).unwrap_or(t))).unwrap_or_default();
                     println!(
                         "{}{draft}  {}",
                         x["skill"].as_str().unwrap_or(""),
