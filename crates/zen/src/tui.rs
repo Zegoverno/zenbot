@@ -317,8 +317,10 @@ struct App {
     view_dirty: usize,
     /// Full screen: lines scrolled up from the bottom of the conversation (0 follows it).
     scroll: usize,
-    /// Conversation lines at the last frame, to keep a scrolled-up view still as lines arrive.
+    /// Conversation lines at the last frame, and the first one shown, to keep a scrolled-up view
+    /// still as lines arrive, entries fold, or the conversation re-wraps.
     last_total: usize,
+    top_line: usize,
     screen: Screen,
     panel: Option<Panel>,
     /// The last file a tool read or changed: what `/open` with no path shows.
@@ -432,6 +434,7 @@ impl App {
             view_dirty: usize::MAX,
             scroll: 0,
             last_total: 0,
+            top_line: 0,
             screen: Screen::default(),
             panel: None,
             last_file: None,
@@ -1023,6 +1026,11 @@ impl App {
     /// Full screen: compose every row (conversation and side panel above, live region below)
     /// and write the rows that changed.
     fn frame(&mut self) {
+        // Scrolled up: remember which entry the top line belongs to before the view re-renders.
+        let anchor = (self.scroll > 0 && self.top_line < self.view.len()).then(|| {
+            let e = self.view_start.partition_point(|&s| s <= self.top_line).saturating_sub(1);
+            (e, self.top_line - self.view_start.get(e).copied().unwrap_or(0))
+        });
         self.sync_view();
         let (cw, pw) = self.columns();
         let h = self.height();
@@ -1040,19 +1048,32 @@ impl App {
         let tail = if streaming { self.stream_tail(cw) } else { Vec::new() };
         let done: &[Line] = if streaming { &self.stream_lines } else { &[] };
         let total = self.view.len() + done.len() + tail.len();
-        if self.scroll > 0 && total > self.last_total {
-            self.scroll += total - self.last_total; // scrolled up: keep the view where it is
+        // Scrolled up, a row at the bottom says how much is below, so content gets one row less.
+        let rows_up = vh.saturating_sub(1).max(1);
+        if self.scroll > 0 {
+            match anchor.filter(|(e, _)| *e < self.view_start.len()) {
+                // Keep the same line of the same entry at the top (it may have re-wrapped).
+                Some((e, off)) => {
+                    let first = self.view_start[e];
+                    let len = self.view_start.get(e + 1).copied().unwrap_or(self.view.len()) - first;
+                    let top = first + off.min(len.saturating_sub(1));
+                    self.scroll = total.saturating_sub(top + rows_up).max(1);
+                }
+                // The top was in the streaming reply: only lines added below move it.
+                None if total > self.last_total => self.scroll += total - self.last_total,
+                None => {}
+            }
         }
         self.last_total = total;
-        self.scroll = self.scroll.min(total.saturating_sub(vh));
+        self.scroll = self.scroll.min(total.saturating_sub(rows_up));
         let end = total - self.scroll;
-        let start = end.saturating_sub(vh);
+        let start = end.saturating_sub(if self.scroll > 0 { rows_up } else { vh });
+        self.top_line = start;
         let (v, d) = (self.view.len(), done.len());
         let at = |i: usize| if i < v { &self.view[i] } else if i < v + d { &done[i - v] } else { &tail[i - v - d] };
         let mut chat: Vec<Line> = (start..end).map(|i| at(i).clone()).collect();
-        if self.scroll > 0 && !chat.is_empty() {
-            let last = chat.len() - 1;
-            chat[last] = line(format!("↓ {} more lines · PgDn", self.scroll), Sty::Accent);
+        if self.scroll > 0 {
+            chat.push(line(format!("↓ {} more lines · PgDn", self.scroll), Sty::Accent));
         }
 
         // The side panel: tabs on top, the folder tree or the open file below.
@@ -2765,6 +2786,33 @@ mod tests {
         a.draw();
         assert_eq!(a.scroll, 0);
         assert!(a.screen.rows().join("\n").contains("new session"));
+    }
+
+    #[tokio::test]
+    async fn a_scrolled_up_view_stays_on_its_line_when_the_conversation_shrinks() {
+        let mut a = app(80, 20);
+        for i in 0..50 {
+            a.commit(vec![line(format!("row {i}"), Sty::Plain)]);
+        }
+        tool_turn(&mut a, 10);
+        for i in 50..100 {
+            a.commit(vec![line(format!("row {i}"), Sty::Plain)]);
+        }
+        let ctrl_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+        a.on_key(ctrl_o).await.unwrap(); // expanded: 10 steps with their results
+        a.draw();
+        for _ in 0..3 {
+            key(&mut a, KeyCode::PageUp).await;
+        }
+        a.draw();
+        let top = a.screen.rows()[0].clone();
+        let n: usize = top.trim().strip_prefix("row ").and_then(|n| n.parse().ok()).expect("a row at the top");
+        assert!(n >= 50, "the expanded run is above the top: {top}");
+        a.on_key(ctrl_o).await.unwrap(); // folded: far fewer lines above the top
+        assert_eq!(a.screen.rows()[0], top, "the view didn't jump");
+        let rows = a.screen.rows().to_vec();
+        let marker = rows.iter().position(|r| r.contains("more lines · PgDn")).expect("marker shown");
+        assert!(rows[marker - 1].contains("row "), "the marker has its own row, after real content: {rows:#?}");
     }
 
     #[test]
