@@ -12,7 +12,7 @@ mod tui;
 
 use std::io::{IsTerminal, Read, Write};
 
-use client::{assistant_text, describe_update, dim, record_total, short, tool_summary, usage_total, zen_home, Client, NewSession, Ws};
+use client::{assistant_text, describe_update, dim, enc, record_total, short, tool_summary, usage_total, zen_home, Client, NewSession, Ws};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -765,7 +765,7 @@ async fn run(cli: Cli) -> Result<()> {
                 MemoryCmd::Reject { id } => (id, "reject"),
                 MemoryCmd::Sleep => unreachable!(),
             };
-            let r = c.post(&format!("/api/memory/{id}/review"), json!({ "decision": decision })).await?;
+            let r = c.post(&format!("/api/memory/{}/review", enc(&id)), json!({ "decision": decision })).await?;
             if cli.json {
                 out(&r);
             } else {
@@ -854,11 +854,11 @@ async fn run(cli: Cli) -> Result<()> {
                 ReviewCmd::Reject { name } => (name, "reject"),
             };
             let name = name.trim_start_matches("made_").to_string();
-            let res = c.post(&format!("/api/tools/{name}/review"), json!({ "decision": decision })).await?;
+            let res = c.post(&format!("/api/tools/{}/review", enc(&name)), json!({ "decision": decision })).await?;
             if cli.json { out(&res) } else { println!("{}", res["result"].as_str().unwrap_or("")) }
         }
         Cmd::Memory { cmd: None, tier } => {
-            let m = c.get(&format!("/api/memory?tier={tier}")).await?;
+            let m = c.get(&format!("/api/memory?tier={}", enc(&tier))).await?;
             if cli.json {
                 out(&m);
             } else {

@@ -101,7 +101,7 @@ impl Client {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         use tokio_tungstenite::tungstenite::http::{header::AUTHORIZATION, HeaderValue};
         // The token goes in a header, not the URL, where it could end up in logs.
-        let mut req = format!("{}/api/sessions/{id}/ws", self.url.replacen("http", "ws", 1)).into_client_request()?;
+        let mut req = format!("{}/api/sessions/{}/ws", self.url.replacen("http", "ws", 1), enc(id)).into_client_request()?;
         req.headers_mut().insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", self.token)).context("token is not a valid header value")?);
         let (ws, _) = tokio::time::timeout(REQUEST_TIMEOUT, tokio_tungstenite::connect_async(req))
             .await
@@ -109,6 +109,21 @@ impl Client {
             .context("opening session stream")?;
         Ok(ws)
     }
+}
+
+/// Text as one URL path segment or query value: everything but unreserved characters
+/// (RFC 3986: letters, digits, `-._~`) percent-encoded, so a `/`, `?` or `#` in a name typed on
+/// the command line can't change which route it reaches.
+pub fn enc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// The host a plain-http URL points to, when it isn't this machine: the token would cross the
@@ -254,6 +269,12 @@ pub fn tool_summary(name: &str, args: &Value) -> String {
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+
+    #[test]
+    fn path_segments_are_encoded() {
+        assert_eq!(enc("web_fetch-2.x~"), "web_fetch-2.x~");
+        assert_eq!(enc("../skills?x=1#y z/é"), "..%2Fskills%3Fx%3D1%23y%20z%2F%C3%A9");
+    }
 
     #[test]
     fn plain_http_is_flagged_only_off_this_machine() {
