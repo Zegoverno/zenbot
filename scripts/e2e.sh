@@ -421,6 +421,17 @@ system_one_direct() {
   kill "$srv" 2>/dev/null || true
 }
 
+kernel_tools() {
+  local ws; ws=$(new_workspace kernel-tools)
+  printf 'foo  \nbar\n' > "$ws/a.txt"
+  truncate -s $((16 * 1024 * 1024 + 1)) "$ws/huge.txt"
+  start_kernel "$ws" "$(script kernel-tools.json "s|ZENHOME|$TMP/home/.zenbot|")"
+  local sid; sid=$(zen ask --json -m faux/smoke "check kernel tools" | jq -r .session_id)
+  check "the zen home environment file is not attached as project context" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND kind='context'")" 0
+  check "a loose edit keeps exactly one trailing newline" eq "$(cat "$ws/a.txt")" $'baz\nbar'
+  check "a huge read is refused before loading" grep -q "16 MiB limit" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='read' ORDER BY seq DESC LIMIT 1")"
+}
+
 secrets_masked() {
   local ws; ws=$(new_workspace secret)
   start_kernel "$ws" "$(script secret.json)" E2E_PLANTED_KEY=planted-value-1234567890
@@ -490,6 +501,7 @@ run ask ask_and_gone_tools
 run verifier verifier
 run summaries summaries
 run system-one system_one_direct
+run kernel-tools kernel_tools
 run secrets secrets_masked
 run slow-summary slow_summary
 run stale-turn stale_turn

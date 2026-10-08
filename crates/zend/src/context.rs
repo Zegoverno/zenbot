@@ -52,8 +52,16 @@ pub fn always(workspace: &Path) -> Vec<(PathBuf, String)> {
 /// Instruction files that govern `paths` but aren't covered by `always` (they live below the
 /// workspace), ordered from the outermost directory in.
 pub fn governing(workspace: &Path, paths: &[PathBuf]) -> Vec<PathBuf> {
+    governing_except(workspace, paths, &crate::zen_home())
+}
+
+fn governing_except(workspace: &Path, paths: &[PathBuf], zen_home: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for path in paths {
+        // The environment's AGENTS.md is already in the system prompt, not project context.
+        if path.starts_with(zen_home) {
+            continue;
+        }
         let start = if path.is_dir() { path.as_path() } else { path.parent().unwrap_or(path) };
         let mut here = Vec::new();
         for dir in start.ancestors() {
@@ -129,6 +137,10 @@ mod tests {
         // The workspace's own file is in the system prompt already; outside paths add nothing.
         assert!(governing(&ws, &[ws.join("x.txt")]).is_empty());
         assert!(governing(&ws, &[PathBuf::from("/etc/hostname")]).is_empty());
+        let zen_home = ws.join(".zenbot");
+        std::fs::create_dir_all(&zen_home).unwrap();
+        std::fs::write(zen_home.join("AGENTS.md"), "environment rules").unwrap();
+        assert!(governing_except(&ws, &[zen_home.join("token")], &zen_home).is_empty());
     }
 
     #[test]

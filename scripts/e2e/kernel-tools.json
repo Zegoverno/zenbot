@@ -1,0 +1,6 @@
+[
+  {"tool":"read","args":{"path":"ZENHOME/AGENTS.md"}},
+  {"tool":"edit","args":{"path":"a.txt","old_text":"foo \n","new_text":"baz\n"}},
+  {"tool":"read","args":{"path":"huge.txt"}},
+  {"text":"done"}
+]

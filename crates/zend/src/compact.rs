@@ -72,15 +72,18 @@ pub fn plan(blocks: &[Block], keep_tokens: i64) -> Option<(i32, i32)> {
     let msgs: Vec<&Block> = blocks.iter().filter(|b| b.kind == "message" && b.seq > after).collect();
     let starts: Vec<usize> = msgs.iter().enumerate().filter(|(_, b)| b.payload["role"] == "user").map(|(i, _)| i).collect();
     let last_start = *starts.last()?;
+    let mut suffix = vec![0_i64; msgs.len() + 1];
+    for i in (0..msgs.len()).rev() {
+        suffix[i] = suffix[i + 1] + est_tokens(&msgs[i].payload);
+    }
     let mut cut = last_start;
     for &i in starts.iter().rev() {
-        let tail: i64 = msgs[i..].iter().map(|b| est_tokens(&b.payload)).sum();
-        if tail > keep_tokens {
+        if suffix[i] > keep_tokens {
             break;
         }
         cut = i;
     }
-    let removed: i64 = msgs[..cut].iter().map(|b| est_tokens(&b.payload)).sum();
+    let removed = suffix[0] - suffix[cut];
     if cut == 0 || removed < keep_tokens / 2 {
         return None;
     }

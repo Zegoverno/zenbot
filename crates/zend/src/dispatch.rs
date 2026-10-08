@@ -58,13 +58,27 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
     }
     match msg.method.as_str() {
         "tool.call" => {
-            let id = id?;
+            let id = match id {
+                Ok(id) => id,
+                Err(e) => {
+                    if let Some(req_id) = msg.id {
+                        mind.respond(req_id, json!({ "content": format!("invalid session id: {e}"), "is_error": true })).await?;
+                    }
+                    return Ok(());
+                }
+            };
             let name = p.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
             let call_id = p.get("call_id").and_then(Value::as_str).unwrap_or_default().to_string();
             let args = p.get("args").cloned().unwrap_or(json!({}));
             let (mut cancel, model, turn_id, mut ending, workspace, kind) = {
                 let mut turns = app.turns.lock().await;
-                let Some(t) = turns.get_mut(&id) else { return Ok(()) };
+                let Some(t) = turns.get_mut(&id) else {
+                    drop(turns);
+                    if let Some(req_id) = msg.id {
+                        mind.respond(req_id, json!({ "content": "this turn has ended", "is_error": true })).await?;
+                    }
+                    return Ok(());
+                };
                 t.tools_running += 1;
                 (t.cancel.subscribe(), t.model.clone(), t.turn_id, t.ending, t.workspace.clone(), t.kind.clone())
             };

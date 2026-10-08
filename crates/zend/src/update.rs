@@ -38,8 +38,7 @@ impl Updater {
     /// The installed commit (~/.zenbot/version). Read each time: apply-upgrade.sh writes it only
     /// after the new kernel has passed its health check, so it can change after startup.
     pub fn running(&self) -> String {
-        let home = std::env::var("HOME").unwrap_or_default();
-        std::fs::read_to_string(format!("{home}/.zenbot/version")).unwrap_or_default().trim().to_string()
+        std::fs::read_to_string(crate::zen_home().join("version")).unwrap_or_default().trim().to_string()
     }
 
     /// The last check's result (without checking again).
@@ -70,12 +69,16 @@ impl Updater {
                 .map(String::from)
                 .collect();
             let prebuilt = if behind > 0 {
-                Command::new(repo.join("scripts/fetch-release.sh"))
-                    .args(["--check", &latest])
-                    .stdin(Stdio::null())
-                    .output()
-                    .await
-                    .is_ok_and(|o| o.status.success())
+                tokio::time::timeout(
+                    Duration::from_secs(30),
+                    Command::new(repo.join("scripts/fetch-release.sh"))
+                        .args(["--check", &latest])
+                        .stdin(Stdio::null())
+                        .kill_on_drop(true)
+                        .output(),
+                )
+                .await
+                .is_ok_and(|r| r.is_ok_and(|o| o.status.success()))
             } else {
                 false
             };
@@ -159,8 +162,7 @@ impl Updater {
     /// The current job (if this kernel started one) and the last line of ~/.zenbot/upgrade.log.
     pub async fn status(&self) -> Value {
         let job = self.job.lock().await.as_ref().map(|j| json!({ "started_at": j.started_at, "status": j.status, "log": j.log }));
-        let home = std::env::var("HOME").unwrap_or_default();
-        let last = std::fs::read_to_string(format!("{home}/.zenbot/upgrade.log"))
+        let last = std::fs::read_to_string(crate::zen_home().join("upgrade.log"))
             .unwrap_or_default()
             .lines()
             .rev()

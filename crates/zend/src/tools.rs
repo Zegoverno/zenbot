@@ -390,7 +390,12 @@ fn is_binary(bytes: &[u8]) -> bool {
 }
 
 async fn read(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> {
+    const MAX_READ_FILE: u64 = 16 * 1024 * 1024;
     let path = resolve(workspace, str_arg(args, "path")?);
+    let size = tokio::fs::metadata(&path).await.map_err(|e| err(format!("cannot stat {}: {e}", path.display())))?.len();
+    if size > MAX_READ_FILE {
+        return Err(err(format!("{} is {} bytes, over read's 16 MiB limit; use bash to inspect a range", path.display(), size)));
+    }
     let bytes = tokio::fs::read(&path).await.map_err(|e| err(format!("cannot read {}: {e}", path.display())))?;
     if is_binary(&bytes) {
         return Err(err(format!(
@@ -502,7 +507,7 @@ fn find_matches(hay: &str, needle: &str) -> (Vec<(usize, usize)>, bool) {
     }
     let h = normalize(hay);
     let n = normalize(needle);
-    let needle = n.text.trim_end_matches('\n');
+    let needle = n.text.as_str();
     if needle.trim().is_empty() {
         return (Vec::new(), false);
     }
@@ -617,6 +622,25 @@ mod tests {
         assert!(r.content.contains("normalizing"));
         // Untouched lines keep their original bytes.
         assert_eq!(std::fs::read_to_string(ws.join("q.md")).unwrap(), "replaced\nkeep \u{2019}this\u{2019}\n");
+    }
+
+    #[tokio::test]
+    async fn read_refuses_a_huge_file_before_loading_it() {
+        let ws = scratch("huge-read");
+        let file = std::fs::File::create(ws.join("huge.txt")).unwrap();
+        file.set_len(16 * 1024 * 1024 + 1).unwrap();
+        let r = run(&ws, "read", json!({ "path": "huge.txt" })).await;
+        assert!(r.is_error);
+        assert!(r.content.contains("16 MiB limit"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn loose_edit_preserves_the_needles_trailing_newline() {
+        let ws = scratch("loose-newline");
+        std::fs::write(ws.join("a.txt"), "foo  \nbar\n").unwrap();
+        let r = run(&ws, "edit", json!({ "path": "a.txt", "old_text": "foo \n", "new_text": "baz\n" })).await;
+        assert!(!r.is_error, "{}", r.content);
+        assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "baz\nbar\n");
     }
 
     #[tokio::test]

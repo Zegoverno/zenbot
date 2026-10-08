@@ -111,15 +111,18 @@ pub(crate) async fn collect_models(app: &App) -> Value {
         }
         all.extend(res["models"].as_array().into_iter().flatten().map(|m| (i, m.clone())));
     }
-    let mut routes = app.routes.lock().await;
-    let mut catalog = app.catalog.lock().await;
+    // Rebuild after each worker refresh: an engine update may change a model's efforts,
+    // context window or serving worker. Keep first-worker preference for duplicate ids.
+    let mut routes = HashMap::new();
+    let mut catalog = HashMap::new();
     for (i, m) in &all {
         if let Some(id) = m["id"].as_str() {
             routes.entry(id.to_string()).or_insert(*i);
             catalog.entry(id.to_string()).or_insert_with(|| m.clone());
         }
     }
-    drop((routes, catalog));
+    *app.routes.lock().await = routes;
+    *app.catalog.lock().await = catalog;
     let wanted = std::env::var("ZEN_MODELS").unwrap_or_else(|_| DEFAULT_MODELS.into());
     let mut curated: Vec<Value> = wanted
         .split(',')
