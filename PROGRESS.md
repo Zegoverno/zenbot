@@ -6,6 +6,13 @@
 
 ---
 
+## 2026-10-08 — Bound web caches
+
+- `web_fetch` pages and `web_search` results now evict the oldest entry when a cache reaches 32
+  entries. Both still expire entries after 15 minutes; a page keeps its 2 MB text limit.
+- Why: many distinct URLs or queries could previously grow the kernel's resident memory without
+  limit. A unit test checks eviction and replacement at capacity.
+
 ## 2026-10-08 — Bound kernel reads and refresh routing
 
 - The `read` tool refuses files over 16 MiB before loading them; `edit` no longer adds a newline

@@ -119,12 +119,14 @@ verdicts and the owner's reviews (memory promotions, skill drafts, tools, routes
 
 ## Technical debt
 
+- Web page/search caches now cap at 32 entries each; pages still cap at 2 MB and expire after
+  15 minutes. The untrusted-content boundary and SSRF filtering remain security-critical.
 - The kernel `read` tool now caps files at 16 MiB before loading them; it should eventually stream
-  bounded lines so large text files can be paged without `bash`. Test scratch directories and
-  `outputs/` still need automatic cleanup/retention.
+  bounded lines so large text files can be paged without `bash`. New test scratch directories are
+  cleaned on drop; `outputs/` still needs retention.
 - The terminal client was split into focused modules; incremental streaming/transcript rendering,
   reconnect recovery and bounded private prompt history are in place. A future client event contract
-  should replace the remaining untyped JSON.
+  should replace the remaining untyped JSON (below).
 - Settings are read from the environment in ~25 places (no single config).
 - Client events are untyped JSON.
 - The old workflow's schema stays (expand-only): `sessions.state` and old tape block kinds.
