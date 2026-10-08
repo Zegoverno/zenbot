@@ -6,6 +6,12 @@
 
 ---
 
+## 2026-10-08 — `web_fetch` reads Latin-1 pages
+
+- Pages declared ISO-8859-1 / Windows-1252 (header or `<meta charset>`), or not valid UTF-8 with
+  no charset, are decoded as Windows-1252 instead of showing replacement characters. Common on
+  older Brazilian sites. No new dependency; unit test with Portuguese text.
+
 ## 2026-10-08 — Kernel throughput: per-session queues, paging, one summary at a time
 
 - Worker notifications are handled in order per session, each session on its own queue, so one
