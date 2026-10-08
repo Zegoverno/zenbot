@@ -441,7 +441,7 @@ mod tests {
 
     #[test]
     fn history_keeps_prompts_exactly_and_reads_the_old_format_once() {
-        let dir = crate::test_util::TempDir::new("history");
+        let dir = crate::tui::test_util::TempDir::new("history");
         let path = dir.file("history", "first\\nsecond line\nplain\n");
         let mut e = Editor::new(Some(path.clone()));
         assert_eq!(e.history, ["first\nsecond line", "plain"], "old format: \\n was a newline");

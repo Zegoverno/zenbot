@@ -3,11 +3,8 @@
 
 mod client;
 mod editor;
-mod files;
 mod md;
 mod screen;
-#[cfg(test)]
-mod test_util;
 mod tui;
 
 use std::io::{IsTerminal, Read, Write};

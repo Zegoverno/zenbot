@@ -130,7 +130,7 @@ impl Files {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::TempDir;
+    use crate::tui::test_util::TempDir;
 
     fn tree() -> TempDir {
         let d = TempDir::new("files");
