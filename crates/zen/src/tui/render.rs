@@ -87,6 +87,7 @@ impl App {
 
     pub(super) fn scroll_chat(&mut self, up: bool, n: usize) {
         self.scroll = if up { self.scroll + n } else { self.scroll.saturating_sub(n) };
+        self.scroll_input = true;
     }
 
     /// Full screen: compose every row (conversation and side panel above, live region below)
@@ -101,10 +102,11 @@ impl App {
             return;
         }
         // Scrolled up: remember which entry the top line belongs to before the view re-renders.
-        let anchor = (self.scroll > 0 && self.top_line < self.view.len()).then(|| {
+        let anchor = (!self.scroll_input && self.scroll > 0 && self.top_line < self.view.len()).then(|| {
             let e = self.view_start.partition_point(|&s| s <= self.top_line).saturating_sub(1);
             (e, self.top_line - self.view_start.get(e).copied().unwrap_or(0))
         });
+        self.scroll_input = false;
         self.sync_view();
         let (cw, pw) = self.columns();
         let h = self.height();
@@ -360,6 +362,7 @@ mod tests {
         assert!(bottom.contains("row 99"));
         key(&mut a, KeyCode::PageUp).await;
         a.draw();
+        assert!(a.scroll > 1, "PageUp moves by a viewport, not just one line");
         let up = a.screen.rows().join("\n");
         assert!(!up.contains("row 99") && up.contains("more lines · PgDn"), "{up}");
         a.commit(vec![line("row 100", Sty::Plain)]);
@@ -388,13 +391,12 @@ mod tests {
         a.draw();
         for _ in 0..3 {
             key(&mut a, KeyCode::PageUp).await;
+            a.draw();
         }
-        a.draw();
         let top = a.screen.rows()[0].clone();
-        let n: usize = top.trim().strip_prefix("row ").and_then(|n| n.parse().ok()).expect("a row at the top");
-        assert!(n >= 50, "the expanded run is above the top: {top}");
+        assert!(top.contains("out"), "the expanded run is at the top: {top}");
         a.on_key(ctrl_o).await.unwrap(); // folded: far fewer lines above the top
-        assert_eq!(a.screen.rows()[0], top, "the view didn't jump");
+        assert!(a.screen.rows()[1].contains("row 50"), "folding keeps the viewport at the adjacent conversation");
         let rows = a.screen.rows().to_vec();
         let marker = rows.iter().position(|r| r.contains("more lines · PgDn")).expect("marker shown");
         assert!(rows[marker - 1].contains("row "), "the marker has its own row, after real content: {rows:#?}");
