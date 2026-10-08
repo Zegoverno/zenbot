@@ -61,6 +61,11 @@ pub struct Page {
 
 /// A new page's text.
 pub fn new_page(title: &str, kind: &str, aliases: &[String], today: &str) -> String {
+    // Titles and aliases come from the model: one line each, and no characters that would end the
+    // alias list early or split it.
+    let one_line = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title = one_line(title);
+    let aliases: Vec<String> = aliases.iter().map(|a| one_line(&a.replace([',', '[', ']'], " "))).filter(|a| !a.is_empty()).collect();
     format!(
         "---\ntype: {kind}\naliases: [{}]\nupdated: {today}\n---\n# {title}\n\n{NO_SUMMARY}\n\n---\n## Timeline\n",
         aliases.join(", ")
@@ -257,7 +262,7 @@ async fn capture(app: &App, session: Uuid, args: &Value) -> Result<String> {
         .filter(|p| title.is_some_and(|t| p.title.eq_ignore_ascii_case(t) || p.aliases.iter().any(|a| a.eq_ignore_ascii_case(t)) || p.slug == slug(t)))
         .cloned()
         .collect();
-    if let Err(e) = crate::search::index_once(&app.db).await {
+    if let Err(e) = crate::search::refresh_wiki(&app.db).await {
         tracing::warn!("indexing before a capture: {e:#}");
     }
     for f in crate::search::query(&app.db, wanted, &["wiki"], None, 5).await.unwrap_or_default() {
@@ -274,8 +279,9 @@ async fn capture(app: &App, session: Uuid, args: &Value) -> Result<String> {
         (None, Some((page, p, _, _))) if page != "new" && *p >= 0.5 => (candidates.iter().find(|c| &c.slug == page).cloned(), format!("System One: {p:.2}")),
         _ => (None, if routed.is_some() { "System One: no existing page fits".into() } else { "no page matches".into() }),
     };
-    if let Some((_, _, known, _)) = &routed {
-        if *known >= 0.8 && target.is_some() {
+    // `known` is System One's judgment of the page it chose, so it counts only for that page.
+    if let Some((page, _, known, _)) = &routed {
+        if *known >= 0.8 && target.as_ref().is_some_and(|t| &t.slug == page) {
             let t = target.as_ref().map(|p| p.slug.clone()).unwrap_or_default();
             return Ok(format!("Not added: [[{t}]] already records this (System One: {known:.2}). Read it at {}.", dir.join(format!("{t}.md")).display()));
         }
@@ -293,6 +299,9 @@ async fn capture(app: &App, session: Uuid, args: &Value) -> Result<String> {
     };
     let from = args["from"].as_str().map(|f| format!("{}, ", crate::secrets::mask(f))).unwrap_or_default();
     let entry = format!("- **{today}** | {from}session {} ({source}) — {note}", &session.to_string()[..8]);
+    // Parallel captures (subagents) read-modify-write the same page, log.md and index.md.
+    static WRITING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _writing = WRITING.lock().await;
     let (slug_, created) = match &target {
         Some(p) => (p.slug.clone(), false),
         None => {
@@ -381,6 +390,14 @@ pub fn documents(dir: &Path) -> Vec<(String, String, String, String, std::time::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_page_headers_stay_one_line() {
+        let text = new_page("Two\nlines", "concept", &["a, b".into(), "[c]".into(), " ".into()], "2026-10-08");
+        assert!(text.contains("aliases: [a b, c]\n"), "{text}");
+        assert!(text.contains("# Two lines\n"), "{text}");
+        assert_eq!(parse("x", &text).aliases, ["a b", "c"]);
+    }
 
     #[test]
     fn slugs_are_plain() {
