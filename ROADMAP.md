@@ -106,15 +106,13 @@ clear (lower bound beats upper bound, 20 judged subtasks each). `ask` takes `wai
 
 ## What's next
 
-The redesign's phases are built. Next: install, dogfood on the other VM, and let real sessions,
+The redesign's phases are built. Next: keep dogfooding zenbot on real work and let sessions,
 verdicts and the owner's reviews (memory promotions, skill drafts, tools, routes) drive what changes.
 
 ## Open decisions
 
 1. ~~What System One may see~~: decided (D-032): private content allowed by default,
    `ZEN_S1_PRIVATE=0` turns it off.
-2. **Dogfooding data.** Real use runs on another VM. A `zen export` (sessions, verdicts, cost, model
-   choices; secrets masked) would bring it here for evals and, later, Phase 6. Not yet scheduled.
 3. **Pilot project.** Which side project zenbot serves after zenbot itself.
 
 ## Technical debt

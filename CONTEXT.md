@@ -80,8 +80,7 @@ tools, skills, memory and knowledge; any model can do the work. Fixed rules exis
   (github.com/Zegoverno/zenbot).
 - **Subscriptions first.** Models run on the owner's existing Claude and ChatGPT plans through
   officially supported paths; a small, capped API budget covers System One and embeddings.
-- **Two VMs.** This repository's VM is for developing zenbot; the owner uses zenbot for real on another
-  VM, so local sessions and the local database say nothing about real use.
+
 - **zenbot improves zenbot.** Its own development is the first real workload (dogfooding).
 
 ## Thesis

@@ -2,7 +2,7 @@
 
 How to build, test, verify and ship a change to zenbot from this checkout. Written for a coding agent (or a person) starting a fresh session. `AGENTS.md` has the collaboration rules; this file has the how-to.
 
-> **This VM is a dev box.** Real use of zenbot happens on another VM. The `zenbot` service here is a dev install, but treat it like the real one: the rules below still apply.
+> This checkout is used to develop zenbot. Follow the checks below before shipping changes; install changes only through `scripts/upgrade.sh`.
 
 **The rule this enables:** a change is built, unit-tested, linted and run through the end-to-end scenarios locally, exactly as CI runs them, before it goes into a pull request. It is installed only through `scripts/upgrade.sh`, which smoke-tests it and rolls back on failure.
 

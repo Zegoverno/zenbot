@@ -27,8 +27,7 @@ for a turn and ask the kernel to run tools. Engines run with their own tools swi
 Code `--tools ""`, Codex shell disabled) so every action goes through the kernel. Keep it that way.
 
 Config lives in `~/.zenbot/` (MAP.md lists every file). `auth.json` may hold a retired Pi
-sign-in: secret, never print it. This VM is a development box; the owner uses zenbot for real on
-another VM.
+sign-in: secret, never print it.
 
 ## Making a change
 
