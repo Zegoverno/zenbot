@@ -6,6 +6,19 @@
 
 ---
 
+## 2026-10-08 — Kernel throughput: per-session queues, paging, one summary at a time
+
+- Worker notifications are handled in order per session, each session on its own queue, so one
+  session's slow write (a turn's end, a model refresh) no longer stalls every other session's
+  stream, which matters with parallel subagents. Idle queues end after a minute.
+- `GET /api/sessions/{id}` takes `?last=N` and `?after=seq` (default unchanged: every message).
+- A turn at the hard context limit waits for a summary already being prepared in the background
+  instead of paying for a second one. Stalled turns are aborted in parallel; instruction-file
+  checks run off the async runtime.
+- The wiki index compares each page's file time with when it was indexed (a page restored with an
+  older time is indexed again) and reads only changed pages, instead of parsing the whole wiki
+  every 20 seconds.
+
 ## 2026-10-08 — Remove dead code; one place for tool permissions
 
 - One `agent::refusal(kind, name)` decides what each kind of session may call (verifiers,
