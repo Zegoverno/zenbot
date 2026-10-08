@@ -16,7 +16,7 @@
 //!   for 90 (`skills/_archived`).
 //!
 //! `save_tool` makes a tool: a manifest (name, description, JSON-schema parameters, command) and its
-//! files in `~/.zenbot/tools/<name>/`. It is found with `find_tools` (as `made_<name>`) and run with
+//! files in `<zen home>/global/tools/<name>/`. It is found with `find_tools` (as `made_<name>`) and run with
 //! `call_tool`: the arguments arrive as JSON on stdin. Until the owner approves it (`made_tools`, in
 //! the database, out of the agent's reach) it runs in bubblewrap with no network and a read-only
 //! filesystem; approved, it runs with the network. It never gets the kernel's environment (tokens,
@@ -301,7 +301,7 @@ pub async fn made_tools(db: &sqlx::PgPool) -> Vec<(crate::mcp::ToolEntry, bool)>
     }).collect()
 }
 
-/// The agent's tools from their manifests (`~/.zenbot/tools/<name>/tool.json`), as catalog entries
+/// The agent's tools from their manifests (`<zen home>/global/tools/<name>/tool.json`), as catalog entries
 /// (server `made`).
 pub fn made_entries() -> Vec<crate::mcp::ToolEntry> {
     let root = tools_root();

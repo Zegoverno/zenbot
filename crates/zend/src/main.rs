@@ -279,7 +279,3 @@ fn context_in(blocks: &[tape::Block]) -> Vec<PathBuf> {
     }
     out
 }
-
-async fn append_tape(db: &PgPool, id: Uuid, kind: &str, payload: &Value) -> Result<(), sqlx::Error> {
-    tape::append(db, id, kind, payload).await.map(|_| ())
-}

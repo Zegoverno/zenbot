@@ -1,7 +1,7 @@
 //! Skills: how to do a kind of work well, loaded on demand (DESIGN.md, "Skills and tools that
 //! improve themselves"; the agentskills.io format).
 //!
-//! A skill is a folder `~/.zenbot/skills/<domain>/<name>/` with a `SKILL.md` (frontmatter `name` and
+//! A skill is a folder `<zen home>/global/skills/<domain>/<name>/` with a `SKILL.md` (frontmatter `name` and
 //! `description`, then the instructions) and optional `references/`, `scripts/` and `assets/`. The
 //! session's fixed prefix carries only an index (`index_text`); the model finds skills with
 //! `find_skills` and loads one with `load_skill`, whose text arrives as a tool result, so the prefix
