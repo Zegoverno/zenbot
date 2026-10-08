@@ -155,6 +155,9 @@ enum Tab {
     Viewer,
 }
 
+/// Smallest terminal (columns, rows) zen lays out; below it, a frame asks for more room.
+const MIN_SIZE: (usize, usize) = (21, 6);
+
 /// Narrowest terminal (columns) that fits the chat and the side panel next to each other.
 const SPLIT_MIN: usize = 60;
 
@@ -668,12 +671,23 @@ impl App {
     // ---------- drawing ----------
 
     /// Columns to draw in (one less than the terminal, so lines never trigger an auto-wrap).
+    /// Never below `MIN_SIZE`: a smaller terminal gets the `too_small` frame instead.
     fn width(&self) -> usize {
-        self.size.0.saturating_sub(1).max(20)
+        self.size.0.saturating_sub(1).max(MIN_SIZE.0 - 1)
     }
 
     fn height(&self) -> usize {
-        self.size.1.max(6)
+        self.size.1.max(MIN_SIZE.1)
+    }
+
+    /// The terminal is smaller than zen can lay out.
+    fn too_small(&self) -> bool {
+        self.size.0 < MIN_SIZE.0 || self.size.1 < MIN_SIZE.1
+    }
+
+    /// What a too-small terminal shows: one line, cut to its real width.
+    fn too_small_line(&self) -> Line {
+        screen::fit(&line("zen: enlarge the terminal", Sty::Warn), self.size.0.saturating_sub(1).max(1), false)
     }
 
     fn erase(&mut self, out: &mut String) {
@@ -689,7 +703,7 @@ impl App {
     }
 
     fn paint_region(&mut self, out: &mut String) {
-        let (lines, mut caret_row, caret_col, show_caret) = self.compose();
+        let (lines, mut caret_row, caret_col, show_caret) = if self.too_small() { (vec![self.too_small_line()], 0, 0, false) } else { self.compose() };
         // Every line exactly fits a row: a wrapped one would make `region.height` wrong, and
         // `erase` would leave its extra rows behind.
         let w = self.width();
@@ -1032,6 +1046,13 @@ impl App {
     /// Full screen: compose every row (conversation and side panel above, live region below)
     /// and write the rows that changed.
     fn frame(&mut self) {
+        if self.too_small() {
+            let mut rows = vec![md::to_ansi(&self.too_small_line())];
+            rows.resize(self.size.1.max(1), String::new());
+            let out = self.screen.frame(rows, None);
+            self.flush(out);
+            return;
+        }
         // Scrolled up: remember which entry the top line belongs to before the view re-renders.
         let anchor = (self.scroll > 0 && self.top_line < self.view.len()).then(|| {
             let e = self.view_start.partition_point(|&s| s <= self.top_line).saturating_sub(1);
@@ -2418,6 +2439,27 @@ mod tests {
         a.picker = Some(Picker { title: "pick".into(), items: vec![("😀".repeat(40), "x".into())], selected: 0, kind: PickKind::Session });
         a.draw();
         assert!(a.region.widths.iter().all(|&w| w <= a.width()), "{:?}", a.region.widths);
+    }
+
+    #[test]
+    fn a_terminal_too_small_to_lay_out_shows_one_line_that_fits() {
+        for (cols, rows) in [(10, 30), (80, 4), (3, 2)] {
+            let mut a = app(cols, rows);
+            a.commit(vec![line("some conversation", Sty::Plain)]);
+            let shown = a.screen.rows().to_vec();
+            assert_eq!(shown.len(), rows, "exactly the real rows");
+            assert!(shown[0].contains("zen: enlarge"[..(cols - 1).min(12)].trim()), "{shown:?}");
+            assert!(shown.iter().skip(1).all(|r| r.is_empty()));
+            let mut b = app(cols, rows);
+            b.inline = true;
+            b.draw();
+            assert!(b.region.height == 1 && b.region.widths[0] < cols, "{:?}", b.region.widths);
+        }
+        let mut a = app(10, 30);
+        a.size = (80, 30); // enlarged again: the normal layout comes back
+        a.screen.invalidate();
+        a.draw();
+        assert!(a.screen.rows().iter().any(|r| r.contains('╰')));
     }
 
     #[test]
