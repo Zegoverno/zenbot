@@ -14,7 +14,7 @@ accepted for ordinary HTTP requests. The token is in `~/.zenbot/token`. The serv
 |---|---|---|
 | `GET /health` (no token) | | `{ ok, db, mind, workers, busy, version, commit }`; `busy` counts running turns and kernel work outside them |
 | `GET /api/models` | | `{ models, authenticated, default, scorer }` |
-| `GET /api/sessions?archived=` | | sessions (not child sessions): `{ id, title, model, effort, archived, state, cost, created_at, updated_at }` (`state` is from the old briefed workflow; null for new sessions) |
+| `GET /api/sessions?archived=` | | sessions (not child sessions): `{ id, title, model, effort, archived, cost, created_at, updated_at }` |
 | `POST /api/sessions` | `{ title?, model?, effort? }` | the session |
 | `GET /api/sessions/{id}` | | the session with `messages` (each with its `seq`) and `busy` |
 | `PATCH /api/sessions/{id}` | `{ title?, model?, effort? ("default" clears), archived? }` | the session |

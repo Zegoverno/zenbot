@@ -14,8 +14,9 @@
 
 use std::path::{Path, PathBuf};
 
-/// The one agent there is today.
-pub const AGENT: &str = "zenbot";
+/// The agent's own prompt file, relative to the zen home (`agents/<name>/SOUL.md`; one agent,
+/// `zenbot`, today).
+pub const SOUL: &str = "agents/zenbot/SOUL.md";
 
 /// Knowledge shared by every agent: `<zen home>/global`.
 pub fn global_dir() -> PathBuf {
@@ -24,7 +25,7 @@ pub fn global_dir() -> PathBuf {
 
 /// (old path, new path, the setting that moves it elsewhere): each relative to the zen home.
 const MOVES: &[(&str, &str, Option<&str>)] = &[
-    ("SOUL.md", "agents/zenbot/SOUL.md", None),
+    ("SOUL.md", SOUL, None),
     ("MEMORY.md", "global/MEMORY.md", None),
     ("wiki", "global/wiki", Some("ZEN_WIKI_DIR")),
     ("skills", "global/skills", Some("ZEN_SKILLS_DIR")),

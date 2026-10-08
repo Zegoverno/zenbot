@@ -98,10 +98,8 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                         let read_only = agent::read_only(kind.as_deref());
                         if let Some(why) = agent::refuse(ending) {
                             tools::ToolOutput { content: why, is_error: true }
-                        } else if read_only && !matches!(name.as_str(), "bash" | "read" | "submit_verdict") {
-                            tools::ToolOutput { content: format!("`{name}` isn't available to a verifier"), is_error: true }
-                        } else if kind.as_deref() == Some(crate::delegate::SUBAGENT) && matches!(name.as_str(), "ask" | "delegate") {
-                            tools::ToolOutput { content: format!("`{name}` isn't available to a subagent: decide yourself and say what you assumed"), is_error: true }
+                        } else if let Some(why) = agent::refusal(kind.as_deref(), &name) {
+                            tools::ToolOutput { content: why, is_error: true }
                         } else if let Some(out) = agent::run_tool(app, id, &workspace, &name, &args, &mut ending).await {
                             out
                         } else {
@@ -130,7 +128,7 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             };
             for path in new_context {
                 if let Some(text) = context::read_capped(&path) {
-                    if let Err(e) = append_tape(&app.db, id, "context", &json!({ "path": path })).await {
+                    if let Err(e) = tape::append(&app.db, id, "context", &json!({ "path": path })).await {
                         tracing::error!("recording instruction file {} for {id}: {e:#}", path.display());
                     }
                     out.content.push_str(&context::attachment(&path, &text));
@@ -169,7 +167,7 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
         "turn.message" => {
             let id = id?;
             let message = p.get("message").cloned().unwrap_or(Value::Null);
-            append_tape(&app.db, id, "message", &message).await?;
+            tape::append(&app.db, id, "message", &message).await?;
             if message.get("role").and_then(Value::as_str) == Some("assistant") {
                 let u = &message["usage"];
                 let n = |k: &str| u.get(k).and_then(Value::as_i64).unwrap_or(0);

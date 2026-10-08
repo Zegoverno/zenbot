@@ -73,8 +73,8 @@ pub fn system_prompt(workspace: &Path, repo: &str, memory: &str, sleep_note: Opt
     ];
     let mut s = String::new();
     // The agent's own soul; the environment and the owner are system-wide (layout.rs).
-    let soul_rel = format!("agents/{}/SOUL.md", crate::layout::AGENT);
-    let soul = prompt_file(&soul_rel, &vars).unwrap_or_else(|| "You are zenbot, the owner's agent on their Linux VM.".into());
+    let soul_rel = crate::layout::SOUL;
+    let soul = prompt_file(soul_rel, &vars).unwrap_or_else(|| "You are zenbot, the owner's agent on their Linux VM.".into());
     s.push_str(&format!("<soul file=\"~/.zenbot/{soul_rel}\">\n{soul}\n</soul>\n"));
     if let Some(env) = prompt_file("AGENTS.md", &vars) {
         s.push_str(&format!("\n<environment file=\"~/.zenbot/AGENTS.md\">\n{env}\n</environment>\n"));
@@ -162,12 +162,10 @@ async fn load_envelope(db: &PgPool, hash: &str) -> Result<Option<Envelope>, sqlx
     Ok(row.map(|r| Envelope { hash: r.get("hash"), system: r.get("system"), tools: r.get("tools") }))
 }
 
-/// The turn context sent after the prompt: the date and the workflow phase, only when they differ
-/// from the last ones this session was given (goose's turn-context message, deduplicated). None when
-/// nothing changed.
-pub fn turn_context(blocks: &[Block], today: &str, phase: Option<&str>) -> Option<String> {
-    let phase = phase.map(|p| format!("{p}\n")).unwrap_or_default();
-    let text = format!("<turn_context>\nToday is {today}.\n{phase}</turn_context>");
+/// The turn context sent after the prompt: the date, only when it differs from the last one this
+/// session was given (goose's turn-context message, deduplicated). None when nothing changed.
+pub fn turn_context(blocks: &[Block], today: &str) -> Option<String> {
+    let text = format!("<turn_context>\nToday is {today}.\n</turn_context>");
     let last = blocks
         .iter()
         .rev()
@@ -265,11 +263,11 @@ mod tests {
     #[test]
     fn turn_context_only_when_it_changed() {
         let mut blocks = vec![msg(1, "user", json!("hi"))];
-        let first = turn_context(&blocks, "2026-10-05 (Monday)", Some("Phase: framing.")).expect("first turn gets the date");
+        let first = turn_context(&blocks, "2026-10-05 (Monday)").expect("first turn gets the date");
+        assert_eq!(first, "<turn_context>\nToday is 2026-10-05 (Monday).\n</turn_context>", "unchanged format: earlier turns' context stays comparable");
         blocks[0].payload["context"] = json!(first);
-        assert_eq!(turn_context(&blocks, "2026-10-05 (Monday)", Some("Phase: framing.")), None, "nothing changed: nothing to add");
-        assert!(turn_context(&blocks, "2026-10-06 (Tuesday)", Some("Phase: framing.")).unwrap().contains("2026-10-06"));
-        assert!(turn_context(&blocks, "2026-10-05 (Monday)", Some("Phase: working on brief v1.")).unwrap().contains("working"));
+        assert_eq!(turn_context(&blocks, "2026-10-05 (Monday)"), None, "nothing changed: nothing to add");
+        assert!(turn_context(&blocks, "2026-10-06 (Tuesday)").unwrap().contains("2026-10-06"));
     }
 
     /// The prefix-invariance property (goose's test): as a session grows, each turn's history

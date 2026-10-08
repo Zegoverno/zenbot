@@ -87,7 +87,7 @@ pub(crate) async fn finish_turn(app: &AppState, id: Uuid, error: Value) -> bool 
     let es = &turn.reported["engine_session"];
     if error.is_null() && es["resumable"] == true {
         let engine = turn.model.split_once('/').map(|(e, _)| e).unwrap_or("");
-        if let Err(e) = append_tape(&app.db, id, "engine_session", &json!({ "engine": engine, "id": es["id"] })).await {
+        if let Err(e) = tape::append(&app.db, id, "engine_session", &json!({ "engine": engine, "id": es["id"] })).await {
             tracing::error!("recording engine session for {id}: {e:#}");
         }
     }
@@ -280,11 +280,6 @@ pub(crate) async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result
     begin_turn(app, id, text, Origin::Owner).await
 }
 
-/// Start a turn the kernel asks for (a verifier's review).
-pub(crate) async fn start_kernel_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
-    begin_turn(app, id, text, Origin::Kernel).await
-}
-
 /// Run a child session of `kind` (a verifier, a subagent) with one kernel prompt, on `model` (the
 /// parent's when None), and wait for it to end (30 minutes at most). It inherits the parent's
 /// taint. Returns the child's id; the caller reads what it needs from its tape.
@@ -305,7 +300,7 @@ pub(crate) async fn run_child(app: &AppState, parent: Uuid, kind: &str, prompt: 
     .await?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.waiters.lock().await.insert(child, tx);
-    if let Err(e) = start_kernel_turn(app, child, prompt.to_string()).await {
+    if let Err(e) = begin_turn(app, child, prompt.to_string(), Origin::Kernel).await {
         app.waiters.lock().await.remove(&child);
         return Err(e);
     }
@@ -417,7 +412,7 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
         };
         let (history, summary) = compile::history(&blocks);
         let today = chrono::Local::now().format("%Y-%m-%d (%A)").to_string();
-        let turn_context = compile::turn_context(&blocks, &today, None);
+        let turn_context = compile::turn_context(&blocks, &today);
         let sent = measure::record(&envelope, &history, &summary, &text, &turn_context, resume.is_some(), new_envelope);
         let cache_break = measure::break_at_start(prev.as_ref(), &model, &envelope.hash, &sent);
         // An abort or the watchdog may have ended the turn while it was being prepared: then
@@ -455,7 +450,7 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
         if origin == Origin::Kernel {
             user["kernel"] = json!(true);
         }
-        append_tape(&app.db, id, "message", &user).await?;
+        tape::append(&app.db, id, "message", &user).await?;
         if title.is_empty() && origin == Origin::Owner {
             let t: String = text.chars().take(60).collect();
             sqlx::query("UPDATE sessions SET title = $2 WHERE id = $1").bind(id).bind(t.trim()).execute(&app.db).await?;

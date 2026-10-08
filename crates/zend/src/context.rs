@@ -94,7 +94,6 @@ pub fn paths_in_call(workspace: &Path, name: &str, args: &Value) -> Vec<PathBuf>
     let arg = |k: &str| args.get(k).and_then(Value::as_str).map(|p| crate::tools::resolve(workspace, p));
     match name {
         "read" | "write" | "edit" => arg("path").into_iter().collect(),
-        "move" => arg("from").into_iter().chain(arg("to")).collect(),
         "bash" => args
             .get("command")
             .and_then(Value::as_str)
