@@ -1255,6 +1255,8 @@ impl App {
         Ok(())
     }
 
+    /// Leave the current session: disconnect and forget its transcript and turn state (the side
+    /// panel stays open; it shows a file, not the session).
     fn reset_session(&mut self) {
         if let Some(r) = self.reader.take() {
             r.abort();
@@ -1264,6 +1266,26 @@ impl App {
         self.title.clear();
         self.session_tokens = 0;
         self.busy = false;
+        self.aborting = false;
+        self.pending_prompt = None;
+        self.last_file = None;
+        self.reset_stream();
+        self.entries.clear();
+        self.view.clear();
+        self.view_start.clear();
+        self.view_w = 0;
+        self.view_dirty = usize::MAX;
+        self.scroll = 0;
+        self.last_total = 0;
+        self.top_line = 0;
+    }
+
+    /// Refuse to leave the session while a turn runs in it (its output would land in the next one).
+    fn still_working(&mut self) -> bool {
+        if self.busy {
+            self.note("zenbot is still working; press esc to interrupt first", Sty::Warn);
+        }
+        self.busy
     }
 
     async fn switch_session(&mut self, id: String) -> Result<()> {
@@ -1509,6 +1531,7 @@ impl App {
         let Some(p) = self.picker.take() else { return Ok(()) };
         let Some((_, value)) = p.items.get(p.selected).cloned() else { return Ok(()) };
         match p.kind {
+            PickKind::Session if self.still_working() => {}
             PickKind::Session => self.switch_session(value).await?,
             PickKind::Model => {
                 self.model = value.clone();
@@ -1862,11 +1885,8 @@ impl App {
             if m.len() == 1 { Some(m[0]) } else { None }
         });
         match cmd {
+            Some("/new" | "/resume") if self.still_working() => {}
             Some("/new") => {
-                if self.busy {
-                    self.note("zenbot is still working; press esc to interrupt first", Sty::Warn);
-                    return Ok(());
-                }
                 self.reset_session();
                 self.model = self.default_model.clone();
                 self.effort = None;
@@ -2813,6 +2833,26 @@ mod tests {
         let rows = a.screen.rows().to_vec();
         let marker = rows.iter().position(|r| r.contains("more lines · PgDn")).expect("marker shown");
         assert!(rows[marker - 1].contains("row "), "the marker has its own row, after real content: {rows:#?}");
+    }
+
+    #[tokio::test]
+    async fn a_new_session_starts_a_fresh_transcript_and_resume_waits_for_the_turn() {
+        let mut a = app(80, 20);
+        a.session = Some("s1".into());
+        a.push(Entry::User("old question".into()));
+        a.busy = true;
+        a.on_event(json!({ "type": "delta", "delta": "half an answ" }));
+        a.on_event(json!({ "type": "tool_start", "name": "read", "args": { "path": "/tmp/x" } }));
+        a.command("/resume").await.unwrap();
+        assert!(a.picker.is_none() && a.notice.as_ref().is_some_and(|(t, _)| t.starts_with("zenbot is still working")));
+        a.command("/new").await.unwrap();
+        assert_eq!(a.session.as_deref(), Some("s1"), "/new waits for the turn too");
+        a.on_event(json!({ "type": "idle" }));
+        a.command("/new").await.unwrap();
+        assert!(a.session.is_none() && a.stream.is_empty() && a.last_file.is_none());
+        assert_eq!(a.entries.len(), 1, "only the new-session line");
+        let rows = a.screen.rows().join("\n");
+        assert!(rows.contains("new session") && !rows.contains("old question") && !rows.contains("half an answ"), "{rows}");
     }
 
     #[test]
