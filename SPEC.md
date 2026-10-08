@@ -86,7 +86,7 @@ Each module lists what it does, its contract, the default implementation and pos
 #### 5.3 Router
 | Class | Used for | v1 providers |
 |---|---|---|
-| **S2** | reasoning, writing, coding | GPT via ChatGPT subscription (Pi OAuth) · Claude via Claude Agent SDK on the Claude subscription · API models via LiteLLM |
+| **S2** | reasoning, writing, coding | GPT via Codex on the ChatGPT subscription · Claude via Claude Code on the Claude subscription · System One classifiers via OpenRouter |
 | **S1** | routing, triage, relevance scoring, "retry or stop?", "notify owner?", eval checks | Jev (API) · small LLM fallback · later Laya/CLM local |
 | **Embeddings** | indexing and semantic search | API model first · later local |
 
@@ -233,7 +233,7 @@ Moved to [CONTEXT.md](CONTEXT.md#how-success-is-measured).
 |---|---|
 | Building the tool instead of doing the work | Payback rule; pilot project in every milestone; time cap on zenbot work |
 | Subscription policies change | Router degrades to API providers; budgets ready |
-| Pi / SDK churn | Pin Pi's exact version; a bump is a commit with an eval like any harness change (the daily job only reports a newer Pi). The vendor CLIs (Claude Code, Codex) track their latest versions daily, tested and rolled back on failure (`scripts/update-engines.sh`, `zen-engines.timer`); every turn records the engine version it ran; wrap behind the worker protocol |
+| Vendor CLI churn | The Claude Code and Codex CLIs track their latest versions daily, tested and rolled back on failure (`scripts/update-engines.sh`, `zen-engines.timer`); every turn records the engine version it ran; wrap behind the worker protocol |
 | Two languages slow the solo builder | Protocol-first; thin kernel early; generate types |
 | Prompt injection / exfiltration | Taint rule, credential injection, approvals, egress allow-lists |
 | Knowledge rot (wrong wiki pages compound) | Citations, confidence, lint, human-approved writes |

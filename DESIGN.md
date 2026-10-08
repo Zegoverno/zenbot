@@ -38,11 +38,11 @@ These hold today and in the target design. Changing one needs the owner's OK and
 ┌──────────────────────── zend (Rust kernel, systemd service `zenbot`) ────────────────────────┐
 │ API/WS · sessions and tape · context compiler · tools and executor · memory and sleep · skills │
 │ System One decisions and scoring · summaries · tracing · worker routing and supervision        │
-└────────────┬───────────────────────────────┬─────────────────────────────────────┬───────────┘
-             │ JSON-RPC 2.0 over stdio        │ JSON-RPC 2.0 over stdio              │ sqlx
-    zen-engine (Rust, default)        zen-mind (TypeScript, optional `pi`)     Postgres + pgvector
-    Claude Code CLI ─ MCP bridge ─┐   Pi agent loop, ChatGPT sign-in,          (Docker, deploy/compose.yaml)
-    Codex app-server ─ dynamic    │   OpenRouter models, System One
+└────────────┬───────────────────────────────┬─────────────────────────────────────┘
+             │ JSON-RPC 2.0 over stdio        │ sqlx / HTTPS for System One
+    zen-engine (Rust)                    Postgres + pgvector / OpenRouter
+    Claude Code CLI ─ MCP bridge ─┐      (Docker, deploy/compose.yaml)
+    Codex app-server ─ dynamic    │
     tools                         └── tools come back to zend
 ```
 
@@ -51,13 +51,11 @@ These hold today and in the target design. Changing one needs the owner's OK and
 | `zend` | Rust (axum, sqlx, tokio) | Always-on kernel; owns state and side effects; single binary |
 | `zen` | Rust | Terminal app (full screen with diffed frames, scrolling and a file side panel, or `--inline`) and script commands (`--json`) |
 | `zen-engine` | Rust | Default worker: runs turns on the Claude Code CLI and `codex app-server` on the owner's subscriptions, with zenbot's prompt, tools and history |
-| `zen-mind` | TypeScript (Node 22, from source) | Optional worker (`ZEN_WORKERS=engine,pi`): Pi loop, direct ChatGPT sign-in, OpenRouter, System One (`s1.decide`) |
 | Postgres | — | 16+ with pgvector; local in compose, movable via `DATABASE_URL` |
 
 The kernel starts each worker as a child process, supervises and restarts it, ends orphaned turns,
 and stops stalled turns (watchdog). Each worker lists the models it serves (`models.list`), and the
-kernel routes a model to the worker that lists it (`claude/…` and `codex/…` to zen-engine, Pi's
-providers to zen-mind). The protocol is in `docs/worker-protocol.md`; the client protocol in
+kernel routes a model to the worker that lists it (`claude/…` and `codex/…` to zen-engine). The protocol is in `docs/worker-protocol.md`; the client protocol in
 `docs/client-protocol.md`. A scripted model, `faux/smoke` (`ZEN_FAUX=1`), runs turns without a
 subscription for tests.
 
@@ -139,11 +137,12 @@ with questions for the owner. The kernel-enforced workflow (`flow.rs`) was remov
 
 ### System One
 
-A fast typed-decision model (Jev via OpenRouter, through Pi's `s1.decide`): choice, score or bool
-questions, answered with probabilities. Used today for live scoring of sessions (from the owner's
+A fast typed-decision model (Jev via OpenRouter's `/api/v1/systemone`, called by the kernel):
+choice, score or bool questions, answered with probabilities. Public bool maps to `noul` on the
+wire; OpenRouter reports usage and cost directly. Used today for live scoring of sessions (from the owner's
 messages and final answers only, never tool output; `session_scores`), the model's `decide` tool,
 and the memory sleep (private content allowed unless `ZEN_S1_PRIVATE=0`, D-032). Configured
-by `ZEN_S1_MODEL` and `OPENROUTER_API_KEY`; needs the `pi` worker.
+by `ZEN_S1_MODEL` and `OPENROUTER_API_KEY`; no additional worker is needed.
 
 ### Measurement
 
@@ -192,8 +191,8 @@ are covered by the system prompt ("ask before"), not enforced.
 - `deploy/compose.yaml` runs Postgres (pgvector) and SearXNG (keyless web search). `zend` runs on the host as the systemd service
   `zenbot` (installed by `install.sh`) and starts its workers. One port for API, WebSocket and web
   UI; `/health` reports the database, workers and busy sessions.
-- `zen-engines.timer` updates the Claude Code and Codex CLIs daily, tested, with rollback; Pi is
-  pinned (D-022). `zen-sleep.timer` runs the memory sleep nightly. Both are installed by
+- `zen-engines.timer` updates the Claude Code and Codex CLIs daily, tested, with rollback.
+  `zen-sleep.timer` runs the memory sleep nightly. Both are installed by
   `install.sh` and refreshed after each upgrade.
 - CI publishes binaries for every commit on `main` that passes its checks; installs and upgrades
   download them or compile. `scripts/upgrade.sh` checks, smoke-tests on a throwaway database copy,
@@ -220,8 +219,8 @@ tape). A rule comes back only where measurement shows the agent needs it.
 
 ### Engine
 
-- **Provider-free.** Claude Code and Codex on subscriptions, Pi through OpenRouter, API models such as
-  Jev; always the latest. zenbot owns skills, tools and context, so any model can do any session or
+- **Provider-free.** Claude Code and Codex on subscriptions, System One classifiers such as
+  Jev through OpenRouter; always the latest. zenbot owns skills, tools and context, so any model can do any session or
   subtask. Engine-native skills and tools are not used.
 - **Context management stays as built.** A model switch re-sends the whole context, so switches
   happen at natural boundaries (a new session or subtask).

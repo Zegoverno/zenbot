@@ -6,6 +6,18 @@
 
 ---
 
+## 2026-10-08 — Retire Pi; System One in the kernel (D-043)
+
+- `zend` now calls OpenRouter's System One endpoint directly, mapping bool questions to `noul`
+  and recording the returned cost. A stale `ZEN_WORKERS=engine,pi` is ignored during upgrade.
+- Removed `packages/mind`, its Node dependencies, `zen login pi`, the Pi updater and Pi branches
+  of install, upgrade, dev and eval scripts. Claude Code and Codex still run through `zen-engine`;
+  both TUI modes and `zen chat` remain.
+- Tests: release build, Rust unit tests, clippy, 20/20 e2e scenarios (new local System One
+  stub covers auth, model id, answer mapping and the legacy worker setting), upgrade `--check`
+  smoke, and a three-task GPT harness eval (3/3 base and new). Why: remove a redundant process
+  and its dependency tree.
+
 ## 2026-10-08 — Separate the development kernel's home (D-042)
 
 - `scripts/dev.sh` now defaults the dev kernel to `~/.zenbot-dev` and moves an existing
