@@ -33,7 +33,7 @@ BASE="${ZEN_RELEASE_BASE:-${SLUG:+https://github.com/$SLUG/releases/download/edg
 
 NAME="zenbot-x86_64-linux-$SHA.tar.gz"
 if [ -n "$CHECK" ]; then
-  curl -fsSIL -o /dev/null "$BASE/$NAME.sha256" 2>/dev/null
+  curl --connect-timeout 10 --max-time 20 -fsSIL -o /dev/null "$BASE/$NAME.sha256" 2>/dev/null
   exit $?
 fi
 TMP=$(mktemp -d)

@@ -392,11 +392,17 @@ fn is_binary(bytes: &[u8]) -> bool {
 async fn read(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> {
     const MAX_READ_FILE: u64 = 16 * 1024 * 1024;
     let path = resolve(workspace, str_arg(args, "path")?);
-    let size = tokio::fs::metadata(&path).await.map_err(|e| err(format!("cannot stat {}: {e}", path.display())))?.len();
+    let file = tokio::fs::File::open(&path).await.map_err(|e| err(format!("cannot read {}: {e}", path.display())))?;
+    let size = file.metadata().await.map_err(|e| err(format!("cannot stat {}: {e}", path.display())))?.len();
     if size > MAX_READ_FILE {
         return Err(err(format!("{} is {} bytes, over read's 16 MiB limit; use bash to inspect a range", path.display(), size)));
     }
-    let bytes = tokio::fs::read(&path).await.map_err(|e| err(format!("cannot read {}: {e}", path.display())))?;
+    // The same open file may grow after stat, and procfs files often report size zero.
+    let mut bytes = Vec::with_capacity(size as usize);
+    file.take(MAX_READ_FILE + 1).read_to_end(&mut bytes).await.map_err(|e| err(format!("cannot read {}: {e}", path.display())))?;
+    if bytes.len() as u64 > MAX_READ_FILE {
+        return Err(err(format!("{} exceeds read's 16 MiB limit; use bash to inspect a range", path.display())));
+    }
     if is_binary(&bytes) {
         return Err(err(format!(
             "{} is a binary file ({} bytes), not text; inspect it with bash (e.g. `file`, `xxd | head`)",

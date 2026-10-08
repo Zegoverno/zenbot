@@ -57,9 +57,14 @@ pub fn governing(workspace: &Path, paths: &[PathBuf]) -> Vec<PathBuf> {
 
 fn governing_except(workspace: &Path, paths: &[PathBuf], zen_home: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
+    let real_zen_home = zen_home.canonicalize().unwrap_or_else(|_| zen_home.to_path_buf());
     for path in paths {
-        // The environment's AGENTS.md is already in the system prompt, not project context.
-        if path.starts_with(zen_home) {
+        // Lexical `..` or a symlink can point into the zen home; avoid attaching its
+        // environment AGENTS.md as project instructions even through such aliases.
+        let real_path = path.canonicalize().or_else(|_| {
+            path.parent().unwrap_or(path).canonicalize().map(|parent| parent.join(path.file_name().unwrap_or_default()))
+        });
+        if path.starts_with(zen_home) || real_path.is_ok_and(|p| p.starts_with(&real_zen_home)) {
             continue;
         }
         let start = if path.is_dir() { path.as_path() } else { path.parent().unwrap_or(path) };
@@ -141,6 +146,9 @@ mod tests {
         std::fs::create_dir_all(&zen_home).unwrap();
         std::fs::write(zen_home.join("AGENTS.md"), "environment rules").unwrap();
         assert!(governing_except(&ws, &[zen_home.join("token")], &zen_home).is_empty());
+        std::fs::create_dir_all(ws.join("sub")).unwrap();
+        let alias = ws.join("sub/../.zenbot/AGENTS.md");
+        assert!(governing_except(&ws, &[alias], &zen_home).is_empty());
     }
 
     #[test]

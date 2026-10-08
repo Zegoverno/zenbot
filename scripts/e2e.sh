@@ -425,7 +425,8 @@ kernel_tools() {
   local ws; ws=$(new_workspace kernel-tools)
   printf 'foo  \nbar\n' > "$ws/a.txt"
   truncate -s $((16 * 1024 * 1024 + 1)) "$ws/huge.txt"
-  start_kernel "$ws" "$(script kernel-tools.json "s|ZENHOME|$TMP/home/.zenbot|")"
+  mkdir -p "$TMP/home/sub"
+  start_kernel "$ws" "$(script kernel-tools.json "s|ZENHOME|$TMP/home/.zenbot|" "s|ZENALIAS|$TMP/home/sub/../.zenbot|")"
   local sid; sid=$(zen ask --json -m faux/smoke "check kernel tools" | jq -r .session_id)
   check "the zen home environment file is not attached as project context" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND kind='context'")" 0
   check "a loose edit keeps exactly one trailing newline" eq "$(cat "$ws/a.txt")" $'baz\nbar'
