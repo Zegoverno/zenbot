@@ -41,6 +41,9 @@ impl Client {
                 std::fs::read_to_string(&path).with_context(|| format!("no token: set ZEN_TOKEN or create {}", path.display()))?.trim().to_string()
             }
         };
+        if let Some(host) = cleartext_remote(&url) {
+            eprintln!("warning: the zenbot token goes to {host} unencrypted (plain http); use https or an SSH tunnel");
+        }
         let http = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT).timeout(REQUEST_TIMEOUT).build()?;
         Ok(Client { http, url: url.trim_end_matches('/').to_string(), token })
     }
@@ -106,6 +109,19 @@ impl Client {
             .context("opening session stream")?;
         Ok(ws)
     }
+}
+
+/// The host a plain-http URL points to, when it isn't this machine: the token would cross the
+/// network in clear text.
+fn cleartext_remote(url: &str) -> Option<String> {
+    let u = reqwest::Url::parse(url).ok()?;
+    if u.scheme() != "http" {
+        return None;
+    }
+    let host = u.host_str()?;
+    let ip = host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>();
+    let local = host == "localhost" || host.ends_with(".localhost") || ip.is_ok_and(|ip| ip.is_loopback());
+    (!local).then(|| host.to_string())
 }
 
 /// Settings for a session created from the command line; unset means the kernel's default.
@@ -238,6 +254,15 @@ pub fn tool_summary(name: &str, args: &Value) -> String {
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+
+    #[test]
+    fn plain_http_is_flagged_only_off_this_machine() {
+        for local in ["http://127.0.0.1:8100", "http://localhost:8100", "http://[::1]:8100", "https://zen.example.com", "http://127.0.0.5"] {
+            assert_eq!(cleartext_remote(local), None, "{local}");
+        }
+        assert_eq!(cleartext_remote("http://10.0.0.7:8100").as_deref(), Some("10.0.0.7"));
+        assert_eq!(cleartext_remote("http://zen.example.com").as_deref(), Some("zen.example.com"));
+    }
 
     #[test]
     fn short_ids_never_split_a_character() {
