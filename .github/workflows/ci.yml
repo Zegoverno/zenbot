@@ -42,6 +42,28 @@ jobs:
       - name: End-to-end scenarios
         run: ZEN_E2E_NO_BUILD=1 scripts/e2e.sh
 
+  # The Matrix channel is its own Cargo workspace (crates/zen-matrix): built, tested and linted apart,
+  # and not part of the release tarball (scripts/matrix.sh builds it where it's used).
+  matrix:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: crates/zen-matrix
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/zen-matrix
+      - name: Build
+        run: cargo build --release --locked
+      - name: Unit tests
+        run: cargo test --release --locked
+      - name: Clippy
+        run: cargo clippy --release --locked --all-targets -- -D warnings
+
   release:
     needs: check
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
