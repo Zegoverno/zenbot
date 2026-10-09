@@ -86,6 +86,17 @@ that tool result and kept. The kernel writes missing default prompt files and sk
 earlier turns come from the provider's cache. Past 70% of the context budget, older turns are
 summarized in the background with block addresses; the `history` tool reads any block back.
 
+### Session names and suggested prompts
+
+After an owner's turn ends cleanly, the kernel makes one call to the assist model (`assist.rs`,
+D-047; Haiku 5.5 by default, through the worker's tool-less `complete`), reading the session's first
+prompt and its latest exchanges (no tool output). It names the session while the title isn't the
+owner's (after each of the first 3 turns) and suggests the owner's likely next prompt, or nothing
+when there's no clear next step; not after `ask`, nor in jobs or child sessions. The client shows
+the suggestion in grey in the empty input (tab takes it). The next prompt reports what the owner did
+with it, and `prompt_suggestions` keeps the suggestion, the outcome (accepted, edited, declined,
+unseen), what was sent and the prompt version, so the prompt can be improved from evidence.
+
 ### Tools today
 
 Fixed order, the same every turn of a session: `bash`, `read`, `write`, `edit`, `history`, `ask`,
