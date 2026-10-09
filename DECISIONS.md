@@ -6,6 +6,37 @@
 
 ---
 
+## D-048 — The sessions board is zen's home screen
+
+**Date:** 2026-10-09 · **Status:** accepted (owner)
+
+**Decision:** In full screen, plain `zen` opens on the sessions board (`tui/board.rs`), not a new
+session. It lists every session in sections, Main, Jobs and Archived (the owner: jobs set apart from
+mains; archived hidden until `a`), with running ones first. Each session shows whether it's running
+or idle, and its subagents and verifiers sit under it with the task each was given: running ones
+always, plus the 3 newest finished ones. Enter dives into the chosen session in the usual chat view.
+`n` starts a new session, `/` filters by title or task, `/board` (or Esc on an empty input) comes
+back, and a running turn keeps going in the kernel meanwhile. Subagent and verifier sessions open
+read-only (owner): nothing can be sent, and Esc and Ctrl+C never interrupt them, since the parent
+session drives them. The board polls `GET /api/board` every 2 s while it's shown. That endpoint
+returns every session with `kind`, `parent`, `busy` (from the kernel's running turns) and, for child
+sessions, `task` (their first message), with no costs. `zen -r/-c/-m/-e`, `zen chat` and `--inline`
+start as before; inline has no board.
+
+**Why:** The owner asked for one place to see every open session, which ones have subagents working,
+and to dive into any of them. Before this, zen showed one session at a time, and subagents not at
+all. Polling a localhost endpoint is about 25 ms a call on today's data and needs no new protocol.
+A kernel-wide event stream would update faster, but it's a new WebSocket and fan-out for a screen
+that's only shown sometimes. Read-only subagents keep the delegation coherent: the parent waits for
+the child's answer.
+
+**Considered:** the board as a view toggled from the chat, or as a side-panel tab (owner chose the
+home screen); typing into or stopping subagents (owner: read-only); a global events WebSocket
+(later, if 2 s feels slow); hiding job and archived sessions (owner: show everything, with sections
+and a filter).
+
+---
+
 ## D-047 — Session names and suggested next prompts from a cheap side model
 
 **Date:** 2026-10-09 · **Status:** accepted (owner)
