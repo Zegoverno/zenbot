@@ -272,9 +272,20 @@ impl Editor {
         let mut rows: Vec<(String, String, usize)> = Vec::new(); // prefix, text, text width
         let (mut crow, mut ccol) = (0, 0);
         if self.buf.is_empty() {
-            let p: String = placeholder.chars().take(inner).collect();
-            let w = UnicodeWidthStr::width(p.as_str());
-            rows.push(("› ".into(), p, w));
+            // The placeholder (a suggested prompt can be long) wraps like text; the caret stays at its start.
+            let p = placeholder.replace('\n', " ");
+            for (s, e) in wrap_ranges(&p, inner) {
+                let prefix = if rows.is_empty() { "› " } else { "  " };
+                let mut text = p[s..e].to_string();
+                if UnicodeWidthStr::width(text.as_str()) > inner {
+                    text.pop();
+                }
+                let w = UnicodeWidthStr::width(text.as_str());
+                rows.push((prefix.into(), text, w));
+            }
+            if rows.is_empty() {
+                rows.push(("› ".into(), String::new(), 0));
+            }
         } else {
             let mut offset = 0;
             for logical in self.buf.split('\n') {

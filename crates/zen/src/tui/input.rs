@@ -128,7 +128,9 @@ impl App {
                 self.toggle_side();
                 return Ok(());
             }
-            if k.code == KeyCode::Tab && plain && self.side_open() && (self.side_focus || (self.editor.is_empty() && self.menu().is_empty())) {
+            // Shift+tab moves the keys between the chat and the side panel; tab (or esc) in the
+            // panel hands them back. Tab in the chat is for completing: the `/` menu, a suggestion.
+            if self.side_open() && (k.code == KeyCode::BackTab || (k.code == KeyCode::Tab && plain && self.side_focus)) {
                 self.side_focus = !self.side_focus;
                 return Ok(());
             }
@@ -237,6 +239,14 @@ impl App {
                     self.editor.clear();
                 }
             }
+            // Tab takes the suggested next prompt into the input, to send (enter) or edit first.
+            KeyCode::Tab if self.editor.is_empty() => {
+                if let Some(s) = &mut self.suggestion {
+                    s.taken = true;
+                    let text = s.text.clone();
+                    self.editor.set(&text);
+                }
+            }
             KeyCode::Enter if alt || shift || ctrl => self.editor.insert("\n"),
             KeyCode::Char('j') if ctrl => self.editor.insert("\n"),
             KeyCode::Enter => {
@@ -295,6 +305,9 @@ impl App {
         if self.still_working() {
             return Ok(());
         }
+        // What became of the suggested next prompt goes with the prompt (read before a reconnect
+        // below forgets it).
+        let prompt = prompt_message(&text, self.suggestion.as_ref());
         // The prompt stays in the input until it can be sent.
         if self.session.is_none() {
             let id = self.c.new_session(Some(self.model.clone()), self.effort.clone()).await?;
@@ -310,6 +323,7 @@ impl App {
             }
         }
         self.editor.take();
+        self.suggestion = None;
         if self.title.is_empty() {
             self.title = text.chars().take(40).collect::<String>().trim().to_string();
         }
@@ -320,7 +334,7 @@ impl App {
         self.aborting = false;
         self.reset_stream();
         if let Some(sink) = &mut self.sink {
-            if let Err(e) = sink.send(Message::text(json!({ "type": "prompt", "text": text }).to_string())).await {
+            if let Err(e) = sink.send(Message::text(prompt.to_string())).await {
                 // The connection is gone: the next send reconnects.
                 self.sink = None;
                 self.busy = false;
@@ -377,10 +391,11 @@ impl App {
                     ("enter", "send"),
                     ("shift+enter", "new line (also alt+enter, ctrl+j, or end a line with \\)"),
                     ("esc", "interrupt zenbot"),
+                    ("tab", "take the suggested next prompt (grey) into the input; enter sends it"),
                     ("↑ ↓", "previous prompts; in the / menu, choose a command (tab completes)"),
                     ("ctrl+←/→", "move by word (also alt+b / alt+f); ctrl+a/e line start/end"),
                     ("ctrl+u/k", "delete to line start / end; ctrl+w deletes a word"),
-                    ("ctrl+b", "open or close the side panel; tab moves the keys between chat and panel"),
+                    ("ctrl+b", "open or close the side panel; shift+tab moves the keys between chat and panel"),
                     ("ctrl+o", "show or fold the steps of tool calls (full screen)"),
                     ("PgUp/PgDn", "scroll the conversation (also the mouse wheel)"),
                     ("alt+↑↓", "scroll the side panel (alt+PgUp/PgDn by page; or the wheel over it)"),
@@ -421,10 +436,86 @@ impl App {
     }
 }
 
+/// The `prompt` message for the kernel, with what became of the suggested next prompt, if one was shown.
+pub(super) fn prompt_message(text: &str, suggestion: Option<&Suggestion>) -> Value {
+    let mut prompt = json!({ "type": "prompt", "text": text });
+    if let Some(s) = suggestion {
+        prompt["suggestion"] = s.report();
+    }
+    prompt
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tui::test_util::*;
+
+    fn suggest(a: &mut App, text: &str) {
+        a.on_event(json!({ "type": "suggestion", "id": 7, "text": text }));
+    }
+
+    #[tokio::test]
+    async fn a_suggestion_is_grey_until_tab_takes_it_and_enter_would_send_it_as_taken() {
+        let mut a = app(60, 20);
+        suggest(&mut a, "Run the tests again");
+        let (lines, ..) = a.compose();
+        let row = lines.iter().find(|l| l.iter().any(|(t, _)| t.contains("Run the tests again"))).expect("the suggestion is drawn");
+        assert!(row.iter().any(|(t, s)| t.contains("Run the tests") && *s == Sty::Dim), "grey, not typed text: {row:?}");
+        assert!(texts(&lines).iter().any(|l| l.contains("tab: use suggestion")));
+        assert!(a.editor.is_empty());
+        key(&mut a, KeyCode::Tab).await;
+        assert_eq!(a.editor.buf, "Run the tests again");
+        assert_eq!(prompt_message(&a.editor.buf, a.suggestion.as_ref())["suggestion"], json!({ "id": 7, "taken": true }));
+        // Edited after tab: still taken; the kernel compares the text and records `edited`.
+        typed(&mut a, " twice").await;
+        assert_eq!(prompt_message(&a.editor.buf, a.suggestion.as_ref())["suggestion"]["taken"], true);
+    }
+
+    #[tokio::test]
+    async fn typing_your_own_prompt_declines_the_suggestion() {
+        let mut a = app(60, 20);
+        suggest(&mut a, "Run the tests again");
+        typed(&mut a, "something else").await;
+        let t = texts(&a.compose().0);
+        assert!(!t.iter().any(|l| l.contains("Run the tests again")), "the grey text gives way to typing");
+        assert_eq!(prompt_message("something else", a.suggestion.as_ref())["suggestion"], json!({ "id": 7, "taken": false }));
+        // Tab with text in the input doesn't replace it.
+        key(&mut a, KeyCode::Tab).await;
+        assert_eq!(a.editor.buf, "something else");
+        assert_eq!(prompt_message("x", None).get("suggestion"), None);
+    }
+
+    #[tokio::test]
+    async fn a_new_turn_clears_the_suggestion_and_a_late_one_is_ignored() {
+        let mut a = app(60, 20);
+        suggest(&mut a, "Run the tests again");
+        a.on_event(json!({ "type": "busy", "busy": true }));
+        assert!(a.suggestion.is_none());
+        suggest(&mut a, "too late");
+        assert!(a.suggestion.is_none(), "a suggestion arriving mid-turn isn't shown");
+    }
+
+    #[tokio::test]
+    async fn the_kernel_can_rename_the_session() {
+        let mut a = app(60, 20);
+        a.on_event(json!({ "type": "title", "title": "Session names and suggestions" }));
+        assert_eq!(a.title, "Session names and suggestions");
+    }
+
+    #[tokio::test]
+    async fn tab_takes_the_suggestion_and_shift_tab_moves_to_the_panel() {
+        let mut a = app(120, 24);
+        a.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)).await.unwrap();
+        key(&mut a, KeyCode::Esc).await; // back to the chat
+        assert!(a.side_open() && !a.side_focus);
+        suggest(&mut a, "Ship it");
+        key(&mut a, KeyCode::Tab).await;
+        assert!(!a.side_focus && a.editor.buf == "Ship it", "tab in the chat is for the suggestion");
+        a.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)).await.unwrap();
+        assert!(a.side_focus, "shift+tab moves the keys to the panel");
+        a.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)).await.unwrap();
+        assert!(!a.side_focus, "and back");
+    }
 
     #[tokio::test]
     async fn slash_menu_arrows_tab_and_argument_commands() {
