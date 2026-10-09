@@ -6,6 +6,28 @@
 
 ---
 
+## 2026-10-09 — Scheduled jobs in the kernel; the sleep and engine updates leave systemd (D-046)
+
+- A scheduler in `zend` (`jobs.rs`, tables `jobs` and `job_runs`, migration 0019) runs the
+  kernel's own jobs (`sleep` 03:00 UTC, `engines` 04:00 UTC, seeded at start) and agent jobs: a
+  prompt run in a fresh session of kind `job` with only the instructions it picks (soul always;
+  default user and memory) and its named skills, no `ask`/`delegate`/`schedule`, ending with a
+  report (`[SILENT]` runs are archived, `[FAILED]` counts as a failure).
+- The owner manages jobs with `zen jobs` (`add`, `set`, `pause`, `resume`, `rm`, `run`, `runs`)
+  and `/api/jobs`; the agent with the new `schedule` tool. An agent's job goes live only if System
+  One, reading the owner's own messages, gives ≥ 0.9 (`ZEN_JOB_BAR`) that the owner asked for it;
+  otherwise (or in a tainted session) it's saved paused, and `zen jobs resume` approves it.
+- Claiming with `FOR UPDATE SKIP LOCKED` and the next run set in the same transaction; one running
+  run per job (partial unique index); runs cut by a restart marked `interrupted`; a missed run
+  caught up once within its grace, else recorded `missed`; failing agent jobs backed off and paused
+  after 5 failures. Patterns from Hermes and OpenClaw, read in code. pg_cron considered and
+  rejected (D-046).
+- The `zen-sleep` and `zen-engines` timers and `scripts/sleep.sh` are gone; `install.sh` and the
+  first healthy upgrade remove the installed units. Smoke, e2e, eval and dev kernels run with
+  `ZEN_JOBS=0`. `zen status` shows a `jobs` line. New deps: `croner`, `chrono-tz`.
+- Tests: 5 unit tests (schedules in a timezone, `every`/`at`/`in`, the 5-minute floor, grace,
+  context); e2e scenario `scheduled-jobs` (22 checks); the full e2e suite passes.
+
 ## 2026-10-08 — IDENTITY.md; traits and guidance leave memory (D-045)
 
 - New prompt file `agents/zenbot/IDENTITY.md`, loaded right after `SOUL.md`: the agent's character

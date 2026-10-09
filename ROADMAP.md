@@ -105,6 +105,11 @@ clear (lower bound beats upper bound, 20 judged subtasks each). `ask` takes `wai
 
 ## What's next
 
+Scheduled jobs are built (D-046): the sleep and engine updates run in the kernel's scheduler, and
+agent jobs run prompts on a schedule. Their reports are only seen in `zen jobs runs` and the session
+list; the next step for reach is a channel that brings them to the owner's phone (Telegram or
+WhatsApp), then pre-run checks that skip the model when nothing changed, if job costs call for it.
+
 The redesign's phases are built. Next: keep dogfooding zenbot on real work and let sessions,
 verdicts and the owner's reviews (proposed edits to `IDENTITY.md` and `USER.md`, skill drafts, tools,
 routes) drive what changes.
@@ -154,7 +159,7 @@ phases above deliver parts of them; what remains is planned after Phase 6.
 | M2 | Build loop | Sandboxes; `run` in any language; services; dev preview, point & comment, screenshots; MCP client; skills | MCP and skills in Phases 1–2 |
 | M3 | Work v0 | Goals, tasks, board; agent definitions; `delegate`; inbox with push; device pairing | `delegate` in Phase 6 |
 | M4 | Router, context, bench | System One and embeddings; model selection; budgets; context manager; hybrid search; zen-bench | context done; search in Phase 3; model choice in Phase 6 |
-| M5 | Closed loop | Crons; runs and evals; reviewer; taste distillation; crystallization | skills loop in Phase 5 |
+| M5 | Closed loop | Crons; runs and evals; reviewer; taste distillation; crystallization | skills loop in Phase 5; crons (scheduled jobs, D-046) built |
 | M6 | Research & reach | `web_search` / `web_fetch` with taint rules; agent browser; Matrix; publish with approval | web in Phase 2 |
 | M7 | Ship to agents | Project template exposing a project's own MCP server, skills, API and metering | |
 

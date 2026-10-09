@@ -53,12 +53,12 @@ cd ~/zenbot && git pull && ./scripts/upgrade.sh
 
 ### Engines
 
-The Claude Code and Codex CLIs are kept on their latest versions by a daily timer (`zen-engines.timer`, around 04:00 UTC, running `scripts/update-engines.sh`). Each new version must pass a real test turn; if it doesn't, the previous version is put back. The CLIs need no restart, and the job never commits, builds or restarts zenbot. Results are in `~/.zenbot/upgrade.log` (`engines:` lines), and `zen status` shows the versions.
+The Claude Code and Codex CLIs are kept on their latest versions by the kernel's daily `engines` job (04:00 UTC, running `scripts/update-engines.sh`). Each new version must pass a real test turn; if it doesn't, the previous version is put back. The CLIs need no restart, and the job never commits, builds or restarts zenbot. Results are in `~/.zenbot/upgrade.log` (`engines:` lines), and `zen status` shows the versions.
 
 ```bash
 ~/zenbot/scripts/update-engines.sh --check   # installed vs latest, changes nothing
 ~/zenbot/scripts/update-engines.sh           # update now
-systemctl list-timers zen-engines.timer      # next run
+zen jobs                                     # next run of every scheduled job
 ```
 
 Right after a push to `main`, CI needs a few minutes to check and publish the binaries; an upgrade started before that (or for a commit whose checks failed) compiles locally instead.
