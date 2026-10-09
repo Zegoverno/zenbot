@@ -38,8 +38,11 @@ pub fn refusal(kind: Option<&str>, name: &str) -> Option<String> {
     if !read_only(kind) && name == "submit_verdict" {
         return Some("`submit_verdict` is only for a verifier session".into());
     }
-    if kind == Some(crate::delegate::SUBAGENT) && matches!(name, "ask" | "delegate") {
+    if kind == Some(crate::delegate::SUBAGENT) && matches!(name, "ask" | "delegate" | "schedule") {
         return Some(format!("`{name}` isn't available to a subagent: decide yourself and say what you assumed"));
+    }
+    if kind == Some(crate::jobs::JOB) && matches!(name, "ask" | "delegate" | "schedule") {
+        return Some(format!("`{name}` isn't available in a scheduled job: no one is in the conversation; decide yourself and say what you assumed in the report"));
     }
     None
 }
@@ -170,11 +173,11 @@ pub fn specs(kind: Option<&str>) -> Value {
         picked.push(verdict_spec());
         return Value::Array(picked);
     }
-    let subagent = kind == Some(crate::delegate::SUBAGENT);
+    // A subagent or a scheduled job can't ask the owner, delegate or schedule.
+    let subagent = kind == Some(crate::delegate::SUBAGENT) || kind == Some(crate::jobs::JOB);
     let mut all = builtins;
     all.push(crate::compact::tool_spec());
     all.push(crate::search::spec());
-    // A subagent can't ask the owner or delegate further.
     if !subagent {
         all.push(ask_spec());
     }
@@ -192,6 +195,7 @@ pub fn specs(kind: Option<&str>) -> Value {
     all.push(verify_spec());
     if !subagent {
         all.push(crate::delegate::spec());
+        all.push(crate::jobs::spec());
     }
     if decide_on() {
         all.push(decide_spec());
@@ -271,6 +275,7 @@ If a question goes unanswered, take your recommended option and say it was an as
         "capture" => crate::wiki::run_tool(app, session, name, args).await,
         "save_skill" | "save_tool" => crate::workshop::run_tool(app, session, name, args).await,
         "delegate" => crate::delegate::run_tool(app, session, workspace, name, args).await,
+        "schedule" => crate::jobs::run_tool(app, session, name, args).await,
         "find_tools" | "load_tool" | "call_tool" => crate::mcp::run_tool(app, session, name, args).await,
         "decide" => {
             let res = crate::score::decide(app, &args["state"], &args["questions"]).await;
@@ -516,14 +521,14 @@ mod tests {
         let names = |v: Value| v.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         assert_eq!(names(specs(Some(VERIFIER))), ["bash", "read", "submit_verdict"]);
         // What each kind is offered is exactly what it may call.
-        for kind in [None, Some(VERIFIER), Some(crate::delegate::SUBAGENT)] {
+        for kind in [None, Some(VERIFIER), Some(crate::delegate::SUBAGENT), Some(crate::jobs::JOB)] {
             let offered = names(specs(kind));
             for t in names(specs(None)).into_iter().chain(["submit_verdict".to_string()]) {
                 assert_eq!(refusal(kind, &t).is_none(), offered.contains(&t), "{kind:?} {t}");
             }
         }
         let all = names(specs(None));
-        for t in ["bash", "read", "write", "edit", "history", "search", "ask", "remember", "capture", "web_search", "web_fetch", "find_skills", "load_skill", "save_skill", "find_tools", "load_tool", "call_tool", "save_tool", "verify", "delegate"] {
+        for t in ["bash", "read", "write", "edit", "history", "search", "ask", "remember", "capture", "web_search", "web_fetch", "find_skills", "load_skill", "save_skill", "find_tools", "load_tool", "call_tool", "save_tool", "verify", "delegate", "schedule"] {
             assert!(all.contains(&t.to_string()), "{t} offered");
         }
         assert!(!all.contains(&"move".to_string()) && !all.contains(&"propose_brief".to_string()));

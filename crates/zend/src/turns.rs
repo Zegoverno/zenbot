@@ -323,7 +323,7 @@ pub(crate) async fn run_kernel_session(app: &AppState, kind: &str, title: &str, 
     Ok(id)
 }
 
-async fn run_and_wait(app: &AppState, id: Uuid, kind: &str, prompt: &str) -> Result<()> {
+pub(crate) async fn run_and_wait(app: &AppState, id: Uuid, kind: &str, prompt: &str) -> Result<()> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.waiters.lock().await.insert(id, tx);
     if let Err(e) = begin_turn(app, id, prompt.to_string(), Origin::Kernel).await {

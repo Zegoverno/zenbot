@@ -1,0 +1,8 @@
+[
+  {"when": "please schedule", "tool": "schedule", "args": {"action": "create", "name": "agent-made", "prompt": "JOBTASK-B", "schedule": "every 1h"}},
+  {"when": "please schedule", "text": "Scheduled."},
+  {"when": "JOBTASK-A", "tool": "schedule", "args": {"action": "list"}},
+  {"when": "JOBTASK-A", "text": "Report A: all good."},
+  {"when": "JOBTASK-S", "text": "[SILENT]"},
+  {"when": "JOBTASK-F", "text": "[FAILED] the thing is broken"}
+]

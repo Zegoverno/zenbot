@@ -65,6 +65,16 @@ fn prompt_file(rel: &str, vars: &[(&str, String)]) -> Option<String> {
 /// skills index, and the instruction files of the workspace's projects (from `/` down). How to use
 /// each tool is in the tool's own description; how to do a kind of work, in skills.
 pub fn system_prompt(workspace: &Path, repo: &str, memory: &str, sleep_note: Option<&str>, skills_index: &str) -> String {
+    compose(&PARTS, workspace, repo, memory, sleep_note, skills_index)
+}
+
+/// The parts of the instructions a session can have, in order. A scheduled job picks some (its
+/// `context`, jobs.rs); the soul is always in.
+pub const PARTS: [&str; 7] = ["soul", "identity", "agents", "user", "memory", "skills", "project"];
+
+/// The instructions made of the given `parts` only (names from `PARTS`), in the usual order.
+pub fn compose(parts: &[&str], workspace: &Path, repo: &str, memory: &str, sleep_note: Option<&str>, skills_index: &str) -> String {
+    let has = |p: &str| parts.contains(&p);
     let home = std::env::var("HOME").unwrap_or_default();
     let vars = [
         ("workspace", workspace.display().to_string()),
@@ -78,28 +88,30 @@ pub fn system_prompt(workspace: &Path, repo: &str, memory: &str, sleep_note: Opt
     let soul = prompt_file(soul_rel, &vars).unwrap_or_else(|| "You are zenbot, the owner's agent on their Linux VM.".into());
     s.push_str(&format!("<soul file=\"~/.zenbot/{soul_rel}\">\n{soul}\n</soul>\n"));
     let identity_rel = crate::layout::IDENTITY;
-    if let Some(identity) = prompt_file(identity_rel, &vars) {
+    if let Some(identity) = prompt_file(identity_rel, &vars).filter(|_| has("identity")) {
         s.push_str(&format!("\n<identity file=\"~/.zenbot/{identity_rel}\">\n{identity}\n</identity>\n"));
     }
-    if let Some(env) = prompt_file("AGENTS.md", &vars) {
+    if let Some(env) = prompt_file("AGENTS.md", &vars).filter(|_| has("agents")) {
         s.push_str(&format!("\n<environment file=\"~/.zenbot/AGENTS.md\">\n{env}\n</environment>\n"));
     }
-    if let Some(user) = prompt_file("USER.md", &vars) {
+    if let Some(user) = prompt_file("USER.md", &vars).filter(|_| has("user")) {
         s.push_str(&format!("\n<owner file=\"~/.zenbot/USER.md\">\n{user}\n</owner>\n"));
     }
-    s.push_str(&format!(
-        "\n<memory size=\"{}/{}\">\nYour short-term memory as of this session's start (entries by id; change them with the remember tool).\n{}{}</memory>\n",
-        memory.len(),
-        crate::memory::cap(),
-        if memory.is_empty() { "(empty)\n".to_string() } else { memory.to_string() },
-        sleep_note.map(|n| format!("\n{n}\n")).unwrap_or_default()
-    ));
-    if !skills_index.is_empty() {
+    if has("memory") {
+        s.push_str(&format!(
+            "\n<memory size=\"{}/{}\">\nYour short-term memory as of this session's start (entries by id; change them with the remember tool).\n{}{}</memory>\n",
+            memory.len(),
+            crate::memory::cap(),
+            if memory.is_empty() { "(empty)\n".to_string() } else { memory.to_string() },
+            sleep_note.map(|n| format!("\n{n}\n")).unwrap_or_default()
+        ));
+    }
+    if !skills_index.is_empty() && has("skills") {
         s.push_str(&format!(
             "\n<skills>\nHow to do kinds of work well. When a job matches one, load it with load_skill and follow it; find_skills searches them.\n{skills_index}</skills>\n"
         ));
     }
-    let files = context::always(workspace);
+    let files = if has("project") { context::always(workspace) } else { Vec::new() };
     if !files.is_empty() {
         s.push_str("\n<project_context>\nInstructions the owner keeps for agents in these projects. Follow them.\n");
         for (path, text) in files {
