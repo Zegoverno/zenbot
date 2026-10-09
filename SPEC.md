@@ -38,7 +38,7 @@ Moved to [CONTEXT.md](CONTEXT.md#principles).
 | Syscalls | the kernel ⇄ worker protocol and the MCP tool surface |
 | Drivers | model providers, MCP servers, channels |
 | Package manager | skills and MCP servers, pinned and reviewed |
-| Shell | chat + command palette (web), later Matrix |
+| Shell | the `zen` terminal app; Matrix (`zen-matrix`, D-049) |
 | Notification center | the **inbox** |
 | Logs | traces (model calls, tool calls, costs) |
 | Cron | scheduler |

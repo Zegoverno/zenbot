@@ -398,9 +398,10 @@ Code that depends on a CLI's flags or output should fail loudly, so the post-upd
 
 ## CI and releases
 
-`.github/workflows/ci.yml` has two jobs (there is no separate release workflow):
+`.github/workflows/ci.yml` has three jobs (there is no separate release workflow):
 
 - **`check`**: on every pull request and every push to `main`. Build, unit tests, clippy, e2e (commands above). A newer push to a pull request cancels its running check.
+- **`matrix`**: build, unit tests and clippy of `crates/zen-matrix` (its own workspace); not in the release tarball.
 - **`release`**: only on a push to `main` that passed `check`. Builds the `dist` profile (fat LTO), checks `zen-engine` answers `ping` and `zen --version` runs, and uploads `zenbot-x86_64-linux-<sha12>.tar.gz` plus `.sha256` to the rolling `edge` prerelease (newest 20 builds kept).
 
 So binaries exist only for commits on `main` that passed. `install.sh`, `upgrade.sh` and `eval.sh` use them via `scripts/fetch-release.sh`; when there are none (yet), they compile locally. Right after a merge, CI needs a few minutes.
@@ -409,6 +410,20 @@ So binaries exist only for commits on `main` that passed. `install.sh`, `upgrade
 scripts/fetch-release.sh --check origin/main && echo "binaries published"
 gh run list --limit 5
 ```
+
+## The Matrix channel
+
+`crates/zen-matrix` is its own Cargo workspace (D-049), so the commands above don't build it. CI's
+`matrix` job runs the same three in its directory:
+
+```bash
+cd crates/zen-matrix && cargo build --release && cargo test --release && cargo clippy --release --all-targets -- -D warnings
+scripts/matrix-e2e.sh      # end to end, through E2EE, on a throwaway homeserver and a faux kernel (Docker)
+scripts/matrix.sh          # build, sign in if needed, install and restart the zen-matrix service
+```
+
+The first build compiles matrix-sdk (about 15 minutes on 2 cores; relinking takes a few minutes).
+The e2e test needs nothing paid: the kernel runs only the faux model with OpenRouter keys unset.
 
 ## Git flow
 

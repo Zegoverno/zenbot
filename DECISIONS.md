@@ -6,6 +6,36 @@
 
 ---
 
+## D-049 — A Matrix channel: zen-matrix, a separate bridge process
+
+**Date:** 2026-10-09 · **Status:** accepted (owner)
+
+**Decision:** The owner can talk to zen from Matrix (from Beeper, which he already uses) as well as
+from the terminal. `zen-matrix` (`crates/zen-matrix`, its own Cargo workspace) is a separate process
+and service (`zen-matrix.service`) and a client of the kernel's client protocol, like `zen`; the
+kernel is unchanged. The bot is an account on matrix.org; it answers only `MATRIX_OWNER` and joins
+only rooms that account invites it to. Every room is end-to-end encrypted (owner: required; Beeper
+requires it), and the bot sets up cross-signing and key backup at sign-in. Scope of the first
+version (owner): one room per session (a main "zen" room, `!new` for more, any room the owner
+invites it to), `ask` questions as numbered options answered by number, and a "zen jobs" room where
+every finished job run is reported. How it works: docs/matrix.md.
+
+**Why:** The owner wants to reach zen away from the terminal, and job reports had no way to reach
+his phone (the roadmap's next step for reach, D-046). D-008 had planned Matrix as a channel. A
+separate process keeps matrix-sdk (a few hundred crates, its own SQLite) out of the kernel: a crash
+or a bad update there can't take sessions down, and the client protocol already carries everything
+needed. Its own workspace because matrix-sdk's `libsqlite3-sys` clashes with sqlx's `links` in the
+kernel's dependency graph. matrix.org rather than a self-hosted homeserver: no public domain or
+upkeep; with end-to-end encryption the server sees metadata, not content.
+
+**Considered:** a channel driver inside the kernel (tidier for pushing reports, but couples the core
+to a heavy SDK); Telegram or WhatsApp (the roadmap's earlier idea; no end-to-end encryption for bots
+on Telegram, WhatsApp's API is costly and gated); a self-hosted homeserver (owner: matrix.org);
+unencrypted rooms (owner: no); streaming text by editing a message (later, if waiting for the whole
+answer feels slow).
+
+---
+
 ## D-048 — The sessions board is zen's home screen
 
 **Date:** 2026-10-09 · **Status:** accepted (owner)
@@ -769,7 +799,7 @@ module replaces Readwise later.
 
 ## D-008 — Channels
 
-**Decision:** Web UI first, Matrix later. (Web-first superseded by D-011.)
+**Decision:** Web UI first, Matrix later. (Web-first superseded by D-011; Matrix built in D-049.)
 
 **Date:** 2026-09-30
 
