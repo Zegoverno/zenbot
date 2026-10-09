@@ -6,10 +6,13 @@
 //! scrolls with PgUp/PgDn or the mouse wheel. `/open <file>` shows a file in a side panel next to
 //! the chat, reloaded when it changes. Each frame is drawn whole and only changed rows are
 //! written (`screen.rs`), so nothing flickers.
+//! The sessions board (`board.rs`) is the home screen: every session, running or idle, with its
+//! subagents; enter dives into one, `/board` (or esc on an empty input) comes back.
 //! Inline (`zen --inline` or ZEN_INLINE=1): the conversation is printed into normal terminal
 //! scrollback and the live region (with the streaming text) follows it, like Claude Code, Codex
 //! and Pi.
 
+mod board;
 mod events;
 mod files;
 mod inline;
@@ -43,7 +46,7 @@ use crate::md::{self, line, Line, Md, Sty};
 use crate::screen::{self, Screen};
 
 use self::files::Files;
-use self::{inline::*, panel::*, pickers::*, render::*, state::*, transcript::*};
+use self::{board::*, inline::*, panel::*, pickers::*, render::*, state::*, transcript::*};
 
 const ALT_SCREEN_ON: &str = "\x1b[?1049h\x1b[H\x1b[2J";
 const ALT_SCREEN_OFF: &str = "\x1b[?1049l";
@@ -57,6 +60,8 @@ const KEYS_PUSH: &str = "\x1b[>1u";
 const KEYS_POP: &str = "\x1b[<1u";
 
 pub enum Start {
+    /// The sessions board (full screen; inline starts a new session instead).
+    Board,
     New,
     Continue,
     Resume(Option<String>),
@@ -132,7 +137,8 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
             }
         });
         match start {
-            Start::New => {}
+            Start::Board if !inline => app.open_board().await,
+            Start::Board | Start::New => {}
             Start::Continue => {
                 let list = app.c.get("/api/sessions?archived=false").await?;
                 match list.as_array().and_then(|a| a.first()).and_then(|s| s["id"].as_str()) {
@@ -152,6 +158,7 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
         let mut tick = tokio::time::interval(Duration::from_millis(90));
         let mut watch = tokio::time::interval(Duration::from_millis(500));
         let mut install_check = tokio::time::interval(Duration::from_secs(5));
+        let mut board_poll = tokio::time::interval(BOARD_REFRESH);
         while !app.quit {
             tokio::select! {
                 ev = events.next() => match ev {
@@ -160,8 +167,16 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
                     None => break,
                 },
                 Some(msg) = rx.recv() => app.on_incoming(msg).await,
-                _ = tick.tick(), if app.busy => {
+                _ = tick.tick(), if app.busy || app.board_running() => {
+                    if app.board.is_some() {
+                        app.rebuild_board();
+                    }
                     app.spin = app.spin.wrapping_add(1);
+                    app.draw();
+                }
+                // The board follows what runs in every session.
+                _ = board_poll.tick(), if app.board.is_some() => {
+                    app.refresh_board().await;
                     app.draw();
                 }
                 // The side panel follows its file as it changes (e.g. while zenbot edits it).

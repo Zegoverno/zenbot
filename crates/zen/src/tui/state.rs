@@ -111,6 +111,10 @@ pub(super) struct App {
     /// Tool calls and distinct files written or edited in the running turn, for the status line.
     pub(super) turn_tools: usize,
     pub(super) turn_files: std::collections::HashSet<String>,
+    /// The sessions board, while it's shown instead of a session.
+    pub(super) board: Option<Board>,
+    /// The session is a subagent's or a verifier's: watch it, don't type into it or stop it.
+    pub(super) read_only: bool,
 }
 
 /// A suggested next prompt (the kernel's `suggestion` event) and whether the owner took it into
@@ -209,6 +213,8 @@ impl App {
             expand_work: false,
             turn_tools: 0,
             turn_files: Default::default(),
+            board: None,
+            read_only: false,
         }
     }
 
@@ -241,7 +247,8 @@ impl App {
     }
 
     /// Leave the current session: disconnect and forget its transcript and turn state (the side
-    /// panel stays open; it shows a file, not the session).
+    /// panel stays open; it shows a file, not the session). A running turn keeps going in the
+    /// kernel; its events from the old connection are dropped (`on_incoming`).
     pub(super) fn reset_session(&mut self) {
         if let Some(r) = self.reader.take() {
             r.abort();
@@ -249,6 +256,7 @@ impl App {
         self.sink = None;
         self.session = None;
         self.title.clear();
+        self.read_only = false;
         self.session_tokens = 0;
         self.busy = false;
         self.aborting = false;
@@ -273,6 +281,7 @@ impl App {
         self.title = clean(s["title"].as_str().unwrap_or(""));
         self.model = s["model"].as_str().unwrap_or(&self.default_model).to_string();
         self.effort = s["effort"].as_str().map(String::from);
+        self.read_only = s["kind"].as_str().is_some_and(read_only_kind);
         self.connect(&id).await?;
         self.show_history(&s);
         Ok(())

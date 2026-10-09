@@ -7,6 +7,9 @@ pub(super) const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴"
 
 pub(super) const PLACEHOLDER: &str = "Ask zenbot to do something…";
 
+/// The input's placeholder in a subagent's or verifier's session.
+pub(super) const READ_ONLY: &str = "Read-only: zenbot drives this session · esc: back to the board";
+
 /// Smallest terminal (columns, rows) zen lays out; below it, a frame asks for more room.
 pub(super) const MIN_SIZE: (usize, usize) = (21, 6);
 
@@ -99,6 +102,10 @@ impl App {
             self.last_vh = 0;
             let out = self.screen.frame(rows, None);
             self.flush(out);
+            return;
+        }
+        if self.board.is_some() {
+            self.board_frame();
             return;
         }
         // Scrolled up: remember which entry the top line belongs to before the view re-renders.
@@ -200,6 +207,10 @@ impl App {
             let skip = partial.len().saturating_sub(6);
             lines.extend(partial.into_iter().skip(skip));
         }
+        // In a read-only session a refused send is said even while its turn runs.
+        if let Some((n, s)) = self.notice.as_ref().filter(|_| self.busy && self.read_only) {
+            lines.push(line(n.clone(), *s));
+        }
         if self.busy {
             let secs = self.turn_started.elapsed().as_secs();
             // How long the running tool has taken, so a long one (a subagent) visibly progresses.
@@ -212,7 +223,8 @@ impl App {
                 work.push_str(&format!(" · {} file{} edited", self.turn_files.len(), if self.turn_files.len() == 1 { "" } else { "s" }));
             }
             // The status gives way first, so the timing and the interrupt hint stay in view.
-            let tail = format!("{tool}  ·  turn {secs}s{work} · esc to interrupt");
+            let keys = if self.read_only { "esc: back to the board" } else { "esc to interrupt" };
+            let tail = format!("{tool}  ·  turn {secs}s{work} · {keys}");
             let room = w.saturating_sub(2 + UnicodeWidthStr::width(tail.as_str())).max(10);
             let mut status = vec![(format!("{} ", SPINNER[self.spin % SPINNER.len()]), Sty::Accent)];
             status.extend(screen::fit(&line(self.status.clone(), Sty::Plain), room, false));
@@ -223,8 +235,11 @@ impl App {
         }
 
         // A suggested next prompt shows as the input's grey placeholder.
-        let suggested = self.suggestion.as_ref().filter(|_| self.editor.is_empty() && !self.busy).map(|s| s.text.as_str());
-        let hint = if suggested.is_some() {
+        let suggested = self.suggestion.as_ref().filter(|_| self.editor.is_empty() && !self.busy && !self.read_only).map(|s| s.text.as_str());
+        let placeholder = if self.read_only { READ_ONLY } else { PLACEHOLDER };
+        let hint = if self.read_only {
+            ""
+        } else if suggested.is_some() {
             "tab: use suggestion"
         } else if self.editor.is_empty() {
             ""
@@ -233,7 +248,7 @@ impl App {
         } else {
             "enter send · alt+enter new line"
         };
-        let (input, crow, ccol) = self.editor.render(w, suggested.unwrap_or(PLACEHOLDER), hint, (self.height() / 2).max(3));
+        let (input, crow, ccol) = self.editor.render(w, suggested.unwrap_or(placeholder), hint, (self.height() / 2).max(3));
         let caret_row = lines.len() + crow;
         lines.extend(input);
 
@@ -257,7 +272,8 @@ impl App {
                 None => "new session".into(),
             };
             let effort = self.shown_effort().map(|e| format!(" · {e}")).unwrap_or_default();
-            let footer = format!("  {model}{effort} · {session} · {} tokens", fmt_tokens(self.session_tokens));
+            let watch = if self.read_only { " · read-only" } else { "" };
+            let footer = format!("  {model}{effort} · {session}{watch} · {} tokens", fmt_tokens(self.session_tokens));
             lines.push(line(footer, Sty::Dim));
         }
         (lines, caret_row, ccol, true)

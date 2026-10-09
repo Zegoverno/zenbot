@@ -717,7 +717,9 @@ async fn run(cli: Cli) -> Result<()> {
             (_, Some(id)) if !id.is_empty() => tui::Start::Resume(Some(id)),
             (_, Some(_)) => tui::Start::Resume(None),
             (true, None) => tui::Start::Continue,
-            _ => tui::Start::New,
+            // A model or thinking level asked for means a new session on it; plain `zen` is the board.
+            _ if cli.model.is_some() || cli.effort.is_some() => tui::Start::New,
+            _ => tui::Start::Board,
         };
         return tui::run(c, start, NewSession { model: cli.model, effort: cli.effort }, cli.inline).await;
     };

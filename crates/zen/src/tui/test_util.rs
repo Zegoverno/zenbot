@@ -65,6 +65,29 @@ pub(super) fn texts(lines: &[Line]) -> Vec<String> {
     lines.iter().map(|l| l.iter().map(|(t, _)| t.as_str()).collect()).collect()
 }
 
+/// The screen's rows as plain text, without escape codes (styles split words across codes).
+pub(super) fn plain_rows(a: &App) -> Vec<String> {
+    a.screen.rows().iter().map(|r| {
+        let mut out = String::new();
+        let mut chars = r.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                // CSI: ESC [ params final-byte
+                if chars.next() == Some('[') {
+                    for d in chars.by_ref() {
+                        if ('@'..='~').contains(&d) {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }).collect()
+}
+
 pub(super) fn width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }
