@@ -252,7 +252,7 @@ What it does, in order:
 1. Waits until the service's `/health` says `"busy":0` (no session working). After 30 minutes it goes ahead anyway and logs that it did.
 2. If migrations are pending, backs up the live database to `~/.zenbot/backups/<UTC time>-<previous version>.dump` (last 10 kept). If the backup fails, it aborts and changes nothing.
 3. Keeps the old binaries as `~/.zenbot/bin/<name>.prev`, installs `zend`, `zen` and `zen-engine` from `target/release`, writes the commit to `~/.zenbot/version`, and runs `sudo systemctl restart zenbot`. The kernel applies migrations at start.
-4. Waits up to 45 seconds for `/health` to say `"ok":true`. If it is healthy, it refreshes the timers from `deploy/` (`install_timers`) and runs `docker compose -f deploy/compose.yaml up -d`, so a new timer or compose service (such as SearXNG) arrives with the upgrade; a failure there is logged, not rolled back. If it isn't healthy, it logs the last 30 service log lines, puts the `.prev` binaries and the old version back, and restarts again. **A rollback does not restore the database.** When there was a backup, the log prints the exact command to restore it.
+4. Waits up to 45 seconds for `/health` to say `"ok":true`. If it is healthy, it removes the systemd timers older versions installed (`remove_old_timers`; the kernel schedules that work itself now, D-046) and runs `docker compose -f deploy/compose.yaml up -d`, so a new compose service (such as SearXNG) arrives with the upgrade; a failure there is logged, not rolled back. If it isn't healthy, it logs the last 30 service log lines, puts the `.prev` binaries and the old version back, and restarts again. **A rollback does not restore the database.** When there was a backup, the log prints the exact command to restore it.
 
 The restart ends the current turn's connection. In a zen session, the owner reconnects by sending the next message.
 
@@ -308,15 +308,28 @@ Each run gets a fresh copy of the task's files, its own kernel on port 18301, it
 
 Tasks live in `evals/tasks/<name>/` (`task.json` plus `files/`). See `evals/README.md` for the format and what makes a good task.
 
-## Memory sleep
+## Scheduled jobs
 
-`zen-sleep.timer` runs `scripts/sleep.sh` nightly (03:00 UTC, up to 30 minutes' random delay): it asks the running kernel to tidy short-term memory (`POST /api/memory/sleep?trigger=nightly`). The kernel does the work; the script only waits for it to be healthy and prints the counts.
+The kernel runs a scheduler (`jobs.rs`, D-046; DESIGN.md "Scheduled jobs"). Its own jobs are seeded at start: `sleep` (03:00 UTC) and `engines` (04:00 UTC). Agent jobs run a prompt in a fresh session of kind `job` and record its report; the owner adds them with `zen jobs add`, the agent with the `schedule` tool (live only past the System One gate, else paused until `zen jobs resume`).
 
 ```bash
-scripts/sleep.sh                             # sleep now (same as `zen memory sleep`)
+zen jobs                                      # every job: schedule, next run, last result
+zen jobs runs [name]                          # recent runs and their reports
+zen jobs run sleep                            # run a job now (here: the memory sleep)
+zen jobs add morning-brief -s "0 7 * * 1-5" -p "…"   # an agent job (America/Sao_Paulo unless --tz)
+zen jobs pause|resume|rm <name>
+```
+
+Throwaway kernels must not run the copy's jobs (an engine update on the real CLIs, agent jobs on real models): `upgrade.sh`'s smoke kernel, the e2e and eval kernels set `ZEN_JOBS=0`, and so does `dev.sh` unless you set `ZEN_JOBS=1`. The `scheduled-jobs` e2e scenario turns it on with `ZEN_JOBS_TICK=0.5` so runs start within a second.
+
+## Memory sleep
+
+The kernel's `sleep` job tidies short-term memory nightly (03:00 UTC); `zen memory sleep` runs it now.
+
+```bash
 zen memory                                   # short-term memory and the last sleep
 zen memory --tier archived                   # what the sleeps archived
-systemctl list-timers zen-sleep.timer        # next run
+zen jobs runs sleep                          # when it ran and what it did
 ```
 
 The sleep promotes on its own (D-045): lasting entries about the owner move to `USER.md`, lasting guidance to `IDENTITY.md` (under `## Learned`; only `owner`/`verified` entries), lasting knowledge is copied into the wiki. `ZEN_PROMOTE_BAR` (0.9) sets the bar. A prompt file over its cap (`ZEN_USER_CHARS`, `ZEN_IDENTITY_CHARS`) is compacted by a session the sleep starts (`sleep: compact USER.md` in `zen sessions`). Every change to a prompt file, by the sleep or the agent, first saves the old version to `~/.zenbot/backups/prompt-files/<name>-<time>.md` (kept 90 days); to undo, copy it back.
@@ -330,7 +343,6 @@ docker compose -f deploy/compose.yaml exec -T postgres psql -U zen -d zen_dev \
   -c "SELECT kind, count(*), count(embedding) FROM search_docs GROUP BY kind"   # what the dev kernel indexed
 ```
 
-`install.sh` installs the timers, and `apply-upgrade.sh` refreshes them after a healthy upgrade (`install_timers` in `scripts/lib.sh`), so a new timer arrives with an upgrade.
 
 ## Wiki
 
@@ -369,14 +381,14 @@ Every choice is a `decisions` row (`point = 'model'`); the owner's verdict on th
 
 ## Engine updates
 
-The Claude Code and Codex CLIs track their latest versions. `zen-engines.timer` runs `scripts/update-engines.sh` daily (04:00 UTC, up to an hour's random delay). Each update downloads from the vendor, checks the SHA-256, runs one real tool-free completion through `zen-engine`, and rolls back if it fails. It never commits, builds or restarts zenbot.
+The Claude Code and Codex CLIs track their latest versions. The kernel's `engines` job runs `scripts/update-engines.sh` daily (04:00 UTC), with the kernel's secret variables removed from its environment. Each update downloads from the vendor, checks the SHA-256, runs one real tool-free completion through `zen-engine`, and rolls back if it fails. It never commits, builds or restarts zenbot.
 
 ```bash
 scripts/update-engines.sh --check            # installed vs latest; changes nothing
 scripts/update-engines.sh                    # update now (safe from inside a zen session)
 ZEN_ENGINES=claude scripts/update-engines.sh # only some engines
 ZEN_ENGINES_FAIL=codex scripts/update-engines.sh  # force a failed check, to test the rollback
-systemctl list-timers zen-engines.timer      # next run
+zen jobs runs engines                        # when it ran, and its output
 ```
 
 Results go to `~/.zenbot/upgrade.log` (`engines:` lines) and `~/.zenbot/engines.json` (shown by `zen status`).

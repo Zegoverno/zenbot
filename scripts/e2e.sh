@@ -43,7 +43,8 @@ new_workspace() {
 start_kernel() {
   local ws=$1 script=$2; shift 2
   (
-    export ZEN_TOKEN=$TOKEN ZEN_PORT=$PORT ZEN_WORKERS=engine ZEN_FAUX=1 ZEN_FAUX_SCRIPT=$script ZEN_WORKSPACE=$ws \
+    # The scheduler is off unless a scenario turns it on (ZEN_JOBS=1).
+    export ZEN_JOBS=0 ZEN_TOKEN=$TOKEN ZEN_PORT=$PORT ZEN_WORKERS=engine ZEN_FAUX=1 ZEN_FAUX_SCRIPT=$script ZEN_WORKSPACE=$ws \
       ZEN_ENGINE_CMD="$BIN/zen-engine" DATABASE_URL="$DB_URL" HOME="$TMP/home"
     unset ZEN_S1_MODEL OPENROUTER_API_KEY
     for kv in "$@"; do export "$kv"; done
@@ -123,7 +124,7 @@ The owner's name is E2E Owner." >"$TMP/home/.zenbot/USER.md"
   check "the skills index is in the instructions" grep -q "work/verify:" <<<"$base"
   check "memory starts empty" grep -q "(empty)" <<<"$base"
   local tools; tools=$(q "SELECT string_agg(t->>'name', ',') FROM turns, envelopes e, jsonb_array_elements(e.tools) t WHERE turns.session_id='$sid' AND e.hash = turns.envelope")
-  check "the system tools, in order, no workflow tools" eq "$tools" bash,read,write,edit,history,search,ask,remember,capture,web_search,web_fetch,find_skills,load_skill,save_skill,find_tools,load_tool,call_tool,save_tool,verify,delegate
+  check "the system tools, in order, no workflow tools" eq "$tools" bash,read,write,edit,history,search,ask,remember,capture,web_search,web_fetch,find_skills,load_skill,save_skill,find_tools,load_tool,call_tool,save_tool,verify,delegate,schedule
 }
 
 # A home in the old flat layout moves into the scoped one (layout.rs) when the kernel starts, once:
@@ -516,6 +517,67 @@ slow_summary() {
   check "its tools ran (not interrupted)" eq "$(q "SELECT tool_errors || '/' || outcome FROM turns WHERE session_id='$sid' ORDER BY started_at DESC LIMIT 1")" 0/ok
 }
 
+# Scheduled jobs (jobs.rs): the kernel's own are seeded; an owner's job runs in a fresh session of
+# kind `job` with the context it picked and can't schedule; its report is recorded, a silent run is
+# kept out of sight, failures pause the job; a run missed beyond its grace is skipped, one within it
+# catches up once, a run cut by a restart is marked interrupted; a job the agent creates stays
+# paused unless System One judges the owner asked for it; a system job runs through the same engine.
+scheduled_jobs() {
+  local ws; ws=$(new_workspace jobs)
+  local port=$((PORT + 3))
+  python3 "$REPO/scripts/e2e/systemone_stub.py" "$port" & local srv=$!
+  local s1=(ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone")
+  start_kernel "$ws" "$(script jobs.json)" ZEN_JOBS=1 ZEN_JOBS_TICK=0.5 ZEN_DEFAULT_MODEL=faux/smoke "${s1[@]}"
+  poll() { local i; for i in $(seq 1 60); do [ "$(q "$1")" = "$2" ] && return 0; sleep 0.5; done; echo "        waited for [$2], got [$(q "$1")]" >&2; return 1; }
+  local runs="SELECT string_agg(r.status || '/' || r.trigger, ',' ORDER BY r.id) FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name ="
+  check "the system jobs are seeded" eq "$(zen jobs --json | jq -r '[.jobs[] | select(.kind == "system") | .name] | sort | join(",")')" engines,sleep
+  zen jobs add report-a --schedule "every 1h" --prompt "JOBTASK-A" >/dev/null
+  q "UPDATE jobs SET next_run_at = now() WHERE name = 'report-a'" >/dev/null
+  check "a due job runs once" poll "$runs 'report-a'" ok/schedule
+  check "its report is recorded" grep -q "Report A: all good." <<<"$(zen jobs runs report-a)"
+  check "and its next run is an hour on" eq "$(q "SELECT next_run_at BETWEEN now() + interval '55 minutes' AND now() + interval '61 minutes' FROM jobs WHERE name = 'report-a'")" t
+  local sid; sid=$(q "SELECT session_id FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name = 'report-a'")
+  check "in a session of kind job, listed for the owner" eq "$(zen sessions ls --json | jq -r --arg s "$sid" '.[] | select(.id == $s) | .title')" "job: report-a"
+  check "which can't schedule" grep -q "available in a scheduled job" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id = '$sid' AND payload->>'toolName' = 'schedule'")"
+  local base; base=$(q "SELECT payload->>'text' FROM tape_events WHERE session_id = '$sid' AND kind = 'base'")
+  check "with the job's context only: soul, owner, memory, the job note" bash -c 'grep -q "<soul" <<<"$1" && grep -q "<memory" <<<"$1" && grep -q "<scheduled_job name=\"report-a\"" <<<"$1" && ! grep -q "<identity" <<<"$1" && ! grep -q "<skills>" <<<"$1"' _ "$base"
+  zen jobs add quiet --schedule "every 1h" --prompt "JOBTASK-S" >/dev/null
+  zen jobs run quiet >/dev/null
+  check "a silent run is recorded" poll "$runs 'quiet'" silent/owner
+  check "and its session is out of sight" eq "$(q "SELECT s.archived FROM sessions s JOIN job_runs r ON r.session_id = s.id JOIN jobs j ON j.id = r.job_id WHERE j.name = 'quiet'")" t
+  zen jobs add broken --schedule "every 1h" --prompt "JOBTASK-F" >/dev/null
+  q "UPDATE jobs SET failures = 4 WHERE name = 'broken'" >/dev/null
+  zen jobs run broken >/dev/null
+  check "a failed run is an error" poll "$runs 'broken'" error/owner
+  check "the fifth failure in a row pauses the job" grep -q "paused after 5 failed runs in a row; last: the thing is broken" <<<"$(q "SELECT paused_reason FROM jobs WHERE name = 'broken' AND NOT enabled")"
+  q "UPDATE jobs SET next_run_at = now() - interval '3 hours' WHERE name = 'report-a'" >/dev/null
+  check "a run missed beyond its grace is skipped" poll "$runs 'report-a'" ok/schedule,missed/schedule
+  q "UPDATE jobs SET next_run_at = now() - interval '10 minutes' WHERE name = 'report-a'" >/dev/null
+  check "one within it catches up once" poll "$runs 'report-a'" ok/schedule,missed/schedule,ok/catchup
+  zen jobs pause report-a >/dev/null
+  q "INSERT INTO job_runs (job_id, trigger, status) SELECT id, 'schedule', 'running' FROM jobs WHERE name = 'quiet'" >/dev/null
+  check "a second run of a running job is refused" grep -q "already running" <<<"$(zen jobs run quiet 2>&1)"
+  stop_kernel
+  start_kernel "$ws" "$(script jobs.json)" ZEN_JOBS=1 ZEN_JOBS_TICK=0.5 ZEN_DEFAULT_MODEL=faux/smoke "${s1[@]}"
+  check "a run cut by a restart is marked interrupted" poll "$runs 'quiet'" silent/owner,interrupted/schedule
+  local r; r=$(zen ask --json -m faux/smoke "please schedule a report")
+  check "a job the agent creates waits for the owner below the bar" grep -q "paused, awaiting the owner's approval: System One gave 0.82 (needs 0.90)" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id = '$(echo "$r" | jq -r .session_id)' AND payload->>'toolName' = 'schedule'")"
+  check "with the judgment on record" eq "$(q "SELECT chosen || '@' || probability FROM decisions WHERE point = 'job_approval'")" paused@0.82
+  zen jobs resume agent-made >/dev/null
+  check "the owner's resume approves it" eq "$(q "SELECT enabled::text || '/' || created_by FROM jobs WHERE name = 'agent-made'")" true/agent
+  stop_kernel
+  start_kernel "$ws" "$(script jobs.json)" ZEN_JOBS=1 ZEN_JOBS_TICK=0.5 ZEN_DEFAULT_MODEL=faux/smoke ZEN_JOB_BAR=0.8 "${s1[@]}"
+  zen jobs rm agent-made >/dev/null
+  r=$(zen ask --json -m faux/smoke "please schedule a report")
+  check "above the bar it goes live" eq "$(q "SELECT enabled::text || '/' || (approval->>'probability') FROM jobs WHERE name = 'agent-made' AND removed_at IS NULL")" true/0.82
+  q "DELETE FROM sleep_runs" >/dev/null
+  zen jobs run sleep >/dev/null
+  check "a system job runs through the same engine" poll "$runs 'sleep'" ok/owner
+  check "the sleep ran as the nightly one" eq "$(q "SELECT trigger FROM sleep_runs")" nightly
+  check "zen status shows the jobs" grep -q "^jobs .*jobs (" <<<"$(zen status)"
+  kill "$srv" 2>/dev/null || true
+}
+
 run open-loop open_loop
 run restart-recovery restart_recovery
 run prompt-files prompt_files
@@ -537,6 +599,7 @@ run kernel-tools kernel_tools
 run secrets secrets_masked
 run slow-summary slow_summary
 run stale-turn stale_turn
+run scheduled-jobs scheduled_jobs
 echo "== tape"
 check "every tape is numbered and its hash chain recomputes" tape_is_sound
 

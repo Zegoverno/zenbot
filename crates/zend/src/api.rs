@@ -112,7 +112,7 @@ pub(crate) struct ListQuery {
 pub(crate) async fn list_sessions(State(app): State<AppState>, Query(q): Query<ListQuery>) -> ApiResult<Json<Value>> {
     let rows = sqlx::query(&format!(
         "SELECT {SESSION_COLUMNS}, {} AS cost
-         FROM sessions s WHERE s.archived = $1 AND s.kind IS NULL ORDER BY s.updated_at DESC",
+         FROM sessions s WHERE s.archived = $1 AND (s.kind IS NULL OR s.kind = 'job') ORDER BY s.updated_at DESC",
         session_cost("s.id")
     ))
     .bind(q.archived.unwrap_or(false))
@@ -418,8 +418,8 @@ pub(crate) struct SleepQuery {
     trigger: Option<String>,
 }
 
-/// Tidy short-term memory now: `?trigger=nightly` from the timer (scripts/sleep.sh), else the
-/// owner. The sleep runs in its own task, so a client that stops waiting doesn't cut it short.
+/// Tidy short-term memory now: `?trigger=nightly` is recorded as the nightly sleep (the scheduled
+/// `sleep` job calls `memory::sleep` itself), else the owner. The sleep runs in its own task, so a client that stops waiting doesn't cut it short.
 pub(crate) async fn run_sleep(State(app): State<AppState>, Query(q): Query<SleepQuery>) -> ApiResult<Json<Value>> {
     let trigger = if q.trigger.as_deref() == Some("nightly") { "nightly" } else { "owner" };
     let job = tokio::spawn(async move { memory::sleep(&app, trigger).await });
@@ -494,4 +494,56 @@ pub(crate) async fn undo_policy(State(app): State<AppState>) -> ApiResult<Json<V
     let Some((latest, data)) = previous else { return Err(ApiError(StatusCode::CONFLICT, "there is no policy to undo".into())) };
     let v = delegate::set_policy(&app.db, &data, &format!("undo v{latest}"), "owner").await?;
     Ok(Json(json!({ "version": v })))
+}
+
+// ---------- scheduled jobs (jobs.rs) ----------
+
+/// Every job with its schedule, next run and last result.
+pub(crate) async fn list_jobs(State(app): State<AppState>) -> ApiResult<Json<Value>> {
+    let jobs = jobs::list(&app.db).await.map_err(bad_request)?;
+    Ok(Json(json!({ "jobs": jobs.iter().map(jobs::job_json).collect::<Vec<_>>(), "scheduler": jobs::enabled() })))
+}
+
+/// The owner creates an agent job: {name, prompt, schedule, tz?, context?, skills?, model?, workspace?}.
+pub(crate) async fn create_job(State(app): State<AppState>, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
+    let (job, _) = jobs::create(&app, jobs::Spec::from_json(&body), jobs::By::Owner).await.map_err(bad_request)?;
+    Ok(Json(jobs::job_json(&job)))
+}
+
+/// The owner changes a job: `enabled` pauses or resumes it; other fields change an agent job.
+pub(crate) async fn update_job(State(app): State<AppState>, Path(name): Path<String>, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
+    let spec = jobs::Spec::from_json(&body);
+    let changes = spec.prompt.is_some() || spec.schedule.is_some() || spec.tz.is_some() || spec.context.is_some() || spec.skills.is_some() || spec.model.is_some() || spec.workspace.is_some();
+    let mut job = if changes { Some(jobs::update(&app, &name, spec, jobs::By::Owner).await.map_err(bad_request)?.0) } else { None };
+    if let Some(on) = body["enabled"].as_bool() {
+        job = Some(jobs::set_enabled(&app, &name, on, jobs::By::Owner).await.map_err(bad_request)?.0);
+    }
+    let job = match job {
+        Some(j) => j,
+        None => jobs::get(&app.db, &name).await.map_err(bad_request)?,
+    };
+    Ok(Json(jobs::job_json(&job)))
+}
+
+pub(crate) async fn delete_job(State(app): State<AppState>, Path(name): Path<String>) -> ApiResult<Json<Value>> {
+    jobs::remove(&app.db, &name).await.map_err(bad_request)?;
+    Ok(Json(json!({ "removed": name })))
+}
+
+/// Run a job now, in the background.
+pub(crate) async fn run_job(State(app): State<AppState>, Path(name): Path<String>) -> ApiResult<Json<Value>> {
+    let run = jobs::run_now(&app, &name, jobs::By::Owner).await.map_err(bad_request)?;
+    Ok(Json(json!({ "run": run, "job": name })))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RunsQuery {
+    job: Option<String>,
+    limit: Option<i64>,
+}
+
+/// Recent runs, newest first (`?job=` for one job).
+pub(crate) async fn list_job_runs(State(app): State<AppState>, Query(q): Query<RunsQuery>) -> ApiResult<Json<Value>> {
+    let runs = jobs::runs(&app.db, q.job.as_deref(), q.limit.unwrap_or(20)).await.map_err(bad_request)?;
+    Ok(Json(Value::Array(runs)))
 }

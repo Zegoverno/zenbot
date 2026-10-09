@@ -63,6 +63,8 @@ zen sessions ls | show <id> | new | archive <id> | restore <id> | rename <id> <t
 zen sessions decide <id> accept|more|reshape|drop [-n note]   # same as /done
 zen memory [--tier short|long|archived|all]       # what zenbot remembers, and the last sleep
 zen memory sleep                                  # tidy short-term memory now
+zen jobs [runs [name]]                            # scheduled jobs, and their reports
+zen jobs add <name> -s "0 7 * * 1-5" -p "…"       # run a prompt on a schedule (also: pause|resume|rm|run|set)
 zen ask -m claude/claude-sonnet-5-5 -e low "…"    # model and thinking level for a new session
 zen models                                        # models and their thinking levels, [default]
 zen status
@@ -76,13 +78,17 @@ A session is one job. zenbot gets tools, skills and memory rather than a fixed p
 - **Skills** are how to do a kind of work well: `~/.zenbot/global/skills/<domain>/<name>/SKILL.md` ([agentskills.io](https://agentskills.io) format). Only their names and descriptions are in the instructions; zenbot loads one when a job matches it. It starts with `work/brief` (frame a big, risky or unclear job: the real goal, scope, assumptions, criteria as commands) and `work/verify` (prove it before saying it's done).
 - **`verify`**: the kernel runs the criteria's commands itself, and when some need judgment a fresh verifier (no history, read-only) reads the diff and judges them.
 - **`ask`**: up to three questions only you can answer, each with options and a recommendation; the turn ends until you reply.
-- **Memory**: zenbot saves where things stand with `remember` (`MEMORY.md`, a fixed size, shown from the next session). Traits, guidance and preferences aren't memory: when one really matters, zenbot writes it straight into `IDENTITY.md` (about itself) or `USER.md` (about you) and keeps both compact (a full file is rewritten tighter, never cut); every version is backed up in `~/.zenbot/backups/prompt-files/`. A session that read the web, or a subagent, can't edit those files. Every night (`zen-sleep.timer`) a sleep keeps what's most likely needed, archives the rest (never deletes, but out of search) and promotes lasting entries on its own: about you into `USER.md`, about how it works into `IDENTITY.md` (backed up first, compacted when full), lasting knowledge into the wiki. The morning note lists what moved. `zen memory` shows it; `~/.zenbot/global/MEMORY.md` is a copy to read. `search` finds anything said or done in earlier sessions. Settings: `ZEN_MEMORY_CHARS` (size, default 4000), `ZEN_S1_PRIVATE=0` (keep memories away from the System One model; the sleep then ranks by recency).
+- **Memory**: zenbot saves where things stand with `remember` (`MEMORY.md`, a fixed size, shown from the next session). Traits, guidance and preferences aren't memory: when one really matters, zenbot writes it straight into `IDENTITY.md` (about itself) or `USER.md` (about you) and keeps both compact (a full file is rewritten tighter, never cut); every version is backed up in `~/.zenbot/backups/prompt-files/`. A session that read the web, or a subagent, can't edit those files. Every night (the kernel's `sleep` job) a sleep keeps what's most likely needed, archives the rest (never deletes, but out of search) and promotes lasting entries on its own: about you into `USER.md`, about how it works into `IDENTITY.md` (backed up first, compacted when full), lasting knowledge into the wiki. The morning note lists what moved. `zen memory` shows it; `~/.zenbot/global/MEMORY.md` is a copy to read. `search` finds anything said or done in earlier sessions. Settings: `ZEN_MEMORY_CHARS` (size, default 4000), `ZEN_S1_PRIVATE=0` (keep memories away from the System One model; the sleep then ranks by recency).
 
 `/done` records your verdict on the work so far.
 
 ## Skills and tools zenbot improves itself
 
 zenbot keeps its know-how as skills (`~/.zenbot/global/skills/`, a git repository) and can write tools of its own (`~/.zenbot/global/tools/`). It improves a skill when a job shows what works, rather than adding near-duplicates; a new skill stays a draft until you accept it (or a session that used it is accepted), and a new kind of work needs your OK. A tool it makes runs sandboxed, with no network, until you approve it. `zen skills` shows each skill's use; `zen skills accept|reject <domain/name>` and `zen tools accept|reject <name>` decide.
+
+## Scheduled jobs
+
+zenbot runs work on a schedule without you in the conversation. Ask for it ("every weekday at 7, brief me on …") and it creates the job with its `schedule` tool, or add one yourself with `zen jobs add`. Each run is a fresh session (`job: <name>` in your sessions) with only the instructions the job picks (the soul always; by default your profile and memory) and the skills it names; it can't ask you, delegate or schedule more jobs, takes no outward action, and ends with a report, or stays silent when there's nothing new. `zen jobs runs` shows the reports. A job zenbot creates goes live only when a fast model, reading your own words in that conversation, judges you asked for it; otherwise it waits paused until you `zen jobs resume` it. The same scheduler runs zenbot's own upkeep: the nightly memory sleep and the daily engine updates. Schedules: cron (`0 7 * * 1-5`, in America/Sao_Paulo unless `--tz`), `every 2h`, `at 2026-10-12 07:00`, `in 30m`.
 
 ## Subagents
 

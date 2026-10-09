@@ -74,6 +74,10 @@ impl Client {
         self.call(reqwest::Method::PATCH, path, Some(body)).await
     }
 
+    pub async fn delete(&self, path: &str) -> Result<Value> {
+        self.call(reqwest::Method::DELETE, path, None).await
+    }
+
     /// The kernel's health report (GET /health, no token needed).
     pub async fn health(&self) -> Result<Value> {
         let res = self.http.get(format!("{}/health", self.url)).send().await.with_context(|| format!("cannot reach zenbot at {}", self.url))?;

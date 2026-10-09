@@ -35,17 +35,16 @@ new_token() {
   chmod 600 "$HOME/.zenbot/token"
 }
 
-# The timers in deploy/ (engine updates, the memory sleep), written to /etc/systemd/system and
-# enabled. install.sh calls it, and apply-upgrade.sh, so an upgrade brings a new timer too.
-install_timers() {
-  local repo=$1 user=${USER:-$(id -un)} unit
-  for unit in zen-engines.service zen-engines.timer zen-sleep.service zen-sleep.timer; do
-    sed -e "s#__USER__#$user#g" -e "s#__REPO__#$repo#g" -e "s#__HOME__#$HOME#g" "$repo/deploy/$unit" \
-      | sudo tee "/etc/systemd/system/$unit" >/dev/null
+# The systemd timers older versions installed (engine updates, the memory sleep), stopped and
+# removed: the kernel's scheduler runs both now, as system jobs (D-046). install.sh and
+# apply-upgrade.sh (after the new kernel is healthy) call it; it does nothing when they're gone.
+remove_old_timers() {
+  local unit removed=
+  for unit in zen-engines.timer zen-engines.service zen-sleep.timer zen-sleep.service; do
+    [ -e "/etc/systemd/system/$unit" ] || continue
+    sudo systemctl disable --now "$unit" >/dev/null 2>&1 || true
+    sudo rm -f "/etc/systemd/system/$unit"
+    removed=1
   done
-  sudo systemctl daemon-reload
-  # Daily: the Claude Code and Codex CLIs on their latest versions, tested (scripts/update-engines.sh).
-  sudo systemctl enable --now zen-engines.timer >/dev/null 2>&1
-  # Nightly: short-term memory tidied to its size (scripts/sleep.sh).
-  sudo systemctl enable --now zen-sleep.timer >/dev/null 2>&1
+  [ -z "$removed" ] || sudo systemctl daemon-reload
 }

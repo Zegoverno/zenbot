@@ -115,6 +115,11 @@ enum Cmd {
         #[arg(long, default_value = "short")]
         tier: String,
     },
+    /// Scheduled jobs: the kernel's own (sleep, engines) and agent jobs; `zen jobs` lists them
+    Jobs {
+        #[command(subcommand)]
+        cmd: Option<JobsCmd>,
+    },
     /// Update zenbot to the latest version on GitHub (main) and restart it
     Upgrade {
         /// Only check whether an update is available
@@ -191,6 +196,67 @@ impl ReviewCmd {
             ReviewCmd::Reject { name } => (name, "reject"),
         }
     }
+}
+
+#[derive(Subcommand)]
+enum JobsCmd {
+    /// Create an agent job: a prompt run in a fresh session on a schedule
+    Add {
+        /// Lowercase letters, digits and hyphens, e.g. morning-brief
+        name: String,
+        /// When: a cron expression (`0 7 * * 1-5`), `every 2h`, `at 2026-10-12 07:00` or `in 30m`
+        #[arg(short, long)]
+        schedule: String,
+        /// The task, self-contained
+        #[arg(short, long)]
+        prompt: String,
+        /// IANA timezone the schedule is read in (default America/Sao_Paulo)
+        #[arg(long)]
+        tz: Option<String>,
+        /// Instruction parts besides the soul, comma-separated: identity, agents, user, memory, skills, project (default user,memory)
+        #[arg(long)]
+        context: Option<String>,
+        /// Skills loaded into its instructions, comma-separated (domain/name)
+        #[arg(long)]
+        skills: Option<String>,
+        /// Model (default: the default model when it runs)
+        #[arg(short, long)]
+        model: Option<String>,
+        /// Directory it works in (default: the workspace)
+        #[arg(long)]
+        dir: Option<String>,
+    },
+    /// Change an agent job's schedule, prompt, timezone, context, skills or model
+    Set {
+        name: String,
+        #[arg(short, long)]
+        schedule: Option<String>,
+        #[arg(short, long)]
+        prompt: Option<String>,
+        #[arg(long)]
+        tz: Option<String>,
+        #[arg(long)]
+        context: Option<String>,
+        #[arg(long)]
+        skills: Option<String>,
+        #[arg(short, long)]
+        model: Option<String>,
+    },
+    /// Pause a job
+    Pause { name: String },
+    /// Resume a paused job (also approves one the agent created)
+    Resume { name: String },
+    /// Remove an agent job (its runs stay on record)
+    Rm { name: String },
+    /// Run a job now
+    Run { name: String },
+    /// Recent runs and their reports (of one job, or all)
+    Runs {
+        name: Option<String>,
+        /// How many
+        #[arg(short = 'n', long, default_value_t = 10)]
+        limit: i64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -701,8 +767,10 @@ async fn run(cli: Cli) -> Result<()> {
             let git_identity = git_identity();
             let engines = engines_state();
             let memory = c.get("/api/memory").await.unwrap_or(Value::Null);
+            let jobs = c.get("/api/jobs").await.unwrap_or(Value::Null);
             let status = json!({
                 "memory": memory_summary(&memory),
+                "jobs": jobs,
                 "engines": engines,
                 "git_identity": git_identity,
                 "commit": health["commit"],
@@ -732,11 +800,14 @@ async fn run(cli: Cli) -> Result<()> {
                 }
                 match engines_line(&engines) {
                     Some(line) => println!("engines   {}", for_stdout(&line)),
-                    None => println!("engines   not checked yet (scripts/update-engines.sh, daily via zen-engines.timer)"),
+                    None => println!("engines   not checked yet (the `engines` job runs scripts/update-engines.sh daily)"),
                 }
                 println!("model     {}", for_stdout(models["default"].as_str().unwrap_or("")));
                 if !memory.is_null() {
                     println!("memory    {}", for_stdout(&memory_line(&memory)));
+                }
+                if !jobs.is_null() {
+                    println!("jobs      {}", for_stdout(&jobs_summary(&jobs)));
                 }
                 match models["scorer"].as_str() {
                     None => println!("scorer    off (set ZEN_S1_MODEL to score sessions)"),
@@ -845,6 +916,65 @@ async fn run(cli: Cli) -> Result<()> {
             let res = c.post(&format!("/api/tools/{}/review", enc(name.trim_start_matches("made_"))), json!({ "decision": decision })).await?;
             emit(json, &res, || res["result"].as_str().unwrap_or("").to_string());
         }
+        Cmd::Jobs { cmd: None } => {
+            let r = c.get("/api/jobs").await?;
+            if json {
+                out(&r);
+            } else {
+                if r["scheduler"] == false {
+                    println!("{}", dim("the scheduler is off in this kernel (ZEN_JOBS=0)"));
+                }
+                for j in r["jobs"].as_array().into_iter().flatten() {
+                    println!("{}", for_stdout(&job_line(j)));
+                }
+            }
+        }
+        Cmd::Jobs { cmd: Some(cmd) } => match cmd {
+            JobsCmd::Add { name, schedule, prompt, tz, context, skills, model, dir } => {
+                let body = json!({ "name": name, "schedule": schedule, "prompt": prompt, "tz": tz, "context": context, "skills": skills, "model": model, "workspace": dir });
+                let j = c.post("/api/jobs", body).await?;
+                emit(json, &j, || job_line(&j));
+            }
+            JobsCmd::Set { name, schedule, prompt, tz, context, skills, model } => {
+                let body = json!({ "schedule": schedule, "prompt": prompt, "tz": tz, "context": context, "skills": skills, "model": model });
+                let j = c.patch(&format!("/api/jobs/{}", enc(&name)), body).await?;
+                emit(json, &j, || job_line(&j));
+            }
+            JobsCmd::Pause { name } => {
+                let j = c.patch(&format!("/api/jobs/{}", enc(&name)), json!({ "enabled": false })).await?;
+                emit(json, &j, || job_line(&j));
+            }
+            JobsCmd::Resume { name } => {
+                let j = c.patch(&format!("/api/jobs/{}", enc(&name)), json!({ "enabled": true })).await?;
+                emit(json, &j, || job_line(&j));
+            }
+            JobsCmd::Rm { name } => {
+                let r = c.delete(&format!("/api/jobs/{}", enc(&name))).await?;
+                emit(json, &r, || format!("removed {name}"));
+            }
+            JobsCmd::Run { name } => {
+                let r = c.post(&format!("/api/jobs/{}/run", enc(&name)), json!({})).await?;
+                emit(json, &r, || format!("started run {} of {name}; see `zen jobs runs {name}`", r["run"]));
+            }
+            JobsCmd::Runs { name, limit } => {
+                let q = name.as_deref().map(|n| format!("&job={}", enc(n))).unwrap_or_default();
+                let r = c.get(&format!("/api/jobs/runs?limit={limit}{q}")).await?;
+                if json {
+                    out(&r);
+                } else {
+                    for x in r.as_array().into_iter().flatten() {
+                        let when = x["started_at"].as_str().map(|t| t.get(..16).unwrap_or(t).replace('T', " ")).unwrap_or_default();
+                        let session = x["session"].as_str().map(|s| format!(", session {}", &s[..8])).unwrap_or_default();
+                        println!("{} {}  {}", for_stdout(x["job"].as_str().unwrap_or("")), when, dim(&format!("{} ({}{session})", x["status"].as_str().unwrap_or(""), x["trigger"].as_str().unwrap_or(""))));
+                        if let Some(body) = x["output"].as_str().or(x["error"].as_str()) {
+                            for line in body.lines().take(12) {
+                                println!("  {}", for_stdout(line));
+                            }
+                        }
+                    }
+                }
+            }
+        },
         Cmd::Memory { cmd: None, tier } => {
             let m = c.get(&format!("/api/memory?tier={}", enc(&tier))).await?;
             if json {
@@ -923,6 +1053,41 @@ fn memory_summary(m: &Value) -> Value {
     let list = m["memories"].as_array().cloned().unwrap_or_default();
     let chars: usize = list.iter().map(|x| x["text"].as_str().map_or(0, str::len) + 10).sum();
     json!({ "entries": list.len(), "chars": chars, "size": m["size"], "last_sleep": m["last_sleep"] })
+}
+
+/// The jobs in a few words: how many, the next run, and anything failing or paused.
+fn jobs_summary(r: &Value) -> String {
+    let all: Vec<&Value> = r["jobs"].as_array().into_iter().flatten().collect();
+    if r["scheduler"] == false {
+        return format!("{} jobs; the scheduler is OFF in this kernel (ZEN_JOBS=0)", all.len());
+    }
+    let paused = all.iter().filter(|j| j["enabled"] != true).count();
+    let failing: Vec<&str> = all.iter().filter(|j| j["last_status"] == "error").filter_map(|j| j["name"].as_str()).collect();
+    let next = all.iter().filter(|j| j["enabled"] == true).filter_map(|j| Some((j["next_run_at"].as_str()?, j["name"].as_str()?))).min();
+    let mut s = format!("{} jobs ({paused} paused)", all.len());
+    if let Some((t, n)) = next {
+        s.push_str(&format!("; next: {n} at {} UTC", t.get(..16).unwrap_or(t).replace('T', " ")));
+    }
+    if !failing.is_empty() {
+        s.push_str(&format!("; last run FAILED: {} (`zen jobs runs`)", failing.join(", ")));
+    }
+    s
+}
+
+/// One job on one line: name, kind, schedule, and when it runs next (or why it's paused).
+fn job_line(j: &Value) -> String {
+    let t = |k: &str| j[k].as_str().map(|t| t.get(..16).unwrap_or(t).replace('T', " ")).unwrap_or_default();
+    let state = if j["enabled"] == true {
+        match j["next_run_at"].as_str() {
+            Some(_) => format!("next {} UTC", t("next_run_at")),
+            None => "nothing ahead".into(),
+        }
+    } else {
+        format!("paused: {}", j["paused_reason"].as_str().unwrap_or("paused"))
+    };
+    let last = j["last_status"].as_str().map(|s| format!("; last {s} {} UTC", t("last_run_at"))).unwrap_or_default();
+    let when = format!("{} ({})", j["schedule"].as_str().unwrap_or(""), j["tz"].as_str().unwrap_or(""));
+    format!("{:<16} {:<6} {:<34} {state}{last}", j["name"].as_str().unwrap_or(""), j["kind"].as_str().unwrap_or(""), when)
 }
 
 fn memory_line(m: &Value) -> String {

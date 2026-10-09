@@ -69,7 +69,8 @@ SMOKE_DB_URL=$(db_url_for "$SMOKE_DB")
   # The smoke kernel runs on a copy of the live database: without these it would start scoring and
   # embedding with the owner's OpenRouter key on every upgrade (real money, nothing tested).
   unset OPENROUTER_API_KEY ZEN_S1_MODEL BRAVE_API_KEY TAVILY_API_KEY
-  ZEN_TOKEN="$(cat "$HOME/.zenbot/token")" ZEN_PORT=$SMOKE_PORT ZEN_WORKERS=engine ZEN_FAUX=1 ZEN_WORKSPACE="$SMOKE_WS" ZEN_HOME="$SMOKE_WS/.zenbot" \
+  # ZEN_JOBS=0: the copy's scheduled jobs must not run (engine updates, agent jobs on real models).
+  ZEN_JOBS=0 ZEN_TOKEN="$(cat "$HOME/.zenbot/token")" ZEN_PORT=$SMOKE_PORT ZEN_WORKERS=engine ZEN_FAUX=1 ZEN_WORKSPACE="$SMOKE_WS" ZEN_HOME="$SMOKE_WS/.zenbot" \
     ZEN_HARNESS="$(git rev-parse --short HEAD)" DATABASE_URL="$SMOKE_DB_URL" \
     exec ./target/release/zend
 ) >>"$SMOKE_LOG" 2>&1 &

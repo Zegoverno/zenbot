@@ -233,7 +233,7 @@ Moved to [CONTEXT.md](CONTEXT.md#how-success-is-measured).
 |---|---|
 | Building the tool instead of doing the work | Payback rule; pilot project in every milestone; time cap on zenbot work |
 | Subscription policies change | Router degrades to API providers; budgets ready |
-| Vendor CLI churn | The Claude Code and Codex CLIs track their latest versions daily, tested and rolled back on failure (`scripts/update-engines.sh`, `zen-engines.timer`); every turn records the engine version it ran; wrap behind the worker protocol |
+| Vendor CLI churn | The Claude Code and Codex CLIs track their latest versions daily, tested and rolled back on failure (`scripts/update-engines.sh`, the kernel's `engines` job); every turn records the engine version it ran; wrap behind the worker protocol |
 | Two languages slow the solo builder | Protocol-first; thin kernel early; generate types |
 | Prompt injection / exfiltration | Taint rule, credential injection, approvals, egress allow-lists |
 | Knowledge rot (wrong wiki pages compound) | Citations, confidence, lint, human-approved writes |

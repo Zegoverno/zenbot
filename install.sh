@@ -92,7 +92,7 @@ git rev-parse --short HEAD > "$HOME/.zenbot/version" 2>/dev/null || true
 say "Service"
 sed -e "s#__USER__#$USER#g" -e "s#__REPO__#$REPO#g" -e "s#__HOME__#$HOME#g" deploy/zenbot.service \
   | sudo tee /etc/systemd/system/zenbot.service >/dev/null
-install_timers "$REPO" # engine updates (daily) and the memory sleep (nightly)
+remove_old_timers # the kernel schedules engine updates and the memory sleep itself (zen jobs)
 sudo systemctl enable zenbot >/dev/null 2>&1
 sudo systemctl restart zenbot
 wait_healthy "http://127.0.0.1:$PORT/health" 60 || { echo "zenbot did not become healthy; see: journalctl -u zenbot -n 50"; exit 1; }

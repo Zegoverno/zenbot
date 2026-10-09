@@ -90,7 +90,7 @@ summarized in the background with block addresses; the `history` tool reads any 
 
 Fixed order, the same every turn of a session: `bash`, `read`, `write`, `edit`, `history`, `ask`,
 `remember`, `web_search`, `web_fetch`, `find_skills`, `load_skill`, `find_tools`, `load_tool`,
-`call_tool`, `verify`, and `decide` when a System One model is configured. A verifier session gets only `bash` (read-only, bubblewrap), `read` and
+`call_tool`, `verify`, `delegate`, `schedule`, and `decide` when a System One model is configured. A verifier session gets only `bash` (read-only, bubblewrap), `read` and
 `submit_verdict`. Each description says what the tool does, when to use it and when not, and what
 it returns. Tool output is cut once, when the tool runs (full output saved and referenced); edits
 are serialized per file and CRLF/BOM-safe; tools are cancelled with their process group on abort.
@@ -102,13 +102,43 @@ big, risky or unclear job; the `verify` tool has the kernel run the criteria's c
 criteria that need judgment, a fresh read-only verifier session judge the diff. `ask` ends the turn
 with questions for the owner. The kernel-enforced workflow (`flow.rs`) was removed on 2026-10-07.
 
+### Scheduled jobs
+
+One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
+
+- **System jobs**, seeded at start: `sleep` (03:00 UTC, `memory::sleep`) and `engines` (04:00 UTC,
+  `scripts/update-engines.sh` with the kernel's secrets removed). The owner can pause or run them.
+- **Agent jobs**: a prompt run in a fresh session of kind `job`, titled `job: <name>` and listed
+  with the owner's sessions. Its instructions (a `base` block written before the turn) are the
+  parts the job picked (`context`: the soul always, plus identity, agents, user, memory, skills,
+  project; default user and memory) with its named skills loaded and a `<scheduled_job>` note: no
+  one is there, report what needs attention, `[SILENT]` when nothing does, `[FAILED]` when it
+  can't, no outward action. The prompt carries the previous report. A job session can't `ask`,
+  `delegate` or `schedule` (`agent::refusal`). A silent run's session is archived.
+- **Creating jobs**: the owner (`zen jobs add`, `POST /api/jobs`) or the agent (`schedule`). An
+  agent's job goes live only when System One, reading the owner's own messages in the session,
+  gives ≥ `ZEN_JOB_BAR` (0.9) that the owner asked for it (decision point `job_approval`);
+  otherwise, or in a tainted session, it's saved paused with the reason, and the owner's
+  `zen jobs resume` approves it. The agent can't set a job's model.
+- **Running**: the loop sleeps until the earliest due job (at most `ZEN_JOBS_TICK`, 60 s), claims
+  due jobs with `FOR UPDATE SKIP LOCKED` and sets their next run in the same transaction; a partial
+  unique index allows one `running` run per job; a running job counts as busy for upgrades. At
+  start, runs left `running` are marked `interrupted`. A run later than its grace (half its period,
+  2 minutes to 2 hours) is recorded `missed`; within it, it runs once (`catchup`). A failing agent
+  job's next run waits at least 1, 5, 15, then 60 minutes, and the 5th failure in a row pauses it.
+- **Schedules**: 5-field cron in the job's IANA zone (`croner`, `chrono-tz`; default
+  America/Sao_Paulo, `ZEN_TZ`), `every <duration>`, `at <time>`, `in <duration>` (stored as `at`);
+  agent jobs at most every 5 minutes.
+- `ZEN_JOBS=0` turns the scheduler off (smoke, e2e, eval and dev kernels); system jobs are still
+  seeded.
+
 ### Memory and skills
 
 - **Short-term memory** (`memory.rs`, table `memories`): `remember` adds, replaces or removes an
   entry with its source (`owner`, `verified`, `inferred`). Rendered into the instructions at a
   session's start (frozen for the session) and exported to `~/.zenbot/global/MEMORY.md`. Size
   `ZEN_MEMORY_CHARS` (4000); writes past twice that are refused and start a sleep at once.
-- **Sleep** (`memory::sleep`, `scripts/sleep.sh` from `zen-sleep.timer` nightly, `zen memory
+- **Sleep** (`memory::sleep`, the kernel's `sleep` job nightly at 03:00 UTC, `zen memory
   sleep`): ranks entries (System One's "needed soon" when allowed, else recency; the owner's words
   and verified results a little higher), keeps what fits and archives the rest (out of the search
   index). First it promotes on its own (D-045, bar `ZEN_PROMOTE_BAR` 0.9): lasting and about the
@@ -206,9 +236,9 @@ are covered by the system prompt ("ask before"), not enforced.
 - `deploy/compose.yaml` runs Postgres (pgvector) and SearXNG (keyless web search). `zend` runs on the host as the systemd service
   `zenbot` (installed by `install.sh`) and starts its workers. One port for API, WebSocket and web
   UI; `/health` reports the database, workers and busy sessions.
-- `zen-engines.timer` updates the Claude Code and Codex CLIs daily, tested, with rollback.
-  `zen-sleep.timer` runs the memory sleep nightly. Both are installed by
-  `install.sh` and refreshed after each upgrade.
+- The kernel's `engines` job updates the Claude Code and Codex CLIs daily, tested, with rollback;
+  its `sleep` job runs the memory sleep nightly ("Scheduled jobs"). The systemd timers that ran
+  them before D-046 are removed by `install.sh` and by the first healthy upgrade.
 - CI publishes binaries for every commit on `main` that passes its checks; installs and upgrades
   download them or compile. `scripts/upgrade.sh` checks, smoke-tests on a throwaway database copy,
   backs up before migrations, restarts when no session is busy, and rolls back if unhealthy

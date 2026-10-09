@@ -10,6 +10,7 @@ mod layout;
 mod delegate;
 mod dispatch;
 mod git;
+mod jobs;
 mod mcp;
 mod measure;
 mod memory;
@@ -221,6 +222,7 @@ async fn main() -> Result<()> {
     tokio::spawn(watchdog(app.clone()));
     tokio::spawn(score::idle_loop(app.clone()));
     tokio::spawn(search::index_loop(app.clone()));
+    tokio::spawn(jobs::run_loop(app.clone()));
 
     let api = Router::new()
         .route("/models", get(list_models))
@@ -236,6 +238,10 @@ async fn main() -> Result<()> {
         .route("/skills/review", axum::routing::post(review_skill))
         .route("/tools/{name}/review", axum::routing::post(review_tool))
         .route("/memory/sleep", axum::routing::post(run_sleep))
+        .route("/jobs", get(list_jobs).post(create_job))
+        .route("/jobs/runs", get(list_job_runs))
+        .route("/jobs/{name}", axum::routing::patch(update_job).delete(delete_job))
+        .route("/jobs/{name}/run", axum::routing::post(run_job))
         .route("/version", get(version))
         .route("/upgrade", get(upgrade_status).post(upgrade_start))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth));

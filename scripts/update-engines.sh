@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Keep the model engines' CLIs on their latest versions: Claude Code and Codex.
-# Run daily by zen-engines.timer (deploy/); safe to run by hand, also from inside a zen session.
+# Run daily by the kernel's `engines` job (jobs.rs); safe to run by hand, also from inside a zen session.
 #
 #   scripts/update-engines.sh           update what is behind, test it, roll back what fails
 #   scripts/update-engines.sh --check   report installed and latest versions; change nothing

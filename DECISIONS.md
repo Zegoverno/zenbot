@@ -6,6 +6,50 @@
 
 ---
 
+## D-046 — Scheduled jobs in the kernel; the sleep and engine updates move off systemd timers
+
+**Date:** 2026-10-09 · **Status:** accepted (owner) · **Supersedes:** D-022's daily timer for engine
+updates and the nightly `zen-sleep.timer` (the jobs themselves are unchanged)
+
+**Decision:** One scheduler in `zend` (`jobs.rs`), backed by Postgres (`jobs`, `job_runs`), runs
+the kernel's own maintenance as **system** jobs (`sleep` at 03:00 UTC, `engines` at 04:00 UTC,
+seeded at start; they can be paused and run, never removed) and **agent** jobs: a prompt run in a
+fresh session of kind `job`. An agent job picks its instructions (`context`: the soul always, plus
+any of identity, agents, user, memory, skills, project; default user and memory, owner 2026-10-09)
+and names skills loaded into them; the run can't ask, delegate or schedule, takes no outward action
+(prompt rule, as everywhere) and answers with a report (`[SILENT]` when there's nothing new, kept
+out of sight). Both the owner (`zen jobs`, `/api/jobs`) and the agent (`schedule` tool) create jobs
+(owner, 2026-10-09). An agent's job goes live only if System One, reading only the owner's own
+messages in that session, judges that the owner asked for it or clearly wants it (≥ `ZEN_JOB_BAR`,
+0.9); otherwise, or in a session that read untrusted content, it's saved paused until the owner
+resumes it. The agent can't set a job's model. Schedules: 5-field cron in an IANA zone per job
+(default America/Sao_Paulo), `every <duration>`, `at <time>`, `in <duration>`; agent jobs at most
+every 5 minutes. Due jobs are claimed with `FOR UPDATE SKIP LOCKED` and their next run set in the
+same transaction (a crash loses at most one run, never repeats one); the database allows one
+running run per job; a restart marks unfinished runs `interrupted`; a run missed while the kernel
+was down catches up once within its grace (half its period, 2 minutes to 2 hours), else it's
+recorded as missed. A failing agent job waits 1, 5, 15, then 60 minutes at least before its next
+run (never more often than scheduled) and is paused after 5 failures in a row. The upgrade removes
+the old timers once the new kernel is healthy; throwaway kernels (smoke test, e2e, eval, dev) run
+with `ZEN_JOBS=0`.
+
+**Why:** The owner wants an agent that works on a schedule without them in the conversation; the
+two timers were fixed, single-purpose and invisible to the kernel. One engine makes maintenance and
+agent work visible in the same place (`zen jobs`, `zen status`) with the same guarantees. The gate
+lets the agent act when it's clearly asked, without letting it, or text it read, create unattended
+work on its own initiative; the owner's resume is the approval otherwise.
+
+**Considered:** pg_cron (only runs SQL inside Postgres, isn't in the pgvector image, needs
+`shared_preload_libraries`; the kernel would still need the trigger listener, catch-up, overlap
+guards and delivery, so it adds a part without removing one); keeping the systemd timers next to
+the scheduler (two places to look); Hermes' JSON-file store and OpenClaw's SQLite store (we have
+Postgres); making the sleep an agent session (it's checked kernel code; a model would make it
+costlier and less predictable); pre-run scripts that skip the model when nothing changed (later,
+if job costs call for it). Patterns from Hermes (`cron/`) and OpenClaw (`src/cron/`), read in code
+2026-10-09.
+
+---
+
 ## D-045 — IDENTITY.md; the agent keeps its prompt files; memory is promoted into them and the wiki
 
 **Date:** 2026-10-08 · **Status:** accepted (owner) · **Supersedes:** D-035's promotion to
@@ -483,6 +527,8 @@ working on the newer schema.
 ---
 
 ## D-022 — Vendor CLIs on their latest versions; Pi pinned
+
+> Runs as the kernel's `engines` job since D-046 (2026-10-09), no longer a systemd timer.
 
 **Decision:** `scripts/update-engines.sh`, daily via `zen-engines.timer`, updates Claude Code and
 Codex (vendor release, checksum-verified, installed next to the old one). Each update must pass a
