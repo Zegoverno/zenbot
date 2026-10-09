@@ -31,6 +31,8 @@ if [ -z "${ZEN_DEV_HOME:-}" ] && [ -d "$HOME/.zenbot/dev" ]; then
   mv "$HOME/.zenbot/dev" "$HOME/.zenbot-dev"
 fi
 export ZEN_HOME=${ZEN_DEV_HOME:-$HOME/.zenbot-dev}
+# A dev kernel doesn't run scheduled jobs (they would update the real CLIs); ZEN_JOBS=1 turns them on.
+export ZEN_JOBS=${ZEN_JOBS:-0}
 
 docker compose -f deploy/compose.yaml up -d --wait postgres
 [ "$(db_psql -d postgres -c "SELECT 1 FROM pg_database WHERE datname = '$DB'")" = 1 ] ||

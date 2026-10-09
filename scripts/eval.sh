@@ -140,7 +140,7 @@ start_kernel() { # bin workspace db label log [task-env…]
     for kv in "${task_env[@]}"; do export "$kv"; done
     # Its own zenbot home: the default prompt files and skills, not the owner's, and memory exports
     # that never touch ~/.zenbot (a build that predates ZEN_HOME ignores it).
-    ZEN_TOKEN="$TOKEN" ZEN_PORT=$PORT ZEN_WORKSPACE="$2" ZEN_HARNESS="$4" ZEN_WORKERS=engine ZEN_FAUX=1 \
+    ZEN_JOBS=0 ZEN_TOKEN="$TOKEN" ZEN_PORT=$PORT ZEN_WORKSPACE="$2" ZEN_HARNESS="$4" ZEN_WORKERS=engine ZEN_FAUX=1 \
       ZEN_ENGINE_CMD="$1/zen-engine" DATABASE_URL="$db_url" ZEN_HOME="$2.zenbot" \
       exec "$1/zend"
   ) >"$5" 2>&1 &

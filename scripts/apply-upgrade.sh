@@ -43,8 +43,8 @@ sudo systemctl restart zenbot
 
 if wait_healthy "$HEALTH" 45; then
   log "upgrade OK: now running $(cat "$HOME/.zenbot/version")"
-  # Timers a new version brings (deploy/); the service unit itself only changes with install.sh.
-  install_timers "$REPO" 2>>"$LOG" || log "installing the timers failed; re-run install.sh"
+  # The kernel's scheduler runs the sleep and engine updates now (D-046): the old timers go.
+  remove_old_timers 2>>"$LOG" || log "removing the old zen-sleep/zen-engines timers failed; remove them by hand"
   # Services a new version brings in deploy/compose.yaml (e.g. SearXNG for web search).
   sudo docker compose -f "$REPO/deploy/compose.yaml" up -d >>"$LOG" 2>&1 || log "starting the compose services failed; see the log above"
   exit 0
