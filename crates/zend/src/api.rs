@@ -121,8 +121,40 @@ pub(crate) async fn list_sessions(State(app): State<AppState>, Query(q): Query<L
     Ok(Json(Value::Array(rows.iter().map(session_json).collect())))
 }
 
+/// Every session for the sessions board (`zen`'s home screen): main and job sessions, archived
+/// ones too, and their child sessions (subagents, verifiers) with the task each was given. Each
+/// says whether a turn is running in it right now; the client nests children under their parent.
+/// No costs: the board polls this, and they'd double its time.
+pub(crate) async fn board(State(app): State<AppState>) -> ApiResult<Json<Value>> {
+    let rows = sqlx::query(&format!(
+        "SELECT {SESSION_COLUMNS},
+           CASE WHEN s.parent IS NOT NULL THEN
+             (SELECT e.payload->'content' FROM tape_events e
+              WHERE e.session_id = s.id AND e.kind = 'message' AND e.payload->>'role' = 'user' ORDER BY e.seq LIMIT 1)
+           END AS task
+         FROM sessions s ORDER BY s.updated_at DESC"
+    ))
+    .fetch_all(&app.db)
+    .await?;
+    let running: HashSet<Uuid> = app.turns.lock().await.keys().copied().collect();
+    let sessions = rows
+        .iter()
+        .map(|r| {
+            let mut s = session_json(r);
+            // Polled every few seconds: costs (a sum per session) are left to the session's own view.
+            s.as_object_mut().map(|o| o.remove("cost"));
+            s["busy"] = json!(running.contains(&r.get::<Uuid, _>("id")));
+            if let Some(task) = r.get::<Option<Value>, _>("task") {
+                s["task"] = json!(zen_proto::text_of(&task).chars().take(200).collect::<String>());
+            }
+            s
+        })
+        .collect();
+    Ok(Json(json!({ "sessions": Value::Array(sessions) })))
+}
+
 /// The columns `session_json` reads, without the cost (each query computes it its own way).
-const SESSION_COLUMNS: &str = "id, title, model, effort, archived, created_at, updated_at";
+const SESSION_COLUMNS: &str = "id, title, model, effort, archived, created_at, updated_at, kind, parent";
 
 pub(crate) fn session_json(r: &sqlx::postgres::PgRow) -> Value {
     json!({
@@ -131,6 +163,9 @@ pub(crate) fn session_json(r: &sqlx::postgres::PgRow) -> Value {
         "model": r.get::<String, _>("model"),
         "effort": r.get::<Option<String>, _>("effort"),
         "archived": r.get::<bool, _>("archived"),
+        // None for a session the owner started; "job", "subagent" or "verifier" otherwise.
+        "kind": r.get::<Option<String>, _>("kind"),
+        "parent": r.get::<Option<Uuid>, _>("parent"),
         "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
         "updated_at": r.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
         "cost": r.try_get::<f64, _>("cost").unwrap_or(0.0),

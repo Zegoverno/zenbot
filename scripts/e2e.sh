@@ -330,6 +330,21 @@ delegation() {
   check "undo restores the earlier policy" eq "$(zen policy --json | jq -c .policy)" '{"routes":{}}'
   r=$(zen ask --json -m faux/smoke "waitless")
   check "ask with wait=false keeps working" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" ask:false,bash:false
+  # The sessions board: a running subagent shows with its task under its running parent.
+  board() { curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/board"; }
+  zen ask --json -m faux/smoke "hand off a doze" >/dev/null &
+  local asker=$! seen="" i
+  for i in $(seq 1 60); do
+    seen=$(board | jq -r '[.sessions[] | select(.kind == "subagent" and .busy and ((.task // "") | contains("doze for a bit")))] | length')
+    [ "$seen" = 1 ] && break
+    sleep 0.25
+  done
+  check "the board shows the running subagent with its task" eq "$seen" 1
+  local parent; parent=$(board | jq -r '.sessions[] | select(.kind == "subagent" and .busy) | .parent')
+  check "under its running parent" eq "$(board | jq -r --arg p "$parent" '.sessions[] | select(.id == $p) | "\(.busy) \(.kind)"')" "true null"
+  wait "$asker"
+  check "all idle once it's done" eq "$(board | jq '[.sessions[] | select(.busy)] | length')" 0
+  check "finished subagents stay listed under their parent" eq "$(board | jq --arg p "$sid" '[.sessions[] | select(.parent == $p and .kind == "subagent")] | length')" 2
 }
 
 # remember: a memory saved in one session is in the next session's instructions, not the current one's.

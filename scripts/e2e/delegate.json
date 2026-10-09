@@ -5,5 +5,7 @@
   {"when": "subtask", "tool": "write", "args": {"path": "~/.zenbot/agents/zenbot/IDENTITY.md", "content": "rewritten by a subagent"}},
   {"when": "waitless", "tool": "ask", "args": {"questions": [{"question": "Which name?", "options": ["a", "b"]}], "wait": false}},
   {"when": "waitless", "tool": "bash", "args": {"command": "echo still-working"}},
+  {"when": "hand off a doze", "tool": "delegate", "args": {"task": "doze for a bit"}},
+  {"when": "doze for a bit", "tool": "bash", "args": {"command": "sleep 4; echo awake"}},
   {"text": "Done."}
 ]
