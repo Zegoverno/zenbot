@@ -110,6 +110,9 @@ agent jobs run prompts on a schedule. Their reports are only seen in `zen jobs r
 list; the next step for reach is a channel that brings them to the owner's phone (Telegram or
 WhatsApp), then pre-run checks that skip the model when nothing changed, if job costs call for it.
 
+zen opens on a sessions board (D-048): every session, running or idle, with its subagents. It
+polls the kernel every 2 s; a kernel-wide event stream is the upgrade if that feels slow.
+
 The redesign's phases are built. Next: keep dogfooding zenbot on real work and let sessions,
 verdicts and the owner's reviews (proposed edits to `IDENTITY.md` and `USER.md`, skill drafts, tools,
 routes) drive what changes.

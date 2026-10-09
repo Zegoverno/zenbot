@@ -6,6 +6,20 @@
 
 ---
 
+## 2026-10-09 — The sessions board (D-048)
+
+- `zen` (full screen) opens on a board of every session: Main, Jobs and Archived sections, running
+  first. Each row shows running or idle, the model and the time since the last activity, with
+  subagents and verifiers nested under their parent with their task. Enter dives in, `n` starts a
+  new session, `/` filters, `a` shows archived sessions, `q` quits; `/board`, or Esc on an empty
+  input, comes back without stopping a running turn.
+- Subagent and verifier sessions open read-only: no sending, and Esc and Ctrl+C don't interrupt
+  them.
+- Kernel: `GET /api/board` (every session with `kind`, `parent`, `busy` and the child's `task`, no
+  costs); `kind` and `parent` added to every session's JSON.
+- Tests: 7 render/key tests in `tui/board.rs`; the `delegation` e2e scenario checks a running
+  subagent, with its task, under its running parent, and both idle after.
+
 ## 2026-10-09 — Session names and suggested next prompts (D-047)
 
 - After each owner's turn, one call to the assist model (`assist.rs`; `ZEN_ASSIST_MODEL`, Haiku 5.5)

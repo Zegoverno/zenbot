@@ -228,6 +228,7 @@ async fn main() -> Result<()> {
     let api = Router::new()
         .route("/models", get(list_models))
         .route("/sessions", get(list_sessions).post(create_session))
+        .route("/board", get(board))
         .route("/sessions/{id}", get(get_session).patch(update_session))
         .route("/sessions/{id}/ws", get(session_ws))
         .route("/sessions/{id}/decision", axum::routing::post(decide))

@@ -49,7 +49,7 @@ These hold today and in the target design. Changing one needs the owner's OK and
 | Process | Language | Responsibility |
 |---|---|---|
 | `zend` | Rust (axum, sqlx, tokio) | Always-on kernel; owns state and side effects; single binary |
-| `zen` | Rust | Terminal app (full screen with diffed frames, scrolling and a file side panel, or `--inline`) and script commands (`--json`) |
+| `zen` | Rust | Terminal app (full screen with a sessions board as home, diffed frames, scrolling and a file side panel, or `--inline`) and script commands (`--json`) |
 | `zen-engine` | Rust | Default worker: runs turns on the Claude Code CLI and `codex app-server` on the owner's subscriptions, with zenbot's prompt, tools and history |
 | Postgres | — | 16+ with pgvector; local in compose, movable via `DATABASE_URL` |
 

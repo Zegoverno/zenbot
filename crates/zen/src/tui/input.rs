@@ -16,6 +16,7 @@ pub(super) const fn cmd(name: &'static str, help: &'static str, takes_arg: bool)
 pub(super) const COMMANDS: &[Command] = &[
     cmd("/new", "start a new session", false),
     cmd("/resume", "switch to another session", false),
+    cmd("/board", "every session, running or idle, with its subagents (also esc on an empty input)", false),
     cmd("/model", "choose the model", false),
     cmd("/effort", "choose the thinking level", false),
     cmd("/done", "judge the work so far: accept, more, reshape or drop", false),
@@ -61,6 +62,12 @@ impl App {
     pub(super) async fn on_terminal(&mut self, ev: Event) -> Result<()> {
         match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => self.on_key(k).await?,
+            Event::Paste(s) if self.board.is_some() => {
+                if let Some(b) = self.board.as_mut().filter(|b| b.filtering) {
+                    b.filter.push_str(&clean(&s).replace('\n', " "));
+                    self.rebuild_board();
+                }
+            }
             Event::Paste(s) if self.picker.is_none() => self.editor.insert(&s),
             Event::Resize(cols, rows) => {
                 // The terminal has re-wrapped what was on screen; find the region again before redrawing.
@@ -72,6 +79,21 @@ impl App {
             Event::Mouse(m) => {
                 // The wheel scrolls whichever side is under the pointer.
                 let (x, y) = (m.column as usize, m.row as usize);
+                if self.board.is_some() {
+                    match m.kind {
+                        MouseEventKind::Down(MouseButton::Left) => self.click_board(y).await?,
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                            if let Some(b) = &mut self.board {
+                                b.step(if m.kind == MouseEventKind::ScrollUp { -1 } else { 1 });
+                            }
+                        }
+                        _ => return Ok(()),
+                    }
+                    if !self.quit {
+                        self.draw();
+                    }
+                    return Ok(());
+                }
                 if m.kind == MouseEventKind::Down(MouseButton::Left) {
                     if self.in_panel(x, y) {
                         self.click_side(x - (self.columns().0 + 3), y);
@@ -102,6 +124,10 @@ impl App {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+
+        if self.board.is_some() {
+            return self.board_key(k).await;
+        }
 
         if let Some(p) = &mut self.picker {
             match k.code {
@@ -162,7 +188,7 @@ impl App {
 
         if !(ctrl && k.code == KeyCode::Char('c')) {
             self.ctrl_c_at = None;
-            if !self.busy {
+            if !self.busy || self.read_only {
                 self.notice = None;
             }
         }
@@ -214,7 +240,7 @@ impl App {
     pub(super) async fn edit_key(&mut self, k: KeyEvent, ctrl: bool, alt: bool, shift: bool) -> Result<()> {
         match k.code {
             KeyCode::Char('c') if ctrl => {
-                if self.busy {
+                if self.busy && !self.read_only {
                     self.abort().await;
                 } else if !self.editor.is_empty() {
                     self.editor.clear();
@@ -232,8 +258,11 @@ impl App {
                     self.editor.delete();
                 }
             }
+            // A subagent's session is watched, never interrupted from here: esc goes back.
+            KeyCode::Esc if self.read_only && !self.inline => self.open_board().await,
+            KeyCode::Esc if self.editor.is_empty() && !self.busy && !self.inline => self.open_board().await,
             KeyCode::Esc => {
-                if self.busy {
+                if self.busy && !self.read_only {
                     self.abort().await;
                 } else if self.editor.buf.starts_with('/') {
                     self.editor.clear();
@@ -302,6 +331,10 @@ impl App {
             self.editor.take();
             return self.command(&text).await;
         }
+        if self.read_only {
+            self.note("this session is read-only: zenbot drives it · esc goes back to the board", Sty::Warn);
+            return Ok(());
+        }
         if self.still_working() {
             return Ok(());
         }
@@ -352,13 +385,9 @@ impl App {
             if m.len() == 1 { Some(m[0]) } else { None }
         });
         match cmd {
+            Some("/board") => self.open_board().await,
             Some("/new" | "/resume") if self.still_working() => {}
-            Some("/new") => {
-                self.reset_session();
-                self.model = self.default_model.clone();
-                self.effort = None;
-                self.commit(vec![line("── new session ──", Sty::Dim), Vec::new()]);
-            }
+            Some("/new") => self.fresh_session(),
             Some("/resume") => self.open_session_picker().await?,
             Some("/model") => self.open_model_picker(),
             Some("/effort") => self.open_effort_picker(),
@@ -390,7 +419,7 @@ impl App {
                 for (k, h) in [
                     ("enter", "send"),
                     ("shift+enter", "new line (also alt+enter, ctrl+j, or end a line with \\)"),
-                    ("esc", "interrupt zenbot"),
+                    ("esc", "interrupt zenbot; on an empty input, back to the sessions board"),
                     ("tab", "take the suggested next prompt (grey) into the input; enter sends it"),
                     ("↑ ↓", "previous prompts; in the / menu, choose a command (tab completes)"),
                     ("ctrl+←/→", "move by word (also alt+b / alt+f); ctrl+a/e line start/end"),
