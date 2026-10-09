@@ -3,6 +3,8 @@
 
 use super::*;
 
+use std::collections::HashSet;
+
 /// A worker process speaking the worker protocol (docs/worker-protocol.md).
 /// The process is restarted by `supervise` when it exits, so `mind` is swapped in place.
 pub(crate) struct Worker {
@@ -97,10 +99,35 @@ pub(crate) async fn complete(app: &App, model: &str, system: &str, prompt: &str)
     Ok(res)
 }
 
-/// Models offered, in order of preference. All run through the Claude or Codex engine.
-pub(crate) const DEFAULT_MODELS: &str = "claude/claude-opus-5-5,claude/claude-sonnet-5-5,claude/claude-haiku-4-5-20251001,codex/gpt-6-sol,codex/gpt-6-astra,codex/gpt-6-luna,codex/gpt-5.5";
+fn visible_models(all: &[(usize, Value)], wanted: Option<&str>) -> Vec<Value> {
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+    let mut add = |model: &Value| {
+        if let Some(id) = model["id"].as_str() {
+            if seen.insert(id.to_string()) {
+                result.push(model.clone());
+            }
+        }
+    };
+    if let Some(wanted) = wanted.filter(|s| !s.trim().is_empty()) {
+        for id in wanted.split(',').map(str::trim).filter(|id| !id.is_empty()) {
+            if let Some((_, model)) = all.iter().find(|(_, model)| model["id"] == id) {
+                add(model);
+            }
+        }
+    } else {
+        for (_, model) in all {
+            add(model);
+        }
+    }
+    for (_, model) in all.iter().filter(|(_, model)| model["id"].as_str().is_some_and(|id| id.starts_with("faux/"))) {
+        add(model);
+    }
+    result
+}
 
-/// Ask every worker for its models, refresh routing, and return the curated list.
+/// Ask every worker for its models, refresh routing, and return every available model unless
+/// `ZEN_MODELS` explicitly curates the visible list. Routing retains the full catalog either way.
 pub(crate) async fn collect_models(app: &App) -> Value {
     let mut all: Vec<(usize, Value)> = Vec::new();
     let mut authenticated = serde_json::Map::new();
@@ -123,12 +150,7 @@ pub(crate) async fn collect_models(app: &App) -> Value {
     }
     *app.routes.lock().await = routes;
     *app.catalog.lock().await = catalog;
-    let wanted = std::env::var("ZEN_MODELS").unwrap_or_else(|_| DEFAULT_MODELS.into());
-    let mut curated: Vec<Value> = wanted
-        .split(',')
-        .filter_map(|id| all.iter().find(|(_, m)| m["id"] == id.trim()).map(|(_, m)| m.clone()))
-        .collect();
-    curated.extend(all.iter().filter(|(_, m)| m["id"].as_str().is_some_and(|id| id.starts_with("faux/"))).map(|(_, m)| m.clone()));
+    let curated = visible_models(&all, std::env::var("ZEN_MODELS").ok().as_deref());
     let default = if curated.iter().any(|m| m["id"] == app.default_model.as_str()) {
         app.default_model.clone()
     } else {
@@ -175,4 +197,34 @@ pub(crate) async fn check_effort(app: &App, model: &str, effort: Option<&str>) -
         format!("model `{model}` takes effort {}; got `{effort}`", allowed.join(", "))
     };
     Err(ApiError(StatusCode::BAD_REQUEST, msg))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(models: &[Value]) -> Vec<&str> {
+        models.iter().filter_map(|m| m["id"].as_str()).collect()
+    }
+
+    #[test]
+    fn no_models_allowlist_exposes_the_full_worker_catalog() {
+        let all = vec![
+            (0, json!({ "id": "claude/claude-haiku-5-5" })),
+            (1, json!({ "id": "codex/gpt-6.1-sol" })),
+            (0, json!({ "id": "faux/smoke" })),
+        ];
+        assert_eq!(id(&visible_models(&all, None)), ["claude/claude-haiku-5-5", "codex/gpt-6.1-sol", "faux/smoke"]);
+    }
+
+    #[test]
+    fn explicit_models_allowlist_orders_and_filters_but_keeps_faux_models() {
+        let all = vec![
+            (0, json!({ "id": "claude/claude-haiku-5-5" })),
+            (1, json!({ "id": "codex/gpt-6.1-sol" })),
+            (0, json!({ "id": "faux/smoke" })),
+        ];
+        assert_eq!(id(&visible_models(&all, Some("codex/gpt-6.1-sol,unknown,claude/claude-haiku-5-5"))),
+                   ["codex/gpt-6.1-sol", "claude/claude-haiku-5-5", "faux/smoke"]);
+    }
 }

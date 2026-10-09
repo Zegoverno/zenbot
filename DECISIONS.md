@@ -6,6 +6,16 @@
 
 ---
 
+## D-044 — One safe cross-provider continuation on hard usage limits
+
+**Date:** 2026-10-08 · **Status:** accepted (owner) · **Exception to:** D-030's no-per-turn-switch rule
+
+**Decision:** List every worker-reported model by default; `ZEN_MODELS` remains an optional visible allowlist. On an explicitly recognized hard subscription usage limit, `zen-engine` may continue once on the other provider: Claude → Codex GPT-6.1 Sol; Codex → Claude Sonnet 5.5. It first checks subscription sign-ins and refuses API-key environments, carries forward the original prompt and completed current-turn transcript, never repeats a tool call with an unknown result, emits a visible switch event, and stops if safe continuation is not possible. Temporary throttles and generic 429s do not trigger it. The switch is configurable or disabled by environment variable.
+
+**Why:** A subscription cap should not discard completed work or force the owner to restart the job. A hard cap is an exceptional boundary, not D-030's routine model selection; limiting it to one cross-provider attempt avoids loops and unplanned API charges.
+
+---
+
 ## D-043 — Retire Pi; call System One directly from the kernel
 
 **Date:** 2026-10-08 · **Status:** accepted (owner) · **Supersedes in part:** D-002, D-012,

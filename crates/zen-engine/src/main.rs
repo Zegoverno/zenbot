@@ -9,6 +9,7 @@ mod bridge;
 mod claude;
 mod codex;
 mod faux;
+mod failover;
 mod rpc;
 mod turn;
 
@@ -94,16 +95,31 @@ async fn handle(rpc: &Rpc, running: &Running, method: &str, p: Value) -> Result<
             let ctx = TurnCtx::new(rpc.clone(), session_id.clone(), turn_id.clone(), tools);
             let running = running.clone();
             tokio::spawn(async move {
-                let result = match engine.as_str() {
-                    "claude" => claude::run_turn(ctx.clone(), &input, abort_rx).await,
-                    "codex" => codex::run_turn(ctx.clone(), &input, abort_rx).await,
-                    "faux" if faux::enabled() => faux::run_turn(ctx.clone(), &input, abort_rx).await,
-                    other => Ok(Some(format!("zen-engine has no `{other}` engine"))),
+                let result = if engine == "faux" && faux::enabled() {
+                    faux::run_turn(ctx.clone(), &input, abort_rx.clone()).await
+                } else {
+                    failover::run(&engine, ctx.clone(), &input, abort_rx.clone()).await
                 };
-                let error = match result {
+                let mut error = match result {
                     Ok(e) => e,
                     Err(e) => Some(e.to_string()),
                 };
+                if let Some(first_error) = error.as_deref() {
+                    if failover::is_hard_usage_limit(first_error) {
+                        if let Some(continued) = failover::try_continue(
+                            &engine,
+                            &input,
+                            &ctx,
+                            abort_rx.clone(),
+                            first_error,
+                        )
+                        .await
+                        {
+                            error = continued;
+                        }
+                    }
+                }
+                failover::publish_usage(&ctx).await;
                 running.lock().await.remove(&turn_id);
                 ctx.notify("turn.end", json!({ "error": error })).await;
             });

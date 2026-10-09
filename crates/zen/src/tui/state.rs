@@ -79,6 +79,8 @@ pub(super) struct App {
     pub(super) view_dirty: usize,
     /// Full screen: lines scrolled up from the bottom of the conversation (0 follows it).
     pub(super) scroll: usize,
+    /// The owner moved the viewport; don't treat this frame as transcript reflow to anchor.
+    pub(super) scroll_input: bool,
     /// Conversation lines at the last frame, and the first one shown, to keep a scrolled-up view
     /// still as lines arrive, entries fold, or the conversation re-wraps.
     pub(super) last_total: usize,
@@ -172,6 +174,7 @@ impl App {
             view_start: Vec::new(),
             view_dirty: usize::MAX,
             scroll: 0,
+            scroll_input: false,
             last_total: 0,
             top_line: 0,
             last_vh: 0,

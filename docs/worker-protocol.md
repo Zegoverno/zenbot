@@ -40,6 +40,7 @@ JSON-RPC 2.0 over the worker's stdin/stdout, one JSON object per line. The kerne
 | `turn.thinking` | notification | `{ session_id, turn_id, delta }`: streamed reasoning (optional) |
 | `turn.message` | notification | `{ session_id, turn_id, message }`: a finished message, appended to the session's tape |
 | `turn.usage` | notification | `{ session_id, turn_id, engine, engine_version, input?, output?, cache_read?, cache_write?, cost_usd?, render?, engine_session?, fallback_reason?, … }`: the worker's report for the whole turn, sent before `turn.end` |
+| `turn.fallback` | notification | `{ session_id, turn_id, from, to, reason }`: a hard subscription limit caused one cross-provider continuation; the kernel records it and notifies clients |
 | `turn.end` | notification | `{ session_id, turn_id, error }`: the turn is over; `error` is null on success, `"interrupted"` after an abort |
 
 ## Messages
@@ -72,6 +73,8 @@ Some engines cache earlier turns only inside their own sessions (measured for Cl
 - An engine that continues its own session may report totals for the whole session; the kernel makes them per turn by subtracting the previous turn's report for the same engine session.
 
 Switches: `ZEN_CLAUDE_RESUME=0` and `ZEN_CODEX_RESUME=0` run every turn without an engine session; `ZEN_CODEX_INJECT=0` replays Codex history as a transcript.
+
+`zen-engine` makes at most one cross-provider continuation after an **explicit hard subscription usage-limit** error (not a temporary throttle or generic 429): Claude → `codex/gpt-6.1-sol`, Codex → `claude/claude-sonnet-5-5`. It confirms both CLIs use subscription sign-in, refuses an API-key environment, includes the original prompt and every completed message/tool result in the new engine's history, and does not resume either engine session. If a tool call has no result or the captured transcript is too large, it stops with the original error rather than risking a duplicate action. `ZEN_QUOTA_FAILOVER=0` disables it; `ZEN_FAILOVER_CLAUDE_TO_CODEX` and `ZEN_FAILOVER_CODEX_TO_CLAUDE` override targets (full ids). The kernel records the switch in the tape and shows a status line. The final usage report preserves each provider report, but the kernel totals mixed usage from per-call records because Claude's resumed-session totals are cumulative.
 
 ## What the kernel guarantees
 

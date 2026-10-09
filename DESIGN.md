@@ -57,7 +57,15 @@ The kernel starts each worker as a child process, supervises and restarts it, en
 and stops stalled turns (watchdog). Each worker lists the models it serves (`models.list`), and the
 kernel routes a model to the worker that lists it (`claude/…` and `codex/…` to zen-engine). The protocol is in `docs/worker-protocol.md`; the client protocol in
 `docs/client-protocol.md`. A scripted model, `faux/smoke` (`ZEN_FAUX=1`), runs turns without a
-subscription for tests.
+subscription for tests. By default `/api/models` shows every model reported by the workers;
+`ZEN_MODELS` can explicitly curate the visible list. `zen-engine` includes Haiku 5.5 and reads
+Codex's live model catalog.
+
+A hard subscription usage cap may trigger one cross-provider continuation in the same kernel turn
+(D-044, `docs/worker-protocol.md`). It replays the original request and completed current-turn
+messages to the other engine, with no engine-session resume, but stops if a tool's result or side
+effect is uncertain. Both providers must be signed in on subscriptions, not API keys. The switch
+is shown to the owner and recorded on the tape.
 
 ### Sessions, tape and context
 

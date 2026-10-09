@@ -255,6 +255,13 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             }
             app.emit(id, json!({ "type": "message", "message": message })).await;
         }
+        "turn.fallback" => {
+            let id = id?;
+            let from = p["from"].as_str().unwrap_or("unknown");
+            let to = p["to"].as_str().unwrap_or("unknown");
+            tape::append(&app.db, id, "failover", &json!({ "from": from, "to": to, "reason": "hard_usage_limit" })).await?;
+            app.emit(id, json!({ "type": "status", "text": format!("{from} usage limit reached; continuing with {to}") })).await;
+        }
         "turn.usage" => {
             // The worker's report for the whole turn (engine, version, totals); recorded when the turn ends.
             let id = id?;
