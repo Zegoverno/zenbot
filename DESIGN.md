@@ -78,7 +78,7 @@ link and a hash over the parent's hash and the content. Block kinds include `mes
 What the model reads each turn (`docs/context.md`): the envelope (system prompt and tools, fixed for
 the session) → a summary of older turns, if any → the history (append-only) → the new message with
 its turn context (the date) at the end, sent only when it
-changed. The system prompt is the prompt files (laid out by scope, `layout.rs`, D-040) `~/.zenbot/agents/zenbot/SOUL.md`, `AGENTS.md` (the environment)
+changed. The system prompt is the prompt files (laid out by scope, `layout.rs`, D-040) `~/.zenbot/agents/zenbot/SOUL.md`, then `agents/zenbot/IDENTITY.md`, `AGENTS.md` (the environment)
 and `USER.md`, short-term memory as of the session's start, the skills index, then `AGENTS.md` (or
 `CLAUDE.md`) from `/` down to the workspace; a project's file found later by a tool is attached to
 that tool result and kept. The kernel writes missing default prompt files and skills at start
@@ -110,19 +110,22 @@ with questions for the owner. The kernel-enforced workflow (`flow.rs`) was remov
   `ZEN_MEMORY_CHARS` (4000); writes past twice that are refused and start a sleep at once.
 - **Sleep** (`memory::sleep`, `scripts/sleep.sh` from `zen-sleep.timer` nightly, `zen memory
   sleep`): ranks entries (System One's "needed soon" when allowed, else recency; the owner's words
-  and verified results a little higher), keeps what fits, archives the rest, and proposes for
-  long-term the entries from the owner or a check that System One judges durable and impactful at
-  ≥ 0.95 on the lowest of three samples. Proposals wait for the owner (`zen memory accept|reject`);
-  promotion acts on its own once the Wilson lower bound of the owner's agreement with its proposals
-  reaches 0.95 (D-035; `ZEN_MEMORY_PROMOTE=on|shadow` overrides). Every entry's fate
+  and verified results a little higher), keeps what fits and archives the rest (out of the search
+  index). First it promotes on its own (D-045, bar `ZEN_PROMOTE_BAR` 0.9): lasting and about the
+  owner → `USER.md`, lasting guidance on how the agent acts → `IDENTITY.md` (under `## Learned`,
+  backup in `~/.zenbot/backups/`, lowest of three samples, only `owner`/`verified` entries; the
+  entry leaves memory), lasting knowledge → copied into the wiki. A prompt file over its cap is then
+  compacted: `turns::run_kernel_session` starts a parentless subagent session on the default model
+  that answers with the rewritten file; the kernel checks it (markers, a heading, within the cap,
+  not under a quarter of the 80% target), backs up and writes it. Every entry's fate
   is a `decisions` row; the run is a `sleep_runs` row; the next sessions get a one-line note. System
   One sees memories unless `ZEN_S1_PRIVATE=0` (D-032).
 - **Search** (`search.rs`, D-035): an indexer keeps `search_docs` current: one document per turn of
   every session (the owner's words, the answers, the tools called; no tool output) and one per
-  short- or long-term memory. `search` runs exact names and paths first (trigram over identifiers),
+  short-term memory (and each `long` row from before D-045). `search` runs exact names and paths first (trigram over identifiers),
   then full text (`simple`) and meaning (pgvector; `ZEN_EMBED_MODEL`, default
   `openai/text-embedding-3-small` through OpenRouter, filled in the background) merged by reciprocal
-  rank fusion, and System One reranks. Long-term memories are reached this way; a memory found
+  rank fusion, and System One reranks. A memory found
   counts as used. Every search is a `searches` row. `history` reads any session's messages by
   number.
 - **Wiki** (`wiki.rs`, D-036): pages in `~/.zenbot/global/wiki/` (git) with a summary over an append-only
@@ -171,7 +174,11 @@ harness versions with the same model on isolated kernels and databases (`evals/R
   call; results deduplicated, http(s) only, reranked by System One.
 - **Untrusted content** (D-034): results are wrapped in `<untrusted …>` (markers inside are
   defused) and the session is tainted (`sessions.tainted_at`, a `taint` block); `remember` from a
-  tainted session records `inferred`, so web text can't become a promotable memory.
+  tainted session records `inferred`, so web text can't pass as the owner's words, and its `edit` or
+  `write` on a prompt file (`SOUL`, `IDENTITY`, `AGENTS`, `USER`) is refused, as for any subagent
+  or kernel session (D-045). A main session may write `IDENTITY.md` and `USER.md` itself; each
+  change is backed up first (`~/.zenbot/backups/prompt-files/`) and one that passes the file's cap
+  comes back with a request to compact it.
 - **MCP** (`mcp.rs`, D-033): servers in `~/.zenbot/mcp.json` (stdio or streamable HTTP, `${VAR}`
   from the environment, `include`/`exclude`, `timeout_s`, `untrusted`, default true for remote
   servers). The tool list never changes: `find_tools` ranks tools by name and description,
@@ -241,15 +248,16 @@ tape). A rule comes back only where measurement shows the agent needs it.
 
 | When | What |
 |---|---|
-| Session start (fixed prefix) | `SOUL.md` · `AGENTS.md` · `USER.md` · `MEMORY.md` (fixed size) · the system tools with their descriptions · a short index of skill domains · a repo's own `AGENTS.md` as project context |
+| Session start (fixed prefix) | `SOUL.md` · `IDENTITY.md` · `AGENTS.md` · `USER.md` · `MEMORY.md` (fixed size) · the system tools with their descriptions · a short index of skill domains · a repo's own `AGENTS.md` as project context |
 | On demand (appended) | skills, connected MCP servers' tools, tools the agent made |
 
 | File in `~/.zenbot/` | Says | Owner |
 |---|---|---|
-| `SOUL.md` | who the agent is: character, standards, how it works with the owner | owner; agent proposes |
+| `SOUL.md` | the deep layer: what the agent is for, what it holds to, lines it doesn't cross | owner only; agent may suggest |
+| `IDENTITY.md` | the agent in practice: character, how it works, learned guidance (D-045) | agent writes what really matters, kept compact; the owner may edit |
 | `AGENTS.md` | its environment: the VM, its body, where things live, what it can reach | owner; agent proposes |
-| `USER.md` | the owner: who they are, their preferences, their context | owner; agent proposes |
-| `MEMORY.md` | short-term memory | agent, within a fixed size |
+| `USER.md` | the owner: who they are, their preferences, their context | owner; agent writes what really matters, kept compact |
+| `MEMORY.md` | where things stand (not traits or preferences) | agent, within a fixed size |
 
 **Who teaches what:** `AGENTS.md` the environment; each tool's own description how and when to use
 that tool (what it does, when to use it and when not, what it returns, an example); skills how to do
@@ -305,7 +313,8 @@ save.
 |---|---|---|
 | Working | `MEMORY.md`, fixed size | `memories` table, rendered into the prompt and exported as a file |
 | Episodic (what happened) | sessions, the tape | Postgres (built) |
-| Semantic (what's true) | long-term memories; the wiki | memories in Postgres (source, supersedes); wiki as markdown in git |
+| Semantic (what's true) | the wiki | markdown in git |
+| Identity (who acts, for whom) | `SOUL.md`, `IDENTITY.md`, `USER.md` | prompt files the agent keeps compact, backed up on every change (D-045) |
 | Procedural (how to do things) | skills, tools | markdown and scripts in git |
 | External | `web_search`, `web_fetch` | web content is untrusted input (taint rule, SPEC.md §5.18) |
 
@@ -322,15 +331,17 @@ budget, cost recorded) asks System One about every entry:
 |---|---|
 | Will this be needed in the coming days? | score |
 | Will it still be true in months? | probability |
-| Does it change how the agent should act for the owner, across jobs? | score |
+| Is it guidance on how the agent should act (a trait, a preference)? | probability |
+| Is it about the owner as a person? | probability |
+| Is it lasting knowledge (a decision and why, how something works, a lesson)? | probability |
 | Is it already covered (another memory, a skill, `USER.md`)? | probability |
 
 - **Keep:** rank by likely need, adjusted for recent use; fill the fixed size from the top.
-- **Promote to long-term:** only really impactful memories. Durable and impactful at a very high bar
-  (e.g. ≥ 0.95) on the lower end of the confidence interval, a source that is the owner's words or a
-  verified result, and not already covered. Facts about the owner become a proposed `USER.md` edit.
+- **Promote (automatic, D-045):** about the owner → `USER.md`; guidance → `IDENTITY.md` (both with
+  a backup, only from the owner's words or verified results); knowledge → the wiki. No long-term
+  tier.
 - **Drop:** everything else leaves short-term memory, archived, never deleted.
-- Every decision goes to `decisions`; a short morning note says what was kept, dropped and promoted;
+- Every decision goes to `decisions`; a short morning note says what was kept, dropped and promoted, and where;
   anything can be undone.
 
 **Knowledge.** The wiki holds structured notes: each page an append-only timeline plus a summary

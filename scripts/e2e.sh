@@ -111,12 +111,13 @@ prompt_files() {
 The owner's name is E2E Owner." >"$TMP/home/.zenbot/USER.md"
   start_kernel "$ws" ""
   local zh="$TMP/home/.zenbot"
-  check "defaults installed, scoped" test -s "$zh/agents/zenbot/SOUL.md" -a -s "$zh/AGENTS.md" -a -s "$zh/global/skills/work/verify/SKILL.md" -a -s "$zh/global/skills/work/brief/references/template.md"
+  check "defaults installed, scoped" test -s "$zh/agents/zenbot/SOUL.md" -a -s "$zh/agents/zenbot/IDENTITY.md" -a -s "$zh/AGENTS.md" -a -s "$zh/global/skills/work/verify/SKILL.md" -a -s "$zh/global/skills/work/brief/references/template.md"
   check "a fresh home has no old-layout paths" test ! -e "$zh/SOUL.md" -a ! -e "$zh/skills"
   check "the owner's USER.md was kept" grep -q "E2E Owner" "$zh/USER.md"
   local sid; sid=$(zen ask --json -m faux/smoke "hi" | jq -r .session_id)
   local base; base=$(q "SELECT payload->>'text' FROM tape_events WHERE session_id='$sid' AND kind='base'")
   check "SOUL.md is in the instructions, from the agent's folder" grep -qF '<soul file="~/.zenbot/agents/zenbot/SOUL.md">' <<<"$base"
+  check "IDENTITY.md follows the soul" bash -c 'grep -A2 -F "</soul>" <<<"$1" | grep -qF "<identity file=\"~/.zenbot/agents/zenbot/IDENTITY.md\">"' _ "$base"
   check "AGENTS.md is the environment, placeholders filled" grep -qF "Working directory for tools: $ws" <<<"$base"
   check "USER.md is in the instructions" grep -q "E2E Owner" <<<"$base"
   check "the skills index is in the instructions" grep -q "work/verify:" <<<"$base"
@@ -202,22 +203,22 @@ web_tools() {
   python3 "$REPO/scripts/e2e/searxng_stub.py" "$port" & local srv=$!
   start_kernel "$ws" "$(script reach.json)" ZEN_SEARXNG_URL="http://127.0.0.1:$port"
   local r sid; r=$(zen ask --json -m faux/smoke "web please"); sid=$(echo "$r" | jq -r .session_id)
-  check "localhost and metadata refused, search ran, remember ran" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" \
-    web_fetch:true,web_fetch:true,web_search:false,remember:false
+  check "localhost and metadata refused, search ran, remember ran, prompt file edit refused" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" \
+    web_fetch:true,web_fetch:true,web_search:false,remember:false,edit:true
   local res; res=$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult'")
   check "loopback refused" grep -q "127.0.0.1 is not a public address" <<<"$res"
   check "metadata refused" grep -q "169.254.169.254 is not a public address" <<<"$res"
   check "results numbered, non-http dropped" bash -c 'grep -q "\[2\] Another" <<<"$1" && ! grep -q "javascript:" <<<"$1"' _ "$res"
   check "one envelope, its marker defused" eq "$(grep -o '</untrusted>' <<<"$res" | wc -l)" 1
   check "the session is tainted" eq "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")" t
+  check "a tainted session can't change USER.md" bash -c 'grep -q "A session that has read untrusted content can.t change" <<<"$1" && ! grep -q "Rewritten by a web page" "$2"' _ "$res" "$TMP/home/.zenbot/USER.md"
   check "its memory counts as inference" eq "$(q "SELECT source FROM memories WHERE text LIKE 'Something read on the web.%'")" inferred
   q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART" >/dev/null  # the memory scenarios start from none
   kill "$srv" 2>/dev/null || true
 }
 
 # Search: a fact from one session is found from another (by words, and by its exact path first), a
-# memory is found and counted as used, history reads the other session, and a promotion the owner
-# accepts makes the memory long-term and still findable.
+# memory is found and counted as used, and history reads the other session.
 search_recall() {
   local ws; ws=$(new_workspace search)
   q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART" >/dev/null
@@ -235,14 +236,6 @@ search_recall() {
   check "and counted as used" eq "$(q "SELECT uses FROM memories WHERE id = 1")" 1
   check "history read the other session" grep -q "purple elephant" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='history'")"
   check "every search is logged" eq "$(q "SELECT count(*) FROM searches WHERE session_id='$sid'")" 3
-  # The sleep proposed m1 for long-term memory; the owner accepts it.
-  q "UPDATE memories SET tier='archived', proposed='promote' WHERE id=1; INSERT INTO decisions (point, input, chosen, acted) VALUES ('sleep', '{\"memory\": 1}', 'promote', false)" >/dev/null
-  check "a non-proposed memory can't be accepted" bash -c '! ZEN_URL=$1 ZEN_TOKEN=$2 timeout 30 "$3/zen" memory accept m99 >/dev/null 2>&1' _ "$URL" "$TOKEN" "$BIN"
-  zen memory accept m1 >/dev/null
-  check "accepted: long-term" eq "$(q "SELECT tier || '/' || coalesce(proposed, '-') FROM memories WHERE id=1")" long/-
-  check "the review is recorded for calibration" eq "$(q "SELECT actual || '/' || actual_by FROM decisions WHERE point='sleep' AND chosen='promote'")" accept/owner
-  local l; l=$(zen ask --json -m faux/smoke "long term?" | jq -r .session_id)
-  check "a long-term memory is found by search" grep -q "m1 — long-term memory" <<<"$(q "SELECT string_agg(payload->'content'->0->>'text', '|') FROM tape_events WHERE session_id='$l' AND payload->>'role'='toolResult'")"
   q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART; DELETE FROM search_docs WHERE kind='memory'" >/dev/null
 }
 
@@ -324,6 +317,8 @@ delegation() {
   check "the subagents ran their task" eq "$(q "SELECT count(*) FROM sessions WHERE parent='$sid' AND kind='subagent'")" 2
   local child; child=$(q "SELECT id FROM sessions WHERE parent='$sid' AND kind='subagent' LIMIT 1")
   local tools; tools=$(q "SELECT string_agg(t->>'name', ',') FROM turns, envelopes e, jsonb_array_elements(e.tools) t WHERE turns.session_id='$child' AND e.hash = turns.envelope")
+  check "a subagent can't change IDENTITY.md" bash -c 'grep -q "A subagent can.t change" <<<"$1" && ! grep -q "rewritten by a subagent" "$2"' _ \
+    "$(q "SELECT string_agg(payload->'content'->0->>'text', '|') FROM tape_events WHERE session_id IN (SELECT id FROM sessions WHERE parent='$sid') AND payload->>'toolName'='write'")" "$TMP/home/.zenbot/agents/zenbot/IDENTITY.md"
   check "a subagent can't ask or delegate" bash -c '! grep -qE "(^|,)(ask|delegate)(,|$)" <<<"$1" && grep -q "save_skill" <<<"$1"' _ "$tools"
   check "choices logged with their probability" eq "$(q "SELECT string_agg(chosen || '@' || probability, ',' ORDER BY id) FROM decisions WHERE point='model'")" faux/smoke@1,faux/smoke@1
   zen sessions decide "$sid" accept >/dev/null
@@ -416,7 +411,8 @@ system_one_direct() {
   local ws; ws=$(new_workspace systemone)
   local port=$((PORT + 3))
   python3 "$REPO/scripts/e2e/systemone_stub.py" "$port" & local srv=$!
-  start_kernel "$ws" "$(script systemone.json)" ZEN_WORKERS=engine,pi ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone"
+  start_kernel "$ws" "$(script systemone.json)" ZEN_WORKERS=engine,pi ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone" \
+    ZEN_DEFAULT_MODEL=faux/smoke ZEN_USER_CHARS=1200
   check "a stale pi worker setting is ignored" bash -c '! grep -q "worker `pi` started" "$1"' _ "$TMP/kernel.log"
   check "the kernel reports its own OpenRouter key" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/models" | jq -r .authenticated.openrouter)" true
   local sid; sid=$(zen ask --json -m faux/smoke "decide directly" | jq -r .session_id)
@@ -424,6 +420,31 @@ system_one_direct() {
   check "System One bool mapped from noul" grep -q '"probability": 0.82' <<<"$answer"
   check "System One choice and score parsed" bash -c 'grep -q "\"choice\": \"build\"" <<<"$1" && grep -q "\"score\": 1" <<<"$1"' _ "$answer"
   check "the decision was logged" eq "$(q "SELECT count(*) FROM decisions WHERE session_id='$sid' AND point='tool' AND error IS NULL")" 1
+  # The sleep promotes on its own: the owner's lasting fact moves to USER.md (backup first), an
+  # inference stays out of it, lasting knowledge is copied into the wiki.
+  local zh="$TMP/home/.zenbot"; rm -rf "$zh/backups"; printf '# USER.md\n\nE2E Owner.\n' >"$zh/USER.md"
+  q "DELETE FROM memories; INSERT INTO memories (text, source) VALUES ('PROMOTE-USER the owner swims every morning', 'owner'), ('PROMOTE-USER the owner likes web gossip', 'inferred'), ('PROMOTE-WIKI the purple service retries three times', 'verified')" >/dev/null
+  local r; r=$(zen memory sleep --json)
+  check "the sleep reports its promotions" eq "$(echo "$r" | jq -r .promoted)" 2
+  check "the owner's fact is in USER.md, under Learned" bash -c 'sed -n "/^## Learned/,\$p" "$1" | grep -q "PROMOTE-USER the owner swims every morning (from memory m"' _ "$zh/USER.md"
+  check "with a backup of the old USER.md" bash -c 'ls "$1"/USER-*.md >/dev/null && ! grep -q "swims every morning" "$1"/USER-*.md' _ "$zh/backups/prompt-files"
+  check "and it left memory" eq "$(q "SELECT tier || '/' || reason FROM memories WHERE text LIKE '%swims%'")" "archived/promoted to USER.md"
+  check "an inference doesn't reach USER.md" bash -c '! grep -q "web gossip" "$1" && grep -q "it.s an inference" <<<"$2"' _ "$zh/USER.md" "$(echo "$r" | jq -r .note)"
+  check "knowledge is copied into the wiki, by the sleep" grep -rq "memory m[0-9]*, the sleep (verified) — PROMOTE-WIKI the purple service" "$zh/global/wiki"
+  check "and marked so it isn't copied twice" eq "$(q "SELECT proposed FROM memories WHERE text LIKE 'PROMOTE-WIKI%'")" wiki
+  r=$(zen memory sleep --json)
+  check "a second sleep promotes nothing again" eq "$(echo "$r" | jq -r .promoted)" 0
+  q "DELETE FROM memories" >/dev/null
+  # The agent writes USER.md itself: backed up first, told to compact it when it's over its size;
+  # then the sleep compacts it through a session of its own, and checks and backs up the result.
+  local before; before=$(ls "$zh/backups/prompt-files" | wc -l)
+  sid=$(zen ask --json -m faux/smoke "grow the profile" | jq -r .session_id)
+  check "an agent's edit of USER.md is backed up" eq "$(ls "$zh/backups/prompt-files" | wc -l)" $((before + 1))
+  check "and over its size the agent is told to compact it" grep -q "over the 1200 that fit in your instructions" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='write'")"
+  r=$(zen memory sleep --json)
+  check "the sleep compacted USER.md" bash -c 'grep -q "Compacted by the e2e" "$1" && test "$(wc -c <"$1")" -le 1200' _ "$zh/USER.md"
+  check "said so in its note, with a backup of the long version" bash -c 'grep -q "compacted USER.md from" <<<"$1" && grep -l "agent will have to compact" "$2"/USER-*.md >/dev/null' _ "$(echo "$r" | jq -r .note)" "$zh/backups/prompt-files"
+  check "through a session of the kernel's own" eq "$(q "SELECT kind || '/' || coalesce(parent::text, 'none') FROM sessions WHERE title = 'sleep: compact USER.md'")" subagent/none
   stop_kernel
   start_kernel "$ws" "$(script systemone.json)" ZEN_WORKERS=pi ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone"
   check "pi-only legacy setting falls back to engine" grep -q 'worker `engine` started' "$TMP/kernel.log"

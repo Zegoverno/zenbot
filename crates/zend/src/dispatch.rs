@@ -156,10 +156,26 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                             tools::ToolOutput { content: why, is_error: true }
                         } else if let Some(why) = agent::refusal(kind.as_deref(), &name) {
                             tools::ToolOutput { content: why, is_error: true }
-                        } else if let Some(out) = agent::run_tool(app, id, &workspace, &name, &args, &mut ending).await {
-                            out
+                        } else if let Some(why) = agent::prompt_file_refusal(&app.db, id, kind.as_deref(), &workspace, &name, &args).await {
+                            tools::ToolOutput { content: why, is_error: true }
                         } else {
-                            tools::execute(&workspace, &name, &args, &env, read_only).await
+                            // A prompt file is backed up before the agent changes it, and the agent
+                            // is told to compact it when the change takes it past its size.
+                            let prompt_file = agent::prompt_file_target(&crate::zen_home(), &workspace, &name, &args);
+                            if let Some(p) = &prompt_file {
+                                if let Err(e) = crate::memory::backup_file(&crate::zen_home(), p) {
+                                    tracing::warn!("backing up {}: {e:#}", p.display());
+                                }
+                            }
+                            let mut out = if let Some(out) = agent::run_tool(app, id, &workspace, &name, &args, &mut ending).await {
+                                out
+                            } else {
+                                tools::execute(&workspace, &name, &args, &env, read_only).await
+                            };
+                            if let Some(note) = prompt_file.as_deref().filter(|_| !out.is_error).and_then(agent::over_cap_note) {
+                                out.content.push_str(&note);
+                            }
+                            out
                         }
                     } => out,
                     _ = cancel.wait_for(|c| *c) => tools::ToolOutput { content: "interrupted: the turn was stopped before this tool finished".into(), is_error: true },

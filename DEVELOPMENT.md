@@ -27,6 +27,7 @@ Config lives in `~/.zenbot/`:
 | `history` | prompt history |
 | `AGENTS.md`, `USER.md` | system-wide prompt files: zenbot's environment, the owner (defaults written when missing, never overwritten) |
 | `agents/zenbot/SOUL.md` | the agent's own prompt file: who zenbot is (one agent today; D-040) |
+| `agents/zenbot/IDENTITY.md` | the agent's character and how it works, kept by the agent and the sleep, backed up on every change (D-045) |
 | `global/MEMORY.md` | a copy of short-term memory, for reading |
 | `global/skills/` | skills, `<domain>/<name>/SKILL.md`; drafts in `_proposed/`, retired ones in `_archived/`; a git repository once `save_skill` first commits |
 | `global/tools/` | tools the agent made (`save_tool`): `<name>/tool.json` and files; a git repository (`ZEN_TOOLS_DIR`) |
@@ -314,16 +315,15 @@ Tasks live in `evals/tasks/<name>/` (`task.json` plus `files/`). See `evals/READ
 ```bash
 scripts/sleep.sh                             # sleep now (same as `zen memory sleep`)
 zen memory                                   # short-term memory and the last sleep
-zen memory --tier proposed                   # memories the sleep proposed for long-term
-zen memory accept m12                        # the owner accepts a proposal (reject m12 keeps it archived)
+zen memory --tier archived                   # what the sleeps archived
 systemctl list-timers zen-sleep.timer        # next run
 ```
 
-Promotion to long-term memory is calibrated on those reviews (`ZEN_MEMORY_PROMOTE`, default `auto`): the sleep only proposes until the one-sided 95% Wilson lower bound of the owner's acceptances reaches `ZEN_MEMORY_PROMOTE_BAR` (0.95, about 52 accepted with none rejected), then promotes on its own. `GET /api/memory` shows the current `promotion` state. To test it on a dev kernel, the `search` e2e scenario shows how to fake a proposal in SQL.
+The sleep promotes on its own (D-045): lasting entries about the owner move to `USER.md`, lasting guidance to `IDENTITY.md` (under `## Learned`; only `owner`/`verified` entries), lasting knowledge is copied into the wiki. `ZEN_PROMOTE_BAR` (0.9) sets the bar. A prompt file over its cap (`ZEN_USER_CHARS`, `ZEN_IDENTITY_CHARS`) is compacted by a session the sleep starts (`sleep: compact USER.md` in `zen sessions`). Every change to a prompt file, by the sleep or the agent, first saves the old version to `~/.zenbot/backups/prompt-files/<name>-<time>.md` (kept 90 days); to undo, copy it back.
 
 ## Search index
 
-The kernel indexes every session's turns, every short- and long-term memory and every wiki page into `search_docs` in the background (`search::index_loop`, every `ZEN_INDEX_SECS`, default 20 s), for the `search` tool. Exact-name and full-text search need nothing else. Vector search needs embeddings, which the indexer fetches only when `OPENROUTER_API_KEY` is set and `ZEN_S1_PRIVATE` isn't `0` (`ZEN_EMBED_MODEL`, `ZEN_EMBED_URL`; `ZEN_EMBED=0` turns them off). That sends turn, memory and wiki text to the provider, so leave the key out of a dev kernel's environment unless you mean to test embeddings: `dev.sh` loads `~/.zenbot/env`, and the e2e kernels unset `OPENROUTER_API_KEY`. Migration 0017 needs the `vector` and `pg_trgm` extensions, which the `pgvector/pgvector:pg16` image has.
+The kernel indexes every session's turns, every short-term memory (and old `long` rows) and every wiki page into `search_docs` in the background (`search::index_loop`, every `ZEN_INDEX_SECS`, default 20 s), for the `search` tool. Exact-name and full-text search need nothing else. Vector search needs embeddings, which the indexer fetches only when `OPENROUTER_API_KEY` is set and `ZEN_S1_PRIVATE` isn't `0` (`ZEN_EMBED_MODEL`, `ZEN_EMBED_URL`; `ZEN_EMBED=0` turns them off). That sends turn, memory and wiki text to the provider, so leave the key out of a dev kernel's environment unless you mean to test embeddings: `dev.sh` loads `~/.zenbot/env`, and the e2e kernels unset `OPENROUTER_API_KEY`. Migration 0017 needs the `vector` and `pg_trgm` extensions, which the `pgvector/pgvector:pg16` image has.
 
 ```bash
 docker compose -f deploy/compose.yaml exec -T postgres psql -U zen -d zen_dev \

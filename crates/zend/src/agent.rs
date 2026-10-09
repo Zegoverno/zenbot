@@ -44,6 +44,56 @@ pub fn refusal(kind: Option<&str>, name: &str) -> Option<String> {
     None
 }
 
+/// The prompt files that steer every session, under the zen home.
+const PROMPT_FILES: [&str; 4] = [crate::layout::SOUL, crate::layout::IDENTITY, "AGENTS.md", "USER.md"];
+
+/// The prompt file an `edit` or `write` call targets, if it targets one (through `~`, relative
+/// paths, `..` or symlinks such as the old `~/.zenbot/SOUL.md`).
+pub fn prompt_file_target(home: &Path, workspace: &Path, name: &str, args: &Value) -> Option<PathBuf> {
+    if !matches!(name, "edit" | "write") {
+        return None;
+    }
+    // The real path, or the real folder plus the name for a file that doesn't exist yet.
+    let real = |p: &Path| std::fs::canonicalize(p).ok().or_else(|| Some(std::fs::canonicalize(p.parent()?).ok()?.join(p.file_name()?)));
+    let target = real(&tools::resolve(workspace, args["path"].as_str()?))?;
+    PROMPT_FILES.iter().any(|rel| real(&home.join(rel)).as_ref() == Some(&target)).then_some(target)
+}
+
+/// Why this session may not change a prompt file with this call, if it may not (D-045). The agent
+/// writes what's really important straight into `IDENTITY.md` and `USER.md`; a subagent (any child
+/// or kernel session) or a session that has read untrusted content (web, MCP, a tainted subagent)
+/// is refused, so text from outside can't rewrite the agent's instructions. `bash` can still write files as the owner's Unix user (ROADMAP.md, debt).
+pub async fn prompt_file_refusal(db: &PgPool, session: Uuid, kind: Option<&str>, workspace: &Path, name: &str, args: &Value) -> Option<String> {
+    let path = prompt_file_target(&crate::zen_home(), workspace, name, args)?;
+    let who = if kind.is_some() {
+        "A subagent"
+    } else if crate::taint::tainted(db, session).await {
+        "A session that has read untrusted content"
+    } else {
+        return None;
+    };
+    Some(format!(
+        "{who} can't change {}: it steers every session. Give the exact edit in your answer instead; the owner can approve it in a fresh session.",
+        path.display()
+    ))
+}
+
+/// What to tell the agent after it changed a prompt file that is now over its size in the
+/// instructions: compact it now.
+pub fn over_cap_note(path: &Path) -> Option<String> {
+    let n = std::fs::read_to_string(path).ok()?.chars().count();
+    let cap = crate::compile::file_cap(&path.display().to_string());
+    let file = path.file_name()?.to_string_lossy();
+    (n > cap).then(|| {
+        format!(
+            "\n\n{file} is now {n} characters, over the {cap} that fit in your instructions (the middle gets cut there). Compact it now: \
+rewrite it with `write` to under {} characters, keeping only what really matters, merging what overlaps and dropping what's stale. \
+A backup of every version is in ~/.zenbot/backups/prompt-files/.",
+            cap * 8 / 10
+        )
+    })
+}
+
 fn spec(name: &str, description: &str, parameters: Value) -> Value {
     json!({ "name": name, "description": description, "parameters": parameters })
 }
@@ -442,6 +492,24 @@ async fn verify(app: &AppState, session: Uuid, workspace: &Path, args: &Value) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_files_are_recognized_however_they_are_named() {
+        let home = crate::test_util::TestDir::new("prompt-files");
+        std::fs::create_dir_all(home.join("agents/zenbot")).unwrap();
+        std::fs::write(home.join("agents/zenbot/SOUL.md"), "soul").unwrap();
+        std::fs::write(home.join("USER.md"), "user").unwrap();
+        std::os::unix::fs::symlink("agents/zenbot/SOUL.md", home.join("SOUL.md")).unwrap();
+        let ws = home.join("agents");
+        let hit = |name: &str, path: &str| prompt_file_target(&home, &ws, name, &json!({ "path": path })).is_some();
+        assert!(hit("edit", &home.join("USER.md").display().to_string()));
+        assert!(hit("write", "../USER.md"), "relative with ..");
+        assert!(hit("edit", &home.join("SOUL.md").display().to_string()), "the old path is a symlink to the soul");
+        assert!(hit("write", "zenbot/IDENTITY.md"), "a prompt file that doesn't exist yet");
+        assert!(!hit("read", "../USER.md"), "reading is fine");
+        assert!(!hit("edit", "zenbot/notes.md"));
+        assert!(!hit("edit", "/home/nobody/USER.md"));
+    }
 
     #[test]
     fn verifier_sessions_get_their_own_small_tool_list() {

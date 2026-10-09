@@ -21,7 +21,7 @@ steps (old "Phase 2b", "Phase 3 memory", "Phase 4 search", "Phase 5 wiki").
 | 0 | Ground | Research the reference projects in their code; merge the open fix PRs | done (`docs/research/`) |
 | 1 | Foundation | Prompt files, tool descriptions, short-term memory with sleep, skills, workflow into skills | done (#17): 12/12 → 12/12, cost +27% |
 | 2 | Reach | `web_search`, `web_fetch`, MCP client, `find_tools` / `load_tool` / `call_tool` | built (#18) |
-| 3 | Recall | `search` (exact, full-text and semantic) over sessions and memories; long-term memory acts | done (#19): 12/12, cost −6% |
+| 3 | Recall | `search` (exact, full-text and semantic) over sessions and memories | done (#19): 12/12, cost −6% |
 
 | 4 | Knowledge | The wiki and `capture` | built |
 
@@ -61,14 +61,13 @@ descriptions for `verify`, `remember` and `decide`.
 
 ## Phase 3 — Recall `[ built ]`
 
-- `search` over every session's turns and over short- and long-term memories: an indexer keeps
+- `search` over every session's turns and over memories: an indexer keeps
   `search_docs` current; exact names and paths first (trigram), then full text (`simple` config) and
   meaning (pgvector, `openai/text-embedding-3-small` through OpenRouter) merged by reciprocal rank
   fusion; System One reranks; a memory found counts as used; every search is logged. `history` stays
   for reading messages by number, now in any session.
-- Long-term memory is reached through search. Promotions are proposals the owner reviews
-  (`zen memory accept|reject`); promotion acts on its own once the Wilson lower bound of the owner's
-  agreement with them reaches 0.95 (D-035).
+- Long-term promotion (D-035) was retired by D-045: traits and guidance go to `IDENTITY.md` or
+  `USER.md`, which the agent writes and keeps compact.
 
 ## Phase 4 — Knowledge `[ built ]`
 
@@ -107,7 +106,8 @@ clear (lower bound beats upper bound, 20 judged subtasks each). `ask` takes `wai
 ## What's next
 
 The redesign's phases are built. Next: keep dogfooding zenbot on real work and let sessions,
-verdicts and the owner's reviews (memory promotions, skill drafts, tools, routes) drive what changes.
+verdicts and the owner's reviews (proposed edits to `IDENTITY.md` and `USER.md`, skill drafts, tools,
+routes) drive what changes.
 
 ## Open decisions
 
@@ -129,6 +129,9 @@ verdicts and the owner's reviews (memory promotions, skill drafts, tools, routes
 - Client events are untyped JSON.
 - The old workflow's schema stays (expand-only): `sessions.state` and old tape block kinds.
   Drop them in a later release; `policies` is in use by model routing.
+- Prompt files (`SOUL`, `IDENTITY`, `AGENTS`, `USER`) are guarded only at `edit`/`write`, and only
+  for subagents and tainted sessions (D-045); `bash` can still write them. Unused since D-045:
+  `memories.tier = 'long'`, `sleep_runs.promoted/proposed`; drop them in a later release.
 - Tools run as the same Unix user as the owner. Shell subprocesses no longer inherit kernel secrets,
   and the verifier hides token files, but an ordinary agent shell can still read the owner's files.
   Strong isolation requires a separate Unix user and a credential the agent cannot read.

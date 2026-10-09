@@ -4,24 +4,21 @@
 //! short-term entries are rendered into `MEMORY.md` inside the session's fixed instructions, so a
 //! write shows from the next session and the prompt cache holds. The space is fixed
 //! (`ZEN_MEMORY_CHARS`), so entries compete for it: the sleep (nightly, or at once when writes pass
-//! the hard ceiling) ranks them, keeps what fits, archives the rest, and promotes to long-term only
-//! really impactful memories: System One must judge them durable and impactful with a very high
-//! probability on the lower end of several samples, and their source must be the owner's words or a
-//! verified result. Without a System One model the sleep keeps the most recent entries and promotes
-//! nothing. Nothing is ever deleted.
+//! the hard ceiling) ranks them, keeps what fits and archives the rest. Without a System One model
+//! the sleep keeps the most recent entries. Nothing is ever deleted.
 //!
-//! Long-term memories are reached through `search` (search.rs). A sleep's promotions are proposals
-//! the owner reviews (`zen memory accept|reject <id>`) until System One has earned trust: promotion
-//! acts on its own once the one-sided 95% Wilson lower bound of the owner's agreement with its
-//! proposals reaches the bar (about 52 reviewed proposals with none rejected; docs/research/
-//! memory-search-web.md §A). `ZEN_MEMORY_PROMOTE=on` or `shadow` overrides that.
+//! Promotion out of short-term memory (D-045, automatic): a lasting entry about the owner moves to
+//! `USER.md`, lasting guidance on how the agent acts moves to `IDENTITY.md` (each under `## Learned`,
+//! after a dated backup in `<zen home>/backups/prompt-files/`), and lasting knowledge is copied into the wiki
+//! (the entry stays while it's still needed). Only the owner's words and verified results reach the
+//! prompt files. There is no long-term tier any more (old `long` rows stay searchable).
 
 use anyhow::Result;
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::App;
+use crate::AppState;
 
 /// The size of MEMORY.md the sleep tidies to, in characters (ZEN_MEMORY_CHARS, default 4000).
 pub fn cap() -> usize {
@@ -34,12 +31,8 @@ fn ceiling() -> usize {
     cap() * 2
 }
 
-/// The bar a memory must clear on every sample to reach long-term (ZEN_MEMORY_PROMOTE_BAR, 0.95).
-fn promote_bar() -> f64 {
-    crate::env_num("ZEN_MEMORY_PROMOTE_BAR", 0.95)
-}
-
-/// The lower end of the one-sided Wilson score interval for `k` successes in `n` trials.
+/// The lower end of the one-sided Wilson score interval for `k` successes in `n` trials (model
+/// routing's evidence, delegate.rs).
 pub fn wilson_lower(k: u64, n: u64, z: f64) -> f64 {
     if n == 0 {
         return 0.0;
@@ -47,55 +40,6 @@ pub fn wilson_lower(k: u64, n: u64, z: f64) -> f64 {
     let (n, p) = (n as f64, k as f64 / n as f64);
     let z2 = z * z;
     ((p + z2 / (2.0 * n)) - z * ((p * (1.0 - p) + z2 / (4.0 * n)) / n).sqrt()) / (1.0 + z2 / n)
-}
-
-/// How promotion runs: `on` / `shadow` from ZEN_MEMORY_PROMOTE, else `auto` (acts once the owner's
-/// reviews show System One's proposals can be trusted). Returns the mode, whether it acts, and the
-/// calibration: proposals the owner accepted, reviewed, and the lower bound of their agreement.
-pub async fn promotion(db: &PgPool) -> (String, bool, u64, u64, f64) {
-    let row = sqlx::query(
-        "SELECT count(*) FILTER (WHERE actual = 'accept') AS k, count(*) AS n FROM decisions
-         WHERE point = 'sleep' AND chosen = 'promote' AND actual IN ('accept', 'reject')",
-    )
-    .fetch_one(db)
-    .await;
-    let (k, n) = row.map(|r| (r.get::<i64, _>("k") as u64, r.get::<i64, _>("n") as u64)).unwrap_or((0, 0));
-    let lcb = wilson_lower(k, n, 1.645);
-    match std::env::var("ZEN_MEMORY_PROMOTE").unwrap_or_default().trim() {
-        "on" => ("on".into(), true, k, n, lcb),
-        "shadow" | "off" => ("shadow".into(), false, k, n, lcb),
-        _ => ("auto".into(), lcb >= promote_bar(), k, n, lcb),
-    }
-}
-
-/// The owner's review of a promotion the sleep proposed: `accept` moves it to long-term memory,
-/// `reject` leaves it archived. Either way the review is recorded on the sleep's decision, which is
-/// what promotion's trust is calibrated on.
-pub async fn review(db: &PgPool, id: &str, decision: &str) -> Result<Value> {
-    let id = parse_id(&json!(id)).ok_or_else(|| anyhow::anyhow!("not a memory id: {id}"))?;
-    anyhow::ensure!(matches!(decision, "accept" | "reject"), "decision must be accept or reject");
-    let proposed: Option<Option<String>> = sqlx::query_scalar("SELECT proposed FROM memories WHERE id = $1").bind(id).fetch_optional(db).await?;
-    let Some(proposed) = proposed else { anyhow::bail!("no memory m{id}") };
-    anyhow::ensure!(proposed.as_deref() == Some("promote"), "m{id} isn't proposed for long-term memory");
-    let (tier, reason) = if decision == "accept" { ("long", "promoted by the owner") } else { ("archived", "promotion rejected by the owner") };
-    sqlx::query("UPDATE memories SET tier = $2, reason = $3, proposed = $4, updated_at = now() WHERE id = $1")
-        .bind(id)
-        .bind(tier)
-        .bind(reason)
-        .bind(if decision == "accept" { None } else { Some("rejected") })
-        .execute(db)
-        .await?;
-    sqlx::query(
-        "UPDATE decisions SET actual = $2, actual_by = 'owner', resolved_at = now()
-         WHERE id = (SELECT id FROM decisions WHERE point = 'sleep' AND chosen = 'promote' AND (input->>'memory')::bigint = $1 ORDER BY id DESC LIMIT 1)",
-    )
-    .bind(id)
-    .bind(decision)
-    .execute(db)
-    .await?;
-    export(db).await;
-    let (mode, acts, k, n, lcb) = promotion(db).await;
-    Ok(json!({ "id": format!("m{id}"), "tier": tier, "promotion": { "mode": mode, "acts": acts, "accepted": k, "reviewed": n, "lower_bound": lcb } }))
 }
 
 #[derive(Clone, Debug)]
@@ -106,6 +50,8 @@ pub struct Entry {
     pub age_days: f64,
     pub idle_days: f64,
     pub uses: i32,
+    /// Already copied into the wiki by an earlier sleep.
+    pub captured: bool,
 }
 
 fn line(e: &Entry) -> String {
@@ -114,7 +60,7 @@ fn line(e: &Entry) -> String {
 
 async fn short_entries(db: &PgPool) -> Result<Vec<Entry>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, text, source, uses,
+        "SELECT id, text, source, uses, proposed IS NOT DISTINCT FROM 'wiki' AS captured,
                 (EXTRACT(EPOCH FROM now() - created_at) / 86400)::float8 AS age,
                 (EXTRACT(EPOCH FROM now() - GREATEST(updated_at, COALESCE(used_at, updated_at))) / 86400)::float8 AS idle
          FROM memories WHERE tier = 'short' ORDER BY created_at, id",
@@ -130,6 +76,7 @@ async fn short_entries(db: &PgPool) -> Result<Vec<Entry>, sqlx::Error> {
             age_days: r.get::<Option<f64>, _>("age").unwrap_or(0.0),
             idle_days: r.get::<Option<f64>, _>("idle").unwrap_or(0.0),
             uses: r.get("uses"),
+            captured: r.get("captured"),
         })
         .collect())
 }
@@ -186,7 +133,7 @@ pub async fn export(db: &PgPool) {
 pub fn spec() -> Value {
     json!({
         "name": "remember",
-        "description": "Save a fact to your short-term memory, which every new session starts with (it shows from the next session). Save what will matter again: the owner's preferences and decisions, facts about their projects, lessons, where things are; not what's in the code, docs or git. Write facts (\"The owner prefers X\"), not orders to yourself. Space is fixed and tidied nightly: `replace` an entry by id (m12) rather than adding a near-duplicate; `remove` one that's wrong. `source`: owner (their words), verified (you checked it) or inferred (default).",
+        "description": "Save where things stand to your short-term memory, which every new session starts with (it shows from the next session): the owner's decisions, open questions, the state of their projects and jobs, where things are; not what's in the code, docs or git. Not traits, guidance or preferences (how you should act, what the owner likes): when one is really important and lasting, write it straight into IDENTITY.md (about you) or USER.md (about the owner), keeping the file compact; when it isn't, leave it out. The nightly sleep also promotes lasting entries there and into the wiki. Write facts, not orders to yourself. Space is fixed and tidied nightly: `replace` an entry by id (m12) rather than adding a near-duplicate; `remove` one that's wrong. `source`: owner (their words), verified (you checked it) or inferred (default).",
         "parameters": {
             "type": "object",
             "properties": {
@@ -228,7 +175,7 @@ async fn remember(app: &crate::AppState, session: Uuid, args: &Value) -> Result<
         other => anyhow::bail!("source must be owner, verified or inferred, not `{other}`"),
     };
     // A session that read web content can't vouch for what it saves: web text could have put it
-    // there, so it never counts as the owner's words or a checked result (and can't be promoted).
+    // there, so it never counts as the owner's words or a checked result.
     let source = if source != "inferred" && crate::taint::tainted(db, session).await { "inferred" } else { source };
     let text = args["text"].as_str().map(str::trim).unwrap_or("");
     let text = crate::secrets::mask(text);
@@ -314,10 +261,12 @@ pub struct Judged {
     /// Likely need in the coming days, 0..1.
     pub needed: f64,
     pub durable: f64,
-    /// How much it changes how the agent should act across jobs, 0..1.
-    pub impact: f64,
     pub covered: f64,
     pub about_owner: f64,
+    /// A trait, standing guidance or preference: how the agent should act, rather than where things stand.
+    pub guidance: f64,
+    /// Lasting knowledge worth keeping for good (a decision and why, how something works, a lesson).
+    pub knowledge: f64,
 }
 
 /// The questions the sleep asks about each entry (System One via `score.rs`).
@@ -327,12 +276,14 @@ pub fn questions() -> Value {
             "criteria": ["Unlikely: a one-off detail", "Possibly", "Likely", "Almost certainly: it comes up all the time"] },
         "durable": { "type": "bool", "instructions": "Will this memory still be true and useful months from now?",
             "criteria": { "true": "A lasting fact, preference, decision or lesson", "false": "About a passing task, state or moment" } },
-        "impact": { "type": "score", "instructions": "How much does this memory change how the agent should act for the owner, across many jobs?",
-            "criteria": ["Not at all", "A little, in rare cases", "Noticeably, in some kinds of work", "A lot, in most of its work"] },
-        "covered": { "type": "bool", "instructions": "Is this memory already covered by another entry or by the owner's profile (other_memories, user_profile)?",
-            "criteria": { "true": "Another entry or the profile already says the same", "false": "It says something new" } },
+        "covered": { "type": "bool", "instructions": "Is this memory already covered by another entry, the owner's profile or the agent's identity (other_memories, user_profile, agent_identity)?",
+            "criteria": { "true": "One of them already says the same", "false": "It says something new" } },
         "about_owner": { "type": "bool", "instructions": "Is this memory about the owner as a person: who they are, their preferences, their context?",
-            "criteria": { "true": "About the owner", "false": "About work, projects, tools or the world" } }
+            "criteria": { "true": "About the owner", "false": "About work, projects, tools or the world" } },
+        "guidance": { "type": "bool", "instructions": "Is this memory a trait, standing guidance or preference about how the agent should act, rather than a fact about work or where things stand?",
+            "criteria": { "true": "Guidance on how to act (e.g. how to answer, what to check, what to avoid)", "false": "A fact, a state, a decision or where something is" } },
+        "knowledge": { "type": "bool", "instructions": "Is this memory lasting knowledge worth keeping for good in notes: a decision and why it was made, how something works, a lesson, a project's history? Not an open question, a to-do or a passing state.",
+            "criteria": { "true": "Lasting knowledge", "false": "A passing state, an open question or a to-do" } }
     })
 }
 
@@ -345,9 +296,10 @@ fn judged_from(answers: &Value) -> Option<Judged> {
     Some(Judged {
         needed: score01(&answers["needed"])?,
         durable: score01(&answers["durable"])?,
-        impact: score01(&answers["impact"])?,
         covered: score01(&answers["covered"]).unwrap_or(0.0),
         about_owner: score01(&answers["about_owner"]).unwrap_or(0.0),
+        guidance: score01(&answers["guidance"]).unwrap_or(0.0),
+        knowledge: score01(&answers["knowledge"]).unwrap_or(0.0),
     })
 }
 
@@ -356,7 +308,6 @@ fn judged_from(answers: &Value) -> Option<Judged> {
 pub enum Fate {
     Keep,
     Drop(&'static str),
-    Promote,
 }
 
 /// The sleep's ranking: likely need, nudged by recency and use; the owner's own words and verified
@@ -376,9 +327,8 @@ pub fn priority(e: &Entry, j: Option<&Judged>) -> f64 {
 }
 
 /// Decide every entry's fate: covered entries go; the rest are ranked and kept while they fit in
-/// `cap`; of those that don't fit, entries promoted are the ones whose `lower` bound (the lowest of
-/// several samples) of durable and impact clears `bar` and whose source is the owner or a check.
-pub fn plan(entries: &[Entry], judged: &[Option<Judged>], lower: &[Option<(f64, f64)>], cap: usize, bar: f64) -> Vec<Fate> {
+/// `cap`.
+pub fn plan(entries: &[Entry], judged: &[Option<Judged>], cap: usize) -> Vec<Fate> {
     let mut fates = vec![Fate::Keep; entries.len()];
     let mut order: Vec<usize> = (0..entries.len()).collect();
     for (i, j) in judged.iter().enumerate() {
@@ -391,10 +341,7 @@ pub fn plan(entries: &[Entry], judged: &[Option<Judged>], lower: &[Option<(f64, 
     let mut size = 0;
     for &i in &order {
         let l = line(&entries[i]).chars().count();
-        let promotable = matches!(entries[i].source.as_str(), "owner" | "verified") && lower[i].is_some_and(|(d, m)| d >= bar && m >= bar);
-        if promotable {
-            fates[i] = Fate::Promote;
-        } else if size + l <= cap {
+        if size + l <= cap {
             size += l;
         } else {
             fates[i] = Fate::Drop("didn't fit");
@@ -403,9 +350,126 @@ pub fn plan(entries: &[Entry], judged: &[Option<Judged>], lower: &[Option<(f64, 
     fates
 }
 
+/// The bar a judgment must clear for the sleep to promote an entry on its own (`ZEN_PROMOTE_BAR`,
+/// 0.9); a move into a prompt file must clear it on the lowest of three samples.
+fn promote_bar() -> f64 {
+    crate::env_num("ZEN_PROMOTE_BAR", 0.9)
+}
+
+/// Where a lasting entry is promoted to, if anywhere: `USER.md` (about the owner), `IDENTITY.md`
+/// (guidance on how the agent acts) or the wiki (lasting knowledge).
+pub fn belongs_in(j: &Judged, bar: f64) -> Option<&'static str> {
+    if j.durable < bar {
+        None
+    } else if j.about_owner >= bar {
+        Some("USER.md")
+    } else if j.guidance >= bar {
+        Some("IDENTITY.md")
+    } else if j.knowledge >= bar {
+        Some("wiki")
+    } else {
+        None
+    }
+}
+
+/// Whether an entry may go into a prompt file on its own: only the owner's words and verified
+/// results, so text read on the web (saved as `inferred`) never steers every session.
+fn may_steer(source: &str) -> bool {
+    matches!(source, "owner" | "verified")
+}
+
+/// `text` with `line` added at the end of its `## Learned` section (made at the end when missing).
+pub fn with_learned(text: &str, line: &str) -> String {
+    let body = text.trim_end();
+    let Some(h) = body.find("\n## Learned").map(|i| i + 1).or_else(|| body.starts_with("## Learned").then_some(0)) else {
+        return format!("{body}\n\n## Learned\n\n{line}\n");
+    };
+    let after = h + body[h..].find('\n').unwrap_or(body.len() - h);
+    match body[after..].find("\n## ") {
+        Some(n) => {
+            let end = after + n;
+            format!("{}\n{line}\n{}\n", body[..end].trim_end(), &body[end..])
+        }
+        None => format!("{body}\n{line}\n"),
+    }
+}
+
+/// Save a copy of a prompt file in `<zen home>/backups/prompt-files/<name>-<time>.md` before it changes (by the
+/// sleep or an agent's edit); returns the copy's path. Kept 90 days.
+pub(crate) fn backup_file(home: &std::path::Path, path: &std::path::Path) -> Result<std::path::PathBuf> {
+    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+    let dir = home.join(BACKUPS);
+    std::fs::create_dir_all(&dir)?;
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+    // Never over an earlier backup (two changes in the same millisecond).
+    let mut backup = dir.join(format!("{name}-{stamp}.md"));
+    let mut n = 2;
+    while backup.exists() {
+        backup = dir.join(format!("{name}-{stamp}-{n}.md"));
+        n += 1;
+    }
+    std::fs::write(&backup, std::fs::read(path).unwrap_or_default())?;
+    Ok(backup)
+}
+
+/// Replace a prompt file's text (backup first, then an atomic rename); returns the backup.
+fn replace_file(home: &std::path::Path, rel: &str, new: &str) -> Result<std::path::PathBuf> {
+    let path = home.join(rel);
+    let backup = backup_file(home, &path)?;
+    let tmp = path.with_extension("md.tmp");
+    std::fs::write(&tmp, new)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(backup)
+}
+
+/// Move a memory into a prompt file (`rel` under the zen home) as a dated line under `## Learned`,
+/// after a backup. Returns the backup's path. A file pushed over its size is compacted next.
+fn promote_to_file(home: &std::path::Path, rel: &str, id: i64, text: &str) -> Result<std::path::PathBuf> {
+    let old = std::fs::read_to_string(home.join(rel)).unwrap_or_default();
+    let line = format!("- {}: {} (from memory m{id})", chrono::Utc::now().format("%Y-%m-%d"), crate::secrets::mask(text).replace('\n', " "));
+    replace_file(home, rel, &with_learned(&old, &line))
+}
+
+/// What a prompt file over its size is cut to when compacted: 80% of its cap, room to grow.
+fn compact_target(cap: usize) -> usize {
+    cap * 8 / 10
+}
+
+/// The new text from a compaction session's answer, if it is a usable file: between the markers,
+/// starting with a heading, within `cap`, and not gutted (at least a quarter of the target).
+pub fn compacted_text(answer: &str, cap: usize) -> Option<String> {
+    let start = answer.find("<<<FILE")? + "<<<FILE".len();
+    let end = start + answer[start..].find("FILE>>>")?;
+    let text = answer[start..end].trim();
+    let n = text.chars().count();
+    (text.starts_with('#') && n <= cap && n >= compact_target(cap) / 4).then(|| format!("{text}\n"))
+}
+
+/// Compact a prompt file over its size: a session of the kernel's own (a subagent: it can't write
+/// prompt files itself) rewrites it, keeping only what really matters; the kernel checks the
+/// answer, backs the file up and writes it. Returns what it did, for the morning note.
+async fn compact_file(app: &AppState, home: &std::path::Path, rel: &str) -> Result<String> {
+    let old = std::fs::read_to_string(home.join(rel))?;
+    let (n, cap) = (old.chars().count(), crate::compile::file_cap(rel));
+    let target = compact_target(cap);
+    let file = std::path::Path::new(rel).file_name().and_then(|s| s.to_str()).unwrap_or(rel);
+    let prompt = format!(
+        "Compact {file}. It is {n} characters; only {cap} fit in your instructions. Rewrite it to at most {target} characters. \
+Keep only what really matters across jobs; merge what overlaps; drop what is stale or no longer needed (finished projects, \
+superseded decisions, old dated details). Keep its title, its section headings, its voice and every hard rule. Fold the dated \
+lines under `## Learned` into the sections they belong to, or keep the few that still matter there, shortened. Don't use tools \
+and don't write the file: answer with the whole new file only, between a line `<<<FILE` and a line `FILE>>>`.\n\n<<<FILE\n{old}\nFILE>>>"
+    );
+    let id = crate::turns::run_kernel_session(app, crate::delegate::SUBAGENT, &format!("sleep: compact {file}"), &prompt, home, &app.default_model).await?;
+    let answer = crate::delegate::final_answer(&app.db, id).await;
+    let new = compacted_text(&answer, cap).ok_or_else(|| anyhow::anyhow!("session {} gave no usable file (between the markers, a heading first, {} to {cap} characters)", &id.to_string()[..8], target / 4))?;
+    let backup = replace_file(home, rel, &new)?;
+    Ok(format!("compacted {file} from {n} to {} characters (session {}, backup {})", new.chars().count(), &id.to_string()[..8], backup.display()))
+}
+
 /// The material System One judges an entry by: the entry, the other entries and the owner's
 /// profile (to tell whether it's covered).
-fn state_for(e: &Entry, all: &[Entry], user_md: &str) -> Value {
+fn state_for(e: &Entry, all: &[Entry], user_md: &str, identity_md: &str) -> Value {
     let others: Vec<String> = all.iter().filter(|o| o.id != e.id).map(|o| zen_proto::head(&o.text, 300)).collect();
     json!({
         "memory": e.text,
@@ -414,12 +478,13 @@ fn state_for(e: &Entry, all: &[Entry], user_md: &str) -> Value {
         "days_since_used": (e.idle_days * 10.0).round() / 10.0,
         "other_memories": others,
         "user_profile": zen_proto::head(user_md, 4000),
+        "agent_identity": zen_proto::head(identity_md, 4000),
     })
 }
 
-/// Tidy short-term memory: rank, keep what fits, archive the rest, promote (or propose) the few
-/// that clear the bar. Records a `sleep_runs` row and one `decisions` row per entry.
-pub async fn sleep(app: &App, trigger: &str) -> Result<Value> {
+/// Tidy short-term memory: promote lasting entries (to `USER.md`, `IDENTITY.md` or the wiki), rank
+/// the rest, keep what fits and archive the others. Records a `sleep_runs` row and one `decisions` row per entry.
+pub async fn sleep(app: &AppState, trigger: &str) -> Result<Value> {
     // One sleep at a time: a second one (the timer while a ceiling sleep runs) waits, then finds
     // memory already tidied.
     static ONE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -438,19 +503,20 @@ pub async fn sleep(app: &App, trigger: &str) -> Result<Value> {
     res
 }
 
-async fn sleep_inner(app: &App, run: i64) -> Result<Value> {
+async fn sleep_inner(app: &AppState, run: i64) -> Result<Value> {
     let db = &app.db;
     let entries = short_entries(db).await?;
-    let user_md = std::fs::read_to_string(crate::zen_home().join("USER.md")).unwrap_or_default();
+    let home = crate::zen_home();
+    let user_md = std::fs::read_to_string(home.join("USER.md")).unwrap_or_default();
+    let identity_md = std::fs::read_to_string(home.join(crate::layout::IDENTITY)).unwrap_or_default();
     // Memories are private content: System One sees them only when allowed (ZEN_S1_PRIVATE).
     let scorer = crate::score::scorer().filter(|_| crate::score::private_ok());
     let mut judged: Vec<Option<Judged>> = vec![None; entries.len()];
     let mut raw: Vec<Value> = vec![Value::Null; entries.len()];
-    let mut lower: Vec<Option<(f64, f64)>> = vec![None; entries.len()];
     if scorer.is_some() && !entries.is_empty() {
         let qs = questions();
         for (i, e) in entries.iter().enumerate() {
-            let state = state_for(e, &entries, &user_md);
+            let state = state_for(e, &entries, &user_md, &identity_md);
             match crate::score::decide(app, &state, &qs).await {
                 Ok(v) if v["error"].is_null() => {
                     judged[i] = judged_from(&v["answers"]);
@@ -459,62 +525,98 @@ async fn sleep_inner(app: &App, run: i64) -> Result<Value> {
                 Ok(v) => tracing::warn!("sleep: judging m{}: {}", e.id, v["error"]),
                 Err(e2) => tracing::warn!("sleep: judging m{}: {e2:#}", e.id),
             }
-            // The lower end of the confidence interval: candidates are asked twice more, and the
-            // lowest of the three answers counts.
-            if let Some(j) = &judged[i] {
-                let bar = promote_bar();
-                if j.durable >= bar && j.impact >= bar && matches!(e.source.as_str(), "owner" | "verified") {
-                    let (mut d, mut m) = (j.durable, j.impact);
-                    let repeat = json!({ "durable": qs["durable"], "impact": qs["impact"] });
-                    for _ in 0..2 {
-                        match crate::score::decide(app, &state, &repeat).await {
-                            Ok(v) if v["error"].is_null() => {
-                                d = d.min(score01(&v["answers"]["durable"]).unwrap_or(0.0));
-                                m = m.min(score01(&v["answers"]["impact"]).unwrap_or(0.0));
-                            }
-                            _ => {
-                                d = 0.0;
-                            }
-                        }
-                    }
-                    lower[i] = Some((d, m));
+            // A move into a prompt file is asked twice more; the lowest of the three answers counts.
+            if let Some(j) = judged[i].as_mut().filter(|j| matches!(belongs_in(j, promote_bar()), Some("USER.md" | "IDENTITY.md"))) {
+                let repeat = json!({ "durable": qs["durable"], "about_owner": qs["about_owner"], "guidance": qs["guidance"] });
+                for _ in 0..2 {
+                    let a = match crate::score::decide(app, &state, &repeat).await {
+                        Ok(v) if v["error"].is_null() => v["answers"].clone(),
+                        _ => Value::Null,
+                    };
+                    j.durable = j.durable.min(score01(&a["durable"]).unwrap_or(0.0));
+                    j.about_owner = j.about_owner.min(score01(&a["about_owner"]).unwrap_or(0.0));
+                    j.guidance = j.guidance.min(score01(&a["guidance"]).unwrap_or(0.0));
                 }
             }
         }
     }
-    let fates = plan(&entries, &judged, &lower, cap(), promote_bar());
-    let promote_on = promotion(db).await.1;
-    let (mut kept, mut dropped, mut promoted, mut proposed) = (0, 0, 0, 0);
+    // Promotion: into a prompt file (the entry leaves memory: the file is in every session's
+    // instructions) or a copy into the wiki (the entry stays while it's needed).
     let mut notes: Vec<String> = Vec::new();
+    let mut moved: Vec<Option<&'static str>> = vec![None; entries.len()];
+    let mut captured = vec![false; entries.len()];
+    for (i, e) in entries.iter().enumerate() {
+        let Some(j) = &judged[i] else { continue };
+        if j.covered >= 0.8 {
+            continue;
+        }
+        match belongs_in(j, promote_bar()) {
+            Some(file @ ("USER.md" | "IDENTITY.md")) if may_steer(&e.source) => {
+                let rel = if file == "USER.md" { "USER.md" } else { crate::layout::IDENTITY };
+                match promote_to_file(&home, rel, e.id, &e.text) {
+                    Ok(backup) => {
+                        moved[i] = Some(file);
+                        notes.push(format!("promoted m{} to {file} (backup {}): {}", e.id, backup.display(), zen_proto::head(&e.text, 120)));
+                    }
+                    Err(err) => notes.push(format!("m{} belongs in {file} but wasn't moved: {err:#}", e.id)),
+                }
+            }
+            Some(file @ ("USER.md" | "IDENTITY.md")) => {
+                notes.push(format!("m{} looks like it belongs in {file}, but it's an inference: propose it in the conversation: {}", e.id, zen_proto::head(&e.text, 120)));
+            }
+            Some(_) if !e.captured => match crate::wiki::capture_memory(app, e.id, &e.text, &e.source).await {
+                Ok(out) => {
+                    captured[i] = true;
+                    notes.push(format!("promoted m{} to the wiki: {}", e.id, out.lines().next().unwrap_or("")));
+                }
+                Err(err) => notes.push(format!("m{} wasn't copied to the wiki: {err:#}", e.id)),
+            },
+            _ => {}
+        }
+    }
+    // A prompt file over its size (after promotions, or edited past it) is compacted, not cut.
+    if scorer.is_some() {
+        for rel in ["USER.md", crate::layout::IDENTITY] {
+            let size = std::fs::read_to_string(home.join(rel)).map(|t| t.chars().count()).unwrap_or(0);
+            if size > crate::compile::file_cap(rel) {
+                match compact_file(app, &home, rel).await {
+                    Ok(done) => notes.push(done),
+                    Err(err) => notes.push(format!("{rel} is over its size and wasn't compacted (the middle is cut from the instructions): {err:#}")),
+                }
+            }
+        }
+    }
+    let pruned_backups = prune_backups(&home.join(BACKUPS), BACKUP_DAYS);
+    if pruned_backups > 0 {
+        notes.push(format!("backups: removed {pruned_backups} prompt-file backup(s) older than {BACKUP_DAYS} days"));
+    }
+    // What stays competes for the space; moved entries don't count.
+    let rest: Vec<usize> = (0..entries.len()).filter(|&i| moved[i].is_none()).collect();
+    let rest_entries: Vec<Entry> = rest.iter().map(|&i| entries[i].clone()).collect();
+    let rest_judged: Vec<Option<Judged>> = rest.iter().map(|&i| judged[i].clone()).collect();
+    let mut fates: Vec<Fate> = moved.iter().map(|m| Fate::Drop(if m == &Some("USER.md") { "promoted to USER.md" } else { "promoted to IDENTITY.md" })).collect();
+    for (k, f) in plan(&rest_entries, &rest_judged, cap()).into_iter().enumerate() {
+        fates[rest[k]] = f;
+    }
+    let promoted = moved.iter().filter(|m| m.is_some()).count() + captured.iter().filter(|c| **c).count();
+    let (mut kept, mut dropped) = (0, 0);
     // All fates and their decisions apply together: a failure midway must not leave memory half
     // tidied with only some decisions logged.
     let mut tx = db.begin().await?;
     for (i, e) in entries.iter().enumerate() {
-        let user_fact = judged[i].as_ref().is_some_and(|j| j.about_owner >= 0.8 && j.durable >= 0.8);
-        let scores = if raw[i].is_null() { None } else { Some(json!({ "answers": raw[i], "lower": lower[i].map(|(d, m)| json!({ "durable": d, "impact": m })) })) };
-        let (tier, reason, proposal, chosen) = match &fates[i] {
+        let scores = if raw[i].is_null() { None } else { Some(json!({ "answers": raw[i] })) };
+        let (tier, reason, chosen) = match &fates[i] {
             Fate::Keep => {
                 kept += 1;
-                ("short", None, user_fact.then_some("user"), "keep")
+                ("short", None, "keep")
             }
+            Fate::Drop(why) if moved[i].is_some() => ("archived", Some(*why), "promote"),
             Fate::Drop(why) => {
                 dropped += 1;
-                ("archived", Some(*why), user_fact.then_some("user"), "drop")
-            }
-            Fate::Promote if promote_on => {
-                promoted += 1;
-                notes.push(format!("promoted m{}: {}", e.id, zen_proto::head(&e.text, 120)));
-                ("long", Some("promoted by the sleep"), user_fact.then_some("user"), "promote")
-            }
-            Fate::Promote => {
-                proposed += 1;
-                notes.push(format!("would promote m{}: {}", e.id, zen_proto::head(&e.text, 120)));
-                ("archived", Some("proposed for long-term (shadow)"), Some("promote"), "promote")
+                ("archived", Some(*why), "drop")
             }
         };
-        if proposal == Some("user") {
-            notes.push(format!("about the owner, for USER.md: m{}: {}", e.id, zen_proto::head(&e.text, 120)));
-        }
+        let proposal = captured[i].then_some("wiki");
         sqlx::query("UPDATE memories SET tier = $2, reason = COALESCE($3, reason), proposed = COALESCE($4, proposed), scores = COALESCE($5, scores), updated_at = CASE WHEN tier = $2 THEN updated_at ELSE now() END WHERE id = $1")
             .bind(e.id)
             .bind(tier)
@@ -523,14 +625,12 @@ async fn sleep_inner(app: &App, run: i64) -> Result<Value> {
             .bind(&scores)
             .execute(&mut *tx)
             .await?;
-        let p = judged[i].as_ref().map(|j| if chosen == "promote" { lower[i].map(|(d, m)| d.min(m)).unwrap_or(j.durable) } else { j.needed });
-        sqlx::query("INSERT INTO decisions (point, model, input, answer, chosen, probability, acted) VALUES ('sleep', $1, $2, $3, $4, $5, $6)")
+        sqlx::query("INSERT INTO decisions (point, model, input, answer, chosen, probability, acted) VALUES ('sleep', $1, $2, $3, $4, $5, true)")
             .bind(&scorer)
             .bind(json!({ "memory": e.id, "text": e.text, "source": e.source }))
             .bind(&raw[i])
             .bind(chosen)
-            .bind(p)
-            .bind(chosen != "promote" || promote_on)
+            .bind(judged[i].as_ref().map(|j| j.needed))
             .execute(&mut *tx)
             .await?;
     }
@@ -550,17 +650,33 @@ async fn sleep_inner(app: &App, run: i64) -> Result<Value> {
     notes.extend(crate::workshop::tend(db).await);
     notes.extend(crate::delegate::tune(db).await);
     let note = if notes.is_empty() { None } else { Some(notes.join("\n")) };
-    sqlx::query("UPDATE sleep_runs SET ended_at = now(), entries = $2, kept = $3, dropped = $4, promoted = $5, proposed = $6, note = $7 WHERE id = $1")
+    sqlx::query("UPDATE sleep_runs SET ended_at = now(), entries = $2, kept = $3, dropped = $4, promoted = $5, proposed = 0, note = $6 WHERE id = $1")
         .bind(run)
         .bind(entries.len() as i32)
         .bind(kept)
         .bind(dropped)
-        .bind(promoted)
-        .bind(proposed)
+        .bind(promoted as i32)
         .bind(&note)
         .execute(db)
         .await?;
-    Ok(json!({ "run": run, "entries": entries.len(), "kept": kept, "dropped": dropped, "promoted": promoted, "proposed": proposed, "scorer": scorer, "note": note }))
+    Ok(json!({ "run": run, "entries": entries.len(), "kept": kept, "dropped": dropped, "promoted": promoted, "scorer": scorer, "note": note }))
+}
+
+/// Where prompt-file backups go, under the zen home (its own folder: `backups/` holds other things).
+pub(crate) const BACKUPS: &str = "backups/prompt-files";
+
+/// Days a prompt file's backup is kept in `<zen home>/backups/prompt-files`.
+const BACKUP_DAYS: u64 = 90;
+
+/// Remove backups (`*.md` directly in `dir`) not modified for `days` days; returns how many.
+fn prune_backups(dir: &std::path::Path, days: u64) -> usize {
+    let Ok(read) = std::fs::read_dir(dir) else { return 0 };
+    let limit = std::time::Duration::from_secs(days * 86_400);
+    read.flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && e.file_name().to_string_lossy().ends_with(".md"))
+        .filter(|e| e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > limit))
+        .filter(|e| std::fs::remove_file(e.path()).is_ok())
+        .count()
 }
 
 /// Days a saved tool output (cut bash/MCP output, fetched PDFs) is kept in `<zen home>/outputs`.
@@ -580,10 +696,10 @@ fn prune_outputs(dir: &std::path::Path, days: u64) -> usize {
 }
 
 /// A line about the last sleep for a session's instructions, when it ran in the last day (the
-/// "morning note": what was kept, archived and proposed, so the agent knows its memory changed).
+/// "morning note": what was kept, archived and promoted, and where).
 pub async fn morning_note(db: &PgPool) -> Result<Option<String>, sqlx::Error> {
     let r = sqlx::query(
-        "SELECT ended_at, entries, kept, dropped, promoted, proposed, note FROM sleep_runs
+        "SELECT ended_at, entries, kept, dropped, promoted, note FROM sleep_runs
          WHERE ended_at > now() - interval '1 day' AND error IS NULL ORDER BY id DESC LIMIT 1",
     )
     .fetch_optional(db)
@@ -592,12 +708,11 @@ pub async fn morning_note(db: &PgPool) -> Result<Option<String>, sqlx::Error> {
         let n = |k: &str| r.get::<Option<i32>, _>(k).unwrap_or(0);
         let when = r.get::<chrono::DateTime<chrono::Utc>, _>("ended_at").format("%Y-%m-%d %H:%M UTC");
         let mut line = format!(
-            "Last sleep ({when}): {} entries, {} kept, {} archived, {} promoted, {} proposed for long-term.",
+            "Last sleep ({when}): {} entries, {} kept, {} archived, {} promoted.",
             n("entries"),
             n("kept"),
             n("dropped"),
-            n("promoted"),
-            n("proposed")
+            n("promoted")
         );
         if let Some(note) = r.get::<Option<String>, _>("note") {
             line.push_str(&format!("\n{}", zen_proto::head(&note, 1500)));
@@ -648,7 +763,7 @@ mod tests {
     use super::*;
 
     fn e(id: i64, text: &str, source: &str, idle: f64) -> Entry {
-        Entry { id, text: text.into(), source: source.into(), age_days: idle, idle_days: idle, uses: 0 }
+        Entry { id, text: text.into(), source: source.into(), age_days: idle, idle_days: idle, uses: 0, captured: false }
     }
 
     #[test]
@@ -661,30 +776,57 @@ mod tests {
     }
 
     #[test]
-    fn plan_drops_covered_keeps_by_need_and_promotes_only_proven_sourced_entries() {
-        let all = vec![
-            e(1, "duplicate of the profile", "owner", 1.0),
-            e(2, "rarely needed detail", "inferred", 1.0),
-            e(3, "often needed fact", "inferred", 1.0),
-            e(4, "lasting owner rule", "owner", 1.0),
-            e(5, "lasting inferred rule", "inferred", 1.0),
-        ];
-        let j = |needed: f64, covered: f64| Some(Judged { needed, durable: 0.5, impact: 0.5, covered, about_owner: 0.0 });
-        let judged = vec![j(0.9, 0.9), j(0.1, 0.0), j(0.9, 0.0), j(0.5, 0.0), j(0.5, 0.0)];
-        // m4 and m5 cleared the bar on every sample; only m4 has a source that may be promoted.
-        let lower = vec![None, None, None, Some((0.97, 0.96)), Some((0.99, 0.99))];
-        let room = line(&all[2]).chars().count() + line(&all[4]).chars().count();
-        let fates = plan(&all, &judged, &lower, room, 0.95);
-        assert_eq!(fates, vec![Fate::Drop("already covered"), Fate::Drop("didn't fit"), Fate::Keep, Fate::Promote, Fate::Keep]);
-        // One sample below the bar is enough to stay out of long-term memory.
-        let fates = plan(&all, &judged, &[None, None, None, Some((0.97, 0.90)), None], 10_000, 0.95);
-        assert_eq!(fates[3], Fate::Keep);
+    fn plan_drops_covered_and_keeps_by_need() {
+        let all = vec![e(1, "duplicate of the profile", "owner", 1.0), e(2, "rarely needed detail", "inferred", 1.0), e(3, "often needed fact", "inferred", 1.0)];
+        let j = |needed: f64, covered: f64| Some(Judged { needed, durable: 0.5, covered, ..Default::default() });
+        let fates = plan(&all, &[j(0.9, 0.9), j(0.1, 0.0), j(0.9, 0.0)], line(&all[2]).chars().count());
+        assert_eq!(fates, vec![Fate::Drop("already covered"), Fate::Drop("didn't fit"), Fate::Keep]);
+    }
+
+    #[test]
+    fn lasting_entries_are_promoted_by_kind() {
+        let j = |durable: f64, about_owner: f64, guidance: f64, knowledge: f64| Judged { durable, about_owner, guidance, knowledge, ..Default::default() };
+        assert_eq!(belongs_in(&j(0.95, 0.95, 0.0, 0.0), 0.9), Some("USER.md"));
+        assert_eq!(belongs_in(&j(0.95, 0.1, 0.95, 0.9), 0.9), Some("IDENTITY.md"));
+        assert_eq!(belongs_in(&j(0.95, 0.1, 0.1, 0.95), 0.9), Some("wiki"));
+        assert_eq!(belongs_in(&j(0.5, 0.95, 0.95, 0.95), 0.9), None, "passing state stays memory");
+        assert_eq!(belongs_in(&j(0.95, 0.85, 0.1, 0.1), 0.9), None, "below the bar");
+        assert!(may_steer("owner") && may_steer("verified") && !may_steer("inferred"));
+    }
+
+    #[test]
+    fn learned_lines_go_at_the_end_of_their_section() {
+        let line = "- 2026-10-08: x (from memory m1)";
+        assert_eq!(with_learned("# U\n\n## Who\n\nme\n", line), format!("# U\n\n## Who\n\nme\n\n## Learned\n\n{line}\n"));
+        assert_eq!(with_learned("# I\n\n## Learned\n\nDated.\n- old\n", line), format!("# I\n\n## Learned\n\nDated.\n- old\n{line}\n"));
+        assert_eq!(with_learned("# I\n\n## Learned\n\n- old\n\n## Next\n\nz\n", line), format!("# I\n\n## Learned\n\n- old\n{line}\n\n## Next\n\nz\n"));
+    }
+
+    #[test]
+    fn promoting_to_a_file_backs_it_up() {
+        let home = crate::test_util::TestDir::new("promote");
+        std::fs::write(home.join("USER.md"), "# USER.md\n\nJose.\n").unwrap();
+        let backup = promote_to_file(&home, "USER.md", 8, "Jose needs stronger distribution.").unwrap();
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "# USER.md\n\nJose.\n");
+        let now = std::fs::read_to_string(home.join("USER.md")).unwrap();
+        assert!(now.contains("## Learned\n\n- ") && now.contains("Jose needs stronger distribution. (from memory m8)"), "{now}");
+        assert_ne!(promote_to_file(&home, "USER.md", 9, "again").unwrap(), backup, "each change gets its own backup");
+    }
+
+    #[test]
+    fn a_compaction_answer_is_used_only_when_it_is_a_whole_file_that_fits() {
+        let file = format!("# USER.md\n\n{}", "x".repeat(900));
+        assert_eq!(compacted_text(&format!("Here it is:\n<<<FILE\n{file}\nFILE>>>\n"), 3000), Some(format!("{file}\n")));
+        assert_eq!(compacted_text(&file, 3000), None, "no markers");
+        assert_eq!(compacted_text("<<<FILE\nno heading\nFILE>>>", 3000), None);
+        assert_eq!(compacted_text("<<<FILE\n# USER.md\n\nme\nFILE>>>", 3000), None, "gutted");
+        assert_eq!(compacted_text(&format!("<<<FILE\n# U\n{}\nFILE>>>", "x".repeat(3001)), 3000), None, "too long");
     }
 
     #[test]
     fn without_judgments_recency_decides() {
         let all = vec![e(1, "stale", "inferred", 30.0), e(2, "fresh", "inferred", 0.0)];
-        let fates = plan(&all, &[None, None], &[None, None], line(&all[1]).chars().count(), 0.95);
+        let fates = plan(&all, &[None, None], line(&all[1]).chars().count());
         assert_eq!(fates, vec![Fate::Drop("didn't fit"), Fate::Keep]);
     }
 
@@ -703,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn trust_needs_many_agreeing_reviews() {
+    fn wilson_lower_needs_many_agreeing_outcomes() {
         assert_eq!(wilson_lower(0, 0, 1.645), 0.0);
         assert!(wilson_lower(10, 10, 1.645) < 0.95, "ten agreements aren't enough");
         assert!(wilson_lower(52, 52, 1.645) >= 0.95);
@@ -720,8 +862,8 @@ mod tests {
 
     #[test]
     fn answers_map_to_probabilities() {
-        let j = judged_from(&json!({ "needed": { "score": 3, "confidence": 0.9 }, "durable": { "probability": 0.7 }, "impact": { "score": 0 } })).unwrap();
-        assert_eq!((j.needed, j.durable, j.impact, j.covered), (1.0, 0.7, 0.0, 0.0));
+        let j = judged_from(&json!({ "needed": { "score": 3, "confidence": 0.9 }, "durable": { "probability": 0.7 }, "guidance": { "probability": 0.9 } })).unwrap();
+        assert_eq!((j.needed, j.durable, j.covered, j.guidance), (1.0, 0.7, 0.0, 0.9));
         assert!(judged_from(&json!({})).is_none());
     }
 }

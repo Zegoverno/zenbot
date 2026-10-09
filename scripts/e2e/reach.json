@@ -8,5 +8,6 @@
   {"when": "web", "tool": "web_fetch", "args": {"url": "http://169.254.169.254/latest/meta-data"}},
   {"when": "web", "tool": "web_search", "args": {"query": "zenbot agent"}},
   {"when": "web", "tool": "remember", "args": {"text": "Something read on the web.", "source": "owner"}},
+  {"when": "web", "tool": "edit", "args": {"path": "~/.zenbot/USER.md", "old_text": "#", "new_text": "# Rewritten by a web page"}},
   {"text": "Done."}
 ]

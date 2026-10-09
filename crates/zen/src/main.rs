@@ -111,7 +111,7 @@ enum Cmd {
     Memory {
         #[command(subcommand)]
         cmd: Option<MemoryCmd>,
-        /// Which memories: short (default), long, archived, proposed (for long-term) or all
+        /// Which memories: short (default), archived or all
         #[arg(long, default_value = "short")]
         tier: String,
     },
@@ -197,10 +197,6 @@ impl ReviewCmd {
 enum MemoryCmd {
     /// Tidy short-term memory now (what the nightly sleep does)
     Sleep,
-    /// Accept a memory the sleep proposed for long-term memory (`zen memory --tier proposed` lists them)
-    Accept { id: String },
-    /// Reject a proposed promotion (the memory stays archived)
-    Reject { id: String },
 }
 
 /// Outcome of one turn, collected from the session stream.
@@ -780,8 +776,6 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Cmd::Memory { cmd: Some(MemoryCmd::Accept { id }), .. } => review_memory(&c, json, &id, "accept").await?,
-        Cmd::Memory { cmd: Some(MemoryCmd::Reject { id }), .. } => review_memory(&c, json, &id, "reject").await?,
         Cmd::Skills { cmd: None } => {
             let s = c.get("/api/skills").await?;
             if json {
@@ -914,24 +908,6 @@ async fn session_op(c: &Client, id: &str, method: reqwest::Method, body: Option<
     Ok((id, v))
 }
 
-/// `zen memory accept|reject <id>`: decide on a memory the sleep proposed for long-term memory.
-async fn review_memory(c: &Client, json: bool, id: &str, decision: &str) -> Result<()> {
-    let r = c.post(&format!("/api/memory/{}/review", enc(id)), json!({ "decision": decision })).await?;
-    let p = &r["promotion"];
-    emit(json, &r, || {
-        format!(
-            "{} is now {}-term. Promotion: {} ({} of {} proposals accepted; acts on its own at 0.95, now {:.2})",
-            r["id"].as_str().unwrap_or(""),
-            r["tier"].as_str().unwrap_or(""),
-            p["mode"].as_str().unwrap_or(""),
-            p["accepted"],
-            p["reviewed"],
-            p["lower_bound"].as_f64().unwrap_or(0.0)
-        )
-    });
-    Ok(())
-}
-
 /// What a sleep did, in one line.
 fn sleep_counts(r: &Value) -> String {
     if let Some(e) = r["error"].as_str() {
@@ -939,7 +915,7 @@ fn sleep_counts(r: &Value) -> String {
     }
     let n = |k: &str| r[k].as_i64().unwrap_or(0);
     let scorer = r["scorer"].as_str().map(|s| format!(" (judged by {s})")).unwrap_or_else(|| " (by recency: no System One model)".into());
-    format!("{} entries: {} kept, {} archived, {} promoted, {} proposed for long-term{scorer}", n("entries"), n("kept"), n("dropped"), n("promoted"), n("proposed"))
+    format!("{} entries: {} kept, {} archived, {} promoted{scorer}", n("entries"), n("kept"), n("dropped"), n("promoted"))
 }
 
 /// Short-term memory's size and the last sleep, from `/api/memory`.
@@ -976,7 +952,7 @@ mod tests {
     fn memory_line_shows_size_and_the_last_sleep() {
         let m = json!({ "size": 4000, "memories": [{ "text": "abc" }, { "text": "defgh" }],
             "last_sleep": { "ended_at": "2026-10-07T04:01:02Z", "entries": 3, "kept": 2, "dropped": 1, "promoted": 0, "proposed": 0, "scorer": null } });
-        assert_eq!(memory_line(&m), "2 entries, 28/4000 characters; last sleep 2026-10-07 04:01 UTC: 3 entries: 2 kept, 1 archived, 0 promoted, 0 proposed for long-term (by recency: no System One model)");
+        assert_eq!(memory_line(&m), "2 entries, 28/4000 characters; last sleep 2026-10-07 04:01 UTC: 3 entries: 2 kept, 1 archived, 0 promoted (by recency: no System One model)");
         assert!(memory_line(&json!({ "size": 4000, "memories": [], "last_sleep": null })).ends_with("no sleep yet"));
     }
 

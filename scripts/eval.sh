@@ -190,7 +190,7 @@ run_task() { # name bin label model effort db task repeat
     if [ -n "$error" ]; then
       out="not run: $error"
     elif echo "$check" | jq -e 'has("run")' >/dev/null; then
-      if out=$(cd "$ws" && TASK_DIR="$tdir" timeout 300 bash -c "$(echo "$check" | jq -r .run)" 2>&1); then ok=true; fi
+      if out=$(cd "$ws" && TASK_DIR="$tdir" ANSWER="$answer" TURNS="$turns" timeout 300 bash -c "$(echo "$check" | jq -r .run)" 2>&1); then ok=true; fi
     elif echo "$check" | jq -e 'has("answer_contains") or has("answer_lacks")' >/dev/null; then
       # The answer to one prompt (`step`: 1 = the first prompt), else the last one.
       local text="$answer" step; step=$(echo "$check" | jq -r '.step // empty')

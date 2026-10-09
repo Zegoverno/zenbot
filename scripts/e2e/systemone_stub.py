@@ -16,9 +16,15 @@ class H(BaseHTTPRequestHandler):
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             assert request["model"] == "typesafe/jev-1.13"
             answers = {}
+            # The sleep's marker entries: lasting and about the owner, or lasting knowledge.
+            memory = str(request.get("state", {}).get("memory", ""))
+            high = {"PROMOTE-USER": {"durable", "about_owner"}, "PROMOTE-WIKI": {"durable", "knowledge"}}
+            marked = next((v for k, v in high.items() if k in memory), None)
             for name, question in request["questions"].items():
                 kind = question["type"]
-                if kind == "noul":
+                if kind == "noul" and marked is not None:
+                    answers[name] = {"type": "noul", "noul": 0.97 if name in marked else 0.05}
+                elif kind == "noul":
                     answers[name] = {"type": "noul", "noul": 0.82}
                 elif kind == "choice":
                     choice = next(iter(question["criteria"]))

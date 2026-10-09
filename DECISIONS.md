@@ -6,6 +6,52 @@
 
 ---
 
+## D-045 — IDENTITY.md; the agent keeps its prompt files; memory is promoted into them and the wiki
+
+**Date:** 2026-10-08 · **Status:** accepted (owner) · **Supersedes:** D-035's promotion to
+long-term memory and D-028's long-term tier (search over memories stays)
+
+**Decision:** The agent's prompt files have separate jobs. `SOUL.md` is the deep layer: what the
+agent is for, what it holds to and the lines it doesn't cross; only the owner edits it.
+`agents/<name>/IDENTITY.md` (new, loaded right after the soul) is the agent's character in practice
+and how it works. `USER.md` is the owner; `AGENTS.md` the environment; `MEMORY.md` where things
+stand. Traits, standing guidance and preferences are not memory: when one is really important and lasting,
+the agent writes it straight into `IDENTITY.md` (about itself) or `USER.md` (about the owner) and
+says so in one line (owner, 2026-10-08: no approval round, no detour through memory). Both files
+keep their size caps and are kept compact, never trimmed by hand: an edit that takes one over its
+cap tells the agent to compact it, and the sleep compacts any that is still over (a session of the
+kernel's own rewrites it; the kernel checks the answer and writes it). Every change by the agent or
+the sleep is backed up first in `~/.zenbot/backups/prompt-files/` (90 days). The separate long-term tier is gone; the nightly sleep promotes on its own
+(owner, 2026-10-08) into the places lasting things really live: a lasting entry about the owner
+moves to `USER.md`, lasting guidance on how the agent acts to `IDENTITY.md` (a dated line under
+`## Learned`, after a backup; compacted afterwards if that takes it over its cap), and lasting knowledge is copied into the wiki (a capture by "the sleep"; the entry stays in
+short-term memory while it's needed). The bar is 0.9 (`ZEN_PROMOTE_BAR`), on the lowest of three
+samples for a prompt file; only the owner's words and verified results reach the prompt files (an
+inference, which may come from the web, is flagged for the agent to propose instead). The morning
+note lists every promotion.
+Archived memories leave the search index (as before). The kernel refuses `edit`/`write` on the four
+prompt files from subagents and from sessions that have read untrusted content.
+
+**Why:** A promoted memory left the always-loaded instructions for search, so the most lasting,
+high-impact guidance became the hardest to reach; and "how to act" is identity, not recollection.
+A long-term tier of loose sentences duplicated the wiki, which has pages, timelines and git. The
+owner wants promotion automatic; backups and the morning note keep it reviewable and undoable.
+Approval in the conversation is faster and clearer than a review queue. The guard keeps text from
+the web or an MCP server from rewriting the agent's instructions. OpenClaw loads the same files in
+the same order (`SOUL`, `IDENTITY`, `USER`; `docs/research/hermes-openclaw.md`), with a much
+smaller `IDENTITY.md` (name, vibe, emoji).
+
+**Considered:** keeping the long-term tier for durable facts (the wiki already holds lasting
+knowledge); promotion into prompt files only after the owner's yes in the chat (the agent's
+recommendation; the owner chose automatic with backups); refusing a promotion when the file is full
+(the owner wants compaction instead); adding identity to `SOUL.md` (the owner wants the soul as a stable guiding layer); a
+review queue for proposed edits (`zen memory accept`), slower than approving in the conversation.
+
+**Known limit:** `bash` runs as the owner's Unix user and can still write the files (ROADMAP.md,
+technical debt).
+
+---
+
 ## D-044 — One safe cross-provider continuation on hard usage limits
 
 **Date:** 2026-10-08 · **Status:** accepted (owner) · **Exception to:** D-030's no-per-turn-switch rule
@@ -186,6 +232,8 @@ through a separate model call (another moving part), always loading an index of 
 
 ## D-035 — Search: three arms in one query; promotion earns its trust
 
+> Promotion to long-term memory superseded by D-045 (2026-10-08); the search design stands.
+
 **Decision:** One `search_docs` table over session turns and memories (later the wiki and skills),
 indexed in the background. A search runs exact names and paths first (trigram over identifiers),
 then full text (`simple` configuration: no stemming, identifiers survive) and meaning (pgvector,
@@ -329,6 +377,9 @@ specialized.
 ---
 
 ## D-028 — Memory: fixed-size short-term, nightly sleep, a very high bar for long-term
+
+> Long-term promotion superseded by D-045 (2026-10-08): traits and guidance go to `IDENTITY.md` or
+> `USER.md` by approved edit; the sleep keeps or archives.
 
 **Decision:** Anything can be saved to short-term memory (`MEMORY.md`, fixed size, rendered at session
 start and frozen for the session). A nightly sleep job asks System One about every entry (needed

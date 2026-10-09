@@ -22,11 +22,12 @@ pub struct Envelope {
 }
 
 /// Largest size of each prompt file in the instructions (characters): SOUL.md 4000
-/// (ZEN_SOUL_CHARS), AGENTS.md 12000 (ZEN_AGENTS_CHARS), USER.md 3000 (ZEN_USER_CHARS). Sizes from
+/// (ZEN_SOUL_CHARS), IDENTITY.md 4000 (ZEN_IDENTITY_CHARS), AGENTS.md 12000 (ZEN_AGENTS_CHARS), USER.md 3000 (ZEN_USER_CHARS). Sizes from
 /// Hermes and OpenClaw (DESIGN.md, Target design).
-fn file_cap(path: &str) -> usize {
+pub(crate) fn file_cap(path: &str) -> usize {
     let (key, default) = match path.rsplit('/').next().unwrap_or(path) {
         "SOUL.md" => ("ZEN_SOUL_CHARS", 4000.0),
+        "IDENTITY.md" => ("ZEN_IDENTITY_CHARS", 4000.0),
         "AGENTS.md" => ("ZEN_AGENTS_CHARS", 12000.0),
         _ => ("ZEN_USER_CHARS", 3000.0),
     };
@@ -59,7 +60,7 @@ fn prompt_file(rel: &str, vars: &[(&str, String)]) -> Option<String> {
     Some(cut_middle(text.trim(), file_cap(rel), &path.display().to_string()))
 }
 
-/// The system prompt, fixed for the session: who the agent is (SOUL.md), its environment
+/// The system prompt, fixed for the session: who the agent is (SOUL.md, then IDENTITY.md), its environment
 /// (AGENTS.md), the owner (USER.md), its short-term memory (MEMORY.md, rendered by the kernel), the
 /// skills index, and the instruction files of the workspace's projects (from `/` down). How to use
 /// each tool is in the tool's own description; how to do a kind of work, in skills.
@@ -76,6 +77,10 @@ pub fn system_prompt(workspace: &Path, repo: &str, memory: &str, sleep_note: Opt
     let soul_rel = crate::layout::SOUL;
     let soul = prompt_file(soul_rel, &vars).unwrap_or_else(|| "You are zenbot, the owner's agent on their Linux VM.".into());
     s.push_str(&format!("<soul file=\"~/.zenbot/{soul_rel}\">\n{soul}\n</soul>\n"));
+    let identity_rel = crate::layout::IDENTITY;
+    if let Some(identity) = prompt_file(identity_rel, &vars) {
+        s.push_str(&format!("\n<identity file=\"~/.zenbot/{identity_rel}\">\n{identity}\n</identity>\n"));
+    }
     if let Some(env) = prompt_file("AGENTS.md", &vars) {
         s.push_str(&format!("\n<environment file=\"~/.zenbot/AGENTS.md\">\n{env}\n</environment>\n"));
     }

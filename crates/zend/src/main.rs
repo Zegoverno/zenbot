@@ -236,7 +236,6 @@ async fn main() -> Result<()> {
         .route("/skills/review", axum::routing::post(review_skill))
         .route("/tools/{name}/review", axum::routing::post(review_tool))
         .route("/memory/sleep", axum::routing::post(run_sleep))
-        .route("/memory/{id}/review", axum::routing::post(review_memory))
         .route("/version", get(version))
         .route("/upgrade", get(upgrade_status).post(upgrade_start))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth));
