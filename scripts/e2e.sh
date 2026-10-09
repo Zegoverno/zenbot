@@ -66,6 +66,8 @@ check() { # check <description> <command…>
   if "$@"; then echo "  ok    $what"; else echo "  FAIL  $what"; FAILED=$((FAILED + 1)); return 0; fi
 }
 eq() { [ "$1" = "$2" ] || { echo "        expected [$2], got [$1]" >&2; return 1; }; }
+# poll <query> <expected>: wait up to 30 s for a query's result (background work in the kernel).
+poll() { local i; for i in $(seq 1 60); do [ "$(q "$1")" = "$2" ] && return 0; sleep 0.5; done; echo "        waited for [$2], got [$(q "$1")]" >&2; return 1; }
 
 # Every session's tape is numbered 1..n without gaps, and its hash chain recomputes.
 tape_is_sound() {
@@ -528,7 +530,6 @@ scheduled_jobs() {
   python3 "$REPO/scripts/e2e/systemone_stub.py" "$port" & local srv=$!
   local s1=(ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone")
   start_kernel "$ws" "$(script jobs.json)" ZEN_JOBS=1 ZEN_JOBS_TICK=0.5 ZEN_DEFAULT_MODEL=faux/smoke "${s1[@]}"
-  poll() { local i; for i in $(seq 1 60); do [ "$(q "$1")" = "$2" ] && return 0; sleep 0.5; done; echo "        waited for [$2], got [$(q "$1")]" >&2; return 1; }
   local runs="SELECT string_agg(r.status || '/' || r.trigger, ',' ORDER BY r.id) FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name ="
   check "the system jobs are seeded" eq "$(zen jobs --json | jq -r '[.jobs[] | select(.kind == "system") | .name] | sort | join(",")')" engines,sleep
   zen jobs add report-a --schedule "every 1h" --prompt "JOBTASK-A" >/dev/null
@@ -578,6 +579,40 @@ scheduled_jobs() {
   kill "$srv" 2>/dev/null || true
 }
 
+# Session names and next-prompt suggestions (assist.rs): after each owner turn the assist model names
+# the session (while the owner hasn't) and suggests the next prompt; the next prompt settles it.
+names_suggestions() {
+  local ws; ws=$(new_workspace names)
+  start_kernel "$ws" "" ZEN_ASSIST_MODEL=faux/smoke
+  local r sid; r=$(zen ask --json -m faux/smoke "hi"); sid=$(echo "$r" | jq -r .session_id)
+  local s1="SELECT title || '/' || title_source FROM sessions WHERE id = '$sid'"
+  check "the session is named after the first turn" poll "$s1" "Scripted task/model"
+  local open="SELECT count(*) FROM prompt_suggestions WHERE session_id = '$sid' AND outcome IS NULL AND suggested = 'Run the tests again' AND prompt_version = 'v1'"
+  check "a next prompt is suggested" poll "$open" 1
+  local id ev; id=$(q "SELECT max(id) FROM prompt_suggestions WHERE session_id = '$sid'")
+  ev=$(python3 scripts/e2e/ws_prompt.py "$URL" "$TOKEN" "$sid" "{\"type\":\"prompt\",\"text\":\"Run the tests again\",\"suggestion\":{\"id\":$id,\"taken\":true}}" 15)
+  check "taken and sent unchanged: accepted" eq "$(q "SELECT outcome || '/' || coalesce(final, '-') FROM prompt_suggestions WHERE id = $id")" "accepted/-"
+  check "the client is told the name and the new suggestion" bash -c 'grep -q "\"type\": \"title\"" <<<"$1" && grep -q "\"type\": \"suggestion\"" <<<"$1"' _ "$ev"
+  id=$(echo "$ev" | jq -r 'select(.type == "suggestion") | .id')
+  python3 scripts/e2e/ws_prompt.py "$URL" "$TOKEN" "$sid" "{\"type\":\"prompt\",\"text\":\"Run the tests twice\",\"suggestion\":{\"id\":$id,\"taken\":true}}" 15 >/dev/null
+  check "taken and changed: edited, with what was sent" eq "$(q "SELECT outcome || '/' || final FROM prompt_suggestions WHERE id = $id")" "edited/Run the tests twice"
+  id=$(q "SELECT max(id) FROM prompt_suggestions WHERE session_id = '$sid'")
+  python3 scripts/e2e/ws_prompt.py "$URL" "$TOKEN" "$sid" "{\"type\":\"prompt\",\"text\":\"something else\",\"suggestion\":{\"id\":$id,\"taken\":false}}" 15 >/dev/null
+  check "the owner's own prompt: declined" eq "$(q "SELECT outcome || '/' || final FROM prompt_suggestions WHERE id = $id")" "declined/something else"
+  check "a suggestion each turn" poll "SELECT count(*) FROM prompt_suggestions WHERE session_id = '$sid'" 4
+  id=$(q "SELECT max(id) FROM prompt_suggestions WHERE session_id = '$sid'")
+  zen ask --json -s "$sid" "one more" >/dev/null
+  check "a client that doesn't show suggestions: unseen" eq "$(q "SELECT outcome FROM prompt_suggestions WHERE id = $id")" unseen
+  # The owner's name is never overwritten.
+  r=$(zen ask --json -m faux/smoke "hello"); sid=$(echo "$r" | jq -r .session_id)
+  check "a second session is named" poll "SELECT title_source FROM sessions WHERE id = '$sid'" model
+  curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"title":"Mine"}' "$URL/api/sessions/$sid" >/dev/null
+  zen ask --json -s "$sid" "again" >/dev/null
+  check "a suggestion after the rename" poll "SELECT count(*) FROM prompt_suggestions WHERE session_id = '$sid'" 2
+  check "the owner's title stays" eq "$(q "SELECT title || '/' || title_source FROM sessions WHERE id = '$sid'")" "Mine/owner"
+  check "outcomes by prompt version" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/suggestions" | jq -c '.by_version[0] | [.prompt_version, .accepted, .edited, .declined, .unseen]')" '["v1",1,1,1,2]'
+}
+
 run open-loop open_loop
 run restart-recovery restart_recovery
 run prompt-files prompt_files
@@ -600,6 +635,7 @@ run secrets secrets_masked
 run slow-summary slow_summary
 run stale-turn stale_turn
 run scheduled-jobs scheduled_jobs
+run names-suggestions names_suggestions
 echo "== tape"
 check "every tape is numbered and its hash chain recomputes" tape_is_sound
 
