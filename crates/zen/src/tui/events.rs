@@ -159,6 +159,7 @@ impl App {
                 }
             }
             "busy" => {
+                self.suggestion = None;
                 // A turn the kernel started also counts.
                 if !self.busy {
                     self.begin_turn();
@@ -176,6 +177,18 @@ impl App {
                 }
                 out.push(Vec::new());
                 self.commit(out);
+            }
+            // The kernel named the session (only while the owner hasn't).
+            "title" => {
+                self.title = clean(ev["title"].as_str().unwrap_or(""));
+                self.draw();
+            }
+            // A suggested next prompt, after a turn: grey text in the empty input until a prompt is sent.
+            "suggestion" if !self.busy => {
+                if let (Some(id), Some(text)) = (ev["id"].as_i64(), ev["text"].as_str()) {
+                    self.suggestion = Some(Suggestion { id, text: text.trim().to_string(), taken: false });
+                    self.draw();
+                }
             }
             "status" => {
                 self.status = clean(ev["text"].as_str().unwrap_or("Working"));

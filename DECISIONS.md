@@ -6,6 +6,38 @@
 
 ---
 
+## D-047 — Session names and suggested next prompts from a cheap side model
+
+**Date:** 2026-10-09 · **Status:** accepted (owner)
+
+**Decision:** After each owner's turn that ends cleanly, the kernel (`assist.rs`) makes one call to
+the assist model (`ZEN_ASSIST_MODEL`, default `claude/claude-haiku-5-5`: the cheapest model on the
+owner's plans, owner 2026-10-09) through the worker's tool-less `complete`. It returns JSON with a
+session name (2 to 5 words; asked for while the title isn't the owner's, after each of the first
+3 turns) and the owner's likely next prompt (or nothing). A title the owner sets (`PATCH`,
+`/rename`, `title` at creation) is marked `title_source = 'owner'` and never renamed. No suggestion
+after `ask` (the answers are the next prompt), in jobs or child sessions, or once the owner has sent
+something. In zen the suggestion is grey text in the empty input: **Tab** takes it into the input,
+then Enter sends it or the owner edits it first; typing replaces it. Moving the keys between the
+chat and the side panel moves from Tab to **Shift+Tab** (owner: one key keeps Tab; completion, of
+the `/` menu and of the suggestion, keeps it, as in shells and Claude Code). Enter on an empty
+input does not send the suggestion (Claude Code's choice), so nothing is sent by accident. The next
+prompt reports the suggestion and whether it was taken; the kernel records `accepted`, `edited`
+(with what was sent), `declined` (with what was sent) or `unseen` in `prompt_suggestions`, with the
+prompt version, model, latency and cost (`zen suggestions`).
+
+**Why:** The owner asked for both (2026-10-09): titles cut from the first prompt name sessions
+badly, and most next prompts are the obvious step ("go ahead", "run it"). A side call after the turn
+keeps the main model's turn, history and cache untouched (a tool or a trailing block in the answer
+would cost the main model's tokens and bias its answers). Measured on the VM: Haiku 5.5 answers in
+about 2.3 s for about $0.0006 a call (Haiku 4.5: 4 s, $0.014). Recording outcomes per prompt version
+gives the evidence to improve the prompt later.
+
+**Considered:** a `rename_session` tool for the main model (names only sessions where it remembers
+to, and costs a main-model call); System One (typed answers only, it can't write text); the
+session's own model (better guesses, slower, more plan usage); Enter on an empty input sending the
+suggestion (fewer keys, but sends by accident).
+
 ## D-046 — Scheduled jobs in the kernel; the sleep and engine updates move off systemd timers
 
 **Date:** 2026-10-09 · **Status:** accepted (owner) · **Supersedes:** D-022's daily timer for engine

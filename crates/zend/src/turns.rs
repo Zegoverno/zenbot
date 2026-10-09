@@ -105,6 +105,7 @@ pub(crate) async fn finish_turn(app: &AppState, id: Uuid, error: Value) -> bool 
         app.emit(parent, json!({ "type": "child_end", "turn": summary })).await;
     }
     if error.is_null() {
+        assist::after_turn(app, id, turn.kind.as_deref(), turn.ending);
         let size = summary["context_tokens"].as_i64().or(turn.sent["est_tokens"].as_i64()).unwrap_or(0);
         prepare_summary_if_needed(app, id, &turn.model, size).await;
     }

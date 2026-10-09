@@ -6,6 +6,22 @@
 
 ---
 
+## 2026-10-09 — Session names and suggested next prompts (D-047)
+
+- After each owner's turn, one call to the assist model (`assist.rs`; `ZEN_ASSIST_MODEL`, Haiku 5.5)
+  names the session (while the title isn't the owner's, first 3 turns; `title` event) and suggests
+  the next prompt (`suggestion` event; not after `ask`, nor in jobs or child sessions;
+  `ZEN_SUGGEST=off`).
+- zen shows the suggestion in grey in the empty input with "tab: use suggestion": Tab takes it,
+  Enter sends, or edit first; typing replaces it. The side panel's focus key moves to Shift+Tab.
+- The next prompt reports the suggestion; `prompt_suggestions` (migration 0020) records
+  accepted / edited / declined / unseen with what was sent, the prompt version, latency and cost.
+  `zen suggestions` and `GET /api/suggestions` show the rates. `sessions.title_source` keeps an
+  owner's title from being renamed.
+- Tests: 3 kernel unit tests (reply parsing, outcomes, what the model reads), 5 key/render tests in
+  zen; e2e scenario `names-suggestions` (12 checks) with `scripts/e2e/ws_prompt.py`, a stdlib
+  WebSocket client.
+
 ## 2026-10-09 — Scheduled jobs in the kernel; the sleep and engine updates leave systemd (D-046)
 
 - A scheduler in `zend` (`jobs.rs`, tables `jobs` and `job_runs`, migration 0019) runs the

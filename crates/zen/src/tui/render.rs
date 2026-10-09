@@ -222,14 +222,18 @@ impl App {
             lines.push(line(n.clone(), *s));
         }
 
-        let hint = if self.editor.is_empty() {
+        // A suggested next prompt shows as the input's grey placeholder.
+        let suggested = self.suggestion.as_ref().filter(|_| self.editor.is_empty() && !self.busy).map(|s| s.text.as_str());
+        let hint = if suggested.is_some() {
+            "tab: use suggestion"
+        } else if self.editor.is_empty() {
             ""
         } else if self.enhanced {
             "enter send · shift+enter new line"
         } else {
             "enter send · alt+enter new line"
         };
-        let (input, crow, ccol) = self.editor.render(w, PLACEHOLDER, hint, (self.height() / 2).max(3));
+        let (input, crow, ccol) = self.editor.render(w, suggested.unwrap_or(PLACEHOLDER), hint, (self.height() / 2).max(3));
         let caret_row = lines.len() + crow;
         lines.extend(input);
 

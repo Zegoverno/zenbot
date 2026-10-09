@@ -126,14 +126,14 @@ async fn handle(rpc: &Rpc, running: &Running, method: &str, p: Value) -> Result<
             Ok(json!({ "ok": true }))
         }
         "complete" => {
-            // One completion without tools (summaries). Errors are returned in the result.
+            // One completion without tools (summaries, session names and suggestions). Errors are returned in the result.
             let model_ref = p["model"].as_str().unwrap_or("");
             let (engine, model) = model_ref.split_once('/').unwrap_or(("", model_ref));
             let (system, prompt) = (p["system"].as_str().unwrap_or(""), p["prompt"].as_str().unwrap_or(""));
             let res = match engine {
                 "claude" => claude::complete(model, system, prompt).await,
                 "codex" => codex::complete(model, system, prompt).await,
-                "faux" if faux::enabled() => Ok(faux::complete(prompt)),
+                "faux" if faux::enabled() => Ok(faux::complete(system, prompt)),
                 other => Err(anyhow::anyhow!("zen-engine has no `{other}` engine")),
             };
             Ok(res.unwrap_or_else(|e| json!({ "error": e.to_string() })))

@@ -302,7 +302,7 @@ impl App {
                 out.push(Vec::new());
             }
             let hint = match (self.side_focus, self.tab) {
-                (false, _) => "tab: use this panel · ctrl+b: close",
+                (false, _) => "shift+tab: use this panel · ctrl+b: close",
                 (true, Tab::Files) => "↑↓ move · →/enter open · ← fold · . hidden · esc/tab chat",
                 (true, Tab::Viewer) => "↑↓ scroll · ← files · x close file · esc/tab chat",
             };

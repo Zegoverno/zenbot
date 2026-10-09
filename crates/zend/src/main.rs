@@ -2,6 +2,7 @@
 
 mod agent;
 mod api;
+mod assist;
 mod compact;
 mod compile;
 mod context;
@@ -230,6 +231,7 @@ async fn main() -> Result<()> {
         .route("/sessions/{id}", get(get_session).patch(update_session))
         .route("/sessions/{id}/ws", get(session_ws))
         .route("/sessions/{id}/decision", axum::routing::post(decide))
+        .route("/suggestions", get(assist::stats))
         .route("/memory", get(list_memory))
         .route("/mcp", get(mcp_status))
         .route("/skills", get(list_skills))

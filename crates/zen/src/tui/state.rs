@@ -102,13 +102,30 @@ pub(super) struct App {
     /// Where the folder tree starts: zenbot's home (~/.zenbot) unless `/files <dir>` changes it.
     pub(super) files_root: PathBuf,
     pub(super) tab: Tab,
-    /// Keys go to the side panel, not the input (tab switches).
+    /// Keys go to the side panel, not the input (shift+tab switches).
     pub(super) side_focus: bool,
+    /// The kernel's suggested next prompt, shown as grey text in the empty input (tab takes it).
+    pub(super) suggestion: Option<Suggestion>,
     /// Show every step of each run of tool calls (ctrl+o) instead of one line per run.
     pub(super) expand_work: bool,
     /// Tool calls and distinct files written or edited in the running turn, for the status line.
     pub(super) turn_tools: usize,
     pub(super) turn_files: std::collections::HashSet<String>,
+}
+
+/// A suggested next prompt (the kernel's `suggestion` event) and whether the owner took it into
+/// the input with tab, so the kernel can record what became of it.
+pub(super) struct Suggestion {
+    pub(super) id: i64,
+    pub(super) text: String,
+    pub(super) taken: bool,
+}
+
+impl Suggestion {
+    /// What the next prompt tells the kernel about it.
+    pub(super) fn report(&self) -> Value {
+        json!({ "id": self.id, "taken": self.taken })
+    }
 }
 
 impl App {
@@ -188,6 +205,7 @@ impl App {
             files_root: std::env::current_dir().unwrap_or_default(),
             tab: Tab::Files,
             side_focus: false,
+            suggestion: None,
             expand_work: false,
             turn_tools: 0,
             turn_files: Default::default(),
@@ -235,6 +253,7 @@ impl App {
         self.busy = false;
         self.aborting = false;
         self.pending_prompt = None;
+        self.suggestion = None;
         self.last_file = None;
         self.reset_stream();
         self.entries.clear();

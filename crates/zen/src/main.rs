@@ -115,6 +115,8 @@ enum Cmd {
         #[arg(long, default_value = "short")]
         tier: String,
     },
+    /// Suggested next prompts: what became of them (accepted, edited, declined) by prompt version, and the latest
+    Suggestions,
     /// Scheduled jobs: the kernel's own (sleep, engines) and agent jobs; `zen jobs` lists them
     Jobs {
         #[command(subcommand)]
@@ -975,6 +977,14 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
         },
+        Cmd::Suggestions => {
+            let st = c.get("/api/suggestions").await?;
+            if json {
+                out(&st);
+            } else {
+                print_suggestions(&st);
+            }
+        }
         Cmd::Memory { cmd: None, tier } => {
             let m = c.get(&format!("/api/memory?tier={}", enc(&tier))).await?;
             if json {
@@ -1100,6 +1110,33 @@ fn memory_line(m: &Value) -> String {
         format!("last sleep {when} UTC: {}", sleep_counts(sleep))
     };
     format!("{} entries, {}/{} characters; {last}", s["entries"], s["chars"], s["size"])
+}
+
+/// `zen suggestions`: outcomes per prompt version and model, then the latest suggestions.
+fn print_suggestions(st: &Value) {
+    let n = |v: &Value| v.as_i64().unwrap_or(0);
+    for v in st["by_version"].as_array().into_iter().flatten() {
+        let decided = n(&v["accepted"]) + n(&v["edited"]) + n(&v["declined"]);
+        let rate = if decided > 0 { format!("{:.0}% taken", 100.0 * (n(&v["accepted"]) + n(&v["edited"])) as f64 / decided as f64) } else { "no outcomes yet".into() };
+        println!(
+            "{} {}  {} shown: {} accepted, {} edited, {} declined, {} unseen, {} open  ({rate}; {:.1}s, ${:.4})",
+            for_stdout(v["prompt_version"].as_str().unwrap_or("")),
+            dim(&for_stdout(v["model"].as_str().unwrap_or(""))),
+            n(&v["shown"]), n(&v["accepted"]), n(&v["edited"]), n(&v["declined"]), n(&v["unseen"]), n(&v["open"]),
+            v["latency_ms"].as_f64().unwrap_or(0.0) / 1000.0,
+            v["cost_usd"].as_f64().unwrap_or(0.0),
+        );
+    }
+    if st["by_version"].as_array().is_none_or(|a| a.is_empty()) {
+        println!("no suggestions yet");
+        return;
+    }
+    println!();
+    for r in st["recent"].as_array().into_iter().flatten().take(10) {
+        let outcome = r["outcome"].as_str().unwrap_or("open");
+        let fin = r["final"].as_str().map(|f| format!(" → {}", for_stdout(&zen_proto::head(f, 60)))).unwrap_or_default();
+        println!("{:<9} {}{}", outcome, for_stdout(&zen_proto::head(r["suggested"].as_str().unwrap_or(""), 60)), dim(&fin));
+    }
 }
 
 #[cfg(test)]

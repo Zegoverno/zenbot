@@ -149,11 +149,11 @@ pub(crate) async fn create_session(State(app): State<AppState>, Json(body): Json
     let model = body.model.unwrap_or_else(|| app.default_model.clone());
     check_effort(&app, &model, body.effort.as_deref()).await?;
     let row = sqlx::query(&format!(
-        "INSERT INTO sessions (id, title, model, effort) VALUES ($1, $2, $3, $4)
+        "INSERT INTO sessions (id, title, model, effort, title_source) VALUES ($1, $2, $3, $4, CASE WHEN $2 = '' THEN 'auto' ELSE 'owner' END)
          RETURNING {SESSION_COLUMNS}, 0::float8 AS cost"
     ))
     .bind(id)
-    .bind(body.title.unwrap_or_default())
+    .bind(body.title.map(|t| t.trim().to_string()).unwrap_or_default())
     .bind(model)
     .bind(body.effort)
     .fetch_one(&app.db)
@@ -193,7 +193,7 @@ pub(crate) async fn update_session(State(app): State<AppState>, Path(id): Path<U
         }
     };
     let row = sqlx::query(&format!(
-        "UPDATE sessions SET title = COALESCE($2, title), model = COALESCE($3, model), effort = $5,
+        "UPDATE sessions SET title = COALESCE($2, title), title_source = CASE WHEN $2 IS NULL THEN title_source ELSE 'owner' END, model = COALESCE($3, model), effort = $5,
                 archived = COALESCE($4, archived), updated_at = now()
          WHERE id = $1
          RETURNING {SESSION_COLUMNS}, {} AS cost",
@@ -342,8 +342,15 @@ pub(crate) async fn handle_socket(app: AppState, id: Uuid, socket: WebSocket) {
                 // Started apart from this loop, so an abort is read while the turn is prepared
                 // (a summary at the hard limit can take minutes).
                 let text = cmd.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+                // What the owner did with the suggested next prompt, if the client showed one.
+                let reported = cmd["suggestion"]["id"].as_i64().map(|s| (s, cmd["suggestion"]["taken"] == true));
                 let app = app.clone();
                 tokio::spawn(async move {
+                    if !text.trim().is_empty() && !app.is_busy(id).await {
+                        if let Err(e) = assist::settle(&app.db, id, &text, reported).await {
+                            tracing::warn!("recording the suggestion's outcome in session {id}: {e:#}");
+                        }
+                    }
                     if let Err(e) = start_turn(&app, id, text).await {
                         app.emit(id, json!({ "type": "error", "error": e.to_string() })).await;
                     }

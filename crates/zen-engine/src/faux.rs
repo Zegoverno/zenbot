@@ -92,7 +92,12 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
 
 /// A scripted completion for tests: a valid summary that keeps every line marked `FACT:` from the
 /// prompt, so tests can check what survives summarizing.
-pub fn complete(prompt: &str) -> Value {
+pub fn complete(system: &str, prompt: &str) -> Value {
+    // The kernel's assist model (session names, next-prompt suggestions): a fixed answer.
+    if system.contains("\"title\"") && system.contains("\"next\"") {
+        let reply = json!({ "title": "Scripted task", "next": "Run the tests again" });
+        return json!({ "text": reply.to_string(), "usage": { "input": prompt.len() / 4, "output": 20 }, "model": "faux/smoke" });
+    }
     let facts: Vec<Value> = prompt
         .lines()
         .filter_map(|l| l.find("FACT:").map(|i| json!({ "text": l[i..].trim_end_matches(['"', '\\']).to_string(), "refs": [] })))
