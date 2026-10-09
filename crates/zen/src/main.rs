@@ -529,6 +529,12 @@ fn engines_line(state: &Value) -> Option<String> {
     Some(line + ")")
 }
 
+/// Whether a model engine (Claude Code, Codex) is signed in, from `/api/models`. OpenRouter is
+/// listed there too but only serves System One and embeddings, so it can't run a turn.
+pub(crate) fn engine_signed_in(models: &Value) -> bool {
+    models["authenticated"].as_object().is_some_and(|a| a.iter().any(|(n, v)| n != "openrouter" && *v == true))
+}
+
 fn signed_in(engine: &str) -> bool {
     let run = |cmd: &str, args: &[&str]| std::process::Command::new(cmd).args(args).env("PATH", zen_path()).output().ok();
     match engine {
@@ -694,7 +700,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Status => {
             let health = c.health().await?;
             let models = c.get("/api/models").await?;
-            let any_signed_in = models["authenticated"].as_object().is_some_and(|a| a.values().any(|v| v == true));
+            let any_signed_in = engine_signed_in(&models);
             let version = c.get("/api/version").await.unwrap_or(Value::Null);
             let git_identity = git_identity();
             let engines = engines_state();
@@ -958,6 +964,13 @@ fn memory_line(m: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_openrouter_key_alone_is_not_a_signed_in_engine() {
+        assert!(!engine_signed_in(&json!({ "authenticated": { "openrouter": true, "claude": false } })));
+        assert!(engine_signed_in(&json!({ "authenticated": { "openrouter": false, "codex": true } })));
+        assert!(!engine_signed_in(&json!({})));
+    }
 
     #[test]
     fn memory_line_shows_size_and_the_last_sleep() {

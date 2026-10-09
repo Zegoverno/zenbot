@@ -86,7 +86,7 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
     let models = c.get("/api/models").await?;
     let default_model = models["default"].as_str().unwrap_or("").to_string();
     let catalog: Vec<Value> = models["models"].as_array().cloned().unwrap_or_default();
-    let signed_in = models["authenticated"].as_object().is_some_and(|a| a.values().any(|v| v == true));
+    let signed_in = crate::engine_signed_in(&models);
 
     let history = Some(zen_home().join("history"));
     let (tx, mut rx) = mpsc::unbounded_channel();

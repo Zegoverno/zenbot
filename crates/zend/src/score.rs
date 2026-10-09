@@ -30,6 +30,13 @@ pub fn scorer() -> Option<String> {
     std::env::var("ZEN_S1_MODEL").ok().map(|m| m.trim().to_string()).filter(|m| !m.is_empty())
 }
 
+/// Whether the kernel holds an OpenRouter key. The kernel makes every OpenRouter call itself
+/// (System One, embeddings) and workers never get the key, so this, not any worker, says whether
+/// OpenRouter is signed in.
+pub fn openrouter_key() -> bool {
+    std::env::var("OPENROUTER_API_KEY").is_ok_and(|k| !k.trim().is_empty())
+}
+
 /// Whether System One may see private content (file contents, tool output, memories, search
 /// results), not only the owner's messages and final answers: on by default (D-032; the main
 /// model's provider already sees the same content, and secrets are masked). ZEN_S1_PRIVATE=0 keeps

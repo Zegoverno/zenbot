@@ -148,6 +148,8 @@ pub(crate) async fn collect_models(app: &App) -> Value {
             catalog.entry(id.to_string()).or_insert_with(|| m.clone());
         }
     }
+    // OpenRouter is called by the kernel only (workers run without its key), so the kernel reports it.
+    authenticated.insert("openrouter".into(), json!(score::openrouter_key()));
     *app.routes.lock().await = routes;
     *app.catalog.lock().await = catalog;
     let curated = visible_models(&all, std::env::var("ZEN_MODELS").ok().as_deref());
