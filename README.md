@@ -18,7 +18,7 @@ Status: early. The kernel, the `zen` terminal app, Claude Code / Codex engines a
 | [PROGRESS.md](PROGRESS.md) | What shipped, newest first |
 | [AGENTS.md](AGENTS.md) | Rules for agents (and people) working on this repo |
 | [INSTALL.md](INSTALL.md) | Installing on a fresh VM (written for a coding agent) |
-| `docs/` | Deep dives: [context.md](docs/context.md) (what the model reads each turn), [brief.md](docs/brief.md), [worker-protocol.md](docs/worker-protocol.md), [client-protocol.md](docs/client-protocol.md) |
+| `docs/` | Deep dives: [context.md](docs/context.md) (what the model reads each turn), [brief.md](docs/brief.md), [worker-protocol.md](docs/worker-protocol.md), [client-protocol.md](docs/client-protocol.md), [matrix.md](docs/matrix.md) (the Matrix channel) |
 
 ## Install
 
@@ -90,6 +90,10 @@ zenbot keeps its know-how as skills (`~/.zenbot/global/skills/`, a git repositor
 ## Scheduled jobs
 
 zenbot runs work on a schedule without you in the conversation. Ask for it ("every weekday at 7, brief me on …") and it creates the job with its `schedule` tool, or add one yourself with `zen jobs add`. Each run is a fresh session (`job: <name>` in your sessions) with only the instructions the job picks (the soul always; by default your profile and memory) and the skills it names; it can't ask you, delegate or schedule more jobs, takes no outward action, and ends with a report, or stays silent when there's nothing new. `zen jobs runs` shows the reports. A job zenbot creates goes live only when a fast model, reading your own words in that conversation, judges you asked for it; otherwise it waits paused until you `zen jobs resume` it. The same scheduler runs zenbot's own upkeep: the nightly memory sleep and the daily engine updates. Schedules: cron (`0 7 * * 1-5`, in America/Sao_Paulo unless `--tz`), `every 2h`, `at 2026-10-12 07:00`, `in 30m`.
+
+## Matrix
+
+Talk to zen from your phone with any Matrix client (Beeper, Element): `zen-matrix` is a bot that turns each encrypted room into a zen session, answers only you, asks its questions as numbered options, and posts job reports to a "zen jobs" room. Setup: [docs/matrix.md](docs/matrix.md) (a bot account, `~/.zenbot/matrix.env`, then `scripts/matrix.sh`).
 
 ## Subagents
 

@@ -1,0 +1,22 @@
+[Unit]
+Description=zenbot Matrix channel (zen-matrix: the owner's Matrix rooms <-> zen sessions)
+After=network-online.target zenbot.service
+Wants=network-online.target
+# Inert until set up (scripts/matrix.sh, docs/matrix.md).
+ConditionPathExists=__HOME__/.zenbot/matrix/session.json
+
+[Service]
+Type=simple
+User=__USER__
+Environment=HOME=__HOME__
+ExecStart=__HOME__/.zenbot/bin/zen-matrix run
+Restart=always
+RestartSec=10
+# It only needs its own state and the kernel's token; keep the rest of the machine out of reach.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=__HOME__/.zenbot/matrix
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

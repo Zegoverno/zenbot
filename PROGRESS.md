@@ -6,6 +6,22 @@
 
 ---
 
+## 2026-10-09 — The Matrix channel (D-049)
+
+- `zen-matrix` (`crates/zen-matrix`, its own Cargo workspace; docs/matrix.md): the owner talks to
+  zen from any Matrix client. Each room is a session: a main "zen" room, `!new [title]` for more, or
+  any room the owner invites the bot to. Answers come as Markdown, zen shows as typing while it
+  works, `ask` questions come numbered and `1 2` answers them, `!stop` aborts. Finished job runs are
+  posted to a "zen jobs" room.
+- Only the owner's Matrix ID is answered; other invites are declined. Every room is end-to-end
+  encrypted; `zen-matrix login` sets up cross-signing and key backup (recovery key saved, mode 600).
+- `scripts/matrix.sh` builds, signs in and installs the `zen-matrix` service (confined:
+  `ProtectSystem=strict`, writes only `~/.zenbot/matrix`). CI builds, tests and lints it in a
+  separate `matrix` job. The kernel is unchanged.
+- Tests: 12 unit tests (commands, events to posts, numbered answers, job reports, state);
+  `scripts/matrix-e2e.sh` runs a throwaway homeserver (continuwuity in Docker), a faux-model
+  kernel, the bridge and a scripted owner client through end-to-end encryption.
+
 ## 2026-10-09 — The sessions board (D-048)
 
 - `zen` (full screen) opens on a board of every session: Main, Jobs and Archived sections, running

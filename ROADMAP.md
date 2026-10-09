@@ -106,9 +106,10 @@ clear (lower bound beats upper bound, 20 judged subtasks each). `ask` takes `wai
 ## What's next
 
 Scheduled jobs are built (D-046): the sleep and engine updates run in the kernel's scheduler, and
-agent jobs run prompts on a schedule. Their reports are only seen in `zen jobs runs` and the session
-list; the next step for reach is a channel that brings them to the owner's phone (Telegram or
-WhatsApp), then pre-run checks that skip the model when nothing changed, if job costs call for it.
+agent jobs run prompts on a schedule. The Matrix channel (D-049, docs/matrix.md) brings
+them, and zen itself, to the owner's phone. Next for reach: emoji verification of the bot, streaming
+answers by editing a message if waiting feels slow, then pre-run checks that skip the model when
+nothing changed, if job costs call for it.
 
 zen opens on a sessions board (D-048): every session, running or idle, with its subagents. It
 polls the kernel every 2 s; a kernel-wide event stream is the upgrade if that feels slow.
@@ -163,7 +164,7 @@ phases above deliver parts of them; what remains is planned after Phase 6.
 | M3 | Work v0 | Goals, tasks, board; agent definitions; `delegate`; inbox with push; device pairing | `delegate` in Phase 6 |
 | M4 | Router, context, bench | System One and embeddings; model selection; budgets; context manager; hybrid search; zen-bench | context done; search in Phase 3; model choice in Phase 6 |
 | M5 | Closed loop | Crons; runs and evals; reviewer; taste distillation; crystallization | skills loop in Phase 5; crons (scheduled jobs, D-046) built |
-| M6 | Research & reach | `web_search` / `web_fetch` with taint rules; agent browser; Matrix; publish with approval | web in Phase 2 |
+| M6 | Research & reach | `web_search` / `web_fetch` with taint rules; agent browser; Matrix; publish with approval | web in Phase 2; Matrix built (D-049) |
 | M7 | Ship to agents | Project template exposing a project's own MCP server, skills, API and metering | |
 
 ## Open questions (long-term)

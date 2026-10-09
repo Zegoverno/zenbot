@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/zend", "crates/zen", "crates/zen-engine", "crates/zen-proto"]
+# The Matrix channel is a workspace of its own: matrix-sdk's SQLite clashes with sqlx's `links`, and its
+# heavy dependencies stay out of the kernel's build (docs/matrix.md, D-049).
+exclude = ["crates/zen-matrix"]
 
 [workspace.package]
 edition = "2021"

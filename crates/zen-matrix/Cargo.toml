@@ -1,0 +1,31 @@
+[package]
+name = "zen-matrix"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "zenbot's Matrix channel: a bridge between the owner's Matrix rooms and zen sessions"
+
+[dependencies]
+zen-proto = { path = "../zen-proto" }
+anyhow = "1"
+futures-util = "0.3"
+# The Matrix client: end-to-end encryption, a SQLite store for keys and sync state, Markdown bodies.
+matrix-sdk = { version = "0.19", default-features = false, features = ["e2e-encryption", "automatic-room-key-forwarding", "sqlite", "bundled-sqlite", "markdown", "rustls-aws-lc-rs"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "fs"] }
+tokio-tungstenite = { version = "0.27", features = ["rustls-tls-webpki-roots"] }
+# Logs: matrix-sdk reports sync and decryption problems through `tracing` (RUST_LOG overrides the default).
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
+
+# Its own workspace (see the root Cargo.toml).
+[workspace]
+
+[profile.release]
+strip = true
+
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1

@@ -239,6 +239,17 @@ changes it in all three.
 
 ---
 
+## Channel: `zen-matrix` (`crates/zen-matrix`, its own Cargo workspace)
+
+A separate process, a client of the client protocol (D-049; docs/matrix.md has the file table).
+`main.rs` (commands `login`/`run`/`status`, the Matrix client, rooms, invites, per-room link tasks,
+job reporter), `relay.rs` (pure: commands, events → posts, numbered answers, job reports),
+`kernel.rs` (the API calls it uses: `POST /api/sessions`, the session WebSocket, `GET /api/jobs/runs`),
+`state.rs` (`matrix.env`, `state.json`, private files). `examples/owner.rs`: the scripted owner for
+`scripts/matrix-e2e.sh`. The kernel knows nothing of it.
+
+---
+
 ## Database
 
 Postgres 16 with pgvector (`pgvector/pgvector:pg16`), user/password/db `zen` on `127.0.0.1:5432`
@@ -399,6 +410,8 @@ Set by the kernel for every `bash` command: `ZEN_SESSION_ID`, `ZEN_MODEL` (read 
 | `mcp.json` | the owner | `mcp.rs` (re-read when it changes) | MCP servers (`mcpServers`); keep secrets in `env` and refer to them as `${VAR}` |
 | `SOUL.md`, `MEMORY.md`, `wiki`, `skills`, `tools` (symlinks) | `layout::migrate` | a rolled-back build | The old flat layout's paths, each a relative symlink to its new place (D-040); removed in a later release |
 | `evals/<run>/` | `eval.sh` | `eval-report.sh` | Eval results |
+| `matrix.env` | the owner | `zen-matrix` | **Secret** (mode 600): `MATRIX_USER`, `MATRIX_OWNER`, `MATRIX_PASSWORD` (first sign-in only), optional `MATRIX_RECOVERY_KEY`, `MATRIX_HOMESERVER` |
+| `matrix/` | `zen-matrix` | `zen-matrix` | Mode 700. **Secrets:** `session.json` (access token), `store.key` (encrypts `store/`, the SQLite key and sync store), `recovery-key`. `state.json`: rooms ↔ sessions, job-report cursor |
 
 Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 
@@ -422,8 +435,11 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 | `scripts/git-hooks/prepare-commit-msg` | Adds `Zen-Session` / `Co-Authored-By` trailers when `ZEN_SESSION_ID` is set | commit messages |
 | `deploy/compose.yaml` | `postgres` (pgvector, `127.0.0.1:5432`) and `searxng` (pinned by digest, `127.0.0.1:8888`, keyless search for `web_search`) | Docker volume `zen-pg` |
 | `deploy/searxng/settings.yml` | SearXNG settings mounted read-only: JSON output on, limiter and image proxy off, not a public instance | — |
+| `scripts/matrix.sh` | Build and test `crates/zen-matrix`, install `~/.zenbot/bin/zen-matrix`, `zen-matrix login` if not signed in, install and restart `zen-matrix.service`. `--build` stops after the tests | `~/.zenbot/{bin,matrix}`, `/etc/systemd/system` |
+| `scripts/matrix-e2e.sh` | The Matrix channel end to end: a throwaway continuwuity homeserver in Docker, a faux kernel (temp DB, own port and home), the bridge and the scripted owner (`examples/owner.rs`) through E2EE; also a stranger's invite declined and a job report delivered | Docker container, temp DB |
+| `deploy/zen-matrix.service` | Runs `~/.zenbot/bin/zen-matrix run` once `~/.zenbot/matrix/session.json` exists; `ProtectSystem=strict`, writable only `~/.zenbot/matrix` | — |
 | `deploy/zenbot.service` | Runs `~/.zenbot/bin/zend` with `EnvironmentFile=~/.zenbot/env`; `ExecStartPre` brings Postgres up (must succeed) and SearXNG (a failure is ignored); `Restart=always` | — |
-| `.github/workflows/ci.yml` | On PRs and pushes to main: build, `cargo test`, clippy `-D warnings`, `scripts/e2e.sh`. On main, if green: build `dist` profile, publish `zenbot-x86_64-linux-<sha12>.tar.gz` to the rolling `edge` release (20 newest kept) | GitHub releases |
+| `.github/workflows/ci.yml` | On PRs and pushes to main: build, `cargo test`, clippy `-D warnings`, `scripts/e2e.sh`; job `matrix` builds, tests and lints `crates/zen-matrix`. On main, if green: build `dist` profile, publish `zenbot-x86_64-linux-<sha12>.tar.gz` to the rolling `edge` release (20 newest kept) | GitHub releases |
 
 ---
 
