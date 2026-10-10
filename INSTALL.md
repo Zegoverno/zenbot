@@ -9,7 +9,7 @@ These steps are written so a coding agent (or a person) can follow them on a fre
    ~/zenbot/install.sh
    ```
 
-   The installer is safe to re-run. It installs Docker, Node.js 22, bubblewrap (for the read-only shell), and the Claude Code and Codex CLIs if they're missing, downloads zenbot's prebuilt binaries for the checked-out commit, starts Postgres in Docker, installs the `zenbot` systemd service (starts on boot, restarts on failure), and links the `zen` command into `~/.local/bin`.
+   The installer is safe to re-run. It installs Docker, Node.js 22, `git`, `curl`, `jq`, bubblewrap (for the read-only shell and sandboxed tools), `pdftotext`, and the Claude Code and Codex CLIs if they're missing, downloads zenbot's prebuilt binaries for the checked-out commit, writes `~/.zenbot/env` and the API token, installs the `zenbot` systemd service (starts on boot, restarts on failure; it brings up Postgres and the SearXNG search container in Docker before the kernel), and links the `zen` command into `~/.local/bin`.
 
    Prebuilt binaries exist for every commit on `main` that passed CI's checks (built for x86_64 Linux after the tests, clippy and end-to-end scenarios pass). On other platforms, for commits CI hasn't published yet, or with `ZEN_BUILD_FROM_SOURCE=1`, the installer installs Rust and compiles instead, which takes several minutes on a small VM.
 
@@ -19,7 +19,7 @@ These steps are written so a coding agent (or a person) can follow them on a fre
    ~/.local/bin/zen status
    ```
 
-   Every line should say `ok`, except `claude` and `codex`, which say `NOT signed in` until step 3.
+   `kernel`, `database` and `worker:engine` should say `ok`; `claude` and `codex` say `NOT signed in` until step 3. The other lines (engines, model, memory, jobs, version) are information.
 
 3. Sign in to the model engines. This step needs the owner, because it opens a browser:
 
@@ -46,7 +46,7 @@ zen upgrade            # or /upgrade inside zen; `zen upgrade --check` only chec
 This runs `scripts/self-update.sh`: it pulls `main` (refusing if the checkout has local changes or is on another branch) and runs `scripts/upgrade.sh`, showing progress until zenbot is back on the new version. Doing it by hand is the same thing:
 
 ```bash
-cd ~/zenbot && git pull && ./scripts/upgrade.sh
+cd ~/zenbot && git pull --ff-only origin main && ./scripts/upgrade.sh
 ```
 
 `upgrade.sh` uses the prebuilt binaries for the new commit (or builds them if there are none yet, or if you changed the code locally), checks them, runs one scripted test turn against them, and then restarts zenbot as soon as no session is working. If the new version isn't healthy it rolls back by itself. The result is in `~/.zenbot/upgrade.log`, and `~/.zenbot/version` holds the running commit.

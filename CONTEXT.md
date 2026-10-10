@@ -12,7 +12,8 @@ carries the jobs they hand it, end to end, so their attention goes to the fronti
 calls and taste: the decisions that really matter.
 
 - **The owner drives.** They start every job and decide where tokens are spent. zenbot never starts a
-  job on its own (for now). Inside a job it may split the work into subtasks and delegate them.
+  job on its own (for now): a scheduled job the agent sets up goes live only when the owner asked
+  for it (D-046). Inside a job it may split the work into subtasks and delegate them.
 - **Any kind of job.** Operational work and building software, across the owner's job, projects and
   own companies.
 - **A second brain.** It takes tasks, memory and thinking off the owner's plate: what they know, what

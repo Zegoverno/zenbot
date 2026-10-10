@@ -99,6 +99,8 @@ to, and costs a main-model call); System One (typed answers only, it can't write
 session's own model (better guesses, slower, more plan usage); Enter on an empty input sending the
 suggestion (fewer keys, but sends by accident).
 
+---
+
 ## D-046 — Scheduled jobs in the kernel; the sleep and engine updates move off systemd timers
 
 **Date:** 2026-10-09 · **Status:** accepted (owner) · **Supersedes:** D-022's daily timer for engine
@@ -201,7 +203,7 @@ technical debt).
 
 ## D-043 — Retire Pi; call System One directly from the kernel
 
-**Date:** 2026-10-08 · **Status:** accepted (owner) · **Supersedes in part:** D-002, D-012,
+**Date:** 2026-10-08 · **Status:** accepted (owner) · **Supersedes in part:** D-005, D-012,
 D-018 and D-022 (their Pi worker and classifier transport choices)
 
 **Decision:** Remove the optional Node/Pi worker and direct ChatGPT sign-in. Claude Code and Codex
@@ -256,7 +258,7 @@ and the remaining debt in `ROADMAP.md`.
 
 **Decision:** Under the zen home, system-wide files stay at the top (`USER.md`, `AGENTS.md`,
 `mcp.json`, runtime), each agent's own files go in `agents/<name>/` (only `SOUL.md` today; one agent,
-`zenbot`), and knowledge every agent shares goes in `global/` (`MEMORY.md`, `wiki/`, `skills/`,
+`zenbot`; `IDENTITY.md` joined it with D-045), and knowledge every agent shares goes in `global/` (`MEMORY.md`, `wiki/`, `skills/`,
 `tools/`). Projects get `projects/<id>/` with the same folders when the first one exists. The kernel
 moves an old flat layout once at startup (before writing defaults, never overwriting) and leaves a
 relative symlink at each old path; a later release removes them. Runtime files (`bin`, `env`,
@@ -321,6 +323,8 @@ estimates (too noisy at this volume).
 
 ## D-037 — The workshop: rules the kernel enforces for skills and tools the agent makes
 
+> Skills and tools moved to `~/.zenbot/global/` (D-040).
+
 **Decision:** The agent changes skills only through `save_skill` and makes tools only through
 `save_tool`. A skill needs a reason (the evidence), fits the agentskills.io format and 10,000
 characters, and isn't a near-duplicate of one in its domain (refused with "extend X instead"). New
@@ -345,6 +349,8 @@ moving parts for the same result).
 ---
 
 ## D-036 — The wiki: pages over timelines; System One routes, the agent writes
+
+> The wiki moved to `~/.zenbot/global/wiki/` (D-040).
 
 **Decision:** Knowledge lives in markdown pages in `~/.zenbot/wiki/` (git), one per concept,
 entity, decision, playbook, project or person: frontmatter, a summary rewritten from the timeline,
@@ -476,6 +482,8 @@ change at different speeds).
 
 ## D-030 — Model choice learned from real usage (replaces Phase 2b)
 
+> Built for subagents by D-038 (2026-10-07).
+
 **Decision:** Which model does which work is learned from real sessions, not from sweeps over fixed
 eval tasks. System One classifies the situation (did the job or step change, what kind of work, how
 big); a versioned policy maps it to a model; a small share of subtasks explore another model, with
@@ -497,6 +505,9 @@ choosing the model directly (rejected); per-turn switching (rejected: cache cost
 
 ## D-029 — Skills improve in a closed loop, without sprawl
 
+> Made concrete by D-037: near-duplicates are refused at save and unused skills archived; a pass
+> that merges existing near-duplicates is not built.
+
 **Decision:** The agent creates and improves its own skills (agentskills.io format, in git) under
 rules: skills live under a small set of domains (a new domain needs the owner's OK); edit before
 create (search first, a new skill only when none covers the work, with the reason recorded); skills
@@ -515,8 +526,9 @@ specialized.
 
 ## D-028 — Memory: fixed-size short-term, nightly sleep, a very high bar for long-term
 
-> Long-term promotion superseded by D-045 (2026-10-08): traits and guidance go to `IDENTITY.md` or
-> `USER.md` by approved edit; the sleep keeps or archives.
+> Long-term promotion superseded by D-045 (2026-10-08): the agent writes traits and guidance into
+> `IDENTITY.md` or `USER.md` itself, and the sleep keeps, archives or promotes into them and the
+> wiki. Paths moved by D-040.
 
 **Decision:** Anything can be saved to short-term memory (`MEMORY.md`, fixed size, rendered at session
 start and frozen for the session). A nightly sleep job asks System One about every entry (needed
@@ -536,6 +548,9 @@ forces prioritization. Freezing per session keeps the prompt cache.
 ---
 
 ## D-027 — Prompt files, system tools, and loading only what's needed
+
+> Paths moved by D-040; `IDENTITY.md` added and the agent's ownership of prompt files changed by
+> D-045; the open question below decided by D-032.
 
 **Decision:** The system prompt comes from `~/.zenbot/SOUL.md` (who the agent is), `AGENTS.md` (its
 environment: the VM, its body), `USER.md` (the owner) and `MEMORY.md` (short-term), loaded at session
@@ -621,7 +636,8 @@ working on the newer schema.
 
 ## D-022 — Vendor CLIs on their latest versions; Pi pinned
 
-> Runs as the kernel's `engines` job since D-046 (2026-10-09), no longer a systemd timer.
+> Runs as the kernel's `engines` job since D-046 (2026-10-09), no longer a systemd timer. The Pi
+> part is void: Pi was retired by D-043.
 
 **Decision:** `scripts/update-engines.sh`, daily via `zen-engines.timer`, updates Claude Code and
 Codex (vendor release, checksum-verified, installed next to the old one). Each update must pass a
@@ -646,7 +662,7 @@ synthetic harder evals.
 **Why:** The first Phase 2 build re-framed and verified per message (4.9× the cost). With the job
 model, briefs on every job still cost 2.1× for the same pass rate.
 
-**Superseded in part by D-026** (briefs become a skill).
+**Superseded in part by D-026** (briefs become a skill; `ZEN_BRIEFS` and `/brief` are gone).
 
 **Date:** 2026-10-06
 
@@ -697,6 +713,9 @@ question set per session, from the user's messages and final answers only, never
 answers are stored, not acted on. Open models (Laya, CLM) can take over through the same API once
 there are enough labels to calibrate them.
 
+**Superseded in part by D-032** (System One may see private content) **and D-043** (the kernel
+calls OpenRouter directly; no Pi).
+
 **Date:** 2026-10-02
 
 ---
@@ -740,6 +759,8 @@ the scrollback-following layout. The first time a tool touches a project below t
 made in a zen session carry `Zen-Session` and `Co-Authored-By` trailers (`scripts/git-hooks`), so each
 change links to its transcript.
 
+**Superseded in part by D-039** (how full screen draws).
+
 **Date:** 2026-10-01
 
 ---
@@ -762,7 +783,7 @@ CRLF/BOM-safe edit with a normalized-match fallback. `upgrade.sh` runs a scripte
 (Rust) drives the official Claude Code and Codex CLIs on the owner's subscriptions the way qm does:
 built-in tools off, zenbot's tools over MCP / dynamic tools, zenbot's system prompt. Pi stays available
 as the optional `pi` worker. The kernel routes models to workers. (Its "no engine-side sessions" part
-is superseded by D-019.)
+is superseded by D-019; the `pi` worker was retired by D-043.)
 
 **Date:** 2026-10-01
 
@@ -830,6 +851,9 @@ UI.
 **Why:** The always-on parts benefit from Rust's safety, footprint and single binary; the LLM
 ecosystem (Pi, Claude Agent SDK, MCP SDKs) is TypeScript-first; LLM latency dominates, so the loop's
 language doesn't affect speed.
+
+**Superseded:** the TypeScript worker by D-012 (`zen-engine`, Rust) and D-043 (Pi retired); the
+TypeScript web UI by D-011 (the `zen` terminal app; the web UI is frozen).
 
 **Date:** 2026-09-30
 

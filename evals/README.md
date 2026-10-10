@@ -12,18 +12,24 @@ scripts/eval.sh --model faux/smoke --tasks smoke  # self-test of the runner, no 
 scripts/eval-report.sh ~/.zenbot/evals/<run>      # print a run's report again
 ```
 
-Every run starts from a fresh copy of the task's files, on its own kernel and database, so the live
-service and its data are never touched. Prompts go through `zen ask`, so the whole harness is
+`scripts/eval.sh --help` lists every option (`--base-model`, `--base-effort`, `--only new|base`,
+`--keep`). The installed version is the commit in `~/.zenbot/version`; a base build is cached in
+`~/.zenbot/evals/builds/<commit>`, from CI's release binaries when there are some.
+
+Every run starts from a fresh copy of the task's files, on its own kernel, database and zenbot home
+(the default prompt files and skills, not the owner's; scheduled jobs off), so the live service and
+its data are never touched. Prompts go through `zen ask`, so the whole harness is
 measured: system prompt, history, tools, engine. Results are in `~/.zenbot/evals/<run>/`.
 
-The report compares, per task and in total: checks passed, cost, tokens, cache hit rate, time and
-tool errors. Tasks that passed less often or got over 20% slower or more expensive come first.
-It also lists the engine versions, and warns when they differ between the two sides, because then
-the comparison isn't clean.
+The report compares, per task and in total: checks passed, cost, tokens, cache hit rate, time, tool
+errors and unexpected cache breaks (`history`, `miss`; docs/context.md). Tasks that passed less
+often or got over 20% slower or more expensive come first. It also lists the engine versions, and
+warns when an engine ran at different versions across the runs, because then the comparison isn't
+clean.
 
 ## A task
 
-`tasks/<name>/files/` is the workspace the run starts in. `tasks/<name>/task.json`:
+`tasks/<name>/files/` (optional) is the workspace the run starts in. `tasks/<name>/task.json`:
 
 ```json
 {
@@ -48,7 +54,8 @@ the comparison isn't clean.
   too; `$ANSWER` is the last answer and `$TURNS` a file with one JSON line per turn, its `tools`
   included, for checks on what the agent did). `answer_contains` looks for text in the last answer, ignoring case, and `answer_lacks`
   checks it isn't there; with `"step": n` they look at the answer to the n-th prompt instead.
-- `work` is the kind of work (understand, shape, bet, build, verify, maintain, reflect, reach).
+- `work` is the kind of work (understand, shape, bet, build, verify, maintain, reflect, reach), a
+  label for reading results; the runner doesn't use it.
 - `env` sets kernel settings for the task's runs on both sides (e.g. `{"ZEN_CONTEXT_TOKENS": "12000"}`
   to make summaries happen in a short task); a build that doesn't know a setting ignores it.
 - `"selftest": true` keeps a task out of normal runs; it runs only when named with `--tasks`.

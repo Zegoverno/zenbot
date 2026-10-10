@@ -1,5 +1,8 @@
 # Hermes and OpenClaw: prompt files, memory, skills (read in code)
 
+> Dated research snapshot (2026-10-06), kept as history. What zenbot does today is in
+> [DESIGN.md](../../DESIGN.md) and [MAP.md](../../MAP.md); what was decided, in [DECISIONS.md](../../DECISIONS.md).
+
 Sources: `NousResearch/hermes-agent` @ 9b38eb14 and `openclaw/openclaw` @ 45228e1 (both 2026-10-06).
 Paths are relative to each repo root.
 

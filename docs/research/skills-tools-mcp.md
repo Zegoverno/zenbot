@@ -1,5 +1,9 @@
 # Skills, deferred tools and MCP: research for zenbot's redesign
 
+> Dated research snapshot (2026-10-06), kept as history. The Pi worker it mentions is retired, skills
+> now live in `~/.zenbot/global/skills/` (D-040), and the clones and `../spike/` files were not kept.
+> What zenbot does today is in [DESIGN.md](../../DESIGN.md) and [MAP.md](../../MAP.md).
+
 Date 2026-10-06. Sources cloned with `git clone --depth 1` into this directory:
 agentskills/agentskills `69ef37e` (2026-08-09), anthropics/skills `683bc88` (2026-10-05),
 jlowin/fastmcp `5baeacf` (2026-10-04), modelcontextprotocol/rust-sdk `08e0211` (2026-10-06),

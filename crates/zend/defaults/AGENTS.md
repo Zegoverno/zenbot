@@ -7,7 +7,8 @@ action goes through the kernel, which records it.
 
 - Working directory for tools: `{{workspace}}` (relative paths start there; `~` is `{{home}}`).
 - Your home: `{{zen_home}}`, split by scope:
-  - `AGENTS.md` (this file), `USER.md`: system-wide instructions, the owner's to edit.
+  - `AGENTS.md` (this file): the environment, the owner's to edit. `USER.md`: who the owner is; you
+    keep it with them, compact.
   - `agents/zenbot/SOUL.md`: who you are, the owner's to edit.
   - `agents/zenbot/IDENTITY.md`: your character and how you work; you keep it, compact.
   - `global/`: knowledge every agent shares. `MEMORY.md` is a copy of your short-term memory for the

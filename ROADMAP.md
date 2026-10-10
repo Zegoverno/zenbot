@@ -11,22 +11,21 @@ decides; every load and call is recorded per turn; System One is built into each
 
 ## Where things stand
 
-Built and installed: the kernel, the `zen` terminal app, the Claude Code / Codex engines
-and context v2 (`docs/context.md`). Phase 1 is merged (#17); Phase 2 is built on `feat/reach`. Both
-are installed together once Phase 2 merges. See PROGRESS.md. The phases below replace the old next
-steps (old "Phase 2b", "Phase 3 memory", "Phase 4 search", "Phase 5 wiki").
+Every phase below is merged and installed, with what came after (scheduled jobs, the sessions
+board, the Matrix channel): `main` is what runs. The kernel, the `zen` terminal app, the Claude
+Code / Codex engines (through `zen-engine`; the Pi worker is retired, D-043) and context v2
+(`docs/context.md`) were built before. See PROGRESS.md. These phases replaced the old next steps
+(old "Phase 2b", "Phase 3 memory", "Phase 4 search", "Phase 5 wiki").
 
 | Phase | Name | Delivers | Status |
 |---|---|---|---|
 | 0 | Ground | Research the reference projects in their code; merge the open fix PRs | done (`docs/research/`) |
 | 1 | Foundation | Prompt files, tool descriptions, short-term memory with sleep, skills, workflow into skills | done (#17): 12/12 → 12/12, cost +27% |
-| 2 | Reach | `web_search`, `web_fetch`, MCP client, `find_tools` / `load_tool` / `call_tool` | built (#18) |
+| 2 | Reach | `web_search`, `web_fetch`, MCP client, `find_tools` / `load_tool` / `call_tool` | done (#18) |
 | 3 | Recall | `search` (exact, full-text and semantic) over sessions and memories | done (#19): 12/12, cost −6% |
-
-| 4 | Knowledge | The wiki and `capture` | built |
-
-| 5 | Self-improvement | The agent creates and improves skills and tools, without sprawl | built |
-| 6 | Delegation | `delegate`: subagents; model choice from real usage | built |
+| 4 | Knowledge | The wiki and `capture` | done (#20) |
+| 5 | Self-improvement | The agent creates and improves skills and tools, without sprawl | done (#21) |
+| 6 | Delegation | `delegate`: subagents; model choice from real usage | done (#22) |
 
 ---
 
@@ -47,7 +46,7 @@ larger fixed prefix (prompt files, memory, skills index, richer tool description
 16k characters), paid once per session before the cache takes over. Lever if wanted: shorter
 descriptions for `verify`, `remember` and `decide`.
 
-## Phase 2 — Reach `[ built ]`
+## Phase 2 — Reach `[ done ]`
 
 1. **Spike** (`docs/research/skills-tools-mcp.md`): a changed tool list reaches Claude Code
    mid-turn but rewrites the whole cached prefix, on every engine. So the tool list stays fixed:
@@ -59,7 +58,7 @@ descriptions for `verify`, `remember` and `decide`.
 3. MCP client written against the spec (stdio and streamable HTTP; not `rmcp`, D-033), configured
    in `~/.zenbot/mcp.json`.
 
-## Phase 3 — Recall `[ built ]`
+## Phase 3 — Recall `[ done ]`
 
 - `search` over every session's turns and over memories: an indexer keeps
   `search_docs` current; exact names and paths first (trigram), then full text (`simple` config) and
@@ -69,7 +68,7 @@ descriptions for `verify`, `remember` and `decide`.
 - Long-term promotion (D-035) was retired by D-045: traits and guidance go to `IDENTITY.md` or
   `USER.md`, which the agent writes and keeps compact.
 
-## Phase 4 — Knowledge `[ built ]`
+## Phase 4 — Knowledge `[ done ]`
 
 The wiki (`~/.zenbot/global/wiki/`, in git): one page per concept, entity, decision, playbook, project or
 person, in gbrain's shape (a summary over an append-only, dated timeline with sources), plus
@@ -79,7 +78,7 @@ appends the entry, masks secrets, labels notes from web-tainted sessions `web`, 
 agent keeps the summary current with `edit`. `search` covers the wiki; the nightly sleep commits the
 agent's wiki edits and reports pages without a summary and broken links.
 
-## Phase 5 — Self-improvement `[ built ]`
+## Phase 5 — Self-improvement `[ done ]`
 
 `save_skill` and `save_tool` (D-037). Skills: the agentskills.io format under 10,000 characters,
 a reason (the evidence) required, a near-duplicate in the domain refused with "extend X instead"
@@ -92,7 +91,7 @@ owner approves (`made_tools`, out of the agent's reach). A default `work/close` 
 remember, capture and improve skills. `zen skills`, `zen skills accept|reject`, `zen tools
 accept|reject`.
 
-## Phase 6 — Delegation and model choice `[ built ]`
+## Phase 6 — Delegation and model choice `[ done ]`
 
 `delegate` (D-038): subagents are child sessions with a fresh context and the same instructions,
 memory and tools, except `ask` and `delegate`; one call can hand out several `tasks`, which the
@@ -105,49 +104,48 @@ clear (lower bound beats upper bound, 20 judged subtasks each). `ask` takes `wai
 
 ## What's next
 
-Scheduled jobs are built (D-046): the sleep and engine updates run in the kernel's scheduler, and
-agent jobs run prompts on a schedule. The Matrix channel (D-049, docs/matrix.md) brings
-them, and zen itself, to the owner's phone. Next for reach: emoji verification of the bot, streaming
-answers by editing a message if waiting feels slow, then pre-run checks that skip the model when
-nothing changed, if job costs call for it.
+The redesign's phases are done, and so are scheduled jobs (D-046), session names and suggested
+prompts (D-047), the sessions board (D-048) and the Matrix channel (D-049, docs/matrix.md). Next:
+keep dogfooding zenbot on real work and let sessions, verdicts and what the owner reviews (the
+sleep's promotions into `IDENTITY.md` and `USER.md`, skill drafts, tools, routes) drive what
+changes. Candidate follow-ups, each only when use calls for it:
 
-zen opens on a sessions board (D-048): every session, running or idle, with its subagents. It
-polls the kernel every 2 s; a kernel-wide event stream is the upgrade if that feels slow.
-
-The redesign's phases are built. Next: keep dogfooding zenbot on real work and let sessions,
-verdicts and the owner's reviews (proposed edits to `IDENTITY.md` and `USER.md`, skill drafts, tools,
-routes) drive what changes.
+- **Matrix:** interactive (emoji) verification of the bot; streaming answers by editing a message,
+  if waiting for the whole answer feels slow.
+- **Jobs:** pre-run checks that skip the model when nothing changed, if job costs call for it.
+- **Board:** a kernel-wide event stream instead of the 2 s poll, if that feels slow.
+- **Suggestions:** improve the suggestion prompt from `zen suggestions` data after a few weeks.
 
 ## Open decisions
 
 1. ~~What System One may see~~: decided (D-032): private content allowed by default,
    `ZEN_S1_PRIVATE=0` turns it off.
-3. **Pilot project.** Which side project zenbot serves after zenbot itself.
+2. **Pilot project.** Which side project zenbot serves after zenbot itself.
 
 ## Technical debt
 
-- Web page/search caches now cap at 32 entries each; pages still cap at 2 MB and expire after
-  15 minutes. The untrusted-content boundary and SSRF filtering remain security-critical.
-- The kernel `read` tool now caps files at 16 MiB before loading them; it should eventually stream
-  bounded lines so large text files can be paged without `bash`. New test scratch directories are
-  cleaned on drop; the nightly sleep removes saved outputs older than 30 days.
-- The terminal client was split into focused modules; incremental streaming/transcript rendering,
-  reconnect recovery and bounded private prompt history are in place. A future client event contract
-  should replace the remaining untyped JSON (below).
-- Settings are read from the environment in ~25 places (no single config).
-- Client events are untyped JSON.
+- Web page/search caches cap at 32 entries each; a page's text caps at 2 MB (5 MB downloaded) and
+  entries expire after 15 minutes. The untrusted-content boundary and SSRF filtering remain security-critical.
+- The kernel `read` tool refuses files over 16 MiB before loading them; it should eventually stream
+  bounded lines so large text files can be paged without `bash`.
+- Settings are read from the environment in ~50 places across the kernel's modules (about 55
+  `ZEN_*` variables; no single config).
+- Client events are untyped JSON (`docs/client-protocol.md` documents them; `zen-proto` has no
+  event types), so `zen` and `zen-matrix` each parse them by hand.
 - The old workflow's schema stays (expand-only): `sessions.state` and old tape block kinds.
   Drop them in a later release; `policies` is in use by model routing.
 - Prompt files (`SOUL`, `IDENTITY`, `AGENTS`, `USER`) are guarded only at `edit`/`write`, and only
-  for subagents and tainted sessions (D-045); `bash` can still write them. Unused since D-045:
-  `memories.tier = 'long'`, `sleep_runs.promoted/proposed`; drop them in a later release.
+  for child and kernel sessions (subagents, verifiers, jobs) and tainted sessions (D-045); `bash`
+  can still write them. Unused since D-045: new `memories.tier = 'long'` rows (old ones stay
+  searchable) and `sleep_runs.proposed` (always 0); drop them in a later release.
 - Tools run as the same Unix user as the owner. Shell subprocesses no longer inherit kernel secrets,
   and the verifier hides token files, but an ordinary agent shell can still read the owner's files.
   Strong isolation requires a separate Unix user and a credential the agent cannot read.
 - Historical `/tmp/zend-*` test directories from before the scratch guard are not deleted
   automatically; remove them by hand when convenient.
-- Verify criteria use a read-only bubblewrap shell; future work should centralize all tool
-  permissions and taint rules at the dispatch boundary.
+- Verify criteria use a read-only bubblewrap shell. What each kind of session may call is decided
+  in one place (`agent::refusal`), but taint rules are still checked inside each tool (memory,
+  wiki, skills, jobs, delegation); they belong at the dispatch boundary too.
 - Paths never run with real models: the new tools (`remember`, `load_skill`, `verify`, `ask`) on
   Codex, a model switch mid-session, a failed verification followed by a real fix.
 

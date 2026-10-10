@@ -1,6 +1,6 @@
 # Brief: <short title>
 
-Route: quick | bounded | architectural · Work: understand | shape | build | verify | maintain | reflect | reach
+Route: quick | bounded | architectural · Work: understand | shape | bet | build | verify | maintain | reflect | reach
 
 ## Intent
 - Stated: "<what the owner said, quoted>"

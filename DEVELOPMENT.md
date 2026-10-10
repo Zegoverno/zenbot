@@ -12,39 +12,17 @@ How to build, test, verify and ship a change to zenbot from this checkout. Writt
 
 The processes are listed in `AGENTS.md` and, file by file, in `MAP.md`. The kernel owns all state and runs every tool call; engines run with their own tools switched off. Keep it that way.
 
-Config lives in `~/.zenbot/`:
-
-| File | What |
-|---|---|
-| `env` | the service's environment (`ZEN_PORT`, `ZEN_WORKERS`, `ZEN_TOKEN`, …); the dev scripts read it too |
-| `token` | API token; the `zen` CLI reads it when `ZEN_TOKEN` is unset |
-| `auth.json` | Legacy Pi sign-in (unused). **Secret: never print it.** |
-| `version` | the commit the service runs |
-| `upgrade.log` | results of upgrades and engine updates |
-| `engines.json` | engine versions from the last update check |
-| `backups/` | database dumps taken before migrations (last 10) |
-| `evals/` | eval runs and cached base builds |
-| `history` | prompt history |
-| `AGENTS.md`, `USER.md` | system-wide prompt files: zenbot's environment, the owner (defaults written when missing, never overwritten) |
-| `agents/zenbot/SOUL.md` | the agent's own prompt file: who zenbot is (one agent today; D-040) |
-| `agents/zenbot/IDENTITY.md` | the agent's character and how it works, kept by the agent and the sleep, backed up on every change (D-045) |
-| `global/MEMORY.md` | a copy of short-term memory, for reading |
-| `global/skills/` | skills, `<domain>/<name>/SKILL.md`; drafts in `_proposed/`, retired ones in `_archived/`; a git repository once `save_skill` first commits |
-| `global/tools/` | tools the agent made (`save_tool`): `<name>/tool.json` and files; a git repository (`ZEN_TOOLS_DIR`) |
-| `mcp.json` | the owner's MCP servers (`mcpServers`; `${VAR}` filled from `env`), reached through `find_tools` / `load_tool` / `call_tool` |
-| `outputs/` | full text of cut tool output, PDFs saved by `web_fetch`, MCP output over 50 KB |
-| `global/wiki/` | the wiki (`ZEN_WIKI_DIR`): markdown pages, `index.md`, `log.md`, its own git repository; written by the `capture` tool |
-| `SOUL.md`, `MEMORY.md`, `wiki`, `skills`, `tools` | symlinks to the paths above, left by the move from the old flat layout so a rolled-back build still finds the files; removed in a later release |
-| `dev/` | the dev kernel's own home (`scripts/dev.sh`) |
-
-Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
+Config and state live in `~/.zenbot/`; MAP.md ("`~/.zenbot/`") lists every file, who writes it and
+who reads it. The secrets there are `env`, `token`, `auth.json` (a retired Pi sign-in), `matrix.env`
+and `matrix/`: never print them. The dev kernel has its own home, `~/.zenbot-dev` (below). Claude
+Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 
 ## Prerequisites
 
 | Tool | Install | Used for |
 |---|---|---|
 | Rust (stable) with clippy | `rustup` (`ensure_rust` in `scripts/lib.sh` installs a minimal toolchain; add clippy with `rustup component add clippy`) | building and linting |
-| `build-essential`, `pkg-config` | apt | compiling |
+| `build-essential`, `pkg-config` | apt (`ensure_rust` installs them with Rust) | compiling |
 | Docker with `docker compose` | `install.sh` | Postgres and SearXNG (`deploy/compose.yaml`) |
 | `git`, `curl`, `jq` | apt | every script |
 | `python3` | preinstalled on Ubuntu | the e2e test servers (`scripts/e2e/*.py`) |
@@ -53,7 +31,7 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 | Node.js 22+ | `install.sh` puts it in `~/.local/node` | installing the Codex CLI when absent (not needed at runtime) |
 | `gh` | GitHub CLI | pull requests, checking CI |
 
-`install.sh` sets all of this up on a fresh VM except Rust and clippy (it downloads prebuilt binaries when it can). The scripts add `~/.local/node/bin` and `~/.cargo/bin` to `PATH` themselves.
+`install.sh` sets up Docker, `git`, `curl`, `jq`, `bubblewrap`, `poppler-utils` and Node on a fresh VM, and Rust with the C toolchain only when it has to compile (it downloads prebuilt binaries when it can). Clippy and `gh` are yours to add. The scripts add `~/.local/node/bin` and `~/.cargo/bin` to `PATH` themselves.
 
 Postgres must be running for e2e, dev and upgrade:
 
@@ -83,6 +61,7 @@ cargo build --release --locked
 cargo test --release --locked
 cargo clippy --release --locked --all-targets -- -D warnings
 ZEN_E2E_NO_BUILD=1 scripts/e2e.sh
+scripts/check-docs.py --base origin/main         # the docs still match the code (AGENTS.md)
 
 # 3. try it for real (faux model, own database, own port)
 ZEN_FAUX=1 scripts/dev.sh                       # in a second terminal
@@ -126,13 +105,15 @@ scenario uses a local HTTP stub to check its auth, model id and `bool` ↔ `noul
 
 `scripts/e2e.sh` builds (unless `ZEN_E2E_NO_BUILD=1`), then runs each scenario on a kernel built from this checkout with the scripted faux model. It uses a throwaway database (`zen_e2e_<pid>`), throwaway git workspaces and a throwaway `HOME`, on port 18377 (`ZEN_E2E_PORT`). No subscription is used, nothing reaches the internet and the live service isn't touched. It needs Postgres running, plus `git`, `curl`, `jq`, `bubblewrap` and `python3`.
 
-There are 21 scenarios (`run …` lines at the bottom of the script). Some start small test servers from `scripts/e2e/`:
+There are 23 scenarios (`run …` lines at the bottom of the script). Some start small test programs from `scripts/e2e/`:
 
-| Server | Started by | What it is |
+| Program | Started by | What it is |
 |---|---|---|
 | `slow_worker.py` | `slow-summary` (`ZEN_WORKER_SLOW_CMD`) | a worker whose `complete` is deliberately slow (`ZEN_SLOW_SECS`) |
 | `mcp_server.py` | `mcp` | an MCP server with `echo` and `add`: over stdio, and with `--http PORT` as streamable HTTP on the e2e port + 1 |
 | `searxng_stub.py` | `web`, `wiki` (`ZEN_SEARXNG_URL`) | answers `/search?format=json` with fixed results, on the e2e port + 2 |
+| `systemone_stub.py` | `system-one`, `scheduled-jobs` (`ZEN_S1_URL`) | an OpenRouter System One stand-in that checks auth and the `bool` → `noul` mapping, on the e2e port + 3 |
+| `ws_prompt.py` | `names-suggestions` | a client, not a server: sends one message on a session's WebSocket as the terminal app does and prints the events that follow |
 
 ```bash
 scripts/e2e.sh                # build, then every scenario
@@ -202,7 +183,7 @@ Local endpoints:
 | Eval kernels | `http://127.0.0.1:18301` (`ZEN_EVAL_PORT`), databases `zen_eval_*` |
 | Postgres | `127.0.0.1:5432`, user/password `zen` |
 | SearXNG | `http://127.0.0.1:8888` (`ZEN_SEARXNG_URL`) |
-| Health | `GET /health` on any kernel: `ok`, `db`, `mind`, `workers`, `busy` |
+| Health | `GET /health` on any kernel: `ok`, `db`, `mind`, `workers`, `busy`, `commit`, `version` |
 
 Talk to the dev kernel with the CLI you just built:
 
@@ -227,7 +208,7 @@ The installed service runs the installed binaries, not your checkout. So:
 ./target/release/zen ask --json -m faux/smoke "…"        # only if the service runs with ZEN_FAUX=1
 ```
 
-`zen ask --json` prints one JSON object: `session_id`, `text`, `tools` (each with `name` and `is_error`), `error`, usage. It exits non-zero on failure.
+`zen ask --json` prints one JSON object: `session_id`, `text`, `model`, `effort`, `tools` (each with `name` and `is_error`), `error`, `usage`, and the kernel's turn records (`turn`, `turns`). It exits non-zero on failure.
 
 ## Applying a change: `scripts/upgrade.sh`
 
@@ -355,13 +336,13 @@ cat ~/.zenbot-dev/global/wiki/index.md
 
 ## Workshop: skills and tools the agent makes
 
-`save_skill` creates or improves a skill (new ones are drafts in `skills/_proposed/`); `save_tool` makes a tool in `tools/<name>/`, offered through `find_tools` / `call_tool` as `made_<name>`. The owner reviews them from the CLI:
+`save_skill` creates or improves a skill (new ones are drafts in `global/skills/_proposed/`); `save_tool` makes a tool in `global/tools/<name>/`, offered through `find_tools` / `call_tool` as `made_<name>`. The owner reviews them from the CLI:
 
 ```bash
 zen skills                                   # skills with their use, drafts marked; the made tools
 zen skills accept work/release-notes         # activate a draft (reject moves it to _archived)
 zen tools accept word-count                  # let a made tool run unsandboxed, with the network
-git -C ~/.zenbot-dev/skills log --oneline    # every change the dev kernel made to its skills
+git -C ~/.zenbot-dev/global/skills log --oneline   # every change the dev kernel made to its skills
 ```
 
 A draft also becomes active when the owner accepts a session that loaded it (`zen sessions decide <id> accept`), unless it opens a new domain. Unapproved tools run in bubblewrap with the filesystem read-only and no network; approval is stored in the `made_tools` table. The nightly sleep flags skills unused for 30 days and archives them at 90. To test without a subscription, see the `workshop` e2e scenario and `scripts/e2e/workshop.json`.
@@ -373,7 +354,7 @@ A draft also becomes active when the owner accepts a session that loaded it (`ze
 ```bash
 zen policy                                        # routes, evidence per kind and model, suggestions
 zen policy set default faux/smoke                 # route a kind of work (here every unknown one)
-zen policy set build claude/claude-opus-5-5 --candidates codex/gpt-5.5 --explore 0.1
+zen policy set build claude/claude-opus-5-5 --candidates codex/gpt-6.1-sol --explore 0.1
 zen policy undo                                   # a new version with the previous data
 ```
 
@@ -398,10 +379,11 @@ Code that depends on a CLI's flags or output should fail loudly, so the post-upd
 
 ## CI and releases
 
-`.github/workflows/ci.yml` has three jobs (there is no separate release workflow):
+`.github/workflows/ci.yml` has four jobs (there is no separate release workflow):
 
 - **`check`**: on every pull request and every push to `main`. Build, unit tests, clippy, e2e (commands above). A newer push to a pull request cancels its running check.
-- **`matrix`**: build, unit tests and clippy of `crates/zen-matrix` (its own workspace); not in the release tarball.
+- **`matrix`**: on the same events as `check`, beside it. Build, unit tests and clippy of `crates/zen-matrix` (its own workspace); not in the release tarball, and `release` doesn't wait for it.
+- **`docs`**: on the same events. `scripts/check-docs.py` (with `--base` on a pull request): the lists the docs keep (routes, tools, settings, tables, events, tape kinds, slash commands, e2e scenarios, crates) match the code, the paths, settings and decisions the docs name exist, and a change to the code adds a PROGRESS.md entry. AGENTS.md, "Keeping the docs true".
 - **`release`**: only on a push to `main` that passed `check`. Builds the `dist` profile (fat LTO), checks `zen-engine` answers `ping` and `zen --version` runs, and uploads `zenbot-x86_64-linux-<sha12>.tar.gz` plus `.sha256` to the rolling `edge` prerelease (newest 20 builds kept).
 
 So binaries exist only for commits on `main` that passed. `install.sh`, `upgrade.sh` and `eval.sh` use them via `scripts/fetch-release.sh`; when there are none (yet), they compile locally. Right after a merge, CI needs a few minutes.
@@ -417,9 +399,9 @@ gh run list --limit 5
 `matrix` job runs the same three in its directory:
 
 ```bash
-cd crates/zen-matrix && cargo build --release && cargo test --release && cargo clippy --release --all-targets -- -D warnings
+cd crates/zen-matrix && cargo build --release --locked && cargo test --release --locked && cargo clippy --release --locked --all-targets -- -D warnings
 scripts/matrix-e2e.sh      # end to end, through E2EE, on a throwaway homeserver and a faux kernel (Docker)
-scripts/matrix.sh          # build, sign in if needed, install and restart the zen-matrix service
+scripts/matrix.sh          # build, test, install, sign in if needed, restart the zen-matrix service (--build: build and test only)
 ```
 
 The first build compiles matrix-sdk (about 15 minutes on 2 cores; relinking takes a few minutes).

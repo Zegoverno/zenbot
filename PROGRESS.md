@@ -6,6 +6,23 @@
 
 ---
 
+## 2026-10-10 — The docs match the code again, and CI keeps them so
+
+- Every doc was read in full and checked, claim by claim, against the code at `6217f27`. That fixed
+  drift across 25 files: ROADMAP's statuses and "where things stand" (Phases 2 to 6 shown as
+  unmerged), MAP's missing modules, routes, settings and tables, `zen-matrix` and `zen-proto` absent
+  from AGENTS.md, protocol events and routes never documented, retired names (Pi, `/brief`,
+  `ZEN_BRIEFS`, the flat home layout), missing `Superseded` markers in DECISIONS.md, and default
+  prompt files that still said only the owner edits `USER.md` (D-045).
+- `scripts/check-docs.py`, CI job `docs`: fails when a route, tool, setting, table, event, tape
+  kind, slash command, e2e scenario or crate in the code is missing from the doc that lists it,
+  when a current doc names a setting, repo path or decision that doesn't exist, and, on a pull
+  request, when a change to the code adds no PROGRESS.md entry. Tested by breaking a route, a
+  setting, a path and a decision number by hand: each was reported.
+- AGENTS.md: "Keeping the docs true" (the code wins, present tense means shipped, history stays
+  history), the check in the change loop, and a reread of the docs against the final diff before
+  merging; the docs table now covers INSTALL.md, AGENTS.md, the agent's defaults and doc comments.
+
 ## 2026-10-09 — The Matrix channel (D-049)
 
 - `zen-matrix` (`crates/zen-matrix`, its own Cargo workspace; docs/matrix.md): the owner talks to
@@ -79,12 +96,11 @@
 - New prompt file `agents/zenbot/IDENTITY.md`, loaded right after `SOUL.md`: the agent's character
   and how it works. `SOUL.md` is now the deep layer only (what the agent is for, what it holds to,
   the lines it doesn't cross); the default files are split the same way.
-- Traits, guidance and preferences are not memory: the agent proposes the edit to `IDENTITY.md` or
-  `USER.md` in the conversation and makes it once the owner approves. The `remember` and `capture`
-  descriptions say so.
+- Traits, guidance and preferences are not memory: they go to `IDENTITY.md` or `USER.md` (see
+  below). The `remember` and `capture` descriptions say so.
 - No more long-term tier (there were no long-term rows). The sleep promotes on its own instead: a
   lasting entry about the owner moves to `USER.md`, lasting guidance to `IDENTITY.md` (under
-  `## Learned`, dated backup in `~/.zenbot/backups/`, only the owner's words or verified results,
+  `## Learned`, dated backup in `~/.zenbot/backups/prompt-files/`, only the owner's words or verified results,
   lowest of three samples ≥ `ZEN_PROMOTE_BAR` 0.9), and lasting knowledge is copied into the wiki.
   The morning note lists each. `zen memory accept|reject` and `POST /api/memory/{id}/review` are gone.
 - The agent writes what really matters straight into `USER.md` and `IDENTITY.md` (owner's call, no
@@ -102,6 +118,19 @@
   run without the key. The kernel now reports it itself in `/api/models`.
 - An OpenRouter key alone no longer counts as a signed-in engine in `zen status` or the terminal
   app (it can't run a turn). Unit test, and two e2e checks (key set and not set).
+
+## 2026-10-08 — Every model visible; one safe continuation across providers on a hard cap (D-044)
+
+- The model list shows every model the workers report (Haiku 5.5 included); `ZEN_MODELS` is an
+  optional allowlist, and routing keeps the full catalog either way.
+- On a recognized hard subscription usage limit, `zen-engine` (`failover.rs`) continues the turn
+  once on the other provider (Claude → `codex/gpt-6.1-sol`, Codex → `claude/claude-sonnet-5-5`;
+  `ZEN_FAILOVER_CLAUDE_TO_CODEX`, `ZEN_FAILOVER_CODEX_TO_CLAUDE`). It needs a subscription sign-in
+  (refuses API-key environments), carries the prompt and the turn so far, never repeats a tool
+  call whose result is unknown, shows a switch event, and stops if it can't continue safely.
+  Throttles and generic 429s don't trigger it.
+- Full screen keeps its scroll position while a reply streams.
+- Tests: unit tests, the e2e suite (21 scenarios), and a real Claude hard cap continued on Codex.
 
 ## 2026-10-08 — One System One relevance helper; taint is its own module
 
