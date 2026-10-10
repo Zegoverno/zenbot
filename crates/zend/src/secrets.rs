@@ -1,7 +1,7 @@
 //! Masking secrets in tool output before the model or the tape sees it (SPEC 5.18, docs/context.md).
 //!
 //! Two kinds are masked: the values of the kernel's own secrets (environment variables named like a
-//! token, key, secret or password, zenbot's API token, the old Pi sign-in and the Claude Code and
+//! token, key, secret or password, zenbot's API token and the Claude Code and
 //! Codex sign-ins, reloaded when those files change), and text in well-known token
 //! formats (API keys, GitHub, GitLab, Slack, AWS, Google and Hugging Face tokens, private key blocks).
 //! The prefix stays visible so the model knows what was there. A model that needs a secret's value
@@ -45,18 +45,17 @@ pub fn is_secret_var(name: &str) -> bool {
     k == "DATABASE_URL" || ["TOKEN", "KEY", "SECRET", "PASSWORD", "PASSWD"].iter().any(|w| k.contains(w))
 }
 
-/// The files under the zen home that hold secrets: zenbot's API token, Pi's old sign-in, the
-/// settings file. Hidden from sandboxed shells and tools.
+/// The files under the zen home that hold secrets: zenbot's API token and the settings file. Hidden from sandboxed shells and tools.
 pub fn secret_files() -> Vec<std::path::PathBuf> {
     let home = crate::zen_home();
-    ["token", "auth.json", "env"].iter().map(|f| home.join(f)).filter(|p| p.exists()).collect()
+    ["token", "env"].iter().map(|f| home.join(f)).filter(|p| p.exists()).collect()
 }
 
-/// Files whose secret values are masked: zenbot's token and old sign-in, and the engines' sign-ins.
+/// Files whose secret values are masked: zenbot's token and the engines' sign-ins.
 fn known_files() -> Vec<std::path::PathBuf> {
     let home = crate::zen_home();
     let user = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    vec![home.join("token"), home.join("auth.json"), user.join(".codex/auth.json"), user.join(".claude/.credentials.json")]
+    vec![home.join("token"), user.join(".codex/auth.json"), user.join(".claude/.credentials.json")]
 }
 
 /// Secret values the kernel knows, longest first (so a value containing another is masked whole).

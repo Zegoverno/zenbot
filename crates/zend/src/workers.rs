@@ -20,12 +20,11 @@ impl Worker {
     }
 }
 
-/// Workers to run, from ZEN_WORKERS (default: `engine`). A stale `pi` entry is ignored so
-/// an existing installation can upgrade without editing its env file first.
+/// Workers to run, from ZEN_WORKERS (default: `engine`).
 pub(crate) fn worker_configs() -> Vec<(String, String, String)> {
     let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_default();
     let configured = std::env::var("ZEN_WORKERS").unwrap_or_else(|_| "engine".into());
-    let mut names: Vec<&str> = configured.split(',').map(str::trim).filter(|n| !n.is_empty() && *n != "pi").collect();
+    let mut names: Vec<&str> = configured.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
     if names.is_empty() { names.push("engine"); }
     names.into_iter().map(|name| match name {
             "engine" => {

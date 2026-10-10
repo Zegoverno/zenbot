@@ -33,7 +33,7 @@ These hold today and in the target design. Changing one needs the owner's OK and
 ### Processes
 
 ```
- zen (terminal app, script commands)   zen-matrix (Matrix channel)   web UI (frozen)
+ zen (terminal app, script commands)   zen-matrix (Matrix channel)
           │ HTTP + WebSocket, one port (ZEN_PORT, default 8100, loopback), owner token
 ┌──────────────────────── zend (Rust kernel, systemd service `zenbot`) ────────────────────────┐
 │ API/WS · sessions and tape · context compiler · tools and executor · memory and sleep · skills │
@@ -240,7 +240,7 @@ harness versions with the same model on isolated kernels and databases (`evals/R
 ### Security today
 
 One owner token for the API. The listener binds to loopback by default (`ZEN_BIND` opts into an
-external address); only a WebSocket upgrade accepts `?token=`. Every tool runs in the kernel; a
+external address); the token goes only in the `Authorization` header, never the URL. Every tool runs in the kernel; a
 verifier runs read-only in bubblewrap. Worker shells do not inherit kernel secret variables, and
 the verifier hides token files. Made tools run without network and with an empty home until approved.
 Codex turns and tool-free completions use a private `CODEX_HOME` (only the owner's sign-in is linked)

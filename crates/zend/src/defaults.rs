@@ -8,7 +8,9 @@ use std::path::Path;
 const FILES: &[(&str, &str)] = &[
     (crate::layout::SOUL, include_str!("../defaults/SOUL.md")),
     (crate::layout::IDENTITY, include_str!("../defaults/IDENTITY.md")),
-    ("AGENTS.md", include_str!("../defaults/AGENTS.md")),
+    // Named AGENTS.default.md in the repo, so sessions working there don't load it as the
+    // project's own instruction file (context.rs).
+    ("AGENTS.md", include_str!("../defaults/AGENTS.default.md")),
     ("USER.md", include_str!("../defaults/USER.md")),
     ("global/skills/work/brief/SKILL.md", include_str!("../defaults/skills/work/brief/SKILL.md")),
     ("global/skills/work/brief/references/template.md", include_str!("../defaults/skills/work/brief/references/template.md")),

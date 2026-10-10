@@ -575,7 +575,7 @@ fn engines_state() -> Value {
 /// with any engine not left up to date (rolled back, skipped, failed) named with its status.
 fn engines_line(state: &Value) -> Option<String> {
     let engines = state["engines"].as_object().filter(|e| !e.is_empty())?;
-    let mut names: Vec<&String> = engines.keys().filter(|n| n.as_str() != "pi").collect();
+    let mut names: Vec<&String> = engines.keys().collect();
     names.sort_by_key(|n| (["claude", "codex"].iter().position(|k| k == n).unwrap_or(9), n.to_string()));
     let versions: Vec<String> = names.iter().map(|n| format!("{n} {}", engines[*n]["version"].as_str().filter(|v| !v.is_empty()).unwrap_or("?"))).collect();
     let problems: Vec<String> = names
@@ -1203,7 +1203,6 @@ mod tests {
     #[test]
     fn engines_line_lists_versions_and_flags_problems() {
         let state = json!({ "checked": "2026-10-06T14:32:34Z", "engines": {
-            "pi": { "version": "1.0.4", "status": "up to date" },
             "codex": { "version": "0.160.1", "status": "updated from 0.159.0" },
             "claude": { "version": "2.1.284", "status": "rolled back from 2.1.291" },
         }});

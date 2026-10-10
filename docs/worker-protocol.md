@@ -92,7 +92,7 @@ With `ZEN_FAUX=1`, `zen-engine` also lists `faux/smoke`, a scripted model that d
 
 ## Configuration
 
-`ZEN_WORKERS` lists the workers to start (comma-separated, default `engine`; a `pi` entry, the retired Pi worker, is ignored):
+`ZEN_WORKERS` lists the workers to start (comma-separated, default `engine`):
 
 | Name | Command | What it serves |
 |---|---|---|

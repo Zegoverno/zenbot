@@ -21,15 +21,14 @@ fully before making changes.
 | Worker `zen-engine`: turns on the Claude Code and Codex CLIs | `crates/zen-engine` (Rust) | child process of `zend` |
 | Shared types `zen-proto`: the worker protocol's messages | `crates/zen-proto` (Rust library) | linked into `zend` and `zen-engine` |
 | Channel `zen-matrix`: the owner's Matrix rooms ↔ sessions | `crates/zen-matrix` (Rust, its own Cargo workspace) | systemd service `zen-matrix`, binary `~/.zenbot/bin/zen-matrix` |
-| Web UI (frozen, predates D-026; not kept in step with the API) | `crates/zend/web/index.html` | served by `zend` at `/` |
 | Database and web search | `deploy/compose.yaml` | Postgres + pgvector, and SearXNG, in Docker |
 
 The kernel owns all state and executes every tool call. Workers hold no state: they get the context
 for a turn and ask the kernel to run tools. Engines run with their own tools switched off (Claude
 Code `--tools ""`, Codex shell disabled) so every action goes through the kernel. Keep it that way.
 
-Config lives in `~/.zenbot/` (MAP.md lists every file). `token`, `env`, `matrix.env`, `matrix/`
-and a leftover Pi `auth.json`, if present, are secret: never print them.
+Config lives in `~/.zenbot/` (MAP.md lists every file). `token`, `env`, `matrix.env` and
+`matrix/` are secret: never print them.
 
 ## Making a change
 

@@ -42,7 +42,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
@@ -250,7 +250,6 @@ async fn main() -> Result<()> {
         .route_layer(middleware::from_fn_with_state(app.clone(), auth));
 
     let router = Router::new()
-        .route("/", get(index))
         .route("/health", get(health))
         .nest("/api", api)
         .with_state(app);
