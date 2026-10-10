@@ -1,5 +1,9 @@
 # Memory, search and web: research for the zenbot redesign (2026-10-06)
 
+> Dated research snapshot (2026-10-06), kept as history. Its facts about zenbot were true then and
+> have changed since (zend now has `reqwest`; migration `0017_search.sql` adds search). What zenbot
+> does today is in [DESIGN.md](../../DESIGN.md) and [MAP.md](../../MAP.md). The clones under `research/` were not kept.
+
 Scope: DESIGN.md "Target design / Memory and knowledge", ROADMAP.md Phases 1–4. Sources are cloned
 (shallow or sparse) under `research/`; paths below are relative to it. Nothing in the zenbot repo was edited.
 

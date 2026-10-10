@@ -66,7 +66,7 @@ zen_engine() {
   return 1
 }
 
-# The cheapest-looking model the engine lists (override with ZEN_ENGINES_CLAUDE_MODEL/_CODEX_MODEL).
+# The cheapest-looking model the engine lists (override with ZEN_ENGINES_CLAUDE_MODEL or ZEN_ENGINES_CODEX_MODEL).
 check_model() {
   local engine=$1 over ids
   over="ZEN_ENGINES_${engine^^}_MODEL"

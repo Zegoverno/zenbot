@@ -10,9 +10,10 @@ not an hour; most jobs teach little, and that's fine. Save nothing just to have 
 
 ## 1. What did the owner say that will matter again?
 
-Preferences, decisions, corrections, facts about their projects → `remember` (source `owner` for
-their words). Replace an entry rather than adding a near-duplicate. A correction of something you
-believed wins: fix the old entry.
+Decisions, corrections, open questions, the state of their projects → `remember` (source `owner`
+for their words). Replace an entry rather than adding a near-duplicate. A correction of something
+you believed wins: fix the old entry. A preference or standing guidance that is really important
+and lasting isn't memory: write it into `USER.md` (about the owner) or `IDENTITY.md` (about you).
 
 ## 2. What did you learn about the world?
 

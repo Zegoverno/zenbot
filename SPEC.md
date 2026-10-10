@@ -33,7 +33,7 @@ Moved to [CONTEXT.md](CONTEXT.md#principles).
 |---|---|
 | Kernel | `zend`: state, policy, scheduling, side effects |
 | Processes | agent runs, visible, killable, with resource limits (budgets) |
-| File system | `data/`: global and per-project scopes, git-backed |
+| File system | the zen home (`~/.zenbot`): global and per-project scopes, git-backed (§5.13) |
 | Users & permissions | scopes, sensitivity levels, agent allow-lists |
 | Syscalls | the kernel ⇄ worker protocol and the MCP tool surface |
 | Drivers | model providers, MCP servers, channels |
@@ -78,7 +78,7 @@ Each module lists what it does, its contract, the default implementation and pos
 
 #### 5.2 Tools & executor
 - **Built-ins:** `bash`, `read`, `write`, `edit`, `move`, `list`, `search`; `service.start|stop|logs` (background processes such as dev servers); `run` (code in any language); `web.search`, `web.fetch`; `browser.*`; and the Mind/Work tools (`memory.*`, `wiki.*`, `taste.*`, `task.*`, `delegate`, `inbox.ask`).
-- Commands run in a **per-project sandbox container** with only that project's `data/` and linked repos mounted. Toolchains via `mise`.
+- Commands run in a **per-project sandbox container** with only that project's scope folder and linked repos mounted (today they run on the host; only a verifier's are sandboxed, read-only). Toolchains via `mise`.
 - **Scripts become tools:** a saved script with a typed signature is callable as a tool (Windmill's idea).
 - Large outputs are truncated (e.g. 2000 lines / 50 KB); the full output is stored as a blob and referenced.
 - Alternatives: Windmill (executor + workflows), gVisor/Firecracker (stronger isolation).
@@ -138,7 +138,7 @@ Each module lists what it does, its contract, the default implementation and pos
 - Records `{id, scope, text, kind: preference|fact|lesson|directive, sensitivity, source, created_by, revision}`; rendered to markdown for humans.
 - Written explicitly (`memory.remember`) or by post-session extraction. Only the owner's own statements and verified outcomes count; directives are quoted verbatim.
 - Loaded as a capped index per session; the rest via search.
-- Refined (D-028, DESIGN.md "Memory and knowledge"): a fixed-size short-term `MEMORY.md`; a nightly sleep keeps or drops. Superseded in part by D-045: traits, guidance and preferences live in `IDENTITY.md` / `USER.md` by approved edit, not in memory.
+- Refined (D-028, DESIGN.md "Memory and knowledge"): a fixed-size short-term `MEMORY.md`; a nightly sleep keeps or drops. Superseded in part by D-045: traits, guidance and preferences live in `IDENTITY.md` / `USER.md`, written there by the agent or promoted by the sleep (backed up first), not in memory.
 
 #### 5.11 Taste
 The core of the moat: learning the owner's judgment and applying it everywhere.
@@ -187,6 +187,7 @@ The core of the moat: learning the owner's judgment and applying it everywhere.
 - This is how zenbot improves itself: an autoresearch-style loop proposes config changes, runs the bench, and keeps what wins. Promotion needs owner approval.
 
 #### 5.16 Scheduler & workflows
+- First step built (D-046): the kernel's scheduler (`jobs.rs`, tables `jobs` and `job_runs`) runs the kernel's own jobs (`sleep`, `engines`) and agent jobs (a prompt in a fresh session); run statuses today are `running | ok | silent | error | interrupted`, plus `missed`.
 - Cron entries trigger a script, workflow or agent task, each with its own model and budget; explicit statuses (`ok | failed | skipped | delivery_failed`); silent unless an S1 check says the owner should know.
 - Workflows v1: ordered steps with approvals, retries and waits; state in Postgres. Adopt Windmill if we outgrow this.
 - First crons: nightly backup; nightly `zen-bench`; daily digest to the inbox.
@@ -206,7 +207,7 @@ Threats: prompt injection via web/email/docs, secret exfiltration, destructive c
 - **Policy:** per-agent tool allow-lists; a hard deny list for destructive commands; approvals for high-risk actions; outward-facing actions (post, email, publish, spend) always need approval unless explicitly delegated.
 - **Isolation:** sandbox per project; egress allow-list for sensitive projects.
 - **Spend:** hard budget caps per agent, project and day.
-- **Public repo hygiene:** no secrets in git (pre-commit scanning); `data/` is never in the code repo.
+- **Public repo hygiene:** no secrets in git (pre-commit scanning); the zen home's data is never in the code repo.
 
 #### 5.19 Observability
 - Every model call (provider, model, class, tokens, cost, latency, cache hits) and every tool call (args, duration, size, status) is stored in Postgres and viewable per session, task, project and day. OpenTelemetry/Langfuse export later.
@@ -217,7 +218,9 @@ yet: crates `zen-exec`, `zen-store`, `zen-mcp`; `packages/web`; `bench/`; `deplo
 sandbox image. Target v1 tables: `projects` · `agents` · `attachments` · `sources` · `wiki_pages`
 (index; content in git) · `memory_records` · `taste_records` · `principles` (index) · `chunks` ·
 `goals` · `tasks` · `runs` · `evals` · `crons` · `workflows` · `workflow_runs` · `inbox_items` ·
-`skills` (index) · `scripts` (index) · `mcp_servers` · `secrets` · `devices` · `bench_runs`.
+`skills` (index) · `scripts` (index) · `mcp_servers` · `secrets` · `devices` · `bench_runs`. Built
+in another shape so far: memory as `memories`, search chunks as `search_docs`, crons as `jobs` and
+`job_runs`, saved scripts as `made_tools`; MCP servers live in `~/.zenbot/mcp.json`, not a table.
 
 ## 7. Deployment
 Moved to [DESIGN.md](DESIGN.md#deployment) and [DEVELOPMENT.md](DEVELOPMENT.md).
@@ -237,7 +240,7 @@ Moved to [CONTEXT.md](CONTEXT.md#how-success-is-measured).
 | Two languages slow the solo builder | Protocol-first; thin kernel early; generate types |
 | Prompt injection / exfiltration | Taint rule, credential injection, approvals, egress allow-lists |
 | Knowledge rot (wrong wiki pages compound) | Citations, confidence, lint, human-approved writes |
-| Scope creep | Anything not in the current milestone goes to `docs/ideas.md` |
+| Scope creep | Anything not in the current phase goes to ROADMAP.md as a later step |
 
 ## 11. Open questions
 Moved to [ROADMAP.md](ROADMAP.md#open-decisions).

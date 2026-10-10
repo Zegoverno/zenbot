@@ -3,8 +3,9 @@
 The kernel (`zend`) owns sessions, history and tools. A **worker** runs the model side of a turn. Any program that speaks this protocol can be a worker, so engines are swappable: zenbot ships `zen-engine` (Claude Code + Codex), and you can add your own.
 
 System One typed decisions are not part of this protocol: `zend/src/score.rs` calls
-OpenRouter directly (`POST /api/v1/systemone`), mapping public `bool` questions to `noul` on
-the wire. `ZEN_S1_MODEL` chooses the classifier and `OPENROUTER_API_KEY` authenticates it.
+OpenRouter directly (`POST /api/v1/systemone`, `ZEN_S1_URL` overrides it), mapping public `bool`
+questions to `noul` on the wire. `ZEN_S1_MODEL` chooses the classifier (off when unset) and
+`OPENROUTER_API_KEY` authenticates it.
 
 ## Transport
 
@@ -15,19 +16,19 @@ JSON-RPC 2.0 over the worker's stdin/stdout, one JSON object per line. The kerne
 | Method | Params | Result |
 |---|---|---|
 | `ping` | `{}` | `{ "pong": true }` |
-| `models.list` | `{}` | `{ "authenticated": { "<engine>": bool, … }, "models": [{ "id": "<engine>/<model>", "name": "…", "efforts": ["low", …], "default_effort": "medium" }] }` |
+| `models.list` | `{}` | `{ "authenticated": { "<engine>": bool, … }, "models": [{ "id": "<engine>/<model>", "name": "…", "engine": "…", "efforts": ["low", …], "default_effort": "medium", "context"?: tokens }] }` |
 | `turn.start` | `{ session_id, turn_id, model, effort, system_prompt, history, prompt, prompt_context, tools, resume, kind }` | `{ "ok": true }` immediately; the turn then runs asynchronously |
 | `turn.abort` | `{ session_id, turn_id? }` | `{ "ok": true }`; the worker stops the turn (`turn_id`), or every turn it runs for the session, and sends `turn.end` |
-| `complete` | `{ model, system, prompt }` | `{ text, usage, model }` or `{ error }`: one completion without tools (the kernel uses it for summaries; may take minutes) |
+| `complete` | `{ model, system, prompt }` | `{ text, usage, model }` or `{ error }`: one completion without tools (the kernel uses it for summaries, session names and suggested next prompts; may take minutes) |
 
 - `model` is one of the ids from `models.list`, always the model's full id (e.g. `claude/claude-opus-5-5`), never an alias that can move to another model. The kernel routes each model to the worker that listed it.
-- `efforts` are the thinking levels a model accepts, in order, and `default_effort` the one used when a session picks none. Both are optional: a model without them has no level to choose.
+- `efforts` are the thinking levels a model accepts, in order, and `default_effort` the one used when a session picks none. Both are optional: a model without them has no level to choose. `context` (optional) is the model's context window in tokens; the kernel summarizes against the smaller of it and its own budget (docs/context.md).
 - `effort` is the level for this turn: the session's choice, or the model's `default_effort`. The kernel always sends one for a model that has levels, so the level that ran is known; it is `null` only for models without levels. The worker must apply it, not substitute its own default.
 - `system_prompt` and `tools` are fixed for the session (docs/context.md): send them as they are, so the provider's cache keeps hitting.
 - `turn_id` is the kernel's id for this turn. The worker sends it back on every `tool.call` and notification of the turn (see "Late messages"). Messages without one are matched by session only, as from workers older than it.
 - `history` is the session so far as the kernel compiled it, in the format below. Each message carries `seq`, its number on the tape (`#12`). A user message may carry `context`, the turn context that was sent after it; send it as a second text block after the message's content, as it was sent. When older turns were summarized, the first message is the summary: a user message with `"summary": true`. Don't drop or rewrite earlier messages: each turn's history starts with the previous turn's.
 - `prompt_context` (string or null) is this turn's context (the date when it changed, …); send it as a text block after `prompt`.
-- `kind` (string or null) is the kind of session: `verifier` for a child session the kernel runs to check work (the `verify` tool, docs/brief.md); null for the owner's sessions.
+- `kind` (string or null) is the kind of session: `verifier` for a child session the kernel runs to check work (the `verify` tool, docs/brief.md), `subagent` for a delegated task, `job` for a scheduled job's run; null for the owner's sessions.
 - `resume` (`{ id }` or null) names an engine session of the worker's own that the kernel considers in sync with the tape up to this turn; the worker may continue it and send only the new prompt instead of the history (see "Engine sessions").
 - `tools` is a list of `{ name, description, parameters }` with JSON Schema parameters. These are the only tools the model may use; the worker must not give the model tools of its own that touch the machine.
 
@@ -91,9 +92,9 @@ With `ZEN_FAUX=1`, `zen-engine` also lists `faux/smoke`, a scripted model that d
 
 ## Configuration
 
-`ZEN_WORKERS` lists the workers to start (comma-separated, default `engine`):
+`ZEN_WORKERS` lists the workers to start (comma-separated, default `engine`; a `pi` entry, the retired Pi worker, is ignored):
 
 | Name | Command | What it serves |
 |---|---|---|
 | `engine` | `zen-engine` next to `zend` (override with `ZEN_ENGINE_CMD`) | `claude/*` via the Claude Code CLI, `codex/*` via `codex app-server`, on the owner's subscriptions; keeps engine sessions (see above) |
-| any other `name` | `ZEN_WORKER_<NAME>_CMD` | whatever its `models.list` returns |
+| any other `name` | `ZEN_WORKER_<NAME>_CMD` (default: `name` itself) | whatever its `models.list` returns |

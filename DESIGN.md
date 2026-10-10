@@ -5,7 +5,7 @@
 > is in [SPEC.md](SPEC.md); where each piece lives in the code, in [MAP.md](MAP.md); the order of
 > work, in [ROADMAP.md](ROADMAP.md). Deep dives: `docs/context.md` (what the model reads each turn),
 > `docs/brief.md` (briefs and verification), `docs/worker-protocol.md`,
-> `docs/client-protocol.md`.
+> `docs/client-protocol.md`, `docs/matrix.md`.
 
 ## Invariants
 
@@ -33,8 +33,8 @@ These hold today and in the target design. Changing one needs the owner's OK and
 ### Processes
 
 ```
- zen (terminal app, script commands)        web UI (frozen)
-          │ HTTP + WebSocket, one port (ZEN_PORT, default 8100), owner token
+ zen (terminal app, script commands)   zen-matrix (Matrix channel)   web UI (frozen)
+          │ HTTP + WebSocket, one port (ZEN_PORT, default 8100, loopback), owner token
 ┌──────────────────────── zend (Rust kernel, systemd service `zenbot`) ────────────────────────┐
 │ API/WS · sessions and tape · context compiler · tools and executor · memory and sleep · skills │
 │ System One decisions and scoring · summaries · tracing · worker routing and supervision        │
@@ -49,7 +49,8 @@ These hold today and in the target design. Changing one needs the owner's OK and
 | Process | Language | Responsibility |
 |---|---|---|
 | `zend` | Rust (axum, sqlx, tokio) | Always-on kernel; owns state and side effects; single binary |
-| `zen` | Rust | Terminal app (full screen with a sessions board as home, diffed frames, scrolling and a file side panel, or `--inline`) and script commands (`--json`) |
+| `zen` | Rust | Terminal app (full screen with a sessions board as home (`GET /api/board`, D-048), diffed frames, scrolling and a file side panel, or `--inline`) and script commands (`--json`) |
+| `zen-matrix` | Rust (matrix-sdk) | Optional Matrix channel (D-049, `docs/matrix.md`): a client of the client protocol like `zen`, one encrypted room per session plus a "zen jobs" room for job reports; systemd service `zen-matrix`, set up by `scripts/matrix.sh` |
 | `zen-engine` | Rust | Default worker: runs turns on the Claude Code CLI and `codex app-server` on the owner's subscriptions, with zenbot's prompt, tools and history |
 | Postgres | — | 16+ with pgvector; local in compose, movable via `DATABASE_URL` |
 
@@ -71,8 +72,8 @@ is shown to the owner and recorded on the tape.
 
 Each session has an append-only tape: a chain of blocks with a per-session number (`seq`), a parent
 link and a hash over the parent's hash and the content. Block kinds include `message`, `context`,
-`envelope`, `compaction`, `engine_session`, `base` (the session's instructions), `questions` and
-`verification` (and, from sessions before 2026-10-07, the old workflow's `state`, `brief`,
+`envelope`, `compaction`, `engine_session`, `base` (the session's instructions), `questions`,
+`verification`, `verdict`, `taint` and `failover` (and, from sessions before 2026-10-07, the old workflow's `state`, `brief`,
 `submission`, … blocks).
 
 What the model reads each turn (`docs/context.md`): the envelope (system prompt and tools, fixed for
@@ -99,9 +100,12 @@ unseen), what was sent and the prompt version, so the prompt can be improved fro
 
 ### Tools today
 
-Fixed order, the same every turn of a session: `bash`, `read`, `write`, `edit`, `history`, `ask`,
-`remember`, `web_search`, `web_fetch`, `find_skills`, `load_skill`, `find_tools`, `load_tool`,
-`call_tool`, `verify`, `delegate`, `schedule`, and `decide` when a System One model is configured. A verifier session gets only `bash` (read-only, bubblewrap), `read` and
+Fixed order, the same every turn of a session (`agent::specs`): `bash`, `read`, `write`, `edit`,
+`history`, `search`, `ask`, `remember`, `capture`, `web_search`, `web_fetch`, `find_skills`,
+`load_skill`, `save_skill`, `find_tools`, `load_tool`, `call_tool`, `save_tool`, `verify`,
+`delegate`, `schedule`, and `decide` when a System One model is configured (and neither
+`ZEN_S1_PRIVATE` nor `ZEN_DECIDE_TOOL` is 0). Subagents and job sessions don't get `ask`,
+`delegate` or `schedule`; a verifier session gets only `bash` (read-only, bubblewrap), `read` and
 `submit_verdict`. Each description says what the tool does, when to use it and when not, and what
 it returns. Tool output is cut once, when the tool runs (full output saved and referenced); edits
 are serialized per file and CRLF/BOM-safe; tools are cancelled with their process group on abort.
@@ -153,9 +157,9 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
   sleep`): ranks entries (System One's "needed soon" when allowed, else recency; the owner's words
   and verified results a little higher), keeps what fits and archives the rest (out of the search
   index). First it promotes on its own (D-045, bar `ZEN_PROMOTE_BAR` 0.9): lasting and about the
-  owner → `USER.md`, lasting guidance on how the agent acts → `IDENTITY.md` (under `## Learned`,
-  backup in `~/.zenbot/backups/`, lowest of three samples, only `owner`/`verified` entries; the
-  entry leaves memory), lasting knowledge → copied into the wiki. A prompt file over its cap is then
+  owner → `USER.md`, lasting guidance on how the agent acts → `IDENTITY.md` (each under
+  `## Learned`, backup in `~/.zenbot/backups/prompt-files/`, kept 90 days; lowest of three samples,
+  only `owner`/`verified` entries; the entry leaves memory), lasting knowledge → copied into the wiki. A prompt file over its cap is then
   compacted: `turns::run_kernel_session` starts a parentless subagent session on the default model
   that answers with the rewritten file; the kernel checks it (markers, a heading, within the cap,
   not under a quarter of the 80% target), backs up and writes it. Every entry's fate
@@ -163,9 +167,10 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
   One sees memories unless `ZEN_S1_PRIVATE=0` (D-032).
 - **Search** (`search.rs`, D-035): an indexer keeps `search_docs` current: one document per turn of
   every session (the owner's words, the answers, the tools called; no tool output) and one per
-  short-term memory (and each `long` row from before D-045). `search` runs exact names and paths first (trigram over identifiers),
+  short-term memory (and each `long` row from before D-045) and wiki page. `search` runs exact names and paths first (trigram over identifiers),
   then full text (`simple`) and meaning (pgvector; `ZEN_EMBED_MODEL`, default
-  `openai/text-embedding-3-small` through OpenRouter, filled in the background) merged by reciprocal
+  `openai/text-embedding-3-small` through OpenRouter, filled in the background; off with
+  `ZEN_EMBED=0` or `ZEN_S1_PRIVATE=0`) merged by reciprocal
   rank fusion, and System One reranks. A memory found
   counts as used. Every search is a `searches` row. `history` reads any session's messages by
   number.
@@ -179,7 +184,8 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
   vouches, new domains the owner's call, commits; the sleep flags and archives unused skills) and
   `save_tool` (made tools in `~/.zenbot/global/tools/`, called as `made_<name>`, sandboxed without network
   until approved in `made_tools`).
-- **Delegation** (`delegate.rs`, D-038): subagents (kind `subagent`, no `ask` or `delegate`), several
+- **Delegation** (`delegate.rs`, D-038): subagents (kind `subagent`, no `ask`, `delegate` or
+  `schedule`; they inherit the parent's taint), several
   tasks per call in parallel; the model from the routing policy (`policies`) by kind of work, with
   logged exploration; the sleep tunes routes on clear evidence.
 - **Skills** (`skills.rs`): folders in `~/.zenbot/global/skills/<domain>/<name>/` in the agentskills.io
@@ -193,8 +199,11 @@ A fast typed-decision model (Jev via OpenRouter's `/api/v1/systemone`, called by
 choice, score or bool questions, answered with probabilities. Public bool maps to `noul` on the
 wire; OpenRouter reports usage and cost directly. Used today for live scoring of sessions (from the owner's
 messages and final answers only, never tool output; `session_scores`), the model's `decide` tool,
-and the memory sleep (private content allowed unless `ZEN_S1_PRIVATE=0`, D-032). Configured
-by `ZEN_S1_MODEL` and `OPENROUTER_API_KEY`; no additional worker is needed.
+the memory sleep, reranking `search` and `web_search` results, `web_fetch`'s `focus`, `capture`'s
+page choice, `save_skill`'s near-duplicate check, a subtask's kind of work (`delegate`) and agent
+job approval (`schedule`). Private content is allowed unless `ZEN_S1_PRIVATE=0` (D-032).
+Configured by `ZEN_S1_MODEL` and `OPENROUTER_API_KEY`; no additional worker is needed. Without it,
+each use falls back to a simpler rule, and a job the agent schedules is saved paused.
 
 ### Measurement
 
@@ -210,7 +219,8 @@ harness versions with the same model on isolated kernels and databases (`evals/R
   public addresses, IP literals and every redirect are checked, no proxy), 30 s / 5 MB / 20,000
   characters per call with `offset` paging and a 15-minute cache, `focus` keeping only the parts
   System One judges relevant, PDFs saved for `pdftotext`.
-- **`web_search`**: Brave (`BRAVE_API_KEY`) or Tavily (`TAVILY_API_KEY`), else SearXNG
+- **`web_search`**: `ZEN_SEARCH_PROVIDER` if set, else Brave (`BRAVE_API_KEY`) or Tavily
+  (`TAVILY_API_KEY`), else SearXNG
   (`ZEN_SEARXNG_URL`, the compose service on 127.0.0.1:8888), which also rescues one failed keyed
   call; results deduplicated, http(s) only, reranked by System One.
 - **Untrusted content** (D-034): results are wrapped in `<untrusted …>` (markers inside are
@@ -246,7 +256,9 @@ are covered by the system prompt ("ask before"), not enforced.
 
 - `deploy/compose.yaml` runs Postgres (pgvector) and SearXNG (keyless web search). `zend` runs on the host as the systemd service
   `zenbot` (installed by `install.sh`) and starts its workers. One port for API, WebSocket and web
-  UI; `/health` reports the database, workers and busy sessions.
+  UI; `/health` reports the database, workers and busy sessions. `zen-matrix` is a separate
+  workspace, built and installed by `scripts/matrix.sh` (not by CI's release), with its own systemd
+  service.
 - The kernel's `engines` job updates the Claude Code and Codex CLIs daily, tested, with rollback;
   its `sleep` job runs the memory sleep nightly ("Scheduled jobs"). The systemd timers that ran
   them before D-046 are removed by `install.sh` and by the first healthy upgrade.
@@ -261,7 +273,8 @@ are covered by the system prompt ("ask before"), not enforced.
 
 ## Target design (agreed 2026-10-06)
 
-Not built yet unless marked. The roadmap builds it in phases. Sources: the Phase 0 research in
+Not built yet unless marked; most of it has shipped since (see "As built"). The roadmap builds it
+in phases. Sources: the Phase 0 research in
 `docs/research/` (Hermes, OpenClaw, agentskills.io, Anthropic's tool search, FastMCP, rmcp, Voyager,
 Letta, LLM Wiki and gbrain, Postgres hybrid search, web providers and fetch safety), each claim with
 file paths in the projects' code.
@@ -315,25 +328,29 @@ Loaded at session start.
 | `read` | Read a file or image | exists |
 | `write` | Create or overwrite a file | exists |
 | `edit` | Exact string replacement in a file | exists |
-| `ask` | Bring the owner 1–3 questions, each with 2–4 options, recommended first; unanswered → the recommendation, recorded as an assumption. `wait: false` keeps working on what doesn't depend on the answer | built (ends the turn; `wait: false` in Phase 6) |
-| `search` | One search across sessions (this one included), memories and the wiki | built (sessions, memories; the wiki in Phase 4) |
+| `ask` | Bring the owner 1–3 questions, each with 2–4 options, recommended first; unanswered → the recommendation, recorded as an assumption. `wait: false` keeps working on what doesn't depend on the answer | built (D-038 added `wait: false`) |
+| `search` | One search across sessions (this one included), memories and the wiki | built (D-035, D-036) |
 | `remember` | Add, replace or remove a short-term memory entry, with its source | built |
 | `web_search` | Search the web through the configured provider | built |
 | `web_fetch` | Fetch a URL as readable text, with its links | built |
 | `find_skills` | Search skills by need: names and one-line descriptions | built (word match; System One ranking later) |
 | `load_skill` | Load a skill, or one of its reference files | built |
-| `find_tools` | Search MCP and agent-made tools by need: names and one-line descriptions | built (MCP) |
+| `save_skill` | Create or improve a skill, from evidence | built (D-037) |
+| `find_tools` | Search MCP and agent-made tools by need: names and one-line descriptions | built (word match) |
 | `load_tool` | Load a tool's full definition so it can be called | built |
 | `call_tool` | Run a loaded tool (the list stays fixed, D-033) | built |
+| `save_tool` | Make a tool: a script plus a manifest, sandboxed until the owner approves | built (D-037) |
 | `decide` | Ask System One typed questions, in batches, with probabilities | built |
 | `verify` | A fresh verifier checks work against criteria, without the maker's reasoning | built |
 | `capture` | Put a concept into the wiki | built (D-036) |
 | `delegate` | Hand subtasks to subagents with fresh context and a chosen model, in parallel | built (D-038) |
+| `schedule` | Create, change or remove a scheduled job | built (D-046) |
 
 Gone (2026-10-07): `move` (`bash mv`), `propose_brief` (a brief is a file the `brief` skill
-writes), `submit_work`, `note_ruling` and the approvals. Going: `history` (once `search` exists). Wiki pages, skills and
-tool manifests are files, so `write` and `edit` cover authoring; the kernel validates the format on
-save.
+writes), `submit_work`, `note_ruling` and the approvals. Going: `history`, once `search` covers it
+(`search` shipped in D-035; `history` is still offered, and reads messages by number). Skills and
+made tools are authored through `save_skill` and `save_tool`, which check the format and the
+rules (D-037); wiki pages through `capture` (timeline) and `edit` (the summary).
 
 ### System One, used heavily
 
@@ -342,11 +359,12 @@ save.
   each, so the model sets its own threshold.
 - **Built into tools**, so every engine benefits: `search`, `web_search` and `find_*` rank and filter
   by relevance; `web_fetch` can keep only the relevant parts; `remember`'s sleep scores entries;
-  `capture` routes and de-duplicates.
+  `capture` routes and de-duplicates. Built, except ranking in `find_skills` and `find_tools`
+  (word match today).
 - **Shadow first.** Each new use is logged in `decisions` with its probabilities and, later, what
   actually happened; it acts on its own once it matches outcomes often enough.
 - System One decides (where, whether, which); generative work (writing text) goes to a model.
-- **Open:** whether System One may see private content (ROADMAP.md, open decisions).
+- **Private content:** System One may see it unless the owner sets `ZEN_S1_PRIVATE=0` (D-032).
 
 ### Memory and knowledge
 
@@ -392,7 +410,8 @@ content; a model writes the clean text.
 
 **Search.** One index over sessions, memories, the wiki and skills: Postgres full-text first, then
 pgvector, merged by rank (reciprocal rank fusion), exact names and paths first. A tool, not injected
-every turn. Every search logged.
+every turn. Every search logged. Built (D-035, D-036) except skills, which `find_skills` searches
+instead.
 
 **Web.** `web_search` behind one provider contract (swappable providers); `web_fetch` with
 readable-text extraction and link following; a browser later.
@@ -404,15 +423,15 @@ readable-text extraction and link following; a browser later.
 domain needs the owner's OK); edit before create (search first; a new skill only when none covers
 the work, with the reason recorded); changes from evidence at session close, never from one task;
 small and composable; loads and outcomes measured, near-duplicates merged, unused skills retired;
-every change a revertible commit.
+every change a revertible commit. `save_skill` and the sleep enforce these (D-037).
 
 **MCP client** written against the spec (D-033; built). From FastMCP: namespacing and mounting
-(`<server>_<tool>`), tool transformation (rename, hide arguments, rewrite descriptions), middleware
+(`<server>_<tool>`, built), and not built yet: tool transformation (rename, hide arguments, rewrite descriptions), middleware
 (audit, permissions, secret injection), proxying (zenbot's own tools as an MCP server, SPEC.md §3).
 
 **Agent-made tools** are a script plus a manifest (name, input schema, command), run by the kernel in
 the sandbox and kept in git; a full MCP server only when a tool must keep state. A new tool gets no
-network or secrets until the owner approves.
+network until the owner approves, and never the kernel's secrets (built, D-037).
 
 **Loading tools mid-session** would change the tool list, which rewrites the cached prefix on every
 engine (the Phase 0 spike), so the list stays fixed and `call_tool` runs whatever `load_tool`
@@ -422,4 +441,6 @@ showed (built).
 
 Learned from real usage, not fixed tasks (D-030, Phase 6): System One classifies the situation; a
 versioned policy maps it to a model; a small share of subtasks explore another model with the choice
-probability logged; outcomes (verdicts, corrections, verification, cost) update the policy.
+probability logged; outcomes (verdicts, corrections, verification, cost) update the policy. Built
+for subagents (D-038, "Delegation" above: the owner's verdicts and cost are the outcomes so far); a
+main session runs on the model the owner picks.

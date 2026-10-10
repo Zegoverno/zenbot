@@ -38,5 +38,4 @@ guidance that really matters across jobs, write it here yourself, and keep the f
 
 ## Learned
 
-Dated guidance, newest last: approved by the owner in sessions, or promoted from memory by the
-nightly sleep.
+Dated guidance, newest last: written in sessions, or promoted from memory by the nightly sleep.

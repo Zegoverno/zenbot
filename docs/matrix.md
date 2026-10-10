@@ -37,9 +37,10 @@ client protocol (docs/client-protocol.md), like `zen`: the kernel doesn't know M
 - **Secrets stay local.** `~/.zenbot/matrix/` is mode 700 and its files 600: `session.json` (the
   access token), `store.key` (the passphrase that encrypts the SQLite store of keys and sync state),
   `recovery-key`. `matrix.env` holds the password only until the first sign-in; remove it after.
-- **The kernel token** never leaves the machine: the bridge talks to `127.0.0.1` with it in a header.
+- **The kernel token** never leaves the machine: the bridge talks to `127.0.0.1` (the port from
+  `~/.zenbot/env`; `ZEN_URL` overrides it) with it in a header.
 - **The service is confined** (`deploy/zen-matrix.service`): `ProtectSystem=strict`, writable only
-  `~/.zenbot/matrix`, `NoNewPrivileges`. It runs no tools itself; everything zen does still goes
+  `~/.zenbot/matrix`, `NoNewPrivileges`, `PrivateTmp`; it stays inert until `session.json` exists. It runs no tools itself; everything zen does still goes
   through the kernel.
 - **Message content** reaches the bot decrypted on this machine, and is then a prompt like one typed
   in the terminal. Anyone holding the owner's Matrix account can drive zen: protect that account (2FA
@@ -57,7 +58,7 @@ client protocol (docs/client-protocol.md), like `zen`: the kernel doesn't know M
    # MATRIX_RECOVERY_KEY=…          # only if the account already has encryption set up
    # MATRIX_HOMESERVER=https://…    # only if discovery from the user id doesn't work
    ```
-3. `scripts/matrix.sh`: builds `crates/zen-matrix`, installs `~/.zenbot/bin/zen-matrix`, signs in
+3. `scripts/matrix.sh`: builds and tests `crates/zen-matrix`, installs `~/.zenbot/bin/zen-matrix`, signs in
    (`zen-matrix login`), installs and starts the `zen-matrix` service.
 4. Accept the two invites in your client. Remove `MATRIX_PASSWORD` from `matrix.env`.
 

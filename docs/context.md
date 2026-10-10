@@ -28,15 +28,17 @@ the discount, so anything that changes must come after everything that doesn't.
   `{{zen_home}}` and `{{repo}}` filled in), `~/.zenbot/USER.md` (the owner), short-term memory as it
   was at the session's start (entries `[m12] …`, plus a note on last night's sleep when there was
   one), the skills index (each skill's name and description, or only the domains when that's over
-  `ZEN_SKILL_INDEX_CHARS`), then the projects' instruction files. Each prompt file has a size cap
+  `ZEN_SKILL_INDEX_CHARS`), the projects' instruction files, and last the tools' working directory.
+  A scheduled job's session gets only the parts its `context` names (`compile::PARTS`; the soul is
+  always in). Each prompt file has a size cap
   (`ZEN_SOUL_CHARS` 4000, `ZEN_IDENTITY_CHARS` 4000, `ZEN_AGENTS_CHARS` 12000, `ZEN_USER_CHARS` 3000); a longer file keeps its
   first 70% and last 20% with a note where to read the rest (OpenClaw's cut). The kernel writes
   default prompt files and skills that are missing when it starts (`crates/zend/defaults/`) and
   never overwrites one. How to use each tool is in the tool's description, not the instructions.
 - **Loaded on demand, appended.** A skill (`load_skill`) arrives as a tool result, so the
   instructions never change mid-session; a memory saved with `remember` shows from the next session.
-- **Instructions are fixed for the session.** They are written once, stored (`envelopes`), and reused
-  unchanged, so editing an AGENTS.md takes effect in the next session. An instruction file found
+- **Instructions are fixed for the session.** They are written once on the first turn (a `base`
+  block on the tape), stored with the tools (`envelopes`), and reused unchanged, so editing an AGENTS.md takes effect in the next session. An instruction file found
   mid-session (a project below the workspace) arrives once, attached to the tool result that touched
   it, and is never added to the instructions (goose adds it to the system prompt mid-session, which
   breaks the cache; qm keeps the system prompt byte-identical).
@@ -58,9 +60,12 @@ Each session is an append-only chain of blocks in `tape_events`. Every block has
   last block fingerprints the whole session up to it, and any change to stored history shows.
 
 Kinds: `message` (user, assistant, toolResult, in Pi's message format; a user message may carry
-`context`, the turn context sent with it), `context` (an instruction file the session picked up),
-`envelope` (the session's instructions and tools changed), `compaction` (a summary now replaces
-older blocks), `engine_session` (an engine's own session is in sync with the tape up to a block).
+`context`, the turn context sent with it), `base` (the session's instructions, written on its first
+turn), `context` (an instruction file the session picked up), `envelope` (the session's instructions
+and tools changed), `compaction` (a summary now replaces older blocks), `engine_session` (an
+engine's own session is in sync with the tape up to a block), `failover` (a usage-limit switch to
+another engine), `taint` (untrusted content entered the session), and the agent tools' records
+`questions`, `verification`, `verdict` (docs/brief.md).
 
 ## Summaries
 
@@ -69,8 +74,10 @@ after the turn. It is applied at the start of the next turn after a pause (5 min
 has expired anyway), or at once when the context passes 90%. Applying it is one planned cache break;
 every turn after it is smaller. Rules, from qm unless noted:
 
-- The most recent turns (about 30% of the limit) stay word for word. The cut is always at the start
-  of a turn, so a tool call is never separated from its result.
+- The most recent turns (about 30% of the limit, at least the last turn) stay word for word. The
+  cut is always at the start of a turn, so a tool call is never separated from its result. A summary
+  is made only when what it would replace is at least half that size: each one restarts the engine's
+  session, so it must remove a real chunk.
 - The summary has fixed sections (goal, state, decisions, files, facts, open, next; goose's
   structured summary), and every item cites the blocks it came from (`#156-#162`).
 - Each summary is built from the previous one plus the turns since. If the summarizer fails, a
@@ -117,9 +124,10 @@ Every turn records in `turns`:
 - `context`: what was sent (summary used, history range and size, turn context, how it was sent:
   `resume`, `seed`, `inject`, `native`, `transcript`), and the size estimate.
 - `context_tokens`: the context size the provider reported for the turn's last model call.
-- `cache_break`: whether this request could not reuse the previous one's cache, and why:
-  `instructions`, `summary`, `model`, `engine_session`, `history` (a bug), or `expired` (a pause
-  longer than the cache lives). The eval report counts the unexpected ones.
+- `cache_break`: whether this request could not reuse the previous one's cache, and why: `first`,
+  `instructions`, `summary`, `model`, `engine_session`, `history` (a bug), `expired` (a pause longer
+  than the cache lives: 1 hour for Claude, 5 minutes otherwise), or `miss` (the provider read less
+  than half the previous context from its cache). The eval report counts the unexpected ones.
 
 A test checks that for a growing session each turn's history starts with the previous turn's
 (goose's prefix-invariance test); the per-turn record does the same live (caveman's prefix monitor).
