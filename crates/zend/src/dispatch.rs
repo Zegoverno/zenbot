@@ -200,12 +200,22 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                     None => Vec::new(),
                 }
             };
+            // Only a trusted repository's file is attached as instructions; any other is
+            // untrusted content and taints the session (context.rs).
+            let roots = if new_context.is_empty() { Vec::new() } else { context::trusted_roots(std::path::Path::new(&app.repo)) };
             for path in new_context {
                 if let Some(text) = context::read_capped(&path) {
-                    if let Err(e) = tape::append(&app.db, id, "context", &json!({ "path": path })).await {
+                    let trusted = context::trusted(&path, &roots);
+                    if !trusted {
+                        if let Err(e) = crate::taint::taint(app, id, "project file", &path.display().to_string()).await {
+                            out.content.push_str(&format!("\n\n[instructions in {}: {}]", path.display(), crate::taint::withheld(&e)));
+                            continue;
+                        }
+                    }
+                    if let Err(e) = tape::append(&app.db, id, "context", &json!({ "path": path, "trusted": trusted })).await {
                         tracing::error!("recording instruction file {} for {id}: {e:#}", path.display());
                     }
-                    out.content.push_str(&context::attachment(&path, &text));
+                    out.content.push_str(&if trusted { context::attachment(&path, &text) } else { context::untrusted_attachment(&path, &text) });
                 }
             }
             // Every tool's output, instruction files included, is masked before the model or the tape sees it.
