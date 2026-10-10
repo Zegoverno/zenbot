@@ -11,7 +11,7 @@ Every request, the WebSocket upgrade included, carries the owner's token in
 
 | Method and path | Body | Returns |
 |---|---|---|
-| `GET /health` (no token) | | `{ ok, db, mind, workers, busy, version, commit }`; `busy` counts running turns and kernel work outside them |
+| `GET /health` (no token) | | `{ ok, db, mind, workers, ignored_workers, busy, version, commit }`; `busy` counts running turns and kernel work outside them; `ignored_workers` lists names in `ZEN_WORKERS` that aren't known workers (not a failure) |
 | `GET /api/models` | | `{ models, authenticated, default, scorer }` |
 | `GET /api/sessions?archived=` | | the owner's and job sessions (no subagents or verifiers): `{ id, title, model, effort, archived, kind, parent, cost, created_at, updated_at }`; `kind` is null for the owner's, `job` for a scheduled job's |
 | `GET /api/board` | | `{ sessions }`: every session, archived and child ones too (`kind` `subagent`, `verifier`, `job`; `parent`), each with `busy`, `waiting` (its latest `ask` questions came after the owner's latest message) and, for a child, `task` (its first prompt, 200 characters); no `cost`. `zen`'s home screen polls it |
