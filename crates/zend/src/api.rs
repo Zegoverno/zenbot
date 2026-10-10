@@ -28,13 +28,6 @@ pub(crate) fn same_secret(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-/// A canonical base64 encoding of the 16 random bytes required by RFC 6455.
-fn valid_ws_key(value: &str) -> bool {
-    let b = value.as_bytes();
-    b.len() == 24 && b[22..] == *b"==" && b[..21].iter().all(|c| c.is_ascii_alphanumeric() || *c == b'+' || *c == b'/')
-        && matches!(b[21], b'A' | b'Q' | b'g' | b'w') // the four padding bits must be zero
-}
-
 pub(crate) async fn auth(State(app): State<AppState>, req: Request, next: Next) -> Response {
     let token = app.token.as_bytes();
     let header_ok = req
@@ -42,26 +35,12 @@ pub(crate) async fn auth(State(app): State<AppState>, req: Request, next: Next) 
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| same_secret(v.strip_prefix("Bearer ").unwrap_or(v).as_bytes(), token));
-    // A token in the URL ends up in logs and history: accepted only where browsers can't send a
-    // header, the WebSocket upgrade.
-    let path: Vec<_> = req.uri().path().split('/').collect();
-    let websocket_path = matches!(path.as_slice(), ["", "api", "sessions", id, "ws"] if Uuid::parse_str(id).is_ok());
-    let upgrade = req.headers().get(header::UPGRADE).and_then(|v| v.to_str().ok()).is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
-    let connection = req.headers().get(header::CONNECTION).and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.split(',').any(|part| part.trim().eq_ignore_ascii_case("upgrade")));
-    let version = req.headers().get("sec-websocket-version").is_some_and(|v| v == "13");
-    let key = req.headers().get("sec-websocket-key").and_then(|v| v.to_str().ok()).is_some_and(valid_ws_key);
-    let query_ok = req.method() == axum::http::Method::GET && websocket_path && upgrade && connection && version && key
-        && req.uri().query().is_some_and(|q| q.split('&').filter_map(|kv| kv.strip_prefix("token=")).any(|t| same_secret(t.as_bytes(), token)));
-    if header_ok || query_ok {
+    // Only the header: a token in the URL ends up in logs and history.
+    if header_ok {
         next.run(req).await
     } else {
         ApiError(StatusCode::UNAUTHORIZED, "unauthorized".into()).into_response()
     }
-}
-
-pub(crate) async fn index() -> Html<&'static str> {
-    Html(include_str!("../web/index.html"))
 }
 
 pub(crate) async fn health(State(app): State<AppState>) -> Json<Value> {
@@ -411,13 +390,6 @@ mod tests {
         assert!(!same_secret(b"zen-token-123", b"zen-token-124"));
         assert!(!same_secret(b"zen-token-12", b"zen-token-123"));
         assert!(!same_secret(b"", b"x"));
-    }
-
-    #[test]
-    fn websocket_keys_are_canonical() {
-        assert!(valid_ws_key("dGhlIHNhbXBsZSBub25jZQ=="));
-        assert!(!valid_ws_key("//////////////////////==")); // invalid padding bits
-        assert!(!valid_ws_key("not-a-websocket-key"));
     }
 }
 
