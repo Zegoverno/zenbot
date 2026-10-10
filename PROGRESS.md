@@ -6,6 +6,37 @@
 
 ---
 
+## 2026-10-10 — Engine boundary: run-time tool checks, aborts, the tape and usage
+
+- A review of the worker boundary found engines trusted to keep their own tools off, and gaps where
+  the tape, aborts or usage could go wrong. Fixed together:
+- Codex: a turn (or completion) in which Codex starts anything but a message, reasoning, a plan, a
+  compaction or one of zenbot's dynamic tools is stopped and fails naming it; turning features off
+  is no longer the only guard. More tool features are off, and `zen-engine codex-features` fails on
+  any feature on by default that zenbot hasn't reviewed: the daily `engines` job runs it after an
+  update (rolling back) and on its own (failing the job).
+- Claude Code: a run must start with `system/init` and its tool list, or it is refused; `complete`
+  now reads the stream too, so summaries get the same check. It is killed after 9 minutes, as is
+  Codex's.
+- Aborts: the kernel names the turn in `turn.abort` and sends it again if the turn was aborted while
+  `turn.start` was on its way; zen-engine handles both in arrival order and remembers turns aborted
+  before they started.
+- The tape: tool results Claude Code gave the model itself go on the tape, and a turn that ends
+  with a tool call unanswered records it as interrupted (new e2e scenario `abort-tool`). A tool
+  call that never had the model's announcement fails the turn instead of getting an invented id
+  silently.
+- Usage: a failover turn's totals add up each provider's report instead of only the model calls
+  (Codex reports tokens only per turn); a Claude turn that fails early still reports.
+- Codex's version and model list are asked again when the binary changes (the list also hourly);
+  listing models uses zen's private Codex folder, is limited to 15 s and holds no lock while it
+  waits, and a worker whose `models.list` fails keeps its models in routing.
+- Workers get none of the kernel's secret-named variables (not just five of them), the engines'
+  sign-ins excepted, and start with `bash -c`, not a login shell. A kernel tool call that panics
+  still answers and no longer leaves the watchdog off for its turn.
+- A name in `ZEN_WORKERS` without its `ZEN_WORKER_<NAME>_CMD` (the retired `pi`, which rolled back an
+  upgrade on the dev VM) is ignored with a warning, shown in `/health` and `zen status`, instead of
+  failing the health check (new e2e scenario `engine-boundary`).
+
 ## 2026-10-10 — Trust gates: protected files, trusted repositories, the verifier's sandbox
 
 - A review found ways for text from outside (a web page, an MCP server, a cloned repository) to

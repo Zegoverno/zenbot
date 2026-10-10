@@ -1,7 +1,8 @@
 //! Pieces shared by every engine: the per-turn tool socket and the history transcript.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -114,6 +115,37 @@ impl Drop for ToolFlight {
     }
 }
 
+/// The turn's tool calls on the tape, to find those left without a result (`TurnCtx::settle`).
+#[derive(Default)]
+struct OpenCalls {
+    /// Calls sent (in an assistant message) without a result yet: (id, name).
+    open: Vec<(String, String)>,
+    /// Calls whose result was sent: a result can be sent before the message announcing its call
+    /// (the engine runs the tool while it is still writing the message).
+    answered: HashSet<String>,
+}
+
+impl OpenCalls {
+    fn track(&mut self, message: &Value) {
+        match message["role"].as_str() {
+            Some("assistant") => {
+                for b in message["content"].as_array().into_iter().flatten().filter(|b| b["type"] == "toolCall") {
+                    let id = b["id"].as_str().unwrap_or("").to_string();
+                    if !self.answered.contains(&id) {
+                        self.open.push((id, b["name"].as_str().unwrap_or("").to_string()));
+                    }
+                }
+            }
+            Some("toolResult") => {
+                let id = message["toolCallId"].as_str().unwrap_or("");
+                self.open.retain(|(o, _)| o != id);
+                self.answered.insert(id.to_string());
+            }
+            _ => {}
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct TurnCtx {
     pub rpc: Rpc,
@@ -127,11 +159,44 @@ pub struct TurnCtx {
     captured: Arc<Mutex<Captured>>,
     tool_flights: Arc<AtomicUsize>,
     tool_uncertain: Arc<AtomicBool>,
+    /// Tool calls sent to the tape without a result yet, and the calls whose result was sent.
+    open_calls: Arc<std::sync::Mutex<OpenCalls>>,
+    /// Call ids the kernel is running or has answered: a result the engine reports for any other
+    /// call is one it made itself (an unknown tool, invalid arguments), and goes on the tape.
+    answered: Arc<std::sync::Mutex<HashSet<String>>>,
+    /// Set once the turn has settled (`settle`): later tool results are dropped, not sent.
+    sealed: Arc<AtomicBool>,
+    /// Tool calls that ran without the model's announcement to match them to.
+    unmatched: Arc<AtomicUsize>,
 }
+
+/// How long a `complete` may take in the worker before its CLI is killed: less than the kernel
+/// waits for the answer (10 minutes), so the kernel gets an error instead of a timeout.
+pub const COMPLETE_LIMIT: Duration = Duration::from_secs(540);
+
+/// How long `claim` waits for the announcement of a call that is already running (the engine may
+/// write it to its stream just after it calls the tool).
+const CLAIM_WAIT: Duration = Duration::from_secs(2);
+/// How long a turn that has ended waits for its tool calls still running before it marks them
+/// interrupted on the tape.
+const SETTLE_WAIT: Duration = Duration::from_secs(10);
 
 impl TurnCtx {
     pub fn new(rpc: Rpc, session_id: String, turn_id: String, tools: Vec<Value>) -> Self {
-        TurnCtx { rpc, session_id, turn_id, tools, announced: Arc::default(), captured: Arc::default(), tool_flights: Arc::default(), tool_uncertain: Arc::default() }
+        TurnCtx {
+            rpc,
+            session_id,
+            turn_id,
+            tools,
+            announced: Arc::default(),
+            captured: Arc::default(),
+            tool_flights: Arc::default(),
+            tool_uncertain: Arc::default(),
+            open_calls: Arc::default(),
+            answered: Arc::default(),
+            sealed: Arc::default(),
+            unmatched: Arc::default(),
+        }
     }
 
     /// Send a notification for this turn: `params` with the session and turn ids added.
@@ -139,6 +204,9 @@ impl TurnCtx {
         match method {
             "turn.message" => {
                 let message = params["message"].clone();
+                if !self.track_calls(&message) {
+                    return;
+                }
                 let encoded = message.to_string();
                 let mut captured = self.captured.lock().await;
                 if message["role"] == "assistant" {
@@ -172,6 +240,61 @@ impl TurnCtx {
         self.rpc.notify(method, params).await;
     }
 
+    /// Keep `open_calls` up to date with a message about to go to the tape. False when the message
+    /// must not be sent: a tool result after the turn settled (`settle` already recorded the call
+    /// as interrupted, and the tape must not get two results for it).
+    fn track_calls(&self, message: &Value) -> bool {
+        if message["role"] == "toolResult" && self.sealed.load(Ordering::SeqCst) {
+            eprintln!("[engine] dropping the result of tool call {} that came after its turn ended", message["toolCallId"]);
+            return false;
+        }
+        self.open_calls.lock().unwrap().track(message);
+        true
+    }
+
+    /// Whether the kernel runs (or has answered) the tool call `id`.
+    pub fn is_answered(&self, id: &str) -> bool {
+        self.answered.lock().unwrap().contains(id)
+    }
+
+    /// Record a tool result the engine produced itself, without the kernel (Claude Code refusing
+    /// an unknown tool or invalid arguments): the model read it, so the tape must have it.
+    pub async fn engine_result(&self, id: &str, content: &str, is_error: bool) {
+        self.announced.lock().await.retain(|(a, _, _)| a != id);
+        let name = self.open_calls.lock().unwrap().open.iter().find(|(c, _)| c == id).map(|(_, n)| n.clone()).unwrap_or_default();
+        let message = json!({
+            "role": "toolResult", "toolCallId": id, "toolName": name,
+            "content": [{ "type": "text", "text": content }], "isError": is_error, "timestamp": now_ms()
+        });
+        self.notify("turn.message", json!({ "message": message })).await;
+    }
+
+    /// Tool calls that ran without an announcement from the model (their ids were invented).
+    pub fn unmatched_calls(&self) -> usize {
+        self.unmatched.load(Ordering::SeqCst)
+    }
+
+    /// Close the turn's tool calls before `turn.end`: wait (up to `SETTLE_WAIT`) for those still
+    /// running, then record every call the tape has without a result as interrupted, so the tape
+    /// has no tool call without its result (the next turn's history must pair them). Results that
+    /// arrive later are dropped.
+    pub async fn settle(&self) {
+        let deadline = tokio::time::Instant::now() + SETTLE_WAIT;
+        while self.tool_flights.load(Ordering::SeqCst) > 0 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let open: Vec<(String, String)> = std::mem::take(&mut self.open_calls.lock().unwrap().open);
+        for (id, name) in open {
+            eprintln!("[engine] tool call {id} ({name}) has no result at the end of the turn; recording it as interrupted");
+            let message = json!({
+                "role": "toolResult", "toolCallId": id, "toolName": name, "isError": true, "timestamp": now_ms(),
+                "content": [{ "type": "text", "text": "interrupted: the turn ended before this tool call returned a result; whether it ran, and what it changed, is unknown" }]
+            });
+            self.notify("turn.message", json!({ "message": message })).await;
+        }
+        self.sealed.store(true, Ordering::SeqCst);
+    }
+
     /// The full current-turn transcript for one safe continuation; too much state or an
     /// uncertain tool outcome disables failover.
     pub async fn captured_transcript(&self) -> Option<(Vec<Value>, String)> {
@@ -192,8 +315,8 @@ impl TurnCtx {
             return Some(combined);
         }
         // A resumed Claude session reports cumulative usage, whereas Codex reports per-turn
-        // usage. Their raw totals cannot be added safely. Let the kernel derive this mixed
-        // turn's totals from its individual model-call records instead.
+        // usage. Their raw totals cannot be added here: the kernel makes each provider report per
+        // turn (subtracting a resumed session's previous total) and adds them up.
         for key in ["input", "output", "cache_read", "cache_write"] {
             combined[key] = Value::Null;
         }
@@ -212,14 +335,30 @@ impl TurnCtx {
         self.announced.lock().await.push_back((id.to_string(), name.to_string(), args.clone()));
     }
 
-    /// Match an executing call to the tool_use the model announced, so results carry its id.
+    /// Match an executing call to the tool_use the model announced, so results carry its id. The
+    /// announcement may come just after the call (the engine writes its stream and calls the tool
+    /// at once), so it is waited for briefly. A call that never had one gets an invented id, is
+    /// logged, and fails the turn at its end (`unmatched_calls`): the stream stopped announcing
+    /// tool uses, so the tape can't pair calls with results.
     async fn claim(&self, name: &str, args: &Value) -> String {
-        let mut q = self.announced.lock().await;
-        let pos = q.iter().position(|(_, n, a)| n == name && a == args).or_else(|| q.iter().position(|(_, n, _)| n == name));
-        match pos.and_then(|p| q.remove(p)) {
-            Some((id, _, _)) => id,
-            None => format!("call-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()),
+        let deadline = tokio::time::Instant::now() + CLAIM_WAIT;
+        loop {
+            {
+                let mut q = self.announced.lock().await;
+                let pos = q.iter().position(|(_, n, a)| n == name && a == args).or_else(|| q.iter().position(|(_, n, _)| n == name));
+                if let Some((id, _, _)) = pos.and_then(|p| q.remove(p)) {
+                    return id;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        self.unmatched.fetch_add(1, Ordering::SeqCst);
+        let id = format!("call-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+        eprintln!("[engine] tool call `{name}` ran without an announcement from the model; recorded as {id} (has the engine's stream format changed?)");
+        id
     }
 
     /// Execute a tool through the kernel and report the result as a toolResult message.
@@ -229,6 +368,7 @@ impl TurnCtx {
             Some(id) => id,
             None => self.claim(name, &args).await,
         };
+        self.answered.lock().unwrap().insert(call_id.clone());
         let res = self
             .rpc
             .request("tool.call", json!({ "session_id": self.session_id, "turn_id": self.turn_id, "call_id": call_id, "name": name, "args": args }))
@@ -517,6 +657,17 @@ mod tests {
             flight.complete();
         }
         assert!(!known.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn calls_without_a_result_are_found_whatever_the_order() {
+        let call = |id: &str| json!({ "role": "assistant", "content": [{ "type": "toolCall", "id": id, "name": "bash", "arguments": {} }] });
+        let result = |id: &str| json!({ "role": "toolResult", "toolCallId": id, "content": [] });
+        let mut calls = OpenCalls::default();
+        for m in [call("a"), result("a"), result("b"), call("b"), call("c")] {
+            calls.track(&m);
+        }
+        assert_eq!(calls.open, vec![("c".to_string(), "bash".to_string())], "b's result came before its call");
     }
 
     #[test]

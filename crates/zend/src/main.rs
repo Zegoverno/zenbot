@@ -63,6 +63,8 @@ use workers::*;
 struct App {
     db: PgPool,
     workers: Vec<Worker>,
+    /// Names in ZEN_WORKERS that aren't known workers, ignored (shown by /health and `zen status`).
+    ignored_workers: Vec<String>,
     /// model or classifier id -> index into `workers`
     routes: Mutex<HashMap<String, usize>>,
     /// model id -> its entry from `models.list` (name, efforts, default_effort, …)
@@ -184,7 +186,8 @@ async fn main() -> Result<()> {
     let (merged_tx, incoming) = mpsc::unbounded_channel();
     let mut workers = Vec::new();
     let mut exits = Vec::new();
-    for (name, cmd, dir) in worker_configs() {
+    let (configs, ignored_workers) = worker_configs();
+    for (name, cmd, dir) in configs {
         match Mind::spawn(&cmd, &dir).await {
             Ok((mind, rx, exited)) => {
                 forward_worker(workers.len(), rx, merged_tx.clone());
@@ -198,9 +201,13 @@ async fn main() -> Result<()> {
     if workers.is_empty() {
         anyhow::bail!("no workers could be started; check ZEN_WORKERS");
     }
+    for name in &ignored_workers {
+        tracing::warn!("ZEN_WORKERS: `{name}` ignored (not a known worker); remove it from ~/.zenbot/env");
+    }
     let app: AppState = Arc::new(App {
         db,
         workers,
+        ignored_workers,
         routes: Mutex::new(HashMap::new()),
         catalog: Mutex::new(HashMap::new()),
         turns: Mutex::new(HashMap::new()),

@@ -102,15 +102,15 @@ scenario uses a local HTTP stub to check its auth, model id and `bool` ↔ `noul
 
 `scripts/e2e.sh` builds (unless `ZEN_E2E_NO_BUILD=1`), then runs each scenario on a kernel built from this checkout with the scripted faux model. It uses a throwaway database (`zen_e2e_<pid>`), throwaway git workspaces and a throwaway `HOME`, on port 18377 (`ZEN_E2E_PORT`). No subscription is used, nothing reaches the internet and the live service isn't touched. It needs Postgres running, plus `git`, `curl`, `jq`, `bubblewrap` and `python3`.
 
-There are 23 scenarios (`run …` lines at the bottom of the script). Some start small test programs from `scripts/e2e/`:
+There are 26 scenarios (`run …` lines at the bottom of the script). Some start small test programs from `scripts/e2e/`:
 
 | Program | Started by | What it is |
 |---|---|---|
-| `slow_worker.py` | `slow-summary` (`ZEN_WORKER_SLOW_CMD`) | a worker whose `complete` is deliberately slow (`ZEN_SLOW_SECS`) |
+| `slow_worker.py` | `slow-summary` (`ZEN_WORKER_SLOW_CMD`), `engine-boundary` (`ZEN_WORKER_ENVDUMP_CMD`, after writing its environment to a file) | a worker whose `complete` is deliberately slow (`ZEN_SLOW_SECS`) |
 | `mcp_server.py` | `mcp` | an MCP server with `echo` and `add`: over stdio, and with `--http PORT` as streamable HTTP on the e2e port + 1 |
 | `searxng_stub.py` | `web`, `wiki` (`ZEN_SEARXNG_URL`) | answers `/search?format=json` with fixed results, on the e2e port + 2 |
 | `systemone_stub.py` | `system-one`, `scheduled-jobs` (`ZEN_S1_URL`) | an OpenRouter System One stand-in that checks auth and the `bool` → `noul` mapping, on the e2e port + 3 |
-| `ws_prompt.py` | `names-suggestions` | a client, not a server: sends one message on a session's WebSocket as the terminal app does and prints the events that follow |
+| `ws_prompt.py` | `names-suggestions`, `abort-tool` | a client, not a server: sends one message on a session's WebSocket as the terminal app does (and, given a delay, an `abort` after it) and prints the events that follow |
 
 ```bash
 scripts/e2e.sh                # build, then every scenario
@@ -364,7 +364,7 @@ Every choice is a `decisions` row (`point = 'model'`); the owner's verdict on th
 
 ## Engine updates
 
-The Claude Code and Codex CLIs track their latest versions. The kernel's `engines` job runs `scripts/update-engines.sh` daily (04:00 UTC), with the kernel's secret variables removed from its environment. Each update downloads from the vendor, checks the SHA-256, runs one real tool-free completion through `zen-engine`, and rolls back if it fails. It never commits, builds or restarts zenbot.
+The Claude Code and Codex CLIs track their latest versions. The kernel's `engines` job runs `scripts/update-engines.sh` daily (04:00 UTC), with the kernel's secret variables removed from its environment. Each update downloads from the vendor, checks the SHA-256, runs one real tool-free completion through `zen-engine` (for Codex, also `zen-engine codex-features`: every Codex feature on by default must be one zenbot turns off or has reviewed), and rolls back if it fails. The feature check also runs every day on its own and makes the job fail (exit 1) when it doesn't pass. It never commits, builds or restarts zenbot.
 
 ```bash
 scripts/update-engines.sh --check            # installed vs latest; changes nothing

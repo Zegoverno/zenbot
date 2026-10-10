@@ -53,7 +53,8 @@ pub(crate) async fn health(State(app): State<AppState>) -> Json<Value> {
     }
     let mind = workers.values().all(|v| v == true);
     let busy = app.turns.lock().await.len() + app.background.load(std::sync::atomic::Ordering::SeqCst);
-    Json(json!({ "ok": db && mind, "db": db, "mind": mind, "workers": workers, "busy": busy,
+    // Ignored worker names are reported, not a failure: the kernel runs without them.
+    Json(json!({ "ok": db && mind, "db": db, "mind": mind, "workers": workers, "ignored_workers": app.ignored_workers, "busy": busy,
                  "version": env!("CARGO_PKG_VERSION"), "commit": app.updater.running() }))
 }
 

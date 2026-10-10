@@ -13,7 +13,8 @@ These hold today and in the target design. Changing one needs the owner's OK and
 
 1. **The kernel owns all state and runs every tool call.** Workers are stateless: they get a turn's
    context and ask the kernel to run tools. Engines run with their own tools off (Claude Code
-   `--tools ""`, Codex shell disabled), so every action goes through the kernel.
+   `--tools ""`, Codex's tool features disabled), and a run that shows or uses one is stopped, so
+   every action goes through the kernel.
 2. **The tape is the source of truth.** The model reads only what the tape contains, and the tape
    contains everything the model read. Engine sessions are a disposable cache rebuilt from it.
 3. **The prefix is fixed per session.** Instructions and tools are stored once per session (an
@@ -249,14 +250,22 @@ One owner token for the API. The listener binds to loopback by default (`ZEN_BIN
 external address); the token goes only in the `Authorization` header, never the URL. Every tool runs in the kernel; a
 verifier's shell runs read-only in bubblewrap with its own processes (the kernel's `/proc` out of
 sight), no network and an empty home with only the work bound back and the secret files hidden;
-its `read` stays inside the work. Worker shells do not inherit kernel secret variables. Made tools
+its `read` stays inside the work. Worker shells do not inherit kernel secret variables. Workers
+get none of them either (every secret-named variable is removed, except the engines' sign-ins),
+and start without a login shell. Made tools
 run from a private copy of their folder, without network and with an empty home until the owner
 approves the content they reviewed. `edit`/`write` can't change the owner's configuration and
 secrets from any session, nor the prompt files, active skills or made tools from a tainted, child or
 kernel session (D-051). `mcp.json` passes a secret-named variable only to a server that lists it in
 `allow_env`.
-Codex turns and tool-free completions use a private `CODEX_HOME` (only the owner's sign-in is linked)
-and disable Codex's built-in tools, MCP servers and project docs.
+Engines are checked at run time, not only configured: a Claude Code run (a turn or a tool-free
+completion) must start with `system/init` listing its tools, none but zenbot's `mcp__zen__*`, or it
+is refused. Codex turns, model listings and tool-free completions use a private `CODEX_HOME` (only
+the owner's sign-in is linked) and disable Codex's tool features, MCP servers, web search and
+project docs; a turn in which Codex starts anything but a message, reasoning, a plan, a compaction
+or a zenbot dynamic tool call (its own shell, file changes, MCP, web search, …) is stopped and fails
+naming it. The daily `engines` job also fails when a Codex release turns on a feature zenbot hasn't
+reviewed (`zen-engine codex-features`).
 Web pages, untrusted MCP output (including tool descriptions) and instruction files from
 repositories the owner hasn't listed (`ZEN_TRUSTED_REPOS`) taint the session and are wrapped; taint
 fails closed.

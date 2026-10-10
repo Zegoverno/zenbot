@@ -20,23 +20,36 @@ impl Worker {
     }
 }
 
-/// Workers to run, from ZEN_WORKERS (default: `engine`).
-pub(crate) fn worker_configs() -> Vec<(String, String, String)> {
+/// Workers to run, from ZEN_WORKERS (default: `engine`), and the names it lists that are ignored.
+/// A name other than `engine` needs its command in `ZEN_WORKER_<NAME>_CMD`; one without (a retired
+/// worker such as `pi`, a typo) is ignored with a warning instead of starting a worker that can't
+/// run, which would fail the kernel's health check (and roll back an upgrade).
+pub(crate) fn worker_configs() -> (Vec<(String, String, String)>, Vec<String>) {
     let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_default();
     let configured = std::env::var("ZEN_WORKERS").unwrap_or_else(|_| "engine".into());
-    let mut names: Vec<&str> = configured.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
-    if names.is_empty() { names.push("engine"); }
-    names.into_iter().map(|name| match name {
-            "engine" => {
-                let cmd = std::env::var("ZEN_ENGINE_CMD").unwrap_or_else(|_| exe_dir.join("zen-engine").display().to_string());
-                (name.to_string(), cmd, ".".to_string())
-            }
-            other => {
-                let var = format!("ZEN_WORKER_{}_CMD", other.to_uppercase());
-                (other.to_string(), std::env::var(&var).unwrap_or_else(|_| other.to_string()), ".".to_string())
-            }
-        })
-        .collect()
+    let (mut workers, mut ignored) = (Vec::new(), Vec::new());
+    for name in configured.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        if workers.iter().any(|(n, _, _)| n == name) {
+            continue;
+        }
+        let cmd = match name {
+            "engine" => std::env::var("ZEN_ENGINE_CMD").unwrap_or_else(|_| exe_dir.join("zen-engine").display().to_string()),
+            other => match std::env::var(format!("ZEN_WORKER_{}_CMD", other.to_uppercase())) {
+                Ok(cmd) if !cmd.trim().is_empty() => cmd,
+                _ => {
+                    tracing::warn!("ZEN_WORKERS lists `{other}`, which isn't a known worker (no ZEN_WORKER_{}_CMD); ignoring it", other.to_uppercase());
+                    ignored.push(other.to_string());
+                    continue;
+                }
+            },
+        };
+        workers.push((name.to_string(), cmd, ".".to_string()));
+    }
+    if workers.is_empty() {
+        let cmd = std::env::var("ZEN_ENGINE_CMD").unwrap_or_else(|_| exe_dir.join("zen-engine").display().to_string());
+        workers.push(("engine".to_string(), cmd, ".".to_string()));
+    }
+    (workers, ignored)
 }
 
 /// Feed a worker's messages into the kernel's single ordered queue, tagged with its index.
@@ -130,12 +143,26 @@ fn visible_models(all: &[(usize, Value)], wanted: Option<&str>) -> Vec<Value> {
 pub(crate) async fn collect_models(app: &App) -> Value {
     let mut all: Vec<(usize, Value)> = Vec::new();
     let mut authenticated = serde_json::Map::new();
+    let mut failed = Vec::new();
     for (i, w) in app.workers.iter().enumerate() {
-        let Ok(res) = w.mind().request("models.list", json!({})).await else { continue };
-        if let Some(a) = res["authenticated"].as_object() {
-            authenticated.extend(a.clone());
+        match w.mind().request("models.list", json!({})).await {
+            Ok(res) => {
+                if let Some(a) = res["authenticated"].as_object() {
+                    authenticated.extend(a.clone());
+                }
+                all.extend(res["models"].as_array().into_iter().flatten().map(|m| (i, m.clone())));
+            }
+            Err(e) => {
+                tracing::warn!("worker `{}` didn't list its models ({e:#}); keeping its previous ones", w.name);
+                failed.push(i);
+            }
         }
-        all.extend(res["models"].as_array().into_iter().flatten().map(|m| (i, m.clone())));
+    }
+    // A worker that didn't answer this time (busy, restarting, slow) keeps the models it listed
+    // before, so one slow worker doesn't take the others' models out of routing.
+    if !failed.is_empty() {
+        let (routes, catalog) = (app.routes.lock().await, app.catalog.lock().await);
+        all.extend(kept_models(&routes, &catalog, &failed));
     }
     // Rebuild after each worker refresh: an engine update may change a model's efforts,
     // context window or serving worker. Keep first-worker preference for duplicate ids.
@@ -159,6 +186,17 @@ pub(crate) async fn collect_models(app: &App) -> Value {
     };
     json!({ "models": curated, "authenticated": authenticated, "default": default,
             "scorer": score::scorer() })
+}
+
+/// The models `failed` workers served before, from the current routes and catalog, by id.
+fn kept_models(routes: &HashMap<String, usize>, catalog: &HashMap<String, Value>, failed: &[usize]) -> Vec<(usize, Value)> {
+    let mut kept: Vec<(usize, Value)> = routes
+        .iter()
+        .filter(|(_, w)| failed.contains(w))
+        .filter_map(|(id, w)| catalog.get(id).map(|m| (*w, m.clone())))
+        .collect();
+    kept.sort_by(|a, b| a.1["id"].as_str().cmp(&b.1["id"].as_str()));
+    kept
 }
 
 /// The worker that serves a model (refreshing routes once if it's unknown).
@@ -206,6 +244,30 @@ mod tests {
 
     fn id(models: &[Value]) -> Vec<&str> {
         models.iter().filter_map(|m| m["id"].as_str()).collect()
+    }
+
+    #[test]
+    fn a_worker_that_fails_to_list_keeps_its_models() {
+        let routes = HashMap::from([("claude/a".to_string(), 0), ("slow/b".to_string(), 1)]);
+        let catalog = HashMap::from([("claude/a".to_string(), json!({ "id": "claude/a" })), ("slow/b".to_string(), json!({ "id": "slow/b" }))]);
+        assert_eq!(kept_models(&routes, &catalog, &[1]), vec![(1, json!({ "id": "slow/b" }))]);
+        assert!(kept_models(&routes, &catalog, &[]).is_empty());
+    }
+
+    #[test]
+    fn unknown_worker_names_are_ignored() {
+        // One test changes the process's environment, so all cases are in it.
+        std::env::set_var("ZEN_WORKERS", "engine, pi ,slow,engine");
+        std::env::set_var("ZEN_WORKER_SLOW_CMD", "python3 slow.py");
+        let (workers, ignored) = worker_configs();
+        assert_eq!(workers.iter().map(|w| w.0.as_str()).collect::<Vec<_>>(), ["engine", "slow"]);
+        assert_eq!(workers[1].1, "python3 slow.py");
+        assert_eq!(ignored, ["pi"]);
+        std::env::set_var("ZEN_WORKERS", "pi");
+        let (workers, ignored) = worker_configs();
+        assert_eq!((workers[0].0.as_str(), ignored), ("engine", vec!["pi".to_string()]), "never none");
+        std::env::remove_var("ZEN_WORKERS");
+        std::env::remove_var("ZEN_WORKER_SLOW_CMD");
     }
 
     #[test]

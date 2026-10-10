@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Send one message on a session's WebSocket, as zen's terminal app does, and print the events
 that follow as JSON lines: until the turn's `end`, then for up to WAIT seconds more (the kernel's
-after-turn events: `title`, `suggestion`). Standard library only.
+after-turn events: `title`, `suggestion`). With ABORT seconds, also sends `{"type": "abort"}` that
+long after the message. Standard library only.
 
-    ws_prompt.py <base url> <token> <session id> '<json message>' [wait seconds]
+    ws_prompt.py <base url> <token> <session id> '<json message>' [wait seconds] [abort seconds]
 """
 import base64
 import json
@@ -11,6 +12,7 @@ import os
 import socket
 import struct
 import sys
+import threading
 import time
 from urllib.parse import urlparse
 
@@ -52,6 +54,7 @@ def read_frame(sock):
 def main():
     base, token, session, message = sys.argv[1:5]
     wait = float(sys.argv[5]) if len(sys.argv) > 5 else 10
+    abort = float(sys.argv[6]) if len(sys.argv) > 6 else None
     u = urlparse(base)
     sock = socket.create_connection((u.hostname, u.port or 80), timeout=120)
     key = base64.b64encode(os.urandom(16)).decode()
@@ -65,6 +68,8 @@ def main():
     if b" 101 " not in head.split(b"\r\n")[0]:
         sys.exit("no upgrade: " + head.decode(errors="replace").splitlines()[0])
     sock.sendall(frame(message))
+    if abort is not None:
+        threading.Timer(abort, lambda: sock.sendall(frame(json.dumps({"type": "abort"})))).start()
     deadline = None
     while True:
         if deadline is not None:
