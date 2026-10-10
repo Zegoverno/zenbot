@@ -297,11 +297,21 @@ workshop() {
   zen sessions decide "$sid" accept >/dev/null; sleep 2
   check "an accepted session activates the draft it used" test -s "$sk/work/release-notes/SKILL.md"
   check "a new domain stays a draft" test -s "$sk/_proposed/finance/budget-review/SKILL.md"
-  zen skills accept finance/budget-review >/dev/null
+  # The owner's decision names the fingerprint `zen skills` showed: a stale one is refused.
+  local listed; listed=$(zen skills --json)
+  local skill_sha tool_sha
+  skill_sha=$(jq -r '.skills[] | select(.skill == "finance/budget-review") | .sha' <<<"$listed")
+  tool_sha=$(jq -r '.tools[] | select(.tool == "word-count") | .sha' <<<"$listed")
+  check "zen skills shows each draft's and tool's fingerprint" bash -c 'grep -q "finance/budget-review (draft ${1:0:12})" <<<"$3" && grep -q "tool made_word-count ${2:0:12}" <<<"$3"' _ "$skill_sha" "$tool_sha" "$(zen skills)"
+  check "accepting what wasn't reviewed is refused" bash -c '! zen skills accept finance/budget-review 00000000 >/dev/null 2>&1 && ! zen tools accept word-count 00000000 >/dev/null 2>&1 && test -s "$1"' _ "$sk/_proposed/finance/budget-review/SKILL.md"
+  zen skills accept finance/budget-review "${skill_sha:0:12}" >/dev/null
   check "the owner activates the new domain's skill" test -s "$sk/finance/budget-review/SKILL.md"
-  zen tools accept word-count >/dev/null
+  zen tools accept word-count "$tool_sha" >/dev/null
   r=$(zen ask --json -m faux/smoke "again"); sid=$(echo "$r" | jq -r .session_id)
   check "approved: it can write" grep -q "write: ok" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='call_tool'")"
+  check "it runs from a copy: what it wrote stayed out of its folder" test ! -e "$TMP/home/.zenbot/global/tools/word-count/wrote.txt"
+  r=$(zen ask --json -m faux/smoke "again"); sid=$(echo "$r" | jq -r .session_id)
+  check "so its own writes don't cost it its approval" bash -c 'grep -q "write: ok" <<<"$1" && ! grep -q "ran sandboxed" <<<"$1"' _ "$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='call_tool'")"
   echo "# changed after approval" >>"$TMP/home/.zenbot/global/tools/word-count/run.py"
   r=$(zen ask --json -m faux/smoke "again"); sid=$(echo "$r" | jq -r .session_id)
   check "changed after approval: sandboxed again" grep -q "changed since the owner approved it" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='call_tool'")"
