@@ -226,7 +226,9 @@ pub async fn run_tool(app: &AppState, session: Uuid, workspace: &Path, name: &st
             if let (Some(other), false) = (other, is_error) {
                 let tainted = crate::taint::prefix_tainted(&app.db, &other.to_lowercase()).await;
                 if tainted {
-                    crate::taint::taint(app, session, "history", other).await;
+                    if let Err(e) = crate::taint::taint(app, session, "history", other).await {
+                        return out(crate::taint::withheld(&e), true);
+                    }
                     return out(crate::taint::untrusted("history", other, &content), false);
                 }
             }

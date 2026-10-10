@@ -475,12 +475,18 @@ async fn find(app: &App, session: Uuid, query: &str) -> (String, bool) {
                     out.push_str(&format!("- {line}\n"));
                 }
             }
-            if has_untrusted { crate::taint::taint(app, session, "mcp", "find_tools").await; }
+            if has_untrusted {
+                if let Err(e) = crate::taint::taint(app, session, "mcp", "find_tools").await {
+                    return (crate::taint::withheld(&e), true);
+                }
+            }
         }
     }
     if !problems.is_empty() {
         // A remote server controls its error text too. Treat all catalog errors conservatively.
-        crate::taint::taint(app, session, "mcp", "catalog errors").await;
+        if let Err(e) = crate::taint::taint(app, session, "mcp", "catalog errors").await {
+            return (crate::taint::withheld(&e), true);
+        }
         out.push_str(&format!("\nProblems: {}", crate::taint::untrusted("mcp", "catalog errors", &problems.join("; "))));
     }
     (out, false)
@@ -531,7 +537,7 @@ async fn call(app: &App, session: Uuid, full: &str, args: &Value) -> Result<(Str
     if !missing.is_empty() {
         let error = format!("missing required arguments: {} (load_tool shows the parameters)", missing.join(", "));
         if t.untrusted {
-            crate::taint::taint(app, session, "mcp", &t.full()).await;
+            crate::taint::taint(app, session, "mcp", &t.full()).await?;
             return Ok((crate::taint::untrusted("mcp", &t.full(), &error), true));
         }
         anyhow::bail!("{error}");
@@ -540,7 +546,7 @@ async fn call(app: &App, session: Uuid, full: &str, args: &Value) -> Result<(Str
         let (text, is_error, networked) = crate::workshop::run_made(&app.db, &t.name, &args).await?;
         // An approved tool can reach the network: what it returns may be web content.
         if networked {
-            crate::taint::taint(app, session, "made", &t.full()).await;
+            crate::taint::taint(app, session, "made", &t.full()).await?;
             return Ok((crate::taint::untrusted("made", &t.full(), &text), is_error));
         }
         return Ok((text, is_error));
@@ -558,7 +564,7 @@ async fn call(app: &App, session: Uuid, full: &str, args: &Value) -> Result<(Str
     let result = match result {
         Ok(result) => result,
         Err(e) if untrusted => {
-            crate::taint::taint(app, session, "mcp", &t.full()).await;
+            crate::taint::taint(app, session, "mcp", &t.full()).await?;
             return Ok((crate::taint::untrusted("mcp", &t.full(), &format!("call failed: {e:#}")), true));
         }
         Err(e) => return Err(e),
@@ -569,7 +575,7 @@ async fn call(app: &App, session: Uuid, full: &str, args: &Value) -> Result<(Str
         text = format!("{}\n[... cut at 50 KB; {saved} ...]", &text[..text.floor_char_boundary(MAX_OUTPUT)]);
     }
     if untrusted {
-        crate::taint::taint(app, session, "mcp", &t.full()).await;
+        crate::taint::taint(app, session, "mcp", &t.full()).await?;
         text = crate::taint::untrusted("mcp", &t.full(), &text);
     }
     Ok((text, result["isError"] == true))
@@ -615,13 +621,11 @@ pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value) -> Opt
                 let spec = format!("<tool name=\"{}\">\n{}\n\nParameters (JSON schema):\n{}\n</tool>\nRun it with call_tool.",
                     t.full(), t.description.trim(), serde_json::to_string_pretty(&t.schema).unwrap_or_default());
                 // Name, description and schema all come from the server: wrap the entire spec.
-                let spec = if t.untrusted {
-                    crate::taint::taint(app, session, "mcp", &t.full()).await;
-                    crate::taint::untrusted("mcp", &t.full(), &spec)
-                } else {
-                    spec
-                };
-                (spec, false)
+                match if t.untrusted { crate::taint::taint(app, session, "mcp", &t.full()).await } else { Ok(()) } {
+                    Ok(()) if t.untrusted => (crate::taint::untrusted("mcp", &t.full(), &spec), false),
+                    Ok(()) => (spec, false),
+                    Err(e) => (crate::taint::withheld(&e), true),
+                }
             }
             Err(e) => (format!("{e:#}"), true),
         },
