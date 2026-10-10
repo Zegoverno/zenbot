@@ -290,7 +290,8 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], read_onl
         // case it lives under either. Secret files still inside it are hidden.
         let home = std::env::var("HOME").unwrap_or_else(|_| "/home".into());
         c.args(READ_ONLY_SANDBOX).arg("--tmpfs").arg(&home).arg("--ro-bind").arg(dir).arg(dir);
-        for f in crate::secrets::secret_files() {
+        // (Those under the home but outside the work are gone with it already.)
+        for f in crate::secrets::secret_files().into_iter().filter(|f| !f.starts_with(&home) || f.starts_with(dir)) {
             if f.is_dir() {
                 c.arg("--tmpfs").arg(f);
             } else {
