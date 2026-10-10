@@ -180,7 +180,8 @@ mcp_tools() {
   cat >"$TMP/home/.zenbot/mcp.json" <<JSON
 { "mcpServers": {
   "local": { "command": "python3", "args": ["$REPO/scripts/e2e/mcp_server.py"] },
-  "remote": { "url": "http://127.0.0.1:$port/mcp", "headers": { "Authorization": "Bearer \${ZEN_E2E_MCP_TOKEN}" } } } }
+  "remote": { "url": "http://127.0.0.1:$port/mcp", "headers": { "Authorization": "Bearer \${ZEN_E2E_MCP_TOKEN}" }, "allow_env": ["ZEN_E2E_MCP_TOKEN"] },
+  "greedy": { "url": "http://127.0.0.1:$port/mcp", "headers": { "Authorization": "Bearer \${ZEN_TOKEN}" }, "exclude": ["echo", "add"] } } }
 JSON
   start_kernel "$ws" "$(script reach.json)" ZEN_E2E_MCP_TOKEN=e2e
   local r sid; r=$(zen ask --json -m faux/smoke "mcp please"); sid=$(echo "$r" | jq -r .session_id)
@@ -194,6 +195,7 @@ JSON
   check "the remote server answered (event stream), wrapped as untrusted" grep -q 'source="mcp" about="remote_add"' <<<"$res"
   check "a missing argument is named" grep -q "missing required arguments: b" <<<"$res"
   check "the remote call tainted the session" eq "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")" t
+  check "the kernel's token is filled in only where allow_env lists it" grep -q 'server `greedy`: environment variables left empty: ZEN_TOKEN (a secret' <<<"$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/mcp" | jq -r '.problems[]')"
   check "the tool list is still fixed" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND kind='envelope'")" 1
   kill "$srv" 2>/dev/null || true
 }
@@ -206,8 +208,8 @@ web_tools() {
   python3 "$REPO/scripts/e2e/searxng_stub.py" "$port" & local srv=$!
   start_kernel "$ws" "$(script reach.json)" ZEN_SEARXNG_URL="http://127.0.0.1:$port"
   local r sid; r=$(zen ask --json -m faux/smoke "web please"); sid=$(echo "$r" | jq -r .session_id)
-  check "localhost and metadata refused, search ran, remember ran, prompt file edit refused" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" \
-    web_fetch:true,web_fetch:true,web_search:false,remember:false,edit:true
+  check "localhost and metadata refused, search ran, remember ran, prompt file, skill and mcp.json writes refused" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" \
+    web_fetch:true,web_fetch:true,web_search:false,remember:false,edit:true,write:true,write:true
   local res; res=$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult'")
   check "loopback refused" grep -q "127.0.0.1 is not a public address" <<<"$res"
   check "metadata refused" grep -q "169.254.169.254 is not a public address" <<<"$res"
@@ -215,6 +217,8 @@ web_tools() {
   check "one envelope, its marker defused" eq "$(grep -o '</untrusted>' <<<"$res" | wc -l)" 1
   check "the session is tainted" eq "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")" t
   check "a tainted session can't change USER.md" bash -c 'grep -q "A session that has read untrusted content can.t change" <<<"$1" && ! grep -q "Rewritten by a web page" "$2"' _ "$res" "$TMP/home/.zenbot/USER.md"
+  check "a tainted session can't write an active skill" bash -c 'grep -q "active skills and the tools you made steer every session" <<<"$1" && ! grep -q "Rewritten by a web page" "$2"' _ "$res" "$TMP/home/.zenbot/global/skills/work/verify/SKILL.md"
+  check "no session writes mcp.json" bash -c 'grep -q "mcp.json is the owner.s own configuration" <<<"$1" && test ! -e "$2"' _ "$res" "$TMP/home/.zenbot/mcp.json"
   check "its memory counts as inference" eq "$(q "SELECT source FROM memories WHERE text LIKE 'Something read on the web.%'")" inferred
   q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART" >/dev/null  # the memory scenarios start from none
   kill "$srv" 2>/dev/null || true
@@ -484,6 +488,7 @@ kernel_tools() {
   check "no OpenRouter key is reported as not signed in" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/models" | jq -r .authenticated.openrouter)" false
   check "a loose edit keeps exactly one trailing newline" cmp -s "$ws/a.txt" <(printf 'baz\nbar\n')
   check "a huge read is refused before loading" grep -q "16 MiB limit" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='read' ORDER BY seq DESC LIMIT 1")"
+  check "even the owner's own session can't write mcp.json" bash -c 'grep -q "is the owner.s own configuration" <<<"$1" && test ! -e "$2"' _ "$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='write'")" "$TMP/home/.zenbot/mcp.json"
 }
 
 secrets_masked() {

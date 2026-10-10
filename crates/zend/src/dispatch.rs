@@ -156,12 +156,12 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                             tools::ToolOutput { content: why, is_error: true }
                         } else if let Some(why) = agent::refusal(kind.as_deref(), &name) {
                             tools::ToolOutput { content: why, is_error: true }
-                        } else if let Some(why) = agent::prompt_file_refusal(&app.db, id, kind.as_deref(), &workspace, &name, &args).await {
+                        } else if let Some(why) = agent::protected_refusal(&app.db, id, kind.as_deref(), &workspace, &name, &args).await {
                             tools::ToolOutput { content: why, is_error: true }
                         } else {
                             // A prompt file is backed up before the agent changes it, and the agent
                             // is told to compact it when the change takes it past its size.
-                            let prompt_file = agent::prompt_file_target(&crate::zen_home(), &workspace, &name, &args);
+                            let prompt_file = agent::prompt_file_target(&workspace, &name, &args);
                             if let Some(p) = &prompt_file {
                                 if let Err(e) = crate::memory::backup_file(&crate::zen_home(), p) {
                                     tracing::warn!("backing up {}: {e:#}", p.display());

@@ -4,9 +4,12 @@
 //! Servers are configured in `~/.zenbot/mcp.json`, the `mcpServers` shape Claude Code and FastMCP
 //! use: `command`/`args`/`env` for a local server (stdio), or `url`/`headers` for a remote one
 //! (streamable HTTP). `${VAR}` in any string is filled from the kernel's environment, so secrets
-//! stay out of the file and out of the model's sight. Per server: `enabled`, `timeout_s`,
-//! `include` / `exclude` (tool names), and `untrusted` (wrap its output as untrusted and taint the
-//! session; default true for remote servers).
+//! stay out of the file and out of the model's sight; a secret-named variable (`secrets::is_secret_var`:
+//! the kernel's own token, API keys, the database URL) is filled only for a server that lists it in
+//! `allow_env`, so a server can't be handed the kernel's credentials by accident. Per server:
+//! `enabled`, `timeout_s`, `include` / `exclude` (tool names), `allow_env`, and `untrusted` (wrap
+//! its output as untrusted and taint the session; default true for remote servers). The agent can't
+//! change the file with `edit` or `write` (agent.rs, `Protected::OwnerOnly`): only the owner does.
 //!
 //! The model's tool list never changes mid-session (that would break the prompt cache on every
 //! engine; the Phase 0 spike), so MCP tools aren't added to it. Instead the model gets three fixed
@@ -72,8 +75,9 @@ pub fn config_path() -> PathBuf {
     std::env::var("ZEN_MCP_CONFIG").map(PathBuf::from).unwrap_or_else(|_| crate::zen_home().join("mcp.json"))
 }
 
-/// `${VAR}` filled from the environment (an unset variable becomes empty, and is reported).
-pub fn expand(s: &str, missing: &mut Vec<String>) -> String {
+/// `${VAR}` filled from the environment. An unset variable becomes empty, and is reported in
+/// `missing`; so is a secret-named one that `allow` doesn't list (never filled).
+pub fn expand(s: &str, allow: &[String], missing: &mut Vec<String>) -> String {
     let mut out = String::new();
     let mut rest = s;
     while let Some(i) = rest.find("${") {
@@ -82,9 +86,13 @@ pub fn expand(s: &str, missing: &mut Vec<String>) -> String {
         match after.find('}') {
             Some(j) => {
                 let var = &after[..j];
-                match std::env::var(var) {
-                    Ok(v) => out.push_str(&v),
-                    Err(_) => missing.push(var.to_string()),
+                if crate::secrets::is_secret_var(var) && !allow.iter().any(|a| a == var) {
+                    missing.push(format!("{var} (a secret: list it in `allow_env` to pass it to this server)"));
+                } else {
+                    match std::env::var(var) {
+                        Ok(v) => out.push_str(&v),
+                        Err(_) => missing.push(var.to_string()),
+                    }
                 }
                 rest = &after[j + 1..];
             }
@@ -116,12 +124,13 @@ pub fn parse_config(text: &str) -> (Vec<ServerConfig>, Vec<String>) {
             continue;
         }
         let mut missing = Vec::new();
-        let strs = |k: &str, missing: &mut Vec<String>| -> Vec<String> { s[k].as_array().into_iter().flatten().filter_map(Value::as_str).map(|x| expand(x, missing)).collect() };
+        let allow: Vec<String> = s["allow_env"].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
+        let strs = |k: &str, missing: &mut Vec<String>| -> Vec<String> { s[k].as_array().into_iter().flatten().filter_map(Value::as_str).map(|x| expand(x, &allow, missing)).collect() };
         let map = |k: &str, missing: &mut Vec<String>| -> Vec<(String, String)> {
-            s[k].as_object().into_iter().flatten().map(|(k, v)| (k.clone(), expand(v.as_str().unwrap_or(""), missing))).collect()
+            s[k].as_object().into_iter().flatten().map(|(k, v)| (k.clone(), expand(v.as_str().unwrap_or(""), &allow, missing))).collect()
         };
-        let command = s["command"].as_str().map(|c| expand(c, &mut missing));
-        let url = s["url"].as_str().map(|u| expand(u, &mut missing));
+        let command = s["command"].as_str().map(|c| expand(c, &allow, &mut missing));
+        let url = s["url"].as_str().map(|u| expand(u, &allow, &mut missing));
         if command.is_none() == url.is_none() {
             problems.push(format!("server `{name}`: give either `command` (local) or `url` (remote)"));
             continue;
@@ -139,7 +148,7 @@ pub fn parse_config(text: &str) -> (Vec<ServerConfig>, Vec<String>) {
             url,
         };
         if !missing.is_empty() {
-            problems.push(format!("server `{name}`: environment variables not set: {}", missing.join(", ")));
+            problems.push(format!("server `{name}`: environment variables left empty: {}", missing.join(", ")));
         }
         out.push(cfg);
     }
@@ -655,16 +664,21 @@ mod tests {
     #[test]
     fn config_expands_variables_and_reports_problems() {
         std::env::set_var("ZEN_TEST_MCP_TOKEN", "s3cret");
+        std::env::set_var("ZEN_TEST_MCP_PLAIN", "plain");
         let (cfgs, problems) = parse_config(
             r#"{ "mcpServers": {
-                "local": { "command": "python3", "args": ["srv.py", "--key=${ZEN_TEST_MCP_TOKEN}"], "exclude": ["danger"] },
+                "local": { "command": "python3", "args": ["srv.py", "--key=${ZEN_TEST_MCP_TOKEN}", "${ZEN_TEST_MCP_PLAIN}"], "exclude": ["danger"], "allow_env": ["ZEN_TEST_MCP_TOKEN"] },
+                "greedy": { "command": "x", "env": { "T": "${ZEN_TEST_MCP_TOKEN}" } },
                 "remote": { "url": "https://mcp.example.com/mcp", "headers": { "Authorization": "Bearer ${ZEN_TEST_MCP_NOPE}" } },
                 "off": { "command": "x", "enabled": false },
                 "bad name": { "command": "x" },
                 "both": { "command": "x", "url": "https://y" } } }"#,
         );
         let local = cfgs.iter().find(|c| c.name == "local").unwrap();
-        assert_eq!(local.args, ["srv.py", "--key=s3cret"]);
+        assert_eq!(local.args, ["srv.py", "--key=s3cret", "plain"], "a secret listed in allow_env, and a plain variable");
+        let greedy = cfgs.iter().find(|c| c.name == "greedy").unwrap();
+        assert_eq!(greedy.env, [("T".to_string(), String::new())], "a secret not listed is never filled");
+        assert!(problems.iter().any(|p| p.contains("`greedy`") && p.contains("allow_env")));
         assert!(!local.untrusted, "local servers are trusted by default");
         let remote = cfgs.iter().find(|c| c.name == "remote").unwrap();
         assert!(remote.untrusted, "remote servers are untrusted by default");
