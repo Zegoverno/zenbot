@@ -120,9 +120,17 @@ pub fn compose(parts: &[&str], workspace: &Path, repo: &str, memory: &str, sleep
         s.push_str("</project_context>\n");
     }
     s.push_str(&format!(
-        "\nWorking directory for tools: {} (paths are relative to it unless absolute; ~ is the home directory).",
+        "\nWorking directory for tools: {} (paths are relative to it unless absolute; ~ is the home directory). \
+Every command already starts there, so don't cd into it first.",
         workspace.display()
     ));
+    // Claude Code runs from a fixed engine folder (so its sessions resume and stay cached) and appends
+    // an environment block naming that folder; left unexplained, the model cds into the workspace on
+    // every command and trusts the block's git status. Codex gets the same note from its worker.
+    s.push_str(
+        "\nAn environment block after these instructions, if there is one, describes the engine's own empty folder, \
+not this workspace: ignore its working directory and git status, and check the workspace with git yourself.",
+    );
     s
 }
 
@@ -262,6 +270,7 @@ mod tests {
         assert!(outer < inner, "files are ordered from the root down");
         assert!(!prompt.contains("shadowed"));
         assert!(prompt.contains(&format!("Working directory for tools: {}", ws.display())));
+        assert!(prompt.contains("don't cd into it") && prompt.contains("ignore its working directory"));
         assert!(!prompt.contains("Today is"), "the date changes daily, so it is not in the instructions");
         assert!(prompt.contains("[m1] a memory") && prompt.contains("- work/verify: Check work."));
         assert!(prompt.find("Last sleep: 1 kept.").unwrap() < prompt.find("</memory>").unwrap());

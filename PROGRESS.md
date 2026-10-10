@@ -6,6 +6,19 @@
 
 ---
 
+## 2026-10-10 — Coding benchmark against the native CLIs; workspace note for Claude
+
+- `scripts/eval.sh --native claude|codex` runs the base side through the vendor's own CLI with its
+  own tools (`scripts/eval-native.sh`); `scripts/eval-paired.py` gives per-task wins and losses, a
+  sign test, and cost and time ratios with intervals. Nine `coding-*` tasks: six Aider-polyglot
+  exercises with hidden tests and three real zenbot bugs with their fixes reverted, each checked to
+  fail on the starting files and pass on the reference fix.
+- Pilot, Opus, 9 tasks: zenbot and native Claude Code each passed 8 (both fail the same Forth tests);
+  zenbot cost 0.71× and took 0.74× the time. The tasks are too easy to separate the two on passing.
+- Claude Code runs from a fixed engine folder and its environment block names that folder, so the
+  model prefixed commands with `cd <workspace>`. The system prompt now says commands start in the
+  workspace and the block describes the engine's folder; on 4 tasks the `cd`s went from 4 to 0.
+
 ## 2026-10-10 — Upgrades install the build that was tested, and log its commit
 
 - `apply-upgrade.sh` read both the binaries (`target/release`) and the commit (`git rev-parse
