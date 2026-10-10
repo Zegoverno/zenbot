@@ -6,6 +6,20 @@
 
 ---
 
+## 2026-10-10 — Upgrades install the build that was tested, and log its commit
+
+- `apply-upgrade.sh` read both the binaries (`target/release`) and the commit (`git rev-parse
+  HEAD`) from the checkout when it installed, up to 30 minutes after `upgrade.sh` tested them. Two
+  requests queued from two worktrees sharing one `target/` then installed together: the binaries
+  were the last ones built there, and the log and `~/.zenbot/version` named whatever the other
+  checkout had checked out ("now running ee84753", a commit that wasn't in the build).
+- `upgrade.sh` now stages the tested binaries and their commit in `~/.zenbot/upgrades/<id>/`, and
+  `apply-upgrade.sh` installs from that stage and logs its commit (with ", uncommitted changes"
+  when the tree had them). Installs take a lock, and the newest request wins: an older one still
+  waiting, or one after a newer install, logs `skipped`. Tested against a scratch home with stubbed
+  `sudo` and health: a superseded request, a newer one installed before an older, two at once, a
+  later one after those, and a missing stage.
+
 ## 2026-10-10 — The board flags sessions waiting on the owner
 
 - With several sessions working in parallel, a question asked with `ask` was easy to miss: the

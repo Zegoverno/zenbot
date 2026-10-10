@@ -226,28 +226,29 @@ What it does, in order:
 3. **Check.** `cargo test --release -q` (skipped for prebuilt binaries: CI already ran it). `zen-engine` must answer a JSON-RPC `ping`; `zen --version` must run. It does **not** run clippy or the e2e scenarios: run those yourself.
 4. **Smoke.** Copies the live database into `zen_smoke_<pid>` and starts the new `zend` on port 18199 with `ZEN_FAUX=1`, the service's settings and its own `ZEN_HOME` in the smoke workspace. Any pending migrations are applied to that copy, not to the live database. It runs one scripted turn on `faux/smoke`, which must answer "Smoke test passed" with a successful tool call. The copy is dropped afterwards. It lists migrations pending on the live database.
 5. **`--check` stops here** and prints `Check OK (<commit>[, uncommitted changes]); nothing installed.`
-6. **Schedule.** Starts `scripts/apply-upgrade.sh` detached via `sudo systemd-run` and returns.
+6. **Stage and schedule.** Copies the binaries it just tested, with their commit (and a note if the tree had uncommitted changes), into `~/.zenbot/upgrades/<id>/` (the id is a nanosecond timestamp; stages older than 2 hours are removed). Then it starts `scripts/apply-upgrade.sh <stage>` detached via `sudo systemd-run` and returns. The install comes from the stage, so checking out another commit or rebuilding `target/` (worktrees may share one) while it waits changes nothing.
 
 `apply-upgrade.sh` then, on its own:
 
 1. Waits until the service's `/health` says `"busy":0` (no session working). After 30 minutes it goes ahead anyway and logs that it did.
-2. If migrations are pending, backs up the live database to `~/.zenbot/backups/<UTC time>-<previous version>.dump` (last 10 kept). If the backup fails, it aborts and changes nothing.
-3. Keeps the old binaries as `~/.zenbot/bin/<name>.prev`, installs `zend`, `zen` and `zen-engine` from `target/release`, writes the commit to `~/.zenbot/version`, and runs `sudo systemctl restart zenbot`. The kernel applies migrations at start.
-4. Waits up to 45 seconds for `/health` to say `"ok":true`. If it is healthy, it removes the systemd timers older versions installed (`remove_old_timers`; the kernel schedules that work itself now, D-046) and runs `docker compose -f deploy/compose.yaml up -d`, so a new compose service (such as SearXNG) arrives with the upgrade; a failure there is logged, not rolled back. If it isn't healthy, it logs the last 30 service log lines, puts the `.prev` binaries and the old version back, and restarts again. **A rollback does not restore the database.** When there was a backup, the log prints the exact command to restore it.
+2. Takes a lock (`~/.zenbot/upgrades/.lock`), so two installs never interleave. The newest request wins: if a newer stage is still waiting, or a newer one was already installed (`~/.zenbot/upgrades/.installed`), it logs `upgrade to <commit> skipped` and exits.
+3. If migrations are pending, backs up the live database to `~/.zenbot/backups/<UTC time>-<previous version>.dump` (last 10 kept). If the backup fails, it aborts and changes nothing.
+4. Keeps the old binaries as `~/.zenbot/bin/<name>.prev`, installs `zend`, `zen` and `zen-engine` from the stage, writes the stage's commit to `~/.zenbot/version`, and runs `sudo systemctl restart zenbot`. The kernel applies migrations at start.
+5. Waits up to 45 seconds for `/health` to say `"ok":true`. The stage is removed either way. If it is healthy, it removes the systemd timers older versions installed (`remove_old_timers`; the kernel schedules that work itself now, D-046) and runs `docker compose -f deploy/compose.yaml up -d`, so a new compose service (such as SearXNG) arrives with the upgrade; a failure there is logged, not rolled back. If it isn't healthy, it logs the last 30 service log lines, puts the `.prev` binaries and the old version back, and restarts again. **A rollback does not restore the database.** When there was a backup, the log prints the exact command to restore it.
 
 The restart ends the current turn's connection. In a zen session, the owner reconnects by sending the next message.
 
 Afterwards, always check the result:
 
 ```bash
-tail -20 ~/.zenbot/upgrade.log    # "upgrade OK: now running <commit>", or FAILED / rolled back
+tail -20 ~/.zenbot/upgrade.log    # "upgrade OK: now running <commit>[, uncommitted changes]", skipped, or FAILED / rolled back
 cat ~/.zenbot/version
 zen status
 ```
 
 If it rolled back, read the log, fix, and run `scripts/upgrade.sh` again.
 
-Note: `upgrade.sh` installs what is in your working tree, uncommitted changes included, but `~/.zenbot/version` records only `HEAD`. Commit first if you want the version to mean something.
+Note: `upgrade.sh` installs what is in your working tree, uncommitted changes included, but `~/.zenbot/version` records only the commit (the log adds ", uncommitted changes"). Commit first if you want the version to mean something.
 
 To update from GitHub instead (on `main`, clean tree): `zen upgrade` (or `/upgrade`), which runs `scripts/self-update.sh`: `git pull --ff-only origin main`, then `upgrade.sh`. It refuses on another branch or with local changes.
 
