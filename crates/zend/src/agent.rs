@@ -31,20 +31,27 @@ pub fn read_only(kind: Option<&str>) -> bool {
 
 /// Why a session of this kind may not call `name`, if it may not. The one place the kernel enforces
 /// what each kind of session may do (what it is offered is `specs`, which follows the same rules).
+/// Each kind is allowed what it needs; a kind not named here gets nothing.
 pub fn refusal(kind: Option<&str>, name: &str) -> Option<String> {
-    if read_only(kind) && !matches!(name, "bash" | "read" | "submit_verdict") {
-        return Some(format!("`{name}` isn't available to a verifier"));
+    match kind {
+        None => (name == "submit_verdict").then(|| "`submit_verdict` is only for a verifier session".into()),
+        Some(VERIFIER) => (!matches!(name, "bash" | "read" | "submit_verdict")).then(|| format!("`{name}` isn't available to a verifier")),
+        // A subagent (also the sleep's kernel sessions) or a scheduled job can't ask the owner,
+        // delegate or schedule.
+        Some(crate::delegate::SUBAGENT) if matches!(name, "ask" | "delegate" | "schedule") => {
+            Some(format!("`{name}` isn't available to a subagent: decide yourself and say what you assumed"))
+        }
+        Some(crate::jobs::JOB) if matches!(name, "ask" | "delegate" | "schedule") => {
+            Some(format!("`{name}` isn't available in a scheduled job: no one is in the conversation; decide yourself and say what you assumed in the report"))
+        }
+        Some(crate::delegate::SUBAGENT | crate::jobs::JOB) => (name == "submit_verdict").then(|| "`submit_verdict` is only for a verifier session".into()),
+        Some(other) => Some(format!("a `{other}` session has no tools")),
     }
-    if !read_only(kind) && name == "submit_verdict" {
-        return Some("`submit_verdict` is only for a verifier session".into());
-    }
-    if kind == Some(crate::delegate::SUBAGENT) && matches!(name, "ask" | "delegate" | "schedule") {
-        return Some(format!("`{name}` isn't available to a subagent: decide yourself and say what you assumed"));
-    }
-    if kind == Some(crate::jobs::JOB) && matches!(name, "ask" | "delegate" | "schedule") {
-        return Some(format!("`{name}` isn't available in a scheduled job: no one is in the conversation; decide yourself and say what you assumed in the report"));
-    }
-    None
+}
+
+/// Whether the kernel knows this kind of session (an unknown kind is offered no tools).
+fn known(kind: Option<&str>) -> bool {
+    matches!(kind, None | Some(VERIFIER | crate::delegate::SUBAGENT | crate::jobs::JOB))
 }
 
 /// The prompt files that steer every session, under the zen home.
@@ -163,6 +170,9 @@ fn decide_on() -> bool {
 
 /// The tools a session of this kind is offered, in a fixed order.
 pub fn specs(kind: Option<&str>) -> Value {
+    if !known(kind) {
+        return json!([]);
+    }
     let builtins = tools::specs().as_array().cloned().unwrap_or_default();
     if read_only(kind) {
         let mut picked: Vec<Value> = builtins.into_iter().filter(|t| matches!(t["name"].as_str(), Some("read" | "bash"))).collect();
@@ -536,6 +546,12 @@ mod tests {
         assert!(!all.contains(&"move".to_string()) && !all.contains(&"propose_brief".to_string()));
         assert_eq!(specs(None), specs(None), "the same list every turn");
         assert!(read_only(Some(VERIFIER)) && !read_only(None));
+        // A kind the kernel doesn't know gets nothing.
+        assert_eq!(specs(Some("mystery")), json!([]));
+        assert!(refusal(Some("mystery"), "read").is_some());
+        for t in ["ask", "delegate", "schedule", "submit_verdict"] {
+            assert!(refusal(Some(crate::delegate::SUBAGENT), t).is_some() && refusal(Some(crate::jobs::JOB), t).is_some(), "{t}");
+        }
     }
 
     #[test]
