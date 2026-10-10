@@ -6,6 +6,17 @@
 
 ---
 
+## 2026-10-10 — The board flags sessions waiting on the owner
+
+- With several sessions working in parallel, a question asked with `ask` was easy to miss: the
+  session just looked idle. `GET /api/board` now gives each session `waiting`: its latest
+  `questions` came after the owner's latest message (a message the kernel sent itself,
+  `kernel: true`, doesn't count as an answer). The query reads the `(session_id, kind, seq)`
+  index; 12 ms over the 86 sessions on the owner's VM.
+- The board marks such a session `?` with "waiting on you", lists it first in its section, and
+  counts them in the title ("? 2 waiting on you"; archived sessions aside). It clears with the
+  owner's next message in that session. Tested by a render test and an e2e check in `delegation`
+  (asked with `wait: false` → waiting, a session that asked nothing → not, the answer → cleared).
 ## 2026-10-10 — Cleanup: no web UI, no Pi leftovers, the default AGENTS.md stays out of sessions
 
 - The frozen web UI is gone (`crates/zend/web/index.html`, `GET /`). With it goes the only use of
