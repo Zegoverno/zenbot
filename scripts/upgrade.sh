@@ -104,8 +104,19 @@ if [ -n "$CHECK_ONLY" ]; then
 fi
 
 echo "== schedule"
-sudo systemd-run --quiet --collect --unit "zen-upgrade-$(date +%s)" --uid "$(id -u)" --gid "$(id -g)" \
-  --setenv=HOME="$HOME" --setenv=PATH="$PATH" "$REPO/scripts/apply-upgrade.sh"
-echo "Build OK ($(git rev-parse --short HEAD 2>/dev/null)$(git diff --quiet 2>/dev/null || echo ', uncommitted changes'))."
+# Stage what was just tested: the install runs later (once no session is working), and by then this
+# checkout may be on another commit or its target/ rebuilt (worktrees can share one target dir).
+# apply-upgrade.sh installs from the stage and records its commit, not this checkout's.
+STAGE_ID=$(date +%s%N)
+STAGE="$HOME/.zenbot/upgrades/$STAGE_ID"
+mkdir -p "$STAGE"
+# A stage outlives its install only if that process was killed; past 2 hours none is still waiting.
+find "$HOME/.zenbot/upgrades" -mindepth 1 -maxdepth 1 -type d -mmin +120 -exec rm -rf {} +
+for b in zend zen zen-engine; do cp "target/release/$b" "$STAGE/$b"; done
+git rev-parse --short HEAD > "$STAGE/commit"
+git diff --quiet HEAD 2>/dev/null || echo "uncommitted changes" > "$STAGE/note"
+sudo systemd-run --quiet --collect --unit "zen-upgrade-$STAGE_ID" --uid "$(id -u)" --gid "$(id -g)" \
+  --setenv=HOME="$HOME" --setenv=PATH="$PATH" "$REPO/scripts/apply-upgrade.sh" "$STAGE"
+echo "Build OK ($(cat "$STAGE/commit")$([ -f "$STAGE/note" ] && echo ', uncommitted changes'))."
 echo "The new version will be installed and zenbot restarted as soon as no session is working."
 echo "Result is logged to ~/.zenbot/upgrade.log (rolls back automatically if unhealthy)."
