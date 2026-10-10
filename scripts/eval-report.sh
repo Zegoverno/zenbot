@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Print the comparison report for an eval run: scripts/eval-report.sh ~/.zenbot/evals/<run>
-# Reads base.jsonl and new.jsonl (either may be missing) written by scripts/eval.sh.
+# Reads base.jsonl and new.jsonl (either may be missing) and selection.txt, written by scripts/eval.sh.
 set -euo pipefail
 OUT=${1:?usage: eval-report.sh <run directory>}
 cat "$OUT"/base.jsonl "$OUT"/new.jsonl 2>/dev/null | jq -rs '
@@ -61,6 +61,9 @@ cat "$OUT"/base.jsonl "$OUT"/new.jsonl 2>/dev/null | jq -rs '
         + " · \($rows | length) tasks × \($all | map(.repeat) | max) run(s)",
       "engines: " + ($engines_all | join(", "))
         + (if ($engines_all | map(split(" ")[0]) | unique | length) < ($engines_all | length) then "  ⚠ engine versions differ between runs; the comparison is not clean" else "" end),
+      # Base runs reused from the cache (scripts/eval.sh): when they ran, so their age is visible.
+      ([$all[] | select(.cached) | "\(.task) run \(.repeat) (\(.cached.at), run \(.cached.run))"]) as $c
+      | if ($c | length) > 0 then "base results from the cache (`--fresh` runs them again): \($c | length) of \([$all[] | select(.harness == "base")] | length): " + ($c | join(", ")) else empty end,
       "",
       (if $mode == "both" then
         "| task | passed | cost | tokens | cache hit | time | tool errors | cache breaks |",
@@ -88,5 +91,13 @@ cat "$OUT"/base.jsonl "$OUT"/new.jsonl 2>/dev/null | jq -rs '
          (if .error then .error else ([.checks[] | select(.ok | not) | .name] | join(", ")) end)] | if length == 0 then ["- none"] else . end | .[])
     ] | .[]
 '
+# Which tasks ran and why (scripts/eval.sh writes it).
+if [ -s "$OUT/selection.txt" ]; then
+  echo
+  echo "Selection:"
+  echo '```'
+  cat "$OUT/selection.txt"
+  echo '```'
+fi
 echo
 echo "Details: $OUT/{base,new}.jsonl"

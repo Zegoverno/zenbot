@@ -1,5 +1,6 @@
 {
   "description": "The long session with a small context budget, so older turns are summarized mid-session; the first note's detail must survive the summaries (summary + history tool).",
+  "areas": ["compaction", "history", "search"],
   "work": "understand",
   "steps": [
     {

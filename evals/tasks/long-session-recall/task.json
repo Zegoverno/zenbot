@@ -1,5 +1,6 @@
 {
   "description": "Recall a fact from the first turn after several more turns and with the source gone (tests history trimming).",
+  "areas": ["history", "search"],
   "work": "understand",
   "steps": [
     { "prompt": "Look through app.log and tell me the error code and the block number of the checksum error." },

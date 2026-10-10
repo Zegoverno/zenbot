@@ -1,5 +1,6 @@
 {
   "description": "Polyglot benchmark (python/sgf-parsing, Exercism, MIT): implement from instructions; the tests are hidden until the check.",
+  "areas": ["coding"],
   "work": "build",
   "steps": [
     {

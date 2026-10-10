@@ -1,5 +1,6 @@
 {
   "description": "A real zenbot bug, fixed in 57f7b4a; the fix's test is hidden until the check.",
+  "areas": ["coding"],
   "work": "build",
   "steps": [
     {

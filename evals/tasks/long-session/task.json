@@ -1,5 +1,6 @@
 {
   "description": "A long session: 18 turns that each read a 3 KB note, then a detail from the first note after it is deleted (tests caching over many turns and recall).",
+  "areas": ["history", "search"],
   "work": "understand",
   "steps": [
     {

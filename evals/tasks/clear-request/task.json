@@ -1,5 +1,6 @@
 {
   "description": "A clear, small change: do it without unnecessary questions, with the tests passing.",
+  "areas": ["core", "prompt", "tools"],
   "work": "build",
   "steps": [
     { "prompt": "Add a subtract function to calc.py, with a test." }

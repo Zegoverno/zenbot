@@ -63,7 +63,8 @@ scripts/check.sh                                 # scripts/check.sh memory: only
 ZEN_FAUX=1 scripts/dev.sh                       # in a second terminal
 ZEN_URL=http://127.0.0.1:18100 ./target/release/zen ask --json -m faux/smoke "hi"
 
-# 4. harness change? run an eval and show the owner the report
+# 4. harness change? see which tasks it affects, run them, show the owner the report
+scripts/eval.sh --plan
 scripts/eval.sh
 
 # 5. install on this box: smoke test, scheduled restart, auto rollback
@@ -176,7 +177,7 @@ Local endpoints:
 | Dev kernel (`scripts/dev.sh`) | `http://127.0.0.1:18100`, database `zen_dev` |
 | Upgrade smoke kernel (`upgrade.sh`) | `http://127.0.0.1:18199` (`ZEN_SMOKE_PORT`), on a throwaway copy of the live database |
 | e2e kernel | `http://127.0.0.1:18377` (`ZEN_E2E_PORT`), database `zen_e2e_<pid>` |
-| Eval kernels | `http://127.0.0.1:18301` (`ZEN_EVAL_PORT`), databases `zen_eval_*` |
+| Eval kernels | `http://127.0.0.1:18301` (`ZEN_EVAL_PORT`) and the next ports, one per run at once (`--jobs`); one database `zen_eval_<run>_<n>` per run |
 | Postgres | `127.0.0.1:5432`, user/password `zen` |
 | SearXNG | `http://127.0.0.1:8888` (`ZEN_SEARXNG_URL`) |
 | Health | `GET /health` on any kernel: `ok`, `db`, `mind`, `workers`, `busy`, `commit`, `version` |
@@ -273,18 +274,22 @@ sudo systemctl stop zenbot && docker compose -f deploy/compose.yaml exec -T post
 Changes to the harness (system prompt, history, tools, workers, model or effort handling) get an eval before they are merged. The eval is **advisory**: run it, show the owner the report (in the pull request too), and ask whether to merge. The owner decides. It is never an automatic gate.
 
 ```bash
-scripts/eval.sh                                    # this checkout (new) vs the installed version (base)
+scripts/eval.sh --plan                             # which tasks the change affects, and why; runs nothing
+scripts/eval.sh                                    # those tasks: this checkout (new) vs the installed version (base)
+scripts/eval.sh --full                             # every task: a large harness change, or when the owner asks
 scripts/eval.sh --base main --tasks repo-question --repeat 3
 scripts/eval.sh --model claude/claude-sonnet-5-5 --effort low
 scripts/eval.sh --model faux/smoke --tasks smoke   # self-test of the runner, no subscription used
 scripts/eval-report.sh ~/.zenbot/evals/<run>       # print a run's report again
 ```
 
-Other options: `--base-model`, `--base-effort`, `--only new|base`, `--keep`. Without `--model` it asks the running service (`/api/models`) for its default model, so the service must be up.
+Other options: `--jobs N` (runs at once, default 3 or `ZEN_EVAL_JOBS`), `--fresh` (run the base again instead of using the cache), `--native claude|codex` (the base is the vendor's own CLI), `--base-model`, `--base-effort`, `--only new|base`, `--keep`. Without `--model` it asks the running service (`/api/models`) for its default model, so the service must be up.
 
-Each run gets a fresh copy of the task's files, its own kernel on port 18301, its own database (`zen_eval_*`) and its own `ZEN_HOME` (default prompt files and skills, not the owner's). The new side is this checkout, uncommitted changes included. The base side is cached in `~/.zenbot/evals/builds/`. Results and `report.md` go to `~/.zenbot/evals/<run>/`. Real models use the owner's subscription.
+Which tasks run (D-050): the files that differ between the base and this checkout, uncommitted ones included, are mapped to areas by `evals/areas.txt`; the tasks whose `areas` meet them run, plus the `core` tasks. A change to `crates/zen-engine` or `crates/zen-proto` runs every task; a change outside the harness (docs, the `zen` client, scripts) needs no eval, and `eval.sh` says so and stops. The selection and its reasons are at the end of the report.
 
-Tasks live in `evals/tasks/<name>/` (`task.json` plus `files/`). See `evals/README.md` for the format and what makes a good task.
+Each run (harness × task × repeat) gets a fresh copy of the task's files, its own kernel on its own port (18301 and up), its own database (`zen_eval_<run>_<n>`, dropped after it) and its own `ZEN_HOME` (default prompt files and skills, not the owner's), so runs at the same time can't see each other. Base and new runs of a task are interleaved. Stopping `eval.sh` (Ctrl-C) stops every kernel it started and drops their databases. The new side is this checkout, uncommitted changes included. The base build is cached in `~/.zenbot/evals/builds/`, and base results that completed in `~/.zenbot/evals/cache/` for `ZEN_EVAL_CACHE_DAYS` (7) days, keyed by base commit, model, effort, the task's files and the engine versions; the report lists the ones it reused. Results and `report.md` go to `~/.zenbot/evals/<run>/`. Real models use the owner's subscription, so `--jobs` also sets how many turns run on it at once.
+
+Tasks live in `evals/tasks/<name>/` (`task.json` plus `files/` and, for hidden tests, `hidden/`). See `evals/README.md` for the format and what makes a good task.
 
 ## Scheduled jobs
 
