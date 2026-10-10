@@ -6,6 +6,20 @@
 
 ---
 
+## 2026-10-10 — Cleanup: no web UI, no Pi leftovers, the default AGENTS.md stays out of sessions
+
+- The frozen web UI is gone (`crates/zend/web/index.html`, `GET /`). With it goes the only use of
+  a token in the URL: the kernel now accepts the token only in the `Authorization` header, the
+  WebSocket upgrade included (`zen` and `zen-matrix` already send it there).
+- The retired Pi worker's last traces are gone: `ZEN_WORKERS` no longer filters out `pi`,
+  `install.sh` and `update-engines.sh` no longer clean it up, `zen status` no longer hides it, and
+  `~/.zenbot/auth.json` (Pi's sign-in) is no longer a known secret file. The installed `env` had
+  `ZEN_WORKERS=engine,pi` and was cleaned first. The two e2e checks of the legacy setting are gone.
+- The default environment file is `crates/zend/defaults/AGENTS.default.md` (still installed as
+  `~/.zenbot/AGENTS.md`): as `AGENTS.md`, a session working in the repo loaded it as the project's
+  own instructions.
+- The owner waived the eval for these. Build, unit tests, clippy and the 23 e2e scenarios pass.
+
 ## 2026-10-10 — The docs match the code again, and CI keeps them so
 
 - Every doc was read in full and checked, claim by claim, against the code at `6217f27`. That fixed

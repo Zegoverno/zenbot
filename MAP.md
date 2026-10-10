@@ -15,9 +15,9 @@
 
 ```
  owner
-   │  terminal                        browser
-   ▼                                    ▼
- zen (CLI, crates/zen)            web UI (crates/zend/web/index.html, frozen)
+   │  terminal
+   ▼
+ zen (CLI, crates/zen)
    │  (also zen-matrix, crates/zen-matrix: the owner's Matrix rooms, a separate service, D-049)
    │  HTTP /api/* + WebSocket /api/sessions/{id}/ws   (Bearer token from ~/.zenbot/token)
    ▼
@@ -50,8 +50,8 @@
 ## Layer 1 — Kernel `zend` (`crates/zend`)
 
 Single binary (axum, sqlx, tokio). Modules are declared in `main.rs`; most share `App` through
-`use super::*`. ~12,000 lines of Rust plus migrations, default prompt files and skills, the verifier's
-prompt and the web UI.
+`use super::*`. ~12,000 lines of Rust plus migrations, default prompt files and skills, and the verifier's
+prompt.
 
 ### Files
 
@@ -59,7 +59,7 @@ prompt and the web UI.
 |---|---|---|---|---|---|
 | `src/main.rs` | 290 | Startup and shared state. Reads env, writes missing default prompt files and skills (`defaults::install`), connects to Postgres, runs migrations (`set_ignore_missing(true)` so a rolled-back build starts on a newer schema), repairs the tape, spawns workers, starts background tasks (dispatch, watchdog, `score::idle_loop`, `search::index_loop`, `jobs::run_loop`, the updater), builds the router (listens on `ZEN_BIND`, localhost by default, D-041) | `App` (incl. `hubs`, and `background`: kernel work outside turns, counted as busy through `Background` guards), `zen_home` (`ZEN_HOME`, else `~/.zenbot`), `subscribe`/`unsubscribe`/`emit` (a session's event hub exists only while a client is connected; `emit` with no client sends nothing), `env_num`, `outputs_dir`, `load_messages`, `context_in` | every module | everything (via `App`) |
 | `src/assist.rs` | 289 | Small model calls around the owner's turns (D-047): after an owner's turn ends cleanly (not in jobs or child sessions), one call to the assist model (`ZEN_ASSIST_MODEL`, Haiku 5.5) names the session while `title_source` isn't `owner` (first 3 turns) and suggests the next prompt (not after `ask`; `ZEN_SUGGEST=off` stops it); emits `title` and `suggestion`; `settle` records what the owner did with it when the next prompt arrives | `after_turn`, `settle`, `stats` (`GET /api/suggestions`), `PROMPT_VERSION`, `model` | `workers::complete`, `tape` | `turns.rs` (`finish_turn`), `api.rs` (`prompt`) |
-| `src/api.rs` | 591 | HTTP handlers and the WebSocket (docs/client-protocol.md). Token auth middleware (header `Authorization: Bearer`, compared in constant time; `?token=` only on a well-formed WebSocket upgrade of `/api/sessions/{id}/ws`, since browsers can't send the header there). A WebSocket `prompt` starts its turn in a separate task, so an `abort` is read while the turn is prepared. `run_sleep` runs the sleep in its own task, so a client that stops waiting doesn't cut it short | `auth`, `same_secret`, `valid_ws_key`, `health`, `version`, `upgrade_*`, `list_models`, `list_sessions`, `board`, `*_session`, `decide`, `DECISIONS`, `list_memory`, `list_skills`, `review_skill`, `review_tool`, `get_policy`, `put_policy`, `undo_policy`, `run_sleep`, `mcp_status`, `list_jobs`, `create_job`, `update_job`, `delete_job`, `run_job`, `list_job_runs`, `handle_socket` | `turns` (start/abort), `memory`, `workshop`, `delegate`, `jobs`, `assist` (`settle`), `mcp`, `score`, `workers`, `update` | router in `main.rs` |
+| `src/api.rs` | 591 | HTTP handlers and the WebSocket (docs/client-protocol.md). Token auth middleware (header `Authorization: Bearer` only, compared in constant time; a token in the URL is refused). A WebSocket `prompt` starts its turn in a separate task, so an `abort` is read while the turn is prepared. `run_sleep` runs the sleep in its own task, so a client that stops waiting doesn't cut it short | `auth`, `same_secret`, `health`, `version`, `upgrade_*`, `list_models`, `list_sessions`, `board`, `*_session`, `decide`, `DECISIONS`, `list_memory`, `list_skills`, `review_skill`, `review_tool`, `get_policy`, `put_policy`, `undo_policy`, `run_sleep`, `mcp_status`, `list_jobs`, `create_job`, `update_job`, `delete_job`, `run_job`, `list_job_runs`, `handle_socket` | `turns` (start/abort), `memory`, `workshop`, `delegate`, `jobs`, `assist` (`settle`), `mcp`, `score`, `workers`, `update` | router in `main.rs` |
 | `src/turns.rs` | 588 | A turn's lifecycle: start (owner or kernel), compile what it sends (tools and instructions from `agent::specs` / `agent::system_for` by the session's kind), record it in `turns`, finish, abort, watchdog, child sessions (`run_child`: a verifier or a subagent, optionally on another model, inheriting the parent's taint; returns the child's id, stops it after 30 minutes). `Turn.kind` is read once at start. A summary made inline at the hard limit is `hold`-counted as a running tool so the watchdog waits, and an abort stops it. `record_turn` returns the row plus the session's parent and cost in one query | `Turn`, `Origin`, `Recorded`, `start_turn`, `run_kernel_session` (a parentless kernel session: the sleep compacting a prompt file), `run_and_wait`, `begin_turn`, `still_ours`, `hold`, `finish_turn`, `abort_turn`, `run_child`, `watchdog`, `record_turn`, `session_cost` | `agent`, `compile`, `compact`, `measure`, `tape`, `workers`, `assist` (`after_turn`) | `api`, `dispatch`, `agent`, `workers`, `delegate`, `memory`, `jobs` |
 | `src/dispatch.rs` | 299 | Handles every message from workers (notifications in order per session, one queue task per session; tool calls concurrently): `tool.call` (refused after a tool ended the turn, `agent::refuse`; a verifier may run only `bash`, `read`, `submit_verdict`; then `agent::run_tool` or `tools::execute`), `turn.delta`/`turn.thinking`, `turn.message` (tape + `model_calls`), `turn.fallback` (a `failover` tape block and a `status` event), `turn.usage`, `turn.end`. Before a tool runs: `agent::refusal` by kind, `agent::prompt_file_refusal`; a prompt file is backed up (`memory::backup_file`) before an `edit`/`write` to it and `agent::over_cap_note` added when it ends over its cap. Drops messages not from the turn running on that worker (matched by echoed `turn_id`; by session and worker when a message has none). Attaches newly met AGENTS.md files to tool results | `dispatch`, `handle_incoming`, `touch`, `turn_id`, `session_id` | `agent`, `tools`, `compact`, `context`, `turns`, `memory` (`backup_file`) | `main.rs` (spawned task) |
 | `src/agent.rs` | 555 | The agent's tools beyond files and the shell, in a fixed order after them (see "Tools the model gets"); runs `ask` (questions block; ends the turn unless `wait: false`), `verify` (kernel runs criteria commands, a child verifier session judges the rest; `verification` block), `decide` (when a System One model is set; logged as `point = 'tool'`) and the verifier's `submit_verdict`; hands `history`, `search`, `remember`, `capture`, `web_*`, `find_skills`/`load_skill`, `save_skill`/`save_tool`, `find_tools`/`load_tool`/`call_tool`, `delegate` and `schedule` to their modules. A subagent or job session gets no `ask`, `delegate` or `schedule` (`refusal` enforces it); a subagent gets `delegate::system_for` instructions. `prompt_file_refusal`: `edit`/`write` on SOUL, IDENTITY, AGENTS or USER refused for any session with a kind (subagents, verifiers, jobs, kernel sessions) and tainted sessions (D-045); `over_cap_note` asks the agent to compact a file its edit took over its cap. Replaced `flow.rs`: no workflow (docs/brief.md) | `specs`, `system_for`, `read_only`, `run_tool`, `refuse`, `refusal`, `prompt_file_target`, `prompt_file_refusal`, `over_cap_note`, `log_decision`, `combine`, `render_results`, `VERIFIER` | `tools` (`run_shell` for checks), `memory`, `search`, `wiki`, `skills`, `workshop`, `delegate`, `jobs`, `web`, `mcp`, `compact`, `compile` (`file_cap`), `git`, `secrets`, `score`, `turns` (`run_child`); `steps/verify.md` | `dispatch`, `turns` |
@@ -80,17 +80,16 @@ prompt and the web UI.
 | `src/compact.rs` | 482 | Summaries of older turns: linear-time plan, prepared in the background past the soft limit, applied after a pause or at once past the hard limit (`compaction` block). Also the `history` tool, which reads old blocks back by number or search, in this session or another (`session`: a full id or a unique prefix, e.g. the 8 characters `search` shows) | `Settings`, `summary_model`, `plan`, `prepare`, `pending`, `apply`, `tool_spec`, `history_tool` | `tape`, `workers::complete` | `turns`, `dispatch`, `tools` |
 | `src/measure.rs` | 177 | Per-turn record of what was sent and why the prompt cache could or couldn't be reused (`cache_break`: `first`, `instructions`, `summary`, `model`, `engine_session`, `expired`; unexpected: `history`, `miss`) | `previous`, `record`, `break_at_start`, `break_at_end`, `cache_ttl_secs` | `compile` types | `turns` |
 | `src/tape.rs` | 70 | The tape: append (advisory lock per session, `seq` + parent + hash computed in SQL by `zen_block_hash`), load, repair (`zen_rechain`) | `Block`, `append`, `load`, `load_all`, `repair` | DB functions from migration 0007 | `compile`, `compact`, `agent`, `dispatch`, `turns`, `jobs`, `taint`, `assist`, `main.rs` |
-| `src/workers.rs` | 232 | Worker configs from `ZEN_WORKERS` (a stale `pi` entry is dropped; none left means `engine`), supervision with backoff (ends orphaned turns on a crash), model routing and metadata rebuilt on refresh, all worker models visible by default (`ZEN_MODELS` may curate), effort checks, `complete` for summaries | `Worker`, `worker_configs`, `forward_worker`, `supervise`, `complete`, `visible_models`, `collect_models`, `worker_for`, `model_info`, `check_effort` | `mind`, `score` | `main.rs`, `api`, `turns`, `agent`, `compact`, `assist`, `delegate` |
+| `src/workers.rs` | 232 | Worker configs from `ZEN_WORKERS` (empty means `engine`), supervision with backoff (ends orphaned turns on a crash), model routing and metadata rebuilt on refresh, all worker models visible by default (`ZEN_MODELS` may curate), effort checks, `complete` for summaries | `Worker`, `worker_configs`, `forward_worker`, `supervise`, `complete`, `visible_models`, `collect_models`, `worker_for`, `model_info`, `check_effort` | `mind`, `score` | `main.rs`, `api`, `turns`, `agent`, `compact`, `assist`, `delegate` |
 | `src/mind.rs` | 157 | JSON-RPC client for one worker process (`bash -lc <cmd>`, without the kernel's own credentials: `ZEN_TOKEN`, `DATABASE_URL`, OpenRouter and search keys); 30 s default request timeout, `request_within` for longer; a request's entry is removed however it ends; lines are read as bytes (invalid UTF-8 can't stop the reader) | `Mind`, `Incoming`, `spawn`, `request`, `request_within`, `respond` | — | `workers`, `main.rs` |
 | `src/score.rs` | 416 | Direct OpenRouter System One call and live scoring: a classifier answers fixed, versioned questions (`QUESTIONS_VERSION = "v1"`) about a session after a decision or after it goes idle; stored in `session_scores`. Off unless `ZEN_S1_MODEL` is set. Also `decide` (any typed question to System One), `judge` (`Relevance`: reranking and `focus`, logged under their own `point`) and `private_ok` (`ZEN_S1_PRIVATE`) | `scorer`, `openrouter_key`, `decide`, `judge`, `private_ok`, `questions`, `state`, `score_session`, `idle_loop` | OpenRouter `/api/v1/systemone` | `api`, `agent`, `memory`, `web`, `search`, `wiki`, `workshop`, `delegate`, `jobs`, `workers`, `main.rs` |
-| `src/secrets.rs` | 242 | Masks secrets in tool output: values of the kernel's own secret-looking env vars, `~/.zenbot/token`, `~/.zenbot/auth.json`, `~/.codex/auth.json` and `~/.claude/.credentials.json` values (reloaded when those files change), and well-known token prefixes / private key blocks | `mask`, `mask_off_thread` (large text on a blocking thread), `is_secret_var` (named like a token, key, secret or password, or `DATABASE_URL`: masked and kept out of the agent's shells), `secret_files` (`token`, `auth.json`, `env` under the zen home: hidden from sandboxed shells) | — | `tools`, `agent` (check output, diff), `memory` (memories), `web` (pages), `mcp` (tool output) |
+| `src/secrets.rs` | 242 | Masks secrets in tool output: values of the kernel's own secret-looking env vars, `~/.zenbot/token`, `~/.codex/auth.json` and `~/.claude/.credentials.json` values (reloaded when those files change), and well-known token prefixes / private key blocks | `mask`, `mask_off_thread` (large text on a blocking thread), `is_secret_var` (named like a token, key, secret or password, or `DATABASE_URL`: masked and kept out of the agent's shells), `secret_files` (`token`, `env` under the zen home: hidden from sandboxed shells) | — | `tools`, `agent` (check output, diff), `memory` (memories), `web` (pages), `mcp` (tool output) |
 | `src/test_util.rs` | 28 | Test-only owner-private scratch directory removed on drop; `bash` large-output tests save there instead of the live zen home | `TestDir` | — | kernel unit tests |
 | `src/update.rs` | 178 | Self-update: compares `~/.zenbot/version` with `origin/main` (hourly by default), asks `scripts/fetch-release.sh --check` whether binaries exist (30-second timeout), starts `scripts/self-update.sh` on request | `Updater` (`running`, `info`, `check`, `check_periodically`, `start`, `status`) | `git`, scripts | `api`, `main.rs` |
 | `src/git.rs` | 62 | Async git with a 60 s limit and an output cap (git is stopped once the cap is reached) | `output`, `git` | — | `update`, `agent` (the verifier's diff) |
 | `steps/verify.md` | 9 | The verifier's whole system prompt (`include_str!` in `agent.rs`) | — | — | `agent::system_for` |
 | `src/layout.rs` | 116 | Where files live under the zen home, by scope (D-040): system-wide prompt files at the top, `agents/<name>/` (the agent's `SOUL.md` and `IDENTITY.md`), `global/` (`MEMORY.md`, wiki, skills, tools). `migrate` moves an old flat layout once at startup, before the defaults, never overwriting, and leaves a relative symlink at each old path for rollbacks | `SOUL`, `IDENTITY`, `global_dir`, `migrate`, `MOVES` | — | `main.rs`, `compile`, `defaults`, `memory`, `wiki`, `skills`, `workshop` |
-| `defaults/` | — | Default `SOUL.md`, `IDENTITY.md`, `AGENTS.md` (with `{{workspace}}`, `{{home}}`, `{{zen_home}}`, `{{repo}}`), `USER.md`, and the skills `work/brief` (with `references/template.md`), `work/verify` and `work/close` (keep what a job taught: memory, wiki, skills, tools) (`include_str!` in `defaults.rs`) | — | — | `defaults::install` |
-| `web/index.html` | 493 | Browser UI, served at `/` (`include_str!`). **Frozen** (AGENTS.md). Uses `/api/models` and `/api/sessions…` | — | API | owner |
+| `defaults/` | — | Default `SOUL.md`, `IDENTITY.md`, `AGENTS.default.md` (installed as `AGENTS.md`; named so sessions in the repo don't load it as the project's instructions; with `{{workspace}}`, `{{home}}`, `{{zen_home}}`, `{{repo}}`), `USER.md`, and the skills `work/brief` (with `references/template.md`), `work/verify` and `work/close` (keep what a job taught: memory, wiki, skills, tools) (`include_str!` in `defaults.rs`) | — | — | `defaults::install` |
 | `migrations/*.sql` | — | Schema (see Database) | — | — | `sqlx::migrate!` in `main.rs` |
 
 ### Invariants stated in header comments
@@ -125,11 +124,10 @@ prompt and the web UI.
 
 ## Kernel routes
 
-From `main.rs` (router) and `api.rs`. Everything under `/api` needs the token (`Authorization: Bearer`; `?token=` only on the WebSocket upgrade).
+From `main.rs` (router) and `api.rs`. Everything under `/api` needs the token in `Authorization: Bearer` (never in the URL).
 
 | Method | Path | Handler | Does |
 |---|---|---|---|
-| GET | `/` | `index` | Web UI (no auth; the page asks for the token) |
 | GET | `/health` | `health` | No auth. `{ok, db, mind, workers:{name:bool}, busy, version, commit}`; pings every worker. `busy` = running turns + kernel work outside them. Used by `wait_healthy` and `apply-upgrade.sh` (`"busy":0`) |
 | GET | `/api/models` | `list_models` | Asks every worker for `models.list`, refreshes routes, returns all worker models by default (`ZEN_MODELS` optionally curates, plus any `faux/*`), `authenticated`, `default`, `scorer` |
 | GET | `/api/sessions?archived=` | `list_sessions` | The owner's sessions and scheduled jobs' sessions (`kind IS NULL OR kind = 'job'`; subagents, verifiers and kernel sessions hidden), with cost |
@@ -313,7 +311,7 @@ the kernel's environment except `ZEN_TOKEN`, `DATABASE_URL`, `OPENROUTER_API_KEY
 | `ZEN_REPO` | `$HOME/zenbot` | `main.rs`, `zen` CLI | zenbot's checkout: named in the system prompt; used by the updater |
 | `ZEN_DEFAULT_MODEL` | `claude/claude-opus-5-5` | `main.rs` | Model for new sessions |
 | `ZEN_HARNESS` | `~/.zenbot/version` | `main.rs` | Build id recorded with every turn (dev, smoke and eval kernels set it) |
-| `ZEN_WORKERS` | `engine` | `workers.rs`, scripts | Workers to start; stale `pi` is ignored |
+| `ZEN_WORKERS` | `engine` | `workers.rs`, scripts | Workers to start |
 | `ZEN_ENGINE_CMD` | `zen-engine` next to `zend` | `workers.rs` | Command for `engine` |
 | `ZEN_WORKER_<NAME>_CMD` | the name | `workers.rs` | Command for any other worker name |
 | `ZEN_MODELS` | unset (all worker models) | `workers.rs` | Optional visible model allowlist and order |
@@ -415,7 +413,6 @@ Read from the process environment, else `~/.zenbot/matrix.env` (`state.rs::Confi
 |---|---|---|---|
 | `env` | `install.sh` | systemd (`EnvironmentFile`), `zen` CLI, `zen-matrix` (`ZEN_PORT`), scripts (`lib.sh::zen_env`) | Service environment; mode 600; hidden from sandboxed shells |
 | `token` | `lib.sh::new_token` (install, dev) | `zen` CLI, `install.sh` (copies into `env`), `secrets.rs`, `zen-matrix`, scripts | **Secret.** API token; hidden from sandboxed shells |
-| `auth.json` | legacy Pi sign-in, no longer used (absent on installs that never ran Pi) | `secrets.rs` | **Secret. Never print it.** Keep or remove only by owner decision |
 | `version` | `install.sh`, `apply-upgrade.sh` | `update.rs`, `zen` banner | Installed commit |
 | `upgrade.log` | `apply-upgrade.sh`, `update-engines.sh` | owner, `update.rs` (last line), `zen upgrade` | Upgrade and engine-update results |
 | `engines.json` | `update-engines.sh` | `zen status` | Engine versions from the last check |
@@ -503,7 +500,7 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
   a failed command skips it), `summaries`, `secrets`, `slow-summary` (a
   summary at the hard limit slower than the watchdog: the turn waits, then runs), `system-one`
   (the direct System One call through `systemone_stub.py`: `decide` answers parsed and logged; a
-  stale `pi` worker setting ignored; the sleep promotes into `USER.md` under `## Learned` with a
+  the sleep promotes into `USER.md` under `## Learned` with a
   backup and copies knowledge into the wiki; an agent's over-cap edit of `USER.md` is backed up and
   the sleep compacts it through a kernel session), `kernel-tools` (the zen home's files aren't
   attached as project context, edit keeps one trailing newline, a read over 16 MiB is refused), `stale-turn` (a
@@ -517,7 +514,7 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
   `names-suggestions` (the session is named after its first turn, a next prompt suggested each turn,
   outcomes `accepted`/`edited`/`declined`/`unseen` recorded, the owner's title never overwritten,
   `GET /api/suggestions` counts by prompt version). `secrets` also checks that the kernel's secret
-  variables don't reach the agent's shell and that `?token=` is refused outside the WebSocket upgrade.
+  variables don't reach the agent's shell and that a `?token=` in the URL is refused (only the header counts).
   Faux scripts in `scripts/e2e/*.json`, named after what they drive (`reach.json` drives `mcp` and `web`; `wiki` also starts the SearXNG stub); `slow-summary` adds the
   `slow` worker from `scripts/e2e/slow_worker.py` via `ZEN_WORKER_SLOW_CMD`; `mcp` starts
   `scripts/e2e/mcp_server.py` (stdio, and `--http` on port +1), `web` starts
@@ -545,7 +542,7 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 - **Workers start through a login shell** (`bash -lc` in `mind.rs`), so the service user's
   profile can change their environment.
 - **`GET /api/mcp` connects every configured server** (starts stdio ones) to count their tools.
-  No client calls it (not `zen status`, not the web UI).
+  No client calls it (not `zen status`).
 - **The skill rules apply only through `save_skill`.** The agent's `write`/`edit` can change any
   skill or tool file directly (including activating a draft by moving it); the next workshop commit
   records it. Changes to an active skill through `save_skill` apply at once, without review.

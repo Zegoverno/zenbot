@@ -141,8 +141,6 @@ changes. Candidate follow-ups, each only when use calls for it:
 - Tools run as the same Unix user as the owner. Shell subprocesses no longer inherit kernel secrets,
   and the verifier hides token files, but an ordinary agent shell can still read the owner's files.
   Strong isolation requires a separate Unix user and a credential the agent cannot read.
-- Historical `/tmp/zend-*` test directories from before the scratch guard are not deleted
-  automatically; remove them by hand when convenient.
 - Verify criteria use a read-only bubblewrap shell. What each kind of session may call is decided
   in one place (`agent::refusal`), but taint rules are still checked inside each tool (memory,
   wiki, skills, jobs, delegation); they belong at the dispatch boundary too.

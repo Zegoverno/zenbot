@@ -1,18 +1,16 @@
 # Client protocol
 
-How a client (the `zen` terminal app and CLI, the web UI, scripts) talks to the kernel. Workers use
+How a client (the `zen` terminal app and CLI, `zen-matrix`, scripts) talks to the kernel. Workers use
 a different protocol (docs/worker-protocol.md).
 
-Every request carries the owner's token in `Authorization: Bearer <token>`. Only a WebSocket
-upgrade accepts `?token=` (the browser WebSocket API cannot set that header); URL tokens are not
-accepted for ordinary HTTP requests. The token is in `~/.zenbot/token`. The server listens on
+Every request, the WebSocket upgrade included, carries the owner's token in
+`Authorization: Bearer <token>`; a token in the URL is refused. The token is in `~/.zenbot/token`. The server listens on
 `127.0.0.1:8100` by default; `ZEN_BIND` and `ZEN_PORT` change the address and port.
 
 ## HTTP
 
 | Method and path | Body | Returns |
 |---|---|---|
-| `GET /` (no token) | | the web UI (frozen), which then uses the token |
 | `GET /health` (no token) | | `{ ok, db, mind, workers, busy, version, commit }`; `busy` counts running turns and kernel work outside them |
 | `GET /api/models` | | `{ models, authenticated, default, scorer }` |
 | `GET /api/sessions?archived=` | | the owner's and job sessions (no subagents or verifiers): `{ id, title, model, effort, archived, kind, parent, cost, created_at, updated_at }`; `kind` is null for the owner's, `job` for a scheduled job's |

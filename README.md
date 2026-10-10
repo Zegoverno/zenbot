@@ -133,6 +133,3 @@ Every turn is recorded in the `turns` table with what produced it: the zenbot bu
   It calls OpenRouter directly; no extra worker is needed. `ZEN_SCORE_IDLE_SECS` changes the quiet time (default 7200).
 - **Evals** compare two harness versions on fixed tasks with the same model: `scripts/eval.sh` (see [evals/README.md](evals/README.md)). Run them before changing the harness; the report is for you to decide on.
 
-## Web UI (on hold)
-
-The kernel still serves a minimal web chat at `http://<host>:8100/?token=$(cat ~/.zenbot/token)`. It works but is frozen while the CLI comes first.

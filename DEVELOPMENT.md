@@ -13,7 +13,7 @@ How to build, test, verify and ship a change to zenbot from this checkout. Writt
 The processes are listed in `AGENTS.md` and, file by file, in `MAP.md`. The kernel owns all state and runs every tool call; engines run with their own tools switched off. Keep it that way.
 
 Config and state live in `~/.zenbot/`; MAP.md ("`~/.zenbot/`") lists every file, who writes it and
-who reads it. The secrets there are `env`, `token`, `auth.json` (a retired Pi sign-in), `matrix.env`
+who reads it. The secrets there are `env`, `token`, `matrix.env`
 and `matrix/`: never print them. The dev kernel has its own home, `~/.zenbot-dev` (below). Claude
 Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 
@@ -420,7 +420,7 @@ The e2e test needs nothing paid: the kernel runs only the faux model with OpenRo
 
 - **Never** run `systemctl restart zenbot` (or stop/start) or kill `zend` from inside a session. Use `scripts/upgrade.sh`.
 - Migrations are **expand-only**, in new files; never edit an applied one.
-- No secrets in the repo, logs or tool output. **Never print `~/.zenbot/auth.json`**, `~/.zenbot/token` or `~/.zenbot/env` (it holds the token and API keys, such as search keys). Put secrets an MCP server needs in `env` and refer to them as `${VAR}` in `mcp.json`.
+- No secrets in the repo, logs or tool output. **Never print `~/.zenbot/token`** or `~/.zenbot/env` (it holds the token and API keys, such as search keys). Put secrets an MCP server needs in `env` and refer to them as `${VAR}` in `mcp.json`.
 - Keep engines' own tools switched off; every action goes through the kernel.
 - Don't add dependencies without a good reason.
 
