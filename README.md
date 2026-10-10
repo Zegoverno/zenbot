@@ -85,7 +85,7 @@ A session is one job. zenbot gets tools, skills and memory rather than a fixed p
 
 ## Skills and tools zenbot improves itself
 
-zenbot keeps its know-how as skills (`~/.zenbot/global/skills/`, a git repository) and can write tools of its own (`~/.zenbot/global/tools/`). It improves a skill when a job shows what works, rather than adding near-duplicates; a new skill stays a draft until you accept it (or a session that used it is accepted), and a new kind of work needs your OK. A tool it makes runs sandboxed, with no network, until you approve it. `zen skills` shows each skill's use; `zen skills accept|reject <domain/name>` and `zen tools accept|reject <name>` decide.
+zenbot keeps its know-how as skills (`~/.zenbot/global/skills/`, a git repository) and can write tools of its own (`~/.zenbot/global/tools/`). It improves a skill when a job shows what works, rather than adding near-duplicates; a new skill stays a draft until you accept it (or a session that used it is accepted), and a new kind of work needs your OK. A tool it makes runs sandboxed, with no network, until you approve it. `zen skills` shows each skill's use, and each draft's and tool's fingerprint; `zen skills accept|reject <domain/name> <fingerprint>` and `zen tools accept|reject <name> <fingerprint>` decide, and are refused if what you reviewed changed since. zenbot can't change an active skill or one of its tools from a session that read the web.
 
 ## Scheduled jobs
 
@@ -106,13 +106,13 @@ zenbot keeps lasting knowledge in `~/.zenbot/global/wiki/` (a git repository of 
 ## The web and connected services
 
 - **Web**: `web_search` and `web_fetch` work out of the box. Search goes through a SearXNG container the installer starts next to Postgres (only reachable from the VM); set `BRAVE_API_KEY` or `TAVILY_API_KEY` in `~/.zenbot/env` to use those instead. Fetching reaches public addresses only. Everything read from the web is marked untrusted, and a session that read it can't save memories that count as the owner's words.
-- **MCP servers** (email, calendar, documents, your own services): list them in `~/.zenbot/mcp.json`, the same shape Claude Code uses. zenbot finds their tools with `find_tools` and runs them with `call_tool`, so its tool list (and the prompt cache) never changes. Secrets go in `~/.zenbot/env` and are referenced as `${VAR}`:
+- **MCP servers** (email, calendar, documents, your own services): list them in `~/.zenbot/mcp.json`, the same shape Claude Code uses. zenbot finds their tools with `find_tools` and runs them with `call_tool`, so its tool list (and the prompt cache) never changes. Secrets go in `~/.zenbot/env` and are referenced as `${VAR}`; a variable named like a secret (`…TOKEN`, `…KEY`, `…SECRET`, `…PASSWORD`) is passed only to a server that lists it in `allow_env`:
   ```json
   { "mcpServers": {
       "files": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/docs"] },
-      "issues": { "url": "https://mcp.example.com/mcp", "headers": { "Authorization": "Bearer ${ISSUES_TOKEN}" } } } }
+      "issues": { "url": "https://mcp.example.com/mcp", "headers": { "Authorization": "Bearer ${ISSUES_TOKEN}" }, "allow_env": ["ISSUES_TOKEN"] } } }
   ```
-  Per server: `enabled`, `timeout_s`, `include` / `exclude` (tool names), `untrusted` (default true for remote servers). `curl -H "Authorization: Bearer $(cat ~/.zenbot/token)" localhost:8100/api/mcp` shows what loaded.
+  Per server: `enabled`, `timeout_s`, `include` / `exclude` (tool names), `allow_env`, `untrusted` (default true for remote servers). Only you edit `mcp.json`: zenbot's own file tools refuse it, like `env` and `token`. `curl -H "Authorization: Bearer $(cat ~/.zenbot/token)" localhost:8100/api/mcp` shows what loaded.
 
 ## Context
 

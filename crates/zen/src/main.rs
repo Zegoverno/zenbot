@@ -185,19 +185,32 @@ enum PolicyCmd {
 #[derive(Subcommand)]
 enum ReviewCmd {
     /// Accept: activate a draft skill (domain/name), or let a tool use the network
-    Accept { name: String },
+    Accept {
+        name: String,
+        /// The fingerprint `zen skills` showed for what you reviewed (refused if it changed since)
+        sha: String,
+    },
     /// Reject: archive a draft skill, or stop a tool from running
-    Reject { name: String },
+    Reject {
+        name: String,
+        /// The fingerprint `zen skills` showed for what you reviewed (refused if it changed since)
+        sha: String,
+    },
 }
 
 impl ReviewCmd {
-    /// The name and the decision to send.
-    fn parts(self) -> (String, &'static str) {
+    /// The name, the decision and the reviewed fingerprint to send.
+    fn parts(self) -> (String, &'static str, String) {
         match self {
-            ReviewCmd::Accept { name } => (name, "accept"),
-            ReviewCmd::Reject { name } => (name, "reject"),
+            ReviewCmd::Accept { name, sha } => (name, "accept", sha),
+            ReviewCmd::Reject { name, sha } => (name, "reject", sha),
         }
     }
+}
+
+/// How a draft's or a tool's fingerprint is shown in `zen skills` (and typed back to review it).
+fn short_sha(v: &Value) -> String {
+    v["sha"].as_str().map(|s| format!(" {}", &s[..12.min(s.len())])).unwrap_or_default()
 }
 
 #[derive(Subcommand)]
@@ -857,7 +870,7 @@ async fn run(cli: Cli) -> Result<()> {
                 out(&s);
             } else {
                 for x in s["skills"].as_array().into_iter().flatten() {
-                    let draft = if x["status"] == "draft" { " (draft)" } else { "" };
+                    let draft = if x["status"] == "draft" { format!(" (draft{})", short_sha(x)) } else { String::new() };
                     let last = x["last_load"].as_str().map(|t| format!(", last {}", t.get(..10).unwrap_or(t))).unwrap_or_default();
                     println!(
                         "{}{draft}  {}",
@@ -867,13 +880,13 @@ async fn run(cli: Cli) -> Result<()> {
                 }
                 for t in s["tools"].as_array().into_iter().flatten() {
                     let state = if t["approved"] == true { "approved" } else { "sandboxed until approved" };
-                    println!("tool made_{}  {}", for_stdout(t["tool"].as_str().unwrap_or("")), dim(state));
+                    println!("tool made_{}{}  {}", for_stdout(t["tool"].as_str().unwrap_or("")), for_stdout(&short_sha(t)), dim(state));
                 }
             }
         }
         Cmd::Skills { cmd: Some(r) } => {
-            let (name, decision) = r.parts();
-            let res = c.post("/api/skills/review", json!({ "name": name, "decision": decision })).await?;
+            let (name, decision, sha) = r.parts();
+            let res = c.post("/api/skills/review", json!({ "name": name, "decision": decision, "sha": sha })).await?;
             emit(json, &res, || res["result"].as_str().unwrap_or("").to_string());
         }
         Cmd::Policy { cmd: None } => {
@@ -916,8 +929,8 @@ async fn run(cli: Cli) -> Result<()> {
             emit(json, &r, || format!("policy v{}", r["version"]));
         }
         Cmd::Tools { cmd } => {
-            let (name, decision) = cmd.parts();
-            let res = c.post(&format!("/api/tools/{}/review", enc(name.trim_start_matches("made_"))), json!({ "decision": decision })).await?;
+            let (name, decision, sha) = cmd.parts();
+            let res = c.post(&format!("/api/tools/{}/review", enc(name.trim_start_matches("made_"))), json!({ "decision": decision, "sha": sha })).await?;
             emit(json, &res, || res["result"].as_str().unwrap_or("").to_string());
         }
         Cmd::Jobs { cmd: None } => {

@@ -3,5 +3,6 @@
   {"tool":"read","args":{"path":"ZENALIAS/AGENTS.md"}},
   {"tool":"edit","args":{"path":"a.txt","old_text":"foo \n","new_text":"baz\n"}},
   {"tool":"read","args":{"path":"huge.txt"}},
+  {"tool":"write","args":{"path":"ZENALIAS/mcp.json","content":"{\"planted-by-owner-session\": 1}"}},
   {"text":"done"}
 ]

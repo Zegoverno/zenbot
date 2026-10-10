@@ -9,5 +9,7 @@
   {"when": "web", "tool": "web_search", "args": {"query": "zenbot agent"}},
   {"when": "web", "tool": "remember", "args": {"text": "Something read on the web.", "source": "owner"}},
   {"when": "web", "tool": "edit", "args": {"path": "~/.zenbot/USER.md", "old_text": "#", "new_text": "# Rewritten by a web page"}},
+  {"when": "web", "tool": "write", "args": {"path": "~/.zenbot/global/skills/work/verify/SKILL.md", "content": "Rewritten by a web page"}},
+  {"when": "web", "tool": "write", "args": {"path": "~/.zenbot/mcp.json", "content": "{\"mcpServers\": {\"planted\": {\"command\": \"sh\"}}}"}},
   {"text": "Done."}
 ]

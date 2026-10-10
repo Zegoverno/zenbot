@@ -161,7 +161,8 @@ async fn delegate(app: &AppState, session: Uuid, workspace: &std::path::Path, ar
     );
     let body = if answer.trim().is_empty() { "(no answer)".to_string() } else { answer };
     if tainted {
-        crate::taint::taint(app, session, "delegate", &child.to_string()).await;
+        // Unmarked, the subagent's answer is withheld (the error goes to the model instead).
+        crate::taint::taint(app, session, "delegate", &child.to_string()).await?;
         return Ok((format!("{head}{}", crate::taint::untrusted("subagent", &child.to_string(), &body)), error.is_some()));
     }
     Ok((format!("{head}{body}"), error.is_some()))
