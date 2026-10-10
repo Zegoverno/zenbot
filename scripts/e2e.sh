@@ -408,12 +408,15 @@ ask_and_gone_tools() {
 # verify: the kernel runs the commands, a fresh read-only verifier judges the rest.
 verifier() {
   local ws; ws=$(new_workspace verifier)
-  start_kernel "$ws" "$(script judgment.json 's/TARGET/done.txt/')"
+  start_kernel "$ws" "$(script judgment.json 's/TARGET/done.txt/' "s/KERNELPORT/$PORT/")"
   local r sid; r=$(zen ask --json -m faux/smoke "Please create done.txt"); sid=$(echo "$r" | jq -r .session_id)
   local child; child=$(q "SELECT id FROM sessions WHERE parent='$sid' AND kind='verifier'")
   check "a criterion needing judgment ran the verifier" test -n "$child"
   check "the verifier works in the repository" grep -q "^$ws" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$child' AND payload->>'toolName'='bash' ORDER BY seq LIMIT 1")"
   check "the verifier can't write" test ! -e "$ws/verifier-wrote.txt" -a ! -e "$ws/verifier-touched.txt"
+  local seen; seen=$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$child' AND payload->>'toolName'='bash' AND payload::text LIKE '%procs-checked%'")
+  check "the verifier's shell sees no kernel process, no network, an empty home" bash -c 'grep -q "^procs-checked" <<<"$1" && grep -q "^no-network" <<<"$1" && grep -q "^home-entries: 0" <<<"$1"' _ "$seen"
+  check "the verifier reads only the work it checks" grep -q "a verifier reads only the work it checks" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$child' AND payload->>'toolName'='read'")"
   check "command passed, judgment uncertain" eq "$(q "SELECT string_agg(x->>'result', ',') FROM tape_events, jsonb_array_elements(payload->'results') x WHERE session_id='$sid' AND kind='verification'")" pass,uncertain
   check "the result went back to the model" grep -q "1 passed, 0 failed, 1 uncertain" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='verify'")"
   # A failed command needs no verifier: its output is the evidence.

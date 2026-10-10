@@ -1,6 +1,6 @@
 //! Built-in tools. The kernel is the only place side effects happen.
-//! Commands run on the host in the workspace (a verifier's in a read-only bubblewrap sandbox); per-project
-//! sandboxes come with M2.
+//! Commands run on the host in the workspace (a verifier's in a read-only bubblewrap sandbox, and its
+//! `read` confined to the work it checks); per-project sandboxes come with M2.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -200,14 +200,19 @@ fn save_full_output_in(dir: &Path, text: &str) -> Option<PathBuf> {
     Some(path)
 }
 
-/// Run a tool. `env` is added to the environment of commands (bash). With `read_only`, bash runs in
-/// a sandbox where the filesystem is mounted read-only (bubblewrap) and only `read` may run besides.
+/// Run a tool. `env` is added to the environment of commands (bash). With `read_only` (a verifier),
+/// bash runs in a read-only sandbox (bubblewrap), and only `read` may run besides, inside the
+/// workspace (`confined`).
 pub async fn execute(workspace: &Path, name: &str, args: &Value, env: &[(&str, &str)], read_only: bool) -> ToolOutput {
     if read_only && !matches!(name, "bash" | "read") {
         return err(format!("`{name}` can't run in a read-only session"));
     }
     let result = match name {
         "bash" => bash(workspace, args, env, read_only, None).await,
+        "read" if read_only => match confined(workspace, args) {
+            Ok(()) => read(workspace, args).await,
+            Err(e) => Err(err(e)),
+        },
         "read" => read(workspace, args).await,
         "write" => write(workspace, args).await,
         "edit" => edit(workspace, args).await,
@@ -244,8 +249,26 @@ impl Drop for GroupKill {
 }
 
 /// bubblewrap's arguments for a read-only view of the machine: everything mounted read-only, a
-/// private /tmp, the network left as it is (looking things up is allowed).
-const READ_ONLY_SANDBOX: [&str; 10] = ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--die-with-parent"];
+/// private /tmp, its own processes (the kernel's `/proc/<pid>/environ` and `/proc/<pid>/root` out
+/// of sight), its own terminal session, and no network (the database and the kernel's API listen
+/// on it). `run_shell` adds an empty home folder with only the work bound back, and hides the
+/// secret files.
+const READ_ONLY_SANDBOX: [&str; 13] =
+    ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--unshare-pid", "--unshare-net", "--new-session", "--die-with-parent"];
+
+/// Why a verifier may not `read` this path, if it may not: only files in the work it checks (its
+/// workspace), never a secret file there, however the path is named (symlinks resolved). The same
+/// view as its sandboxed shell, without the rest of the machine it doesn't need.
+fn confined(workspace: &Path, args: &Value) -> Result<(), String> {
+    let path = resolve(workspace, args.get("path").and_then(Value::as_str).unwrap_or(""));
+    let real = path.canonicalize().map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let root = workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf());
+    let secret = crate::secrets::secret_files().iter().filter_map(|f| f.canonicalize().ok()).any(|f| real.starts_with(f));
+    if !real.starts_with(&root) || secret {
+        return Err(format!("a verifier reads only the work it checks (in {}), and no secret files", root.display()));
+    }
+    Ok(())
+}
 
 /// What a command printed (stdout and stderr as they arrived; past MAX_CAPTURE only counted) and how
 /// it ended: `None` when it timed out and its process group was killed.
@@ -262,10 +285,17 @@ pub struct Shell {
 pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], read_only: bool, timeout: Duration) -> Result<Shell, String> {
     let mut cmd = if read_only {
         let mut c = Command::new("bwrap");
-        // The workspace is bound again after the private /tmp, in case it lives under /tmp.
-        c.args(READ_ONLY_SANDBOX).arg("--ro-bind").arg(dir).arg(dir);
+        // The home folder (keys, sign-ins, the zen home) is replaced by an empty one, as for a
+        // made tool (workshop.rs); the workspace is bound back after it and the private /tmp, in
+        // case it lives under either. Secret files still inside it are hidden.
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home".into());
+        c.args(READ_ONLY_SANDBOX).arg("--tmpfs").arg(&home).arg("--ro-bind").arg(dir).arg(dir);
         for f in crate::secrets::secret_files() {
-            c.arg("--ro-bind").arg("/dev/null").arg(f);
+            if f.is_dir() {
+                c.arg("--tmpfs").arg(f);
+            } else {
+                c.arg("--ro-bind").arg("/dev/null").arg(f);
+            }
         }
         c.arg("--chdir").arg(dir).args(["bash", "-c"]);
         c
@@ -631,6 +661,22 @@ mod tests {
         } else {
             execute(ws, name, &args, &[], false).await
         }
+    }
+
+    #[tokio::test]
+    async fn a_verifier_reads_only_its_work() {
+        let root = scratch("confined");
+        let ws = root.join("work");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("a.txt"), "inside\n").unwrap();
+        std::fs::write(root.join("secret.txt"), "outside\n").unwrap();
+        std::os::unix::fs::symlink(root.join("secret.txt"), ws.join("link")).unwrap();
+        assert!(!execute(&ws, "read", &json!({ "path": "a.txt" }), &[], true).await.is_error);
+        for p in ["../secret.txt", "link", "/proc/self/environ"] {
+            let r = execute(&ws, "read", &json!({ "path": p }), &[], true).await;
+            assert!(r.is_error && r.content.contains("reads only the work it checks"), "{p}: {}", r.content);
+        }
+        assert!(!run(&ws, "read", json!({ "path": "../secret.txt" })).await.is_error, "other sessions aren't confined");
     }
 
     #[tokio::test]
