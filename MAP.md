@@ -131,7 +131,7 @@ From `main.rs` (router) and `api.rs`. Everything under `/api` needs the token in
 | GET | `/health` | `health` | No auth. `{ok, db, mind, workers:{name:bool}, busy, version, commit}`; pings every worker. `busy` = running turns + kernel work outside them. Used by `wait_healthy` and `apply-upgrade.sh` (`"busy":0`) |
 | GET | `/api/models` | `list_models` | Asks every worker for `models.list`, refreshes routes, returns all worker models by default (`ZEN_MODELS` optionally curates, plus any `faux/*`), `authenticated`, `default`, `scorer` |
 | GET | `/api/sessions?archived=` | `list_sessions` | The owner's sessions and scheduled jobs' sessions (`kind IS NULL OR kind = 'job'`; subagents, verifiers and kernel sessions hidden), with cost |
-| GET | `/api/board` | `board` | Every session (archived and child ones too), newest activity first, with `kind`, `parent`, `busy` and, for child sessions, `task` (first message); no cost. zen's sessions board polls it |
+| GET | `/api/board` | `board` | Every session (archived and child ones too), newest activity first, with `kind`, `parent`, `busy`, `waiting` (unanswered `ask` questions) and, for child sessions, `task` (first message); no cost. zen's sessions board polls it |
 | POST | `/api/sessions` | `create_session` | `{title?, model?, effort?}` |
 | GET | `/api/sessions/{id}?last=&after=` | `get_session` | Session, its `message` blocks (with `seq`; all, the `last` N, or those after `after`) and `busy` |
 | PATCH | `/api/sessions/{id}` | `update_session` | Title, model, effort (`"default"` clears it), archived |

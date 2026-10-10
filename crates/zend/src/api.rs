@@ -102,7 +102,9 @@ pub(crate) async fn list_sessions(State(app): State<AppState>, Query(q): Query<L
 
 /// Every session for the sessions board (`zen`'s home screen): main and job sessions, archived
 /// ones too, and their child sessions (subagents, verifiers) with the task each was given. Each
-/// says whether a turn is running in it right now; the client nests children under their parent.
+/// says whether a turn is running in it right now, and whether it's waiting on the owner: its
+/// latest `ask` questions came after the owner's latest message (a message the kernel sent in the
+/// owner's place, `kernel: true`, isn't an answer). The client nests children under their parent.
 /// No costs: the board polls this, and they'd double its time.
 pub(crate) async fn board(State(app): State<AppState>) -> ApiResult<Json<Value>> {
     let rows = sqlx::query(&format!(
@@ -110,8 +112,14 @@ pub(crate) async fn board(State(app): State<AppState>) -> ApiResult<Json<Value>>
            CASE WHEN s.parent IS NOT NULL THEN
              (SELECT e.payload->'content' FROM tape_events e
               WHERE e.session_id = s.id AND e.kind = 'message' AND e.payload->>'role' = 'user' ORDER BY e.seq LIMIT 1)
-           END AS task
-         FROM sessions s ORDER BY s.updated_at DESC"
+           END AS task,
+           q.last IS NOT NULL AND NOT EXISTS (
+             SELECT 1 FROM tape_events m
+             WHERE m.session_id = s.id AND m.kind = 'message' AND m.seq > q.last
+               AND m.payload->>'role' = 'user' AND m.payload->>'kernel' IS NULL) AS waiting
+         FROM sessions s
+         LEFT JOIN LATERAL (SELECT max(e.seq) AS last FROM tape_events e WHERE e.session_id = s.id AND e.kind = 'questions') q ON true
+         ORDER BY s.updated_at DESC"
     ))
     .fetch_all(&app.db)
     .await?;
@@ -123,6 +131,7 @@ pub(crate) async fn board(State(app): State<AppState>) -> ApiResult<Json<Value>>
             // Polled every few seconds: costs (a sum per session) are left to the session's own view.
             s.as_object_mut().map(|o| o.remove("cost"));
             s["busy"] = json!(running.contains(&r.get::<Uuid, _>("id")));
+            s["waiting"] = json!(r.get::<Option<bool>, _>("waiting").unwrap_or(false));
             if let Some(task) = r.get::<Option<Value>, _>("task") {
                 s["task"] = json!(zen_proto::text_of(&task).chars().take(200).collect::<String>());
             }

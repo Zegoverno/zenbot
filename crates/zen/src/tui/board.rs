@@ -1,5 +1,6 @@
 //! The sessions board: zen's home screen in full screen. Every session in sections (Main, Jobs,
-//! Archived), whether each is running or idle, and the subagents and verifiers working under it.
+//! Archived), whether each is running, idle or waiting on the owner's answers (questions asked
+//! with `ask` and not yet answered), and the subagents and verifiers working under it.
 //! Enter dives into the chosen session (subagents and verifiers read-only); `/board`, or esc on
 //! an empty input, comes back. It refreshes from `GET /api/board` while it's shown.
 
@@ -35,6 +36,8 @@ pub(super) struct Board {
     pub(super) error: Option<String>,
     /// Sessions (with their children) running at the last load.
     pub(super) running: usize,
+    /// Sessions waiting on the owner's answers at the last load (archived ones aside).
+    pub(super) waiting: usize,
 }
 
 /// A session isn't the owner's to type into: the kernel or a parent session drives it.
@@ -80,6 +83,11 @@ fn busy(s: &Value) -> bool {
     s["busy"] == true
 }
 
+/// The session asked the owner questions (`ask`) they haven't answered yet.
+fn waiting(s: &Value) -> bool {
+    s["waiting"] == true
+}
+
 fn title_of(s: &Value) -> String {
     clean(s["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("(untitled)"))
 }
@@ -119,14 +127,15 @@ impl Board {
         let kids = |s: &Value| children.get(s_id(s)).cloned().unwrap_or_default();
         let active = |s: &Value| busy(s) || kids(s).iter().any(|c| busy(c));
         self.running = top.iter().filter(|s| active(s)).count();
+        self.waiting = top.iter().filter(|s| waiting(s) && section(s) != "Archived").count();
         let needle = self.filter.to_lowercase();
         let hit = |s: &Value| needle.is_empty() || title_of(s).to_lowercase().contains(&needle) || task_of(s).to_lowercase().contains(&needle);
 
         let mut rows = Vec::new();
         for name in ["Main", "Jobs", "Archived"] {
             let mut group: Vec<&Value> = top.iter().copied().filter(|s| section(s) == name).filter(|s| hit(s) || kids(s).iter().any(|c| hit(c))).collect();
-            // Running first; otherwise the kernel's order (latest activity first).
-            group.sort_by_key(|s| !active(s));
+            // Waiting on the owner first, then running; otherwise the kernel's order (latest activity first).
+            group.sort_by_key(|s| (!waiting(s), !active(s)));
             let archived = name == "Archived";
             let hidden = archived && !self.archived && needle.is_empty();
             let mut head = vec![(format!(" {}", name.to_uppercase()), Sty::Bold), (format!("  {}", group.len()), Sty::Dim)];
@@ -165,7 +174,13 @@ impl Board {
 
     /// A session's row: state, title (or a child's task), then model, age and its subagents.
     fn session_line(s: &Value, depth: usize, now: i64, spin: usize, running_kids: usize, kids: usize, more: usize) -> Line {
-        let (mark, sty) = if busy(s) || running_kids > 0 { (SPINNER[spin % SPINNER.len()], Sty::Accent) } else { ("○", Sty::Dim) };
+        let (mark, sty) = if waiting(s) && !busy(s) {
+            ("?", Sty::Warn)
+        } else if busy(s) || running_kids > 0 {
+            (SPINNER[spin % SPINNER.len()], Sty::Accent)
+        } else {
+            ("○", Sty::Dim)
+        };
         let mut l: Line = Vec::new();
         if depth > 0 {
             l.push(("    ↳ ".into(), Sty::Dim));
@@ -174,9 +189,12 @@ impl Board {
             l.push((task_of(s), Sty::Plain));
         } else {
             l.push((format!("  {mark} "), sty));
-            l.push((title_of(s), if busy(s) || running_kids > 0 { Sty::Bold } else { Sty::Plain }));
+            l.push((title_of(s), if busy(s) || running_kids > 0 || waiting(s) { Sty::Bold } else { Sty::Plain }));
         }
-        let mut meta = format!("  · {}", model_of(s));
+        if waiting(s) {
+            l.push(("  · waiting on you".into(), Sty::Warn));
+        }
+        let mut meta = format!("{}· {}", if waiting(s) { " " } else { "  " }, model_of(s));
         if busy(s) {
             meta.push_str(" · running");
         } else {
@@ -353,12 +371,18 @@ impl App {
         let total = b.sessions.as_ref().map(|s| s.iter().filter(|s| !s["parent"].is_string()).count()).unwrap_or(0);
         let right = match (&b.sessions, b.running) {
             (None, _) => "loading…".to_string(),
-            (_, 0) => format!("{total} sessions · all idle"),
+            (_, 0) if b.waiting == 0 => format!("{total} sessions · all idle"),
+            (_, 0) => format!("{total} sessions"),
             (_, n) => format!("{total} sessions · {n} running"),
         };
+        // Sessions waiting on the owner stand out in the title, before the count.
+        let ask = if b.sessions.is_some() && b.waiting > 0 { format!("? {} waiting on you · ", b.waiting) } else { String::new() };
         let left = "zen · sessions";
-        let gap = w.saturating_sub(UnicodeWidthStr::width(left) + UnicodeWidthStr::width(right.as_str()) + 1).max(2);
-        let mut out = vec![vec![(left.into(), Sty::Bold), (" ".repeat(gap), Sty::Plain), (right, if b.running > 0 { Sty::Accent } else { Sty::Dim })], Vec::new()];
+        let gap = w.saturating_sub(UnicodeWidthStr::width(left) + UnicodeWidthStr::width(ask.as_str()) + UnicodeWidthStr::width(right.as_str()) + 1).max(2);
+        let mut out = vec![
+            vec![(left.into(), Sty::Bold), (" ".repeat(gap), Sty::Plain), (ask, Sty::Warn), (right, if b.running > 0 { Sty::Accent } else { Sty::Dim })],
+            Vec::new(),
+        ];
         if b.filtering || !b.filter.is_empty() {
             let cursor = if b.filtering { "▏" } else { "" };
             out.push(vec![(" filter: ".into(), Sty::Dim), (format!("{}{cursor}", b.filter), Sty::Accent)]);
@@ -481,6 +505,32 @@ mod tests {
         assert!(rows[at("sessions board feature")].starts_with("›"), "the first session is highlighted: {text}");
         assert!(rows.last().unwrap().contains("enter open · n new session"), "{text}");
         assert!(rows.iter().all(|r| width(r) < 100), "rows fit");
+    }
+
+    #[test]
+    fn sessions_waiting_on_the_owner_are_flagged_and_listed_first() {
+        let mut a = app(100, 30);
+        let mut list = sample();
+        list.push(s("asks", "pricing questions", json!({ "waiting": true, "updated_at": "2026-10-09T10:00:00Z" })));
+        list.push(s("old-ask", "archived question", json!({ "waiting": true, "archived": true })));
+        let mut b = Board { sessions: Some(list), ..Board::default() };
+        b.rebuild(epoch_secs(NOW).unwrap(), 0);
+        a.board = Some(b);
+        a.draw();
+        let rows = plain_rows(&a);
+        let text = rows.join("\n");
+        assert!(rows[0].contains("? 1 waiting on you · 6 sessions · 1 running"), "counted in the title, archived aside: {text}");
+        let at = |needle: &str| rows.iter().position(|r| r.contains(needle)).unwrap_or_else(|| panic!("no {needle}: {text}"));
+        assert!(at("MAIN") < at("pricing questions") && at("pricing questions") < at("sessions board feature"), "waiting before running: {text}");
+        assert!(rows[at("pricing questions")].contains("? pricing questions  · waiting on you · claude-opus-5-5 · 2h"), "{text}");
+        assert!(!rows[at("zenfitness research")].contains("waiting"), "{text}");
+        // Nothing running: the title still says who waits, not "all idle".
+        let mut b = Board { sessions: Some(vec![s("asks", "pricing questions", json!({ "waiting": true }))]), ..Board::default() };
+        b.rebuild(epoch_secs(NOW).unwrap(), 0);
+        a.board = Some(b);
+        a.draw();
+        let top = &plain_rows(&a)[0];
+        assert!(top.contains("? 1 waiting on you · 1 sessions") && !top.contains("idle"), "{top}");
     }
 
     #[tokio::test]

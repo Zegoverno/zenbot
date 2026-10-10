@@ -307,7 +307,8 @@ workshop() {
 
 # Delegation: subagents run their own turns (one on a named model, one routed by the owner's policy),
 # can't ask or delegate, report back; each choice is logged with its probability, and the owner's
-# verdict on the parent is the evidence `zen policy` shows. ask with wait=false keeps the turn going.
+# verdict on the parent is the evidence `zen policy` shows. ask with wait=false keeps the turn going,
+# and the board says the session waits on the owner until they answer.
 delegation() {
   local ws; ws=$(new_workspace delegate)
   start_kernel "$ws" "$(script delegate.json)"
@@ -330,8 +331,15 @@ delegation() {
   check "undo restores the earlier policy" eq "$(zen policy --json | jq -c .policy)" '{"routes":{}}'
   r=$(zen ask --json -m faux/smoke "waitless")
   check "ask with wait=false keeps working" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" ask:false,bash:false
-  # The sessions board: a running subagent shows with its task under its running parent.
+  # The sessions board: a session whose questions the owner hasn't answered is waiting on them,
+  # until the owner's next message; a running subagent shows with its task under its running parent. subagent shows with its task under its running parent.
   board() { curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/board"; }
+  local asked; asked=$(echo "$r" | jq -r .session_id)
+  waiting() { board | jq -r --arg s "$1" '.sessions[] | select(.id == $s) | .waiting'; }
+  check "unanswered questions: waiting on the owner" eq "$(waiting "$asked")" true
+  check "a session that asked nothing isn't" eq "$(waiting "$sid")" false
+  zen ask --json -s "$asked" "b" >/dev/null
+  check "the owner's answer clears it" eq "$(waiting "$asked")" false
   zen ask --json -m faux/smoke "hand off a doze" >/dev/null &
   local asker=$! seen="" i
   for i in $(seq 1 60); do
