@@ -548,6 +548,36 @@ stale_turn() {
   check "the ended turn's late answer was dropped" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND payload::text LIKE '%LATE answer%'")" 0
 }
 
+# The kernel's boundary with its workers: a name in ZEN_WORKERS that isn't a known worker (a
+# retired one) is ignored, not started, and doesn't fail the health check; workers get none of the
+# kernel's secret variables, except the engines' sign-ins.
+engine_boundary() {
+  local ws; ws=$(new_workspace boundary)
+  start_kernel "$ws" "" ZEN_WORKERS=engine,pi,envdump E2E_PLANTED_KEY=planted-worker-secret ANTHROPIC_API_KEY=e2e-sign-in \
+    "ZEN_WORKER_ENVDUMP_CMD=env > $TMP/worker-env; exec python3 $REPO/scripts/e2e/slow_worker.py"
+  local h; h=$(curl -s "$URL/health")
+  check "an unknown worker name doesn't fail the health check" eq "$(echo "$h" | jq -c '[.ok, (.workers | keys)]')" '[true,["engine","envdump"]]'
+  check "it is reported as ignored" eq "$(echo "$h" | jq -c .ignored_workers)" '["pi"]'
+  check "and logged" grep -q "\`pi\`, which isn't a known worker" "$TMP/kernel.log"
+  check "workers get no secret of the kernel's" bash -c '! grep -qE "^(E2E_PLANTED_KEY|ZEN_TOKEN|DATABASE_URL)=" "$1"' _ "$TMP/worker-env"
+  check "but keep the engines' sign-ins" grep -qx "ANTHROPIC_API_KEY=e2e-sign-in" "$TMP/worker-env"
+  check "a turn still runs" eq "$(zen ask --json -m faux/smoke "hi" | jq -r .error)" null
+}
+
+# A turn aborted while its tool runs: the tape still pairs every tool call with a result.
+abort_tool() {
+  local ws; ws=$(new_workspace aborttool)
+  start_kernel "$ws" "$(script abort-tool.json)"
+  local sid; sid=$(zen sessions new --json -m faux/smoke | jq -r .id)
+  python3 scripts/e2e/ws_prompt.py "$URL" "$TOKEN" "$sid" '{"type":"prompt","text":"run the slow command"}' 1 3 >/dev/null
+  check "the turn was interrupted" poll "SELECT outcome FROM turns WHERE session_id='$sid'" interrupted
+  local calls="SELECT b->>'id' FROM tape_events, jsonb_array_elements(payload->'content') b WHERE session_id='$sid' AND payload->>'role'='assistant' AND b->>'type'='toolCall'"
+  check "its tool call is on the tape" eq "$(q "SELECT count(*) FROM ($calls) c")" 1
+  check "with a result saying it was interrupted" grep -q "interrupted" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolCallId' IN ($calls)")"
+  check "and only one" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult'")" 1
+  check "the next turn runs" eq "$(zen ask --json -s "$sid" "again" | jq -r .error)" null
+}
+
 # A session the old briefed workflow left mid-verification still works after an upgrade.
 restart_recovery() {
   local ws; ws=$(new_workspace restart)
@@ -668,6 +698,8 @@ names_suggestions() {
   check "outcomes by prompt version" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/suggestions" | jq -c '.by_version[0] | [.prompt_version, .accepted, .edited, .declined, .unseen]')" '["v1",1,1,1,2]'
 }
 
+run engine-boundary engine_boundary
+run abort-tool abort_tool
 run open-loop open_loop
 run restart-recovery restart_recovery
 run prompt-files prompt_files

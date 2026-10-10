@@ -1,0 +1,5 @@
+[
+  { "when": "slow", "tool": "bash", "args": { "command": "sleep 20; echo too-late" } },
+  { "when": "slow", "text": "never reached" },
+  { "when": "again", "text": "second turn done" }
+]
