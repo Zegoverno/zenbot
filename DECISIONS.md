@@ -237,7 +237,7 @@ kernel's file tree or be mistaken for live data. The move preserves the existing
 **Date:** 2026-10-08 · **Status:** accepted (owner)
 
 **Decision:** `zend` listens on `127.0.0.1` by default (`ZEN_BIND` can opt into another address).
-Only WebSocket upgrades accept a token in the URL. Every tool result, including attached project
+Only WebSocket upgrades accept a token in the URL (since 2026-10-10, with the web UI gone, no request does: header only). Every tool result, including attached project
 instructions, is secret-masked at the dispatcher. Web pages, untrusted MCP tools and approved made
 tools are wrapped and taint their session; web-tainted sessions cannot rewrite an active skill.
 Codex turns and completions use a private `CODEX_HOME` (linking only the owner's ChatGPT sign-in)
@@ -792,7 +792,7 @@ is superseded by D-019; the `pi` worker was retired by D-043.)
 ## D-011 — Interface: the `zen` terminal app
 
 **Decision:** `zen` is a single Rust binary with a Claude Code/Codex/Pi-style terminal app plus script
-commands; the web UI is frozen. zen is used directly, not called from other agents. Supersedes the
+commands; the web UI is frozen (removed on 2026-10-10). zen is used directly, not called from other agents. Supersedes the
 "web UI first" part of D-008.
 
 **Date:** 2026-10-01
@@ -853,7 +853,7 @@ ecosystem (Pi, Claude Agent SDK, MCP SDKs) is TypeScript-first; LLM latency domi
 language doesn't affect speed.
 
 **Superseded:** the TypeScript worker by D-012 (`zen-engine`, Rust) and D-043 (Pi retired); the
-TypeScript web UI by D-011 (the `zen` terminal app; the web UI is frozen).
+TypeScript web UI by D-011 (the `zen` terminal app; the web UI was frozen, then removed on 2026-10-10).
 
 **Date:** 2026-09-30
 
