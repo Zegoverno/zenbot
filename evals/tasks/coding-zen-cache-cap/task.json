@@ -1,0 +1,18 @@
+{
+  "description": "A real zenbot bug, fixed in 31f03b6; the fix's test is hidden until the check.",
+  "work": "build",
+  "steps": [
+    {
+      "shell": "git -C \"$HOME/zenbot\" archive e0adf69 Cargo.toml Cargo.lock crates | tar x && rm -rf crates/zen-matrix && mkdir -p .cargo && printf '[build]\\ntarget-dir = \"%s\"\\n' \"$HOME/.zenbot/evals/cargo-target-zen\" > .cargo/config.toml && git init -q && git add -A && git -c user.name=eval -c user.email=eval@local commit -qm base"
+    },
+    {
+      "prompt": "The web_fetch page cache and the web_search cache in crates/zend/src/web.rs grow without bound in a long-running kernel. Cap each at `const CACHE_ENTRIES: usize = 32`, evicting the oldest entry, through one generic helper `fn cache_insert<K: std::hash::Hash + Eq + Clone, V>(cache: &mut HashMap<K, V>, key: K, value: V, at: impl Fn(&V) -> Instant)` where `at` gives an entry's time (a unit test will call it). Updating a key that's already cached must not evict another entry."
+    }
+  ],
+  "checks": [
+    {
+      "name": "hidden test passes",
+      "run": "python3 \"$TASK_DIR/../coding-zen-insert.py\" crates/zend/src/web.rs \"$TASK_DIR/hidden/test.rs\" && out=$(cargo test -p zend --offline --bin zend -- web_caches_evict_the_oldest_entry_at_the_limit 2>&1); echo \"$out\" | tail -15; echo \"$out\" | grep -q ' 1 passed'"
+    }
+  ]
+}

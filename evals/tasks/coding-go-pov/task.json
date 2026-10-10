@@ -1,0 +1,15 @@
+{
+  "description": "Polyglot benchmark (go/pov, Exercism, MIT): implement from instructions; the tests are hidden until the check.",
+  "work": "build",
+  "steps": [
+    {
+      "prompt": "Solve the exercise in INSTRUCTIONS.md by implementing it in pov.go. Use only the language's standard library. Hidden tests will check your solution against the instructions, so handle the edge cases they describe."
+    }
+  ],
+  "checks": [
+    {
+      "name": "hidden tests pass",
+      "run": "set -o pipefail; cp -a \"$TASK_DIR/hidden/.\" . && go test ./... 2>&1 | tail -20"
+    }
+  ]
+}
