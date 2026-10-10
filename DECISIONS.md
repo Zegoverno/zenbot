@@ -6,6 +6,45 @@
 
 ---
 
+## D-051 — Trust gates: what steers every session, project instructions, the verifier, reviews
+
+**Date:** 2026-10-10 · **Status:** proposed (pending the owner's OK in the pull request) ·
+**Extends:** D-045 (who may change the prompt files), D-034 (untrusted content), D-037 (the workshop)
+
+**Decision:** Text from outside (a web page, an MCP server, a cloned repository) must not be able to
+change what steers every session or reach the kernel's credentials through the kernel's own tools.
+- `edit`/`write` keep D-045's rule for the prompt files and apply it to active (and archived)
+  skills and the agent's made tools too: refused to child and kernel sessions and to tainted
+  sessions; drafts in `skills/_proposed` stay free, since they go through the owner's review. The
+  owner's configuration and secrets (`mcp.json`, `env`, `token`, `matrix.env`, `matrix/`, `bin/`)
+  are refused to every session: the owner edits them by hand. An MCP server's `command` runs as the
+  kernel, so no session may write it.
+- `mcp.json` fills a secret-named `${VAR}` only for a server that lists it in `allow_env`.
+- A project's AGENTS.md or CLAUDE.md found by a tool is attached as instructions only from a
+  trusted repository: zenbot's checkout (`ZEN_REPO`) and the paths in `ZEN_TRUSTED_REPOS`. Any
+  other is attached as untrusted content and taints the session. The files from `/` down to the
+  workspace stay in the system prompt as before.
+- The verifier's shell gets its own processes, no network and an empty home with only the work
+  bound back; its `read` stays inside the work.
+- Taint fails closed: a session whose taint can't be read counts as tainted, and content whose
+  taint can't be recorded is withheld.
+- Session kinds are allow-listed: a kind the kernel doesn't know gets no tools.
+- The owner's accept or reject of a draft skill or a made tool names the fingerprint they
+  reviewed (`zen skills` shows it) and is refused when the content changed; a made tool runs from a
+  private copy of its folder, the copy being what is checked against the approval.
+
+**Why:** A review found each of these reachable from a session that had only read a web page (or
+cloned a repository): an active skill rewritten past the draft review, an `mcp.json` that made the
+kernel start any command with its token, planted instructions the agent was told to follow, the
+kernel's environment readable from the verifier through `/proc`, and approvals that covered content
+the owner never saw.
+
+**Trade-off:** The owner's own projects under the workspace now taint a session whose tools touch
+them until they are listed in `ZEN_TRUSTED_REPOS`. A made tool can't keep state in its own folder
+(it runs from a copy); one that needs to must write elsewhere. A verifier's shell has no network.
+`bash` still runs as the owner's Unix user and can write any of these files (ROADMAP.md, debt): the
+gates close the kernel's own tools, not the shell.
+
 ## D-050 — Evals run only the affected tasks, in parallel, against a cached base
 
 **Date:** 2026-10-10 · **Status:** accepted (owner)

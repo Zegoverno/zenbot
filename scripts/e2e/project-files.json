@@ -1,0 +1,5 @@
+[
+  {"when": "cloned", "tool": "read", "args": {"path": "cloned/README"}},
+  {"when": "mine", "tool": "read", "args": {"path": "mine/README"}},
+  {"text": "Done."}
+]

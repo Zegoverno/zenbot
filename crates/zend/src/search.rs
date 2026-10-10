@@ -579,7 +579,7 @@ async fn run(app: &App, session: Uuid, args: &Value) -> Result<String> {
         || sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM search_docs WHERE kind = 'wiki' AND ref = ANY($1) AND body LIKE '%(web) —%')")
             .bind(&pages).fetch_one(&app.db).await?;
     if tainted {
-        crate::taint::taint(app, session, "search", "results from a session that read web content").await;
+        crate::taint::taint(app, session, "search", "results from a session that read web content").await?;
         return Ok(format!("{header}{}", crate::taint::untrusted("search", q, &render(&listed))));
     }
     Ok(format!("{header}{}", render(&listed)))

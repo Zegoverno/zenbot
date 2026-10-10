@@ -8,5 +8,7 @@
     {"tool": "bash", "args": {"command": "pwd; ls"}},
     {"tool": "write", "args": {"path": "verifier-wrote.txt", "content": "x"}},
     {"tool": "bash", "args": {"command": "touch verifier-touched.txt"}},
+    {"tool": "bash", "args": {"command": "grep -l ZEN_TOKEN /proc/[0-9]*/environ 2>/dev/null; echo procs-checked; (exec 3<>/dev/tcp/127.0.0.1/KERNELPORT) 2>/dev/null && echo reached-kernel || echo no-network; echo home-entries: $(ls -A ~ | wc -l)"}},
+    {"tool": "read", "args": {"path": "~/.zenbot/AGENTS.md"}},
     {"tool": "submit_verdict", "args": {"criteria": [{"id": "c1", "verdict": "pass", "evidence": "in the diff"}, {"id": "c2", "verdict": "uncertain", "evidence": "taste"}]}},
     {"text": "Done."}] }

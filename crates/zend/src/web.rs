@@ -364,7 +364,9 @@ async fn fetch(app: &App, session: Uuid, args: &Value) -> tools::ToolOutput {
             Err(e) => return err(format!("web_fetch {url}: {e}")),
         },
     };
-    taint(app, session, "web_fetch", &page.final_url).await;
+    if let Err(e) = taint(app, session, "web_fetch", &page.final_url).await {
+        return err(crate::taint::withheld(&e));
+    }
     let offset = args["offset"].as_u64().unwrap_or(0) as usize;
     let focus = args["focus"].as_str().map(str::trim).filter(|f| !f.is_empty());
     let mut header = format!("{} {} ({}){}\n", page.status, page.final_url, page.content_type, if page.title.is_empty() { String::new() } else { format!(" — {}", page.title) });
@@ -596,7 +598,9 @@ async fn search(app: &App, session: Uuid, args: &Value) -> tools::ToolOutput {
             }
         }
     };
-    taint(app, session, "web_search", query).await;
+    if let Err(e) = taint(app, session, "web_search", query).await {
+        return err(crate::taint::withheld(&e));
+    }
     if hits.is_empty() {
         return tools::ToolOutput { content: format!("No results for \"{query}\" ({used})."), is_error: false };
     }

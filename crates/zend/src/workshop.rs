@@ -21,6 +21,12 @@
 //! the database, out of the agent's reach) it runs in bubblewrap with no network and a read-only
 //! filesystem; approved, it runs with the network. It never gets the kernel's environment (tokens,
 //! keys), only the basics.
+//!
+//! The owner's decision covers what they reviewed: `zen skills` shows each draft's and tool's
+//! fingerprint, and accepting or rejecting one sends it back; the kernel refuses when the content
+//! changed since. A tool runs from a fresh copy of its folder, fingerprinted as it runs, so it
+//! can't change between the check and the run, and what it writes (a `__pycache__`) never lands in
+//! its folder and never costs it its approval.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -197,10 +203,15 @@ async fn save_skill(app: &App, session: Uuid, args: &Value) -> Result<String> {
     Ok(format!("{what} {domain}/{name} ({}). {next}", dir.display()))
 }
 
-/// Make a draft skill active (or archive it). `by` is who decided.
-pub async fn decide_draft(name: &str, accept: bool, by: &str) -> Result<String> {
+/// Make a draft skill active (or archive it). `by` is who decided; `reviewed` is the fingerprint
+/// of the draft the owner reviewed (`zen skills`), refused when the draft changed since. None only
+/// for the kernel's own decisions (`on_accept`).
+pub async fn decide_draft(db: &sqlx::PgPool, name: &str, accept: bool, by: &str, reviewed: Option<&str>) -> Result<String> {
     let name = name.trim().trim_end_matches('/');
     let draft = skills::lookup(&skills::drafts(), name).map_err(|e| anyhow::anyhow!(e))?.clone();
+    if let Some(r) = reviewed {
+        same_content(&fingerprint(db, &draft.dir).await?, r)?;
+    }
     let to = if accept { skills::root().join(&draft.domain).join(&draft.name) } else { archived_root().join(&draft.domain).join(&draft.name) };
     if to.exists() {
         bail!("{} already exists", to.display());
@@ -223,7 +234,7 @@ pub async fn on_accept(app: &App, session: Uuid) {
     for name in loaded {
         let Ok(d) = skills::lookup(&skills::drafts(), &name).cloned() else { continue };
         if domains.contains(&d.domain) {
-            match decide_draft(&format!("{}/{}", d.domain, d.name), true, "a session that used it was accepted").await {
+            match decide_draft(&app.db, &format!("{}/{}", d.domain, d.name), true, "a session that used it was accepted", None).await {
                 Ok(m) => tracing::info!("{m}"),
                 Err(e) => tracing::warn!("activating {name}: {e:#}"),
             }
@@ -250,7 +261,10 @@ pub async fn stats(db: &sqlx::PgPool) -> Result<Value> {
     for (status, list) in [("active", skills::scan(&skills::root())), ("draft", skills::drafts())] {
         for s in list {
             let r = used(&s);
+            // What the owner reviews a draft by (and sends back to accept or reject it).
+            let sha = if status == "draft" { fingerprint(db, &s.dir).await.ok() } else { None };
             out.push(json!({
+                "sha": sha,
                 "skill": format!("{}/{}", s.domain, s.name), "status": status, "description": s.description,
                 "loads": r.map(|r| r.get::<i64, _>("loads")).unwrap_or(0),
                 "last_load": r.map(|r| r.get::<chrono::DateTime<chrono::Utc>, _>("last")),
@@ -259,7 +273,11 @@ pub async fn stats(db: &sqlx::PgPool) -> Result<Value> {
             }));
         }
     }
-    let tools: Vec<Value> = made_tools(db).await.into_iter().map(|(t, approved)| json!({ "tool": t.name, "approved": approved, "description": t.description })).collect();
+    let mut tools = Vec::new();
+    for (t, approved) in made_tools(db).await {
+        let sha = fingerprint(db, &tools_root().join(&t.name)).await.ok();
+        tools.push(json!({ "tool": t.name, "approved": approved, "description": t.description, "sha": sha }));
+    }
     Ok(json!({ "skills": out, "tools": tools }))
 }
 
@@ -396,15 +414,30 @@ fn content(dir: &Path) -> Vec<u8> {
     all
 }
 
-/// The SHA-256 of a tool's content (computed by Postgres: no hashing crate needed).
-async fn fingerprint(db: &sqlx::PgPool, name: &str) -> Result<String> {
-    Ok(sqlx::query_scalar("SELECT encode(sha256($1), 'hex')").bind(content(&tools_root().join(name))).fetch_one(db).await?)
+/// The SHA-256 of a folder's content: a tool's or a draft skill's (computed by Postgres: no
+/// hashing crate needed).
+async fn fingerprint(db: &sqlx::PgPool, dir: &Path) -> Result<String> {
+    anyhow::ensure!(dir.is_dir(), "{} doesn't exist", dir.display());
+    Ok(sqlx::query_scalar("SELECT encode(sha256($1), 'hex')").bind(content(dir)).fetch_one(db).await?)
 }
 
-/// The owner approves (or rejects) a tool the agent made. Approval covers the tool as it is now: a
-/// later change to its manifest or files puts it back in the sandbox until approved again.
-pub async fn decide_tool(db: &sqlx::PgPool, name: &str, accept: bool) -> Result<String> {
-    let sha = fingerprint(db, name).await?;
+/// Whether the fingerprint the owner reviewed (all of it, or its first 8 or more characters, as
+/// `zen skills` shows it) is the content's now.
+fn same_content(now: &str, reviewed: &str) -> Result<()> {
+    let r = reviewed.trim().to_lowercase();
+    anyhow::ensure!(r.len() >= 8, "give the fingerprint you reviewed (`zen skills` shows it; 8 characters or more)");
+    anyhow::ensure!(now.starts_with(&r), "it changed since you reviewed it (now {}): look at it again (`zen skills`)", &now[..12.min(now.len())]);
+    Ok(())
+}
+
+/// The owner approves (or rejects) a tool the agent made, as reviewed (its fingerprint, `reviewed`).
+/// Approval covers the tool as it is now: a later change to its manifest or files puts it back in
+/// the sandbox until approved again.
+pub async fn decide_tool(db: &sqlx::PgPool, name: &str, accept: bool, reviewed: &str) -> Result<String> {
+    let dir = tools_root().join(name);
+    anyhow::ensure!(valid_name(name) && dir.join("tool.json").is_file(), "no tool `{name}`");
+    let sha = fingerprint(db, &dir).await?;
+    same_content(&sha, reviewed)?;
     let n = sqlx::query(if accept {
         "UPDATE made_tools SET approved_at = now(), approved_sha = $2, rejected_at = NULL WHERE name = $1"
     } else {
@@ -433,12 +466,61 @@ async fn drain_capped(mut pipe: impl tokio::io::AsyncRead + Unpin, cap: usize) -
     kept
 }
 
+/// Copy a tool's folder (without `.git`; symlinks as symlinks, never followed).
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        if e.file_name() == ".git" {
+            continue;
+        }
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        let kind = e.file_type()?;
+        if kind.is_dir() {
+            copy_tree(&src, &dst)?;
+        } else if kind.is_symlink() {
+            std::os::unix::fs::symlink(std::fs::read_link(&src)?, &dst)?;
+        } else if kind.is_file() {
+            std::fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
+}
+
+/// A private copy of a tool's folder, removed when dropped.
+struct RunCopy(PathBuf);
+
+impl RunCopy {
+    fn of(name: &str) -> Result<Self> {
+        use std::os::unix::fs::DirBuilderExt;
+        let root = std::env::temp_dir().join(format!("zen-tool-{}", Uuid::new_v4()));
+        std::fs::DirBuilder::new().mode(0o700).create(&root)?;
+        let copy = RunCopy(root);
+        copy_tree(&tools_root().join(name), &copy.dir(name)).context("copying the tool")?;
+        Ok(copy)
+    }
+
+    fn dir(&self, name: &str) -> PathBuf {
+        self.0.join(name)
+    }
+}
+
+impl Drop for RunCopy {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Run a tool the agent made: arguments as JSON on stdin, output from stdout and stderr. Sandboxed
 /// (no network, read-only files, an empty home folder) until the owner approves it; never with the
-/// kernel's environment; its process group is killed after 120 s.
+/// kernel's environment; its process group is killed after 120 s. It runs from a private copy of
+/// its folder, which is what is checked against the approval (nothing can change it in between)
+/// and what it writes to (dropped after the run).
 /// Returns the output, whether it failed, and whether it ran with the network (approved).
 pub async fn run_made(db: &sqlx::PgPool, name: &str, args: &Value) -> Result<(String, bool, bool)> {
-    let dir = tools_root().join(name);
+    anyhow::ensure!(valid_name(name) && tools_root().join(name).join("tool.json").is_file(), "no such tool");
+    let copy = RunCopy::of(name)?;
+    let dir = copy.dir(name);
     let m: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("tool.json")).context("no such tool")?)?;
     let command = m["command"].as_str().context("the manifest has no command")?.to_string();
     let row = sqlx::query("SELECT approved_at IS NOT NULL AND rejected_at IS NULL AS ok, rejected_at IS NOT NULL AS rejected, approved_sha FROM made_tools WHERE name = $1")
@@ -448,7 +530,7 @@ pub async fn run_made(db: &sqlx::PgPool, name: &str, args: &Value) -> Result<(St
     let (approved, rejected, sha) = row.map(|r| (r.get::<bool, _>("ok"), r.get::<bool, _>("rejected"), r.get::<Option<String>, _>("approved_sha"))).unwrap_or((false, false, None));
     anyhow::ensure!(!rejected, "the owner rejected this tool");
     // Approval covers the content the owner saw: a changed tool runs sandboxed again.
-    let changed = approved && sha.as_deref() != Some(fingerprint(db, name).await?.as_str());
+    let changed = approved && sha.as_deref() != Some(fingerprint(db, &dir).await?.as_str());
     let approved = approved && !changed;
     let keep = ["PATH", "HOME", "USER", "LANG", "LC_ALL", "TZ"];
     let mut cmd = if approved {
@@ -603,6 +685,23 @@ mod tests {
         assert!(bytes.windows(5).any(|w| w == b"cycle"));
         assert!(bytes.len() < 100, "a symlink cycle must not expand");
 
+    }
+
+    #[test]
+    fn a_copy_has_the_same_content_and_a_review_names_it() {
+        let dir = crate::test_util::TestDir::new("copy-tool");
+        let tool = dir.join("t");
+        std::fs::create_dir_all(tool.join("lib/.git")).unwrap();
+        std::fs::write(tool.join("tool.json"), "{}").unwrap();
+        std::fs::write(tool.join("lib/run.py"), "print(1)").unwrap();
+        std::os::unix::fs::symlink("lib/run.py", tool.join("run.py")).unwrap();
+        copy_tree(&tool, &dir.join("copy")).unwrap();
+        assert_eq!(content(&tool), content(&dir.join("copy")), "the copy is what gets fingerprinted");
+        assert!(std::fs::symlink_metadata(dir.join("copy/run.py")).unwrap().file_type().is_symlink());
+        let now = "0123456789abcdef";
+        assert!(same_content(now, "0123456789AB").is_ok() && same_content(now, now).is_ok());
+        assert!(same_content(now, "01234").is_err(), "too short to mean anything");
+        assert!(same_content(now, "fedcba98").unwrap_err().to_string().contains("changed since you reviewed it"));
     }
 
     #[test]

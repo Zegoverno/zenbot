@@ -134,16 +134,21 @@ changes. Candidate follow-ups, each only when use calls for it:
   event types), so `zen` and `zen-matrix` each parse them by hand.
 - The old workflow's schema stays (expand-only): `sessions.state` and old tape block kinds.
   Drop them in a later release; `policies` is in use by model routing.
-- Prompt files (`SOUL`, `IDENTITY`, `AGENTS`, `USER`) are guarded only at `edit`/`write`, and only
-  for child and kernel sessions (subagents, verifiers, jobs) and tainted sessions (D-045); `bash`
-  can still write them. Unused since D-045: new `memories.tier = 'long'` rows (old ones stay
+- Prompt files (`SOUL`, `IDENTITY`, `AGENTS`, `USER`), active skills and made tools are guarded
+  only at `edit`/`write`, and only for child and kernel sessions (subagents, verifiers, jobs) and
+  tainted sessions (D-045, D-051); the owner's config and secrets (`mcp.json`, `env`, `token`,
+  `matrix*`, `bin/`) for every session. `bash` can still write all of them. Unused since D-045: new `memories.tier = 'long'` rows (old ones stay
   searchable) and `sleep_runs.proposed` (always 0); drop them in a later release.
 - Tools run as the same Unix user as the owner. Shell subprocesses no longer inherit kernel secrets,
-  and the verifier hides token files, but an ordinary agent shell can still read the owner's files.
+  and the verifier's shell has its own processes, no network and an empty home (D-051), but an
+  ordinary agent shell can still read the owner's files, `/proc/<zend pid>/environ` included.
   Strong isolation requires a separate Unix user and a credential the agent cannot read.
-- Verify criteria use a read-only bubblewrap shell. What each kind of session may call is decided
-  in one place (`agent::refusal`), but taint rules are still checked inside each tool (memory,
-  wiki, skills, jobs, delegation); they belong at the dispatch boundary too.
+- What each kind of session may call is decided in one place (`agent::refusal`, an allow-list per
+  kind), but taint rules are still checked inside each tool (memory, wiki, skills, jobs,
+  delegation); they belong at the dispatch boundary too.
+- A draft activated because a session that loaded it was accepted (`workshop::on_accept`) isn't
+  tied to the content that session loaded; the owner's own accept is (D-051). Reading a project's
+  files with `read` or `bash` isn't taint, only its AGENTS.md is.
 - Paths never run with real models: the new tools (`remember`, `load_skill`, `verify`, `ask`) on
   Codex, a model switch mid-session, a failed verification followed by a real fix.
 

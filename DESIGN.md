@@ -82,7 +82,8 @@ its turn context (the date) at the end, sent only when it
 changed. The system prompt is the prompt files (laid out by scope, `layout.rs`, D-040) `~/.zenbot/agents/zenbot/SOUL.md`, then `agents/zenbot/IDENTITY.md`, `AGENTS.md` (the environment)
 and `USER.md`, short-term memory as of the session's start, the skills index, then `AGENTS.md` (or
 `CLAUDE.md`) from `/` down to the workspace; a project's file found later by a tool is attached to
-that tool result and kept. The kernel writes missing default prompt files and skills at start
+that tool result and kept: as instructions when the project is a trusted repository (zenbot's
+checkout, `ZEN_TRUSTED_REPOS`), otherwise as untrusted content that taints the session (D-051). The kernel writes missing default prompt files and skills at start
 (`crates/zend/defaults/`), never overwriting. Each zenbot session keeps a matching Claude Code session (`--resume`) or Codex thread, so
 earlier turns come from the provider's cache. Past 70% of the context budget, older turns are
 summarized in the background with block addresses; the `history` tool reads any block back.
@@ -105,8 +106,8 @@ Fixed order, the same every turn of a session (`agent::specs`): `bash`, `read`, 
 `load_skill`, `save_skill`, `find_tools`, `load_tool`, `call_tool`, `save_tool`, `verify`,
 `delegate`, `schedule`, and `decide` when a System One model is configured (and neither
 `ZEN_S1_PRIVATE` nor `ZEN_DECIDE_TOOL` is 0). Subagents and job sessions don't get `ask`,
-`delegate` or `schedule`; a verifier session gets only `bash` (read-only, bubblewrap), `read` and
-`submit_verdict`. Each description says what the tool does, when to use it and when not, and what
+`delegate` or `schedule`; a verifier session gets only `bash` (read-only, bubblewrap), `read`
+(inside the work it checks) and `submit_verdict`; a session of any other kind gets no tools. Each description says what the tool does, when to use it and when not, and what
 it returns. Tool output is cut once, when the tool runs (full output saved and referenced); edits
 are serialized per file and CRLF/BOM-safe; tools are cancelled with their process group on abort.
 
@@ -183,7 +184,9 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
   near-duplicates refused, drafts in `skills/_proposed` until the owner or an accepted session
   vouches, new domains the owner's call, commits; the sleep flags and archives unused skills) and
   `save_tool` (made tools in `~/.zenbot/global/tools/`, called as `made_<name>`, sandboxed without network
-  until approved in `made_tools`).
+  until approved in `made_tools`; each run uses a private copy of the tool's folder, which is what
+  is checked against the approval). The owner accepts or rejects a draft or a tool by the
+  fingerprint `zen skills` showed, refused when the content changed since (D-051).
 - **Delegation** (`delegate.rs`, D-038): subagents (kind `subagent`, no `ask`, `delegate` or
   `schedule`; they inherit the parent's taint), several
   tasks per call in parallel; the model from the routing policy (`policies`) by kind of work, with
@@ -226,13 +229,16 @@ harness versions with the same model on isolated kernels and databases (`evals/R
 - **Untrusted content** (D-034): results are wrapped in `<untrusted …>` (markers inside are
   defused) and the session is tainted (`sessions.tainted_at`, a `taint` block); `remember` from a
   tainted session records `inferred`, so web text can't pass as the owner's words, and its `edit` or
-  `write` on a prompt file (`SOUL`, `IDENTITY`, `AGENTS`, `USER`) is refused, as for any subagent
-  or kernel session (D-045). A main session may write `IDENTITY.md` and `USER.md` itself; each
-  change is backed up first (`~/.zenbot/backups/prompt-files/`) and one that passes the file's cap
-  comes back with a request to compact it.
+  `write` on a prompt file (`SOUL`, `IDENTITY`, `AGENTS`, `USER`), an active skill or a made tool is
+  refused, as for any subagent or kernel session (D-045, D-051). A main session may write
+  `IDENTITY.md` and `USER.md` itself; each change is backed up first
+  (`~/.zenbot/backups/prompt-files/`) and one that passes the file's cap comes back with a request
+  to compact it. No session may `edit` or `write` the owner's configuration and secrets
+  (`mcp.json`, `env`, `token`, `matrix.env`, `matrix/`, `bin/`). When the taint can't be read the
+  session counts as tainted; when it can't be recorded the content is withheld.
 - **MCP** (`mcp.rs`, D-033): servers in `~/.zenbot/mcp.json` (stdio or streamable HTTP, `${VAR}`
-  from the environment, `include`/`exclude`, `timeout_s`, `untrusted`, default true for remote
-  servers). The tool list never changes: `find_tools` ranks tools by name and description,
+  from the environment, a secret-named one only when the server lists it in `allow_env`,
+  `include`/`exclude`, `timeout_s`, `untrusted`, default true for remote servers). The tool list never changes: `find_tools` ranks tools by name and description,
   `load_tool` returns the schema, `call_tool` checks required arguments, runs the call with a
   timeout, masks and caps the output (the rest to `~/.zenbot/outputs`), and wraps untrusted output.
   `GET /api/mcp` shows servers and problems.
@@ -241,14 +247,23 @@ harness versions with the same model on isolated kernels and databases (`evals/R
 
 One owner token for the API. The listener binds to loopback by default (`ZEN_BIND` opts into an
 external address); the token goes only in the `Authorization` header, never the URL. Every tool runs in the kernel; a
-verifier runs read-only in bubblewrap. Worker shells do not inherit kernel secret variables, and
-the verifier hides token files. Made tools run without network and with an empty home until approved.
+verifier's shell runs read-only in bubblewrap with its own processes (the kernel's `/proc` out of
+sight), no network and an empty home with only the work bound back and the secret files hidden;
+its `read` stays inside the work. Worker shells do not inherit kernel secret variables. Made tools
+run from a private copy of their folder, without network and with an empty home until the owner
+approves the content they reviewed. `edit`/`write` can't change the owner's configuration and
+secrets from any session, nor the prompt files, active skills or made tools from a tainted, child or
+kernel session (D-051). `mcp.json` passes a secret-named variable only to a server that lists it in
+`allow_env`.
 Codex turns and tool-free completions use a private `CODEX_HOME` (only the owner's sign-in is linked)
 and disable Codex's built-in tools, MCP servers and project docs.
-Web pages and untrusted MCP output (including tool descriptions) taint the session and are wrapped.
+Web pages, untrusted MCP output (including tool descriptions) and instruction files from
+repositories the owner hasn't listed (`ZEN_TRUSTED_REPOS`) taint the session and are wrapped; taint
+fails closed.
 All tool output is masked before reaching the model or tape; full outputs stay under
 `~/.zenbot/outputs`. **This is not a security boundary against the agent:** ordinary commands still
-run as the owner's Unix user and can read the owner's files, including `~/.zenbot/token`. Strong
+run as the owner's Unix user and can read and write the owner's files, including `~/.zenbot/token`
+and the files `edit`/`write` protect. Strong
 isolation needs a separate uid and an owner credential unavailable to it. Outward-facing actions
 are covered by the system prompt ("ask before"), not enforced.
 

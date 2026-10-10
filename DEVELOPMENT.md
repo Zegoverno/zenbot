@@ -341,13 +341,13 @@ cat ~/.zenbot-dev/global/wiki/index.md
 `save_skill` creates or improves a skill (new ones are drafts in `global/skills/_proposed/`); `save_tool` makes a tool in `global/tools/<name>/`, offered through `find_tools` / `call_tool` as `made_<name>`. The owner reviews them from the CLI:
 
 ```bash
-zen skills                                   # skills with their use, drafts marked; the made tools
-zen skills accept work/release-notes         # activate a draft (reject moves it to _archived)
-zen tools accept word-count                  # let a made tool run unsandboxed, with the network
+zen skills                                   # skills with their use, drafts marked with their fingerprint; the made tools with theirs
+zen skills accept work/release-notes 3f9a0c1d2e4b  # activate the draft you reviewed (reject moves it to _archived)
+zen tools accept word-count 81c2d0a7f3e9     # let the made tool you reviewed run unsandboxed, with the network
 git -C ~/.zenbot-dev/global/skills log --oneline   # every change the dev kernel made to its skills
 ```
 
-A draft also becomes active when the owner accepts a session that loaded it (`zen sessions decide <id> accept`), unless it opens a new domain. Unapproved tools run in bubblewrap with the filesystem read-only and no network; approval is stored in the `made_tools` table. The nightly sleep flags skills unused for 30 days and archives them at 90. To test without a subscription, see the `workshop` e2e scenario and `scripts/e2e/workshop.json`.
+A draft also becomes active when the owner accepts a session that loaded it (`zen sessions decide <id> accept`), unless it opens a new domain. Accepting or rejecting names the fingerprint `zen skills` showed and is refused when the content changed since. Each run of a made tool uses a temporary copy of its folder (what it writes there is dropped). Unapproved tools run in bubblewrap with the filesystem read-only and no network; approval is stored in the `made_tools` table. The nightly sleep flags skills unused for 30 days and archives them at 90. To test without a subscription, see the `workshop` e2e scenario and `scripts/e2e/workshop.json`.
 
 ## Delegation and the routing policy
 
@@ -422,7 +422,7 @@ The e2e test needs nothing paid: the kernel runs only the faux model with OpenRo
 
 - **Never** run `systemctl restart zenbot` (or stop/start) or kill `zend` from inside a session. Use `scripts/upgrade.sh`.
 - Migrations are **expand-only**, in new files; never edit an applied one.
-- No secrets in the repo, logs or tool output. **Never print `~/.zenbot/token`** or `~/.zenbot/env` (it holds the token and API keys, such as search keys). Put secrets an MCP server needs in `env` and refer to them as `${VAR}` in `mcp.json`.
+- No secrets in the repo, logs or tool output. **Never print `~/.zenbot/token`** or `~/.zenbot/env` (it holds the token and API keys, such as search keys). Put secrets an MCP server needs in `env` and refer to them as `${VAR}` in `mcp.json`, listed in that server's `allow_env`.
 - Keep engines' own tools switched off; every action goes through the kernel.
 - Don't add dependencies without a good reason.
 
@@ -449,7 +449,7 @@ scripts/db.sh pending               # migrations not yet applied
 | e2e check fails on the read-only shell | `bubblewrap` missing |
 | e2e `mcp`, `web` or `wiki` fails to start its server | `python3` missing, or the e2e port + 1 / + 2 is taken |
 | `web_search failed: … searxng at http://127.0.0.1:8888` | SearXNG not running: `docker compose -f deploy/compose.yaml up -d searxng` |
-| `find_tools` lists problems | `~/.zenbot/mcp.json` (invalid JSON, a server with both or neither of `command`/`url`, an unset `${VAR}`); `GET /api/mcp` shows the same |
+| `find_tools` lists problems | `~/.zenbot/mcp.json` (invalid JSON, a server with both or neither of `command`/`url`, an unset `${VAR}`, or a secret-named one the server doesn't list in `allow_env`); `GET /api/mcp` shows the same |
 | `search` finds nothing recent | the indexer runs every `ZEN_INDEX_SECS`; `search` also indexes before it queries. Warnings `search index:` / `embedding search documents:` in the kernel log |
 | A build is killed with no compiler error | out of memory: `CARGO_BUILD_JOBS=2`, one build at a time |
 | Upgrade compiles instead of downloading | local changes under `crates/` or `Cargo.*`, or CI hasn't published this commit yet (`scripts/fetch-release.sh --check HEAD`) |

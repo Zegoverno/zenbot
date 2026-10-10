@@ -31,43 +31,135 @@ pub fn read_only(kind: Option<&str>) -> bool {
 
 /// Why a session of this kind may not call `name`, if it may not. The one place the kernel enforces
 /// what each kind of session may do (what it is offered is `specs`, which follows the same rules).
+/// Each kind is allowed what it needs; a kind not named here gets nothing.
 pub fn refusal(kind: Option<&str>, name: &str) -> Option<String> {
-    if read_only(kind) && !matches!(name, "bash" | "read" | "submit_verdict") {
-        return Some(format!("`{name}` isn't available to a verifier"));
+    match kind {
+        None => (name == "submit_verdict").then(|| "`submit_verdict` is only for a verifier session".into()),
+        Some(VERIFIER) => (!matches!(name, "bash" | "read" | "submit_verdict")).then(|| format!("`{name}` isn't available to a verifier")),
+        // A subagent (also the sleep's kernel sessions) or a scheduled job can't ask the owner,
+        // delegate or schedule.
+        Some(crate::delegate::SUBAGENT) if matches!(name, "ask" | "delegate" | "schedule") => {
+            Some(format!("`{name}` isn't available to a subagent: decide yourself and say what you assumed"))
+        }
+        Some(crate::jobs::JOB) if matches!(name, "ask" | "delegate" | "schedule") => {
+            Some(format!("`{name}` isn't available in a scheduled job: no one is in the conversation; decide yourself and say what you assumed in the report"))
+        }
+        Some(crate::delegate::SUBAGENT | crate::jobs::JOB) => (name == "submit_verdict").then(|| "`submit_verdict` is only for a verifier session".into()),
+        Some(other) => Some(format!("a `{other}` session has no tools")),
     }
-    if !read_only(kind) && name == "submit_verdict" {
-        return Some("`submit_verdict` is only for a verifier session".into());
-    }
-    if kind == Some(crate::delegate::SUBAGENT) && matches!(name, "ask" | "delegate" | "schedule") {
-        return Some(format!("`{name}` isn't available to a subagent: decide yourself and say what you assumed"));
-    }
-    if kind == Some(crate::jobs::JOB) && matches!(name, "ask" | "delegate" | "schedule") {
-        return Some(format!("`{name}` isn't available in a scheduled job: no one is in the conversation; decide yourself and say what you assumed in the report"));
-    }
-    None
+}
+
+/// Whether the kernel knows this kind of session (an unknown kind is offered no tools).
+fn known(kind: Option<&str>) -> bool {
+    matches!(kind, None | Some(VERIFIER | crate::delegate::SUBAGENT | crate::jobs::JOB))
 }
 
 /// The prompt files that steer every session, under the zen home.
 const PROMPT_FILES: [&str; 4] = [crate::layout::SOUL, crate::layout::IDENTITY, "AGENTS.md", "USER.md"];
 
-/// The prompt file an `edit` or `write` call targets, if it targets one (through `~`, relative
-/// paths, `..` or symlinks such as the old `~/.zenbot/SOUL.md`).
-pub fn prompt_file_target(home: &Path, workspace: &Path, name: &str, args: &Value) -> Option<PathBuf> {
+/// The owner's configuration and secrets under the zen home: the agent never changes them with
+/// `edit` or `write` (the owner edits them by hand). `matrix` and `bin` are folders.
+const OWNER_FILES: [&str; 6] = ["mcp.json", "env", "token", "matrix.env", "matrix", "bin"];
+
+/// A file an `edit` or `write` call may not change freely.
+#[derive(Debug, PartialEq)]
+pub enum Protected {
+    /// A prompt file: it steers every session.
+    PromptFile(PathBuf),
+    /// An active (or archived) skill, or a tool the agent made: they steer every session too.
+    /// Drafts (`skills/_proposed`) are free: they go through the owner's review.
+    Steering(PathBuf),
+    /// The owner's configuration and secrets (`OWNER_FILES`, and mcp.json wherever ZEN_MCP_CONFIG puts it).
+    OwnerOnly(PathBuf),
+}
+
+/// Where the protected files are: the zen home, and the skills, tools and MCP config (each can be
+/// moved by a setting).
+pub struct Guarded {
+    pub home: PathBuf,
+    pub skills: PathBuf,
+    pub tools: PathBuf,
+    pub mcp: PathBuf,
+}
+
+impl Guarded {
+    pub fn current() -> Self {
+        Guarded { home: crate::zen_home(), skills: crate::skills::root(), tools: crate::workshop::tools_root(), mcp: crate::mcp::config_path() }
+    }
+}
+
+/// The real path a tool would write: symlinks resolved as far as the path exists, the rest (folders
+/// `write` would create) added after it, `..` and all.
+fn real(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let parts: Vec<Component> = p.components().collect();
+    for split in (1..=parts.len()).rev() {
+        let head: PathBuf = parts[..split].iter().collect();
+        let Ok(mut out) = std::fs::canonicalize(&head) else { continue };
+        let rest = &parts[split..];
+        let climbs = rest.iter().any(|c| matches!(c, Component::ParentDir));
+        for c in rest {
+            match c {
+                Component::ParentDir => {
+                    out.pop();
+                }
+                Component::CurDir => {}
+                c => out.push(c),
+            }
+        }
+        // A `..` past a missing folder lands somewhere that may exist (and be a symlink): resolve again.
+        return if climbs { real(&out) } else { out };
+    }
+    p.to_path_buf()
+}
+
+/// What an `edit` or `write` call targets, if it is protected (however it is named: `~`, relative
+/// paths, `..`, symlinks such as the old `~/.zenbot/SOUL.md`, or folders that don't exist yet).
+pub fn protected_target(g: &Guarded, workspace: &Path, name: &str, args: &Value) -> Option<Protected> {
     if !matches!(name, "edit" | "write") {
         return None;
     }
-    // The real path, or the real folder plus the name for a file that doesn't exist yet.
-    let real = |p: &Path| std::fs::canonicalize(p).ok().or_else(|| Some(std::fs::canonicalize(p.parent()?).ok()?.join(p.file_name()?)));
-    let target = real(&tools::resolve(workspace, args["path"].as_str()?))?;
-    PROMPT_FILES.iter().any(|rel| real(&home.join(rel)).as_ref() == Some(&target)).then_some(target)
+    let target = real(&tools::resolve(workspace, args["path"].as_str()?));
+    let is = |p: PathBuf| real(&p) == target;
+    let under = |p: PathBuf| target.starts_with(real(&p));
+    if PROMPT_FILES.iter().any(|rel| is(g.home.join(rel))) {
+        return Some(Protected::PromptFile(target));
+    }
+    if OWNER_FILES.iter().any(|rel| under(g.home.join(rel))) || is(g.mcp.clone()) {
+        return Some(Protected::OwnerOnly(target));
+    }
+    if (under(g.skills.clone()) && !under(g.skills.join("_proposed"))) || under(g.tools.clone()) {
+        return Some(Protected::Steering(target));
+    }
+    None
 }
 
-/// Why this session may not change a prompt file with this call, if it may not (D-045). The agent
-/// writes what's really important straight into `IDENTITY.md` and `USER.md`; a subagent (any child
-/// or kernel session) or a session that has read untrusted content (web, MCP, a tainted subagent)
-/// is refused, so text from outside can't rewrite the agent's instructions. `bash` can still write files as the owner's Unix user (ROADMAP.md, debt).
-pub async fn prompt_file_refusal(db: &PgPool, session: Uuid, kind: Option<&str>, workspace: &Path, name: &str, args: &Value) -> Option<String> {
-    let path = prompt_file_target(&crate::zen_home(), workspace, name, args)?;
+/// The prompt file an `edit` or `write` call targets, if it targets one (it is backed up first).
+pub fn prompt_file_target(workspace: &Path, name: &str, args: &Value) -> Option<PathBuf> {
+    match protected_target(&Guarded::current(), workspace, name, args)? {
+        Protected::PromptFile(p) => Some(p),
+        _ => None,
+    }
+}
+
+/// Why this session may not change a protected file with this call, if it may not (D-045). The
+/// agent writes what's really important straight into `IDENTITY.md` and `USER.md`, and may improve
+/// an active skill or its own tool; a subagent (any child or kernel session) or a session that has
+/// read untrusted content (web, MCP, a tainted subagent, an untrusted project's instructions) is
+/// refused, so text from outside can't rewrite what steers every session. The owner's configuration
+/// and secrets are refused to every session: an MCP server's `command` runs as the kernel. `bash`
+/// can still write files as the owner's Unix user (ROADMAP.md, debt).
+pub async fn protected_refusal(db: &PgPool, session: Uuid, kind: Option<&str>, workspace: &Path, name: &str, args: &Value) -> Option<String> {
+    let (path, what) = match protected_target(&Guarded::current(), workspace, name, args)? {
+        Protected::OwnerOnly(p) => {
+            return Some(format!(
+                "{} is the owner's own configuration (secrets, MCP servers, the kernel's files): only the owner changes it, by hand. Give the exact change in your answer instead.",
+                p.display()
+            ))
+        }
+        Protected::PromptFile(p) => (p, "it steers every session"),
+        Protected::Steering(p) => (p, "active skills and the tools you made steer every session"),
+    };
     let who = if kind.is_some() {
         "A subagent"
     } else if crate::taint::tainted(db, session).await {
@@ -76,7 +168,7 @@ pub async fn prompt_file_refusal(db: &PgPool, session: Uuid, kind: Option<&str>,
         return None;
     };
     Some(format!(
-        "{who} can't change {}: it steers every session. Give the exact edit in your answer instead; the owner can approve it in a fresh session.",
+        "{who} can't change {}: {what}. Give the exact edit in your answer instead; the owner can approve it in a fresh session.",
         path.display()
     ))
 }
@@ -163,6 +255,9 @@ fn decide_on() -> bool {
 
 /// The tools a session of this kind is offered, in a fixed order.
 pub fn specs(kind: Option<&str>) -> Value {
+    if !known(kind) {
+        return json!([]);
+    }
     let builtins = tools::specs().as_array().cloned().unwrap_or_default();
     if read_only(kind) {
         let mut picked: Vec<Value> = builtins.into_iter().filter(|t| matches!(t["name"].as_str(), Some("read" | "bash"))).collect();
@@ -226,7 +321,9 @@ pub async fn run_tool(app: &AppState, session: Uuid, workspace: &Path, name: &st
             if let (Some(other), false) = (other, is_error) {
                 let tainted = crate::taint::prefix_tainted(&app.db, &other.to_lowercase()).await;
                 if tainted {
-                    crate::taint::taint(app, session, "history", other).await;
+                    if let Err(e) = crate::taint::taint(app, session, "history", other).await {
+                        return out(crate::taint::withheld(&e), true);
+                    }
                     return out(crate::taint::untrusted("history", other, &content), false);
                 }
             }
@@ -381,6 +478,12 @@ fn criteria_of(args: &Value) -> Vec<Value> {
         .collect()
 }
 
+/// An id that more than one criterion has, if any.
+fn duplicate_id(criteria: &[Value]) -> Option<String> {
+    let mut seen = std::collections::HashSet::new();
+    criteria.iter().filter_map(|c| c["id"].as_str()).find(|id| !seen.insert(*id)).map(String::from)
+}
+
 /// Combine the kernel's checks and the verifier's verdict: a failed command can't be overridden;
 /// otherwise the verifier's judgment, or uncertain when there was none.
 pub fn combine(criteria: &[Value], checks: &serde_json::Map<String, Value>, verdict: &Value) -> Vec<Value> {
@@ -437,6 +540,10 @@ async fn verify(app: &AppState, session: Uuid, workspace: &Path, args: &Value) -
     let criteria = criteria_of(args);
     if goal.is_empty() || criteria.is_empty() || criteria.iter().any(|c| c["text"].as_str().is_none_or(|t| t.trim().is_empty())) {
         return err("verify needs a `goal` and at least one criterion with `text`.".into());
+    }
+    // Each check is kept by its criterion's id: two criteria with one id would hide one's result.
+    if let Some(id) = duplicate_id(&criteria) {
+        return err(format!("two criteria have the id `{id}`: give each its own (or leave ids out)."));
     }
     let dir: PathBuf = args["dir"].as_str().map(|d| tools::resolve(workspace, d)).unwrap_or_else(|| workspace.to_path_buf());
     if !dir.is_dir() {
@@ -499,21 +606,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prompt_files_are_recognized_however_they_are_named() {
+    fn protected_files_are_recognized_however_they_are_named() {
         let home = crate::test_util::TestDir::new("prompt-files");
         std::fs::create_dir_all(home.join("agents/zenbot")).unwrap();
+        std::fs::create_dir_all(home.join("global/skills/work/verify")).unwrap();
+        std::fs::create_dir_all(home.join("global/tools")).unwrap();
         std::fs::write(home.join("agents/zenbot/SOUL.md"), "soul").unwrap();
         std::fs::write(home.join("USER.md"), "user").unwrap();
         std::os::unix::fs::symlink("agents/zenbot/SOUL.md", home.join("SOUL.md")).unwrap();
+        std::os::unix::fs::symlink("global/skills", home.join("skills")).unwrap();
+        let g = Guarded { home: home.to_path_buf(), skills: home.join("global/skills"), tools: home.join("global/tools"), mcp: home.join("mcp.json") };
         let ws = home.join("agents");
-        let hit = |name: &str, path: &str| prompt_file_target(&home, &ws, name, &json!({ "path": path })).is_some();
-        assert!(hit("edit", &home.join("USER.md").display().to_string()));
-        assert!(hit("write", "../USER.md"), "relative with ..");
-        assert!(hit("edit", &home.join("SOUL.md").display().to_string()), "the old path is a symlink to the soul");
-        assert!(hit("write", "zenbot/IDENTITY.md"), "a prompt file that doesn't exist yet");
-        assert!(!hit("read", "../USER.md"), "reading is fine");
-        assert!(!hit("edit", "zenbot/notes.md"));
-        assert!(!hit("edit", "/home/nobody/USER.md"));
+        let at = |name: &str, path: &str| protected_target(&g, &ws, name, &json!({ "path": path }));
+        let prompt = |name: &str, path: &str| matches!(at(name, path), Some(Protected::PromptFile(_)));
+        assert!(prompt("edit", &home.join("USER.md").display().to_string()));
+        assert!(prompt("write", "../USER.md"), "relative with ..");
+        assert!(prompt("edit", &home.join("SOUL.md").display().to_string()), "the old path is a symlink to the soul");
+        assert!(prompt("write", "zenbot/IDENTITY.md"), "a prompt file that doesn't exist yet");
+        assert!(at("read", "../USER.md").is_none(), "reading is fine");
+        assert!(at("edit", "zenbot/notes.md").is_none());
+        assert!(at("edit", "/home/nobody/USER.md").is_none());
+        let owner = |path: &str| matches!(at("write", path), Some(Protected::OwnerOnly(_)));
+        for p in ["../mcp.json", "../token", "../env", "../matrix.env", "../matrix/store/x", "../bin/zend"] {
+            assert!(owner(p), "{p}");
+        }
+        let steering = |path: &str| matches!(at("write", path), Some(Protected::Steering(_)));
+        assert!(steering("../global/skills/work/verify/SKILL.md"), "an active skill");
+        assert!(steering("../skills/new-domain/new-skill/SKILL.md"), "through the old symlink, in folders that don't exist yet");
+        assert!(steering("../global/skills/nope/../work/x/../verify/SKILL.md"), "`..` past missing folders");
+        assert!(steering("../global/tools/word-count/run.py"), "a made tool");
+        assert!(at("write", "../global/skills/_proposed/work/new/SKILL.md").is_none(), "drafts go through review");
+        assert!(at("write", "../global/wiki/page.md").is_none());
     }
 
     #[test]
@@ -534,12 +657,24 @@ mod tests {
         assert!(!all.contains(&"move".to_string()) && !all.contains(&"propose_brief".to_string()));
         assert_eq!(specs(None), specs(None), "the same list every turn");
         assert!(read_only(Some(VERIFIER)) && !read_only(None));
+        // A kind the kernel doesn't know gets nothing.
+        assert_eq!(specs(Some("mystery")), json!([]));
+        assert!(refusal(Some("mystery"), "read").is_some());
+        for t in ["ask", "delegate", "schedule", "submit_verdict"] {
+            assert!(refusal(Some(crate::delegate::SUBAGENT), t).is_some() && refusal(Some(crate::jobs::JOB), t).is_some(), "{t}");
+        }
     }
 
     #[test]
     fn a_failed_command_beats_the_verifier_and_judgment_needs_a_verdict() {
         let criteria = criteria_of(&json!({ "criteria": [{ "text": "tests pass", "run": "cargo test" }, "docs updated", { "id": "x", "text": "fast", "run": "true" }] }));
         assert_eq!(criteria[1]["id"], "c2");
+        assert_eq!(duplicate_id(&criteria), None);
+        // A failing check under an id another criterion also has would be overwritten: refused.
+        let twice = criteria_of(&json!({ "criteria": [{ "id": "a", "text": "x", "run": "false" }, { "id": "a", "text": "y", "run": "true" }] }));
+        assert_eq!(duplicate_id(&twice).as_deref(), Some("a"));
+        let clash = criteria_of(&json!({ "criteria": ["first", { "id": "c1", "text": "named like the first" }] }));
+        assert_eq!(duplicate_id(&clash).as_deref(), Some("c1"));
         let mut checks = serde_json::Map::new();
         checks.insert("c1".into(), json!({ "ok": false, "exit": 1, "output": "1 failed" }));
         checks.insert("x".into(), json!({ "ok": true }));

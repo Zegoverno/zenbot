@@ -30,19 +30,31 @@ fn defuse(text: &str) -> String {
     out
 }
 
-/// Mark the session as having read untrusted content (once).
-pub async fn taint(app: &App, session: Uuid, source: &str, about: &str) {
+/// Mark the session as having read untrusted content (once). Fails when the mark couldn't be
+/// recorded: then the caller must not hand the content to the model (an unmarked session could
+/// still change what steers every session); `withheld` says so.
+pub async fn taint(app: &App, session: Uuid, source: &str, about: &str) -> anyhow::Result<()> {
     let first = sqlx::query("UPDATE sessions SET tainted_at = now() WHERE id = $1 AND tainted_at IS NULL")
-        .bind(session).execute(&app.db).await.map(|r| r.rows_affected() == 1).unwrap_or(false);
+        .bind(session).execute(&app.db).await?.rows_affected() == 1;
     if first {
-        let _ = crate::tape::append(&app.db, session, "taint", &json!({ "source": source, "about": about })).await;
+        // The mark is the column; the tape block only says where it came from.
+        if let Err(e) = crate::tape::append(&app.db, session, "taint", &json!({ "source": source, "about": about })).await {
+            tracing::warn!("recording where session {session}'s taint came from: {e:#}");
+        }
     }
+    Ok(())
 }
 
-/// Whether a session has read untrusted content.
+/// The tool result in place of untrusted content whose taint couldn't be recorded.
+pub fn withheld(e: &anyhow::Error) -> String {
+    format!("not shown: this session couldn't be marked as having read untrusted content ({e:#}); try again")
+}
+
+/// Whether a session has read untrusted content. When it can't be told (a database error), it
+/// counts as tainted: the checks that use this fail closed.
 pub async fn tainted(db: &sqlx::PgPool, session: Uuid) -> bool {
     sqlx::query_scalar::<_, bool>("SELECT tainted_at IS NOT NULL FROM sessions WHERE id = $1")
-        .bind(session).fetch_optional(db).await.ok().flatten().unwrap_or(false)
+        .bind(session).fetch_optional(db).await.map(|t| t.unwrap_or(false)).unwrap_or(true)
 }
 
 /// Whether any of these sessions has read untrusted content.

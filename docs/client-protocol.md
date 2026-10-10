@@ -22,9 +22,9 @@ Every request, the WebSocket upgrade included, carries the owner's token in
 | `GET /api/suggestions` | | suggested next prompts: outcomes by prompt version and model, and the latest 20 |
 | `GET /api/memory?tier=` | | `{ memories, last_sleep, size }`: memories of a tier (`short`, the default; `archived`, `all`; `long` holds only rows from before D-045), each `{ id: "m12", text, source, tier, proposed, reason, created_at, updated_at }`; the latest `sleep_runs` row; short-term memory's cap in characters (`ZEN_MEMORY_CHARS`) |
 | `POST /api/memory/sleep?trigger=` | | tidy short-term memory now (recorded as `nightly` with `trigger=nightly`, else as the owner's; the scheduled `sleep` job runs it without this route): `{ run, entries, kept, dropped, promoted, scorer, note }` |
-| `GET /api/skills` | | skills (active and drafts) with their use, and the tools the agent made |
-| `POST /api/skills/review` | `{ name, decision: accept\|reject }` | `{ result }`: activates or archives a draft skill |
-| `POST /api/tools/{name}/review` | `{ decision: accept\|reject }` | `{ result }`: approves (network allowed) or rejects a tool the agent made |
+| `GET /api/skills` | | skills (active and drafts) with their use, and the tools the agent made; each draft and tool has its `sha` (fingerprint of its content) |
+| `POST /api/skills/review` | `{ name, decision: accept\|reject, sha }` | `{ result }`: activates or archives a draft skill; `sha` is the fingerprint the owner reviewed (8 characters or more), 400 when the draft changed since |
+| `POST /api/tools/{name}/review` | `{ decision: accept\|reject, sha }` | `{ result }`: approves (network allowed) or rejects a tool the agent made; `sha` as above |
 | `GET /api/mcp` | | `{ config, servers, problems }`: MCP servers from `~/.zenbot/mcp.json` and their tools |
 | `GET /api/policy`, `POST /api/policy` | `{ policy: { routes }, reason? }` | the routing policy, evidence and suggestions / set a new version `{ version }` |
 | `POST /api/policy/undo` | | `{ version }`: the policy before the latest change, as a new version |

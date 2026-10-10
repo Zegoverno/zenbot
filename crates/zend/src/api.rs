@@ -420,6 +420,8 @@ pub(crate) async fn list_memory(State(app): State<AppState>, Query(q): Query<Mem
 #[derive(Deserialize)]
 pub(crate) struct Review {
     decision: String,
+    /// The fingerprint of what the owner reviewed (`GET /api/skills`): refused if it changed since.
+    sha: String,
 }
 
 /// `accept` → true, `reject` → false, anything else a 400.
@@ -464,19 +466,21 @@ pub(crate) async fn list_skills(State(app): State<AppState>) -> ApiResult<Json<V
 pub(crate) struct SkillReview {
     name: String,
     decision: String,
+    /// The fingerprint of the draft the owner reviewed (`GET /api/skills`): refused if it changed since.
+    sha: String,
 }
 
-/// The owner accepts (activates) or rejects (archives) a draft skill.
-pub(crate) async fn review_skill(Json(body): Json<SkillReview>) -> ApiResult<Json<Value>> {
+/// The owner accepts (activates) or rejects (archives) a draft skill, as reviewed.
+pub(crate) async fn review_skill(State(app): State<AppState>, Json(body): Json<SkillReview>) -> ApiResult<Json<Value>> {
     let accept = accept_or_reject(&body.decision)?;
-    let msg = workshop::decide_draft(&body.name, accept, "the owner").await.map_err(bad_request)?;
+    let msg = workshop::decide_draft(&app.db, &body.name, accept, "the owner", Some(&body.sha)).await.map_err(bad_request)?;
     Ok(Json(json!({ "result": msg })))
 }
 
-/// The owner approves (network allowed) or rejects a tool the agent made.
+/// The owner approves (network allowed) or rejects a tool the agent made, as reviewed.
 pub(crate) async fn review_tool(State(app): State<AppState>, Path(name): Path<String>, Json(body): Json<Review>) -> ApiResult<Json<Value>> {
     let accept = accept_or_reject(&body.decision)?;
-    let msg = workshop::decide_tool(&app.db, &name, accept).await.map_err(bad_request)?;
+    let msg = workshop::decide_tool(&app.db, &name, accept, &body.sha).await.map_err(bad_request)?;
     Ok(Json(json!({ "result": msg })))
 }
 

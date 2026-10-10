@@ -45,10 +45,17 @@ pub fn is_secret_var(name: &str) -> bool {
     k == "DATABASE_URL" || ["TOKEN", "KEY", "SECRET", "PASSWORD", "PASSWD"].iter().any(|w| k.contains(w))
 }
 
-/// The files under the zen home that hold secrets: zenbot's API token and the settings file. Hidden from sandboxed shells and tools.
+/// The files and folders that hold secrets: under the zen home zenbot's API token, the settings
+/// file, the MCP config and the Matrix channel's sign-in; the engines' sign-ins. Hidden from a
+/// verifier's sandboxed shell and refused to its `read` (tools.rs). Only those that exist.
 pub fn secret_files() -> Vec<std::path::PathBuf> {
     let home = crate::zen_home();
-    ["token", "env"].iter().map(|f| home.join(f)).filter(|p| p.exists()).collect()
+    let user = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let mut paths: Vec<std::path::PathBuf> = ["token", "env", "mcp.json", "matrix.env", "matrix"].iter().map(|f| home.join(f)).collect();
+    paths.push(crate::mcp::config_path());
+    paths.extend([user.join(".codex/auth.json"), user.join(".claude/.credentials.json")]);
+    paths.retain(|p| p.exists());
+    paths
 }
 
 /// Files whose secret values are masked: zenbot's token and the engines' sign-ins.

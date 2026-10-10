@@ -6,6 +6,28 @@
 
 ---
 
+## 2026-10-10 — Trust gates: protected files, trusted repositories, the verifier's sandbox
+
+- A review found ways for text from outside (a web page, an MCP server, a cloned repository) to
+  reach what steers every session or the kernel's credentials through the kernel's own tools. Fixed
+  together (D-051, proposed):
+- `edit`/`write` protect active skills and made tools like the prompt files (refused to tainted,
+  child and kernel sessions; drafts stay free), and the owner's config and secrets (`mcp.json`,
+  `env`, `token`, `matrix.env`, `matrix/`, `bin/`) from every session. Paths through folders that
+  don't exist yet, `..` and symlinks are resolved. `mcp.json` fills a secret-named `${VAR}` only for
+  a server that lists it in `allow_env`.
+- A project's AGENTS.md or CLAUDE.md found by a tool is followed only from zenbot's checkout or a
+  repository in the new `ZEN_TRUSTED_REPOS`; any other comes as untrusted content and taints the
+  session (new e2e scenario `project-files`).
+- The verifier's shell has its own processes (the kernel's `/proc/<pid>/environ` held the token and
+  database URL), no network and an empty home; its `read` stays inside the work it checks.
+- Taint fails closed: an unreadable taint counts as tainted, and content whose taint can't be
+  recorded is withheld. A session kind the kernel doesn't know gets no tools. `verify` refuses
+  duplicate criterion ids (a second one hid the first one's failed check).
+- `zen skills` shows each draft's and tool's fingerprint, and `zen skills|tools accept|reject`
+  must name it; a change since is refused. A made tool runs from a private copy of its folder: what
+  is checked is what runs, and its own writes (a `__pycache__`) no longer cost it its approval.
+
 ## 2026-10-10 — Faster evals: affected tasks only, in parallel, base from cache; scripts/check.sh
 
 - Shipping took about four times as long as building, mostly the eval: every task on both harnesses,

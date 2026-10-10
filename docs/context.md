@@ -40,7 +40,8 @@ the discount, so anything that changes must come after everything that doesn't.
 - **Instructions are fixed for the session.** They are written once on the first turn (a `base`
   block on the tape), stored with the tools (`envelopes`), and reused unchanged, so editing an AGENTS.md takes effect in the next session. An instruction file found
   mid-session (a project below the workspace) arrives once, attached to the tool result that touched
-  it, and is never added to the instructions (goose adds it to the system prompt mid-session, which
+  it (as instructions from a trusted repository, `ZEN_REPO` or `ZEN_TRUSTED_REPOS`; otherwise as
+  untrusted content that taints the session, D-051), and is never added to the instructions (goose adds it to the system prompt mid-session, which
   breaks the cache; qm keeps the system prompt byte-identical).
 - **The date is not in the instructions.** It goes in the turn context, only when it changed
   (goose's turn-context message, qm's volatile footer, gbrain's `additionalContext`).
