@@ -42,6 +42,22 @@ jobs:
       - name: End-to-end scenarios
         run: ZEN_E2E_NO_BUILD=1 scripts/e2e.sh
 
+  # The docs still match the code (scripts/check-docs.py); on a pull request, the change also adds
+  # a PROGRESS.md entry if it touches the code.
+  docs:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check the docs
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            scripts/check-docs.py --base "origin/${{ github.base_ref }}"
+          else
+            scripts/check-docs.py
+          fi
+
   # The Matrix channel is its own Cargo workspace (crates/zen-matrix): built, tested and linted apart,
   # and not part of the release tarball (scripts/matrix.sh builds it where it's used).
   matrix:
