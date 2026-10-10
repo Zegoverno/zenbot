@@ -1,6 +1,7 @@
 //! Claude engine: runs each turn with the official `claude` CLI on the owner's Claude plan.
 //! Built-in tools are off; the only tools are zenbot's (via the MCP bridge), and zenbot's system
-//! prompt replaces Claude Code's.
+//! prompt replaces Claude Code's. Every run must first show its tool list (`system/init`), with
+//! nothing but zenbot's tools in it, or it is stopped (`check_init`).
 //!
 //! Engine sessions (docs/context.md): Claude Code caches earlier turns only within its own session,
 //! so each zenbot session keeps a matching Claude Code session, run from one fixed directory. When
@@ -17,7 +18,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::watch;
 
-use crate::turn::{enabled, new_uuid, now_ms, prompt_blocks, seed_blocks, StderrTail, TurnCtx, TurnInput};
+use crate::turn::{enabled, new_uuid, now_ms, prompt_blocks, seed_blocks, StderrTail, TurnCtx, TurnInput, COMPLETE_LIMIT};
 
 const PREFIX: &str = "mcp__zen__";
 
@@ -81,18 +82,61 @@ fn unmediated_tools(init: &Value) -> Option<String> {
     (!bad.is_empty()).then(|| bad.join(", "))
 }
 
+/// Check an event of the CLI's stream before it is handled, given whether `system/init` was seen.
+/// Every action must go through the kernel: the run must start with `system/init` listing its
+/// tools (as an array), none but zenbot's; if a CLI release stops honoring `--tools ""` or stops
+/// showing its tools, the run is refused before the model can use a built-in tool.
+/// Returns Ok(true) for the init event, Ok(false) for any other allowed event, Err(why) to refuse.
+fn check_init(ev: &Value, init_seen: bool) -> Result<bool, String> {
+    let is_init = ev["type"] == "system" && ev["subtype"] == "init";
+    if !is_init {
+        return if init_seen { Ok(false) } else { Err(format!("claude sent `{}` before its system/init event, so its tools can't be checked; refusing the run (has the stream format changed?)", ev["type"].as_str().unwrap_or("?"))) };
+    }
+    if !ev["tools"].is_array() {
+        return Err("claude's system/init event has no tool list, so its tools can't be checked; refusing the run (has the stream format changed?)".into());
+    }
+    match unmediated_tools(ev) {
+        Some(bad) => Err(format!("claude offered tools zenbot doesn't control ({bad}); refusing the run (does the CLI still honor --tools \"\"?)")),
+        None => Ok(true),
+    }
+}
+
+/// Stops the turn's tool socket server when dropped, however `run_turn` ends.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// The text of a `tool_result` block (a string, or text blocks).
+fn result_text(block: &Value) -> String {
+    zen_proto::text_of(&block["content"])
+}
+
 pub fn available() -> bool {
     std::process::Command::new("claude").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
-pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bool>) -> Result<Option<String>> {
+pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, abort: watch::Receiver<bool>) -> Result<Option<String>> {
+    let model = input.model.as_str();
+    // The turn's report, sent on every path (an early error included): what ran, and what it used.
+    let mut usage = json!({ "engine": "claude-code", "provider": "claude", "model": model });
+    let outcome = drive(&ctx, input, abort, &mut usage).await;
+    ctx.notify("turn.usage", usage).await;
+    outcome
+}
+
+/// Run the turn's CLI, filling in `usage` as it learns it.
+async fn drive(ctx: &TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bool>, usage: &mut Value) -> Result<Option<String>> {
     let model = input.model.as_str();
     let (socket_dir, socket) = crate::turn::socket_dir().context("creating the tool socket's folder")?;
     // The socket and the prompt file go when the turn ends, on every path.
     let _turn_dir = crate::turn::RemoveOnDrop(socket_dir.clone());
     let system_file = socket_dir.join("system.md");
     crate::turn::private_file(&system_file, &input.system).context("writing the system prompt file")?;
-    let server = ctx.serve_socket(&socket).context("opening tool socket")?;
+    let _server = AbortOnDrop(ctx.serve_socket(&socket).context("opening tool socket")?);
     let exe = std::env::current_exe()?.display().to_string();
     let mcp = json!({ "mcpServers": { "zen": { "command": exe, "args": ["mcp-bridge", socket] } } }).to_string();
     let allowed: Vec<String> = ctx.tools.iter().filter_map(|t| t["name"].as_str()).map(|n| format!("{PREFIX}{n}")).collect();
@@ -109,8 +153,18 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
         _ if sessions => ("seed", Some(new_uuid()), seed_blocks(&input.history, &input.prompt, input.context.as_deref())),
         _ => ("transcript", None, seed_blocks(&input.history, &input.prompt, input.context.as_deref())),
     };
+    usage["render"] = json!(render);
+    if let Some(reason) = &fallback {
+        eprintln!("[engine] claude: {reason}");
+        usage["fallback_reason"] = json!(reason);
+    }
+    // Until the turn has finished cleanly, the engine session isn't in sync with the tape.
+    if let Some(id) = &engine_session {
+        usage["engine_session"] = json!({ "id": id, "resumable": false });
+    }
     let dir = if sessions { session_dir() } else { std::env::temp_dir().join(format!("zen-claude-{}", now_ms())) };
     std::fs::create_dir_all(&dir)?;
+    let _throwaway = (!sessions).then(|| crate::turn::RemoveOnDrop(dir.clone()));
 
     let mut cmd = Command::new("claude");
     if let Some(e) = &input.effort {
@@ -137,32 +191,51 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
         .spawn()
         .context("starting the claude CLI (is Claude Code installed and signed in?)")?;
 
+    let stderr = StderrTail::collect(child.stderr.take());
     let mut stdin = child.stdin.take().context("claude stdin")?;
     let user = json!({ "type": "user", "message": { "role": "user", "content": content } });
-    stdin.write_all(format!("{user}\n").as_bytes()).await?;
-    stdin.flush().await?;
+    let mut outcome: Option<Result<Option<String>>> = None;
+    if let Err(e) = async {
+        stdin.write_all(format!("{user}\n").as_bytes()).await?;
+        stdin.flush().await
+    }
+    .await
+    {
+        let _ = child.start_kill();
+        outcome = Some(Err(anyhow::anyhow!("{}", stderr.explain(&format!("sending the prompt to claude failed ({e})")).await)));
+    }
     let mut stdin = Some(stdin);
-
-    let stderr = StderrTail::collect(child.stderr.take());
 
     let mut lines = BufReader::new(child.stdout.take().context("claude stdout")?).lines();
     let mut calls = Calls::default();
-    let mut outcome: Option<Result<Option<String>>> = None;
-    let mut usage = json!({ "engine": "claude-code", "provider": "claude", "model": model, "render": render });
-    if let Some(reason) = &fallback {
-        eprintln!("[engine] claude: {reason}");
-        usage["fallback_reason"] = json!(reason);
-    }
     // Messages sent to the tape, and stream lines this code doesn't understand: if the CLI's
     // stream format changes, the turn fails loudly instead of answering with nothing.
     let mut sent = 0;
     let mut unknown = 0;
+    let mut init_seen = false;
 
-    loop {
+    while outcome.is_none() {
         tokio::select! {
             line = lines.next_line() => {
-                let Some(line) = line? else { break };
+                let line = match line {
+                    Ok(Some(l)) => l,
+                    Ok(None) => break,
+                    Err(e) => { outcome = Some(Err(anyhow::anyhow!("reading claude's output: {e}"))); break; }
+                };
                 let Ok(ev) = serde_json::from_str::<Value>(&line) else { unknown += 1; continue };
+                match check_init(&ev, init_seen) {
+                    Ok(true) => {
+                        init_seen = true;
+                        usage["engine_version"] = ev["claude_code_version"].clone();
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(why) => {
+                        let _ = child.start_kill();
+                        outcome = Some(Ok(Some(why)));
+                        break;
+                    }
+                }
                 if !matches!(ev["type"].as_str(), Some("stream_event" | "assistant" | "user" | "system" | "result")) {
                     unknown += 1;
                 }
@@ -182,35 +255,34 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
                     ctx.notify("turn.message", json!({ "message": message })).await;
                     sent += 1;
                 }
-                match ev["type"].as_str() {
-                    Some("system") if ev["subtype"] == "init" => {
-                        usage["engine_version"] = ev["claude_code_version"].clone();
-                        // Every action must go through the kernel: if a CLI release stops honoring
-                        // `--tools ""`, stop before the model can use a built-in tool.
-                        if let Some(bad) = unmediated_tools(&ev) {
-                            let _ = child.start_kill();
-                            outcome = Some(Ok(Some(format!("claude offered tools zenbot doesn't control ({bad}); refusing the turn (does the CLI still honor --tools \"\"?)"))));
-                            break;
-                        }
+                // Results the CLI gave the model without the kernel (an unknown tool, invalid
+                // arguments): the model read them, so they go on the tape too. The call's message
+                // must be on the tape first.
+                let own: Vec<(String, String, bool)> = engine_results(&ev).into_iter().filter(|(id, _, _)| !ctx.is_answered(id)).collect();
+                if !own.is_empty() {
+                    if let Some(message) = calls.flush("toolUse") {
+                        ctx.notify("turn.message", json!({ "message": message })).await;
+                        sent += 1;
                     }
-                    Some("result") => {
-                        turn_usage(&ev, &mut usage);
-                        let answered = ev["result"].as_str().is_some_and(|t| !t.trim().is_empty());
-                        let err = if ev["is_error"] == true {
-                            Some(ev["result"].as_str().or(ev["subtype"].as_str()).unwrap_or("claude reported an error").to_string())
-                        } else if answered && sent == 0 {
-                            Some(format!("claude stream format changed: the CLI answered, but no assistant message was read from its stream ({unknown} lines not understood)"))
-                        } else { None };
-                        outcome = Some(Ok(err));
-                        stdin = None; // closing stdin lets the CLI exit
+                    for (id, text, is_error) in own {
+                        ctx.engine_result(&id, &text, is_error).await;
                     }
-                    _ => {}
+                }
+                if ev["type"] == "result" {
+                    turn_usage(&ev, usage);
+                    let answered = ev["result"].as_str().is_some_and(|t| !t.trim().is_empty());
+                    let err = if ev["is_error"] == true {
+                        Some(ev["result"].as_str().or(ev["subtype"].as_str()).unwrap_or("claude reported an error").to_string())
+                    } else if answered && sent == 0 {
+                        Some(format!("claude stream format changed: the CLI answered, but no assistant message was read from its stream ({unknown} lines not understood)"))
+                    } else { None };
+                    outcome = Some(Ok(err));
+                    stdin = None; // closing stdin lets the CLI exit
                 }
             }
             _ = abort.changed() => {
                 let _ = child.start_kill();
                 outcome = Some(Ok(Some("interrupted".into())));
-                break;
             }
         }
     }
@@ -219,27 +291,42 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
         ctx.notify("turn.message", json!({ "message": message })).await;
     }
     drop(stdin);
-    let status = child.wait().await.ok();
-    server.abort();
-    if !sessions {
-        let _ = std::fs::remove_dir_all(&dir);
-    }
+    // The result is in: the CLI exits once stdin closes. One that doesn't is killed.
+    let status = match tokio::time::timeout(std::time::Duration::from_secs(30), child.wait()).await {
+        Ok(s) => s.ok(),
+        Err(_) => {
+            let _ = child.start_kill();
+            child.wait().await.ok()
+        }
+    };
     if unknown > 0 {
         eprintln!("[engine] claude: {unknown} stream lines not understood");
     }
     // Only a turn that finished cleanly leaves the engine session in sync with the tape.
-    let clean = matches!(outcome, Some(Ok(None)));
-    if let Some(id) = engine_session {
-        usage["engine_session"] = json!({ "id": id, "resumable": clean });
+    if let (Some(Ok(None)), Some(es)) = (&outcome, usage["engine_session"].as_object_mut()) {
+        es.insert("resumable".into(), json!(true));
     }
-    ctx.notify("turn.usage", usage).await;
     match outcome {
         Some(o) => o,
         None => Ok(Some(stderr.explain(&format!("claude exited unexpectedly ({})", status.map(|s| s.to_string()).unwrap_or_default())).await)),
     }
 }
 
+/// The `tool_result` blocks in a `user` event of the stream: (call id, text, is_error).
+fn engine_results(ev: &Value) -> Vec<(String, String, bool)> {
+    if ev["type"] != "user" {
+        return Vec::new();
+    }
+    let blocks = ev["message"]["content"].as_array().into_iter().flatten();
+    blocks
+        .filter(|b| b["type"] == "tool_result")
+        .filter_map(|b| Some((b["tool_use_id"].as_str()?.to_string(), result_text(b), b["is_error"] == true)))
+        .collect()
+}
+
 /// One completion without tools, in a throwaway session (summaries). Returns `{ text, usage, model }`.
+/// Its stream must show the run's tools off (`check_init`), like a turn's; given up (the CLI
+/// killed) after `COMPLETE_LIMIT`.
 pub async fn complete(model: &str, system: &str, prompt: &str) -> Result<Value> {
     // A fixed, empty directory: Claude Code tells the model its working directory.
     let dir = crate::turn::engine_dir("complete")?;
@@ -248,7 +335,7 @@ pub async fn complete(model: &str, system: &str, prompt: &str) -> Result<Value> 
     let _cleanup = crate::turn::RemoveOnDrop(prompt_dir);
     crate::turn::private_file(&system_file, system)?;
     let mut child = Command::new("claude")
-        .args(["-p", "--output-format", "json", "--tools", "", "--setting-sources", "", "--no-session-persistence"])
+        .args(["-p", "--output-format", "stream-json", "--verbose", "--tools", "", "--setting-sources", "", "--no-session-persistence"])
         .args(["--strict-mcp-config", "--effort", DEFAULT_EFFORT, "--system-prompt-file"])
         .arg(&system_file)
         .args(["--model", model])
@@ -259,12 +346,38 @@ pub async fn complete(model: &str, system: &str, prompt: &str) -> Result<Value> 
         .kill_on_drop(true)
         .spawn()
         .context("starting the claude CLI")?;
+    let stderr = StderrTail::collect(child.stderr.take());
     let mut stdin = child.stdin.take().context("claude stdin")?;
-    stdin.write_all(prompt.as_bytes()).await?;
-    drop(stdin);
-    let out = child.wait_with_output().await?;
-    let res: Value = serde_json::from_slice(&out.stdout)
-        .with_context(|| format!("claude gave no result: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("")))?;
+    let mut lines = BufReader::new(child.stdout.take().context("claude stdout")?).lines();
+    let read = async {
+        stdin.write_all(prompt.as_bytes()).await?;
+        drop(stdin);
+        let mut init_seen = false;
+        while let Some(line) = lines.next_line().await? {
+            let Ok(ev) = serde_json::from_str::<Value>(&line) else { continue };
+            match check_init(&ev, init_seen) {
+                Ok(seen) => init_seen |= seen,
+                Err(why) => anyhow::bail!("{why}"),
+            }
+            if ev["type"] == "result" {
+                return Ok(Some(ev));
+            }
+        }
+        Ok::<_, anyhow::Error>(None)
+    };
+    let res = match tokio::time::timeout(COMPLETE_LIMIT, read).await {
+        Ok(Ok(Some(res))) => res,
+        Ok(Ok(None)) => anyhow::bail!("{}", stderr.explain("claude gave no result").await),
+        Ok(Err(e)) => {
+            let _ = child.start_kill();
+            return Err(e);
+        }
+        Err(_) => {
+            let _ = child.start_kill();
+            anyhow::bail!("claude didn't complete within {} s", COMPLETE_LIMIT.as_secs());
+        }
+    };
+    let _ = child.wait().await;
     if res["is_error"] == true {
         anyhow::bail!("{}", res["result"].as_str().unwrap_or("claude reported an error"));
     }
@@ -459,6 +572,28 @@ mod tests {
         assert_eq!(unmediated_tools(&json!({ "tools": [format!("{PREFIX}bash"), format!("{PREFIX}read")] })), None);
         assert_eq!(unmediated_tools(&json!({ "tools": [] })), None);
         assert_eq!(unmediated_tools(&json!({ "tools": [format!("{PREFIX}bash"), "Bash", "Read"] })).as_deref(), Some("Bash, Read"));
+    }
+
+    #[test]
+    fn the_tool_list_must_be_seen_first() {
+        let init = |tools: Value| json!({ "type": "system", "subtype": "init", "tools": tools });
+        assert_eq!(check_init(&init(json!([format!("{PREFIX}bash")])), false), Ok(true));
+        assert_eq!(check_init(&json!({ "type": "assistant" }), true), Ok(false));
+        assert!(check_init(&json!({ "type": "assistant" }), false).is_err(), "an event before init");
+        assert!(check_init(&json!({ "type": "system", "subtype": "init" }), false).is_err(), "init without a tool list");
+        assert!(check_init(&init(json!(["Bash"])), false).unwrap_err().contains("Bash"));
+    }
+
+    #[test]
+    fn results_the_cli_gave_itself_are_read() {
+        let ev = json!({ "type": "user", "message": { "role": "user", "content": [
+            { "type": "tool_result", "tool_use_id": "t1", "content": "<tool_use_error>Error: No such tool available: Bash</tool_use_error>", "is_error": true },
+            { "type": "tool_result", "tool_use_id": "t2", "content": [{ "type": "text", "text": "fine" }] } ] } });
+        assert_eq!(engine_results(&ev), vec![
+            ("t1".to_string(), "<tool_use_error>Error: No such tool available: Bash</tool_use_error>".to_string(), true),
+            ("t2".to_string(), "fine".to_string(), false),
+        ]);
+        assert!(engine_results(&json!({ "type": "assistant" })).is_empty());
     }
 
     #[test]

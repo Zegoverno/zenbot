@@ -1,6 +1,9 @@
 //! Codex engine: runs each turn through `codex app-server` on the owner's ChatGPT plan.
 //! Codex's own tools, MCP servers and project instruction files are switched off (`config`);
-//! zenbot's tools are given as dynamic tools and executed by the kernel. Threads persist, like
+//! zenbot's tools are given as dynamic tools and executed by the kernel. Switching features off
+//! is a list of what is known; what holds the boundary at run time is `foreign_item`: a turn in
+//! which Codex starts anything but a message, reasoning, a plan, a compaction or one of zenbot's
+//! dynamic tools is stopped at once. Threads persist, like
 //! Claude Code's sessions, unless ZEN_CODEX_RESUME=0 (Codex ties its prompt cache to the thread). A
 //! new thread gets zenbot's tape as native items (`thread/inject_items`, as qm does), so the model
 //! sees its own earlier turns as messages and tool calls; ZEN_CODEX_INJECT=0 (or an app-server that
@@ -8,43 +11,160 @@
 
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::{watch, Mutex};
+use tokio::sync::watch;
 
-use crate::turn::{enabled, now_ms, prompt_blocks, seed_blocks, StderrTail, TurnCtx, TurnInput};
+use crate::turn::{enabled, now_ms, prompt_blocks, seed_blocks, StderrTail, TurnCtx, TurnInput, COMPLETE_LIMIT};
 
-/// Codex's settings for every zen thread: no tool of its own (shell, browser, apps, plugins, hooks,
-/// subagents, image tools, …), no MCP servers and no project instruction files from the owner's
-/// Codex setup. Every action goes through the kernel's dynamic tools. A Codex release that adds a
-/// tool feature on by default needs it added here (the daily engine check lists them).
+/// Codex features zen turns off in every thread: each gives the model a tool of its own (shell,
+/// browser, apps, plugins, hooks, subagents, image tools, …) or acts outside zen's tools.
+const DISABLED: &[&str] = &[
+    "shell_tool", "unified_exec", "unified_exec_tty", "write_stdin_approval", "shell_snapshot", "apps", "plugins", "remote_plugin",
+    "plugin_sharing", "browser_use", "browser_use_external", "browser_use_full_cdp_access", "browser_annotation_api", "computer_use",
+    "image_generation", "view_image", "in_app_browser", "in_app_local_automation", "in_app_chat", "in_app_dictation", "in_app_voice",
+    "in_app_updates", "multi_agent", "request_permissions_tool", "tool_suggest", "tool_call_mcp_elicitation", "hooks", "goals",
+    "code_mode_host", "sleep_tool", "skill_search", "skill_mcp_dependency_install", "worktrees", "workspace_dependencies",
+    "realtime_conversation",
+];
+
+/// Features on by default that were reviewed and give the model nothing to act with (transport,
+/// pacing, compaction, model discovery). `zen-engine codex-features` fails on any feature on by
+/// default that is in neither list, so the daily engine job notices a Codex release that adds one.
+const REVIEWED: &[&str] = &[
+    "api_key_model_discovery", "auth_elicitation", "compaction_image_budget", "content_item_kinds", "daemon_auto_start",
+    "enable_request_compression", "fast_mode", "ultrafast_mode", "guardian_approval", "guardian_reuse_parent_compaction",
+    "instant_interrupt", "mentions_v2", "system_proxy_fallback", "unbounded_connection_retries",
+];
+
+/// Codex's settings for every zen thread: the features in `DISABLED` off, no web search, no MCP
+/// servers and no project instruction files from the owner's Codex setup. Every action goes
+/// through the kernel's dynamic tools.
 fn config() -> Value {
-    json!({ "web_search": "disabled", "mcp_servers": {}, "project_doc_max_bytes": 0, "features": {
-        "shell_tool": false, "unified_exec": false, "shell_snapshot": false, "apps": false, "plugins": false, "remote_plugin": false,
-        "browser_use": false, "browser_use_external": false, "computer_use": false, "image_generation": false, "view_image": false,
-        "in_app_browser": false, "in_app_local_automation": false, "multi_agent": false, "request_permissions_tool": false,
-        "tool_suggest": false, "hooks": false, "goals": false, "code_mode_host": false, "sleep_tool": false, "skill_search": false,
-        "skill_mcp_dependency_install": false, "worktrees": false, "workspace_dependencies": false, "realtime_conversation": false
-    }})
+    let features: serde_json::Map<String, Value> = DISABLED.iter().map(|f| (f.to_string(), json!(false))).collect();
+    json!({ "web_search": "disabled", "mcp_servers": {}, "project_doc_max_bytes": 0, "features": features })
+}
+
+/// The thread items a zen turn may contain: messages, reasoning, plans, compactions and zenbot's
+/// own dynamic tool calls. Anything else (`commandExecution`, `fileChange`, `mcpToolCall`,
+/// `webSearch`, `imageView`, subagents, …) is Codex acting by itself.
+const ITEMS: &[&str] = &["userMessage", "agentMessage", "reasoning", "plan", "contextCompaction", "dynamicToolCall"];
+
+/// The type of an item Codex started or completed that isn't in `ITEMS`, if this message is one.
+fn foreign_item(msg: &Value) -> Option<String> {
+    if !matches!(msg["method"].as_str(), Some("item/started" | "item/completed")) {
+        return None;
+    }
+    let kind = msg["params"]["item"]["type"].as_str().unwrap_or("");
+    (!ITEMS.contains(&kind)).then(|| if kind.is_empty() { "(an item without a type)".into() } else { kind.to_string() })
+}
+
+/// The error a turn ends with when Codex used something of its own.
+fn foreign_error(kind: &str) -> String {
+    format!("codex used `{kind}`, which zenbot doesn't control; the turn was stopped (has a Codex release turned on a tool of its own? run `zen-engine codex-features`)")
+}
+
+/// How long starting the app-server, or listing models, may take before it is given up.
+const SETUP_LIMIT: Duration = Duration::from_secs(15);
+/// How long a model list is used before Codex is asked again.
+const MODELS_TTL: Duration = Duration::from_secs(3600);
+
+/// The `codex` binary on PATH, resolved, and when it last changed: an update changes it.
+type Stamp = (std::path::PathBuf, SystemTime);
+
+fn binary_stamp() -> Option<Stamp> {
+    let path = std::env::var_os("PATH")?;
+    let bin = std::env::split_paths(&path).map(|d| d.join("codex")).find(|p| p.is_file())?;
+    let real = std::fs::canonicalize(bin).ok()?;
+    let modified = std::fs::metadata(&real).ok()?.modified().ok()?;
+    Some((real, modified))
 }
 
 pub fn available() -> bool {
     version().is_some()
 }
 
-/// The installed Codex CLI version ("codex-cli 0.155.1" -> "0.155.1").
-/// Asked once per engine process (the daily engine update restarts it), not on every turn.
+/// The installed Codex CLI version ("codex-cli 0.155.1" -> "0.155.1"). Asked again when the
+/// binary changes (the daily engine update replaces it without restarting this process).
+/// A blocking process run when it does: call it off the runtime's threads.
 fn version() -> Option<String> {
-    static VERSION: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    VERSION
-        .get_or_init(|| {
-            let out = std::process::Command::new("codex").arg("--version").output().ok()?;
-            String::from_utf8_lossy(&out.stdout).split_whitespace().last().map(String::from)
-        })
-        .clone()
+    static VERSION: std::sync::Mutex<Option<(Stamp, Option<String>)>> = std::sync::Mutex::new(None);
+    let stamp = binary_stamp();
+    if let (Some(now), Some((seen, v))) = (&stamp, &*VERSION.lock().unwrap()) {
+        if now == seen {
+            return v.clone();
+        }
+    }
+    let out = std::process::Command::new("codex").arg("--version").output().ok()?;
+    let v = String::from_utf8_lossy(&out.stdout).split_whitespace().last().map(String::from);
+    if let Some(now) = stamp {
+        *VERSION.lock().unwrap() = Some((now, v.clone()));
+    }
+    v
+}
+
+/// `zen-engine codex-features`: the Codex features on by default that zen neither turns off nor
+/// has reviewed (`DISABLED`, `REVIEWED`), from `codex features list` run with zen's private
+/// CODEX_HOME. Prints them and returns 1 if there are any (or the list can't be read), else 0.
+/// The daily engine job runs it, so a Codex release that adds a feature fails loudly.
+pub fn check_features() -> i32 {
+    let home = match crate::turn::engine_dir("codex") {
+        Ok(d) => d.join("home"),
+        Err(e) => {
+            println!("codex features: can't create zen's Codex home: {e}");
+            return 1;
+        }
+    };
+    let _ = std::fs::create_dir_all(&home);
+    let out = match std::process::Command::new("codex").args(["features", "list"]).env("CODEX_HOME", &home).current_dir(home.parent().unwrap_or(&home)).output() {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        Ok(o) => {
+            println!("codex features: `codex features list` failed: {}", String::from_utf8_lossy(&o.stderr).trim());
+            return 1;
+        }
+        Err(e) => {
+            println!("codex features: can't run `codex features list`: {e}");
+            return 1;
+        }
+    };
+    match unknown_features(&out) {
+        Some(unknown) if unknown.is_empty() => {
+            println!("codex features: every feature on by default is known to zenbot");
+            0
+        }
+        Some(unknown) => {
+            println!("codex features on by default that zenbot doesn't know: {} (review each; add it to DISABLED or REVIEWED in crates/zen-engine/src/codex.rs)", unknown.join(", "));
+            1
+        }
+        None => {
+            println!("codex features: `codex features list` printed nothing zenbot can read (has its format changed?)");
+            1
+        }
+    }
+}
+
+/// Features `codex features list` shows on (`<name> <stage…> true`), not removed, and in neither
+/// `DISABLED` nor `REVIEWED`. None when no line could be read.
+fn unknown_features(list: &str) -> Option<Vec<String>> {
+    let mut read = 0;
+    let mut unknown = Vec::new();
+    for line in list.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let (Some(name), Some(on)) = (words.first(), words.last()) else { continue };
+        if words.len() < 3 || !matches!(*on, "true" | "false") {
+            continue;
+        }
+        read += 1;
+        let removed = words[1..words.len() - 1].join(" ") == "removed";
+        if *on == "true" && !removed && !DISABLED.contains(name) && !REVIEWED.contains(name) {
+            unknown.push(name.to_string());
+        }
+    }
+    (read > 0).then_some(unknown)
 }
 
 struct AppServer {
@@ -84,7 +204,12 @@ impl AppServer {
         let lines = BufReader::new(child.stdout.take().context("codex stdout")?).lines();
         let stderr = StderrTail::collect(child.stderr.take());
         let mut s = AppServer { child, stdin, lines, next: AtomicU64::new(1), stderr, unknown: 0 };
-        s.call("initialize", json!({ "clientInfo": { "name": "zen", "version": env!("CARGO_PKG_VERSION") }, "capabilities": { "experimentalApi": true } }), None).await?;
+        // A hung app-server is killed (dropping it does) instead of holding up the turn.
+        let init = json!({ "clientInfo": { "name": "zen", "version": env!("CARGO_PKG_VERSION") }, "capabilities": { "experimentalApi": true } });
+        match tokio::time::timeout(SETUP_LIMIT, s.call("initialize", init, None)).await {
+            Ok(r) => r?,
+            Err(_) => bail!("{}", s.stderr.explain(&format!("codex app-server didn't answer `initialize` within {} s", SETUP_LIMIT.as_secs())).await),
+        };
         s.send(json!({ "method": "initialized" })).await?;
         Ok(s)
     }
@@ -142,24 +267,41 @@ fn is_request(msg: &Value) -> bool {
     msg.get("id").is_some_and(|id| !id.is_null()) && msg.get("method").is_some()
 }
 
-/// Models available to this Codex sign-in, asked from Codex itself. Cached once Codex lists some;
-/// a failed lookup is logged and tried again next time.
-static MODELS: Mutex<Vec<Value>> = Mutex::const_new(Vec::new());
-
-pub async fn models() -> Vec<Value> {
-    let mut cached = MODELS.lock().await;
-    if cached.is_empty() {
-        match list_models().await {
-            Ok(list) if !list.is_empty() => *cached = list,
-            Ok(_) => eprintln!("[engine] codex: model/list returned no models"),
-            Err(e) => eprintln!("[engine] codex: listing models failed: {e:#}"),
-        }
-    }
-    cached.clone()
+/// The models Codex listed last: when, for which binary, and the list.
+struct Listed {
+    at: Instant,
+    stamp: Option<Stamp>,
+    models: Vec<Value>,
 }
 
+/// Not held while Codex is asked: a slow lookup must not hold up other callers.
+static MODELS: std::sync::Mutex<Option<Listed>> = std::sync::Mutex::new(None);
+
+/// Models available to this Codex sign-in, asked from Codex itself. A list is kept for an hour, or
+/// until the binary changes (an update). A failed lookup (within `SETUP_LIMIT`) is logged and the
+/// previous list, if any, is returned; it is tried again next time.
+pub async fn models() -> Vec<Value> {
+    let stamp = binary_stamp();
+    let previous = MODELS.lock().unwrap().as_ref().map(|l| (l.at.elapsed() < MODELS_TTL && l.stamp == stamp, l.models.clone()));
+    if let Some((true, models)) = previous {
+        return models;
+    }
+    match tokio::time::timeout(SETUP_LIMIT, list_models()).await {
+        Ok(Ok(models)) if !models.is_empty() => {
+            *MODELS.lock().unwrap() = Some(Listed { at: Instant::now(), stamp, models: models.clone() });
+            return models;
+        }
+        Ok(Ok(_)) => eprintln!("[engine] codex: model/list returned no models"),
+        Ok(Err(e)) => eprintln!("[engine] codex: listing models failed: {e:#}"),
+        Err(_) => eprintln!("[engine] codex: listing models took over {} s; stopped", SETUP_LIMIT.as_secs()),
+    }
+    previous.map(|(_, models)| models).unwrap_or_default()
+}
+
+/// Ask a new app-server for its models (in zen's private Codex folder, like turns). Dropping the
+/// future (a timeout) kills the app-server.
 async fn list_models() -> Result<Vec<Value>> {
-    let mut s = AppServer::start(&std::env::temp_dir()).await?;
+    let mut s = AppServer::start(&crate::turn::engine_dir("codex")?).await?;
     let list = s.call("model/list", json!({}), None).await;
     let _ = s.child.start_kill();
     Ok(list?["data"]
@@ -288,6 +430,12 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
                     _ = abort.changed() => { interrupted = true; break; }
                 },
             };
+            // Codex acting by itself (its own shell, files, web, …): stop it before it goes on.
+            if let Some(kind) = foreign_item(&msg) {
+                let _ = s.child.start_kill();
+                error = Some(foreign_error(&kind));
+                break;
+            }
             let p = &msg["params"];
             match msg["method"].as_str().unwrap_or("") {
                 "item/tool/call" => {
@@ -349,8 +497,9 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
         if s.unknown > 0 {
             eprintln!("[engine] codex: {} app-server lines not understood", s.unknown);
         }
+        let engine_version = tokio::task::spawn_blocking(version).await.ok().flatten();
         ctx
-            .notify("turn.usage", json!({ "engine": "codex", "engine_version": version(),
+            .notify("turn.usage", json!({ "engine": "codex", "engine_version": engine_version,
                 "provider": "codex", "model": model, "render": render, "fallback_reason": fallback,
                 "engine_session": if sessions { json!({ "id": thread_id, "resumable": error.is_none() && !interrupted }) } else { Value::Null },
                 "input": usage["input"], "output": usage["output"], "cache_read": usage["cacheRead"], "cost_usd": null }))
@@ -364,7 +513,15 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
 }
 
 /// One completion without tools, in an ephemeral thread (summaries). Returns `{ text, usage, model }`.
+/// Given up after `COMPLETE_LIMIT` (the app-server is killed).
 pub async fn complete(model: &str, system: &str, prompt: &str) -> Result<Value> {
+    match tokio::time::timeout(COMPLETE_LIMIT, complete_now(model, system, prompt)).await {
+        Ok(r) => r,
+        Err(_) => bail!("codex didn't complete within {} s", COMPLETE_LIMIT.as_secs()),
+    }
+}
+
+async fn complete_now(model: &str, system: &str, prompt: &str) -> Result<Value> {
     let dir = crate::turn::engine_dir("codex")?;
     let mut s = AppServer::start(&dir).await?;
     let thread = s
@@ -381,6 +538,10 @@ pub async fn complete(model: &str, system: &str, prompt: &str) -> Result<Value> 
             Some(m) => m,
             None => s.next().await?,
         };
+        if let Some(kind) = foreign_item(&msg) {
+            let _ = s.child.start_kill();
+            bail!("{}", foreign_error(&kind));
+        }
         let p = &msg["params"];
         match msg["method"].as_str().unwrap_or("") {
             "item/completed" if p["item"]["type"] == "agentMessage" => text.push_str(p["item"]["text"].as_str().unwrap_or("")),
@@ -448,6 +609,35 @@ fn history_items(history: &[Value]) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_messages_and_zen_tools_may_run() {
+        let item = |method: &str, kind: &str| json!({ "method": method, "params": { "item": { "type": kind, "id": "i1" } } });
+        for kind in ["agentMessage", "reasoning", "userMessage", "dynamicToolCall", "plan", "contextCompaction"] {
+            assert_eq!(foreign_item(&item("item/started", kind)), None, "{kind}");
+            assert_eq!(foreign_item(&item("item/completed", kind)), None, "{kind}");
+        }
+        for kind in ["commandExecution", "fileChange", "mcpToolCall", "webSearch", "imageView", "collabAgentToolCall", "somethingNew"] {
+            assert_eq!(foreign_item(&item("item/started", kind)).as_deref(), Some(kind));
+        }
+        assert!(foreign_item(&json!({ "method": "item/started", "params": { "item": {} } })).is_some(), "an item without a type");
+        assert_eq!(foreign_item(&json!({ "method": "item/agentMessage/delta", "params": {} })), None);
+    }
+
+    #[test]
+    fn features_on_by_default_must_be_known() {
+        let list = "apps                 stable             true\n\
+                    fast_mode            stable             true\n\
+                    steer                removed            true\n\
+                    new_magic_tool       under development  true\n\
+                    chronicle            under development  false\n";
+        assert_eq!(unknown_features(list), Some(vec!["new_magic_tool".to_string()]));
+        assert_eq!(unknown_features("apps stable false\n"), Some(vec![]));
+        assert_eq!(unknown_features("Usage: codex features …"), None);
+        let disabled = config()["features"].as_object().unwrap().len();
+        assert_eq!(disabled, DISABLED.len());
+        assert!(DISABLED.iter().all(|f| !REVIEWED.contains(f)));
+    }
 
     #[test]
     fn requests_are_told_from_notifications_and_responses() {

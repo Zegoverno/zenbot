@@ -10,13 +10,17 @@
 # next to the old one, which is kept, wherever the CLI lives now (a plain binary such as
 # /usr/local/bin/claude, the native or standalone installers' versioned layout, or a global npm
 # install). Then one real tool-free completion runs through zen-engine (`complete`, the path the
-# kernel uses for summaries). If the check fails, the previous version is restored. Both CLIs are
-# started fresh for every turn, so no restart is needed. When the check already fails on the
+# kernel uses for summaries); for Codex, also `zen-engine codex-features`: every Codex feature on
+# by default must be one zenbot turns off or has reviewed, so a release that adds a tool of its own
+# fails here. If the check fails, the previous version is restored. Both CLIs are started fresh for
+# every turn, and zen-engine asks Codex its version and models again when the binary changes, so no
+# restart is needed. When the check already fails on the
 # installed version (signed out, offline), the update is skipped instead, since a test that fails
 # anyway can't judge it. Nothing here commits, builds or restarts zenbot.
 #
 # Results go to ~/.zenbot/upgrade.log ("engines: …", one line per change) and the latest state
-# to ~/.zenbot/engines.json (shown by `zen status`).
+# to ~/.zenbot/engines.json (shown by `zen status`). The Codex feature check also runs every day on
+# its own, whatever the update did: when it fails the script exits 1, so the `engines` job fails.
 # ZEN_ENGINES=claude,codex limits which engines are looked at. ZEN_ENGINES_FAIL=<engine> makes
 # that engine's post-update check fail, to test the rollback.
 set -uo pipefail
@@ -78,6 +82,16 @@ check_model() {
   esac
 }
 
+# codex_features: every Codex feature on by default is known to zenbot (zen-engine codex-features).
+# Prints why not.
+codex_features() {
+  local out
+  # A zen-engine older than the check answers nothing (and exits 0): that is a failure too.
+  out=$(timeout 60 "$(zen_engine)" codex-features </dev/null 2>/dev/null) && [[ "$out" == "codex features: every feature"* ]] && return 0
+  echo "${out:-zen-engine could not check the Codex features (is it older than the check?)}"
+  return 1
+}
+
 # cli_check ENGINE VERSION: the CLI reports VERSION and answers one real tool-free completion.
 # Prints why it failed.
 cli_check() {
@@ -90,7 +104,11 @@ cli_check() {
   [ -n "$model" ] || { echo "zen-engine lists no $engine model (signed out?)"; return 1; }
   req=$(jq -nc --arg m "$model" '{jsonrpc:"2.0",id:1,method:"complete",params:{model:$m,system:"You are a health check.",prompt:"Reply with exactly: OK"}}')
   res=$(cd "$TMP" && echo "$req" | timeout 180 "$(zen_engine)" 2>/dev/null | head -1)
-  if echo "$res" | jq -e '.result.error == null and (.result.text // "" | test("OK"))' >/dev/null 2>&1; then return 0; fi
+  if echo "$res" | jq -e '.result.error == null and (.result.text // "" | test("OK"))' >/dev/null 2>&1; then
+    [ "$engine" = codex ] || return 0
+    codex_features && return 0
+    return 1
+  fi
   echo "a test turn on $model failed: $(echo "$res" | jq -r '.result.error // .error.message // "no answer"' 2>/dev/null | head -c 300)"
   return 1
 }
@@ -240,6 +258,15 @@ update_cli() {
 update_cli claude
 update_cli codex
 
+# Every day, whatever the update did: a Codex feature on by default that zenbot doesn't know may be a
+# tool of Codex's own. Turns stop if Codex uses one (codex.rs); this says so before they do.
+FEATURES_FAILED=
+if wanted codex && command -v codex >/dev/null && ! why=$(codex_features); then
+  FEATURES_FAILED=1
+  record codex "${VERSION[codex]:-$(codex_installed)}" "FEATURES NOT REVIEWED: $why"
+  log "codex: $why"
+fi
+
 # ---- state for `zen status` ----
 if [ -z "$CHECK_ONLY" ]; then
   # Engines not looked at this time (ZEN_ENGINES) keep their last entry.
@@ -252,3 +279,4 @@ fi
 behind=0
 for e in "${!STATUS[@]}"; do [ "${STATUS[$e]}" = "up to date" ] || [[ "${STATUS[$e]}" == updated* ]] || behind=1; done
 if [ $behind = 0 ]; then say "engines: all up to date"; else say "engines: not all up to date (see above)"; fi
+[ -z "$FEATURES_FAILED" ] || exit 1

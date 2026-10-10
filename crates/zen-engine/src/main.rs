@@ -13,7 +13,7 @@ mod failover;
 mod rpc;
 mod turn;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -24,14 +24,57 @@ use tokio::sync::{watch, Mutex};
 use rpc::Rpc;
 use turn::{TurnCtx, TurnInput};
 
-/// Turns running, by the kernel's turn id: their session and the switch that aborts them.
-type Running = Arc<Mutex<HashMap<String, (String, watch::Sender<bool>)>>>;
+/// Turns running, by the kernel's turn id, and the turns aborted before their `turn.start` came.
+type Running = Arc<Mutex<Turns>>;
+
+#[derive(Default)]
+struct Turns {
+    /// Each running turn's session and the switch that aborts it.
+    running: HashMap<String, (String, watch::Sender<bool>)>,
+    /// Turn ids aborted while not running here (yet): a `turn.start` for one ends at once. The
+    /// kernel may abort a turn before its `turn.start` arrives; the last few hundred are kept.
+    aborted: VecDeque<String>,
+}
+
+impl Turns {
+    const TOMBSTONES: usize = 256;
+
+    /// Register a turn. None if it was aborted already (its `turn.abort` came first).
+    fn start(&mut self, turn_id: &str, session_id: &str) -> Option<watch::Receiver<bool>> {
+        if self.aborted.iter().any(|t| t == turn_id) {
+            return None;
+        }
+        let (tx, rx) = watch::channel(false);
+        self.running.insert(turn_id.to_string(), (session_id.to_string(), tx));
+        Some(rx)
+    }
+
+    /// Abort the turn named, or every turn of the session (a stale one the kernel ended included).
+    /// A named turn that isn't running is remembered, so it can't start later.
+    fn abort(&mut self, session_id: &str, turn_id: Option<&str>) {
+        let mut found = false;
+        for (id, (session, tx)) in &self.running {
+            if session == session_id && turn_id.is_none_or(|t| t == id) {
+                let _ = tx.send(true);
+                found = true;
+            }
+        }
+        if let (Some(t), false) = (turn_id, found) {
+            if self.aborted.len() >= Self::TOMBSTONES {
+                self.aborted.pop_front();
+            }
+            self.aborted.push_back(t.to_string());
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    if args.get(1).map(String::as_str) == Some("mcp-bridge") {
-        return bridge::run(args.get(2).cloned().unwrap_or_default()).await;
+    match args.get(1).map(String::as_str) {
+        Some("mcp-bridge") => return bridge::run(args.get(2).cloned().unwrap_or_default()).await,
+        Some("codex-features") => std::process::exit(codex::check_features()),
+        _ => {}
     }
     serve().await
 }
@@ -54,6 +97,16 @@ async fn serve() -> Result<()> {
         };
         let id = msg.get("id").cloned();
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
+        // Starting and aborting turns are handled here, in the order they came: an abort sent
+        // just after a `turn.start` must find the turn registered, and one sent before it must
+        // stop it from starting. Both are quick (the turn itself runs in its own task).
+        if matches!(method.as_str(), "turn.start" | "turn.abort") {
+            let result = handle(&rpc, &running, &method, params).await;
+            if let Some(id) = id {
+                rpc.respond(id, result.map_err(|e| e.to_string())).await;
+            }
+            continue;
+        }
         let rpc = rpc.clone();
         let running = running.clone();
         answering.spawn(async move {
@@ -89,10 +142,13 @@ async fn handle(rpc: &Rpc, running: &Running, method: &str, p: Value) -> Result<
             let turn_id = p["turn_id"].as_str().map(String::from).unwrap_or_else(turn::new_uuid);
             let engine = p["model"].as_str().unwrap_or("").split_once('/').map(|(e, _)| e.to_string()).unwrap_or_default();
             let input = TurnInput::from_params(&p);
-            let (abort_tx, abort_rx) = watch::channel(false);
-            running.lock().await.insert(turn_id.clone(), (session_id.clone(), abort_tx));
             let tools = p["tools"].as_array().cloned().unwrap_or_default();
             let ctx = TurnCtx::new(rpc.clone(), session_id.clone(), turn_id.clone(), tools);
+            let Some(abort_rx) = running.lock().await.start(&turn_id, &session_id) else {
+                // Aborted before it started: it ends at once, without running.
+                ctx.notify("turn.end", json!({ "error": "interrupted" })).await;
+                return Ok(json!({ "ok": true }));
+            };
             let running = running.clone();
             tokio::spawn(async move {
                 let result = if engine == "faux" && faux::enabled() {
@@ -119,8 +175,14 @@ async fn handle(rpc: &Rpc, running: &Running, method: &str, p: Value) -> Result<
                         }
                     }
                 }
+                // No tool call is left on the tape without a result.
+                ctx.settle().await;
+                let unmatched = ctx.unmatched_calls();
+                if error.is_none() && unmatched > 0 {
+                    error = Some(format!("{unmatched} tool call(s) ran without the model's announcement in the engine's stream, so the tape can't pair them with their results (has the stream format changed?)"));
+                }
                 failover::publish_usage(&ctx).await;
-                running.lock().await.remove(&turn_id);
+                running.lock().await.running.remove(&turn_id);
                 ctx.notify("turn.end", json!({ "error": error })).await;
             });
             Ok(json!({ "ok": true }))
@@ -139,15 +201,32 @@ async fn handle(rpc: &Rpc, running: &Running, method: &str, p: Value) -> Result<
             Ok(res.unwrap_or_else(|e| json!({ "error": e.to_string() })))
         }
         "turn.abort" => {
-            // The turn named, or every turn of the session (a stale one the kernel ended included).
-            let session_id = p["session_id"].as_str().unwrap_or("");
-            for (turn_id, (session, tx)) in running.lock().await.iter() {
-                if session == session_id && p["turn_id"].as_str().is_none_or(|t| t == turn_id) {
-                    let _ = tx.send(true);
-                }
-            }
+            running.lock().await.abort(p["session_id"].as_str().unwrap_or(""), p["turn_id"].as_str());
             Ok(json!({ "ok": true }))
         }
         _ => anyhow::bail!("unknown method {method}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_abort_before_its_start_keeps_the_turn_from_running() {
+        let mut turns = Turns::default();
+        turns.abort("s1", Some("t1"));
+        assert!(turns.start("t1", "s1").is_none(), "aborted before it started");
+        let rx = turns.start("t2", "s1").expect("another turn starts");
+        turns.abort("s1", Some("t2"));
+        assert!(*rx.borrow(), "a running turn is aborted");
+        assert!(!turns.aborted.contains(&"t2".to_string()), "no tombstone for a turn that was running");
+        let rx = turns.start("t3", "s2").unwrap();
+        turns.abort("s2", None);
+        assert!(*rx.borrow(), "without a turn id, every turn of the session");
+        for i in 0..300 {
+            turns.abort("s", Some(&format!("x{i}")));
+        }
+        assert_eq!(turns.aborted.len(), Turns::TOMBSTONES);
     }
 }
