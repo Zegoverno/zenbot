@@ -6,6 +6,27 @@
 
 ---
 
+## 2026-10-10 — Faster evals: affected tasks only, in parallel, base from cache; scripts/check.sh
+
+- Shipping took about four times as long as building, mostly the eval: every task on both harnesses,
+  one kernel at a time, the unchanged base rerun on every pull request (D-050).
+- `scripts/eval.sh` now runs only the tasks the change affects: changed paths map to areas in
+  `evals/areas.txt`, every task names its `areas`, and three cheap `core` tasks always run. No
+  harness change: it says no eval is needed and stops. `--plan` shows the selection and why;
+  `--full` runs everything. A change to `memory.rs` runs 4 tasks, to `compile.rs` 9, to the
+  default prompt files 6, to `zen-engine` all 22.
+- Runs go 3 at a time (`--jobs`), each with its own kernel, port and database, base and new
+  interleaved; Ctrl-C stops every kernel and drops the databases. With `faux/smoke`, 16 runs took
+  40 s one at a time and 22 s three at a time; real turns wait on the model, so they gain more.
+- Completed base runs are cached for 7 days by base commit, model, effort, task files and engine
+  versions, so a second eval against the same installed base runs only the new side; the report
+  lists the reused results and their dates (`--fresh` reruns them).
+- `scripts/check.sh` runs what CI checks in one command, timed per step, stopping at the first
+  failure.
+- `archive-old-logs`' fixture logs were never committed (the task couldn't pass elsewhere); now they
+  are. The coding-zen check helper moved to `evals/lib/`. MAP.md had 14 tasks (there are 23) and
+  didn't list `eval-native.sh` or `eval-paired.py`.
+
 ## 2026-10-10 — Coding benchmark against the native CLIs; workspace note for Claude
 
 - `scripts/eval.sh --native claude|codex` runs the base side through the vendor's own CLI with its

@@ -1,5 +1,6 @@
 {
   "description": "Use what was read in an earlier turn after the file is gone (tests that history survives between turns).",
+  "areas": ["core", "history"],
   "work": "maintain",
   "steps": [
     { "prompt": "What port does config.toml configure? Just answer with the number." },

@@ -388,7 +388,8 @@ Set by the kernel for every `bash` command: `ZEN_SESSION_ID`, `ZEN_MODEL` (read 
 | `ZEN_E2E_MCP_TOKEN` | set by `e2e.sh` | `e2e.sh` (`mcp` scenario) | Tests `${VAR}` expansion in `mcp.json` headers |
 | `ZEN_MATRIX_E2E_PORT` / `ZEN_MATRIX_E2E_HS_PORT` | `18197` / `16167` | `matrix-e2e.sh` | Faux kernel port; throwaway homeserver port |
 | `ZEN_SLOW_SECS` | `12` | `scripts/e2e/slow_worker.py` | How long the test summarizer's `complete` takes |
-| `ZEN_EVAL_PORT` / `ZEN_EVAL_KEEP_BUILDS` | `18301` / `5` | `eval.sh` | Eval kernel port; base builds kept |
+| `ZEN_EVAL_PORT` / `ZEN_EVAL_KEEP_BUILDS` | `18301` / `5` | `eval.sh` | First eval kernel port (runs at once use the next ones); base builds kept |
+| `ZEN_EVAL_JOBS` / `ZEN_EVAL_CACHE_DAYS` | `3` / `7` | `eval.sh` | Eval runs at once (`--jobs`); days a cached base result is reused |
 | `ZEN_ENGINES` / `ZEN_ENGINES_FAIL` / `ZEN_ENGINES_CLAUDE_MODEL` / `ZEN_ENGINES_CODEX_MODEL` | all / – / cheapest listed | `update-engines.sh` | Limit engines; force a failed check (tests rollback); model for the check |
 | `ZEN_BUILD_FROM_SOURCE` | – | `fetch-release.sh` (so `install.sh`, `upgrade.sh`) | `1`: never download binaries |
 | `ZEN_RELEASE_BASE` | GitHub `edge` release of `origin` | `fetch-release.sh` | Where binaries are downloaded from |
@@ -434,7 +435,9 @@ Read from the process environment, else `~/.zenbot/matrix.env` (`state.rs::Confi
 | `global/wiki/` | `wiki.rs` (`capture`: pages, `index.md`, `log.md`, git commits), the agent (`edit` of summaries), the sleep (commits) | `search.rs` (indexer), the model (`read`), the owner | The wiki (`ZEN_WIKI_DIR`), its own git repository |
 | `mcp.json` | the owner | `mcp.rs` (re-read when it changes) | MCP servers (`mcpServers`); keep secrets in `env` and refer to them as `${VAR}` |
 | `SOUL.md`, `MEMORY.md`, `wiki`, `skills`, `tools` (symlinks) | `layout::migrate` | a rolled-back build | The old flat layout's paths, each a relative symlink to its new place (D-040); removed in a later release |
-| `evals/<run>/` | `eval.sh` | `eval-report.sh` | Eval results |
+| `evals/<run>/` | `eval.sh` | `eval-report.sh` | Eval results: `base.jsonl`, `new.jsonl`, `selection.txt` (which tasks and why), `report.md` |
+| `evals/cache/<key>.json` | `eval.sh` | `eval.sh` | Base results reused while young and unchanged (key: base commit, model, effort, the task's files, engine versions, repeat) |
+| `evals/builds/<commit>/` | `eval.sh` | `eval.sh` | Base harness builds (the newest `ZEN_EVAL_KEEP_BUILDS`) |
 | `matrix.env` | the owner | `zen-matrix` | **Secret** (mode 600): `MATRIX_USER`, `MATRIX_OWNER`, `MATRIX_PASSWORD` (first sign-in only), optional `MATRIX_RECOVERY_KEY`, `MATRIX_HOMESERVER` |
 | `matrix/` | `zen-matrix` | `zen-matrix` | Mode 700. **Secrets:** `session.json` (access token), `store.key` (encrypts `store/`, the SQLite key and sync store), `recovery-key`. `state.json`: rooms ↔ sessions, job-report cursor |
 
@@ -456,7 +459,12 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 | `scripts/lib.sh` | `zen_env`, `wait_healthy`, `ensure_rust`, `new_token`, `remove_old_timers` (stops and deletes the `zen-sleep`/`zen-engines` timers older versions installed; `install.sh` and, after a healthy upgrade, `apply-upgrade.sh`) | `/etc/systemd/system` |
 | `scripts/dev.sh` | Dev kernel in the foreground on `:18100` with database `zen_dev` and `ZEN_HOME` `~/.zenbot-dev`, using `~/.zenbot/env` settings | `zen_dev` DB, `~/.zenbot-dev` |
 | `scripts/e2e.sh` | End-to-end scenarios (below); scripts in `scripts/e2e/*.json`, plus test servers in Python: `slow_worker.py` (a worker serving `slow/summarizer`, a deliberately slow `complete`), `mcp_server.py` (an MCP server with `echo` and `add`, stdio or `--http PORT`), `searxng_stub.py` (answers `/search?format=json`), `systemone_stub.py` (validates the direct classifier call), `ws_prompt.py` (sends one WebSocket message as zen's terminal app does and prints the events) | temp DB, workspace and `HOME` |
-| `scripts/eval.sh`, `scripts/eval-report.sh` | Harness eval: this checkout vs installed (or `--base REF`), same model; each kernel gets its own `ZEN_HOME` next to the task workspace (default prompt files and skills); report for the owner, never a gate | `zen_eval_*` DBs, `~/.zenbot/evals/` |
+| `scripts/check.sh [filter]` | What CI checks, in one command: build once, unit tests, clippy `-D warnings`, `scripts/e2e.sh [filter]` on that build, `scripts/check-docs.py --base origin/main`; times each step, stops at the first failure | `target/`, e2e's temp DB |
+| `scripts/eval.sh`, `scripts/eval-report.sh` | Harness eval: this checkout vs installed (or `--base REF`), same model, on the tasks the change affects (`evals/areas.txt`; `--plan` shows which and why, `--full` all). Runs `--jobs` at once, each with its own kernel, port, database and `ZEN_HOME` next to the task workspace (default prompt files and skills); base results cached. `--native claude\|codex` makes the base the vendor's CLI. Report for the owner, never a gate | `zen_eval_*` DBs, `~/.zenbot/evals/` |
+| `scripts/eval-native.sh` | One eval turn through the vendor's own CLI (Claude Code or Codex, with their own tools), printed like `zen ask --json`: the base of `eval.sh --native` | the task workspace |
+| `scripts/eval-paired.py` | Paired comparison of eval runs: tasks only one side passed with a sign test, cost, token, time and tool-call ratios with bootstrap intervals | – |
+| `evals/areas.txt` | Path prefix → areas, so `eval.sh` runs only the tasks a change can affect (D-050) | – |
+| `evals/lib/coding-zen-insert.py` | Puts a hidden test into a Rust file's `mod tests` (the `coding-zen-*` checks) | the task workspace |
 | `scripts/git-hooks/prepare-commit-msg` | Adds `Zen-Session` / `Co-Authored-By` trailers when `ZEN_SESSION_ID` is set | commit messages |
 | `deploy/compose.yaml` | `postgres` (pgvector, `127.0.0.1:5432`) and `searxng` (pinned by digest, `127.0.0.1:8888`, keyless search for `web_search`) | Docker volume `zen-pg` |
 | `deploy/searxng/settings.yml` | SearXNG settings mounted read-only: JSON output on, limiter and image proxy off, not a public instance | — |
@@ -521,10 +529,11 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
   `scripts/e2e/mcp_server.py` (stdio, and `--http` on port +1), `web` starts
   `scripts/e2e/searxng_stub.py` on port +2 (`ZEN_SEARXNG_URL`), `system-one` starts
   `scripts/e2e/systemone_stub.py` on port +3 (`ZEN_S1_URL`). Nothing reaches the internet. Add a scenario when kernel behavior changes.
-- **Evals:** `evals/tasks/<name>/{task.json,files/}` (14 tasks, including the runner self-test
-  `smoke`), run by `scripts/eval.sh`; see `evals/README.md`. Harness changes (system prompt,
-  history, tools, workers, model or effort handling) get an eval before commit; the report goes to
-  the owner, who decides.
+- **Evals:** `evals/tasks/<name>/{task.json,files/,hidden/}` (23 tasks: 13 on how zenbot works,
+  9 `coding-*` with hidden tests, and the runner self-test `smoke`), run by `scripts/eval.sh` on the
+  tasks a change affects (`evals/areas.txt`, plus the `core` tasks); see `evals/README.md`. Harness
+  changes (system prompt, history, tools, workers, model or effort handling) get an eval before
+  merging; the report goes to the owner, who decides.
 - **Upgrade smoke test:** one scripted `faux/smoke` turn inside `scripts/upgrade.sh`.
 - **Matrix channel:** `scripts/matrix-e2e.sh` end to end (Scripts table); not run by `scripts/e2e.sh` or CI.
 
@@ -584,7 +593,7 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 | `DEVELOPMENT.md` | Local loop: build, test, verify and ship a change |
 | `ROADMAP.md` | Phases in order |
 | `PROGRESS.md` | Append-only log of what shipped and what was learned |
-| `DECISIONS.md` | Why things are the way they are, newest first (D-001 to D-049; D-025 onward: the target design and the choices made building it) |
+| `DECISIONS.md` | Why things are the way they are, newest first (D-001 to D-050; D-025 onward: the target design and the choices made building it) |
 | `SPEC.md` | Long-term target modules (section numbers kept, e.g. 5.18 Security) |
 | `docs/context.md` | How each turn's context is built, stored, cached, summarized and measured; the tape |
 | `docs/brief.md` | Briefs and verification: the `work/brief` and `work/verify` skills, the `verify` and `ask` tools |

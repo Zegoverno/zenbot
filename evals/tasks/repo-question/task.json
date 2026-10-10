@@ -1,5 +1,6 @@
 {
   "description": "Answer a question about a small codebase: which function decides, and what happens on the error path.",
+  "areas": ["core", "prompt", "tools"],
   "work": "understand",
   "steps": [
     { "prompt": "In this codebase, which function decides whether a refund is allowed, and what happens when the amount is more than was captured? Answer in two sentences, naming the function, its file and the exception." }

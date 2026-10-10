@@ -1,5 +1,6 @@
 {
   "description": "Runner self-test with the scripted faux/smoke model (run with --model faux/smoke --tasks smoke).",
+  "areas": ["tools"],
   "selftest": true,
   "steps": [
     { "prompt": "smoke test, turn 1" },

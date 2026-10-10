@@ -1,5 +1,6 @@
 {
   "description": "Add a small feature to an existing script and keep its existing data working.",
+  "areas": ["tools"],
   "work": "build",
   "steps": [
     { "prompt": "Add a `done N` command to todo.py that marks item N as done. `list` should show done items as `[x]` and open ones as `[ ]`. The existing todo.txt must keep working." }

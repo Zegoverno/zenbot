@@ -1,5 +1,6 @@
 {
   "description": "An incomplete request (which timeout? to what?): it must ask before changing anything, then do what the answer says.",
+  "areas": ["prompt", "tools"],
   "work": "shape",
   "steps": [
     { "prompt": "Change the timeout." },

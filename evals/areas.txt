@@ -1,0 +1,45 @@
+# Which eval tasks a change can affect: scripts/eval.sh picks the tasks to run from this (D-050).
+#
+# A changed path takes the areas of every line whose prefix it starts with. A task runs when one of
+# its areas (`areas` in its task.json) is among them. `all` runs every task, coding included; `core`
+# only the core tasks, which run whenever any line here matches. A path no line matches isn't part
+# of the harness: a change to only such paths needs no eval (the client `zen`, zen-matrix, docs,
+# scripts, the eval tasks themselves). When unsure, give a path more areas, not fewer.
+#
+# Areas: prompt (instructions and what a turn sends), history (earlier turns reaching the model),
+# tools, memory, search, compaction, jobs, wiki, skills, delegation, web, mcp, coding (the coding-*
+# benchmark: only `all` or naming them selects it). Some areas have no task yet; they select core.
+#
+# prefix                          areas
+crates/zen-engine/                all
+crates/zen-proto/                 all
+crates/zend/src/workers.rs        all
+crates/zend/src/mind.rs           all
+crates/zend/src/main.rs           prompt history tools
+crates/zend/src/compile.rs        prompt history
+crates/zend/src/context.rs        prompt
+crates/zend/src/layout.rs         prompt memory skills
+crates/zend/src/defaults.rs       prompt skills
+crates/zend/defaults/             prompt skills
+crates/zend/steps/                prompt tools
+crates/zend/src/measure.rs        prompt history
+crates/zend/src/turns.rs          prompt history tools
+crates/zend/src/tape.rs           history compaction
+crates/zend/src/dispatch.rs       tools
+crates/zend/src/tools.rs          tools
+crates/zend/src/secrets.rs        tools
+crates/zend/src/agent.rs          tools memory skills history
+crates/zend/src/taint.rs          history web mcp delegation
+crates/zend/src/memory.rs         memory
+crates/zend/src/search.rs         search
+crates/zend/src/compact.rs        compaction history
+crates/zend/src/jobs.rs           jobs
+crates/zend/src/wiki.rs           wiki
+crates/zend/src/skills.rs         skills
+crates/zend/src/workshop.rs       skills
+crates/zend/src/delegate.rs       delegation
+crates/zend/src/web.rs            web
+crates/zend/src/mcp.rs            mcp
+crates/zend/                      core   # the rest of the kernel: API, migrations, side calls, a new module
+Cargo.toml                        core
+Cargo.lock                        core

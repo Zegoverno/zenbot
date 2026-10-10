@@ -1,5 +1,6 @@
 {
   "description": "A real zenbot bug, fixed in 8fdb954; the fix's test is hidden until the check.",
+  "areas": ["coding"],
   "work": "build",
   "steps": [
     {
@@ -12,7 +13,7 @@
   "checks": [
     {
       "name": "hidden test passes",
-      "run": "python3 \"$TASK_DIR/../coding-zen-insert.py\" crates/zend/src/tools.rs \"$TASK_DIR/hidden/test.rs\" && out=$(cargo test -p zend --offline --bin zend -- edit_keeps_mixed_line_endings_and_writes_through_symlinks 2>&1); echo \"$out\" | tail -15; echo \"$out\" | grep -q ' 1 passed'"
+      "run": "python3 \"$TASK_DIR/../../lib/coding-zen-insert.py\" crates/zend/src/tools.rs \"$TASK_DIR/hidden/test.rs\" && out=$(cargo test -p zend --offline --bin zend -- edit_keeps_mixed_line_endings_and_writes_through_symlinks 2>&1); echo \"$out\" | tail -15; echo \"$out\" | grep -q ' 1 passed'"
     }
   ]
 }

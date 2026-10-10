@@ -1,5 +1,6 @@
 {
   "description": "A small feature in a Rust CLI: a --json flag printing the same data, no new dependencies, with tests.",
+  "areas": ["tools"],
   "work": "build",
   "steps": [
     { "prompt": "Add a --json flag to the stock CLI that prints the same items as a JSON array of {name, count} objects. Keep the table as the default, add no dependencies, and add a test." }

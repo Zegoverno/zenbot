@@ -35,12 +35,13 @@ Config lives in `~/.zenbot/` (MAP.md lists every file). `token`, `env`, `matrix.
 1. **Branch.** Start from an up-to-date `main` and work on a branch (`feat/…`, `fix/…`, `docs/…`),
    never directly on `main`.
 2. **Read the code you're changing.** Keep the existing style. Keep changes small.
-3. **Build and check** exactly as CI does: build, tests, clippy as errors, and `scripts/e2e.sh`
-   (DEVELOPMENT.md). Add an e2e scenario when you change the kernel's behavior. Test kernel behavior
-   without a subscription with the scripted `faux/smoke` model. `crates/zen-matrix` is built,
-   tested and linted in its own CI job; test it end to end with `scripts/matrix-e2e.sh` (not in
-   CI). Changes to the worker protocol
-   update `docs/worker-protocol.md` and every worker.
+3. **Build and check** exactly as CI does: `scripts/check.sh` builds once, then runs the tests,
+   clippy as errors, `scripts/e2e.sh` and the docs check, timing each step and stopping at the
+   first failure (`scripts/check.sh <filter>` runs only matching e2e scenarios; DEVELOPMENT.md).
+   Add an e2e scenario when you change the kernel's behavior. Test kernel behavior without a
+   subscription with the scripted `faux/smoke` model. `crates/zen-matrix` is built, tested and
+   linted in its own CI job; test it end to end with `scripts/matrix-e2e.sh` (not in CI). Changes
+   to the worker protocol update `docs/worker-protocol.md` and every worker.
 4. **Test it for real** where you can, e.g. `./target/release/zen ask --json "…"` against the running
    service or a dev kernel.
 5. **Update the docs** in the same branch (table below), then run `scripts/check-docs.py`. Docs are
@@ -52,8 +53,11 @@ Config lives in `~/.zenbot/` (MAP.md lists every file). `token`, `env`, `matrix.
    touch `zen-matrix`: `scripts/matrix.sh` builds, installs and restarts that.
 7. **Ship.** Commit (one concern per commit), push the branch, open a pull request, merge when CI is
    green. Harness changes (system prompt, history, tools, workers, model or effort handling) also get
-   an eval first: run `scripts/eval.sh`, show the owner the report (in the pull request too), and merge
-   only once the owner agrees. The report informs the owner's decision; it is never a pass/fail gate.
+   an eval first: `scripts/eval.sh --plan` shows which tasks the change affects and why, then
+   `scripts/eval.sh` runs those (in parallel, the base from cache when it can); use `--full` for a
+   large harness change or when the owner asks. Show the owner the report (in the pull request
+   too), and merge only once the owner agrees. The report informs the owner's decision; it is never
+   a pass/fail gate.
 8. **After a merge**, `git checkout main && git pull` before starting the next branch.
 
 ## Update the docs before shipping
@@ -128,5 +132,7 @@ zen status                  # health of kernel, database, workers, sign-in, engi
 journalctl -u zenbot -n 50  # service logs (zen-matrix: journalctl -u zen-matrix)
 cat ~/.zenbot/upgrade.log   # upgrade results
 scripts/upgrade.sh --check  # build, check and smoke test without installing
+scripts/check.sh            # what CI checks: build, tests, clippy, e2e, docs
+scripts/eval.sh --plan      # which eval tasks a harness change affects, and why
 ZEN_FAUX=1 scripts/dev.sh   # dev kernel on :18100 with its own zen_dev database
 ```

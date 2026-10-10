@@ -6,6 +6,38 @@
 
 ---
 
+## D-050 — Evals run only the affected tasks, in parallel, against a cached base
+
+**Date:** 2026-10-10 · **Status:** accepted (owner)
+
+**Decision:** `scripts/eval.sh` runs, by default, only the tasks a change can affect: the files that
+differ between the base and the checkout are mapped to areas (prompt, history, tools, memory,
+search, compaction, …) by `evals/areas.txt`, and the tasks whose `areas` meet them run, plus a few
+cheap `core` tasks that run for any harness change. A change to the engine worker or the worker
+protocol runs every task; a change outside the harness needs no eval. Runs go `--jobs` at a time (3
+by default), each on its own kernel, port and database, base and new interleaved. A base result
+that completed is cached for a week and reused while its base commit, model, effort, task files and
+engine versions are unchanged. `--plan` shows the selection and its reasons before anything runs;
+`--full` runs every task, `--fresh` reruns the base. `scripts/check.sh` runs CI's checks in one
+command.
+
+**Why:** The owner found that shipping a feature took about four times as long as building it, mostly
+the eval: 23 tasks × 2 harnesses, one kernel at a time, the unchanged base run again on every pull
+request, and heavy coding tasks run for a one-line memory change. Most of that bought no
+information.
+
+**Trade-off:** A change can affect a task its area doesn't name, and that regression would be missed.
+The `core` tasks always run, the mapping errs toward including (an unknown kernel file gets `core`,
+a worker change gets everything), and `--full` remains for large harness changes or whenever the
+owner asks. Cached base results ran under other conditions (another day's load and rate limits);
+the report says which came from the cache and when. Runs at the same time share the machine, so
+times are noisier than one at a time; base and new interleave so both sides see the same load.
+
+**Considered:** fewer tasks for everyone (loses coverage where a change does land); one database for
+all parallel runs (kernels would index each other's sessions into search and spoil recall tasks).
+
+---
+
 ## D-049 — A Matrix channel: zen-matrix, a separate bridge process
 
 **Date:** 2026-10-09 · **Status:** accepted (owner)

@@ -1,5 +1,6 @@
 {
   "description": "Find and fix a bug that makes a Rust test fail, without touching the tests.",
+  "areas": ["tools"],
   "work": "build",
   "steps": [
     { "prompt": "`cargo test` fails in this crate. Find the bug and fix it. Don't change the tests." }
