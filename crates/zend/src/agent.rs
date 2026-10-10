@@ -393,6 +393,12 @@ fn criteria_of(args: &Value) -> Vec<Value> {
         .collect()
 }
 
+/// An id that more than one criterion has, if any.
+fn duplicate_id(criteria: &[Value]) -> Option<String> {
+    let mut seen = std::collections::HashSet::new();
+    criteria.iter().filter_map(|c| c["id"].as_str()).find(|id| !seen.insert(*id)).map(String::from)
+}
+
 /// Combine the kernel's checks and the verifier's verdict: a failed command can't be overridden;
 /// otherwise the verifier's judgment, or uncertain when there was none.
 pub fn combine(criteria: &[Value], checks: &serde_json::Map<String, Value>, verdict: &Value) -> Vec<Value> {
@@ -449,6 +455,10 @@ async fn verify(app: &AppState, session: Uuid, workspace: &Path, args: &Value) -
     let criteria = criteria_of(args);
     if goal.is_empty() || criteria.is_empty() || criteria.iter().any(|c| c["text"].as_str().is_none_or(|t| t.trim().is_empty())) {
         return err("verify needs a `goal` and at least one criterion with `text`.".into());
+    }
+    // Each check is kept by its criterion's id: two criteria with one id would hide one's result.
+    if let Some(id) = duplicate_id(&criteria) {
+        return err(format!("two criteria have the id `{id}`: give each its own (or leave ids out)."));
     }
     let dir: PathBuf = args["dir"].as_str().map(|d| tools::resolve(workspace, d)).unwrap_or_else(|| workspace.to_path_buf());
     if !dir.is_dir() {
@@ -558,6 +568,12 @@ mod tests {
     fn a_failed_command_beats_the_verifier_and_judgment_needs_a_verdict() {
         let criteria = criteria_of(&json!({ "criteria": [{ "text": "tests pass", "run": "cargo test" }, "docs updated", { "id": "x", "text": "fast", "run": "true" }] }));
         assert_eq!(criteria[1]["id"], "c2");
+        assert_eq!(duplicate_id(&criteria), None);
+        // A failing check under an id another criterion also has would be overwritten: refused.
+        let twice = criteria_of(&json!({ "criteria": [{ "id": "a", "text": "x", "run": "false" }, { "id": "a", "text": "y", "run": "true" }] }));
+        assert_eq!(duplicate_id(&twice).as_deref(), Some("a"));
+        let clash = criteria_of(&json!({ "criteria": ["first", { "id": "c1", "text": "named like the first" }] }));
+        assert_eq!(duplicate_id(&clash).as_deref(), Some("c1"));
         let mut checks = serde_json::Map::new();
         checks.insert("c1".into(), json!({ "ok": false, "exit": 1, "output": "1 failed" }));
         checks.insert("x".into(), json!({ "ok": true }));
