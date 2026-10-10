@@ -53,10 +53,7 @@ ENGINE_PIDS=()
 if ! command -v claude >/dev/null; then (curl -fsSL https://claude.ai/install.sh | bash >/tmp/zen-install-claude.log 2>&1) & ENGINE_PIDS+=($!); fi
 if ! command -v codex >/dev/null; then (npm install -g --no-audit --no-fund --silent @openai/codex >/tmp/zen-install-codex.log 2>&1) & ENGINE_PIDS+=($!); fi
 
-# Keep configured model workers, but retire a stale `pi` entry from existing installations.
 WORKERS="${ZEN_WORKERS:-$(zen_env ZEN_WORKERS)}"; WORKERS=${WORKERS:-engine}
-WORKERS=$(printf '%s' "$WORKERS" | tr ',' '\n' | awk '$0 != "pi"' | paste -sd, -)
-WORKERS=${WORKERS:-engine}
 if "$REPO/scripts/fetch-release.sh"; then
   say "Downloaded prebuilt zenbot $(git rev-parse --short HEAD)"
 else

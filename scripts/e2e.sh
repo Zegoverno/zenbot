@@ -429,9 +429,8 @@ system_one_direct() {
   local ws; ws=$(new_workspace systemone)
   local port=$((PORT + 3))
   python3 "$REPO/scripts/e2e/systemone_stub.py" "$port" & local srv=$!
-  start_kernel "$ws" "$(script systemone.json)" ZEN_WORKERS=engine,pi ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone" \
+  start_kernel "$ws" "$(script systemone.json)" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone" \
     ZEN_DEFAULT_MODEL=faux/smoke ZEN_USER_CHARS=1200
-  check "a stale pi worker setting is ignored" bash -c '! grep -q "worker `pi` started" "$1"' _ "$TMP/kernel.log"
   check "the kernel reports its own OpenRouter key" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/models" | jq -r .authenticated.openrouter)" true
   local sid; sid=$(zen ask --json -m faux/smoke "decide directly" | jq -r .session_id)
   local answer; answer=$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='decide' ORDER BY seq DESC LIMIT 1")
@@ -463,9 +462,6 @@ system_one_direct() {
   check "the sleep compacted USER.md" bash -c 'grep -q "Compacted by the e2e" "$1" && test "$(wc -c <"$1")" -le 1200' _ "$zh/USER.md"
   check "said so in its note, with a backup of the long version" bash -c 'grep -q "compacted USER.md from" <<<"$1" && grep -l "agent will have to compact" "$2"/USER-*.md >/dev/null' _ "$(echo "$r" | jq -r .note)" "$zh/backups/prompt-files"
   check "through a session of the kernel's own" eq "$(q "SELECT kind || '/' || coalesce(parent::text, 'none') FROM sessions WHERE title = 'sleep: compact USER.md'")" subagent/none
-  stop_kernel
-  start_kernel "$ws" "$(script systemone.json)" ZEN_WORKERS=pi ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone"
-  check "pi-only legacy setting falls back to engine" grep -q 'worker `engine` started' "$TMP/kernel.log"
   kill "$srv" 2>/dev/null || true
 }
 
@@ -492,7 +488,7 @@ secrets_masked() {
   # (The command the model typed still contains it: masking applies to what tools return.)
   check "no tool output holds the token's value" eq "$(q "SELECT count(*) FROM tape_events WHERE payload->>'role'='toolResult' AND payload::text LIKE '%AbCdEfGhIjKlMnOp%'")" 0
   check "URL tokens are rejected for HTTP" eq "$(curl -s -o /dev/null -w '%{http_code}' "$URL/api/models?token=$TOKEN")" 401
-  check "URL tokens need a WebSocket upgrade" eq "$(curl -s -o /dev/null -w '%{http_code}' "$URL/api/sessions/$sid/ws?token=$TOKEN")" 401
+  check "URL tokens are rejected for the WebSocket too" eq "$(curl -s -o /dev/null -w '%{http_code}' "$URL/api/sessions/$sid/ws?token=$TOKEN")" 401
 }
 
 # A turn the kernel ended (the watchdog, after an abort the worker ignored) keeps running in the

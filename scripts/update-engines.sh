@@ -243,7 +243,7 @@ update_cli codex
 # ---- state for `zen status` ----
 if [ -z "$CHECK_ONLY" ]; then
   # Engines not looked at this time (ZEN_ENGINES) keep their last entry.
-  json=$(jq --arg at "$(date -u +%FT%TZ)" '{checked: $at, engines: ((.engines // {}) | del(.pi))}' "$STATE" 2>/dev/null || jq -n --arg at "$(date -u +%FT%TZ)" '{checked: $at, engines: {}}')
+  json=$(jq --arg at "$(date -u +%FT%TZ)" '{checked: $at, engines: (.engines // {})}' "$STATE" 2>/dev/null || jq -n --arg at "$(date -u +%FT%TZ)" '{checked: $at, engines: {}}')
   for e in "${!VERSION[@]}"; do
     json=$(echo "$json" | jq --arg e "$e" --arg v "${VERSION[$e]}" --arg s "${STATUS[$e]}" '.engines[$e] = {version: $v, status: $s}')
   done
