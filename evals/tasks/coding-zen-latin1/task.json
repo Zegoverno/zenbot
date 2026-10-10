@@ -12,7 +12,7 @@
   "checks": [
     {
       "name": "hidden test passes",
-      "run": "python3 \"$TASK_DIR/../coding-zen-insert.py\" crates/zend/src/web.rs \"$TASK_DIR/hidden/test.rs\" && out=$(cargo test -p zend --offline --bin zend -- legacy_pages_decode_from_their_charset 2>&1); echo \"$out\" | tail -15; echo \"$out\" | grep -q ' 1 passed'"
+      "run": "python3 \"$TASK_DIR/../../lib/coding-zen-insert.py\" crates/zend/src/web.rs \"$TASK_DIR/hidden/test.rs\" && out=$(cargo test -p zend --offline --bin zend -- legacy_pages_decode_from_their_charset 2>&1); echo \"$out\" | tail -15; echo \"$out\" | grep -q ' 1 passed'"
     }
   ]
 }
