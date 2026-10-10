@@ -12,6 +12,8 @@
 #   --tasks a,b       only these tasks (self-tests such as `smoke` run only when named)
 #   --repeat N        runs per task and harness (default 1)
 #   --only new|base   run one harness only
+#   --native ENGINE   the base is the vendor's own CLI (claude or codex) with its own tools, not a
+#                     zenbot build: how much zenbot's harness adds or costs (scripts/eval-native.sh)
 #   --keep            keep the per-run databases and workspaces
 #
 # Each run gets a fresh copy of the task's files as the workspace, its own kernel and its own
@@ -23,7 +25,7 @@ cd "$REPO"
 export PATH="$HOME/.local/node/bin:$HOME/.cargo/bin:$PATH"
 . "$REPO/scripts/db.sh"
 
-BASE_REF="" MODEL="" EFFORT="" BASE_MODEL="" BASE_EFFORT="" TASKS="" REPEAT=1 ONLY="" KEEP=""
+BASE_REF="" MODEL="" EFFORT="" BASE_MODEL="" BASE_EFFORT="" TASKS="" REPEAT=1 ONLY="" KEEP="" NATIVE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --base) BASE_REF=$2; shift ;;
@@ -35,6 +37,7 @@ while [ $# -gt 0 ]; do
     --repeat) REPEAT=$2; shift ;;
     --only) ONLY=$2; shift ;;
     --keep) KEEP=1 ;;
+    --native) NATIVE=$2; shift ;;
     -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -158,7 +161,8 @@ run_task() { # name bin label model effort db task repeat
   local started; started=$(date +%s%3N)
   local error="" sid=""
   local task_env=(); mapfile -t task_env < <(jq -r '.env // {} | to_entries[] | "\(.key)=\(.value)"' "$tdir/task.json")
-  if start_kernel "$bin" "$ws" "$db" "$label" "$WORK/$name/$task-$r.kernel.log" "${task_env[@]}"; then
+  local native=""; [[ $bin == native:* ]] && native=${bin#native:}
+  if [ -n "$native" ] || start_kernel "$bin" "$ws" "$db" "$label" "$WORK/$name/$task-$r.kernel.log" "${task_env[@]}"; then
     local n; n=$(jq '.steps | length' "$tdir/task.json")
     for i in $(seq 0 $((n - 1))); do
       local step; step=$(jq -c ".steps[$i]" "$tdir/task.json")
@@ -167,10 +171,14 @@ run_task() { # name bin label model effort db task repeat
         continue
       fi
       local prompt; prompt=$(echo "$step" | jq -r .prompt)
-      local args=(ask --json)
-      if [ -z "$sid" ]; then args+=(-m "$model"); [ -n "$effort" ] && args+=(-e "$effort"); else args+=(-s "$sid"); fi
       local res t0; t0=$(date +%s%3N)
-      res=$(ZEN_URL="http://127.0.0.1:$PORT" ZEN_TOKEN="$TOKEN" timeout 900 "$OUT/new-bin/zen" "${args[@]}" "$prompt" 2>/dev/null) || true
+      if [ -n "$native" ]; then
+        res=$(timeout 900 "$REPO/scripts/eval-native.sh" "$native" "$model" "$effort" "$ws" "$prompt" "$sid" 2>/dev/null) || true
+      else
+        local args=(ask --json)
+        if [ -z "$sid" ]; then args+=(-m "$model"); [ -n "$effort" ] && args+=(-e "$effort"); else args+=(-s "$sid"); fi
+        res=$(ZEN_URL="http://127.0.0.1:$PORT" ZEN_TOKEN="$TOKEN" timeout 900 "$OUT/new-bin/zen" "${args[@]}" "$prompt" 2>/dev/null) || true
+      fi
       if ! echo "$res" | jq -e .session_id >/dev/null 2>&1; then error="turn $((i + 1)) did not complete"; break; fi
       # Time the turn here, the same way for every harness (older kernels report no durations).
       echo "$res" | jq -c --argjson ms $(( $(date +%s%3N) - t0 )) '. + {client_ms: $ms}' >>"$turns"
@@ -214,7 +222,7 @@ run_task() { # name bin label model effort db task repeat
 
 run_harness() { # name bin label model effort
   local name=$1 db; db="zen_eval_$(echo "${RUN}_$1" | tr 'A-Z' 'a-z')"
-  db_psql -d postgres -c "CREATE DATABASE $db" >/dev/null
+  [[ $2 == native:* ]] || db_psql -d postgres -c "CREATE DATABASE $db" >/dev/null
   mkdir -p "$WORK/$name"
   for task in "${TASK_LIST[@]}"; do
     for r in $(seq 1 "$REPEAT"); do
@@ -222,14 +230,20 @@ run_harness() { # name bin label model effort
       run_task "$name" "$2" "$3" "$4" "$5" "$db" "$task" "$r" | tee -a "$OUT/$name.jsonl" | jq -r '"   " + (if .passed then "passed" else "FAILED" end) + (if .error then " (" + .error + ")" else "" end)' >&2
     done
   done
-  [ -z "$KEEP" ] && db_psql -d postgres -c "DROP DATABASE $db" >/dev/null
+  [ -z "$KEEP" ] && [[ $2 != native:* ]] && db_psql -d postgres -c "DROP DATABASE $db" >/dev/null
   true
 }
 
 # ---------- main ----------
 
 build_new
-[ "$ONLY" = new ] || build_base
+if [ -n "$NATIVE" ]; then
+  [[ $NATIVE == claude || $NATIVE == codex ]] || { echo "--native takes claude or codex" >&2; exit 2; }
+  [[ $MODEL == "$NATIVE"/* ]] || { echo "--native $NATIVE needs a $NATIVE/ model (--model)" >&2; exit 2; }
+  BASE_BIN="native:$NATIVE"; BASE_LABEL="native $NATIVE $("$NATIVE" --version 2>/dev/null | awk 'NR==1{print ($1 ~ /^[0-9]/) ? $1 : $NF}')"
+elif [ "$ONLY" != new ]; then
+  build_base
+fi
 log "== model $MODEL${EFFORT:+ · effort $EFFORT} · ${#TASK_LIST[@]} tasks × $REPEAT · results in $OUT"
 [ "$ONLY" = new ] || run_harness base "$BASE_BIN" "$BASE_LABEL" "$BASE_MODEL" "$BASE_EFFORT"
 [ "$ONLY" = base ] || run_harness new "$OUT/new-bin" "$NEW_LABEL" "$MODEL" "$EFFORT"

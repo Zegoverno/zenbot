@@ -1,0 +1,18 @@
+{
+  "description": "A real zenbot bug, fixed in 57f7b4a; the fix's test is hidden until the check.",
+  "work": "build",
+  "steps": [
+    {
+      "shell": "git -C \"$HOME/zenbot\" archive 70b18fe Cargo.toml Cargo.lock crates | tar x && rm -rf crates/zen-matrix && mkdir -p .cargo && printf '[build]\\ntarget-dir = \"%s\"\\n' \"$HOME/.zenbot/evals/cargo-target-zen\" > .cargo/config.toml && git init -q && git add -A && git -c user.name=eval -c user.email=eval@local commit -qm base"
+    },
+    {
+      "prompt": "web_fetch garbles pages that aren't UTF-8: Brazilian sites served as ISO-8859-1 or Windows-1252 come out with replacement characters (São Paulo becomes S�o Paulo). Fix it in crates/zend/src/web.rs: decode the body by its charset, from the Content-Type header, else a <meta charset> in the page, else UTF-8 when the bytes are valid UTF-8, else Windows-1252. Put the decoding in `fn decode_page(body: &[u8], content_type: &str) -> String` (a unit test will call it) and use it where pages are decoded. No new dependencies."
+    }
+  ],
+  "checks": [
+    {
+      "name": "hidden test passes",
+      "run": "python3 \"$TASK_DIR/../coding-zen-insert.py\" crates/zend/src/web.rs \"$TASK_DIR/hidden/test.rs\" && out=$(cargo test -p zend --offline --bin zend -- legacy_pages_decode_from_their_charset 2>&1); echo \"$out\" | tail -15; echo \"$out\" | grep -q ' 1 passed'"
+    }
+  ]
+}

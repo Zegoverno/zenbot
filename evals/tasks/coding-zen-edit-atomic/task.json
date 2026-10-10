@@ -1,0 +1,18 @@
+{
+  "description": "A real zenbot bug, fixed in 8fdb954; the fix's test is hidden until the check.",
+  "work": "build",
+  "steps": [
+    {
+      "shell": "git -C \"$HOME/zenbot\" archive ce25de4 Cargo.toml Cargo.lock crates | tar x && rm -rf crates/zen-matrix && mkdir -p .cargo && printf '[build]\\ntarget-dir = \"%s\"\\n' \"$HOME/.zenbot/evals/cargo-target-zen\" > .cargo/config.toml && git init -q && git add -A && git -c user.name=eval -c user.email=eval@local commit -qm base"
+    },
+    {
+      "prompt": "The kernel's edit tool (crates/zend/src/tools.rs) has three problems: editing a file whose lines mix CRLF and LF rewrites the line endings it didn't touch; editing through a symlink replaces the symlink with a regular file; and a crash mid-write can leave a truncated file. Make write and edit atomic (write a temporary file next to the target, then rename it over the real file, keeping its permissions and writing through symlinks to their target), never leave temporary files behind (name them with a `.zen-` prefix), and keep each line's original ending."
+    }
+  ],
+  "checks": [
+    {
+      "name": "hidden test passes",
+      "run": "python3 \"$TASK_DIR/../coding-zen-insert.py\" crates/zend/src/tools.rs \"$TASK_DIR/hidden/test.rs\" && out=$(cargo test -p zend --offline --bin zend -- edit_keeps_mixed_line_endings_and_writes_through_symlinks 2>&1); echo \"$out\" | tail -15; echo \"$out\" | grep -q ' 1 passed'"
+    }
+  ]
+}
