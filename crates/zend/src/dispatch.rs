@@ -99,6 +99,29 @@ pub(crate) async fn touch(app: &App, id: Uuid, worker: usize, turn: Option<Uuid>
     }
 }
 
+/// A tool call counted in its turn's `tools_running` (the watchdog leaves a turn running a tool
+/// alone). If the call ends without uncounting itself (a panic), dropping this does it.
+struct ToolCounted {
+    app: AppState,
+    id: Uuid,
+    turn_id: Uuid,
+    done: bool,
+}
+
+impl Drop for ToolCounted {
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        let (app, id, turn_id) = (self.app.clone(), self.id, self.turn_id);
+        tokio::spawn(async move {
+            if let Some(t) = app.turns.lock().await.get_mut(&id).filter(|t| t.turn_id == turn_id) {
+                t.tools_running = t.tools_running.saturating_sub(1);
+            }
+        });
+    }
+}
+
 pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming) -> Result<()> {
     let mind = app.workers[worker].mind();
     let p = &msg.params;
@@ -138,15 +161,17 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                 t.tools_running += 1;
                 (t.cancel.subscribe(), t.model.clone(), t.turn_id, t.ending, t.workspace.clone(), t.kind.clone())
             };
+            let mut counted = ToolCounted { app: app.clone(), id, turn_id, done: false };
             // Commands can tell which session runs them (e.g. the commit-trailer hook in scripts/git-hooks).
             let session_env = id.to_string();
             let env = [("ZEN_SESSION_ID", session_env.as_str()), ("ZEN_MODEL", model.as_str())];
             app.emit(id, json!({ "type": "tool_start", "call_id": call_id, "name": name, "args": args })).await;
             let started = Instant::now();
             // Abort (or the turn ending) drops the tool future, which kills a running command.
-            let mut out = if *cancel.borrow() {
-                tools::ToolOutput { content: "not run: the turn was interrupted".into(), is_error: true }
-            } else {
+            let run = async {
+                if *cancel.borrow() {
+                    return tools::ToolOutput { content: "not run: the turn was interrupted".into(), is_error: true };
+                }
                 tokio::select! {
                     out = async {
                         // Nothing more after a tool ended the turn; then the agent's own tools
@@ -181,6 +206,14 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                     _ = cancel.wait_for(|c| *c) => tools::ToolOutput { content: "interrupted: the turn was stopped before this tool finished".into(), is_error: true },
                 }
             };
+            // A tool that panics still gets an answer: the model must not wait for it.
+            let mut out = match futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(run)).await {
+                Ok(out) => out,
+                Err(_) => {
+                    tracing::error!("tool `{name}` panicked in session {id}");
+                    tools::ToolOutput { content: format!("the `{name}` tool failed with an internal error in the kernel"), is_error: true }
+                }
+            };
             let ms = started.elapsed().as_millis() as i64;
             // First time this session touches a project with its own instructions: attach them.
             let new_context: Vec<PathBuf> = {
@@ -188,7 +221,8 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                 let (ws, n, a) = (workspace.clone(), name.clone(), args.clone());
                 let candidates = tokio::task::spawn_blocking(move || context::governing(&ws, &context::paths_in_call(&ws, &n, &a))).await.unwrap_or_default();
                 let mut turns = app.turns.lock().await;
-                match turns.get_mut(&id) {
+                counted.done = true;
+                match turns.get_mut(&id).filter(|t| t.turn_id == turn_id) {
                     Some(t) => {
                         t.tools_running = t.tools_running.saturating_sub(1);
                         if ending.is_some() {

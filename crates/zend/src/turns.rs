@@ -53,17 +53,17 @@ pub(crate) async fn watchdog(app: AppState) {
                 None if t.tools_running == 0 && t.last_activity.elapsed() > idle_limit => {
                     t.abort_sent = Some(Instant::now());
                     let _ = t.cancel.send(true);
-                    to_abort.push((*id, t.worker));
+                    to_abort.push((*id, t.worker, t.turn_id));
                 }
                 _ => {}
             }
         }
         // All at once: each request may wait up to 30 s for a worker that is itself stuck.
-        futures_util::future::join_all(to_abort.into_iter().map(|(id, worker)| {
+        futures_util::future::join_all(to_abort.into_iter().map(|(id, worker, turn_id)| {
             let app = &app;
             async move {
                 tracing::warn!("turn in session {id} stalled; aborting");
-                let _ = app.workers[worker].mind().request("turn.abort", json!({ "session_id": id })).await;
+                let _ = app.workers[worker].mind().request("turn.abort", json!({ "session_id": id, "turn_id": turn_id })).await;
             }
         }))
         .await;
@@ -218,9 +218,27 @@ pub(crate) async fn record_turn(app: &App, turn: &Turn, error: &Value) -> Result
 
 /// The worker's report with its totals made per turn. An engine that continues its own session
 /// (Claude Code with --resume) reports totals for the whole session so far; the previous turn's
-/// report for the same engine session is subtracted. The raw report is stored as it came.
+/// report for the same engine session is subtracted. A turn that moved to another provider
+/// (failover) has one report per provider (`provider_reports`): each is made per turn the same
+/// way, and they are added up. The raw report is stored as it came.
 pub(crate) async fn per_turn_report(app: &App, turn: &Turn) -> Result<Value> {
     let mut r = turn.reported.clone();
+    let Some(reports) = r["provider_reports"].as_array().cloned() else {
+        return per_turn(app, turn.turn_id, r).await;
+    };
+    let mut each = Vec::new();
+    for report in reports {
+        each.push(per_turn(app, turn.turn_id, report).await?);
+    }
+    let total = sum_reports(&each);
+    for k in ["input", "output", "cache_read", "cache_write", "cost_usd"] {
+        r[k] = total[k].clone();
+    }
+    Ok(r)
+}
+
+/// One provider's report made per turn (see `per_turn_report`).
+async fn per_turn(app: &App, turn_id: Uuid, mut r: Value) -> Result<Value> {
     if r["render"] != "resume" {
         return Ok(r);
     }
@@ -228,7 +246,7 @@ pub(crate) async fn per_turn_report(app: &App, turn: &Turn) -> Result<Value> {
         "SELECT usage FROM turns WHERE session_id = (SELECT session_id FROM turns WHERE id = $1)
            AND id <> $1 AND usage->'engine_session'->>'id' = $2 ORDER BY started_at DESC LIMIT 1",
     )
-    .bind(turn.turn_id)
+    .bind(turn_id)
     .bind(r["engine_session"]["id"].as_str().unwrap_or(""))
     .fetch_optional(&app.db)
     .await?
@@ -243,6 +261,20 @@ pub(crate) async fn per_turn_report(app: &App, turn: &Turn) -> Result<Value> {
         r["cost_usd"] = json!((now - before).max(0.0));
     }
     Ok(r)
+}
+
+/// Per-turn provider reports added up. A figure no report gives stays null (the kernel then sums
+/// the turn's model calls for it); one only some give is the sum of those (Codex reports no cost
+/// on a subscription).
+fn sum_reports(reports: &[Value]) -> Value {
+    let mut total = json!({});
+    for k in ["input", "output", "cache_read", "cache_write"] {
+        let given: Vec<i64> = reports.iter().filter_map(|r| r[k].as_i64()).collect();
+        total[k] = if given.is_empty() { Value::Null } else { json!(given.iter().sum::<i64>()) };
+    }
+    let costs: Vec<f64> = reports.iter().filter_map(|r| r["cost_usd"].as_f64()).collect();
+    total["cost_usd"] = if costs.is_empty() { Value::Null } else { json!(costs.iter().sum::<f64>()) };
+    total
 }
 
 pub(crate) fn turn_json(r: &sqlx::postgres::PgRow) -> Value {
@@ -518,6 +550,12 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
                 }),
             )
             .await?;
+        // An abort that came while `turn.start` was on its way may have reached the worker before
+        // the turn did: send it again now that the worker has the turn.
+        let aborted = app.turns.lock().await.get(&id).is_some_and(|t| t.turn_id == turn_id && *t.cancel.borrow());
+        if aborted {
+            let _ = app.workers[widx].mind().request("turn.abort", json!({ "session_id": id, "turn_id": turn_id })).await;
+        }
         Ok(())
     }
     .await;
@@ -580,9 +618,25 @@ pub(crate) async fn abort_turn(app: &App, id: Uuid) {
     let worker = app.turns.lock().await.get_mut(&id).map(|t| {
         let _ = t.cancel.send(true);
         t.abort_sent.get_or_insert_with(Instant::now);
-        t.worker
+        (t.worker, t.turn_id)
     });
-    if let Some(w) = worker.and_then(|i| app.workers.get(i)) {
-        let _ = w.mind().request("turn.abort", json!({ "session_id": id })).await;
+    if let Some((w, turn_id)) = worker.and_then(|(i, t)| Some((app.workers.get(i)?, t))) {
+        let _ = w.mind().request("turn.abort", json!({ "session_id": id, "turn_id": turn_id })).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failover_reports_are_added_up() {
+        let claude = json!({ "provider": "claude", "input": 1000, "output": 50, "cache_read": 9000, "cache_write": 10, "cost_usd": 0.25 });
+        let codex = json!({ "provider": "codex", "input": 400, "output": 20, "cache_read": 100, "cost_usd": null });
+        let t = sum_reports(&[claude, codex]);
+        assert_eq!((t["input"].as_i64(), t["output"].as_i64(), t["cache_read"].as_i64(), t["cache_write"].as_i64()), (Some(1400), Some(70), Some(9100), Some(10)));
+        assert_eq!(t["cost_usd"].as_f64(), Some(0.25));
+        let none = sum_reports(&[json!({ "provider": "codex" })]);
+        assert!(none["input"].is_null() && none["cost_usd"].is_null(), "nothing reported: the model calls are summed instead");
     }
 }
