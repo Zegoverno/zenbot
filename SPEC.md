@@ -113,12 +113,13 @@ Each module lists what it does, its contract, the default implementation and pos
 #### 5.6 Browser & preview
 1. `web.search` (search API) and `web.fetch` (page → markdown). **Both taint the session.**
 2. Agent browser: headless Chromium in the sandbox via an existing MCP server (Playwright MCP or Chrome DevTools MCP).
-3. **Dev preview:** `service.start` runs a dev server; `zend` proxies it to `/preview/<session>/<port>`; the web UI shows it next to the chat.
+3. **Dev preview:** `service.start` runs a dev server; `zend` proxies it to `/preview/<session>/<port>`; a future web UI shows it next to the chat (none exists today: the web UI was removed on 2026-10-10).
 4. **Point & comment:** click an element in the preview; zenbot attaches its selector, outer HTML, key styles, bounding box and a cropped screenshot to the next message.
 5. **Screenshot & annotate.**
 6. **Shared live browser:** CDP screencast into the UI; the owner can take over.
 
-#### 5.7 Web UI
+#### 5.7 Web UI (future)
+- Not built today: the frozen web UI was removed on 2026-10-10; zen (terminal) and Matrix are the clients. If one comes back:
 - Mobile-friendly (installable PWA, push notifications).
 - Views: sessions · chat (streaming, tool cards, attachments, model picker) · preview · **inbox** · board · wiki · traces & costs · settings · command palette.
 
