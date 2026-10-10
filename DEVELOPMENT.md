@@ -56,12 +56,8 @@ It listens on `127.0.0.1:8888` only (`ZEN_SEARXNG_URL` points elsewhere). The se
 # 1. branch
 git switch -c fix/short-name
 
-# 2. edit, then check exactly as CI does
-cargo build --release --locked
-cargo test --release --locked
-cargo clippy --release --locked --all-targets -- -D warnings
-ZEN_E2E_NO_BUILD=1 scripts/e2e.sh
-scripts/check-docs.py --base origin/main         # the docs still match the code (AGENTS.md)
+# 2. edit, then check exactly as CI does: build, tests, clippy, e2e, docs (AGENTS.md)
+scripts/check.sh                                 # scripts/check.sh memory: only matching e2e scenarios
 
 # 3. try it for real (faux model, own database, own port)
 ZEN_FAUX=1 scripts/dev.sh                       # in a second terminal
@@ -89,7 +85,7 @@ cargo clippy --release --locked --all-targets -- -D warnings
 ZEN_E2E_NO_BUILD=1 scripts/e2e.sh
 ```
 
-Run the same four locally before a pull request. `--locked` fails if `Cargo.lock` would change; don't add dependencies without a good reason.
+Run the same locally before a pull request: `scripts/check.sh` does it in one command (build once, then the tests, clippy, the e2e scenarios on that build, and `scripts/check-docs.py --base origin/main`), prints how long each step took and stops at the first failure with a short summary. `scripts/check.sh <filter>` passes the filter to `scripts/e2e.sh`. `--locked` fails if `Cargo.lock` would change; don't add dependencies without a good reason.
 
 **Limit build parallelism on this VM.** It has 2 CPUs and 7.7 GB of RAM, and parallel release builds have been OOM-killed. Set `CARGO_BUILD_JOBS=2` (e.g. `export CARGO_BUILD_JOBS=2` in your shell) and don't run two release builds at once (for example `cargo build` while `scripts/e2e.sh` or `scripts/upgrade.sh` is building).
 

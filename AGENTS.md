@@ -35,12 +35,13 @@ Config lives in `~/.zenbot/` (MAP.md lists every file). `token`, `env`, `matrix.
 1. **Branch.** Start from an up-to-date `main` and work on a branch (`feat/…`, `fix/…`, `docs/…`),
    never directly on `main`.
 2. **Read the code you're changing.** Keep the existing style. Keep changes small.
-3. **Build and check** exactly as CI does: build, tests, clippy as errors, and `scripts/e2e.sh`
-   (DEVELOPMENT.md). Add an e2e scenario when you change the kernel's behavior. Test kernel behavior
-   without a subscription with the scripted `faux/smoke` model. `crates/zen-matrix` is built,
-   tested and linted in its own CI job; test it end to end with `scripts/matrix-e2e.sh` (not in
-   CI). Changes to the worker protocol
-   update `docs/worker-protocol.md` and every worker.
+3. **Build and check** exactly as CI does: `scripts/check.sh` builds once, then runs the tests,
+   clippy as errors, `scripts/e2e.sh` and the docs check, timing each step and stopping at the
+   first failure (`scripts/check.sh <filter>` runs only matching e2e scenarios; DEVELOPMENT.md).
+   Add an e2e scenario when you change the kernel's behavior. Test kernel behavior without a
+   subscription with the scripted `faux/smoke` model. `crates/zen-matrix` is built, tested and
+   linted in its own CI job; test it end to end with `scripts/matrix-e2e.sh` (not in CI). Changes
+   to the worker protocol update `docs/worker-protocol.md` and every worker.
 4. **Test it for real** where you can, e.g. `./target/release/zen ask --json "…"` against the running
    service or a dev kernel.
 5. **Update the docs** in the same branch (table below), then run `scripts/check-docs.py`. Docs are
