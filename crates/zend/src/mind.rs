@@ -29,17 +29,13 @@ impl Mind {
     /// Start a worker. The returned receiver fires when the process has exited; by then every
     /// request still waiting on it has failed.
     pub async fn spawn(command: &str, dir: &str) -> Result<(Arc<Mind>, mpsc::UnboundedReceiver<Incoming>, oneshot::Receiver<()>)> {
-        let mut child = Command::new("bash")
-            .arg("-lc")
-            .arg(command)
-            .current_dir(dir)
-            // Workers run model CLIs, not the kernel's tools: they get none of the kernel's own
-            // credentials (engine sign-ins such as ANTHROPIC_API_KEY pass through).
-            .env_remove("ZEN_TOKEN")
-            .env_remove("DATABASE_URL")
-            .env_remove("OPENROUTER_API_KEY")
-            .env_remove("BRAVE_API_KEY")
-            .env_remove("TAVILY_API_KEY")
+        // Not a login shell: a profile could put back what is removed below.
+        let mut cmd = Command::new("bash");
+        cmd.arg("-c").arg(command).current_dir(dir);
+        for name in scrubbed(std::env::vars_os().filter_map(|(k, _)| k.into_string().ok())) {
+            cmd.env_remove(name);
+        }
+        let mut child = cmd
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
@@ -143,6 +139,16 @@ impl Mind {
     }
 }
 
+/// Engine sign-ins a worker may need, though named like secrets: they stay in its environment.
+const ENGINE_SIGN_INS: &[&str] = &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"];
+
+/// The variables removed from a worker's environment: every secret-looking one of the kernel's
+/// (`secrets::is_secret_var`: its token, database, web search and OpenRouter keys, any other
+/// credential) but the engines' sign-ins. Workers run model CLIs, not the kernel's tools.
+fn scrubbed(names: impl Iterator<Item = String>) -> Vec<String> {
+    names.filter(|n| crate::secrets::is_secret_var(n) && !ENGINE_SIGN_INS.contains(&n.as_str())).collect()
+}
+
 struct Waiting<'a> {
     mind: &'a Mind,
     id: u64,
@@ -153,5 +159,16 @@ impl Drop for Waiting<'_> {
         if let Ok(mut pending) = self.mind.pending.lock() {
             pending.remove(&self.id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workers_get_no_secrets_but_engine_sign_ins() {
+        let names = ["ZEN_TOKEN", "DATABASE_URL", "OPENROUTER_API_KEY", "GITHUB_TOKEN", "MY_SECRET", "ANTHROPIC_API_KEY", "CODEX_ACCESS_TOKEN", "PATH", "HOME", "ZEN_FAUX"];
+        assert_eq!(scrubbed(names.iter().map(|n| n.to_string())), ["ZEN_TOKEN", "DATABASE_URL", "OPENROUTER_API_KEY", "GITHUB_TOKEN", "MY_SECRET"]);
     }
 }

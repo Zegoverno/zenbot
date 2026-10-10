@@ -795,6 +795,7 @@ async fn run(cli: Cli) -> Result<()> {
                 "url": c.url,
                 "ok": health["ok"] == true && any_signed_in,
                 "workers": health["workers"],
+                "ignored_workers": health["ignored_workers"],
                 "kernel": true,
                 "database": health["db"],
                 "worker": health["mind"],
@@ -810,6 +811,10 @@ async fn run(cli: Cli) -> Result<()> {
                 println!("database  {}", mark(health["db"] == true));
                 for (name, ok) in health["workers"].as_object().into_iter().flatten() {
                     println!("{:<9} {}", format!("worker:{}", for_stdout(name)), mark(*ok == true));
+                }
+                // Names in ZEN_WORKERS the kernel doesn't know (a retired worker): not a failure.
+                for name in health["ignored_workers"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                    println!("{:<9} ignored: not a known worker (remove it from ZEN_WORKERS in ~/.zenbot/env)", format!("worker:{}", for_stdout(name)));
                 }
                 // OpenRouter is only used for live scoring; it's shown with the scorer below.
                 for (name, ok) in models["authenticated"].as_object().into_iter().flatten().filter(|(n, _)| *n != "openrouter") {
