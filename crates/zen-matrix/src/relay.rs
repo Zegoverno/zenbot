@@ -3,6 +3,7 @@
 //! into reports. Everything here is pure, so it is tested without a homeserver or a kernel.
 
 use serde_json::Value;
+use zen_proto::client::{Event, Sent};
 use zen_proto::text_of;
 
 /// Longest Markdown body of one message, in bytes. A Matrix event may be 65,535 bytes; an
@@ -68,7 +69,7 @@ pub type Questions = Vec<(String, Vec<String>)>;
 #[derive(Default)]
 pub struct Stream {
     /// Prompts this bridge sent that the kernel hasn't echoed yet: their echo isn't repeated.
-    pub sent: Vec<String>,
+    pub sent: Sent,
     /// The questions of the last `ask`, until the owner answers.
     pub questions: Questions,
     pub busy: bool,
@@ -92,9 +93,8 @@ impl Stream {
         match m["role"].as_str() {
             Some("user") if m["kernel"] != true => {
                 let text = text_of(&m["content"]);
-                if let Some(i) = self.sent.iter().position(|s| s.trim() == text.trim()) {
-                    self.sent.remove(i);
-                } else if live && !text.trim().is_empty() {
+                // Our own prompt's echo isn't repeated (and is matched even when not live).
+                if !self.sent.take_echo(m) && live && !text.trim().is_empty() {
                     // A prompt typed somewhere else (the terminal) in the same session.
                     out.push(Out::Note(format!("⌨️ *from the terminal:* {}", one_line(&text, 300))));
                 }
@@ -116,45 +116,31 @@ impl Stream {
     }
 
     /// What one kernel event means for the room.
-    pub fn on_event(&mut self, ev: &Value) -> Vec<Out> {
+    pub fn on_event(&mut self, ev: &Event) -> Vec<Out> {
         let mut out = vec![];
-        match ev["type"].as_str().unwrap_or("") {
-            "busy" => {
+        match ev {
+            Event::Busy { .. } => {
                 self.busy = true;
                 out.push(Out::Typing(true));
             }
-            "message" => out = self.on_message(&ev["message"], true),
-            "questions" => {
-                self.questions = ev["questions"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|q| {
-                        let opts = q["options"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
-                        (q["question"].as_str().unwrap_or("").to_string(), opts)
-                    })
-                    .collect();
+            Event::Message { message } => out = self.on_message(message, true),
+            Event::Questions { questions } => {
+                self.questions = questions.iter().map(|q| (q.question.clone(), q.options.clone())).collect();
                 out.push(Out::Answer(render_questions(&self.questions)));
             }
-            "end" => {
-                if let Some(e) = ev["error"].as_str().filter(|e| !e.is_empty()) {
+            Event::End { error, .. } => {
+                if let Some(e) = error.as_deref().filter(|e| !e.is_empty()) {
                     out.push(Out::Note(format!("⚠️ the turn failed: {}", one_line(e, 500))));
                 }
-                if ev["next"] != true {
-                    self.busy = false;
-                    out.push(Out::Typing(false));
-                }
             }
-            "idle" => {
-                self.busy = false;
-                out.push(Out::Typing(false));
-            }
-            "error" => out.push(Out::Note(format!("⚠️ {}", one_line(ev["error"].as_str().unwrap_or("error"), 500)))),
-            "resync" if ev["busy"] == false && self.busy => {
-                self.busy = false;
-                out.push(Out::Typing(false));
-            }
+            Event::Error { error } => out.push(Out::Note(format!("⚠️ {}", one_line(if error.is_empty() { "error" } else { error }, 500)))),
             _ => {}
+        }
+        // The same end-of-turn rule as every client: `end` not followed by the kernel's own turn,
+        // `idle`, or a `resync` that found the session idle (said only if the room showed typing).
+        if ev.ends_turn() && (self.busy || !matches!(ev, Event::Resync { .. })) {
+            self.busy = false;
+            out.push(Out::Typing(false));
         }
         out
     }
@@ -289,6 +275,13 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    impl Stream {
+        /// An event from its JSON, as the bridge reads it off the stream.
+        fn on_ev(&mut self, v: &Value) -> Vec<Out> {
+            self.on_event(&Event::from_value(v.clone()))
+        }
+    }
+
     #[test]
     fn commands_and_prompts() {
         assert_eq!(parse("  hello there "), Input::Prompt("hello there".into()));
@@ -320,16 +313,16 @@ mod tests {
         let mut s = Stream::default();
         let p = s.prompt("hi");
         assert_eq!(p, "hi");
-        assert_eq!(s.on_event(&json!({ "type": "busy" })), vec![Out::Typing(true)]);
-        assert_eq!(s.on_event(&json!({ "type": "message", "message": { "role": "user", "content": "hi" } })), vec![], "our own prompt isn't echoed");
-        assert_eq!(s.on_event(&json!({ "type": "delta", "delta": "Hel" })), vec![]);
+        assert_eq!(s.on_ev(&json!({ "type": "busy" })), vec![Out::Typing(true)]);
+        assert_eq!(s.on_ev(&json!({ "type": "message", "message": { "role": "user", "content": "hi" } })), vec![], "our own prompt isn't echoed");
+        assert_eq!(s.on_ev(&json!({ "type": "delta", "delta": "Hel" })), vec![]);
         let tool_only = json!({ "type": "message", "message": { "role": "assistant", "content": [{ "type": "toolCall", "name": "bash" }] } });
-        assert_eq!(s.on_event(&tool_only), vec![]);
+        assert_eq!(s.on_ev(&tool_only), vec![]);
         let answer = json!({ "type": "message", "message": { "role": "assistant", "content": [{ "type": "text", "text": "Hello **Ze**" }] } });
-        assert_eq!(s.on_event(&answer), vec![Out::Answer("Hello **Ze**".into())]);
-        assert_eq!(s.on_event(&json!({ "type": "end", "next": true })), vec![], "the kernel goes on: still working");
+        assert_eq!(s.on_ev(&answer), vec![Out::Answer("Hello **Ze**".into())]);
+        assert_eq!(s.on_ev(&json!({ "type": "end", "next": true })), vec![], "the kernel goes on: still working");
         assert!(s.busy);
-        assert_eq!(s.on_event(&json!({ "type": "idle" })), vec![Out::Typing(false)]);
+        assert_eq!(s.on_ev(&json!({ "type": "idle" })), vec![Out::Typing(false)]);
         assert!(!s.busy);
     }
 
@@ -348,13 +341,13 @@ mod tests {
     #[test]
     fn prompts_from_the_terminal_and_failures_are_noted() {
         let mut s = Stream::default();
-        let out = s.on_event(&json!({ "type": "message", "message": { "role": "user", "content": "check the build" } }));
+        let out = s.on_ev(&json!({ "type": "message", "message": { "role": "user", "content": "check the build" } }));
         assert_eq!(out, vec![Out::Note("⌨️ *from the terminal:* check the build".into())]);
         let kernel = json!({ "type": "message", "message": { "role": "user", "kernel": true, "content": "verifier instructions" } });
-        assert_eq!(s.on_event(&kernel), vec![]);
-        let out = s.on_event(&json!({ "type": "end", "error": "engine crashed" }));
+        assert_eq!(s.on_ev(&kernel), vec![]);
+        let out = s.on_ev(&json!({ "type": "end", "error": "engine crashed" }));
         assert_eq!(out, vec![Out::Note("⚠️ the turn failed: engine crashed".into()), Out::Typing(false)]);
-        assert_eq!(s.on_event(&json!({ "type": "error", "error": "session is busy" })), vec![Out::Note("⚠️ session is busy".into())]);
+        assert_eq!(s.on_ev(&json!({ "type": "error", "error": "session is busy" })), vec![Out::Note("⚠️ session is busy".into())]);
     }
 
     #[test]
@@ -363,7 +356,7 @@ mod tests {
         let ev = json!({ "type": "questions", "questions": [
             { "question": "Homeserver?", "options": ["matrix.org", "self-host"] },
             { "question": "E2EE?", "options": ["yes", "no"] } ] });
-        let [Out::Answer(text)] = &s.on_event(&ev)[..] else { panic!() };
+        let [Out::Answer(text)] = &s.on_ev(&ev)[..] else { panic!() };
         assert!(text.contains("**1. Homeserver?**\n1. matrix.org *(recommended)*\n2. self-host"), "{text}");
         assert!(text.contains("(`1 1`)"), "{text}");
         assert_eq!(s.prompt("1 2"), "Homeserver? → matrix.org\nE2EE? → no");
@@ -371,7 +364,7 @@ mod tests {
         assert_eq!(s.prompt("1 2"), "1 2", "answered once: numbers are plain text again");
         // The echo of the translated answer isn't repeated in the room.
         let echo = json!({ "type": "message", "message": { "role": "user", "content": "Homeserver? → matrix.org\nE2EE? → no" } });
-        assert_eq!(s.on_event(&echo), vec![]);
+        assert_eq!(s.on_ev(&echo), vec![]);
     }
 
     #[test]
