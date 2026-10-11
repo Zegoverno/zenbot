@@ -529,6 +529,10 @@ pub async fn query(db: &PgPool, q: &str, kinds: &[&str], session: Option<Uuid>, 
     // enough rows pass them, in order (pgvector 0.8 iterative scans).
     sqlx::query("SET LOCAL hnsw.ef_search = 100").execute(&mut *tx).await?;
     sqlx::query("SET LOCAL hnsw.iterative_scan = strict_order").execute(&mut *tx).await?;
+    // Planned for its parameters every time: a generic plan (Postgres's choice for a statement
+    // prepared often enough) can't walk the HNSW index for a parameter vector, so it sorts every
+    // row, parsing the vector once per row (seconds on 30,000 documents).
+    sqlx::query("SET LOCAL plan_cache_mode = force_custom_plan").execute(&mut *tx).await?;
     // Each arm filters `search_docs` itself, so each uses its own index (trigram, GIN over `tsv`,
     // HNSW); only the candidates they return are read in full. Ties go to the older document.
     let rows = sqlx::query(
