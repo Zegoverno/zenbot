@@ -1,5 +1,6 @@
 //! The folder tree in the side panel's Files tab: which folders are open, which row is selected,
-//! and what is listed. Listing is lazy: a folder is read only while it is expanded.
+//! and what is listed. Listing is lazy: a folder is read only while it is expanded. Files that
+//! hold secrets (`secret_paths`) are never listed, and the side panel won't open them.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -9,6 +10,32 @@ const SKIP: &[&str] = &[".git", "target", "node_modules", ".venv", "__pycache__"
 
 /// Most rows kept, so a huge folder can't stall a redraw.
 const MAX_ROWS: usize = 5000;
+
+/// Files in zenbot's home that hold secrets: the kernel's token, the database password, the
+/// environment (API keys) and its previous copy, MCP servers' settings, the Matrix bridge's
+/// login and recovery key. Kept in line with the kernel's `secrets::secret_files`.
+const HOME_SECRETS: &[&str] = &["token", "db-password", "env", "env.prev", "mcp.json", "matrix.env", "matrix"];
+
+/// Paths that hold secrets (a folder: everything in it), given zenbot's home and the user's home
+/// (the engines' sign-ins).
+pub fn secret_paths(zen_home: &Path, home: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = HOME_SECRETS.iter().map(|f| zen_home.join(f)).collect();
+    paths.extend([home.join(".codex/auth.json"), home.join(".claude/.credentials.json")]);
+    paths
+}
+
+/// The secret paths of this machine's zenbot, also as their real paths (a home reached through a
+/// symlink).
+pub fn default_secrets() -> Vec<PathBuf> {
+    let paths = secret_paths(&crate::client::zen_home(), Path::new(&std::env::var_os("HOME").unwrap_or_default()));
+    let real: Vec<PathBuf> = paths.iter().filter_map(|p| std::fs::canonicalize(p).ok()).filter(|r| !paths.contains(r)).collect();
+    [paths, real].concat()
+}
+
+/// `path` is, or is inside, one of `secrets`.
+pub fn is_secret(path: &Path, secrets: &[PathBuf]) -> bool {
+    secrets.iter().any(|s| path.starts_with(s))
+}
 
 pub struct Row {
     pub path: PathBuf,
@@ -25,11 +52,17 @@ pub struct Files {
     pub scroll: usize,
     /// List dotfiles too.
     pub hidden: bool,
+    /// Never listed (`secret_paths`).
+    pub secrets: Vec<PathBuf>,
 }
 
 impl Files {
     pub fn new(root: PathBuf) -> Files {
-        let mut f = Files { expanded: HashSet::from([root.clone()]), root, rows: Vec::new(), sel: 0, scroll: 0, hidden: false };
+        Files::with_secrets(root, default_secrets())
+    }
+
+    pub fn with_secrets(root: PathBuf, secrets: Vec<PathBuf>) -> Files {
+        let mut f = Files { expanded: HashSet::from([root.clone()]), root, rows: Vec::new(), sel: 0, scroll: 0, hidden: false, secrets };
         f.rebuild();
         f
     }
@@ -52,7 +85,7 @@ impl Files {
                 // Symlinks are hidden like dotfiles: in ~/.zenbot they are the old layout's paths
                 // kept for rollbacks (crates/zend/src/layout.rs), not files of their own.
                 let link = e.file_type().is_ok_and(|t| t.is_symlink());
-                !SKIP.contains(&name.as_str()) && (self.hidden || (!name.starts_with('.') && !link))
+                !SKIP.contains(&name.as_str()) && (self.hidden || (!name.starts_with('.') && !link)) && !is_secret(&e.path(), &self.secrets)
             })
             .map(|e| (e.path(), e.path().is_dir()))
             .collect();
@@ -182,6 +215,18 @@ mod tests {
         assert_eq!(f.sel, 3, "clamped at the bottom");
         f.toggle_hidden();
         assert!(names(&f).contains(&".env".to_string()));
+    }
+
+    #[test]
+    fn secret_files_are_never_listed() {
+        let d = TempDir::new("secrets");
+        for f in ["token", "db-password", "env", "env.prev", "matrix.env", "matrix/recovery-key", "config.toml", "skills/x.md"] {
+            d.file(f, "s3cret");
+        }
+        let mut f = Files::with_secrets(d.path().to_path_buf(), secret_paths(d.path(), &d.join("home")));
+        f.toggle_hidden();
+        assert_eq!(names(&f), ["skills", "config.toml"]);
+        assert!(is_secret(&d.join("matrix/recovery-key"), &f.secrets) && !is_secret(&d.join("tokens.md"), &f.secrets));
     }
 
     #[test]
