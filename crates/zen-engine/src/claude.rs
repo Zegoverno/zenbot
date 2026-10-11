@@ -18,6 +18,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::watch;
 
+use zen_proto::worker::{Completion, Model, TurnEvent};
+
+use crate::engine::{BoxFuture, Engine};
 use crate::turn::{enabled, new_uuid, now_ms, prompt_blocks, seed_blocks, StderrTail, TurnCtx, TurnInput, COMPLETE_LIMIT};
 
 const PREFIX: &str = "mcp__zen__";
@@ -27,10 +30,14 @@ const PREFIX: &str = "mcp__zen__";
 ///
 /// Effort levels are Claude Code's `--effort` values. The CLI doesn't report the level it uses when
 /// none is given, so zenbot always passes one: `default_effort` unless the session picks another.
-pub fn models() -> Vec<Value> {
-    let model = |id: &str, name: &str| {
-        json!({ "id": format!("claude/{id}"), "name": name, "engine": "claude-code",
-                "efforts": EFFORTS, "default_effort": DEFAULT_EFFORT })
+pub fn models() -> Vec<Model> {
+    let model = |id: &str, name: &str| Model {
+        id: format!("claude/{id}"),
+        name: name.into(),
+        engine: "claude-code".into(),
+        efforts: EFFORTS.iter().map(|e| e.to_string()).collect(),
+        default_effort: Some(DEFAULT_EFFORT.into()),
+        ..Model::default()
     };
     vec![
         model("claude-opus-5-5", "Claude Opus 5.5"),
@@ -64,7 +71,7 @@ fn session_exists(id: &str) -> bool {
 }
 
 /// Delete engine sessions not used for 30 days. They are only a cache of zenbot's tape.
-pub fn clean_sessions() {
+fn clean_sessions() {
     let name = session_dir().display().to_string().replace(['/', '.'], "-");
     let Ok(files) = std::fs::read_dir(config_dir().join("projects").join(name)) else { return };
     let month = std::time::Duration::from_secs(30 * 24 * 3600);
@@ -118,16 +125,57 @@ fn result_text(block: &Value) -> String {
     zen_proto::text_of(&block["content"])
 }
 
-pub fn available() -> bool {
-    std::process::Command::new("claude").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+/// The Claude Code engine (`claude/*` models).
+pub struct Claude;
+
+impl Engine for Claude {
+    fn name(&self) -> &'static str {
+        "claude"
+    }
+
+    /// `claude --version` ("2.1.287 (Claude Code)" -> "2.1.287"); None when it fails.
+    fn version(&self) -> Option<String> {
+        let out = std::process::Command::new("claude").arg("--version").output().ok().filter(|o| o.status.success())?;
+        Some(String::from_utf8_lossy(&out.stdout).split_whitespace().next().unwrap_or("").to_string())
+    }
+
+    fn prepare(&self) {
+        clean_sessions();
+    }
+
+    fn models(&self) -> BoxFuture<'_, Vec<Model>> {
+        Box::pin(async { models() })
+    }
+
+    fn run_turn<'a>(&'a self, ctx: TurnCtx, input: &'a TurnInput, abort: watch::Receiver<bool>) -> BoxFuture<'a, Result<Option<String>>> {
+        Box::pin(run_turn(ctx, input, abort))
+    }
+
+    fn complete<'a>(&'a self, model: &'a str, system: &'a str, prompt: &'a str) -> BoxFuture<'a, Result<Completion>> {
+        Box::pin(complete(model, system, prompt))
+    }
+
+    fn failover_target(&self) -> Option<String> {
+        Some(std::env::var("ZEN_FAILOVER_CLAUDE_TO_CODEX").unwrap_or_else(|_| "codex/gpt-6.1-sol".into()))
+    }
+
+    /// No API key or token in the environment (the CLI would prefer it), and `claude auth status`
+    /// says it is signed in with claude.ai.
+    fn subscription_login(&self) -> bool {
+        if std::env::var_os("ANTHROPIC_API_KEY").is_some() || std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN").is_some() {
+            return false;
+        }
+        let Ok(out) = std::process::Command::new("claude").args(["auth", "status", "--json"]).output() else { return false };
+        out.status.success() && serde_json::from_slice::<Value>(&out.stdout).is_ok_and(|v| v["loggedIn"] == true && v["authMethod"] == "claude.ai")
+    }
 }
 
-pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, abort: watch::Receiver<bool>) -> Result<Option<String>> {
+async fn run_turn(ctx: TurnCtx, input: &TurnInput, abort: watch::Receiver<bool>) -> Result<Option<String>> {
     let model = input.model.as_str();
     // The turn's report, sent on every path (an early error included): what ran, and what it used.
     let mut usage = json!({ "engine": "claude-code", "provider": "claude", "model": model });
     let outcome = drive(&ctx, input, abort, &mut usage).await;
-    ctx.notify("turn.usage", usage).await;
+    ctx.report_usage(usage).await;
     outcome
 }
 
@@ -245,8 +293,8 @@ async fn drive(ctx: &TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bool
                 if ev["type"] == "stream_event" && ev["event"]["type"] == "content_block_delta" {
                     let d = &ev["event"]["delta"];
                     match d["type"].as_str() {
-                        Some("text_delta") => ctx.notify("turn.delta", json!({ "delta": d["text"] })).await,
-                        Some("thinking_delta") => ctx.notify("turn.thinking", json!({ "delta": d["thinking"] })).await,
+                        Some("text_delta") => ctx.notify(TurnEvent::Delta { delta: d["text"].as_str().unwrap_or("").into() }).await,
+                        Some("thinking_delta") => ctx.notify(TurnEvent::Thinking { delta: d["thinking"].as_str().unwrap_or("").into() }).await,
                         _ => {}
                     }
                     continue;
@@ -255,7 +303,7 @@ async fn drive(ctx: &TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bool
                     ctx.announce(&id, &name, &args).await;
                 }
                 if let Some(message) = calls.feed(&ev) {
-                    ctx.notify("turn.message", json!({ "message": message })).await;
+                    ctx.notify(TurnEvent::Message { message }).await;
                     sent += 1;
                 }
                 // Results the CLI gave the model without the kernel (an unknown tool, invalid
@@ -264,7 +312,7 @@ async fn drive(ctx: &TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bool
                 let own: Vec<(String, String, bool)> = engine_results(&ev).into_iter().filter(|(id, _, _)| !ctx.is_answered(id)).collect();
                 if !own.is_empty() {
                     if let Some(message) = calls.flush("toolUse") {
-                        ctx.notify("turn.message", json!({ "message": message })).await;
+                        ctx.notify(TurnEvent::Message { message }).await;
                         sent += 1;
                     }
                     for (id, text, is_error) in own {
@@ -291,7 +339,7 @@ async fn drive(ctx: &TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bool
     }
     // A model call cut off (abort, crash) still goes on the tape with what it had produced.
     if let Some(message) = calls.flush("aborted") {
-        ctx.notify("turn.message", json!({ "message": message })).await;
+        ctx.notify(TurnEvent::Message { message }).await;
     }
     drop(stdin);
     // The result is in: the CLI exits once stdin closes. One that doesn't is killed.
@@ -327,10 +375,10 @@ fn engine_results(ev: &Value) -> Vec<(String, String, bool)> {
         .collect()
 }
 
-/// One completion without tools, in a throwaway session (summaries). Returns `{ text, usage, model }`.
+/// One completion without tools, in a throwaway session (summaries).
 /// Its stream must show the run's tools off (`check_init`), like a turn's; given up (the CLI
 /// killed) after `COMPLETE_LIMIT`.
-pub async fn complete(model: &str, system: &str, prompt: &str) -> Result<Value> {
+async fn complete(model: &str, system: &str, prompt: &str) -> Result<Completion> {
     // A fixed, empty directory: Claude Code tells the model its working directory.
     let dir = crate::turn::engine_dir("complete")?;
     let (prompt_dir, _) = crate::turn::socket_dir()?;
@@ -386,7 +434,7 @@ pub async fn complete(model: &str, system: &str, prompt: &str) -> Result<Value> 
     }
     let mut usage = json!({});
     turn_usage(&res, &mut usage);
-    Ok(json!({ "text": res["result"], "usage": usage, "model": model }))
+    Ok(Completion { text: res["result"].as_str().unwrap_or("").to_string(), usage, model: model.to_string() })
 }
 
 /// Turn totals from the CLI's `result` event. `modelUsage` covers every model call the CLI made,
