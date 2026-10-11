@@ -36,9 +36,21 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 say "Node.js"
 NODE_DIR="$HOME/.local/node"
+# Pinned, and checked against the SHA-256 nodejs.org publishes for it (SHASUMS256.txt for the
+# version), so a tampered or truncated download is never unpacked. Bump both together.
+NODE_VERSION=v22.20.0
+NODE_TAR=node-$NODE_VERSION-linux-x64.tar.xz
+NODE_SHA256=00bbd05e306ea68b6e13e17360d0e2f680b493ef95f2fea1c4296ff7437530bc
 if ! "$NODE_DIR/bin/node" --version 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])\.'; then
   mkdir -p "$NODE_DIR"
-  curl -fsSL https://nodejs.org/dist/v22.20.0/node-v22.20.0-linux-x64.tar.xz | tar -xJ -C "$NODE_DIR" --strip-components=1
+  NODE_DL=$(mktemp -d)
+  curl -fsSL -o "$NODE_DL/$NODE_TAR" "https://nodejs.org/dist/$NODE_VERSION/$NODE_TAR"
+  if ! echo "$NODE_SHA256  $NODE_DL/$NODE_TAR" | sha256sum -c --quiet -; then
+    echo "The Node.js download doesn't match its published checksum; stopping." >&2
+    exit 1
+  fi
+  tar -xJf "$NODE_DL/$NODE_TAR" -C "$NODE_DIR" --strip-components=1
+  rm -rf "$NODE_DL"
 fi
 export PATH="$NODE_DIR/bin:$PATH"
 grep -q '.local/node/bin' "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="$HOME/.local/bin:$HOME/.local/node/bin:$HOME/.cargo/bin:$PATH"' >> "$HOME/.bashrc"
