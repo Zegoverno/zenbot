@@ -112,8 +112,8 @@ release tarball.
 |---|---|
 | `src/main.rs` | Commands (`login`, `run`, `status`, `repin-owner`); the Matrix client (SQLite store, sign-in, cross-signing and backup, decryption trust), rooms, invites, membership watch, the message handler, posting (room check, parts, failure notice), the per-room link task (session WebSocket, catch-up, reconnects, typing) and the job reporter |
 | `src/trust.rs` | Pure: who and where it answers (sender, device trust, room members and encryption, invites, the pinned owner identity). Unit-tested |
-| `src/relay.rs` | Pure: commands, kernel events and session messages → room posts, numbered answers, job reports, splitting long answers, Markdown → HTML without raw HTML. Unit-tested |
-| `src/kernel.rs` | The client-protocol calls it uses |
+| `src/relay.rs` | Pure: commands, kernel events (`zen_proto::client::Event`, its end-of-turn rule and echo matching) and session messages → room posts, numbered answers, job reports, splitting long answers, Markdown → HTML without raw HTML. Unit-tested |
+| `src/kernel.rs` | The client-protocol calls it uses, over the client `zen` uses too (`crates/zen-client`, a path dependency) |
 | `src/state.rs` | `matrix.env` and `~/.zenbot/env` (an owner that is the bot is refused), `state.json` (rooms ↔ sessions, per-room `seen` seq, the pinned owner key, job cursor; bad ids dropped on load), private files |
 
 ## Limits and next steps

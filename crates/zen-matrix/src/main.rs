@@ -48,13 +48,13 @@ use matrix_sdk::{
 };
 use matrix_sdk_crypto::{DecryptionSettings, TrustRequirement};
 use relay::{Input, Out, Stream};
-use serde_json::Value;
 use state::{write_private, Config, State};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
+use zen_proto::client::Event;
 
 const DEVICE_NAME: &str = "zenbot";
 /// How often the jobs room checks for finished runs.
@@ -765,11 +765,11 @@ impl Bridge {
                             Some(Ok(_)) => continue,
                             _ => break,
                         };
-                        let Ok(ev) = serde_json::from_str::<Value>(&text) else { continue };
-                        match ev["type"].as_str() {
+                        let Some(ev) = Event::parse(&text) else { continue };
+                        match ev {
                             // A message event carries no seq: it's the cue to fetch what's new.
-                            Some("message") => self.catch_up(&room, &session, &mut stream, true).await,
-                            Some("resync") => {
+                            Event::Message { .. } => self.catch_up(&room, &session, &mut stream, true).await,
+                            Event::Resync { .. } => {
                                 for out in stream.on_event(&ev) {
                                     self.post(&room, out).await;
                                 }

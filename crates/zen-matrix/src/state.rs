@@ -7,33 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use zen_client::{parse_env, zen_home};
+
 use crate::kernel::valid_id;
-
-/// zenbot's home: `ZEN_HOME`, else `~/.zenbot`.
-pub fn zen_home() -> PathBuf {
-    match std::env::var_os("ZEN_HOME").filter(|h| !h.is_empty()) {
-        Some(h) => PathBuf::from(h),
-        None => PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".zenbot"),
-    }
-}
-
-/// `KEY=value` lines (blank lines, `#` comments and `export ` allowed; quotes around the value
-/// dropped), as `~/.zenbot/env` and `~/.zenbot/matrix.env` are written.
-pub fn parse_env(text: &str) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let line = line.strip_prefix("export ").unwrap_or(line);
-        let Some((k, v)) = line.split_once('=') else { continue };
-        let v = v.trim();
-        let v = v.strip_prefix('"').and_then(|v| v.strip_suffix('"')).or_else(|| v.strip_prefix('\'').and_then(|v| v.strip_suffix('\''))).unwrap_or(v);
-        out.insert(k.trim().to_string(), v.to_string());
-    }
-    out
-}
 
 fn env_file(path: &Path) -> BTreeMap<String, String> {
     std::fs::read_to_string(path).map(|t| parse_env(&t)).unwrap_or_default()
@@ -209,15 +185,6 @@ pub fn write_private(path: &Path, text: &str) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn env_files_parse() {
-        let e = parse_env("# bot\nMATRIX_USER=@zen:matrix.org\nexport MATRIX_PASSWORD=\"p=ss word\"\n\nX='y'\nbad line\n");
-        assert_eq!(e["MATRIX_USER"], "@zen:matrix.org");
-        assert_eq!(e["MATRIX_PASSWORD"], "p=ss word");
-        assert_eq!(e["X"], "y");
-        assert_eq!(e.len(), 3);
-    }
 
     #[test]
     fn user_ids() {

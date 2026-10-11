@@ -48,7 +48,9 @@ The client sends:
 | `{ "type": "prompt", "text": "…", "suggestion"?: { "id", "taken" } }` | the owner's message: starts a turn. `suggestion` reports the suggested next prompt the client showed: `taken` when the owner took it into the input (tab); the kernel records `accepted` (sent unchanged), `edited` or `declined`. A suggestion the client didn't report is recorded `unseen` |
 | `{ "type": "abort" }` | stops the running turn |
 
-The kernel sends events, in order:
+The kernel sends events, in order. `zen_proto::client::Event` (`crates/zen-proto/src/client.rs`)
+types them for Rust clients, with the end-of-turn rule (`Event::ends_turn`) and echo matching
+every client uses; `zen-client` (`crates/zen-client`) opens the stream and makes the HTTP calls.
 
 | Event | Fields | Meaning |
 |---|---|---|

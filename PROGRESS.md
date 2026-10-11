@@ -6,6 +6,28 @@
 
 ---
 
+## 2026-10-11 — One client contract: typed session events, one kernel client
+
+Toward CONTEXT.md principles 5 and 6: `zen` and `zen-matrix` each parsed the kernel's session
+events by hand and each had its own copy of the kernel client.
+
+- `zen-proto` types the client protocol's events (`zen_proto::client::Event`, exactly the table in
+  docs/client-protocol.md; an unknown or misshapen event is `Other`, so a client still tolerates
+  new events). One end-of-turn rule (`Event::ends_turn`: `end` without `next`, `idle`, a `resync`
+  with `busy: false`) and one echo match for a sent prompt (`echoes`, `Sent`: trimmed text, never
+  the kernel's own message) replace the clients' separate rules. `zen ask`/`zen chat`, the terminal
+  app and the Matrix bridge read events through them. The wire format is unchanged (the kernel
+  still builds events with `json!`). A full shared turn reducer didn't fit: each client renders
+  deltas and messages its own way, and the bridge ignores deltas.
+- New crate `zen-client`: the kernel client both use (`zen_home`, `parse_env`, the token,
+  HTTP calls, `new_session`, `resolve`, the session WebSocket, `enc`, the plain-http token
+  warning). `zen-matrix` uses it through a path dependency, so it now also warns about a token
+  sent over plain http to another machine, encodes session ids in paths, and waits 120 s (was 60)
+  for a call. An echo that differs from the sent prompt only in surrounding whitespace now counts
+  as the echo in `zen` too.
+- AGENTS.md said `zen-proto` holds the worker protocol's messages; it never did. The row now says
+  what it holds; typing the worker protocol stays debt (ROADMAP.md).
+
 ## 2026-10-11 — Kernel modules: upkeep jobs of their own, one settings module, shared helpers
 
 Toward CONTEXT.md principle 5 (every building block a module with a documented contract).

@@ -7,6 +7,8 @@ description = "zenbot's Matrix channel: a bridge between the owner's Matrix room
 
 [dependencies]
 zen-proto = { path = "../zen-proto" }
+# The kernel client zen uses too (in the main workspace).
+zen-client = { path = "../zen-client" }
 anyhow = "1"
 futures-util = "0.3"
 # The Matrix client: end-to-end encryption, a SQLite store for keys and sync state, Markdown bodies.

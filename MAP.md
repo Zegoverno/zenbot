@@ -226,10 +226,10 @@ Code that depends on a CLI's flags or output should fail loudly, so the daily en
 |---|---|---|---|---|
 | `src/main.rs` | 382 | Entry and `run`: dispatches each command (plain `zen` opens the sessions board; piped input without a command is `zen ask`) | `cli`, `client`, `turn`, `print`, `setup`, `tui` | owner, scripts (`zen ask --json`), e2e, evals |
 | `src/cli.rs` | 266 | clap arguments and subcommands: `ask`, `chat`, `sessions {ls,new,show,archive,restore,rename,decide}`, `memory [--tier short\|archived\|all] [sleep]`, `jobs [add\|set\|pause\|resume\|rm\|run\|runs]`, `skills [accept\|reject <domain/name> <sha>]` (use per skill and the made tools, each draft's and tool's fingerprint; accepting or rejecting names the fingerprint reviewed), `tools accept\|reject <name> <sha>` (a `made_` prefix is dropped), `policy [set <kind> <model> [--candidates a,b] [--explore x] \| undo]` (the routing policy and its evidence), `suggestions` (what became of suggested prompts), `models`, `login [claude\|codex]`, `status` (with memory, jobs and engines lines), `upgrade [--check]`; flags `--url` (`ZEN_URL`), `--token` (`ZEN_TOKEN`), `--json`, `-c`, `-r`, `-m`, `-e`, `--inline` (`ZEN_INLINE`) | clap | `main.rs` |
-| `src/turn.rs` | 305 | `zen ask` and line-by-line `zen chat`: stream one turn over the session WebSocket (Ctrl-C stops it, a second one leaves) and report it (`--json`: text, tools, the kernel's turn records) | `client`, `print` | `main.rs` |
-| `src/setup.rs` | 157 | Reads `<zen home>/env` (for `ZEN_REPO`, `PATH`) and `<zen home>/engines.json`; engine sign-in (`zen login`), git identity for `zen status` | `client` | `main.rs`, `tui/` |
+| `src/turn.rs` | 308 | `zen ask` and line-by-line `zen chat`: stream one turn over the session WebSocket as `zen_proto::client::Event`s (Ctrl-C stops it, a second one leaves) and report it (`--json`: text, tools, the kernel's turn records) | `client`, `print`, `zen-proto` | `main.rs` |
+| `src/setup.rs` | 136 | Reads `<zen home>/env` (for `ZEN_REPO`, `PATH`; `zen_client::parse_env`) and `<zen home>/engines.json`; engine sign-in (`zen login`), git identity for `zen status` | `client` | `main.rs`, `tui/` |
 | `src/print.rs` | 182 | How script commands print: `emit` (JSON or text), sanitized stdout/stderr, sessions, messages, memory, jobs and suggestions lines | `client`, `md` | `main.rs`, `turn.rs` |
-| `src/client.rs` | 332 | HTTP + WebSocket client; `zen_home` (`ZEN_HOME`, else `~/.zenbot`); token from `--token`/`ZEN_TOKEN` or `<zen home>/token`; upgrade wait/poll messages | reqwest, tungstenite | `main.rs`, `tui/` |
+| `src/client.rs` | 159 | The shared client (`zen-client`, re-exported) plus what only zen needs: `NewSession`, `upgrade` (wait/poll messages), `describe_update`, display helpers (`short`, `dim`, token totals, `tool_summary`) | `zen-client` | `main.rs`, `turn.rs`, `tui/` |
 | `src/tui/` | ~4,500 | Interactive app split into `mod` (lifecycle), `state` (sessions/reconnect), `events`, `input`, `render`, `transcript` (incremental streaming and view), `board` (the sessions board, zen's home screen, fetched in a task of its own), `panel`, `pickers`, `inline`, `files` and `test_util`. Full screen has a diffed, scrollable view and side panel; inline keeps scrollback. Terminal text is sanitized, requests fail into notices rather than exiting, and reconnect rebuilds from the server. Prompt history is private JSON lines in `<zen home>/history`. Render/key tests live beside the modules | `client`, `editor`, `md`, `setup` | `main.rs` |
 | `src/screen.rs` | 141 | Full-screen frames: writes only changed rows in place; `fit` cuts/pads styled lines; `row` joins chat and panel | `md` | `tui/render.rs` |
 | `src/editor.rs` | 512 | Multi-line input editor with prompt history | — | `tui/` |
@@ -237,12 +237,28 @@ Code that depends on a CLI's flags or output should fail loudly, so the daily en
 
 UI changes to `tui/` / `editor.rs` come with render or key tests (AGENTS.md).
 
-## Shared: `zen-proto` (`crates/zen-proto`, 48 lines)
+## Shared: `zen-proto` (`crates/zen-proto`, ~330 lines)
 
-`text_of` (message content as text, in the message format the tape stores), `head`, `tail`. Used
-by `zend` (`api`, `agent`, `assist`, `compact`, `delegate`, `jobs`, `mcp`, `memory`, `score`,
-`search`, `web`, `wiki`, `workshop`), `zen-engine` (`turn`), `zen` (`turn`, `print`, `tui`) and `zen-matrix`
-(`relay`). Changing how content is read changes it in all four.
+`lib.rs`: `text_of` (message content as text, in the message format the tape stores), `head`,
+`tail`. Used by `zend` (`api`, `agent`, `assist`, `compact`, `delegate`, `jobs`, `mcp`, `memory`,
+`score`, `search`, `web`, `wiki`, `workshop`), `zen-engine` (`turn`), `zen` (`turn`, `print`,
+`tui`) and `zen-matrix` (`relay`). Changing how content is read changes it in all four.
+
+`client.rs`: the client protocol's session events, typed (`Event`, one variant per event in
+docs/client-protocol.md; an unknown or misshapen one is `Other` with its JSON), `Event::ends_turn`
+(the one end-of-turn rule: `end` without `next`, `idle`, `resync` with `busy: false`), and echo
+matching for a sent prompt (`echoes`, `Sent`). Used by `zen` (`turn`, `tui/events`) and
+`zen-matrix` (`relay`, `main`). The kernel still builds its events with `json!`; a change to an
+event changes docs/client-protocol.md, this enum and its tests together.
+
+## Shared: `zen-client` (`crates/zen-client`, ~230 lines)
+
+The kernel client both clients use: `zen_home` (`ZEN_HOME`, else `~/.zenbot`), `parse_env` (the
+`env` and `matrix.env` files), `Client` (the token from the caller or `<zen home>/token`, in the
+`Authorization` header; `call`/`get`/`post`/`patch`/`delete`, `health`, `new_session`, `resolve`,
+`connect` to a session's WebSocket; 5 s connect and 120 s request timeouts; a warning when the
+token would go over plain http to another machine), `enc` (a path segment, percent-encoded), `Ws`.
+Used by `zen` (`client`, `setup`) and `zen-matrix` (`kernel`, `state`, through a path dependency).
 
 ---
 
@@ -256,9 +272,10 @@ environment wins; see Environment variables).
 membership watch, posting, per-room link tasks with catch-up, job reporter), `trust.rs` (pure: who
 and where it answers: sender, device trust, room members and encryption, invites, the pinned owner
 identity), `relay.rs` (pure: commands, events → posts, numbered answers, job reports, splitting,
-Markdown → HTML without raw HTML), `kernel.rs` (the API calls it uses: `POST /api/sessions`,
+Markdown → HTML without raw HTML; session events read as `zen_proto::client::Event`),
+`kernel.rs` (the API calls it uses, over `zen-client`: `POST /api/sessions`,
 `GET /api/sessions/{id}?after=` and `?last=1`, the session WebSocket, `GET /api/jobs/runs`),
-`state.rs` (`matrix.env`, `state.json`, private files). `examples/owner.rs`: the scripted owner for
+`state.rs` (`matrix.env` read with `zen_client::parse_env`, `state.json`, private files). `examples/owner.rs`: the scripted owner for
 `scripts/matrix-e2e.sh`. The kernel knows nothing of it.
 
 ---

@@ -1,72 +1,50 @@
 //! The kernel, as the bridge sees it: a client of the client protocol (docs/client-protocol.md),
-//! like the `zen` terminal app. The token goes in a header, never a URL.
+//! like the `zen` terminal app, through the same client (`zen-client`: the token in a header,
+//! never a URL; timeouts; path encoding; the plain-http warning).
 
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 use serde_json::{json, Value};
-use std::time::Duration;
+use zen_client::{enc, Client};
 
-pub type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+pub use zen_client::Ws;
 
 #[derive(Clone)]
 pub struct Kernel {
-    http: reqwest::Client,
-    url: String,
-    token: String,
+    c: Client,
 }
 
 impl Kernel {
     pub fn new(url: &str, token: String) -> Result<Self> {
-        let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(5)).timeout(Duration::from_secs(60)).build()?;
-        Ok(Kernel { http, url: url.trim_end_matches('/').to_string(), token })
-    }
-
-    async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value> {
-        let mut req = self.http.request(method, format!("{}{}", self.url, path)).bearer_auth(&self.token);
-        if let Some(b) = body {
-            req = req.json(&b);
-        }
-        let res = req.send().await.with_context(|| format!("cannot reach zenbot at {}", self.url))?;
-        let status = res.status();
-        let data: Value = res.json().await.unwrap_or(Value::Null);
-        if !status.is_success() {
-            bail!("{status}: {}", data["error"].as_str().unwrap_or("request failed"));
-        }
-        Ok(data)
+        Ok(Kernel { c: Client::new(url, Some(token))? })
     }
 
     /// A new session; its title is the owner's when given (the kernel won't rename it).
     pub async fn new_session(&self, title: Option<&str>) -> Result<String> {
-        let s = self.call(reqwest::Method::POST, "/api/sessions", Some(json!({ "title": title }))).await?;
-        Ok(s["id"].as_str().context("bad session response")?.to_string())
+        self.c.new_session(json!({ "title": title })).await
     }
 
     /// Recent job runs, newest first (GET /api/jobs/runs).
     pub async fn job_runs(&self, limit: u32) -> Result<Vec<Value>> {
-        let v = self.call(reqwest::Method::GET, &format!("/api/jobs/runs?limit={limit}"), None).await?;
+        let v = self.c.get(&format!("/api/jobs/runs?limit={limit}")).await?;
         Ok(v.as_array().cloned().or_else(|| v["runs"].as_array().cloned()).unwrap_or_default())
     }
 
     /// The session's messages after `seq` (each with its `seq`), oldest first, and whether a turn
     /// is running (GET /api/sessions/{id}?after=).
     pub async fn messages_after(&self, id: &str, seq: i64) -> Result<(Vec<Value>, bool)> {
-        let v = self.call(reqwest::Method::GET, &format!("/api/sessions/{id}?after={seq}"), None).await?;
+        let v = self.c.get(&format!("/api/sessions/{}?after={seq}", enc(id))).await?;
         Ok((v["messages"].as_array().cloned().unwrap_or_default(), v["busy"] == true))
     }
 
     /// The `seq` of the session's latest message (0 when it has none).
     pub async fn last_seq(&self, id: &str) -> Result<i64> {
-        let v = self.call(reqwest::Method::GET, &format!("/api/sessions/{id}?last=1"), None).await?;
+        let v = self.c.get(&format!("/api/sessions/{}?last=1", enc(id))).await?;
         Ok(v["messages"].as_array().and_then(|m| m.last()).and_then(|m| m["seq"].as_i64()).unwrap_or(0))
     }
 
     /// The session's event stream.
     pub async fn connect(&self, id: &str) -> Result<Ws> {
-        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-        use tokio_tungstenite::tungstenite::http::{header::AUTHORIZATION, HeaderValue};
-        let mut req = format!("{}/api/sessions/{id}/ws", self.url.replacen("http", "ws", 1)).into_client_request()?;
-        req.headers_mut().insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", self.token)).context("token is not a valid header value")?);
-        let (ws, _) = tokio::time::timeout(Duration::from_secs(30), tokio_tungstenite::connect_async(req)).await.context("opening session stream: timed out")??;
-        Ok(ws)
+        self.c.connect(id).await
     }
 }
 

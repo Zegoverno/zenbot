@@ -343,7 +343,7 @@ impl App {
         let prompt = prompt_message(&text, self.suggestion.as_ref());
         // The prompt stays in the input until it can be sent.
         if self.session.is_none() {
-            let id = self.c.new_session(Some(self.model.clone()), self.effort.clone()).await?;
+            let id = self.c.new_session(json!({ "model": self.model, "effort": self.effort })).await?;
             self.session = Some(id.clone());
             self.connect(&id).await?;
         } else if self.sink.is_none() {

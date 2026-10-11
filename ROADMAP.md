@@ -136,8 +136,9 @@ changes. Candidate follow-ups, each only when use calls for it:
   `ZEN_ENGINE_CMD`, `ZEN_WORKER_<NAME>_CMD`, `ZEN_MODELS`) and `ZEN_FAUX`. `zen-engine`, `zen`
   and `zen-matrix` read their own settings directly. Moving the rest into `config.rs` needs the
   tests that set `ZEN_WORKERS` to pass values instead.
-- Client events are untyped JSON (`docs/client-protocol.md` documents them; `zen-proto` has no
-  event types), so `zen` and `zen-matrix` each parse them by hand.
+- The worker protocol's messages are untyped JSON in `zend` and `zen-engine`
+  (`docs/worker-protocol.md`); `zen-proto` types only the client events so far, and the kernel
+  still builds those with `json!` rather than from the types.
 - The old workflow's schema stays (expand-only): `sessions.state` and old tape block kinds.
   Drop them in a later release; `policies` is in use by model routing.
 - Unused since migration 0021 (expand-only): the index `search_docs_unembedded` (replaced by

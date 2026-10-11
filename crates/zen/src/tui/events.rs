@@ -29,7 +29,7 @@ impl App {
         let (c, tx) = (self.c.clone(), self.tx.clone());
         tokio::spawn(async move {
             let log_tx = tx.clone();
-            let res = c.upgrade(move |l| {
+            let res = crate::client::upgrade(&c, move |l| {
                 let _ = log_tx.send((String::new(), 0, json!({ "type": "upgrade_log", "line": l })));
             });
             let ev = match res.await {
@@ -79,68 +79,68 @@ impl App {
         }
     }
 
+    /// A session event (docs/client-protocol.md), or `disconnected` from the stream's reader.
     pub(super) fn on_event(&mut self, ev: Value) {
+        use zen_proto::client::{echoes, Event as Ev};
         let w = self.width();
-        match ev["type"].as_str().unwrap_or("") {
-            "message" => {
-                let m = &ev["message"];
-                match m["role"].as_str() {
-                    Some("user") if m["kernel"] == true => {
-                        // The kernel talking to the model (a verifier's instructions), not the owner.
-                        let text = clean(&text_of(&m["content"]));
-                        let mut out: Vec<Line> = text.lines().map(|l| line(format!("  zen › {l}"), Sty::Dim)).collect();
-                        out.push(Vec::new());
-                        self.commit(out);
-                    }
-                    Some("user") => {
-                        let text = clean(&text_of(&m["content"]));
-                        if self.pending_prompt.as_deref() == Some(text.as_str()) {
-                            self.pending_prompt = None;
-                        } else {
-                            self.push(Entry::User(text));
-                        }
-                    }
-                    Some("assistant") => {
-                        let mut entries = Vec::new();
-                        let full = clean(&assistant_text(m));
-                        if self.inline {
-                            // Inline, the streamed lines are already in scrollback: print the rest.
-                            let mut out = Vec::new();
-                            if self.stream.is_empty() {
-                                if !full.trim().is_empty() {
-                                    out.extend(self.md.render(full.trim_end(), w));
-                                }
-                            } else if self.committed < self.stream.len() {
-                                let rest = self.stream[self.committed..].to_string();
-                                out.extend(self.md.render(rest.trim_end(), w));
-                            }
-                            if !full.trim().is_empty() {
-                                out.push(Vec::new());
-                            }
-                            entries.push(Entry::Raw(out));
-                        } else {
-                            let text = if full.trim().is_empty() { self.stream.clone() } else { full };
-                            if !text.trim().is_empty() {
-                                entries.push(Entry::Md(text));
-                            }
-                        }
-                        self.reset_stream();
-                        for c in m["content"].as_array().into_iter().flatten().filter(|c| c["type"] == "toolCall") {
-                            entries.push(Entry::ToolCall(c["name"].as_str().unwrap_or("").to_string(), c["arguments"].clone()));
-                        }
-                        if m["stopReason"] == "error" && !self.aborting {
-                            entries.push(Entry::Raw(vec![line(clean(m["errorMessage"].as_str().unwrap_or("error")), Sty::Err)]));
-                        }
-                        self.turn_tokens += usage_total(&m["usage"]);
-                        self.turn_model = m["model"].as_str().unwrap_or("").to_string();
-                        self.push_all(entries);
-                    }
-                    Some("toolResult") => self.push(Self::tool_result_entry(m)),
-                    _ => {}
+        let ev = Ev::from_value(ev);
+        let ends = ev.ends_turn();
+        match ev {
+            Ev::Message { message: m } => match m["role"].as_str() {
+                Some("user") if m["kernel"] == true => {
+                    // The kernel talking to the model (a verifier's instructions), not the owner.
+                    let text = clean(&text_of(&m["content"]));
+                    let mut out: Vec<Line> = text.lines().map(|l| line(format!("  zen › {l}"), Sty::Dim)).collect();
+                    out.push(Vec::new());
+                    self.commit(out);
                 }
-            }
-            "delta" => {
-                self.stream.push_str(&md::sanitize(ev["delta"].as_str().unwrap_or("")));
+                Some("user") => {
+                    if self.pending_prompt.as_deref().is_some_and(|p| echoes(&m, p)) {
+                        self.pending_prompt = None;
+                    } else {
+                        self.push(Entry::User(clean(&text_of(&m["content"]))));
+                    }
+                }
+                Some("assistant") => {
+                    let mut entries = Vec::new();
+                    let full = clean(&assistant_text(&m));
+                    if self.inline {
+                        // Inline, the streamed lines are already in scrollback: print the rest.
+                        let mut out = Vec::new();
+                        if self.stream.is_empty() {
+                            if !full.trim().is_empty() {
+                                out.extend(self.md.render(full.trim_end(), w));
+                            }
+                        } else if self.committed < self.stream.len() {
+                            let rest = self.stream[self.committed..].to_string();
+                            out.extend(self.md.render(rest.trim_end(), w));
+                        }
+                        if !full.trim().is_empty() {
+                            out.push(Vec::new());
+                        }
+                        entries.push(Entry::Raw(out));
+                    } else {
+                        let text = if full.trim().is_empty() { self.stream.clone() } else { full };
+                        if !text.trim().is_empty() {
+                            entries.push(Entry::Md(text));
+                        }
+                    }
+                    self.reset_stream();
+                    for c in m["content"].as_array().into_iter().flatten().filter(|c| c["type"] == "toolCall") {
+                        entries.push(Entry::ToolCall(c["name"].as_str().unwrap_or("").to_string(), c["arguments"].clone()));
+                    }
+                    if m["stopReason"] == "error" && !self.aborting {
+                        entries.push(Entry::Raw(vec![line(clean(m["errorMessage"].as_str().unwrap_or("error")), Sty::Err)]));
+                    }
+                    self.turn_tokens += usage_total(&m["usage"]);
+                    self.turn_model = m["model"].as_str().unwrap_or("").to_string();
+                    self.push_all(entries);
+                }
+                Some("toolResult") => self.push(Self::tool_result_entry(&m)),
+                _ => {}
+            },
+            Ev::Delta { delta } => {
+                self.stream.push_str(&md::sanitize(&delta));
                 self.status = "Writing".into();
                 self.tool_since = None;
                 if !self.inline {
@@ -159,71 +159,68 @@ impl App {
                     self.commit(out);
                 }
             }
-            "busy" => {
+            Ev::Busy { effort, .. } => {
                 self.suggestion = None;
                 // A turn the kernel started also counts.
                 if !self.busy {
                     self.begin_turn();
                 }
-                self.turn_effort = ev["effort"].as_str().map(String::from);
+                self.turn_effort = effort;
             }
-            "questions" => {
+            Ev::Questions { questions } => {
                 let mut out = vec![line("── Questions ──", Sty::Dim)];
-                for (i, q) in ev["questions"].as_array().into_iter().flatten().enumerate() {
-                    out.push(line(format!("{}. {}", i + 1, clean(q["question"].as_str().unwrap_or(""))), Sty::Plain));
-                    for (j, o) in q["options"].as_array().into_iter().flatten().enumerate() {
+                for (i, q) in questions.iter().enumerate() {
+                    out.push(line(format!("{}. {}", i + 1, clean(&q.question)), Sty::Plain));
+                    for (j, o) in q.options.iter().enumerate() {
                         let rec = if j == 0 { "  (recommended)" } else { "" };
-                        out.push(line(format!("   {}) {}{rec}", (b'a' + j as u8) as char, clean(o.as_str().unwrap_or(""))), Sty::Plain));
+                        out.push(line(format!("   {}) {}{rec}", (b'a' + j as u8) as char, clean(o)), Sty::Plain));
                     }
                 }
                 out.push(Vec::new());
                 self.commit(out);
             }
             // The kernel named the session (only while the owner hasn't).
-            "title" => {
-                self.title = clean(ev["title"].as_str().unwrap_or(""));
+            Ev::Title { title } => {
+                self.title = clean(&title);
                 self.draw();
             }
             // A suggested next prompt, after a turn: grey text in the empty input until a prompt is sent.
-            "suggestion" if !self.busy => {
-                if let (Some(id), Some(text)) = (ev["id"].as_i64(), ev["text"].as_str()) {
-                    self.suggestion = Some(Suggestion { id, text: text.trim().to_string(), taken: false });
-                    self.draw();
-                }
-            }
-            "status" => {
-                self.status = clean(ev["text"].as_str().unwrap_or("Working"));
+            Ev::Suggestion { id, text } if !self.busy => {
+                self.suggestion = Some(Suggestion { id, text: text.trim().to_string(), taken: false });
                 self.draw();
             }
-            "child_end" => {
-                self.session_tokens += record_total(&ev["turn"]);
+            Ev::Status { text } => {
+                self.status = clean(if text.is_empty() { "Working" } else { &text });
+                self.draw();
             }
-            "idle" => {
+            Ev::ChildEnd { turn } => {
+                self.session_tokens += record_total(&turn);
+            }
+            Ev::Idle {} => {
                 self.busy = false;
                 self.draw();
             }
-            "thinking" => {
+            Ev::Thinking { .. } => {
                 self.status = "Thinking".into();
             }
-            "tool_start" => {
-                let name = ev["name"].as_str().unwrap_or("");
-                self.status = format!("Running {}", tool_summary(name, &ev["args"]));
+            Ev::ToolStart { name, args, .. } => {
+                self.status = format!("Running {}", tool_summary(&name, &args));
                 self.tool_since = Some(Instant::now());
                 self.turn_tools += 1;
                 if matches!(name.rsplit("__").next(), Some("write" | "edit")) {
-                    if let Some(path) = ev["args"]["path"].as_str() {
+                    if let Some(path) = args["path"].as_str() {
                         self.turn_files.insert(path.to_string());
                     }
                 }
                 // Remember the file, for `/open` with no path.
                 if matches!(name.rsplit("__").next(), Some("read" | "write" | "edit")) {
-                    if let Some(path) = ev["args"]["path"].as_str() {
+                    if let Some(path) = args["path"].as_str() {
                         self.last_file = Some(path.to_string());
                     }
                 }
                 self.draw();
             }
-            "tool_end" => {
+            Ev::ToolEnd { .. } => {
                 self.status = "Working".into();
                 self.tool_since = None;
                 // A tool may have changed the file in the side panel: show it now, not on the next poll.
@@ -231,14 +228,14 @@ impl App {
                     self.draw();
                 }
             }
-            "end" if !self.busy => {} // already ended (e.g. after a resync)
-            "resync" => {
-                self.note(format!("missed {} updates from zenbot (the terminal fell behind)", ev["skipped"]), Sty::Warn);
-                if ev["busy"] == false && self.busy {
+            Ev::End { .. } if !self.busy => {} // already ended (e.g. after a resync)
+            Ev::Resync { skipped, .. } => {
+                self.note(format!("missed {skipped} updates from zenbot (the terminal fell behind)"), Sty::Warn);
+                if ends && self.busy {
                     self.on_event(serde_json::json!({ "type": "end", "error": null }));
                 }
             }
-            "end" => {
+            Ev::End { error, turn: r, .. } => {
                 let mut entries = Vec::new();
                 let mut out = Vec::new();
                 self.tool_since = None;
@@ -253,42 +250,40 @@ impl App {
                         out.extend(self.md.render(rest.trim_end(), w));
                     }
                     out.push(line("interrupted", Sty::Warn));
-                } else if let Some(e) = ev["error"].as_str() {
-                    out.push(line(clean(e), Sty::Err));
+                } else if let Some(e) = error {
+                    out.push(line(clean(&e), Sty::Err));
                 }
                 self.aborting = false;
                 self.reset_stream();
                 // The kernel's totals cover the whole turn, including calls the stream never showed.
-                let r = &ev["turn"];
                 if r.is_object() {
-                    self.turn_tokens = record_total(r);
+                    self.turn_tokens = record_total(&r);
                 }
                 let secs = self.turn_started.elapsed().as_secs_f32();
                 let effort = self.turn_effort.take().map(|e| format!(" · {e}")).unwrap_or_default();
                 out.push(line(format!("  {}{effort} · {} tokens · {:.1}s", self.turn_model, fmt_tokens(self.turn_tokens), secs), Sty::Dim));
                 out.push(Vec::new());
                 self.session_tokens += self.turn_tokens;
-                // The workflow may continue on its own (verify, or the work after approval).
-                self.busy = ev["next"] == true;
+                // The kernel may go on with a turn of its own (`next`): wait for `idle`.
+                self.busy = !ends;
                 if self.busy {
                     self.status = "Continuing".into();
                 }
                 entries.push(Entry::Raw(out));
                 self.push_all(entries);
             }
-            "error" => {
+            Ev::Error { error } => {
                 self.busy = false;
-                self.commit(vec![line(clean(ev["error"].as_str().unwrap_or("error")), Sty::Err), Vec::new()]);
+                self.commit(vec![line(clean(&error), Sty::Err), Vec::new()]);
             }
-            "disconnected" if self.upgrading => {
-                self.busy = false;
-                self.sink = None; // expected: zenbot is restarting; we reconnect when it's back
-            }
-            "disconnected" => {
+            Ev::Other(v) if v["type"] == "disconnected" => {
                 self.busy = false;
                 self.sink = None;
-                self.note("lost connection to zenbot; send a message to reconnect", Sty::Warn);
-                self.draw();
+                // While upgrading it's expected: zenbot is restarting; we reconnect when it's back.
+                if !self.upgrading {
+                    self.note("lost connection to zenbot; send a message to reconnect", Sty::Warn);
+                    self.draw();
+                }
             }
             _ => {}
         }
@@ -341,6 +336,18 @@ mod tests {
         for want in ["── Questions ──", "1. Which flag name?", "a) --json  (recommended)", "b) --format json"] {
             assert!(out.contains(want), "missing {want:?} in {out}");
         }
+    }
+
+    #[test]
+    fn the_echo_of_a_sent_prompt_shows_once_and_a_prompt_from_elsewhere_shows() {
+        let mut a = app(80, 20);
+        a.pending_prompt = Some("fix the build".into());
+        a.on_event(json!({ "type": "message", "message": { "role": "user", "content": "fix the build\n" } }));
+        assert!(a.pending_prompt.is_none() && a.entries.is_empty(), "already shown when sent");
+        a.on_event(json!({ "type": "message", "message": { "role": "user", "content": "from Matrix" } }));
+        assert!(matches!(&a.entries[..], [Entry::User(t)] if t == "from Matrix"));
+        a.on_event(json!({ "type": "some_future_event", "x": 1 }));
+        assert_eq!(a.entries.len(), 1, "an unknown event is ignored");
     }
 
     #[test]

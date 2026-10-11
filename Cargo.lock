@@ -3392,7 +3392,19 @@ dependencies = [
  "tokio-tungstenite 0.27.0",
  "unicode-segmentation",
  "unicode-width",
+ "zen-client",
  "zen-proto",
+]
+
+[[package]]
+name = "zen-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
 ]
 
 [[package]]
@@ -3410,6 +3422,7 @@ dependencies = [
 name = "zen-proto"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
 ]
 

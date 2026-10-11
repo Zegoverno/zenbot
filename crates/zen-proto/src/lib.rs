@@ -1,7 +1,10 @@
 //! Helpers shared by the kernel, the engine worker and the CLI, so they read messages the same way.
 //! Messages use Pi's format (docs/worker-protocol.md): `content` is a string or a list of parts.
+//! `client` types the client protocol's events (docs/client-protocol.md).
 
 use serde_json::Value;
+
+pub mod client;
 
 /// The text of a message's content: a string as is, or its text parts joined by newlines.
 pub fn text_of(content: &Value) -> String {

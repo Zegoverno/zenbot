@@ -1,30 +1,18 @@
 //! The machine zen runs on: the installer's `env` file, the engines' state and signing in to
 //! them (`zen login`), and git's identity for `zen status`.
 
+use std::collections::BTreeMap;
+
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
+use zen_client::parse_env;
 
 use crate::client::zen_home;
 
 /// Values from `<zen home>/env` (written by the installer), read once.
-pub(crate) fn zen_env() -> &'static std::collections::HashMap<String, String> {
-    static ENV: std::sync::OnceLock<std::collections::HashMap<String, String>> = std::sync::OnceLock::new();
+pub(crate) fn zen_env() -> &'static BTreeMap<String, String> {
+    static ENV: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
     ENV.get_or_init(|| parse_env(&std::fs::read_to_string(zen_home().join("env")).unwrap_or_default()))
-}
-
-/// `KEY=value` lines as a shell would read them: comments and blank lines skipped, an `export `
-/// prefix and matching quotes around the value removed.
-pub(crate) fn parse_env(text: &str) -> std::collections::HashMap<String, String> {
-    text.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .filter_map(|l| l.strip_prefix("export ").unwrap_or(l).split_once('='))
-        .map(|(k, v)| {
-            let v = v.trim();
-            let unquoted = [('"', '"'), ('\'', '\'')].iter().find_map(|(a, b)| v.strip_prefix(*a)?.strip_suffix(*b));
-            (k.trim().to_string(), unquoted.unwrap_or(v).to_string())
-        })
-        .collect()
 }
 
 pub(crate) fn zen_path() -> String {
@@ -130,15 +118,6 @@ mod tests {
         assert!(!engine_signed_in(&json!({ "authenticated": { "openrouter": true, "claude": false } })));
         assert!(engine_signed_in(&json!({ "authenticated": { "openrouter": false, "codex": true } })));
         assert!(!engine_signed_in(&json!({})));
-    }
-
-    #[test]
-    fn the_env_file_is_read_like_a_shell_would() {
-        let env = parse_env("# zenbot\nexport PATH=\"/a/bin:/b\"\nZEN_REPO='/home/x/zenbot'\n\nPLAIN = v \nBAD\n");
-        assert_eq!(env["PATH"], "/a/bin:/b");
-        assert_eq!(env["ZEN_REPO"], "/home/x/zenbot");
-        assert_eq!(env["PLAIN"], "v");
-        assert_eq!(env.len(), 3);
     }
 
     #[test]

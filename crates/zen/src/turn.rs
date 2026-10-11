@@ -7,7 +7,7 @@ use anyhow::{bail, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::Message;
-use zen_proto::text_of;
+use zen_proto::client::{echoes, Event};
 
 use crate::client::{assistant_text, dim, record_total, short, tool_summary, usage_total, Client, NewSession, Ws};
 use crate::print::{for_stderr, for_stdout};
@@ -28,6 +28,22 @@ pub(crate) struct Turn {
     /// Each turn's record, in order (verifier turns included).
     pub(crate) records: Vec<Value>,
     pub(crate) error: Option<String>,
+}
+
+impl Turn {
+    /// Count a turn's record (sent with its `end`, or a child's `child_end`): the kernel's totals
+    /// cover the whole turn, side calls included.
+    fn add(&mut self, r: Value) {
+        if !r.is_object() {
+            return;
+        }
+        add_record(&mut self.record, &r);
+        self.records.push(r);
+        let t = &self.record;
+        self.output_tokens = t["output_tokens"].as_i64().unwrap_or(0);
+        self.input_tokens = record_total(t) - self.output_tokens;
+        self.cost = t["cost_usd"].as_f64().unwrap_or(self.cost);
+    }
 }
 
 /// Add a turn's record to the totals of a chain of turns. A cache break counts if any turn had an
@@ -61,92 +77,79 @@ pub(crate) async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: 
             msg = ws.next() => {
                 let Some(msg) = msg else { bail!("connection to zenbot closed") };
                 let Message::Text(text) = msg? else { continue };
-                let ev: Value = serde_json::from_str(&text)?;
-                match ev["type"].as_str().unwrap_or("") {
-                    "message" => {
-                        let m = &ev["message"];
-                        match m["role"].as_str() {
-                            Some("user") if text_of(&m["content"]) == prompt => started = true,
-                            Some("assistant") if started => {
-                                let text = assistant_text(m);
-                                if !text.is_empty() {
-                                    if !turn.text.is_empty() { turn.text.push_str("\n\n"); }
-                                    turn.text.push_str(&text);
-                                    if show && !streamed { print!("{}", for_stdout(&text)); }
-                                    if show { println!(); }
-                                }
-                                streamed = false;
-                                let u = &m["usage"];
-                                let output = u["output"].as_i64().unwrap_or(0);
-                                turn.input_tokens += usage_total(u) - output;
-                                turn.output_tokens += output;
-                                turn.cost += u["cost"]["total"].as_f64().unwrap_or(0.0);
-                                turn.model = m["model"].as_str().unwrap_or("").to_string();
-                                if m["stopReason"] == "error" {
-                                    turn.error = m["errorMessage"].as_str().map(str::to_string);
-                                }
+                let Some(ev) = Event::parse(&text) else { continue };
+                let ends = ev.ends_turn();
+                match ev {
+                    Event::Message { message: m } => {
+                        if echoes(&m, prompt) {
+                            started = true;
+                        } else if m["role"] == "assistant" && started {
+                            let text = assistant_text(&m);
+                            if !text.is_empty() {
+                                if !turn.text.is_empty() { turn.text.push_str("\n\n"); }
+                                turn.text.push_str(&text);
+                                if show && !streamed { print!("{}", for_stdout(&text)); }
+                                if show { println!(); }
                             }
-                            _ => {}
+                            streamed = false;
+                            let u = &m["usage"];
+                            let output = u["output"].as_i64().unwrap_or(0);
+                            turn.input_tokens += usage_total(u) - output;
+                            turn.output_tokens += output;
+                            turn.cost += u["cost"]["total"].as_f64().unwrap_or(0.0);
+                            turn.model = m["model"].as_str().unwrap_or("").to_string();
+                            if m["stopReason"] == "error" {
+                                turn.error = m["errorMessage"].as_str().map(str::to_string);
+                            }
                         }
                     }
-                    "delta" if started && show => {
-                        print!("{}", for_stdout(ev["delta"].as_str().unwrap_or("")));
+                    Event::Delta { delta } if started && show => {
+                        print!("{}", for_stdout(&delta));
                         stdout.flush().ok();
                         streamed = true;
                     }
-                    "tool_start" if started => {
-                        if show_tools { eprintln!("{}", dim(&format!("  ▸ {}", tool_summary(ev["name"].as_str().unwrap_or(""), &ev["args"])))); }
-                        turn.tools.push(json!({ "id": ev["call_id"], "name": ev["name"], "args": ev["args"] }));
+                    Event::ToolStart { call_id, name, args } if started => {
+                        if show_tools { eprintln!("{}", dim(&format!("  ▸ {}", tool_summary(&name, &args)))); }
+                        turn.tools.push(json!({ "id": call_id, "name": name, "args": args }));
                     }
-                    "tool_end" if started => {
-                        if let Some(t) = turn.tools.iter_mut().find(|t| t["id"] == ev["call_id"]) {
-                            t["is_error"] = ev["is_error"].clone();
-                            t["ms"] = ev["ms"].clone();
+                    Event::ToolEnd { call_id, is_error, ms } if started => {
+                        if let Some(t) = turn.tools.iter_mut().find(|t| t["id"] == call_id.as_str()) {
+                            t["is_error"] = json!(is_error);
+                            t["ms"] = json!(ms);
                         }
-                        if show_tools && ev["is_error"] == true { eprintln!("{}", dim("    (failed)")); }
+                        if show_tools && is_error { eprintln!("{}", dim("    (failed)")); }
                     }
                     // The turn starts with the first `busy` after the prompt was sent, or with the
                     // prompt's echo, whichever comes first (the echo may not match exactly).
-                    "busy" => {
+                    Event::Busy { effort, .. } => {
                         started = true;
-                        turn.effort = ev["effort"].as_str().map(str::to_string);
+                        turn.effort = effort;
                     }
-                    "end" | "child_end" if started => {
-                        if let Some(e) = ev["error"].as_str() { turn.error = Some(e.to_string()); }
-                        let r = &ev["turn"];
-                        if r.is_object() {
-                            // The kernel's totals cover the whole turn, side calls included.
-                            turn.records.push(r.clone());
-                            add_record(&mut turn.record, r);
-                            let t = &turn.record;
-                            turn.output_tokens = t["output_tokens"].as_i64().unwrap_or(0);
-                            turn.input_tokens = record_total(t) - turn.output_tokens;
-                            turn.cost = t["cost_usd"].as_f64().unwrap_or(turn.cost);
-                        }
+                    Event::ChildEnd { turn: r } if started => turn.add(r),
+                    Event::End { error, turn: r, .. } if started => {
+                        if let Some(e) = error { turn.error = Some(e); }
+                        turn.add(r);
                         // A turn may be followed by another the kernel starts itself (`next`): wait for `idle`.
-                        if ev["type"] == "end" && ev["next"] != true {
+                        if ends {
                             return Ok(turn);
                         }
                     }
-                    "idle" if started => return Ok(turn),
-                    "questions" if started => {
-                        let qs: Vec<String> = ev["questions"].as_array().into_iter().flatten().map(|q| {
-                            let opts: Vec<&str> = q["options"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-                            format!("{}\n  {}", q["question"].as_str().unwrap_or(""), opts.join(" / "))
-                        }).collect();
+                    Event::Questions { questions } if started => {
+                        let qs: Vec<String> = questions.iter().map(|q| format!("{}\n  {}", q.question, q.options.join(" / "))).collect();
                         let text = qs.join("\n");
                         if show { println!("\n── Questions\n{}\n", for_stdout(&text)); }
                         if !turn.text.is_empty() { turn.text.push_str("\n\n"); }
                         turn.text.push_str(&format!("Questions:\n{text}"));
                     }
-                    "status" if started && show_tools => {
-                        eprintln!("{}", dim(&format!("  · {}", ev["text"].as_str().unwrap_or(""))));
+                    Event::Status { text } if started && show_tools => {
+                        eprintln!("{}", dim(&format!("  · {text}")));
                     }
-                    "resync" if started && ev["busy"] == false => {
+                    Event::Resync { .. } if started && ends => {
                         turn.error.get_or_insert_with(|| "missed the end of the turn (client fell behind); see `zen sessions show`".into());
                         return Ok(turn);
                     }
-                    "error" => bail!("{}", ev["error"].as_str().unwrap_or("error")),
+                    Event::Idle {} if started => return Ok(turn),
+                    Event::Error { error } => bail!("{error}"),
                     _ => {}
                 }
             }
@@ -216,7 +219,7 @@ pub(crate) async fn ask(c: &Client, json_out: bool, prompt: Option<String>, sess
     let text = read_prompt(prompt)?;
     let id = match session {
         Some(s) => c.resolve(&s).await?,
-        None => c.new_session(new.model, new.effort).await?,
+        None => c.new_session(new.body()).await?,
     };
     let mut ws = c.connect(&id).await?;
     let turn = run_turn(&mut ws, &text, !json_out, !json_out && !quiet).await?;
@@ -238,7 +241,7 @@ pub(crate) async fn ask(c: &Client, json_out: bool, prompt: Option<String>, sess
 pub(crate) async fn chat(c: &Client, session: Option<String>, new: NewSession) -> Result<()> {
     let id = match session {
         Some(s) => c.resolve(&s).await?,
-        None => c.new_session(new.model, new.effort).await?,
+        None => c.new_session(new.body()).await?,
     };
     let info = c.get(&format!("/api/sessions/{id}")).await?;
     eprintln!("{}", dim(&format!("zenbot · {} · session {} · Ctrl-C stops a turn, Ctrl-D exits", info["model"].as_str().unwrap_or(""), short(&id))));
@@ -285,7 +288,7 @@ mod tests {
             }
             prompt
         });
-        (Client::new(url, Some("t".into())).unwrap(), server)
+        (Client::new(&url, Some("t".into())).unwrap(), server)
     }
 
     #[tokio::test]
