@@ -19,7 +19,8 @@ fully before making changes.
 | Kernel `zend`: API, WebSocket, sessions, tools, auth, worker routing | `crates/zend` (Rust) | systemd service `zenbot`, binary `~/.zenbot/bin/zend` |
 | CLI `zen`: terminal app and script commands | `crates/zen` (Rust) | `~/.zenbot/bin/zen` (linked from `~/.local/bin/zen`) |
 | Worker `zen-engine`: turns on the Claude Code and Codex CLIs | `crates/zen-engine` (Rust) | child process of `zend` |
-| Shared types `zen-proto`: the worker protocol's messages | `crates/zen-proto` (Rust library) | linked into `zend` and `zen-engine` |
+| Shared `zen-proto`: message helpers and the client protocol's events, typed (the worker protocol's messages are still untyped JSON) | `crates/zen-proto` (Rust library) | linked into `zend`, `zen-engine`, `zen` and `zen-matrix` |
+| Client `zen-client`: the kernel client (token, HTTP calls, session stream, `zen_home`, env files) | `crates/zen-client` (Rust library) | linked into `zen` and `zen-matrix` |
 | Channel `zen-matrix`: the owner's Matrix rooms ↔ sessions | `crates/zen-matrix` (Rust, its own Cargo workspace) | systemd service `zen-matrix`, binary `~/.zenbot/bin/zen-matrix` |
 | Database and web search | `deploy/compose.yaml` | Postgres + pgvector, and SearXNG, in Docker |
 
