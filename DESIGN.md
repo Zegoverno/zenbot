@@ -102,14 +102,9 @@ unseen), what was sent and the prompt version, so the prompt can be improved fro
 
 ### Tools today
 
-Fixed order, the same every turn of a session (`agent::specs`): `bash`, `read`, `write`, `edit`,
-`history`, `search`, `ask`, `remember`, `capture`, `web_search`, `web_fetch`, `find_skills`,
-`load_skill`, `save_skill`, `find_tools`, `load_tool`, `call_tool`, `save_tool`, `verify`,
-`delegate`, `schedule`, and `decide` when a System One model is configured (and neither
-`ZEN_S1_PRIVATE` nor `ZEN_DECIDE_TOOL` is 0). Subagents and job sessions don't get `ask`,
-`delegate` or `schedule`; a verifier session gets only `bash` (read-only, bubblewrap), `read`
-(inside the work it checks) and `submit_verdict`; a session of any other kind gets no tools. Each description says what the tool does, when to use it and when not, and what
-it returns. Tool output is cut once, when the tool runs (full output saved and referenced); edits
+One fixed list, in a fixed order, the same every turn of a session (`agent::specs`); which tools
+each kind of session gets and which module runs each: MAP.md, "Tools the model gets". Each
+description says what the tool does, when to use it and when not, and what it returns. Tool output is cut once, when the tool runs (full output saved and referenced); edits
 are serialized per file and CRLF/BOM-safe; tools are cancelled with their process group on abort.
 
 ### Briefs and verification
@@ -266,7 +261,9 @@ harness versions with the same model on isolated kernels and databases (`evals/R
   (`TAVILY_API_KEY`), else SearXNG
   (`ZEN_SEARXNG_URL`, the compose service on 127.0.0.1:8888), which also rescues one failed keyed
   call; results deduplicated, http(s) only, reranked by System One.
-- **Untrusted content** (D-034, D-053; `taint.rs`): results are wrapped in `<untrusted …>`
+- **Untrusted content** (D-034, D-053; `taint.rs`): web pages, untrusted MCP servers' output
+  and tool descriptions (D-052), instruction files from repositories the owner hasn't listed
+  (`ZEN_TRUSTED_REPOS`, D-051) and a tainted subagent's answer are wrapped in `<untrusted …>`
   (markers inside are defused) and the session is tainted (`sessions.tainted_at`, a `taint` block).
   Taint is also a property of what a tainted session stores: memories (`memories.tainted`), job
   reports (`job_runs.tainted`), draft skills (`draft_taint`) and wiki entries (labelled `web`).
@@ -308,11 +305,9 @@ its `read` stays inside the work. Worker shells do not inherit kernel secret var
 get none of them either (every secret-named variable is removed, except the engines' sign-ins),
 and start without a login shell. Made tools
 run from a private copy of their folder, without network and with an empty home until the owner
-approves the content they reviewed. A tainted session's shell runs offline in bubblewrap, writing
-only its workspace (D-053). `edit`/`write` can't change the owner's configuration and
-secrets from any session, nor the prompt files, active skills or made tools from a tainted, child or
-kernel session (D-051). `mcp.json` passes a secret-named variable only to a server that lists it in
-`allow_env`.
+approves the content they reviewed. What untrusted content is, how it's wrapped, what a tainted
+session may not do (its shell offline, D-053) and which files `edit`/`write` protect (D-051) are in
+"Untrusted content" above.
 Engines are checked at run time, not only configured: a Claude Code run (a turn or a tool-free
 completion) must start with `system/init` listing its tools, none but zenbot's `mcp__zen__*`, or it
 is refused. Codex turns, model listings and tool-free completions use a private `CODEX_HOME` (only
@@ -321,10 +316,6 @@ project docs; a turn in which Codex starts anything but a message, reasoning, a 
 or a zenbot dynamic tool call (its own shell, file changes, MCP, web search, …) is stopped and fails
 naming it. The daily `engines` job also fails when a Codex release turns on a feature zenbot hasn't
 reviewed (`zen-engine codex-features`).
-Web pages, untrusted MCP output (including tool descriptions) and instruction files from
-repositories the owner hasn't listed (`ZEN_TRUSTED_REPOS`) taint the session and are wrapped; taint
-fails closed. What a tainted session stores carries the mark and is untrusted wherever it's read
-(D-053).
 All tool output is masked before reaching the model or tape, and tool arguments before clients or
 `tool_calls` see them; full outputs stay under `~/.zenbot/outputs`. The database user has a
 private password (`~/.zenbot/db-password`, set by `db_secure` in `scripts/db.sh` at install and on

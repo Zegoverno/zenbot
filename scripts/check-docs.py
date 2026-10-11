@@ -66,11 +66,10 @@ api_routes = {r if r in ("/", "/health") else "/api" + r for r in routes}
 for doc in ("MAP.md", "docs/client-protocol.md"):
     require("route", api_routes - {"/"}, doc, fmt="{}", whole=True)
 
-# Tools: every tool the kernel offers, in DESIGN.md's and MAP.md's lists.
+# Tools: every tool the kernel offers, in MAP.md's list.
 tools = set(re.findall(r'^\s*"name": "([a-z_]+)",\s*$', kernel, re.M))
 tools |= set(re.findall(r'\bspec\(\s*"([a-z_]+)"', kernel))
-for doc in ("DESIGN.md", "MAP.md"):
-    require("tool", tools, doc)
+require("tool", tools, "MAP.md")
 
 # Settings: every ZEN_* / MATRIX_* variable the code or scripts read is documented in MAP.md, and
 # every one a current doc names still exists (a trailing _ or * marks a family: ZEN_FAILOVER_*).

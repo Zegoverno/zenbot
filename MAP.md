@@ -33,14 +33,9 @@
    │      └─ faux:   scripted model `faux/smoke` (ZEN_FAUX=1), for tests
 ```
 
-- **The kernel owns all state and executes every tool call.** Workers are stateless: each
-  `turn.start` carries the whole context (system prompt, history, prompt, tools), and every tool the
-  model calls comes back to the kernel as `tool.call`. Engines run with their own tools off (Claude
-  Code `--tools ""` plus `--strict-mcp-config`; Codex `shell_tool: false`, `unified_exec: false`,
-  apps and plugins off, web search disabled), and are checked at run time (Claude Code's
-  `system/init` tool list; Codex's thread items). Keep it that way.
-- **The tape is the truth.** Each session is an append-only, hash-chained list of blocks in
-  `tape_events`. Engine-side sessions (Claude Code's) are only a cache of it.
+- **The invariants** (the kernel owns all state and runs every tool call, the tape is the truth,
+  the prefix is fixed per session, …) are in DESIGN.md ("Invariants"); how the engines' own tools
+  are kept off and checked at run time, in the `zen-engine` table below.
 - **One process tree.** systemd runs `zend` (`deploy/zenbot.service`); `zend` starts the workers
   as children (`bash -c <cmd>`) and restarts them when they exit (`workers.rs::supervise`).
 - **Never restart `zend` yourself** (it kills the session you run in). Use `scripts/upgrade.sh`.
@@ -598,21 +593,4 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 
 ## Deeper docs
 
-| Doc | What's there |
-|---|---|
-| `AGENTS.md` | How to change zenbot: build, test, upgrade, conventions, rules. Read it fully first |
-| `CONTEXT.md` | What zenbot is for, how success is measured, constraints. Read first |
-| `DESIGN.md` | How the system works today, then the target design agreed on 2026-10-06 |
-| `DEVELOPMENT.md` | Local loop: build, test, verify and ship a change |
-| `ROADMAP.md` | Phases in order |
-| `PROGRESS.md` | Append-only log of what shipped and what was learned |
-| `DECISIONS.md` | Why things are the way they are, newest first (D-001 to D-050; D-025 onward: the target design and the choices made building it) |
-| `SPEC.md` | Long-term target modules (section numbers kept, e.g. 5.18 Security) |
-| `docs/context.md` | How each turn's context is built, stored, cached, summarized and measured; the tape |
-| `docs/brief.md` | Briefs and verification: the `work/brief` and `work/verify` skills, the `verify` and `ask` tools |
-| `docs/worker-protocol.md` | Kernel ⇄ worker JSON-RPC: methods, messages, engine sessions, guarantees |
-| `docs/client-protocol.md` | HTTP API and WebSocket events for clients |
-| `docs/matrix.md` | The Matrix channel: what it does, security, setup, its code, limits |
-| `docs/research/*.md` | Dated research snapshots (2026-10-06), kept as history |
-| `evals/README.md` | Eval tasks and the report |
-| `README.md`, `INSTALL.md` | Using and installing zenbot |
+Every doc and what it holds: [README.md](README.md#docs).

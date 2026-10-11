@@ -289,7 +289,7 @@ Tasks live in `evals/tasks/<name>/` (`task.json` plus `files/` and, for hidden t
 
 ## Scheduled jobs
 
-The kernel runs a scheduler (`jobs.rs`, D-046; DESIGN.md "Scheduled jobs"). Its own jobs are seeded at start: `sleep` (03:00 UTC), the nightly upkeep `wiki` (03:10), `skills` (03:20), `routes` (03:30) and `prune` (03:40), and `engines` (04:00 UTC); `zen jobs run <name>` runs one now and `zen jobs runs <name>` shows what it found. Agent jobs run a prompt in a fresh session of kind `job` and record its report; the owner adds them with `zen jobs add`, the agent with the `schedule` tool (live only past the System One gate, else paused until `zen jobs resume`).
+How the scheduler and its jobs work: DESIGN.md, "Scheduled jobs".
 
 ```bash
 zen jobs                                      # every job: schedule, next run, last result
@@ -303,7 +303,7 @@ Throwaway kernels must not run the copy's jobs (an engine update on the real CLI
 
 ## Memory sleep
 
-The kernel's `sleep` job tidies short-term memory nightly (03:00 UTC); `zen memory sleep` runs it now.
+What the sleep does: DESIGN.md, "Memory and skills". `zen memory sleep` runs it now.
 
 ```bash
 zen memory                                   # short-term memory and the last sleep
@@ -311,7 +311,8 @@ zen memory --tier archived                   # what the sleeps archived
 zen jobs runs sleep                          # when it ran and what it did
 ```
 
-The sleep promotes on its own (D-045): lasting entries about the owner move to `USER.md`, lasting guidance to `IDENTITY.md` (under `## Learned`; only `owner`/`verified` entries), lasting knowledge is copied into the wiki. `ZEN_PROMOTE_BAR` (0.9) sets the bar. A prompt file over its cap (`ZEN_USER_CHARS`, `ZEN_IDENTITY_CHARS`) is compacted by a session the sleep starts (`sleep: compact USER.md` in `zen sessions`). Every change to a prompt file, by the sleep or the agent, first saves the old version to `~/.zenbot/backups/prompt-files/<name>-<time>.md` (kept 90 days); to undo, copy it back.
+A prompt file's old versions are in `~/.zenbot/backups/prompt-files/<name>-<time>.md`; to undo a
+change, copy one back.
 
 ## Search index
 
@@ -328,7 +329,7 @@ docker compose -f deploy/compose.yaml exec -T postgres psql -U zen -d zen_dev \
 
 ## Wiki
 
-The `capture` tool writes the wiki: markdown pages in `ZEN_WIKI_DIR` (default `<zen home>/global/wiki`, so `~/.zenbot-dev/global/wiki` for the dev kernel), a git repository the kernel creates and commits to (`index.md` lists the pages, `log.md` records each capture). The agent edits page summaries itself; those edits are committed by the next capture or the nightly sleep, which also lists wiki problems (pages with no summary, links to missing pages) in its note. Pages are indexed for `search` (scope `wiki`) by file modification time.
+How the wiki works: DESIGN.md, "Memory and skills". It lives in `ZEN_WIKI_DIR` (default `<zen home>/global/wiki`, so `~/.zenbot-dev/global/wiki` for the dev kernel).
 
 ```bash
 git -C ~/.zenbot-dev/global/wiki log --oneline | head   # what the dev kernel captured
@@ -346,7 +347,7 @@ zen tools accept word-count 81c2d0a7f3e9     # let the made tool you reviewed ru
 git -C ~/.zenbot-dev/global/skills log --oneline   # every change the dev kernel made to its skills
 ```
 
-A draft also becomes active when the owner accepts a session that loaded it (`zen sessions decide <id> accept`), unless it opens a new domain. Accepting or rejecting names the fingerprint `zen skills` showed and is refused when the content changed since. Each run of a made tool uses a temporary copy of its folder (what it writes there is dropped). Unapproved tools run in bubblewrap with the filesystem read-only and no network; approval is stored in the `made_tools` table. The nightly sleep flags skills unused for 30 days and archives them at 90. To test without a subscription, see the `workshop` e2e scenario and `scripts/e2e/workshop.json`.
+How drafts become active and how made tools are sandboxed and approved: DESIGN.md, "Memory and skills" (Workshop). To test without a subscription, see the `workshop` e2e scenario and `scripts/e2e/workshop.json`.
 
 ## Delegation and the routing policy
 
