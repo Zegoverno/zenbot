@@ -6,6 +6,32 @@
 
 ---
 
+## 2026-10-10 — Matrix channel: trust, rooms, no lost answers, a confined service
+
+- A review of `zen-matrix` found it trusted the sender's user ID alone, joined any room the owner
+  invited it to, lost answers on a reconnect or restart, and cut long answers by characters. Fixed
+  together (docs/matrix.md, Security):
+- Trust: matrix-sdk decrypts only what cross-signed devices sent (`TrustRequirement::CrossSigned`),
+  and the bridge checks again: plaintext messages and the owner's unverified sessions are refused
+  and logged. The owner's cross-signing master key is pinned on the first accepted message; a
+  changed one is refused until `zen-matrix repin-owner` (service stopped) clears the pin.
+  `MATRIX_OWNER` equal to `MATRIX_USER` is refused; the bot never acts on its own messages.
+- Rooms: invites are joined only from the owner, to rooms not known to be unencrypted, then checked
+  in full; before each post and on every membership change the bot leaves a room that isn't
+  encrypted or holds anyone but the owner and itself. The rules are pure functions in the new
+  `src/trust.rs`, unit-tested.
+- No lost answers: `state.json` keeps each room's last session `seq`; on each connection, `resync`
+  and new message the bridge fetches what came after (`GET /api/sessions/{id}?after=`) and posts
+  it. Every mapped room is linked at start.
+- Long answers are split in bytes (about 20 KB per message, code fences closed and reopened, at most
+  8 parts); a failed send posts a short notice. Raw HTML in model output is shown as text in the
+  formatted body. Ids from `state.json` are validated on load; no lock is held across a kernel call.
+- `deploy/zen-matrix.service` is confined further: a tmpfs home with only the files it needs bound
+  in, no devices or capabilities, IP and Unix sockets only, `@system-service` system calls.
+- docs/client-protocol.md said live `message` events carry `seq`; they don't (the code wins).
+- `scripts/matrix-e2e.sh` also checks the refusals, the restart catch-up, the room rules and the
+  self-owner check.
+
 ## 2026-10-10 — Engine boundary: run-time tool checks, aborts, the tape and usage
 
 - A review of the worker boundary found engines trusted to keep their own tools off, and gaps where

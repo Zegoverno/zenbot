@@ -11,6 +11,10 @@ anyhow = "1"
 futures-util = "0.3"
 # The Matrix client: end-to-end encryption, a SQLite store for keys and sync state, Markdown bodies.
 matrix-sdk = { version = "0.19", default-features = false, features = ["e2e-encryption", "automatic-room-key-forwarding", "sqlite", "bundled-sqlite", "markdown", "rustls-aws-lc-rs"] }
+# The sender-device trust requirement for decryption (matrix-sdk doesn't re-export it); the version matrix-sdk uses.
+matrix-sdk-crypto = { version = "0.19", default-features = false }
+# Markdown → HTML with raw HTML shown as text (matrix-sdk's own conversion passes it through); the version ruma uses.
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

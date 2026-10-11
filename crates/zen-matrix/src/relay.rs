@@ -5,9 +5,15 @@
 use serde_json::Value;
 use zen_proto::text_of;
 
-/// Longest message the bridge posts, in characters. A Matrix event may be 65,535 bytes, and the
-/// formatted HTML body is sent next to the plain one, so a long answer is cut well below that.
-pub const MAX_CHARS: usize = 12_000;
+/// Longest Markdown body of one message, in bytes. A Matrix event may be 65,535 bytes; an
+/// encrypted one carries its content in base64 (a third larger), and the HTML body goes next to
+/// the plain one, so a longer answer is split into several messages.
+pub const MAX_BODY_BYTES: usize = 20_000;
+/// At most this many messages for one answer; the rest stays in the session (`zen -r`).
+pub const MAX_PARTS: usize = 8;
+/// Largest event content the bridge sends, as JSON before encryption: base64 makes it 4/3 larger,
+/// and the encrypted event's envelope needs room too. A message over it goes without its HTML.
+pub const MAX_CONTENT_JSON: usize = 46_000;
 
 /// What the owner wrote in a room.
 #[derive(Debug, PartialEq)]
@@ -78,6 +84,37 @@ impl Stream {
         text
     }
 
+    /// What one session message means for the room. `live` is false when catching up after a
+    /// reconnect or a restart: prompts this bridge sent before it restarted aren't known any more,
+    /// so user messages aren't noted then, only answers posted.
+    pub fn on_message(&mut self, m: &Value, live: bool) -> Vec<Out> {
+        let mut out = vec![];
+        match m["role"].as_str() {
+            Some("user") if m["kernel"] != true => {
+                let text = text_of(&m["content"]);
+                if let Some(i) = self.sent.iter().position(|s| s.trim() == text.trim()) {
+                    self.sent.remove(i);
+                } else if live && !text.trim().is_empty() {
+                    // A prompt typed somewhere else (the terminal) in the same session.
+                    out.push(Out::Note(format!("⌨️ *from the terminal:* {}", one_line(&text, 300))));
+                }
+            }
+            Some("assistant") => {
+                let text = text_of(&m["content"]);
+                if !text.trim().is_empty() {
+                    out.push(Out::Answer(text));
+                }
+                if m["stopReason"] == "error" {
+                    if let Some(e) = m["errorMessage"].as_str() {
+                        out.push(Out::Note(format!("⚠️ {}", one_line(e, 500))));
+                    }
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+
     /// What one kernel event means for the room.
     pub fn on_event(&mut self, ev: &Value) -> Vec<Out> {
         let mut out = vec![];
@@ -86,32 +123,7 @@ impl Stream {
                 self.busy = true;
                 out.push(Out::Typing(true));
             }
-            "message" => {
-                let m = &ev["message"];
-                match m["role"].as_str() {
-                    Some("user") if m["kernel"] != true => {
-                        let text = text_of(&m["content"]);
-                        if let Some(i) = self.sent.iter().position(|s| s.trim() == text.trim()) {
-                            self.sent.remove(i);
-                        } else if !text.trim().is_empty() {
-                            // A prompt typed somewhere else (the terminal) in the same session.
-                            out.push(Out::Note(format!("⌨️ *from the terminal:* {}", one_line(&text, 300))));
-                        }
-                    }
-                    Some("assistant") => {
-                        let text = text_of(&m["content"]);
-                        if !text.trim().is_empty() {
-                            out.push(Out::Answer(cut(&text)));
-                        }
-                        if m["stopReason"] == "error" {
-                            if let Some(e) = m["errorMessage"].as_str() {
-                                out.push(Out::Note(format!("⚠️ {}", one_line(e, 500))));
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            "message" => out = self.on_message(&ev["message"], true),
             "questions" => {
                 self.questions = ev["questions"]
                     .as_array()
@@ -184,7 +196,7 @@ pub fn answers(qs: &Questions, text: &str) -> Option<String> {
 pub fn job_report(run: &Value) -> Option<String> {
     let job = run["job"].as_str().unwrap_or("job");
     match run["status"].as_str()? {
-        "ok" => Some(format!("**{job}**\n\n{}", cut(run["output"].as_str().unwrap_or("(no report)")))),
+        "ok" => Some(format!("**{job}**\n\n{}", run["output"].as_str().unwrap_or("(no report)"))),
         "error" => Some(format!("⚠️ **{job}** failed: {}", one_line(run["error"].as_str().unwrap_or("unknown error"), 1000))),
         "missed" => Some(format!("⏭️ **{job}** missed its run (the kernel was down past its grace)")),
         "interrupted" => Some(format!("⚠️ **{job}** was interrupted (the kernel restarted mid-run)")),
@@ -198,13 +210,78 @@ fn one_line(s: &str, max: usize) -> String {
     zen_proto::head(&flat, max)
 }
 
-/// `s` cut to what one Matrix message carries.
-pub fn cut(s: &str) -> String {
-    if s.chars().count() <= MAX_CHARS {
-        return s.to_string();
+/// `md` split into messages of at most `max` bytes each, at a paragraph or line break where there
+/// is one in the second half of the budget. A code fence open at a split is closed there and
+/// reopened in the next part. After `max_parts` the rest is cut, with a pointer to the session.
+pub fn split(md: &str, max: usize, max_parts: usize) -> Vec<String> {
+    const CUT: &str = "\n\n… *(cut here: the whole answer is in the session, `zen -r`)*";
+    let mut out = vec![];
+    let mut rest = md;
+    let mut reopen = String::new();
+    while !rest.is_empty() {
+        // Room for the reopened fence, a closing one and the cut note.
+        let budget = max.saturating_sub(reopen.len() + CUT.len() + 16).max(1);
+        let end = if rest.len() <= budget { rest.len() } else { break_before(rest, budget) };
+        let mut part = std::mem::take(&mut reopen);
+        part.push_str(rest[..end].trim_end_matches('\n'));
+        rest = rest[end..].trim_start_matches('\n');
+        if !rest.is_empty() {
+            if let Some(fence) = open_fence(&part) {
+                part.push('\n');
+                part.push_str(&fence.chars().take_while(|c| *c == '`' || *c == '~').collect::<String>());
+                reopen = format!("{fence}\n");
+            }
+            if out.len() + 1 == max_parts {
+                part.push_str(CUT);
+                out.push(part);
+                break;
+            }
+        }
+        out.push(part);
     }
-    let kept: String = s.chars().take(MAX_CHARS).collect();
-    format!("{kept}\n\n… *(cut here: the whole answer is in the session, `zen -r`)*")
+    out
+}
+
+/// Where to end a part of at most `budget` bytes of `s`: after the last blank line, else the last
+/// line, in the second half of the budget; else at a character boundary.
+fn break_before(s: &str, budget: usize) -> usize {
+    let mut end = budget.min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let head = &s[..end];
+    let late = |i: &usize| *i >= end / 2;
+    head.rfind("\n\n").filter(late).or_else(|| head.rfind('\n').filter(late)).unwrap_or(end)
+}
+
+/// The opening line of a code fence left open at the end of `md`, if any.
+fn open_fence(md: &str) -> Option<String> {
+    let mut open: Option<String> = None;
+    for line in md.lines() {
+        let t = line.trim_start();
+        let marker = if t.starts_with("```") { '`' } else if t.starts_with("~~~") { '~' } else { continue };
+        match &open {
+            None => open = Some(t.trim_end().to_string()),
+            Some(o) if o.starts_with(marker) && t.trim_end().chars().all(|c| c == marker) => open = None,
+            Some(_) => {}
+        }
+    }
+    open
+}
+
+/// Markdown as the HTML of a message. Raw HTML in it (from the model, a web page it quoted) is
+/// shown as text, never passed on as markup; the rest renders as matrix-sdk's own Markdown does
+/// (tables, strikethrough, a line break for each newline).
+pub fn html(md: &str) -> String {
+    use pulldown_cmark::{Event, Options, Parser};
+    let events = Parser::new_ext(md, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH).map(|e| match e {
+        Event::Html(s) | Event::InlineHtml(s) => Event::Text(s),
+        Event::SoftBreak => Event::HardBreak,
+        e => e,
+    });
+    let mut out = String::new();
+    pulldown_cmark::html::push_html(&mut out, events);
+    out
 }
 
 #[cfg(test)]
@@ -257,6 +334,18 @@ mod tests {
     }
 
     #[test]
+    fn catching_up_posts_answers_but_not_old_prompts() {
+        let mut s = Stream::default();
+        let prompt = json!({ "role": "user", "content": "from before the restart", "seq": 4 });
+        assert_eq!(s.on_message(&prompt, false), vec![], "not taken for a terminal prompt");
+        let answer = json!({ "role": "assistant", "content": [{ "type": "text", "text": "done" }], "seq": 5 });
+        assert_eq!(s.on_message(&answer, false), vec![Out::Answer("done".into())]);
+        s.prompt("again");
+        assert_eq!(s.on_message(&json!({ "role": "user", "content": "again" }), false), vec![]);
+        assert!(s.sent.is_empty(), "a prompt this bridge sent is matched either way");
+    }
+
+    #[test]
     fn prompts_from_the_terminal_and_failures_are_noted() {
         let mut s = Stream::default();
         let out = s.on_event(&json!({ "type": "message", "message": { "role": "user", "content": "check the build" } }));
@@ -295,10 +384,40 @@ mod tests {
     }
 
     #[test]
-    fn long_answers_are_cut() {
-        let long = "é".repeat(MAX_CHARS + 10);
-        let c = cut(&long);
-        assert!(c.starts_with(&"é".repeat(MAX_CHARS)) && c.contains("cut here"));
-        assert_eq!(cut("short"), "short");
+    fn long_answers_are_split_in_bytes() {
+        assert_eq!(split("short", 100, 3), vec!["short"]);
+        // Multi-byte text: every part within the budget, cut at a character boundary.
+        let long = "é".repeat(150);
+        let parts = split(&long, 200, 10);
+        assert!(parts.len() > 1 && parts.iter().all(|p| p.len() <= 200), "{parts:?}");
+        assert_eq!(parts.concat(), long);
+        // Paragraphs are kept whole where they fit.
+        let paras = format!("{}\n\n{}", "a".repeat(60), "b".repeat(60));
+        assert_eq!(split(&paras, 200, 10), vec!["a".repeat(60), "b".repeat(60)]);
+        // Past the last part the rest is cut, with a pointer to the session.
+        let parts = split(&"word ".repeat(500), 200, 3);
+        assert_eq!(parts.len(), 3);
+        assert!(parts[2].contains("cut here") && !parts[1].contains("cut here"));
+    }
+
+    #[test]
+    fn a_code_fence_split_across_parts_is_closed_and_reopened() {
+        let code = format!("Here:\n\n```rust\n{}```\n\nDone.", "let x = 1;\n".repeat(30));
+        let parts = split(&code, 200, 10);
+        assert!(parts.len() > 2);
+        for p in &parts {
+            assert_eq!(open_fence(p), None, "every part is balanced: {p}");
+        }
+        assert!(parts[1].starts_with("```rust\n"), "{}", parts[1]);
+    }
+
+    #[test]
+    fn raw_html_from_the_model_is_shown_as_text() {
+        let h = html("**hi** <img src=x onerror=alert(1)> & <b>bold</b>\n\n<script>x()</script>\n\n`a<b`");
+        assert!(h.contains("<strong>hi</strong>"), "{h}");
+        assert!(!h.contains("<img") && !h.contains("<b>") && !h.contains("<script"), "{h}");
+        assert!(h.contains("&lt;img") && h.contains("&amp;") && h.contains("&lt;script"), "{h}");
+        assert!(h.contains("<code>a&lt;b</code>"), "code shows its own text: {h}");
+        assert!(html("a\nb").contains("a<br />\nb"));
     }
 }

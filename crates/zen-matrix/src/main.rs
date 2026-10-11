@@ -1,18 +1,23 @@
 //! zen-matrix: the owner talks to zen from any Matrix client (Beeper, Element) as well as the
 //! terminal. A separate process and a client of the kernel's client protocol, like `zen`: each
 //! Matrix room is one zen session, and job reports go to a "zen jobs" room. It answers only the
-//! owner's Matrix ID (`MATRIX_OWNER`); every room it makes is end-to-end encrypted.
+//! owner's Matrix ID (`MATRIX_OWNER`), only end-to-end encrypted messages from the owner's
+//! cross-signed devices, and only in encrypted rooms it shares with the owner alone (the rules
+//! are in trust.rs).
 //!
-//!   zen-matrix login    sign in once: a device, cross-signing and key backup (prints where the
-//!                       recovery key was saved), then the rooms
-//!   zen-matrix run      the service: sync, relay, report jobs (deploy/zen-matrix.service)
-//!   zen-matrix status   what's configured, signed in and mapped
+//!   zen-matrix login         sign in once: a device, cross-signing and key backup (prints where
+//!                            the recovery key was saved), then the rooms
+//!   zen-matrix run           the service: sync, relay, report jobs (deploy/zen-matrix.service)
+//!   zen-matrix status        what's configured, signed in, pinned and mapped
+//!   zen-matrix repin-owner   forget the owner's pinned identity, after the owner reset it (with
+//!                            the service stopped)
 //!
 //! Design: docs/matrix.md, D-049.
 
 mod kernel;
 mod relay;
 mod state;
+mod trust;
 
 use anyhow::{bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -20,6 +25,7 @@ use kernel::Kernel;
 use matrix_sdk::{
     authentication::matrix::MatrixSession,
     config::SyncSettings,
+    deserialized_responses::{EncryptionInfo, VerificationLevel, VerificationState},
     encryption::{recovery::RecoveryState, EncryptionSettings},
     room::Room,
     ruma::{
@@ -29,18 +35,20 @@ use matrix_sdk::{
         },
         events::{
             room::{
+                encrypted::OriginalSyncRoomEncryptedEvent,
                 encryption::RoomEncryptionEventContent,
-                member::StrippedRoomMemberEvent,
+                member::{MembershipState, OriginalSyncRoomMemberEvent, StrippedRoomMemberEvent},
                 message::{MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent},
             },
             InitialStateEvent,
         },
         OwnedRoomId, OwnedUserId, RoomId, UserId,
     },
-    Client, RoomState,
+    Client, EncryptionState, RoomMemberships, RoomState,
 };
+use matrix_sdk_crypto::{DecryptionSettings, TrustRequirement};
 use relay::{Input, Out, Stream};
-use serde_json::{json, Value};
+use serde_json::Value;
 use state::{write_private, Config, State};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -61,12 +69,13 @@ async fn main() -> Result<()> {
         "login" => login().await,
         "run" => run().await,
         "status" => status().await,
+        "repin-owner" => repin_owner(),
         "--version" | "-V" => {
             println!("zen-matrix {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         _ => {
-            eprintln!("usage: zen-matrix login | run | status   (settings in ~/.zenbot/matrix.env; see docs/matrix.md)");
+            eprintln!("usage: zen-matrix login | run | status | repin-owner   (settings in ~/.zenbot/matrix.env; see docs/matrix.md)");
             std::process::exit(2);
         }
     }
@@ -98,7 +107,10 @@ async fn client(cfg: &Config) -> Result<Client> {
     }
     let builder = Client::builder()
         .sqlite_store(cfg.dir.join("store"), Some(&passphrase))
-        .with_encryption_settings(EncryptionSettings { auto_enable_cross_signing: false, auto_enable_backups: true, ..Default::default() });
+        .with_encryption_settings(EncryptionSettings { auto_enable_cross_signing: false, auto_enable_backups: true, ..Default::default() })
+        // Decrypt only what a cross-signed device sent: a device the owner's identity hasn't
+        // signed (a new sign-in nobody verified, or one an intruder added) can't drive zen.
+        .with_decryption_settings(DecryptionSettings { sender_device_trust_requirement: TrustRequirement::CrossSigned });
     let builder = match &cfg.homeserver {
         Some(url) => builder.homeserver_url(url),
         None => builder.server_name_or_homeserver_url(cfg.server_name()),
@@ -118,8 +130,22 @@ async fn signed_in(cfg: &Config) -> Result<Client> {
     Ok(c)
 }
 
+/// The lock `run` holds while it runs, so `login` and `repin-owner` (which share its store and
+/// state) refuse to run next to the service.
+fn run_lock(cfg: &Config) -> Result<std::fs::File> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&cfg.dir)?;
+    let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).mode(0o600).open(cfg.dir.join("run.lock"))?;
+    match f.try_lock() {
+        Ok(()) => Ok(f),
+        Err(std::fs::TryLockError::WouldBlock) => bail!("zen-matrix is running (the zen-matrix service?): stop it first"),
+        Err(std::fs::TryLockError::Error(e)) => Err(e).context("locking ~/.zenbot/matrix/run.lock"),
+    }
+}
+
 async fn login() -> Result<()> {
     let cfg = Config::load()?;
+    let _lock = run_lock(&cfg)?;
     let c = if cfg.dir.join("session.json").exists() {
         log("already signed in; checking encryption");
         signed_in(&cfg).await?
@@ -231,6 +257,24 @@ async fn status() -> Result<()> {
     println!("         cross-signing {}, key backup {:?}", if cs.is_some_and(|s| s.is_complete()) { "complete" } else { "INCOMPLETE" }, c.encryption().recovery().state());
     let s = State::load(&cfg.dir)?;
     println!("rooms    main {}, jobs {}, {} mapped", s.main_room.as_deref().unwrap_or("-"), s.jobs_room.as_deref().unwrap_or("-"), s.rooms.len());
+    println!("owner    identity {}", s.owner_key.as_deref().map(|k| format!("pinned, master key {k}")).unwrap_or_else(|| "not pinned yet (the owner's first message pins it)".into()));
+    Ok(())
+}
+
+/// Forget the owner's pinned identity: the next message the owner sends from a cross-signed
+/// device pins the identity it comes from. For when the owner reset their Matrix identity
+/// (new cross-signing keys) themselves; the service must be stopped.
+fn repin_owner() -> Result<()> {
+    let cfg = Config::load()?;
+    let _lock = run_lock(&cfg)?;
+    let mut s = State::load(&cfg.dir)?;
+    match s.owner_key.take() {
+        Some(k) => {
+            s.save(&cfg.dir)?;
+            log(format!("forgot the owner's pinned identity (master key {k}); the owner's next message pins the new one. Start the service again."));
+        }
+        None => log("no identity is pinned: the owner's next message pins one"),
+    }
     Ok(())
 }
 
@@ -240,17 +284,24 @@ enum Cmd {
     Abort,
 }
 
+type Link = mpsc::UnboundedSender<Cmd>;
+
 struct Bridge {
     cfg: Config,
     client: Client,
     kernel: Kernel,
     owner: OwnedUserId,
+    bot: OwnedUserId,
     state: Arc<Mutex<State>>,
-    links: Mutex<HashMap<OwnedRoomId, mpsc::UnboundedSender<Cmd>>>,
+    links: Mutex<HashMap<OwnedRoomId, Link>>,
+    /// Held while a room gets its session, so two first messages don't make two sessions (the
+    /// state and links locks are never held across a kernel call).
+    making: Mutex<()>,
 }
 
 async fn run() -> Result<()> {
     let cfg = Config::load()?;
+    let _lock = run_lock(&cfg)?;
     let c = signed_in(&cfg).await?;
     // The first sync catches up without handlers: messages from before the bridge started are
     // not taken as prompts.
@@ -260,11 +311,20 @@ async fn run() -> Result<()> {
     let bridge = Arc::new(Bridge {
         kernel: Kernel::new(&cfg.kernel_url, cfg.kernel_token.clone())?,
         owner: UserId::parse(&cfg.owner)?,
+        bot: c.user_id().context("no user id after signing in")?.to_owned(),
         cfg,
         client: c.clone(),
         state: st,
         links: Mutex::new(HashMap::new()),
+        making: Mutex::new(()),
     });
+    // The rooms it is in: leave any that break the rules (from before them, or changed while
+    // the bridge was down), and link the mapped ones to their sessions now, so answers that
+    // came while the bridge was down are posted.
+    for room in c.joined_rooms() {
+        let b = bridge.clone();
+        tokio::spawn(async move { b.on_start(room).await });
+    }
     // Invites the owner sent while the bridge was down.
     for room in c.invited_rooms() {
         let b = bridge.clone();
@@ -281,12 +341,40 @@ async fn run() -> Result<()> {
         }
     });
     let b = bridge.clone();
-    c.add_event_handler(move |ev: OriginalSyncRoomMessageEvent, room: Room| {
+    c.add_event_handler(move |ev: OriginalSyncRoomMemberEvent, room: Room| {
         let b = b.clone();
         async move {
-            if let Err(e) = b.clone().on_message(ev, room.clone()).await {
+            // Someone joins or is invited: anyone but the owner and the bot, and the bot leaves.
+            let active = matches!(ev.content.membership, MembershipState::Join | MembershipState::Invite);
+            if active && room.state() == RoomState::Joined {
+                let check = trust::check_room(b.owner.as_str(), b.bot.as_str(), true, [ev.state_key.as_str()]);
+                if check != RoomCheck::Ok {
+                    b.leave(&room, &check).await;
+                }
+            }
+        }
+    });
+    let b = bridge.clone();
+    c.add_event_handler(move |ev: OriginalSyncRoomMessageEvent, room: Room, enc: Option<EncryptionInfo>| {
+        let b = b.clone();
+        async move {
+            if let Err(e) = b.clone().on_message(ev, room.clone(), enc).await {
                 log(format!("message in {}: {e:#}", room.room_id()));
                 b.note(&room, &format!("⚠️ {e}")).await;
+            }
+        }
+    });
+    let b = bridge.clone();
+    c.add_event_handler(move |ev: OriginalSyncRoomEncryptedEvent, room: Room| {
+        let b = b.clone();
+        async move {
+            // Still encrypted after the sync: matrix-sdk couldn't, or wouldn't, decrypt it.
+            if ev.sender == b.owner {
+                log(format!(
+                    "a message from the owner's account in {} wasn't decrypted: it came from a device the owner's identity hasn't signed \
+                     (verify that session in your client), or its key hasn't arrived",
+                    room.room_id()
+                ));
             }
         }
     });
@@ -294,17 +382,98 @@ async fn run() -> Result<()> {
     let b = bridge.clone();
     tokio::spawn(async move { b.report_jobs().await });
 
-    log(format!("zen-matrix running as {} for {}", bridge.cfg.user, bridge.owner));
+    log(format!("zen-matrix running as {} for {}", bridge.bot, bridge.owner));
     c.sync(SyncSettings::default().token(first.next_batch)).await?;
     Ok(())
 }
 
+use trust::{RoomCheck, Sealed, Verdict};
+
+/// How a decrypted event reached the bot, from what matrix-sdk says about it.
+fn sealed(sender: &UserId, enc: Option<&EncryptionInfo>) -> Sealed {
+    let Some(info) = enc else { return Sealed::Plain };
+    if info.sender != sender {
+        return Sealed::Untrusted("the event's sender isn't the device's owner".into());
+    }
+    match &info.verification_state {
+        // Verified (the bot verified the owner), or signed by the owner's identity, which the
+        // bridge pins itself (trust::identity).
+        VerificationState::Verified | VerificationState::Unverified(VerificationLevel::UnverifiedIdentity) => Sealed::CrossSigned,
+        VerificationState::Unverified(level) => Sealed::Untrusted(level.to_string()),
+    }
+}
+
+/// A session id, short (ids are checked when read: kernel::valid_id).
+fn short(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+/// A message's content: the Markdown as the plain body, its HTML as the formatted one, or the
+/// plain body alone when both together would be too large for one event.
+fn content(md: &str, notice: bool) -> RoomMessageEventContent {
+    let html = relay::html(md);
+    let c = if notice { RoomMessageEventContent::notice_html(md, html) } else { RoomMessageEventContent::text_html(md, html) };
+    if serde_json::to_vec(&c).is_ok_and(|j| j.len() <= relay::MAX_CONTENT_JSON) {
+        return c;
+    }
+    if notice {
+        RoomMessageEventContent::notice_plain(md)
+    } else {
+        RoomMessageEventContent::text_plain(md)
+    }
+}
+
 impl Bridge {
-    /// Join rooms the owner invites the bot to (each becomes a session); turn down anyone else.
+    /// Whether a room is one the bot may act and post in (trust::check_room).
+    async fn room_check(&self, room: &Room) -> Result<RoomCheck> {
+        let encryption = match room.encryption_state() {
+            EncryptionState::Unknown => room.latest_encryption_state().await?,
+            known => known,
+        };
+        let members = room.members(RoomMemberships::ACTIVE).await?;
+        Ok(trust::check_room(self.owner.as_str(), self.bot.as_str(), encryption.is_encrypted(), members.iter().map(|m| m.user_id().as_str())))
+    }
+
+    /// Leave a room that broke the rules, loudly.
+    async fn leave(&self, room: &Room, why: &RoomCheck) {
+        let reason = match why {
+            RoomCheck::Stranger(m) => format!("{m} is in it"),
+            RoomCheck::NotEncrypted => "it isn't encrypted".into(),
+            RoomCheck::Ok => "".into(),
+        };
+        log(format!("LEAVING room {}: {reason}. The bot stays only in encrypted rooms with the owner alone.", room.room_id()));
+        self.links.lock().await.remove(room.room_id());
+        if let Err(e) = room.leave().await {
+            log(format!("leaving {}: {e}", room.room_id()));
+        }
+    }
+
+    /// A room the bot is in when the bridge starts.
+    async fn on_start(self: Arc<Self>, room: Room) {
+        match self.room_check(&room).await {
+            Ok(RoomCheck::Ok) => {
+                let mapped = self.state.lock().await.rooms.contains_key(room.room_id().as_str());
+                if mapped {
+                    if let Err(e) = self.link(&room).await {
+                        log(format!("linking {}: {e:#}", room.room_id()));
+                    }
+                }
+            }
+            Ok(bad) => self.leave(&room, &bad).await,
+            Err(e) => log(format!("checking {}: {e}", room.room_id())),
+        }
+    }
+
+    /// Join rooms the owner invites the bot to (each becomes a session) if they are encrypted
+    /// and hold only the owner; turn down anything else (trust::invite).
     async fn on_invite(self: Arc<Self>, room: Room) {
         let inviter = room.invite_details().await.ok().and_then(|d| d.inviter).map(|m| m.user_id().to_owned());
-        if inviter.as_deref() != Some(&*self.owner) {
-            log(format!("declining an invite to {} from {:?}", room.room_id(), inviter));
+        let encrypted = match room.encryption_state() {
+            EncryptionState::Unknown => None,
+            known => Some(known.is_encrypted()),
+        };
+        if let trust::Invite::Decline(why) = trust::invite(self.owner.as_str(), inviter.as_deref().map(|u| u.as_str()), encrypted) {
+            log(format!("declining an invite to {}: {why}", room.room_id()));
             room.leave().await.ok();
             return;
         }
@@ -312,15 +481,33 @@ impl Bridge {
         for delay in [0, 2, 4, 8, 16] {
             tokio::time::sleep(Duration::from_secs(delay)).await;
             if room.join().await.is_ok() {
-                log(format!("joined {} at the owner's invite", room.room_id()));
+                // Now the whole room is visible: check it again.
+                match self.room_check(&room).await {
+                    Ok(RoomCheck::Ok) => log(format!("joined {} at the owner's invite", room.room_id())),
+                    Ok(bad) => self.leave(&room, &bad).await,
+                    Err(e) => log(format!("joined {}, but couldn't check it: {e}", room.room_id())),
+                }
                 return;
             }
         }
         log(format!("could not join {}", room.room_id()));
     }
 
-    async fn on_message(self: Arc<Self>, ev: OriginalSyncRoomMessageEvent, room: Room) -> Result<()> {
-        if ev.sender != self.owner || room.state() != RoomState::Joined {
+    async fn on_message(self: Arc<Self>, ev: OriginalSyncRoomMessageEvent, room: Room, enc: Option<EncryptionInfo>) -> Result<()> {
+        if room.state() != RoomState::Joined || ev.sender != self.owner {
+            return Ok(()); // the bot's own messages and anyone else's: nothing to check
+        }
+        let check = self.room_check(&room).await?;
+        match trust::message(self.owner.as_str(), self.bot.as_str(), ev.sender.as_str(), &sealed(&ev.sender, enc.as_ref()), &check) {
+            Verdict::Act => {}
+            Verdict::Ignore => return Ok(()),
+            Verdict::Refuse(why) => {
+                log(format!("REFUSED a message from the owner's account in {}: {why}", room.room_id()));
+                self.note(&room, &format!("⚠️ zen ignored that message: {why}.")).await;
+                return Ok(());
+            }
+        }
+        if !self.owner_identity_holds(&room).await? {
             return Ok(());
         }
         if matches!(ev.content.relates_to, Some(Relation::Replacement(_))) {
@@ -334,18 +521,21 @@ impl Bridge {
             Input::New(title) => {
                 let name = title.clone().unwrap_or_else(|| "zen".into());
                 let session = self.kernel.new_session(title.as_deref()).await?;
+                if !kernel::valid_id(&session) {
+                    bail!("the kernel returned a bad session id");
+                }
                 let new = create_room(&self.client, &self.owner, &name, "A zen session. !help for commands.", false).await?;
                 let mut s = self.state.lock().await;
                 s.rooms.insert(new.room_id().to_string(), session.clone());
                 s.save(&self.cfg.dir)?;
                 drop(s);
-                self.note(&room, &format!("New session `{}` in the room **{name}**: accept the invite.", &session[..8.min(session.len())])).await;
+                self.note(&room, &format!("New session `{}` in the room **{name}**: accept the invite.", short(&session))).await;
             }
             _ if is_jobs => self.note(&room, "This room only carries job reports; write to zen in the **zen** room.").await,
             Input::Which => {
                 let s = self.state.lock().await.rooms.get(rid.as_str()).cloned();
                 let msg = match s {
-                    Some(id) => format!("Session `{id}`: in the terminal, `zen -r {}`.", &id[..8.min(id.len())]),
+                    Some(id) => format!("Session `{id}`: in the terminal, `zen -r {}`.", short(&id)),
                     None => "No session yet: the first message starts one.".into(),
                 };
                 self.note(&room, &msg).await;
@@ -366,20 +556,52 @@ impl Bridge {
         Ok(())
     }
 
+    /// The owner's cross-signing identity is the pinned one (pinned now if none is): a changed
+    /// identity is refused until the owner resets the pin (`zen-matrix repin-owner`).
+    async fn owner_identity_holds(&self, room: &Room) -> Result<bool> {
+        let identity = self.client.encryption().get_user_identity(&self.owner).await?;
+        let now = identity.and_then(|i| i.master_key().get_first_key()).map(|k| k.to_base64());
+        let mut s = self.state.lock().await;
+        match trust::identity(s.owner_key.as_deref(), now.as_deref()) {
+            trust::Identity::Same => Ok(true),
+            trust::Identity::Pin(key) => {
+                log(format!("pinned the owner's identity: master key {key}"));
+                s.owner_key = Some(key);
+                s.save(&self.cfg.dir)?;
+                Ok(true)
+            }
+            trust::Identity::Changed { pinned, now } => {
+                drop(s);
+                log(format!(
+                    "REFUSED the owner's message in {}: the owner's Matrix identity CHANGED (pinned master key {pinned}, now {now}). \
+                     If the owner reset it themselves: stop the service, run `zen-matrix repin-owner`, start it. Otherwise the account may be taken over.",
+                    room.room_id()
+                ));
+                self.note(room, "⚠️ zen ignored that message: this account's encryption identity changed. If you reset it yourself, re-pin it on the machine (docs/matrix.md).").await;
+                Ok(false)
+            }
+            trust::Identity::Missing => {
+                drop(s);
+                log(format!("REFUSED the owner's message in {}: the owner's cross-signing identity isn't known", room.room_id()));
+                Ok(false)
+            }
+        }
+    }
+
     /// The room's link to its session, made on first use (a room the owner made gets a session).
-    async fn link(self: &Arc<Self>, room: &Room) -> Result<mpsc::UnboundedSender<Cmd>> {
+    async fn link(self: &Arc<Self>, room: &Room) -> Result<Link> {
         let rid = room.room_id().to_owned();
-        let mut links = self.links.lock().await;
-        if let Some(tx) = links.get(&rid).filter(|tx| !tx.is_closed()) {
+        if let Some(tx) = self.links.lock().await.get(&rid).filter(|tx| !tx.is_closed()) {
             return Ok(tx.clone());
         }
         let session = {
-            let mut s = self.state.lock().await;
-            match s.rooms.get(rid.as_str()) {
-                Some(id) => id.clone(),
+            let _making = self.making.lock().await;
+            let known = self.state.lock().await.rooms.get(rid.as_str()).cloned();
+            match known {
+                Some(id) => id,
                 None => {
-                    let title = room.name();
-                    let id = self.kernel.new_session(title.as_deref()).await?;
+                    let id = self.kernel.new_session(room.name().as_deref()).await?;
+                    let mut s = self.state.lock().await;
                     s.rooms.insert(rid.to_string(), id.clone());
                     s.save(&self.cfg.dir)?;
                     id
@@ -387,16 +609,49 @@ impl Bridge {
             }
         };
         if !kernel::valid_id(&session) {
-            bail!("bad session id in state.json for this room");
+            bail!("bad session id for this room");
+        }
+        let mut links = self.links.lock().await;
+        if let Some(tx) = links.get(&rid).filter(|tx| !tx.is_closed()) {
+            return Ok(tx.clone()); // another message linked it meanwhile
         }
         let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn(link_task(self.kernel.clone(), room.clone(), session, rx));
+        tokio::spawn(self.clone().link_task(room.clone(), session, rx));
         links.insert(rid, tx.clone());
         Ok(tx)
     }
 
     async fn note(&self, room: &Room, md: &str) {
-        post(room, Out::Note(md.to_string())).await;
+        self.post(room, Out::Note(md.to_string())).await;
+    }
+
+    /// Post one thing in a room, if the room still holds only the owner and is encrypted (else
+    /// leave it). A long message goes in parts; when one can't be sent, a short notice says so
+    /// (and if that fails too, the log).
+    async fn post(&self, room: &Room, out: Out) {
+        let (md, notice) = match out {
+            Out::Typing(on) => {
+                room.typing_notice(on).await.ok();
+                return;
+            }
+            Out::Answer(md) => (md, false),
+            Out::Note(md) => (md, true),
+        };
+        match self.room_check(room).await {
+            Ok(RoomCheck::Ok) => {}
+            Ok(bad) => return self.leave(room, &bad).await,
+            Err(e) => return log(format!("not posting to {}: couldn't check the room: {e}", room.room_id())),
+        }
+        for part in relay::split(&md, relay::MAX_BODY_BYTES, relay::MAX_PARTS) {
+            if let Err(e) = room.send(content(&part, notice)).await {
+                log(format!("posting to {}: {e}", room.room_id()));
+                let warn = "⚠️ a message from zen couldn't be posted here; it is in the session (`!session`, then `zen -r` in the terminal).";
+                if let Err(e) = room.send(content(warn, true)).await {
+                    log(format!("posting the failure notice to {}: {e}", room.room_id()));
+                }
+                return;
+            }
+        }
     }
 
     async fn report_jobs(self: Arc<Self>) {
@@ -414,7 +669,7 @@ impl Bridge {
                     let room = room.and_then(|r| RoomId::parse(r).ok()).and_then(|r| self.client.get_room(&r));
                     for r in reports {
                         match &room {
-                            Some(room) => post(room, Out::Answer(r)).await,
+                            Some(room) => self.post(room, Out::Answer(r)).await,
                             None => log("a job report, but no jobs room"),
                         }
                     }
@@ -424,73 +679,117 @@ impl Bridge {
             tokio::time::sleep(JOBS_EVERY).await;
         }
     }
-}
 
-/// Post one thing in a room; a failure is logged (the owner can't be told in the same room).
-async fn post(room: &Room, out: Out) {
-    let res = match out {
-        Out::Answer(md) => room.send(RoomMessageEventContent::text_markdown(md)).await.map(|_| ()),
-        Out::Note(md) => room.send(RoomMessageEventContent::notice_markdown(md)).await.map(|_| ()),
-        Out::Typing(on) => room.typing_notice(on).await,
-    };
-    if let Err(e) = res {
-        log(format!("posting to {}: {e}", room.room_id()));
-    }
-}
-
-/// One room's link to its session: prompts in, the session's events out to the room. Reconnects
-/// when the kernel restarts; ends when the bridge drops the room's sender.
-async fn link_task(kernel: Kernel, room: Room, session: String, mut rx: mpsc::UnboundedReceiver<Cmd>) {
-    let mut stream = Stream::default();
-    let mut down_noted = false;
-    loop {
-        let ws = match kernel.connect(&session).await {
-            Ok(ws) => ws,
-            Err(e) => {
-                log(format!("session {session}: {e:#}"));
-                if !down_noted {
-                    post(&room, Out::Note("⚠️ zen isn't reachable right now; retrying.".into())).await;
-                    down_noted = true;
-                }
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
+    /// Post the session's messages the room hasn't had yet (after its `seen` seq) and move
+    /// `seen` on. A room seen for the first time starts at the session's latest message. Every
+    /// message the room gets comes through here, so a reconnect, a resync or a restart loses none
+    /// and posts none twice. `live` as in Stream::on_message.
+    async fn catch_up(&self, room: &Room, session: &str, stream: &mut Stream, live: bool) {
+        let rid = room.room_id().as_str();
+        let seen = self.state.lock().await.seen.get(rid).copied();
+        let Some(seen) = seen else {
+            match self.kernel.last_seq(session).await {
+                Ok(seq) => self.mark_seen(rid, seq).await,
+                Err(e) => log(format!("session {session}: {e:#}")),
             }
+            return;
         };
-        down_noted = false;
-        let (mut sink, mut src) = ws.split();
-        // The kernel's typing notice lasts a few seconds: renew it while zen works.
-        let mut typing = tokio::time::interval(Duration::from_secs(3));
-        loop {
-            tokio::select! {
-                cmd = rx.recv() => {
-                    let Some(cmd) = cmd else { return };
-                    let msg = match cmd {
-                        Cmd::Prompt(text) => json!({ "type": "prompt", "text": stream.prompt(&text) }),
-                        Cmd::Abort => json!({ "type": "abort" }),
-                    };
-                    if sink.send(Message::text(msg.to_string())).await.is_err() {
-                        post(&room, Out::Note("⚠️ lost the connection to zen before that was sent; send it again.".into())).await;
-                        break;
-                    }
-                }
-                msg = src.next() => {
-                    let text = match msg {
-                        Some(Ok(Message::Text(t))) => t,
-                        Some(Ok(_)) => continue,
-                        _ => break,
-                    };
-                    let Ok(ev) = serde_json::from_str::<Value>(&text) else { continue };
-                    for out in stream.on_event(&ev) {
-                        post(&room, out).await;
-                    }
-                }
-                _ = typing.tick(), if stream.busy => { room.typing_notice(true).await.ok(); }
+        let (messages, busy) = match self.kernel.messages_after(session, seen).await {
+            Ok(m) => m,
+            Err(e) => return log(format!("session {session}: catching up: {e:#}")),
+        };
+        for m in messages {
+            let Some(seq) = m["seq"].as_i64().filter(|s| *s > seen) else { continue };
+            for out in stream.on_message(&m, live) {
+                self.post(room, out).await;
             }
+            self.mark_seen(rid, seq).await;
         }
-        if stream.busy {
-            stream.busy = false;
-            room.typing_notice(false).await.ok();
+        if !live && busy != stream.busy {
+            stream.busy = busy;
+            self.post(room, Out::Typing(busy)).await;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
+    async fn mark_seen(&self, room: &str, seq: i64) {
+        let mut s = self.state.lock().await;
+        s.seen.insert(room.to_string(), seq);
+        if let Err(e) = s.save(&self.cfg.dir) {
+            log(format!("saving state: {e:#}"));
+        }
+    }
+
+    /// One room's link to its session: prompts in, the session's events out to the room.
+    /// Reconnects when the kernel restarts; ends when the bridge drops the room's sender.
+    async fn link_task(self: Arc<Self>, room: Room, session: String, mut rx: mpsc::UnboundedReceiver<Cmd>) {
+        let mut stream = Stream::default();
+        let mut down_noted = false;
+        // The first connection follows a bridge start: prompts sent before it aren't known.
+        let mut live = false;
+        loop {
+            let ws = match self.kernel.connect(&session).await {
+                Ok(ws) => ws,
+                Err(e) => {
+                    log(format!("session {session}: {e:#}"));
+                    if !down_noted {
+                        self.note(&room, "⚠️ zen isn't reachable right now; retrying.").await;
+                        down_noted = true;
+                    }
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
+            down_noted = false;
+            // What the session got while this link was down; later messages arrive on the stream.
+            self.catch_up(&room, &session, &mut stream, live).await;
+            live = true;
+            let (mut sink, mut src) = ws.split();
+            // The kernel's typing notice lasts a few seconds: renew it while zen works.
+            let mut typing = tokio::time::interval(Duration::from_secs(3));
+            loop {
+                tokio::select! {
+                    cmd = rx.recv() => {
+                        let Some(cmd) = cmd else { return };
+                        let msg = match cmd {
+                            Cmd::Prompt(text) => serde_json::json!({ "type": "prompt", "text": stream.prompt(&text) }),
+                            Cmd::Abort => serde_json::json!({ "type": "abort" }),
+                        };
+                        if sink.send(Message::text(msg.to_string())).await.is_err() {
+                            self.note(&room, "⚠️ lost the connection to zen before that was sent; send it again.").await;
+                            break;
+                        }
+                    }
+                    msg = src.next() => {
+                        let text = match msg {
+                            Some(Ok(Message::Text(t))) => t,
+                            Some(Ok(_)) => continue,
+                            _ => break,
+                        };
+                        let Ok(ev) = serde_json::from_str::<Value>(&text) else { continue };
+                        match ev["type"].as_str() {
+                            // A message event carries no seq: it's the cue to fetch what's new.
+                            Some("message") => self.catch_up(&room, &session, &mut stream, true).await,
+                            Some("resync") => {
+                                for out in stream.on_event(&ev) {
+                                    self.post(&room, out).await;
+                                }
+                                self.catch_up(&room, &session, &mut stream, true).await;
+                            }
+                            _ => {
+                                for out in stream.on_event(&ev) {
+                                    self.post(&room, out).await;
+                                }
+                            }
+                        }
+                    }
+                    _ = typing.tick(), if stream.busy => { room.typing_notice(true).await.ok(); }
+                }
+            }
+            if stream.busy {
+                stream.busy = false;
+                room.typing_notice(false).await.ok();
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
     }
 }

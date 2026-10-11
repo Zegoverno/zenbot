@@ -4,7 +4,10 @@
 # bridge, and a scripted owner client (crates/zen-matrix/examples/owner.rs) talking to it through
 # end-to-end encryption. Checks: the bot signs in with cross-signing and backup, invites the owner
 # to two encrypted rooms, answers !help, relays a prompt and its answer, turns `ask` into numbered
-# options and numbers back into answers, declines a stranger's invite, and posts a job's report.
+# options and numbers back into answers, refuses a plaintext message and one from the owner's
+# unverified session, posts an answer from while it was down after a restart, declines a
+# stranger's invite and an unencrypted room, leaves a room a stranger is invited to, refuses an
+# owner that is the bot itself, and posts a job's report.
 #
 #   scripts/matrix-e2e.sh        (builds crates/zen-matrix and the kernel first)
 set -euo pipefail
@@ -90,11 +93,14 @@ MATRIX_OWNER=@owner:localhost
 MATRIX_HOMESERVER=$HS
 EOF
 export ZEN_HOME="$TMP/bridge" ZEN_URL="$K" ZEN_TOKEN="$TOKEN"
+MATRIX_OWNER=@zenbot:localhost "$ZM/zen-matrix" status >"$TMP/self.log" 2>&1 && fail "an owner that is the bot was accepted"
+grep -q "MATRIX_OWNER is the bot's own account" "$TMP/self.log" || fail "no clear error for an owner that is the bot: $(cat "$TMP/self.log")"
 "$ZM/zen-matrix" login >"$TMP/bridge.log" 2>&1 || fail "zen-matrix login"
 grep -q "cross-signing and key backup are set up" "$TMP/bridge.log" || fail "no cross-signing/backup"
 [ "$(stat -c %a "$TMP/bridge/matrix")" = 700 ] && [ "$(stat -c %a "$TMP/bridge/matrix/session.json")" = 600 ] || fail "state files aren't private"
 "$ZM/zen-matrix" run >>"$TMP/bridge.log" 2>&1 &
-PIDS+=($!)
+BRIDGE=$!
+PIDS+=($BRIDGE)
 sleep 5
 
 echo "== a stranger's invite is declined"
@@ -105,7 +111,17 @@ echo "== the owner talks to zen"
 "$ZM/examples/owner" "$HS" owner pw-owner-1 "$TMP/owner" matrix-e2e >"$TMP/owner.log" 2>&1 &
 OWNER=$!
 PIDS+=($OWNER)
-for _ in $(seq 120); do grep -q "questions answered" "$TMP/owner.log" && break; kill -0 $OWNER 2>/dev/null || break; sleep 1; done
+for _ in $(seq 240); do grep -q "ready for the restart" "$TMP/owner.log" && break; kill -0 $OWNER 2>/dev/null || break; sleep 1; done
+grep -q "ready for the restart" "$TMP/owner.log" || { cat "$TMP/owner.log"; fail "the owner's conversation"; }
+grep -q "wasn't decrypted" "$TMP/bridge.log" || fail "the unverified session's message wasn't logged as undecrypted"
+
+echo "== an answer from while the bridge was down"
+kill "$BRIDGE"; wait "$BRIDGE" 2>/dev/null || true
+SID=$(jq -r '.rooms[.main_room]' "$TMP/bridge/matrix/state.json")
+"$REPO/target/release/zen" ask --quiet --session "$SID" "hello from the terminal" >/dev/null || fail "zen ask in the room's session"
+"$ZM/zen-matrix" run >>"$TMP/bridge.log" 2>&1 &
+PIDS+=($!)
+for _ in $(seq 240); do grep -q "rooms checked" "$TMP/owner.log" && break; kill -0 $OWNER 2>/dev/null || break; sleep 1; done
 # A job run now; the bridge reports it within a minute.
 curl -fs -XPOST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' "$K/api/jobs" \
   -d '{"name":"matrix-e2e","prompt":"hello from a job","schedule":"every 24h","model":"faux/smoke"}' >/dev/null

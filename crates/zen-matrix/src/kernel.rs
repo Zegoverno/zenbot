@@ -46,6 +46,19 @@ impl Kernel {
         Ok(v.as_array().cloned().or_else(|| v["runs"].as_array().cloned()).unwrap_or_default())
     }
 
+    /// The session's messages after `seq` (each with its `seq`), oldest first, and whether a turn
+    /// is running (GET /api/sessions/{id}?after=).
+    pub async fn messages_after(&self, id: &str, seq: i64) -> Result<(Vec<Value>, bool)> {
+        let v = self.call(reqwest::Method::GET, &format!("/api/sessions/{id}?after={seq}"), None).await?;
+        Ok((v["messages"].as_array().cloned().unwrap_or_default(), v["busy"] == true))
+    }
+
+    /// The `seq` of the session's latest message (0 when it has none).
+    pub async fn last_seq(&self, id: &str) -> Result<i64> {
+        let v = self.call(reqwest::Method::GET, &format!("/api/sessions/{id}?last=1"), None).await?;
+        Ok(v["messages"].as_array().and_then(|m| m.last()).and_then(|m| m["seq"].as_i64()).unwrap_or(0))
+    }
+
     /// The session's event stream.
     pub async fn connect(&self, id: &str) -> Result<Ws> {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;

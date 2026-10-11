@@ -16,7 +16,7 @@ Every request, the WebSocket upgrade included, carries the owner's token in
 | `GET /api/sessions?archived=` | | the owner's and job sessions (no subagents or verifiers): `{ id, title, model, effort, archived, kind, parent, cost, created_at, updated_at }`; `kind` is null for the owner's, `job` for a scheduled job's |
 | `GET /api/board` | | `{ sessions }`: every session, archived and child ones too (`kind` `subagent`, `verifier`, `job`; `parent`), each with `busy`, `waiting` (its latest `ask` questions came after the owner's latest message) and, for a child, `task` (its first prompt, 200 characters); no `cost`. `zen`'s home screen polls it |
 | `POST /api/sessions` | `{ title?, model?, effort? }` | the session |
-| `GET /api/sessions/{id}?last=&after=` | | the session with `messages` (each with its `seq`; all of them, or the `last` N, or those after block `after`) and `busy` |
+| `GET /api/sessions/{id}?last=&after=` | | the session with `messages` (each with its `seq`; all of them, or the `last` N, or those with a `seq` after `after`) and `busy` |
 | `PATCH /api/sessions/{id}` | `{ title?, model?, effort? ("default" clears), archived? }` | the session. A title set here is the owner's: the kernel no longer renames the session |
 | `POST /api/sessions/{id}/decision` | `{ decision: accept\|more\|reshape\|drop, note? }` | the recorded verdict `{ id, session_id, turn_id, decision, note, created_at }` |
 | `GET /api/suggestions` | | suggested next prompts: outcomes by prompt version and model, and the latest 20 |
@@ -49,7 +49,7 @@ The kernel sends events, in order:
 
 | Event | Fields | Meaning |
 |---|---|---|
-| `message` | `message` | a message added to the session (Pi's format, with `seq`). A user message with `kernel: true` is the kernel talking to the model (the prompt of a verifier, subagent, job or sleep session), not the owner |
+| `message` | `message` | a message added to the session (Pi's format; the event carries no `seq`: `GET /api/sessions/{id}?after=` returns messages with theirs, which is how `zen-matrix` catches up). A user message with `kernel: true` is the kernel talking to the model (the prompt of a verifier, subagent, job or sleep session), not the owner |
 | `busy` | `busy: true, turn_id, harness, model, effort` | a turn started (also turns the kernel started itself) |
 | `delta`, `thinking` | `delta` | streamed answer text / reasoning |
 | `tool_start` | `call_id, name, args` | a tool call began |
