@@ -25,13 +25,13 @@ pub struct Envelope {
 /// (ZEN_SOUL_CHARS), IDENTITY.md 4000 (ZEN_IDENTITY_CHARS), AGENTS.md 12000 (ZEN_AGENTS_CHARS), USER.md 3000 (ZEN_USER_CHARS). Sizes from
 /// Hermes and OpenClaw (DESIGN.md, Target design).
 pub(crate) fn file_cap(path: &str) -> usize {
-    let (key, default) = match path.rsplit('/').next().unwrap_or(path) {
-        "SOUL.md" => ("ZEN_SOUL_CHARS", 4000.0),
-        "IDENTITY.md" => ("ZEN_IDENTITY_CHARS", 4000.0),
-        "AGENTS.md" => ("ZEN_AGENTS_CHARS", 12000.0),
-        _ => ("ZEN_USER_CHARS", 3000.0),
-    };
-    crate::env_num(key, default) as usize
+    let c = crate::config::get();
+    match path.rsplit('/').next().unwrap_or(path) {
+        "SOUL.md" => c.soul_chars,
+        "IDENTITY.md" => c.identity_chars,
+        "AGENTS.md" => c.agents_chars,
+        _ => c.user_chars,
+    }
 }
 
 /// Text over `cap` characters, cut as OpenClaw does: the first 70% and the last 20% kept, with a

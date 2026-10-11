@@ -58,13 +58,10 @@ pub async fn previous(db: &PgPool, session: Uuid) -> Result<Option<Previous>, sq
     }))
 }
 
-/// How long an engine's prompt cache lives: Claude Code asks for one hour, others five minutes.
+/// How long the prompt cache of `model`'s engine lives (`ZEN_CACHE_TTL`: Claude Code asks for one
+/// hour, others get five minutes).
 pub fn cache_ttl_secs(model: &str) -> i64 {
-    if model.starts_with("claude/") {
-        3600
-    } else {
-        300
-    }
+    crate::config::get().cache_ttl_secs(model)
 }
 
 /// The record of what a turn sends.

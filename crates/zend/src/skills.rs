@@ -14,8 +14,6 @@ use serde_json::{json, Value};
 
 /// Largest SKILL.md body (or reference file) a load returns; the rest is cut with a note.
 const MAX_LOAD: usize = 48 * 1024;
-/// Above this size the index lists domains only, not every skill.
-const DEFAULT_INDEX_CHARS: usize = 2500;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Skill {
@@ -143,10 +141,14 @@ pub fn scan(root: &Path) -> Vec<Skill> {
 /// in `ZEN_SKILL_INDEX_CHARS` (default 2500), else the domains with their skill counts. Empty
 /// when there are no skills.
 pub fn index_text(skills: &[Skill]) -> String {
+    index_within(skills, crate::config::get().skill_index_chars)
+}
+
+/// The skills index in at most `limit` characters (domains only above it).
+fn index_within(skills: &[Skill], limit: usize) -> String {
     if skills.is_empty() {
         return String::new();
     }
-    let limit = crate::env_num("ZEN_SKILL_INDEX_CHARS", DEFAULT_INDEX_CHARS as f64) as usize;
     let full: String = skills.iter().map(|s| format!("- {}/{}: {}\n", s.domain, s.name, s.description)).collect();
     if full.len() <= limit {
         return full;
@@ -400,9 +402,7 @@ mod tests {
     fn index_lists_skills_or_only_domains_when_long() {
         let all = scan(&tree());
         assert!(index_text(&all).contains("- work/verify: Check that work is done"));
-        std::env::set_var("ZEN_SKILL_INDEX_CHARS", "50");
-        let short = index_text(&all);
-        std::env::remove_var("ZEN_SKILL_INDEX_CHARS");
+        let short = index_within(&all, 50);
         assert_eq!(short, "- build: 1 skill(s)\n- work: 2 skill(s)\n");
         assert_eq!(index_text(&[]), "");
     }

@@ -558,7 +558,7 @@ pub(crate) async fn review_tool(State(app): State<AppState>, Path(name): Path<St
 pub(crate) async fn get_policy(State(app): State<AppState>) -> ApiResult<Json<Value>> {
     let (version, data) = delegate::policy(&app.db).await;
     let stats = delegate::stats(&app.db).await?;
-    let suggestions: Vec<Value> = delegate::suggest(&data, &stats, crate::env_num("ZEN_POLICY_MIN_JUDGED", 20.0) as u64)
+    let suggestions: Vec<Value> = delegate::suggest(&data, &stats, crate::config::get().policy_min_judged)
         .into_iter()
         .map(|(k, m, why)| json!({ "kind": k, "model": m, "why": why }))
         .collect();

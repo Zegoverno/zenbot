@@ -25,14 +25,14 @@ use crate::{tools, App};
 const BODY_MAX: usize = 6000;
 
 fn embed_model() -> String {
-    std::env::var("ZEN_EMBED_MODEL").ok().filter(|m| !m.trim().is_empty()).unwrap_or_else(|| "openai/text-embedding-3-small".into())
+    crate::config::get().embed_model.clone()
 }
 
 /// The key for embeddings, when they may be made: sessions and memories are private content, so
 /// they go to the embedding provider only where System One may see private content (D-032,
 /// ZEN_S1_PRIVATE), and not with ZEN_EMBED=0.
 fn embed_key() -> Option<String> {
-    if std::env::var("ZEN_EMBED").is_ok_and(|v| v.trim() == "0") || !crate::score::private_ok() {
+    if !crate::config::get().embed || !crate::score::private_ok() {
         return None;
     }
     std::env::var("OPENROUTER_API_KEY").ok().filter(|k| !k.trim().is_empty())
@@ -69,7 +69,7 @@ impl Refused {
 /// [`Refused`].
 async fn embed(texts: &[String]) -> Result<Vec<String>> {
     let key = embed_key().context("no embedding key")?;
-    let base = std::env::var("ZEN_EMBED_URL").unwrap_or_else(|_| "https://openrouter.ai/api/v1".into());
+    let base = &crate::config::get().embed_url;
     let res = HTTP
         .post(format!("{}/embeddings", base.trim_end_matches('/')))
         .bearer_auth(key)
@@ -466,7 +466,7 @@ pub async fn index_once(db: &PgPool) -> Result<(usize, usize, usize)> {
 
 /// Keep the index current: a pass every ZEN_INDEX_SECS (default 20), sooner while there's a backlog.
 pub async fn index_loop(app: std::sync::Arc<App>) {
-    let every = Duration::from_secs(crate::env_num("ZEN_INDEX_SECS", 20.0).max(1.0) as u64);
+    let every = Duration::from_secs(crate::config::get().index_secs);
     loop {
         match index_once(&app.db).await {
             Ok((t, m, e)) if t + m + e > 0 => {

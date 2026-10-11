@@ -313,7 +313,14 @@ the kernel's environment except its secret-looking variables (`secrets::is_secre
 
 ### Kernel (`zend`)
 
-| Var | Default | Read in | Effect |
+`config.rs` reads the kernel's tunable settings once, at start: typed, each default there and
+nowhere else, a value that doesn't parse falling back to its default (logged), a flag off with
+`0`, `off`, `false` or `no`. Modules read `config::get()`, never the environment. Still read where
+they're used (ROADMAP.md, debt): the boot settings in `main.rs`, the paths (`ZEN_HOME`,
+`ZEN_*_DIR`, `ZEN_MCP_CONFIG`), the workers' and `ZEN_FAUX`; API keys stay in the environment.
+"Used in" names the module a setting steers.
+
+| Var | Default | Used in | Effect |
 |---|---|---|---|
 | `ZEN_TOKEN` | required | `main.rs` | API token; also masked in tool output |
 | `DATABASE_URL` | `postgres://zen:zen@127.0.0.1:5432/zen` (the bootstrap password: CI, throwaway setups) | `main.rs`, `scripts/db.sh` | Database. `install.sh` and upgrades write it to `env` with the private password from `~/.zenbot/db-password` (`db_secure`); the scripts' throwaway databases use the same user and password (`db_url_for`) |
@@ -344,10 +351,10 @@ the kernel's environment except its secret-looking variables (`secrets::is_secre
 | `ZEN_EMBED_URL` | `https://openrouter.ai/api/v1` | `search.rs` | OpenAI-compatible base URL for `/embeddings` |
 | `ZEN_DECIDE_TOOL` | on | `agent.rs` | `0` hides the `decide` tool |
 | `ZEN_EXPLORE` | `0.1` | `delegate.rs` | Share of routed subtasks that try a candidate model when the policy sets no `explore` (at most 0.5) |
-| `ZEN_POLICY_MIN_JUDGED` | `20` | `delegate.rs`, `api.rs` | Judged subtasks each model needs before the sleep may switch a route |
+| `ZEN_POLICY_MIN_JUDGED` | `20` | `delegate.rs`, `api.rs` | Judged subtasks each model needs before the nightly `routes` job may switch a route |
 | `ZEN_JOBS` | on | `jobs.rs` | `0`: the scheduler doesn't run (smoke, e2e, eval and dev kernels set it); system jobs are still seeded |
 | `ZEN_JOB_BAR` | `0.9` | `jobs.rs` | System One's probability that the owner asked for a job the agent creates, needed for it to go live |
-| `ZEN_TZ` | `America/Sao_Paulo` | `jobs.rs` | Default timezone of a new agent job |
+| `ZEN_TZ` | `America/Sao_Paulo` (the owner's zone) | `jobs.rs` | Default timezone of a new agent job (an IANA name) |
 | `ZEN_JOBS_TICK` | `60` | `jobs.rs` | Longest the scheduler sleeps between checks, in seconds (tests make it shorter) |
 | `ZEN_S1_MODEL` | unset (off) | `score.rs` | OpenRouter System One classifier: scoring, `decide`, the sleep, reranking, `capture`, delegation, the job gate |
 | `ZEN_S1_URL` | `https://openrouter.ai/api/v1/systemone` | `score.rs` | System One endpoint override (primarily for local tests) |
@@ -365,6 +372,7 @@ the kernel's environment except its secret-looking variables (`secrets::is_secre
 | `ZEN_ASSIST_MODEL` | `claude/claude-haiku-5-5` | `assist.rs` | Writes session names and suggested next prompts (the cheapest, fastest model on the owner's plans) |
 | `ZEN_SUGGEST` | on | `assist.rs` | `off` (or 0/false/no): no suggested next prompts (names stay on) |
 | `ZEN_SUMMARY_MODEL` | `claude/claude-sonnet-5-5` | `compact.rs` | Summarizer |
+| `ZEN_CACHE_TTL` | `claude=3600` | `measure.rs` | How long each engine's prompt cache lives, in seconds, as `engine=secs` pairs (`*=secs` for the rest; 300 for an engine not named): a turn after a longer pause is measured as a cache miss |
 | `ZEN_TURN_IDLE_SECS` | `600` | `turns.rs` | Watchdog: abort a quiet turn |
 | `ZEN_TURN_ABORT_GRACE_SECS` | `30` | `turns.rs` | Watchdog: end a turn in the kernel this long after an abort |
 | `ZEN_UPDATE_CHECK_SECS` | `3600` | `update.rs` | How often to compare with `origin/main` (`0` off) |

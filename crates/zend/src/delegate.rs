@@ -62,7 +62,7 @@ pub fn pick(policy: &Value, kind: &str, fallback: &str, served: &[String], r: f6
     let route = if policy["routes"][kind].is_object() { &policy["routes"][kind] } else { &policy["routes"]["default"] };
     let base = route["model"].as_str().filter(|m| served.iter().any(|s| s == m)).unwrap_or(fallback).to_string();
     let others: Vec<String> = route["candidates"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|m| *m != base && served.iter().any(|s| s == m)).map(String::from).collect();
-    let explore = policy["explore"].as_f64().unwrap_or_else(|| crate::env_num("ZEN_EXPLORE", 0.1)).clamp(0.0, 0.5);
+    let explore = policy["explore"].as_f64().unwrap_or(crate::config::get().explore).clamp(0.0, 0.5);
     if others.is_empty() || explore == 0.0 {
         return (base, 1.0, "policy");
     }
@@ -275,7 +275,7 @@ pub fn suggest(policy: &Value, stats: &[Value], min: u64) -> Vec<(String, String
 pub async fn tune(db: &sqlx::PgPool) -> Vec<String> {
     let (version, mut p) = policy(db).await;
     let Ok(st) = stats(db).await else { return Vec::new() };
-    let changes = suggest(&p, &st, crate::env_num("ZEN_POLICY_MIN_JUDGED", 20.0) as u64);
+    let changes = suggest(&p, &st, crate::config::get().policy_min_judged);
     let mut notes = Vec::new();
     for (kind, model, why) in changes {
         let old = p["routes"][&kind]["model"].as_str().unwrap_or("").to_string();

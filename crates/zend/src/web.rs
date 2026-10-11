@@ -407,10 +407,8 @@ pub struct Hit {
 /// The configured provider: ZEN_SEARCH_PROVIDER, else Brave or Tavily when their key is set, else
 /// SearXNG.
 fn provider() -> String {
-    if let Ok(p) = std::env::var("ZEN_SEARCH_PROVIDER") {
-        if !p.trim().is_empty() {
-            return p.trim().to_string();
-        }
+    if let Some(p) = &crate::config::get().search_provider {
+        return p.clone();
     }
     let has = |k: &str| std::env::var(k).is_ok_and(|v| !v.trim().is_empty());
     if has("BRAVE_API_KEY") {
@@ -483,7 +481,7 @@ async fn search_with(provider: &str, query: &str, count: usize) -> Result<Vec<Hi
                 .collect()
         }
         "searxng" => {
-            let base = std::env::var("ZEN_SEARXNG_URL").unwrap_or_else(|_| "http://127.0.0.1:8888".into());
+            let base = &crate::config::get().searxng_url;
             let v: Value = PROVIDERS
                 .get(format!("{}/search", base.trim_end_matches('/')))
                 .query(&[("q", query), ("format", "json")])
@@ -529,7 +527,7 @@ static SEARCHES: LazyLock<Mutex<SearchCache>> = LazyLock::new(Default::default);
 /// Order hits by how relevant System One judges them to `query` (one call). Returns the hits with
 /// their probability, or None when System One isn't available.
 async fn rerank(app: &App, query: &str, hits: &[Hit]) -> Option<Vec<(Hit, f64)>> {
-    if std::env::var("ZEN_SEARCH_RERANK").is_ok_and(|v| v.trim() == "0") || hits.len() < 3 {
+    if !crate::config::get().search_rerank || hits.len() < 3 {
         return None;
     }
     let judge = crate::score::Relevance {

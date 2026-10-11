@@ -27,15 +27,14 @@ next step. \"\" when there is no clear next step: the job looks finished, the ag
 something outside the chat, or you'd only be guessing. Never write what the agent would say, never a \
 thank-you or a greeting, and never invent facts the conversation doesn't contain.";
 
-/// The assist model: `ZEN_ASSIST_MODEL`, else Haiku 5.5 (measured 2026-10-09: about 2 s and $0.0006 a
-/// call, the cheapest and fastest model on the owner's plans).
+/// The assist model: `ZEN_ASSIST_MODEL`, else Haiku 5.5 (config.rs says why).
 pub(crate) fn model() -> String {
-    std::env::var("ZEN_ASSIST_MODEL").ok().filter(|m| !m.trim().is_empty()).unwrap_or_else(|| "claude/claude-haiku-5-5".into())
+    crate::config::get().assist_model.clone()
 }
 
-/// Suggestions are on unless `ZEN_SUGGEST=off` (or 0/false). Names are always on.
+/// Suggestions are on unless `ZEN_SUGGEST=off` (or 0/false/no). Names are always on.
 fn suggest_on() -> bool {
-    !matches!(std::env::var("ZEN_SUGGEST").unwrap_or_default().trim().to_ascii_lowercase().as_str(), "off" | "0" | "false" | "no")
+    crate::config::get().suggest
 }
 
 /// After an owner's turn ended cleanly: name the session and suggest the next prompt, in the

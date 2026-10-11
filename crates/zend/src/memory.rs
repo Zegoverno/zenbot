@@ -29,7 +29,7 @@ use crate::AppState;
 
 /// The size of MEMORY.md the sleep tidies to, in characters (ZEN_MEMORY_CHARS, default 4000).
 pub fn cap() -> usize {
-    crate::env_num("ZEN_MEMORY_CHARS", 4000.0).max(200.0) as usize
+    crate::config::get().memory_chars
 }
 
 /// The hard limit (twice the size): reaching it starts a sleep at once, and `add` is refused
@@ -442,7 +442,7 @@ pub fn plan(entries: &[Entry], judged: &[Option<Judged>], cap: usize) -> Vec<Fat
 /// The bar a judgment must clear for the sleep to promote an entry on its own (`ZEN_PROMOTE_BAR`,
 /// 0.9); a move into a prompt file must clear it on the lowest of three samples.
 fn promote_bar() -> f64 {
-    crate::env_num("ZEN_PROMOTE_BAR", 0.9)
+    crate::config::get().promote_bar
 }
 
 /// Where a lasting entry is promoted to, if anywhere: `USER.md` (about the owner), `IDENTITY.md`

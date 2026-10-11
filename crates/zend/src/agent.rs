@@ -276,7 +276,7 @@ fn decide_spec() -> Value {
 /// Whether the `decide` tool is offered: a System One model is configured, private material may go
 /// to it (ZEN_S1_PRIVATE), and ZEN_DECIDE_TOOL isn't 0.
 fn decide_on() -> bool {
-    std::env::var("ZEN_DECIDE_TOOL").map(|v| v.trim() != "0").unwrap_or(true) && crate::score::scorer().is_some() && crate::score::private_ok()
+    crate::config::get().decide_tool && crate::score::scorer().is_some() && crate::score::private_ok()
 }
 
 /// The tools a session of this kind is offered, in a fixed order.

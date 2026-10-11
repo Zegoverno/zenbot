@@ -5,6 +5,7 @@ mod api;
 mod assist;
 mod compact;
 mod compile;
+mod config;
 mod context;
 mod defaults;
 mod layout;
@@ -104,11 +105,6 @@ pub(crate) fn outputs_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
-/// A number from a setting, or the default when it's unset or not a number.
-pub(crate) fn env_num(key: &str, default: f64) -> f64 {
-    std::env::var(key).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
-}
-
 /// Whether `n` is a valid name for a skill, a skill domain, a made tool or a job: lowercase letters,
 /// digits and single hyphens, not at either end (agentskills.io's rule for skill names), at most
 /// `max` bytes. The rule is the same everywhere; only the length differs (64 for skills and tools,
@@ -161,6 +157,10 @@ impl App {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "zend=info".into())).init();
+    // The settings are read once, here (config.rs); a value that doesn't parse runs on its default.
+    for bad in &config::get().unparsed {
+        tracing::warn!("setting {bad} isn't a number: using its default");
+    }
 
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://zen:zen@127.0.0.1:5432/zen".into());
     let token = std::env::var("ZEN_TOKEN").map_err(|_| anyhow::anyhow!("ZEN_TOKEN must be set"))?;

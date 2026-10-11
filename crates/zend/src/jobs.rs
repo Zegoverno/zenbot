@@ -48,8 +48,6 @@ use crate::{tape, tools, AppState};
 
 /// The kind of a session a scheduled agent job runs in.
 pub const JOB: &str = "job";
-/// The owner's zone, the default for agent jobs (ZEN_TZ).
-const DEFAULT_TZ: &str = "America/Sao_Paulo";
 /// Instructions every agent job gets unless it says otherwise (the soul is always in).
 const DEFAULT_CONTEXT: [&str; 3] = ["soul", "user", "memory"];
 /// Shortest period of an agent job.
@@ -389,7 +387,7 @@ pub async fn create(app: &AppState, spec: Spec, by: By) -> Result<(Job, Option<S
     let name = spec.name.clone().context("a job needs a `name`")?;
     valid_name(&name)?;
     let prompt = spec.prompt.clone().context("a job needs a `prompt`: the task, self-contained (it sees nothing of this conversation)")?;
-    let tz_text = spec.tz.clone().unwrap_or_else(|| std::env::var("ZEN_TZ").unwrap_or_else(|_| DEFAULT_TZ.into()));
+    let tz_text = spec.tz.clone().unwrap_or_else(|| crate::config::get().tz.clone());
     let tz = parse_tz(&tz_text)?;
     let (schedule, next) = checked_schedule(spec.schedule.as_deref().context("a job needs a `schedule`")?, tz, Utc::now())?;
     let context = context_of(spec.context.clone())?;
@@ -558,7 +556,7 @@ async fn gate(app: &AppState, session: Uuid, name: &str, prompt: &str, schedule:
     if crate::taint::limited(&app.db, session, crate::taint::Limit::StartJob).await {
         return (None, Some("awaiting the owner's approval: created in a session that read untrusted content".into()));
     }
-    let bar = crate::env_num("ZEN_JOB_BAR", 0.9);
+    let bar = crate::config::get().job_bar;
     let owner = owner_words(&app.db, session).await;
     if owner.is_empty() {
         return (None, Some("awaiting the owner's approval: the owner said nothing in this session".into()));
@@ -654,7 +652,7 @@ pub async fn seed(db: &PgPool) -> Result<()> {
 
 /// Whether the scheduler runs in this kernel (ZEN_JOBS, on by default).
 pub fn enabled() -> bool {
-    std::env::var("ZEN_JOBS").map(|v| v.trim() != "0").unwrap_or(true)
+    crate::config::get().jobs
 }
 
 /// The scheduler: started once with the kernel.
@@ -689,7 +687,7 @@ pub async fn run_loop(app: AppState) {
         };
         // At least once a minute (ZEN_JOBS_TICK, seconds; tests make it shorter), so a clock jump
         // or a change made straight in the database is seen.
-        let most = Duration::from_secs_f64(crate::env_num("ZEN_JOBS_TICK", 60.0).clamp(0.2, 60.0));
+        let most = Duration::from_secs_f64(crate::config::get().jobs_tick);
         let wait = wait.clamp(Duration::from_millis(200).min(most), most);
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}
