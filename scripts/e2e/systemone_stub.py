@@ -67,6 +67,10 @@ class H(BaseHTTPRequestHandler):
             assert self.headers.get("Authorization") == "Bearer e2e-key"
             assert request["model"] == "typesafe/jev-1.13"
             state = request.get("state", {})
+            # The job gate: the task the agent wrote comes as untrusted data, never as evidence.
+            if "job" in state:
+                assert "task" not in state["job"]
+                assert state["job"]["task_written_by_agent"].startswith('<untrusted source="agent"')
             answers = {}
             # The sleep's marker entries: lasting and about the owner, or lasting knowledge.
             memory = str(state.get("memory", ""))
