@@ -128,14 +128,14 @@ mod tests {
     #[test]
     fn fit_keeps_emoji_sequences_whole() {
         let family = "👨\u{200d}👩\u{200d}👧";
-        for (text, width) in [(format!("ab❤\u{fe0f}cd"), 3), (format!("a{family}b"), 2), (format!("a{family}b"), 3)] {
+        for (text, width) in [("ab❤\u{fe0f}cd".to_string(), 3), (format!("a{family}b"), 2), (format!("a{family}b"), 3)] {
             let cut = fit(&vec![(text.clone(), Sty::Plain)], width, true);
             let out: String = cut.iter().map(|(t, _)| t.as_str()).collect();
             assert_eq!(UnicodeWidthStr::width(out.as_str()), width, "{text:?} at {width}: {out:?}");
             assert!(!out.contains('\u{fe0f}') || out.contains('❤'), "no stray variation selector: {out:?}");
-            assert!(out.matches('\u{200d}').count() % 2 == 0, "a ZWJ family is kept or dropped whole: {out:?}");
+            assert!(out.matches('\u{200d}').count().is_multiple_of(2), "a ZWJ family is kept or dropped whole: {out:?}");
         }
-        let side = row(Some(&line(&format!("{family}❤\u{fe0f} chat"), Sty::Plain)), Some((Some(&line("file", Sty::Plain)), 4)), 6);
+        let side = row(Some(&line(format!("{family}❤\u{fe0f} chat"), Sty::Plain)), Some((Some(&line("file", Sty::Plain)), 4)), 6);
         assert!(side.starts_with(&format!("{family}❤\u{fe0f} c\x1b[2m │")), "two 2-column emoji: the divider stays in column 7: {side:?}");
     }
 }
