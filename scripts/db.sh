@@ -90,8 +90,9 @@ db_secure() {
   [[ $pw =~ ^[A-Za-z0-9]{16,}$ ]] || { echo "db_secure: $DB_PASSWORD_FILE isn't a password this script made" >&2; return 1; }
   want="postgres://zen:$pw@127.0.0.1:5432/$(db_live_name)"
   [ "$cur" != "$want" ] || return 0
-  printf "ALTER USER zen PASSWORD '%s';\n" "$pw" | db_exec psql -U zen -d postgres -v ON_ERROR_STOP=1 -q >/dev/null || {
-    echo "db_secure: setting the database password failed" >&2; return 1; }
+  # psql's own errors can quote the statement, so they're dropped: the caller logs stderr.
+  printf "ALTER USER zen PASSWORD '%s';\n" "$pw" | db_exec psql -U zen -d postgres -v ON_ERROR_STOP=1 -q >/dev/null 2>&1 || {
+    echo "db_secure: setting the database password failed (try: scripts/db.sh secure)" >&2; return 1; }
   env_set DATABASE_URL "$want"
   echo "database password replaced with a private one (~/.zenbot/db-password); DATABASE_URL updated in ~/.zenbot/env"
 }
