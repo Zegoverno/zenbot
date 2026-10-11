@@ -820,10 +820,10 @@ scheduled_jobs() {
   zen jobs run sleep >/dev/null
   check "a system job runs through the same engine" poll "$runs 'sleep'" ok/owner
   check "the sleep ran as the nightly one" eq "$(q "SELECT trigger FROM sleep_runs")" nightly
-  local job
+  local job before; before=$(q "SELECT coalesce(max(id), 0) FROM job_runs")
   for job in wiki skills routes prune; do zen jobs run "$job" >/dev/null; done
   check "each upkeep job runs by hand and records its run" poll \
-    "SELECT string_agg(j.name || ':' || (r.status IN ('ok', 'silent')), ',' ORDER BY j.name) FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name IN ('wiki', 'skills', 'routes', 'prune') AND r.status <> 'running'" \
+    "SELECT string_agg(j.name || ':' || (r.status IN ('ok', 'silent')), ',' ORDER BY j.name) FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name IN ('wiki', 'skills', 'routes', 'prune') AND r.id > $before AND r.status <> 'running'" \
     prune:true,routes:true,skills:true,wiki:true
   check "zen status shows the jobs" grep -q "^jobs .*jobs (" <<<"$(zen status)"
   kill "$srv" 2>/dev/null || true
