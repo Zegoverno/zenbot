@@ -258,7 +258,8 @@ search_recall() {
 # times and ones a long transaction changed are not missed; a document the provider rejects is tried
 # alone 3 times while the rest are embedded; a kernel prompt doesn't split its turn; a search doesn't
 # wait for the embeddings provider; and each arm filtering `search_docs` itself ranks a fixture as
-# the query did before (search_reference.sql).
+# the query did before (search_reference.sql). Each fixture document has its own number of `filler`
+# words, so no two are the same distance from a query (ties in the vector arm come in any order).
 search_index() {
   local ws; ws=$(new_workspace search-index)
   local port=$((PORT + 7)) release="$TMP/embed-release"; rm -f "$release"
@@ -271,12 +272,12 @@ search_index() {
                          WHEN 2 THEN 'a car parked by the harbour, number ' || g
                          WHEN 3 THEN 'the lighthouse code is in the fixture crate, part ' || g
                          WHEN 4 THEN 'red car, blue car, car ' || g
-                         ELSE 'an unrelated note about tea, ' || g END, 'owner', now() - interval '3 days', now() - interval '3 days'
+                         ELSE 'an unrelated note about tea, ' || g END || repeat(' filler', g), 'owner', now() - interval '3 days', now() - interval '3 days'
        FROM generate_series(1, 36) g;
      INSERT INTO memories (text, source) VALUES ('REJECT-EMBED the lighthouse keeper, rejected', 'owner'), ('LONGTX a memory archived in a long transaction', 'owner');
      INSERT INTO search_docs (kind, ref, ident, title, body)
        SELECT 'turn', 'fixture:' || g, CASE WHEN g % 3 = 0 THEN 'crates/fixture/engine_core.rs' ELSE 'crates/fixture/engine_core_' || g || '.rs' END,
-              'fixture', 'Owner: change crates/fixture/engine_core_' || g || '.rs near the lighthouse harbour'
+              'fixture', 'Owner: change crates/fixture/engine_core_' || g || '.rs near the lighthouse harbour' || repeat(' filler', g)
        FROM generate_series(1, 12) g" >/dev/null
   check "memories with old times are indexed, the rest embedded, a rejected one alone 3 times" poll \
     "SELECT count(*) FILTER (WHERE kind = 'memory') || '/' || count(*) FILTER (WHERE embedding IS NOT NULL) || '/' || string_agg(embed_attempts || ':' || (embed_error LIKE '%input rejected by the e2e stub%'), ',') FILTER (WHERE embedding IS NULL) FROM search_docs" \
