@@ -6,6 +6,26 @@
 
 ---
 
+## D-052 — Every MCP server is untrusted until the owner says otherwise
+
+**Date:** 2026-10-11 · **Status:** accepted (owner, taint review) · **Supersedes:** the part of
+D-034 that wraps and taints only remote MCP servers' output
+
+**Decision:** An MCP server's output, tool descriptions and schemas are wrapped as untrusted and
+taint the session for every server, local (stdio) or remote, unless the owner sets
+`"untrusted": false` for it in `mcp.json`. Before, local servers defaulted to trusted.
+
+**Why:** A local server is mostly a bridge to content from outside (mail, documents, a browser, a
+package fetched by `npx`): where it runs says nothing about whether what it returns can steer the
+agent. Trust is the owner's explicit call per server, the same rule as project instructions
+(D-051).
+
+**Trade-off:** A session that uses a local server's tools is tainted, so it can't change the prompt
+files or an active skill, and a job it schedules waits for the owner, until the owner marks that
+server trusted.
+
+---
+
 ## D-051 — Trust gates: what steers every session, project instructions, the verifier, reviews
 
 **Date:** 2026-10-10 · **Status:** proposed (pending the owner's OK in the pull request) ·
@@ -471,6 +491,8 @@ and the owner writes in more than one language), promoting on System One's proba
 ---
 
 ## D-034 — Web access: keyless search by default, untrusted content taints
+
+*Superseded in part by D-052: every MCP server, not only remote ones, is untrusted by default.*
 
 **Decision:** `web_search` uses Brave or Tavily when their key is set, else a self-hosted SearXNG
 started with the service (deploy/compose.yaml, bound to 127.0.0.1), which also rescues one failed

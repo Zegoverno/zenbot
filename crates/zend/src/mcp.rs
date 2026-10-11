@@ -8,8 +8,9 @@
 //! the kernel's own token, API keys, the database URL) is filled only for a server that lists it in
 //! `allow_env`, so a server can't be handed the kernel's credentials by accident. Per server:
 //! `enabled`, `timeout_s`, `include` / `exclude` (tool names), `allow_env`, and `untrusted` (wrap
-//! its output as untrusted and taint the session; default true for remote servers). The agent can't
-//! change the file with `edit` or `write` (agent.rs, `Protected::OwnerOnly`): only the owner does.
+//! its output as untrusted and taint the session; default true for every server, local or remote,
+//! until the owner sets `"untrusted": false`; D-052). The agent can't change the file with `edit` or
+//! `write` (agent.rs, `Protected::OwnerOnly`): only the owner does.
 //!
 //! The model's tool list never changes mid-session (that would break the prompt cache on every
 //! engine; the Phase 0 spike), so MCP tools aren't added to it. Instead the model gets three fixed
@@ -151,7 +152,7 @@ pub fn parse_config(text: &str) -> (Vec<ServerConfig>, Vec<String>) {
             timeout: Duration::from_secs(s["timeout_s"].as_u64().unwrap_or(60).clamp(1, 600)),
             include: s["include"].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect(),
             exclude: s["exclude"].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect(),
-            untrusted: s["untrusted"].as_bool().unwrap_or(url.is_some()),
+            untrusted: s["untrusted"].as_bool().unwrap_or(true),
             command,
             url,
         };
@@ -833,7 +834,9 @@ mod tests {
         let greedy = cfgs.iter().find(|c| c.name == "greedy").unwrap();
         assert_eq!(greedy.env, [("T".to_string(), String::new())], "a secret not listed is never filled");
         assert!(problems.iter().any(|p| p.contains("`greedy`") && p.contains("allow_env")));
-        assert!(!local.untrusted, "local servers are trusted by default");
+        assert!(local.untrusted, "local servers are untrusted by default too");
+        let (mine, _) = parse_config(r#"{ "mcpServers": { "mine": { "command": "x", "untrusted": false } } }"#);
+        assert!(!mine[0].untrusted, "the owner marks a server trusted");
         let remote = cfgs.iter().find(|c| c.name == "remote").unwrap();
         assert!(remote.untrusted, "remote servers are untrusted by default");
         assert!(!cfgs.iter().any(|c| c.name == "off"));

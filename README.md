@@ -112,7 +112,7 @@ zenbot keeps lasting knowledge in `~/.zenbot/global/wiki/` (a git repository of 
       "files": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/docs"] },
       "issues": { "url": "https://mcp.example.com/mcp", "headers": { "Authorization": "Bearer ${ISSUES_TOKEN}" }, "allow_env": ["ISSUES_TOKEN"] } } }
   ```
-  Per server: `enabled`, `timeout_s`, `include` / `exclude` (tool names), `allow_env`, `untrusted` (default true for remote servers). Only you edit `mcp.json`: zenbot's own file tools refuse it, like `env` and `token`. `curl -H "Authorization: Bearer $(cat ~/.zenbot/token)" localhost:8100/api/mcp` shows what loaded.
+  Per server: `enabled`, `timeout_s`, `include` / `exclude` (tool names), `allow_env`, `untrusted` (default true for every server: its output is wrapped as untrusted and taints the session; set `"untrusted": false` for a server you trust). Only you edit `mcp.json`: zenbot's own file tools refuse it, like `env` and `token`. `curl -H "Authorization: Bearer $(cat ~/.zenbot/token)" localhost:8100/api/mcp` shows what loaded.
 
 ## Context
 

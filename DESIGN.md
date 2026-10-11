@@ -248,11 +248,16 @@ harness versions with the same model on isolated kernels and databases (`evals/R
   to compact it. No session may `edit` or `write` the owner's configuration and secrets
   (`mcp.json`, `env`, `token`, `matrix.env`, `matrix/`, `bin/`). When the taint can't be read the
   session counts as tainted; when it can't be recorded the content is withheld.
-- **MCP** (`mcp.rs`, D-033): servers in `~/.zenbot/mcp.json` (stdio or streamable HTTP, `${VAR}`
-  from the environment, a secret-named one only when the server lists it in `allow_env`,
-  `include`/`exclude`, `timeout_s`, `untrusted`, default true for remote servers). The tool list never changes: `find_tools` ranks tools by name and description,
+- **MCP** (`mcp.rs`, D-033, D-052): servers in `~/.zenbot/mcp.json` (stdio or streamable HTTP,
+  `${VAR}` from the environment, a secret-named one only when the server lists it in `allow_env`,
+  `include`/`exclude`, `timeout_s`, `untrusted`, default true for every server until the owner
+  sets `"untrusted": false`). The tool list never changes: `find_tools` ranks tools by name and description,
   `load_tool` returns the schema, `call_tool` checks required arguments, runs the call with a
   timeout, masks and caps the output (the rest to `~/.zenbot/outputs`), and wraps untrusted output.
+  Calls run concurrently, to one server and to several: a server's lock is held only to connect,
+  tools are looked up from its last listing (listed again on `tools/list_changed`), and a stdio
+  server's answers reach their calls by id. A message over 8 MB fails its call. A stdio server runs
+  in its own process group, killed whole when it is replaced or the kernel stops.
   `GET /api/mcp` shows servers and problems.
 
 ### Security today

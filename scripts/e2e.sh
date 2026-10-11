@@ -205,6 +205,7 @@ JSON
   check "the remote call tainted the session" eq "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")" t
   check "the kernel's token is filled in only where allow_env lists it" grep -q 'server `greedy`: environment variables left empty: ZEN_TOKEN (a secret' <<<"$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/mcp" | jq -r '.problems[]')"
   check "the tool list is still fixed" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND kind='envelope'")" 1
+  check "a local server is untrusted by default" grep -q 'source="mcp" about="local_echo"' <<<"$res"
   # One slow call holds up neither the same server's other calls nor the catalog.
   zen ask --json -m faux/smoke "tool slow" >"$TMP/mcp-slow.json" & local slow=$!
   sleep 1.5
