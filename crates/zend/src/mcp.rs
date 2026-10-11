@@ -492,8 +492,16 @@ impl Server {
                 conn.close(&format!("{e:#}"));
                 Err(e)
             }
-            // The server may still answer: its other calls go on, and a late answer is dropped.
-            Err(_) => bail!("no answer within {}s", timeout.as_secs()),
+            // A late answer is dropped. A stdio server with other calls running keeps going; one
+            // with none is started again next time (it may be stuck).
+            Err(_) => {
+                if let Conn::Stdio(io) = &**conn {
+                    if io.pending.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
+                        conn.close("it stopped answering");
+                    }
+                }
+                bail!("no answer within {}s", timeout.as_secs())
+            }
         }
     }
 

@@ -156,8 +156,7 @@ changes. Candidate follow-ups, each only when use calls for it:
   files with `read` or `bash` isn't taint, only its AGENTS.md is.
 - MCP over HTTP doesn't open the server's event stream, so only stdio servers' `tools/list_changed`
   is seen; an HTTP server's tools are listed again only when it reconnects or `mcp.json` changes. A
-  stdio server that stops answering (but doesn't exit) is no longer restarted on a timeout, since
-  its other calls may still be running: it stays until it exits or `mcp.json` changes.
+  stdio server that times out is started again only when no other call to it is running.
 - Paths never run with real models: the new tools (`remember`, `load_skill`, `verify`, `ask`) on
   Codex, a model switch mid-session, a failed verification followed by a real fix.
 
