@@ -24,7 +24,7 @@ every file, route, table and setting in `MAP.md`. The dev kernel has its own hom
 | `git`, `curl`, `jq` | apt | every script |
 | `python3` | preinstalled on Ubuntu | the e2e test servers (`scripts/e2e/*.py`) |
 | `pdftotext` (`poppler-utils`) | apt (`install.sh` installs it) | reading PDFs that `web_fetch` saves |
-| `bubblewrap` | apt | the verifier's read-only shell and the sandbox for unapproved made tools; the e2e scenarios need it |
+| `bubblewrap` | apt | the verifier's read-only shell, a tainted session's offline shell and the sandbox for unapproved made tools; the e2e scenarios need it |
 | Node.js 22+ | `install.sh` puts it in `~/.local/node` | installing and running the Codex CLI (an npm package: Node runs it on every Codex turn) |
 | `gh` | GitHub CLI | pull requests, checking CI |
 
@@ -267,25 +267,17 @@ sudo systemctl stop zenbot && docker compose -f deploy/compose.yaml exec -T post
 
 ## Harness evals
 
-Changes to the harness (system prompt, history, tools, workers, model or effort handling) get an eval before they are merged. The eval is **advisory**: run it, show the owner the report (in the pull request too), and ask whether to merge. The owner decides. It is never an automatic gate.
+Harness changes get an eval before they merge; it is advisory (AGENTS.md, "Making a change").
+Commands, which tasks run, isolation, caching and the report: [evals/README.md](evals/README.md).
 
 ```bash
-scripts/eval.sh --plan                             # which tasks the change affects, and why; runs nothing
-scripts/eval.sh                                    # those tasks: this checkout (new) vs the installed version (base)
-scripts/eval.sh --full                             # every task: a large harness change, or when the owner asks
-scripts/eval.sh --base main --tasks repo-question --repeat 3
-scripts/eval.sh --model claude/claude-sonnet-5-5 --effort low
-scripts/eval.sh --model faux/smoke --tasks smoke   # self-test of the runner, no subscription used
-scripts/eval-report.sh ~/.zenbot/evals/<run>       # print a run's report again
+scripts/eval.sh --plan    # which tasks the change affects, and why; runs nothing
+scripts/eval.sh           # those tasks: this checkout (new) vs the installed version (base)
 ```
 
-Other options: `--jobs N` (runs at once, default 3 or `ZEN_EVAL_JOBS`), `--fresh` (run the base again instead of using the cache), `--native claude|codex` (the base is the vendor's own CLI), `--base-model`, `--base-effort`, `--only new|base`, `--keep`. Without `--model` it asks the running service (`/api/models`) for its default model, so the service must be up.
-
-Which tasks run (D-050): the files that differ between the base and this checkout, uncommitted ones included, are mapped to areas by `evals/areas.txt`; the tasks whose `areas` meet them run, plus the `core` tasks. A change to `crates/zen-engine` or `crates/zen-proto` runs every task; a change outside the harness (docs, the `zen` client, scripts) needs no eval, and `eval.sh` says so and stops. The selection and its reasons are at the end of the report.
-
-Each run (harness × task × repeat) gets a fresh copy of the task's files, its own kernel on its own port (18301 and up), its own database (`zen_eval_<run>_<n>`, dropped after it) and its own `ZEN_HOME` (default prompt files and skills, not the owner's), so runs at the same time can't see each other. Base and new runs of a task are interleaved. Stopping `eval.sh` (Ctrl-C) stops every kernel it started and drops their databases. The new side is this checkout, uncommitted changes included. The base build is cached in `~/.zenbot/evals/builds/`, and base results that completed in `~/.zenbot/evals/cache/` for `ZEN_EVAL_CACHE_DAYS` (7) days, keyed by base commit, model, effort, the task's files and the engine versions; the report lists the ones it reused. Results and `report.md` go to `~/.zenbot/evals/<run>/`. Real models use the owner's subscription, so `--jobs` also sets how many turns run on it at once.
-
-Tasks live in `evals/tasks/<name>/` (`task.json` plus `files/` and, for hidden tests, `hidden/`). See `evals/README.md` for the format and what makes a good task.
+Without `--model` it asks the running service (`/api/models`) for its default model, so the service
+must be up. Real models use the owner's subscription, so `--jobs` also sets how many turns run on it
+at once.
 
 ## Scheduled jobs
 

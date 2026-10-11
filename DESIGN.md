@@ -500,7 +500,7 @@ readable-text extraction and link following; a browser later.
 domain needs the owner's OK); edit before create (search first; a new skill only when none covers
 the work, with the reason recorded); changes from evidence at session close, never from one task;
 small and composable; loads and outcomes measured, near-duplicates merged, unused skills retired;
-every change a revertible commit. `save_skill` and the sleep enforce these (D-037).
+every change a revertible commit. `save_skill` and the nightly `skills` job enforce these (D-037).
 
 **MCP client** written against the spec (D-033; built). From FastMCP: namespacing and mounting
 (`<server>_<tool>`, built), and not built yet: tool transformation (rename, hide arguments, rewrite descriptions), middleware
