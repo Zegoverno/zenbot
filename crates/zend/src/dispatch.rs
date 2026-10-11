@@ -215,6 +215,8 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                             tools::ToolOutput { content: why, is_error: true }
                         } else if let Some(why) = agent::protected_refusal(&app.db, id, kind.as_deref(), &workspace, &name, &args).await {
                             tools::ToolOutput { content: why, is_error: true }
+                        } else if let Some(why) = crate::workshop::mark_draft_write(app, id, &workspace, &name, &args).await {
+                            tools::ToolOutput { content: why, is_error: true }
                         } else {
                             // A prompt file is backed up before the agent changes it, and the agent
                             // is told to compact it when the change takes it past its size.
@@ -227,7 +229,26 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                             let mut out = if let Some(out) = agent::run_tool(app, id, &workspace, &name, &args, &mut ending).await {
                                 out
                             } else {
-                                tools::execute(&workspace, &name, &args, &env, read_only).await
+                                // A verifier's shell is read-only; a tainted session's has no network.
+                                let sandbox = if read_only {
+                                    tools::Sandbox::ReadOnly
+                                } else if name == "bash" {
+                                    crate::taint::shell_sandbox(&app.db, id).await
+                                } else {
+                                    tools::Sandbox::None
+                                };
+                                let mut out = tools::execute(&workspace, &name, &args, &env, sandbox).await;
+                                // Stored content a tainted session wrote is untrusted however it's read.
+                                if name == "read" && !out.is_error {
+                                    if let Some(source) = agent::read_of_tainted(&app.db, &workspace, &args).await {
+                                        let about = args["path"].as_str().unwrap_or("");
+                                        out = match crate::taint::hand_over(app, id, true, source, about, &out.content).await {
+                                            Ok(content) => tools::ToolOutput { content, is_error: false },
+                                            Err(e) => tools::ToolOutput { content: crate::taint::withheld(&e), is_error: true },
+                                        };
+                                    }
+                                }
+                                out
                             };
                             if let Some(note) = prompt_file.as_deref().filter(|_| !out.is_error).and_then(agent::over_cap_note) {
                                 out.content.push_str(&note);

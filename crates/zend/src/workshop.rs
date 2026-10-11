@@ -10,7 +10,9 @@
 //!   "extend X instead" (System One judges; without it, word overlap);
 //! - a new skill is a draft (`skills/_proposed/<domain>/<name>`): found and loaded marked as a draft,
 //!   active once the owner accepts it (`zen skills accept`) or a session that loaded it gets the
-//!   owner's `accept` verdict; a new domain always needs the owner;
+//!   owner's `accept` verdict; a new domain always needs the owner; a draft a session that read
+//!   untrusted content wrote (by `save_skill` or `edit`/`write`) is marked (`draft_taint`), read
+//!   as untrusted content, and activated only by the owner's own accept (D-053);
 //! - changes to an active skill apply at once; every change is a commit in the skills repository;
 //! - the nightly sleep flags skills unused for 30 days and archives (never deletes) those unused
 //!   for 90 (`skills/_archived`).
@@ -165,9 +167,11 @@ async fn save_skill(app: &App, session: Uuid, args: &Value) -> Result<String> {
     let current = active.iter().find(|x| x.domain == domain && x.name == name).cloned();
     let draft = drafts.iter().find(|x| x.domain == domain && x.name == name).cloned();
     // An active skill's description reaches every session's instructions: text from a web page must
-    // not rewrite it without the owner. Drafts and new skills still go through review.
-    if current.is_some() && crate::taint::tainted(&app.db, session).await {
-        bail!("this session read web content, so it can't change an active skill; tell the owner what you'd change and why");
+    // not rewrite it without the owner. Drafts and new skills still go through review, and one a
+    // tainted session writes is marked untrusted (`draft_taint`) before it's written.
+    let tainted = crate::taint::limited(&app.db, session, crate::taint::Limit::Steer).await;
+    if current.is_some() && tainted {
+        bail!("this session read untrusted content, so it can't change an active skill; tell the owner what you'd change and why");
     }
     let (dir, what) = match (&current, &draft) {
         (Some(c), _) => (c.dir.clone(), "Updated the active skill"),
@@ -190,11 +194,17 @@ async fn save_skill(app: &App, session: Uuid, args: &Value) -> Result<String> {
     if !errs.is_empty() {
         bail!("not saved: {}", errs.join("; "));
     }
+    if tainted {
+        mark_draft(&app.db, &format!("{domain}/{name}"), session).await.context("not saved: couldn't mark the draft as written by a session that read untrusted content")?;
+    }
     write_skill(&dir, &md, &args["files"])?;
-    commit(&root, &format!("{what}: {domain}/{name} (session {})\n\n{reason}", &session.to_string()[..8])).await;
+    let mark = if tainted { "; it read untrusted content" } else { "" };
+    commit(&root, &format!("{what}: {domain}/{name} (session {}{mark})\n\n{reason}", &session.to_string()[..8])).await;
     let new_domain = current.is_none() && draft.is_none() && !active.iter().any(|x| x.domain == domain);
     let next = if current.is_some() {
         "It's in use from the next session that loads it.".to_string()
+    } else if tainted {
+        format!("This session read untrusted content, so the draft is marked untrusted: only the owner can make it active (zen skills accept {domain}/{name}). Say so in your report.")
     } else if new_domain {
         format!("`{domain}` is a new domain: the owner decides whether it becomes active (zen skills accept {domain}/{name}). Say so in your report.")
     } else {
@@ -218,12 +228,49 @@ pub async fn decide_draft(db: &sqlx::PgPool, name: &str, accept: bool, by: &str,
     }
     std::fs::create_dir_all(to.parent().context("no parent")?)?;
     std::fs::rename(&draft.dir, &to)?;
+    // The owner's decision covers what they reviewed: the mark goes with the draft.
+    let key = format!("{}/{}", draft.domain, draft.name);
+    if let Err(e) = sqlx::query("DELETE FROM draft_taint WHERE skill = $1").bind(&key).execute(db).await {
+        tracing::warn!("clearing {key}'s untrusted mark: {e:#}");
+    }
     let verb = if accept { "Activated" } else { "Rejected" };
     commit(&skills::root(), &format!("{verb} {}/{} ({by})", draft.domain, draft.name)).await;
     Ok(format!("{verb} {}/{}", draft.domain, draft.name))
 }
 
-/// After the owner accepts a session's work: drafts it loaded (in domains that exist) become active.
+/// Draft skills a session that read untrusted content wrote (domain/name). When that can't be
+/// read, every draft counts (fail closed).
+pub async fn tainted_drafts(db: &sqlx::PgPool) -> Vec<String> {
+    match sqlx::query_scalar("SELECT skill FROM draft_taint").fetch_all(db).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("reading untrusted drafts: {e:#}");
+            skills::drafts().into_iter().map(|s| format!("{}/{}", s.domain, s.name)).collect()
+        }
+    }
+}
+
+/// Mark a draft as written by a session that read untrusted content.
+async fn mark_draft(db: &sqlx::PgPool, skill: &str, session: Uuid) -> Result<()> {
+    sqlx::query("INSERT INTO draft_taint (skill, session_id) VALUES ($1, $2) ON CONFLICT (skill) DO NOTHING").bind(skill).bind(session).execute(db).await?;
+    Ok(())
+}
+
+/// Before an `edit` or `write` into a draft skill from a session that read untrusted content: mark
+/// the draft. Why the call is refused, when the mark can't be recorded.
+pub async fn mark_draft_write(app: &App, session: Uuid, workspace: &Path, name: &str, args: &Value) -> Option<String> {
+    if !matches!(name, "edit" | "write") {
+        return None;
+    }
+    let skill = crate::agent::draft_target(workspace, name, args)?;
+    if !crate::taint::limited(&app.db, session, crate::taint::Limit::Steer).await {
+        return None;
+    }
+    mark_draft(&app.db, &skill, session).await.err().map(|e| format!("not written: the draft {skill} couldn't be marked as written by a session that read untrusted content ({e:#})"))
+}
+
+/// After the owner accepts a session's work: drafts it loaded (in domains that exist) become
+/// active, except drafts marked untrusted (only the owner's own `zen skills accept` activates those).
 pub async fn on_accept(app: &App, session: Uuid) {
     let loaded: Vec<String> = sqlx::query_scalar("SELECT DISTINCT args->>'name' FROM tool_calls WHERE session_id = $1 AND name = 'load_skill' AND NOT is_error")
         .bind(session)
@@ -231,8 +278,13 @@ pub async fn on_accept(app: &App, session: Uuid) {
         .await
         .unwrap_or_default();
     let domains: Vec<String> = skills::scan(&skills::root()).into_iter().map(|s| s.domain).collect();
+    let untrusted = tainted_drafts(&app.db).await;
     for name in loaded {
         let Ok(d) = skills::lookup(&skills::drafts(), &name).cloned() else { continue };
+        if untrusted.contains(&format!("{}/{}", d.domain, d.name)) {
+            tracing::info!("not activating {}/{}: a session that read untrusted content wrote it (the owner accepts it with zen skills)", d.domain, d.name);
+            continue;
+        }
         if domains.contains(&d.domain) {
             match decide_draft(&app.db, &format!("{}/{}", d.domain, d.name), true, "a session that used it was accepted", None).await {
                 Ok(m) => tracing::info!("{m}"),
@@ -257,6 +309,7 @@ pub async fn stats(db: &sqlx::PgPool) -> Result<Value> {
         let n: Option<String> = r.get("name");
         n.as_deref().is_some_and(|n| n == format!("{}/{}", s.domain, s.name) || n == s.name)
     });
+    let untrusted = tainted_drafts(db).await;
     let mut out = Vec::new();
     for (status, list) in [("active", skills::scan(&skills::root())), ("draft", skills::drafts())] {
         for s in list {
@@ -266,6 +319,7 @@ pub async fn stats(db: &sqlx::PgPool) -> Result<Value> {
             out.push(json!({
                 "sha": sha,
                 "skill": format!("{}/{}", s.domain, s.name), "status": status, "description": s.description,
+                "untrusted": status == "draft" && untrusted.contains(&format!("{}/{}", s.domain, s.name)),
                 "loads": r.map(|r| r.get::<i64, _>("loads")).unwrap_or(0),
                 "last_load": r.map(|r| r.get::<chrono::DateTime<chrono::Utc>, _>("last")),
                 "sessions_accepted": r.map(|r| r.get::<i64, _>("accepted")).unwrap_or(0),
