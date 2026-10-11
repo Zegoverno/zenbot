@@ -342,6 +342,19 @@ pub fn tool_spec() -> Value {
 }
 
 /// Run the history tool for a session. Returns the text and whether it is an error.
+/// The ids a session id prefix covers, `a1b2c3d4` → `a1b2c3d4-0000-…` to `a1b2c3d4-ffff-…`, so a
+/// lookup by prefix is a range over the primary key. None when no id starts with it.
+pub(crate) fn id_prefix_range(prefix: &str) -> Option<(Uuid, Uuid)> {
+    const ZERO: &str = "00000000-0000-0000-0000-000000000000";
+    let p = prefix.trim().to_ascii_lowercase();
+    let fits = !p.is_empty() && p.len() <= ZERO.len() && p.bytes().zip(ZERO.bytes()).all(|(c, z)| if z == b'-' { c == b'-' } else { c.is_ascii_hexdigit() });
+    if !fits {
+        return None;
+    }
+    let rest = &ZERO[p.len()..];
+    Some((format!("{p}{rest}").parse().ok()?, format!("{p}{}", rest.replace('0', "f")).parse().ok()?))
+}
+
 pub async fn history_tool(db: &PgPool, session: Uuid, args: &Value) -> (String, bool) {
     match history_inner(db, session, args).await {
         Ok(t) => (t, false),
@@ -354,7 +367,10 @@ async fn history_inner(db: &PgPool, session: Uuid, args: &Value) -> Result<Strin
     let session = match args["session"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
         None => session,
         Some(s) => {
-            let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM sessions WHERE starts_with(id::text, $1) LIMIT 2").bind(s.to_lowercase()).fetch_all(db).await?;
+            let ids: Vec<Uuid> = match id_prefix_range(s) {
+                Some((lo, hi)) => sqlx::query_scalar("SELECT id FROM sessions WHERE id BETWEEN $1 AND $2 LIMIT 2").bind(lo).bind(hi).fetch_all(db).await?,
+                None => Vec::new(),
+            };
             match ids.as_slice() {
                 [one] => *one,
                 [] => anyhow::bail!("no session `{s}`"),
@@ -426,6 +442,18 @@ async fn history_inner(db: &PgPool, session: Uuid, args: &Value) -> Result<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_prefix_is_an_id_range() {
+        let (lo, hi) = id_prefix_range("A1B2c3d4-e").unwrap();
+        assert_eq!(lo.to_string(), "a1b2c3d4-e000-0000-0000-000000000000");
+        assert_eq!(hi.to_string(), "a1b2c3d4-efff-ffff-ffff-ffffffffffff");
+        let whole = "a1b2c3d4-e5f6-4789-8abc-def012345678";
+        assert_eq!(id_prefix_range(whole), Some((whole.parse().unwrap(), whole.parse().unwrap())));
+        for bad in ["", "a1b2c3d4e", "xyz", "a1b2c3d4-e5f6-4789-8abc-def0123456789", "é"] {
+            assert_eq!(id_prefix_range(bad), None, "{bad}");
+        }
+    }
 
     fn msg(seq: i32, role: &str, size: usize) -> Block {
         let content = match role {
