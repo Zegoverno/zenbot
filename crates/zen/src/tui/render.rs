@@ -13,6 +13,9 @@ pub(super) const READ_ONLY: &str = "Read-only: zenbot drives this session · esc
 /// Smallest terminal (columns, rows) zen lays out; below it, a frame asks for more room.
 pub(super) const MIN_SIZE: (usize, usize) = (21, 6);
 
+/// Shortest time between two frames drawn for streamed text (about 30 a second).
+pub(super) const FRAME: Duration = Duration::from_millis(33);
+
 pub(super) fn fmt_tokens(n: i64) -> String {
     if n >= 10_000 {
         format!("{}k", n / 1000)
@@ -56,6 +59,8 @@ impl App {
 
     /// Redraw: the whole frame in full screen, the live region in place inline.
     pub(super) fn draw(&mut self) {
+        self.last_draw = Some(Instant::now());
+        self.dirty = false;
         if !self.inline {
             self.frame();
             return;
@@ -65,6 +70,17 @@ impl App {
         self.paint_region(&mut out);
         out.push_str("\x1b[?2026l");
         self.flush(out);
+    }
+
+    /// Redraw now, or at the next frame tick if the last frame is under `FRAME` old: a reply
+    /// streams in many small deltas, and drawing a whole frame for each would cost more than the
+    /// terminal can show.
+    pub(super) fn draw_soon(&mut self) {
+        if self.last_draw.is_some_and(|t| t.elapsed() < FRAME) {
+            self.dirty = true;
+        } else {
+            self.draw();
+        }
     }
 
     /// Columns for the chat and for the side panel (0 when it's closed or the screen is too narrow).
@@ -366,6 +382,7 @@ mod tests {
         a.on_event(json!({ "type": "delta", "delta": "Hello" }));
         a.capture = Some(String::new());
         a.on_event(json!({ "type": "delta", "delta": " world" }));
+        a.draw(); // the frame tick, a moment later
         let out = a.capture.take().unwrap();
         assert!(out.contains("Hello world"), "{out:?}");
         assert!(!out.contains("earlier conversation"), "unchanged rows are not rewritten: {out:?}");

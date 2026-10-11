@@ -30,6 +30,15 @@ pub(super) struct Panel {
 
 impl Panel {
     pub(super) fn open(path: PathBuf) -> std::result::Result<Panel, String> {
+        Panel::open_unless(path, &files::default_secrets())
+    }
+
+    /// Open `path` unless it holds secrets (`files::secret_paths`): the panel shows files in clear.
+    pub(super) fn open_unless(path: PathBuf, secrets: &[PathBuf]) -> std::result::Result<Panel, String> {
+        let real = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if files::is_secret(&path, secrets) || files::is_secret(&real, secrets) {
+            return Err(format!("{} holds secrets; zen doesn't show it", path.display()));
+        }
         let mut p = Panel { path, text: String::new(), modified: None, scroll: 0, lines: Vec::new(), lines_w: 0 };
         p.load()?;
         Ok(p)
@@ -408,6 +417,31 @@ mod tests {
         assert_eq!(a.panel.as_ref().map(|p| p.path.clone()), Some(path.clone()));
         a.command("/open /no/such/file").await.unwrap();
         assert!(a.notice.as_ref().is_some_and(|(t, s)| t.starts_with("can't open") && *s == Sty::Err), "{:?}", a.notice);
+    }
+
+    #[tokio::test]
+    async fn the_files_tab_never_lists_or_shows_secret_files() {
+        let home = TempDir::new("zenhome");
+        home.file("token", "zen-token-s3cret");
+        home.file("env", "ANTHROPIC_API_KEY=s3cret");
+        home.file("matrix/recovery-key", "s3cret");
+        home.file("config.toml", "model = \"x\"");
+        let secrets = files::secret_paths(home.path(), &home.join("user"));
+        let mut a = app(110, 24);
+        a.files = Some(Files::with_secrets(home.path().to_path_buf(), secrets.clone()));
+        a.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)).await.unwrap();
+        a.draw();
+        // The panel's side of each row (the chat's footer counts tokens).
+        let rows = plain_rows(&a).iter().filter_map(|r| r.split_once(" │ ").map(|(_, p)| p.to_string())).collect::<Vec<_>>().join("\n");
+        assert!(rows.contains("config.toml"), "{rows}");
+        assert!(!rows.contains("token") && !rows.contains("env") && !rows.contains("matrix"), "{rows}");
+        // Opened by path (`/open`), a secret file is refused, also through a symlink.
+        let err = Panel::open_unless(home.join("token"), &secrets).err().unwrap();
+        assert!(err.contains("holds secrets"), "{err}");
+        std::os::unix::fs::symlink(home.join("matrix"), home.join("m")).unwrap();
+        let real: Vec<PathBuf> = secrets.iter().filter_map(|p| std::fs::canonicalize(p).ok()).collect();
+        assert!(Panel::open_unless(home.join("m/recovery-key"), &real).is_err());
+        assert!(Panel::open_unless(home.join("config.toml"), &secrets).is_ok());
     }
 
     #[tokio::test]

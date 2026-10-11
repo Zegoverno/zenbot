@@ -56,7 +56,7 @@ Inside: `/new`, `/resume`, `/board`, `/model`, `/effort`, `/done`, `/rename <tit
 For scripts, every command accepts `--json` and exits non-zero on failure:
 
 ```bash
-zen ask "Find large files in ~ and summarize"     # one task: streams the answer, tools on stderr
+zen ask "Find large files in ~ and summarize"     # one task: streams the answer, tools on stderr; Ctrl-C stops it, twice leaves
 echo "notes…" | zen ask "Summarize this" --json   # prompt from stdin, JSON result
 zen ask -s 3f2a "And now fix it"                  # continue a session (id or prefix)
 zen sessions ls | show <id> | new | archive <id> | restore <id> | rename <id> <title>

@@ -6,6 +6,26 @@
 
 ---
 
+## 2026-10-11 — zen: a lighter board, paged sessions, safer terminal text
+
+- The sessions board fetched `/api/board` inside the render loop every 2 seconds, so a slow kernel
+  froze keys and drawing, and the kernel sent every session ever made with all its children. The
+  fetch now runs in a task of its own and the rows are rebuilt only when the answer changed; the
+  kernel sends the latest 200 sessions with the latest 20 children of each (running ones always),
+  archived sessions only when the board shows them (otherwise a count), and each session's
+  `children` count.
+- Opening a session loaded its whole tape to show the last 40 messages. It now asks for the last
+  40; the kernel adds `message_count` and the session's `tokens` for the footer.
+- Streamed text draws at most ~30 frames a second; text is cut between grapheme clusters (emoji no
+  longer shift the side panel's divider); inline markdown renders in linear time; the Files tab
+  never lists or opens secret files; a panic in any task restores the terminal and ends zen;
+  `jobs runs` can't panic on a short id.
+- `zen ask`: a second Ctrl-C leaves without waiting for the turn to stop. The kernel pings a quiet
+  session WebSocket every 30 seconds so proxies don't close it during a long tool call.
+- `crates/zen/src/main.rs` (1,237 lines) is split into `cli`, `turn`, `setup` and `print`.
+- Tested: render and key tests (board fetches, paging, Files tab, emoji, frame rate), e2e checks of
+  the board's archived count, `children` and `message_count`, `scripts/check.sh`.
+
 ## 2026-10-11 — Operations hardening: a private database password, safer upgrades, honest security docs
 
 - Postgres used the public password `zen`, so any process on the VM could rewrite zenbot's state.

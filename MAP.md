@@ -133,9 +133,9 @@ From `main.rs` (router) and `api.rs`. Everything under `/api` needs the token in
 | GET | `/health` | `health` | No auth. `{ok, db, mind, workers:{name:bool}, ignored_workers, busy, version, commit}`; pings every worker; `ignored_workers` (names in `ZEN_WORKERS` that aren't known workers) don't affect `ok`. `busy` = running turns + kernel work outside them. Used by `wait_healthy` and `apply-upgrade.sh` (`"busy":0`) |
 | GET | `/api/models` | `list_models` | Asks every worker for `models.list`, refreshes routes, returns all worker models by default (`ZEN_MODELS` optionally curates, plus any `faux/*`), `authenticated`, `default`, `scorer` |
 | GET | `/api/sessions?archived=` | `list_sessions` | The owner's sessions and scheduled jobs' sessions (`kind IS NULL OR kind = 'job'`; subagents, verifiers and kernel sessions hidden), with cost |
-| GET | `/api/board` | `board` | Every session (archived and child ones too), newest activity first, with `kind`, `parent`, `busy`, `waiting` (unanswered `ask` questions) and, for child sessions, `task` (first message); no cost. zen's sessions board polls it |
+| GET | `/api/board?archived=` | `board` | The latest 200 sessions (archived ones only when asked; otherwise counted) and the latest 20 children of each plus running ones, newest activity first, with `kind`, `parent`, `busy`, `waiting` (unanswered `ask` questions), `children` (a count) and, for child sessions, `task` (first message); no cost. zen's sessions board polls it |
 | POST | `/api/sessions` | `create_session` | `{title?, model?, effort?}` |
-| GET | `/api/sessions/{id}?last=&after=` | `get_session` | Session, its `message` blocks (with `seq`; all, the `last` N, or those after `after`) and `busy` |
+| GET | `/api/sessions/{id}?last=&after=` | `get_session` | Session, its `message` blocks (with `seq`; all, the `last` N, or those after `after`), `message_count`, `tokens` and `busy` |
 | PATCH | `/api/sessions/{id}` | `update_session` | Title, model, effort (`"default"` clears it), archived |
 | GET | `/api/sessions/{id}/ws` | `session_ws` | WebSocket; its session's event hub is created on connect and freed when the last client leaves. Client sends `{type:"prompt",text}` or `{type:"abort"}`. A `prompt` may carry `suggestion: {id, taken}` (what the owner did with the suggested prompt). Server events: `message`, `delta`, `thinking`, `tool_start`, `tool_end`, `busy`, `end`, `status`, `questions`, `child_end`, `title`, `suggestion`, `error`, `resync` |
 | POST | `/api/sessions/{id}/decision` | `decide` | `{decision: accept\|more\|reshape\|drop, note?}` → `session_decisions`; triggers scoring; `accept` activates draft skills the session loaded (`workshop::on_accept`) |
@@ -219,16 +219,20 @@ Code that depends on a CLI's flags or output should fail loudly, so the daily en
 
 ---
 
-## Layer 3 — CLI `zen` (`crates/zen`, ~6,700 lines)
+## Layer 3 — CLI `zen` (`crates/zen`, ~7,200 lines)
 
 | File | Lines | Role | Depends on | Used by |
 |---|---|---|---|---|
-| `src/main.rs` | 1217 | clap commands (plain `zen` opens the sessions board): `ask`, `chat`, `sessions {ls,new,show,archive,restore,rename,decide}`, `memory [--tier short\|archived\|all] [sleep]`, `jobs [add\|set\|pause\|resume\|rm\|run\|runs]`, `skills [accept\|reject <domain/name> <sha>]` (use per skill and the made tools, each draft's and tool's fingerprint; accepting or rejecting names the fingerprint reviewed), `tools accept\|reject <name> <sha>` (a `made_` prefix is dropped), `policy [set <kind> <model> [--candidates a,b] [--explore x] \| undo]` (the routing policy and its evidence), `suggestions` (what became of suggested prompts), `models`, `login [claude\|codex]`, `status` (with memory, jobs and engines lines), `upgrade [--check]`; flags `--url` (`ZEN_URL`), `--token` (`ZEN_TOKEN`), `--json`, `-c`, `-r`, `-m`, `-e`, `--inline` (`ZEN_INLINE`). Reads `<zen home>/env` (for `ZEN_REPO`, `PATH`) and `<zen home>/engines.json` | `client`, `tui`, `md` | owner, scripts (`zen ask --json`), e2e, evals |
+| `src/main.rs` | 382 | Entry and `run`: dispatches each command (plain `zen` opens the sessions board; piped input without a command is `zen ask`) | `cli`, `client`, `turn`, `print`, `setup`, `tui` | owner, scripts (`zen ask --json`), e2e, evals |
+| `src/cli.rs` | 266 | clap arguments and subcommands: `ask`, `chat`, `sessions {ls,new,show,archive,restore,rename,decide}`, `memory [--tier short\|archived\|all] [sleep]`, `jobs [add\|set\|pause\|resume\|rm\|run\|runs]`, `skills [accept\|reject <domain/name> <sha>]` (use per skill and the made tools, each draft's and tool's fingerprint; accepting or rejecting names the fingerprint reviewed), `tools accept\|reject <name> <sha>` (a `made_` prefix is dropped), `policy [set <kind> <model> [--candidates a,b] [--explore x] \| undo]` (the routing policy and its evidence), `suggestions` (what became of suggested prompts), `models`, `login [claude\|codex]`, `status` (with memory, jobs and engines lines), `upgrade [--check]`; flags `--url` (`ZEN_URL`), `--token` (`ZEN_TOKEN`), `--json`, `-c`, `-r`, `-m`, `-e`, `--inline` (`ZEN_INLINE`) | clap | `main.rs` |
+| `src/turn.rs` | 305 | `zen ask` and line-by-line `zen chat`: stream one turn over the session WebSocket (Ctrl-C stops it, a second one leaves) and report it (`--json`: text, tools, the kernel's turn records) | `client`, `print` | `main.rs` |
+| `src/setup.rs` | 157 | Reads `<zen home>/env` (for `ZEN_REPO`, `PATH`) and `<zen home>/engines.json`; engine sign-in (`zen login`), git identity for `zen status` | `client` | `main.rs`, `tui/` |
+| `src/print.rs` | 182 | How script commands print: `emit` (JSON or text), sanitized stdout/stderr, sessions, messages, memory, jobs and suggestions lines | `client`, `md` | `main.rs`, `turn.rs` |
 | `src/client.rs` | 332 | HTTP + WebSocket client; `zen_home` (`ZEN_HOME`, else `~/.zenbot`); token from `--token`/`ZEN_TOKEN` or `<zen home>/token`; upgrade wait/poll messages | reqwest, tungstenite | `main.rs`, `tui/` |
-| `src/tui/` | ~4,200 | Interactive app split into `mod` (lifecycle), `state` (sessions/reconnect), `events`, `input`, `render`, `transcript` (incremental streaming and view), `board` (the sessions board, zen's home screen), `panel`, `pickers`, `inline`, `files` and `test_util`. Full screen has a diffed, scrollable view and side panel; inline keeps scrollback. Terminal text is sanitized, requests fail into notices rather than exiting, and reconnect rebuilds from the server. Prompt history is private JSON lines in `<zen home>/history`. Render/key tests live beside the modules | `client`, `editor`, `md` | `main.rs` |
-| `src/screen.rs` | 124 | Full-screen frames: writes only changed rows in place; `fit` cuts/pads styled lines; `row` joins chat and panel | `md` | `tui/render.rs` |
+| `src/tui/` | ~4,500 | Interactive app split into `mod` (lifecycle), `state` (sessions/reconnect), `events`, `input`, `render`, `transcript` (incremental streaming and view), `board` (the sessions board, zen's home screen, fetched in a task of its own), `panel`, `pickers`, `inline`, `files` and `test_util`. Full screen has a diffed, scrollable view and side panel; inline keeps scrollback. Terminal text is sanitized, requests fail into notices rather than exiting, and reconnect rebuilds from the server. Prompt history is private JSON lines in `<zen home>/history`. Render/key tests live beside the modules | `client`, `editor`, `md`, `setup` | `main.rs` |
+| `src/screen.rs` | 141 | Full-screen frames: writes only changed rows in place; `fit` cuts/pads styled lines; `row` joins chat and panel | `md` | `tui/render.rs` |
 | `src/editor.rs` | 512 | Multi-line input editor with prompt history | — | `tui/` |
-| `src/md.rs` | 277 | Styled lines, word wrap, line-oriented markdown renderer, terminal text sanitizer | — | `tui/`, `main.rs` |
+| `src/md.rs` | 375 | Styled lines, word wrap, line-oriented markdown renderer, terminal text sanitizer | — | `tui/`, `print.rs` |
 
 UI changes to `tui/` / `editor.rs` come with render or key tests (AGENTS.md).
 
@@ -236,7 +240,7 @@ UI changes to `tui/` / `editor.rs` come with render or key tests (AGENTS.md).
 
 `text_of` (message content as text, in the message format the tape stores), `head`, `tail`. Used
 by `zend` (`api`, `agent`, `assist`, `compact`, `delegate`, `jobs`, `mcp`, `memory`, `score`,
-`search`, `web`, `wiki`, `workshop`), `zen-engine` (`turn`), `zen` (`main`, `tui`) and `zen-matrix`
+`search`, `web`, `wiki`, `workshop`), `zen-engine` (`turn`), `zen` (`turn`, `print`, `tui`) and `zen-matrix`
 (`relay`). Changing how content is read changes it in all four.
 
 ---

@@ -101,30 +101,59 @@ pub(crate) async fn list_sessions(State(app): State<AppState>, Query(q): Query<L
     Ok(Json(Value::Array(rows.iter().map(session_json).collect())))
 }
 
-/// Every session for the sessions board (`zen`'s home screen): main and job sessions, archived
-/// ones too, and their child sessions (subagents, verifiers) with the task each was given. Each
-/// says whether a turn is running in it right now, and whether it's waiting on the owner: its
-/// latest `ask` questions came after the owner's latest message (a message the kernel sent in the
-/// owner's place, `kernel: true`, isn't an answer). The client nests children under their parent.
+#[derive(Deserialize)]
+pub(crate) struct BoardQuery {
+    /// Include archived sessions (and their children).
+    archived: Option<bool>,
+}
+
+/// Most top-level sessions on the board (the latest active), and most child sessions under each
+/// (the latest; running ones always show). The board is polled every few seconds.
+const BOARD_SESSIONS: i64 = 200;
+const BOARD_CHILDREN: i64 = 20;
+
+/// The sessions board (`zen`'s home screen): main and job sessions, the latest `BOARD_SESSIONS`,
+/// archived ones only with `?archived=true` (otherwise `archived` counts them), and under each
+/// its child sessions (subagents, verifiers): the latest `BOARD_CHILDREN` and any running, each
+/// with the task it was given; `children` says how many a session has in all. Each says whether
+/// a turn is running in it right now, and whether it's waiting on the owner: its latest `ask`
+/// questions came after the owner's latest message (a message the kernel sent in the owner's
+/// place, `kernel: true`, isn't an answer). The client nests children under their parent.
 /// No costs: the board polls this, and they'd double its time.
-pub(crate) async fn board(State(app): State<AppState>) -> ApiResult<Json<Value>> {
+pub(crate) async fn board(State(app): State<AppState>, Query(q): Query<BoardQuery>) -> ApiResult<Json<Value>> {
+    let archived = q.archived.unwrap_or(false);
+    let running: Vec<Uuid> = app.turns.lock().await.keys().copied().collect();
     let rows = sqlx::query(&format!(
-        "SELECT {SESSION_COLUMNS},
+        "WITH top AS (
+           SELECT id FROM sessions WHERE parent IS NULL AND ($1 OR NOT archived) ORDER BY updated_at DESC LIMIT $3
+         ), kids AS (
+           SELECT id FROM (
+             SELECT c.id, row_number() OVER (PARTITION BY c.parent ORDER BY c.updated_at DESC) AS n
+             FROM sessions c JOIN top ON c.parent = top.id) k
+           WHERE n <= $4 OR id = ANY($2)
+         )
+         SELECT {SESSION_COLUMNS},
            CASE WHEN s.parent IS NOT NULL THEN
              (SELECT e.payload->'content' FROM tape_events e
               WHERE e.session_id = s.id AND e.kind = 'message' AND e.payload->>'role' = 'user' ORDER BY e.seq LIMIT 1)
            END AS task,
+           CASE WHEN s.parent IS NULL THEN (SELECT count(*) FROM sessions c WHERE c.parent = s.id) END AS children,
            q.last IS NOT NULL AND NOT EXISTS (
              SELECT 1 FROM tape_events m
              WHERE m.session_id = s.id AND m.kind = 'message' AND m.seq > q.last
                AND m.payload->>'role' = 'user' AND m.payload->>'kernel' IS NULL) AS waiting
          FROM sessions s
          LEFT JOIN LATERAL (SELECT max(e.seq) AS last FROM tape_events e WHERE e.session_id = s.id AND e.kind = 'questions') q ON true
+         WHERE s.id IN (SELECT id FROM top UNION ALL SELECT id FROM kids)
          ORDER BY s.updated_at DESC"
     ))
+    .bind(archived)
+    .bind(&running)
+    .bind(BOARD_SESSIONS)
+    .bind(BOARD_CHILDREN)
     .fetch_all(&app.db)
     .await?;
-    let running: HashSet<Uuid> = app.turns.lock().await.keys().copied().collect();
+    let running: HashSet<Uuid> = running.into_iter().collect();
     let sessions = rows
         .iter()
         .map(|r| {
@@ -136,10 +165,18 @@ pub(crate) async fn board(State(app): State<AppState>) -> ApiResult<Json<Value>>
             if let Some(task) = r.get::<Option<Value>, _>("task") {
                 s["task"] = json!(zen_proto::text_of(&task).chars().take(200).collect::<String>());
             }
+            if let Some(n) = r.get::<Option<i64>, _>("children") {
+                s["children"] = json!(n);
+            }
             s
         })
         .collect();
-    Ok(Json(json!({ "sessions": Value::Array(sessions) })))
+    let mut out = json!({ "sessions": Value::Array(sessions) });
+    if !archived {
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE parent IS NULL AND archived").fetch_one(&app.db).await?;
+        out["archived"] = json!(n);
+    }
+    Ok(Json(out))
 }
 
 /// The columns `session_json` reads, without the cost (each query computes it its own way).
@@ -276,6 +313,21 @@ pub(crate) async fn get_session(State(app): State<AppState>, Path(id): Path<Uuid
                 .collect()
         }
     });
+    // What a client shows of a session it opens on its latest messages: how many there are in
+    // all, and the tokens of the whole session (its turns, and calls recorded before turns were,
+    // as `session_cost` counts them).
+    let totals = sqlx::query(
+        "SELECT (SELECT count(*) FROM tape_events WHERE session_id = $1 AND kind = 'message') AS messages,
+                COALESCE((SELECT SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) + COALESCE(cache_read, 0) + COALESCE(cache_write, 0))
+                          FROM turns WHERE session_id = $1), 0)::int8
+              + COALESCE((SELECT SUM(input_tokens + output_tokens + cache_read + cache_write)
+                          FROM model_calls WHERE session_id = $1 AND turn_id IS NULL), 0)::int8 AS tokens",
+    )
+    .bind(id)
+    .fetch_one(&app.db)
+    .await?;
+    session["message_count"] = json!(totals.get::<i64, _>("messages"));
+    session["tokens"] = json!(totals.get::<i64, _>("tokens"));
     session["busy"] = json!(app.is_busy(id).await);
     Ok(Json(session))
 }
@@ -338,13 +390,29 @@ pub(crate) async fn session_ws(State(app): State<AppState>, Path(id): Path<Uuid>
     ws.on_upgrade(move |socket| handle_socket(app, id, socket))
 }
 
+/// How long a session's WebSocket may stay quiet before the kernel pings the client.
+const WS_KEEPALIVE: Duration = Duration::from_secs(30);
+
 pub(crate) async fn handle_socket(app: AppState, id: Uuid, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
     let mut rx = app.subscribe(id).await;
     let fwd_app = app.clone();
     let forward = tokio::spawn(async move {
+        // A ping when nothing else was sent for a while, so proxies don't close a connection
+        // that's quiet during a long tool call (clients answer pings on their own).
+        let mut keepalive = tokio::time::interval(WS_KEEPALIVE);
+        keepalive.reset();
         loop {
-            let msg = match rx.recv().await {
+            let got = tokio::select! {
+                got = rx.recv() => got,
+                _ = keepalive.tick() => {
+                    if sink.send(Message::Ping(Default::default())).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+            };
+            let msg = match got {
                 Ok(msg) => msg,
                 // This client fell behind and missed events: say so and carry on. `busy` lets the
                 // client finish a turn whose `end` it may have missed.
@@ -356,6 +424,7 @@ pub(crate) async fn handle_socket(app: AppState, id: Uuid, socket: WebSocket) {
             if sink.send(Message::Text(msg.into())).await.is_err() {
                 break;
             }
+            keepalive.reset();
         }
     });
     while let Some(Ok(msg)) = stream.next().await {

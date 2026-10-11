@@ -3,7 +3,8 @@
 //! cleared first, so the screen never shows a blank moment, even on terminals that ignore
 //! synchronized output (DEC mode 2026, which we still send).
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::md::{to_ansi, Line, Sty};
 
@@ -61,14 +62,16 @@ pub fn fit(l: &Line, width: usize, pad: bool) -> Line {
             out.push((text.clone(), *sty));
             continue;
         }
+        // Cut between grapheme clusters, each measured as the whole segment was, so an emoji
+        // sequence (❤️, a ZWJ family) is kept or dropped whole and columns stay where they are.
         let mut cut = String::new();
-        for ch in text.chars() {
-            let cw = ch.width().unwrap_or(0);
-            if w + cw > width {
+        for g in text.graphemes(true) {
+            let gw = UnicodeWidthStr::width(g);
+            if w + gw > width {
                 break;
             }
-            cut.push(ch);
-            w += cw;
+            cut.push_str(g);
+            w += gw;
         }
         out.push((cut, *sty));
         break;
@@ -120,5 +123,19 @@ mod tests {
         assert_eq!(UnicodeWidthStr::width(text.as_str()), 5);
         let row = row(Some(&line("chat", Sty::Plain)), Some((Some(&line("file", Sty::Plain)), 10)), 6);
         assert_eq!(row, "chat  \x1b[2m │ \x1b[0mfile");
+    }
+
+    #[test]
+    fn fit_keeps_emoji_sequences_whole() {
+        let family = "👨\u{200d}👩\u{200d}👧";
+        for (text, width) in [("ab❤\u{fe0f}cd".to_string(), 3), (format!("a{family}b"), 2), (format!("a{family}b"), 3)] {
+            let cut = fit(&vec![(text.clone(), Sty::Plain)], width, true);
+            let out: String = cut.iter().map(|(t, _)| t.as_str()).collect();
+            assert_eq!(UnicodeWidthStr::width(out.as_str()), width, "{text:?} at {width}: {out:?}");
+            assert!(!out.contains('\u{fe0f}') || out.contains('❤'), "no stray variation selector: {out:?}");
+            assert!(out.matches('\u{200d}').count().is_multiple_of(2), "a ZWJ family is kept or dropped whole: {out:?}");
+        }
+        let side = row(Some(&line(format!("{family}❤\u{fe0f} chat"), Sty::Plain)), Some((Some(&line("file", Sty::Plain)), 4)), 6);
+        assert!(side.starts_with(&format!("{family}❤\u{fe0f} c\x1b[2m │")), "two 2-column emoji: the divider stays in column 7: {side:?}");
     }
 }

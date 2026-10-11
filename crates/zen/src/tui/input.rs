@@ -259,8 +259,8 @@ impl App {
                 }
             }
             // A subagent's session is watched, never interrupted from here: esc goes back.
-            KeyCode::Esc if self.read_only && !self.inline => self.open_board().await,
-            KeyCode::Esc if self.editor.is_empty() && !self.busy && !self.inline => self.open_board().await,
+            KeyCode::Esc if self.read_only && !self.inline => self.open_board(),
+            KeyCode::Esc if self.editor.is_empty() && !self.busy && !self.inline => self.open_board(),
             KeyCode::Esc => {
                 if self.busy && !self.read_only {
                     self.abort().await;
@@ -385,7 +385,7 @@ impl App {
             if m.len() == 1 { Some(m[0]) } else { None }
         });
         match cmd {
-            Some("/board") => self.open_board().await,
+            Some("/board") => self.open_board(),
             Some("/new" | "/resume") if self.still_working() => {}
             Some("/new") => self.fresh_session(),
             Some("/resume") => self.open_session_picker().await?,

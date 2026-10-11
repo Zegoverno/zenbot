@@ -55,6 +55,7 @@ impl App {
         let text = clean(ev["text"].as_str().or(ev["line"].as_str()).unwrap_or(""));
         match ev["type"].as_str().unwrap_or("") {
             "update_available" => self.commit(vec![line(text, Sty::Warn), Vec::new()]),
+            "board" => self.board_loaded(ev),
             "upgrade_log" => self.commit(vec![line(text, Sty::Dim)]),
             "upgrade_done" => {
                 self.upgrading = false;
@@ -143,7 +144,7 @@ impl App {
                 self.status = "Writing".into();
                 self.tool_since = None;
                 if !self.inline {
-                    self.draw(); // the whole reply so far shows in the conversation
+                    self.draw_soon(); // the whole reply so far shows in the conversation
                     return;
                 }
                 let mut out = Vec::new();
@@ -153,7 +154,7 @@ impl App {
                     self.committed += pos + 1;
                 }
                 if out.is_empty() {
-                    self.draw();
+                    self.draw_soon();
                 } else {
                     self.commit(out);
                 }

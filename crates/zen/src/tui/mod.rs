@@ -91,7 +91,7 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
     let models = c.get("/api/models").await?;
     let default_model = models["default"].as_str().unwrap_or("").to_string();
     let catalog: Vec<Value> = models["models"].as_array().cloned().unwrap_or_default();
-    let signed_in = crate::engine_signed_in(&models);
+    let signed_in = crate::setup::engine_signed_in(&models);
 
     let history = Some(zen_home().join("history"));
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -106,10 +106,14 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
     terminal::enable_raw_mode()?;
     let enhanced = terminal::supports_keyboard_enhancement().unwrap_or(false);
     app.enhanced = enhanced;
+    // A panic anywhere (a spawned task too) gives the terminal back and ends zen: a task that
+    // died would otherwise leave the app running on a restored, garbled terminal. 101 is the
+    // exit code of a Rust panic.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore_terminal(inline, enhanced);
         default_hook(info);
+        std::process::exit(101);
     }));
     let mut out = std::io::stdout();
     if let Err(e) = out.write_all(setup_sequence(inline, enhanced).as_bytes()).and_then(|_| out.flush()) {
@@ -137,7 +141,7 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
             }
         });
         match start {
-            Start::Board if !inline => app.open_board().await,
+            Start::Board if !inline => app.open_board(),
             Start::Board | Start::New => {}
             Start::Continue => {
                 let list = app.c.get("/api/sessions?archived=false").await?;
@@ -159,6 +163,8 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
         let mut watch = tokio::time::interval(Duration::from_millis(500));
         let mut install_check = tokio::time::interval(Duration::from_secs(5));
         let mut board_poll = tokio::time::interval(BOARD_REFRESH);
+        let mut frame = tokio::time::interval(FRAME);
+        frame.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         while !app.quit {
             tokio::select! {
                 ev = events.next() => match ev {
@@ -167,6 +173,8 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
                     None => break,
                 },
                 Some(msg) = rx.recv() => app.on_incoming(msg).await,
+                // Streamed text that arrived since the last frame.
+                _ = frame.tick(), if app.dirty => app.draw(),
                 _ = tick.tick(), if app.busy || app.board_running() => {
                     if app.board.is_some() {
                         app.rebuild_board();
@@ -174,11 +182,9 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
                     app.spin = app.spin.wrapping_add(1);
                     app.draw();
                 }
-                // The board follows what runs in every session.
-                _ = board_poll.tick(), if app.board.is_some() => {
-                    app.refresh_board().await;
-                    app.draw();
-                }
+                // The board follows what runs in every session (fetched apart from this loop, so
+                // a slow kernel never holds up keys or drawing; the answer comes as an event).
+                _ = board_poll.tick(), if app.board.as_ref().is_some_and(|b| !b.loading) => app.refresh_board(),
                 // The side panel follows its file as it changes (e.g. while zenbot edits it).
                 _ = watch.tick(), if app.panel.is_some() => {
                     if app.panel.as_mut().is_some_and(Panel::reload_if_changed) {

@@ -1,7 +1,8 @@
 //! Styled terminal lines, word wrapping, and a small line-oriented markdown renderer.
 //! Line-oriented so streamed text can be committed to scrollback as each line completes.
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Sty {
@@ -149,16 +150,18 @@ pub fn wrap(segs: Vec<Seg>, width: usize, prefix: Seg, cont: Seg) -> Vec<Line> {
                 w = cont_w;
             }
             if w + tw > width {
-                for ch in tok.chars() {
-                    let cw = ch.width().unwrap_or(0);
-                    if w + cw > width && w > start_w {
+                // A word longer than the line is cut between user-perceived characters (grapheme
+                // clusters), measured the way the whole word was: a ZWJ emoji or ❤️ (with its
+                // variation selector) stays whole and as wide as the terminal draws it.
+                for g in tok.graphemes(true) {
+                    let gw = UnicodeWidthStr::width(g);
+                    if w + gw > width && w > start_w {
                         lines.push(std::mem::replace(&mut cur, vec![cont.clone()]));
                         start_w = cont_w;
                         w = cont_w;
                     }
-                    let mut b = [0u8; 4];
-                    push(&mut cur, ch.encode_utf8(&mut b), sty);
-                    w += cw;
+                    push(&mut cur, g, sty);
+                    w += gw;
                 }
             } else {
                 push(&mut cur, tok, sty);
@@ -171,11 +174,21 @@ pub fn wrap(segs: Vec<Seg>, width: usize, prefix: Seg, cont: Seg) -> Vec<Line> {
     lines
 }
 
-/// Inline markdown: `code` and **bold**.
+/// Inline markdown: `code` and **bold**. Linear in the line's length: where the next backtick
+/// and the next `**` start is worked out once, from the end, so an unmatched delimiter in a long
+/// line (a streamed reply's unfinished last line is rendered again as it grows) doesn't cost a
+/// search to the end of the line at every position.
 fn inline(text: &str, base: Sty) -> Vec<Seg> {
     let mut segs = Vec::new();
     let mut cur = String::new();
     let chars: Vec<char> = text.chars().collect();
+    // next_tick[i]: the first backtick at or after i; next_stars[i]: the first `**` at or after i.
+    let mut next_tick = vec![None; chars.len() + 1];
+    let mut next_stars = vec![None; chars.len() + 1];
+    for i in (0..chars.len()).rev() {
+        next_tick[i] = if chars[i] == '`' { Some(i) } else { next_tick[i + 1] };
+        next_stars[i] = if chars[i] == '*' && chars.get(i + 1) == Some(&'*') { Some(i) } else { next_stars[i + 1] };
+    }
     let mut i = 0;
     let flush = |cur: &mut String, segs: &mut Vec<Seg>| {
         if !cur.is_empty() {
@@ -184,7 +197,7 @@ fn inline(text: &str, base: Sty) -> Vec<Seg> {
     };
     while i < chars.len() {
         if chars[i] == '`' {
-            if let Some(j) = (i + 1..chars.len()).find(|&j| chars[j] == '`') {
+            if let Some(j) = next_tick[i + 1] {
                 flush(&mut cur, &mut segs);
                 segs.push((chars[i + 1..j].iter().collect(), Sty::Code));
                 i = j + 1;
@@ -192,7 +205,7 @@ fn inline(text: &str, base: Sty) -> Vec<Seg> {
             }
         }
         if chars[i] == '*' && chars.get(i + 1) == Some(&'*') {
-            if let Some(j) = (i + 2..chars.len().saturating_sub(1)).find(|&j| chars[j] == '*' && chars[j + 1] == '*') {
+            if let Some(j) = next_stars.get(i + 2).copied().flatten() {
                 flush(&mut cur, &mut segs);
                 segs.push((chars[i + 2..j].iter().collect(), if base == Sty::Dim { Sty::Dim } else { Sty::Bold }));
                 i = j + 2;
@@ -273,5 +286,90 @@ mod tests {
         assert!(matches!(sanitize("plain"), std::borrow::Cow::Borrowed(_)));
         let out = to_ansi(&vec![(evil.to_string(), Sty::Err), ("a\nb".to_string(), Sty::Plain)]);
         assert_eq!(out, "\x1b[31mtitle]0;pwned [2J[5A31m    tab\x1b[0ma b", "only our own styling escapes are left");
+    }
+
+    fn text(l: &Line) -> String {
+        l.iter().map(|(t, _)| t.as_str()).collect()
+    }
+
+    fn plain(text: &str) -> Vec<Seg> {
+        vec![(text.to_string(), Sty::Plain)]
+    }
+
+    fn none() -> Seg {
+        (String::new(), Sty::Plain)
+    }
+
+    #[test]
+    fn wrap_breaks_at_spaces_with_prefixes_and_cuts_long_words() {
+        let lines = wrap(plain("the quick brown fox jumps over the lazy dog"), 16, ("> ".into(), Sty::Dim), ("  ".into(), Sty::Plain));
+        let t: Vec<String> = lines.iter().map(text).collect();
+        assert_eq!(t, ["> the quick", "  brown fox", "  jumps over the", "  lazy dog"]);
+        assert!(t.iter().all(|l| UnicodeWidthStr::width(l.as_str()) <= 16));
+        // A word longer than the line is cut where the line ends.
+        let t: Vec<String> = wrap(plain("abcdefghijklmnopqrstuvwxyz"), 12, none(), none()).iter().map(text).collect();
+        assert_eq!(t, ["abcdefghijkl", "mnopqrstuvwx", "yz"]);
+        // Leading indentation stays on the first line (code); styles stay with their text.
+        let lines = wrap(vec![("    x = 1".into(), Sty::Code)], 20, none(), none());
+        assert_eq!(text(&lines[0]), "    x = 1");
+        assert!(lines[0].iter().all(|(t, s)| t.is_empty() || *s == Sty::Code));
+        // Wide characters count two columns.
+        let t: Vec<String> = wrap(plain("界界界界界界界界"), 12, none(), none()).iter().map(text).collect();
+        assert_eq!(t, ["界界界界界界", "界界"]);
+    }
+
+    #[test]
+    fn wrap_never_splits_an_emoji_sequence() {
+        let family = "👨\u{200d}👩\u{200d}👧";
+        let word = format!("{}{}", "❤\u{fe0f}".repeat(5), family.repeat(5));
+        for l in wrap(plain(&word), 12, none(), none()) {
+            let t = text(&l);
+            assert!(UnicodeWidthStr::width(t.as_str()) <= 12, "{t:?}");
+            assert!(!t.starts_with('\u{fe0f}') && !t.starts_with('\u{200d}') && !t.ends_with('\u{200d}'), "{t:?}");
+        }
+    }
+
+    #[test]
+    fn markdown_basics() {
+        let mut md = Md::default();
+        let r = |md: &mut Md, l: &str| md.render_line(l, 40);
+        // Headings are bold, without the hashes.
+        let h = r(&mut md, "## A **big** title");
+        assert_eq!(text(&h[0]), "A big title");
+        assert!(h[0].iter().all(|(t, s)| t.is_empty() || *s == Sty::Bold), "{h:?}");
+        // Inline code and bold.
+        let p = r(&mut md, "run `cargo test` **now**");
+        assert_eq!(p[0], [("run ".into(), Sty::Plain), ("cargo test".into(), Sty::Code), (" ".into(), Sty::Plain), ("now".into(), Sty::Bold)]);
+        // Lists: bullets and numbers, continuation lines indented under the text.
+        assert_eq!(text(&r(&mut md, "- item")[0]), "• item");
+        assert_eq!(text(&r(&mut md, "12. twelfth")[0]), "12. twelfth");
+        let long = r(&mut md, "- a list item long enough to wrap onto a second line");
+        assert!(text(&long[1]).starts_with("  ") && !text(&long[1]).starts_with("   "), "{long:?}");
+        // Quotes.
+        assert_eq!(text(&r(&mut md, "> quoted")[0]), "│ quoted");
+        // Code fences: the fence lines vanish, the code is indented, and markdown inside is literal.
+        assert!(r(&mut md, "```rust").is_empty());
+        let code = r(&mut md, "let x = **y**; // # not a heading");
+        assert_eq!(text(&code[0]), "  let x = **y**; // # not a heading");
+        assert!(code[0].iter().any(|(_, s)| *s == Sty::Code));
+        assert!(r(&mut md, "```").is_empty());
+        assert_eq!(text(&r(&mut md, "**bold** again")[0]), "bold again", "the fence closed");
+        // Blank lines stay; a whole text renders line by line.
+        assert_eq!(Md::default().render("a\n\nb", 40).len(), 3);
+    }
+
+    #[test]
+    fn a_long_line_with_unmatched_delimiters_renders_as_typed_and_fast() {
+        // A streamed reply's unfinished last line renders again with every frame; an unmatched
+        // backtick or `**` there must not cost a search to the end of the line from each position.
+        for open in ["`", "**", "` ** `` **"] {
+            let line = format!("{open}{}", "word ** ` x ".repeat(20_000));
+            let start = std::time::Instant::now();
+            let out = Md::default().render_line(&line, 100);
+            assert!(start.elapsed() < std::time::Duration::from_secs(2), "{open}: {:?}", start.elapsed());
+            assert!(out.len() > 1000);
+        }
+        let out = Md::default().render_line("a ` b ** c", 40);
+        assert_eq!(text(&out[0]), "a ` b ** c");
     }
 }

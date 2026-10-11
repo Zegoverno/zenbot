@@ -323,7 +323,8 @@ mod tests {
         s
     }
 
-    /// Streaming cost in full screen: a 43 KB reply in 20-byte deltas, each drawn as it arrives.
+    /// Streaming cost in full screen: a 43 KB reply in 20-byte deltas, drawn as they arrive (at
+    /// most one frame per `FRAME`).
     /// Run with `cargo test --release -p zen -- --ignored --nocapture streaming_cost`.
     #[test]
     fn the_transcript_renders_only_what_changed_and_matches_a_full_render() {
@@ -343,6 +344,21 @@ mod tests {
         a.size = (60, 20);
         a.draw();
         assert_eq!(a.view, full(&a));
+    }
+
+    #[test]
+    fn a_fast_stream_draws_at_most_one_frame_per_tick() {
+        let mut a = app(80, 30);
+        a.busy = true;
+        for i in 0..200 {
+            a.on_event(json!({ "type": "delta", "delta": format!("word{i} ") }));
+        }
+        let out = a.capture.take().unwrap();
+        assert!(out.matches("\x1b[?2026h").count() <= 2, "the first delta draws, the rest wait for the tick");
+        assert!(a.dirty, "the frame tick draws what's left");
+        a.capture = Some(String::new());
+        a.draw(); // the tick
+        assert!(!a.dirty && plain_rows(&a).join("\n").contains("word199"));
     }
 
     #[test]

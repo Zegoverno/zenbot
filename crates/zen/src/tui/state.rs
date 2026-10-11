@@ -113,8 +113,14 @@ pub(super) struct App {
     pub(super) turn_files: std::collections::HashSet<String>,
     /// The sessions board, while it's shown instead of a session.
     pub(super) board: Option<Board>,
+    /// The latest board fetch sent: only its answer is shown (`Board::loading`).
+    pub(super) board_fetch: u64,
     /// The session is a subagent's or a verifier's: watch it, don't type into it or stop it.
     pub(super) read_only: bool,
+    /// When the last frame was drawn, and whether something changed since that waits for the
+    /// next frame tick (`draw_soon`).
+    pub(super) last_draw: Option<Instant>,
+    pub(super) dirty: bool,
 }
 
 /// A suggested next prompt (the kernel's `suggestion` event) and whether the owner took it into
@@ -214,7 +220,10 @@ impl App {
             turn_tools: 0,
             turn_files: Default::default(),
             board: None,
+            board_fetch: 0,
             read_only: false,
+            last_draw: None,
+            dirty: false,
         }
     }
 
@@ -275,7 +284,7 @@ impl App {
     }
 
     pub(super) async fn switch_session(&mut self, id: String) -> Result<()> {
-        let s = self.c.get(&format!("/api/sessions/{id}")).await?;
+        let s = self.c.get(&format!("/api/sessions/{id}?last={HISTORY_SHOWN}")).await?;
         self.reset_session();
         self.session = Some(id.clone());
         self.title = clean(s["title"].as_str().unwrap_or(""));
@@ -287,29 +296,35 @@ impl App {
         Ok(())
     }
 
-    /// Show a session's latest messages and total its tokens for the footer.
+    /// Show a session's latest messages (the kernel sends only those) and its tokens for the
+    /// footer: the kernel's total of the whole session (`tokens`, `message_count`).
     pub(super) fn show_history(&mut self, s: &Value) {
         let msgs = s["messages"].as_array().cloned().unwrap_or_default();
         let mut head: Vec<Line> = vec![line(format!("── {} ──", if self.title.is_empty() { "session" } else { &self.title }), Sty::Dim), Vec::new()];
-        let skip = msgs.len().saturating_sub(40);
-        if skip > 0 {
-            head.push(line(format!("… {skip} earlier messages"), Sty::Dim));
+        let total = s["message_count"].as_u64().map_or(msgs.len(), |n| n as usize).max(msgs.len());
+        let shown = msgs.len().min(HISTORY_SHOWN);
+        let earlier = total - shown;
+        if earlier > 0 {
+            head.push(line(format!("… {earlier} earlier messages"), Sty::Dim));
             head.push(Vec::new());
         }
         let mut entries = vec![Entry::Raw(head)];
-        for m in msgs.iter().skip(skip) {
+        for m in &msgs[msgs.len() - shown..] {
             entries.extend(Self::message_entries(m));
         }
-        // The footer's total covers the whole session, not only the messages shown.
-        for m in msgs.iter().filter(|m| m["role"] == "assistant") {
-            self.session_tokens += usage_total(&m["usage"]);
-        }
+        self.session_tokens = match s["tokens"].as_i64() {
+            Some(t) => t,
+            None => msgs.iter().filter(|m| m["role"] == "assistant").map(|m| usage_total(&m["usage"])).sum(),
+        };
         self.push_all(entries);
         if s["busy"] == true {
             self.begin_turn();
         }
     }
 }
+
+/// The latest messages a session shows when it's opened.
+const HISTORY_SHOWN: usize = 40;
 
 #[cfg(test)]
 mod tests {
@@ -337,13 +352,19 @@ mod tests {
     }
 
     #[test]
-    fn resumed_session_counts_the_tokens_of_messages_not_shown() {
+    fn resumed_session_shows_its_latest_messages_and_the_kernels_totals() {
         let mut a = app(80, 20);
         let msg = json!({ "role": "assistant", "content": [{ "type": "text", "text": "ok" }], "usage": { "input": 10, "output": 5, "cacheRead": 0, "cacheWrite": 0 } });
-        let s = json!({ "title": "t", "messages": vec![msg; 50] });
+        // The kernel sent the latest 40 of 300 messages and the whole session's tokens.
+        let s = json!({ "title": "t", "messages": vec![msg.clone(); 40], "message_count": 300, "tokens": 4500 });
         a.show_history(&s);
         let shown = texts(&a.view).join("\n");
-        assert!(shown.contains("… 10 earlier messages"), "{shown}");
-        assert_eq!(a.session_tokens, 50 * 15, "every message counts, shown or not");
+        assert!(shown.contains("… 260 earlier messages"), "{shown}");
+        assert_eq!(a.session_tokens, 4500, "the whole session, not only the messages shown");
+        // An older kernel sends every message and no totals.
+        let mut a = app(80, 20);
+        a.show_history(&json!({ "title": "t", "messages": vec![msg; 50] }));
+        assert!(texts(&a.view).join("\n").contains("… 10 earlier messages"));
+        assert_eq!(a.session_tokens, 50 * 15);
     }
 }
