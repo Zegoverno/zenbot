@@ -187,7 +187,7 @@ mcp_tools() {
   mkdir -p "$TMP/home/.zenbot"
   cat >"$TMP/home/.zenbot/mcp.json" <<JSON
 { "mcpServers": {
-  "local": { "command": "python3", "args": ["$REPO/scripts/e2e/mcp_server.py"] },
+  "local": { "command": "python3", "args": ["$REPO/scripts/e2e/mcp_server.py", "--child-pidfile", "$TMP/mcp-child.pid"] },
   "remote": { "url": "http://127.0.0.1:$port/mcp", "headers": { "Authorization": "Bearer \${ZEN_E2E_MCP_TOKEN}" }, "allow_env": ["ZEN_E2E_MCP_TOKEN"] },
   "greedy": { "url": "http://127.0.0.1:$port/mcp", "headers": { "Authorization": "Bearer \${ZEN_TOKEN}" }, "exclude": ["echo", "add"] } } }
 JSON
@@ -205,6 +205,24 @@ JSON
   check "the remote call tainted the session" eq "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")" t
   check "the kernel's token is filled in only where allow_env lists it" grep -q 'server `greedy`: environment variables left empty: ZEN_TOKEN (a secret' <<<"$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/mcp" | jq -r '.problems[]')"
   check "the tool list is still fixed" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND kind='envelope'")" 1
+  # One slow call holds up neither the same server's other calls nor the catalog.
+  zen ask --json -m faux/smoke "tool slow" >"$TMP/mcp-slow.json" & local slow=$!
+  sleep 1.5
+  local t0=$SECONDS; r=$(zen ask --json -m faux/smoke "tool quick")
+  check "a call runs while another is slow" bash -c '[ "$1" -lt 5 ] && grep -q "echo: quick" <<<"$2"' _ "$((SECONDS - t0))" \
+    "$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$(echo "$r" | jq -r .session_id)' AND payload->>'role'='toolResult'")"
+  wait "$slow"
+  check "and the slow one finishes" grep -q "slow: done" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$(jq -r .session_id "$TMP/mcp-slow.json")' AND payload->>'role'='toolResult'")"
+  r=$(zen ask --json -m faux/smoke "tool huge")
+  check "an answer over 8 MB is an error, stdio and HTTP" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" call_tool:true,call_tool:true
+  check "saying so" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$(echo "$r" | jq -r .session_id)' AND payload->>'role'='toolResult' AND payload::text LIKE '%over 8 MB%'")" 2
+  # A server's own children go with it: changing mcp.json restarts the servers.
+  local child; child=$(cat "$TMP/mcp-child.pid")
+  check "the local server's child runs" kill -0 "$child"
+  sed -i 's/"exclude": \["echo", "add"\]/"exclude": ["echo"]/' "$TMP/home/.zenbot/mcp.json"
+  zen ask --json -m faux/smoke "tool find" >/dev/null
+  local i; for i in $(seq 1 20); do kill -0 "$child" 2>/dev/null || break; sleep 0.25; done
+  check "and is gone when the server is replaced" bash -c '! kill -0 "$1" 2>/dev/null' _ "$child"
   kill "$srv" 2>/dev/null || true
 }
 

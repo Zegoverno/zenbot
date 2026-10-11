@@ -17,6 +17,12 @@
 //! a tool result) and `call_tool` (run it). Every call goes through the kernel: recorded like any
 //! tool call, with a timeout, output capped and secrets masked.
 //!
+//! Calls run at the same time, to one server and to several: a server's lock is held only to
+//! connect, and its tools are looked up from its last listing (listed again when a stdio server
+//! says they changed). A stdio server gets each request written under a stdin lock and a reader
+//! task hands each answer to its call by id; it runs in its own process group, killed whole when
+//! it's dropped. A message from a server (a stdio line, an HTTP body) over 8 MB fails the call.
+//!
 //! The client is written here, against the MCP spec (2025-06-18), instead of using the `rmcp` crate:
 //! three methods are needed (initialize, tools/list, tools/call), and rmcp would add a second
 //! reqwest and a C crypto build.
@@ -24,14 +30,16 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{anyhow, bail, Context, Result};
+use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 
 use crate::{tools, App};
@@ -157,21 +165,136 @@ pub fn parse_config(text: &str) -> (Vec<ServerConfig>, Vec<String>) {
 
 // ---------- connections ----------
 
-struct Stdio_ {
+/// The largest message a server may send (a stdio line, an HTTP body): past it the call fails
+/// instead of the kernel holding whatever the server streams.
+const MAX_MESSAGE: usize = 8 * 1024 * 1024;
+
+/// A local server's process and the calls waiting for its answers. Calls run at the same time: each
+/// writes its request under the stdin lock only, and a reader task hands each response to the call
+/// with its id (as mind.rs does for workers).
+struct StdioConn {
+    stdin: Mutex<ChildStdin>,
+    pending: std::sync::Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>,
+    /// Set by the reader when the server exited or broke the protocol: connect again.
+    closed: AtomicBool,
+    /// Set when the server said its tool list changed (`notifications/tools/list_changed`).
+    stale: AtomicBool,
+    /// The server runs in its own process group (an `npx` or `sh` starts children): dropping the
+    /// connection kills all of it, not just the first process.
+    _group: tools::GroupKill,
     _child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+}
+
+impl StdioConn {
+    fn fail_pending(&self, why: &str) {
+        self.closed.store(true, Ordering::SeqCst);
+        let waiters: Vec<_> = self.pending.lock().unwrap_or_else(|e| e.into_inner()).drain().collect();
+        for (_, w) in waiters {
+            let _ = w.send(Err(why.to_string()));
+        }
+    }
+
+    async fn write(&self, msg: &Value) -> Result<()> {
+        let mut stdin = self.stdin.lock().await;
+        stdin.write_all(format!("{msg}\n").as_bytes()).await?;
+        stdin.flush().await?;
+        Ok(())
+    }
+}
+
+/// Hand a local server's messages to the calls waiting for them, until it exits.
+async fn read_stdio(conn: std::sync::Weak<StdioConn>, mut stdout: BufReader<ChildStdout>) {
+    let why = loop {
+        let line = match read_line_capped(&mut stdout, MAX_MESSAGE).await {
+            Ok(Some(line)) => line,
+            Ok(None) => break "the server exited".to_string(),
+            Err(e) => break format!("{e:#}"),
+        };
+        let Some(conn) = conn.upgrade() else { return };
+        let Ok(v) = serde_json::from_slice::<Value>(&line) else { continue };
+        match (v.get("method").and_then(Value::as_str), v.get("id")) {
+            (None, Some(id)) => {
+                if let Some(w) = id.as_i64().and_then(|id| conn.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&id)) {
+                    let _ = w.send(Ok(v));
+                }
+            }
+            // A request from the server (sampling, roots, …): not supported.
+            (Some(_), Some(id)) => {
+                let reply = json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": "not supported by zenbot" } });
+                let _ = conn.write(&reply).await;
+            }
+            (Some("notifications/tools/list_changed"), None) => conn.stale.store(true, Ordering::SeqCst),
+            _ => {}
+        }
+    };
+    if let Some(conn) = conn.upgrade() {
+        conn.fail_pending(&why);
+    }
+}
+
+/// One line (without its newline), None at the end of the stream; an error past `max` bytes.
+async fn read_line_capped<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R, max: usize) -> Result<Option<Vec<u8>>> {
+    let mut line = Vec::new();
+    loop {
+        let buf = r.fill_buf().await?;
+        if buf.is_empty() {
+            return Ok((!line.is_empty()).then_some(line));
+        }
+        let (take, done) = match buf.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (buf.len(), false),
+        };
+        if line.len() + take > max + 1 {
+            bail!("the server sent a message over {} MB", max / 1024 / 1024);
+        }
+        line.extend_from_slice(&buf[..take]);
+        r.consume(take);
+        if done {
+            line.pop();
+            return Ok(Some(line));
+        }
+    }
 }
 
 enum Conn {
-    Stdio(Box<Stdio_>),
-    Http { session: Option<String> },
+    Stdio(Arc<StdioConn>),
+    /// `closed` after a failed call: the next one starts a new MCP session.
+    Http { session: std::sync::Mutex<Option<String>>, closed: AtomicBool },
 }
 
+impl Conn {
+    fn usable(&self) -> bool {
+        match self {
+            Conn::Stdio(io) => io.usable(),
+            Conn::Http { closed, .. } => !closed.load(Ordering::SeqCst),
+        }
+    }
+
+    /// Don't use this connection again: connect afresh next time.
+    fn close(&self, why: &str) {
+        match self {
+            Conn::Stdio(io) => io.fail_pending(why),
+            Conn::Http { closed, .. } => closed.store(true, Ordering::SeqCst),
+        }
+    }
+
+    fn stale(&self) -> bool {
+        matches!(self, Conn::Stdio(io) if io.stale.load(Ordering::SeqCst))
+    }
+}
+
+/// A configured server. Its lock is held only to connect (or list its tools again), never across a
+/// call, so one slow call holds up neither the server's other calls nor any other server.
 struct Server {
     cfg: ServerConfig,
-    conn: Option<Conn>,
-    next_id: i64,
+    next_id: AtomicI64,
+    state: Mutex<State>,
+}
+
+#[derive(Default)]
+struct State {
+    conn: Option<Arc<Conn>>,
+    /// The server's tools as last listed: what find_tools, load_tool and call_tool look up.
     tools: Vec<ToolEntry>,
     error: Option<String>,
     /// When connecting last failed: a server that is down isn't retried for `RETRY_AFTER`, so it
@@ -183,7 +306,7 @@ const RETRY_AFTER: Duration = Duration::from_secs(60);
 
 /// The servers, keyed by name, with the config they were started from and when it was read.
 struct Registry {
-    servers: HashMap<String, Arc<Mutex<Server>>>,
+    servers: HashMap<String, Arc<Server>>,
     loaded: Option<SystemTime>,
     problems: Vec<String>,
 }
@@ -207,15 +330,48 @@ async fn refresh() {
     };
     // A config change replaces the handles without waiting for active calls. Those calls finish on
     // their old Arc; subsequent calls use the new server. Never hold the registry lock over I/O.
-    reg.servers = cfgs.into_iter().map(|cfg| {
-        (cfg.name.clone(), Arc::new(Mutex::new(Server { cfg, conn: None, next_id: 1, tools: Vec::new(), error: None, failed_at: None })))
-    }).collect();
+    reg.servers = cfgs.into_iter().map(|cfg| (cfg.name.clone(), Arc::new(Server { cfg, next_id: AtomicI64::new(1), state: Mutex::default() }))).collect();
     reg.loaded = mtime;
     reg.problems = problems;
 }
 
 impl Server {
-    async fn connect(&mut self) -> Result<()> {
+    /// The live connection and the tools, connecting (or listing the tools again) when needed.
+    async fn ensure(&self) -> Result<(Arc<Conn>, Vec<ToolEntry>)> {
+        let mut st = self.state.lock().await;
+        if let Some(conn) = st.conn.clone().filter(|c| c.usable()) {
+            if !conn.stale() {
+                return Ok((conn, st.tools.clone()));
+            }
+            if let Conn::Stdio(io) = &*conn {
+                io.stale.store(false, Ordering::SeqCst);
+            }
+            match self.list_tools(&conn).await {
+                Ok(tools) => st.tools = tools,
+                Err(e) => tracing::warn!("listing the tools of MCP server `{}` again: {e:#}", self.cfg.name),
+            }
+            return Ok((conn, st.tools.clone()));
+        }
+        st.conn = None;
+        if let (Some(at), Some(e)) = (st.failed_at, &st.error) {
+            if at.elapsed() < RETRY_AFTER {
+                bail!("{e} (tried {}s ago; retrying after {}s)", at.elapsed().as_secs(), RETRY_AFTER.as_secs());
+            }
+        }
+        match self.connect().await {
+            Ok((conn, tools)) => {
+                *st = State { conn: Some(conn.clone()), tools: tools.clone(), error: None, failed_at: None };
+                Ok((conn, tools))
+            }
+            Err(e) => {
+                st.error = Some(format!("{e:#}"));
+                st.failed_at = Some(std::time::Instant::now());
+                Err(e)
+            }
+        }
+    }
+
+    async fn connect(&self) -> Result<(Arc<Conn>, Vec<ToolEntry>)> {
         let conn = match (&self.cfg.command, &self.cfg.url) {
             (Some(cmd), _) => {
                 // A clean environment: the kernel's own (its token, API keys) never reaches a
@@ -229,21 +385,36 @@ impl Server {
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::null())
+                    .process_group(0)
                     .kill_on_drop(true)
                     .spawn()
                     .with_context(|| format!("starting `{cmd}`"))?;
+                let group = tools::GroupKill(child.id().map(|p| p as i32));
                 let stdin = child.stdin.take().context("no stdin")?;
                 let stdout = BufReader::new(child.stdout.take().context("no stdout")?);
-                Conn::Stdio(Box::new(Stdio_ { _child: child, stdin, stdout }))
+                let io = Arc::new(StdioConn {
+                    stdin: Mutex::new(stdin),
+                    pending: Default::default(),
+                    closed: AtomicBool::new(false),
+                    stale: AtomicBool::new(false),
+                    _group: group,
+                    _child: child,
+                });
+                tokio::spawn(read_stdio(Arc::downgrade(&io), stdout));
+                Arc::new(Conn::Stdio(io))
             }
-            _ => Conn::Http { session: None },
+            _ => Arc::new(Conn::Http { session: std::sync::Mutex::new(None), closed: AtomicBool::new(false) }),
         };
-        self.conn = Some(conn);
         let init = self
-            .request("initialize", json!({ "protocolVersion": PROTOCOL, "capabilities": {}, "clientInfo": { "name": "zenbot", "version": env!("CARGO_PKG_VERSION") } }))
+            .request(&conn, "initialize", json!({ "protocolVersion": PROTOCOL, "capabilities": {}, "clientInfo": { "name": "zenbot", "version": env!("CARGO_PKG_VERSION") } }))
             .await?;
         anyhow::ensure!(init["protocolVersion"].is_string(), "the server's initialize answer has no protocolVersion");
-        self.notify("notifications/initialized", json!({})).await?;
+        self.notify(&conn, "notifications/initialized", json!({})).await?;
+        let tools = self.list_tools(&conn).await?;
+        Ok((conn, tools))
+    }
+
+    async fn list_tools(&self, conn: &Arc<Conn>) -> Result<Vec<ToolEntry>> {
         let mut tools = Vec::new();
         let mut cursor: Option<String> = None;
         for _ in 0..20 {
@@ -251,7 +422,7 @@ impl Server {
                 Some(c) => json!({ "cursor": c }),
                 None => json!({}),
             };
-            let page = self.request("tools/list", params).await?;
+            let page = self.request(conn, "tools/list", params).await?;
             for t in page["tools"].as_array().into_iter().flatten() {
                 let name = t["name"].as_str().unwrap_or("").to_string();
                 if name.is_empty() || (!self.cfg.include.is_empty() && !self.cfg.include.contains(&name)) || self.cfg.exclude.contains(&name) {
@@ -270,75 +441,42 @@ impl Server {
                 break;
             }
         }
-        self.tools = tools;
-        self.error = None;
-        Ok(())
+        Ok(tools)
     }
 
-    async fn ensure(&mut self) -> Result<()> {
-        if self.conn.is_none() {
-            if let (Some(at), Some(e)) = (self.failed_at, &self.error) {
-                if at.elapsed() < RETRY_AFTER {
-                    bail!("{e} (tried {}s ago; retrying after {}s)", at.elapsed().as_secs(), RETRY_AFTER.as_secs());
-                }
-            }
-            if let Err(e) = self.connect().await {
-                self.conn = None;
-                self.error = Some(format!("{e:#}"));
-                self.failed_at = Some(std::time::Instant::now());
-                return Err(e);
-            }
-            self.failed_at = None;
-        }
-        Ok(())
-    }
-
-    async fn notify(&mut self, method: &str, params: Value) -> Result<()> {
+    async fn notify(&self, conn: &Conn, method: &str, params: Value) -> Result<()> {
         let msg = json!({ "jsonrpc": "2.0", "method": method, "params": params });
-        match self.conn.as_mut().context("not connected")? {
-            Conn::Stdio(io) => {
-                io.stdin.write_all(format!("{msg}\n").as_bytes()).await?;
-                io.stdin.flush().await?;
-            }
-            Conn::Http { session } => {
-                let session = session.clone();
-                let _ = self.post(&msg, session.as_deref()).await?;
+        match conn {
+            Conn::Stdio(io) => io.write(&msg).await,
+            Conn::Http { session, .. } => {
+                let current = session.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                self.post(&msg, current.as_deref()).await.map(|_| ())
             }
         }
-        Ok(())
     }
 
-    async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
-        let id = self.next_id;
-        self.next_id += 1;
+    /// A request on `conn`: its result, or its JSON-RPC error. A broken connection (an exited
+    /// server, a failed HTTP call, a message too large) is an error too, and isn't used again.
+    async fn request(&self, conn: &Arc<Conn>, method: &str, params: Value) -> Result<Value> {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         let timeout = self.cfg.timeout;
         let res = tokio::time::timeout(timeout, async {
-            match self.conn.as_mut().context("not connected")? {
+            match &**conn {
                 Conn::Stdio(io) => {
-                    io.stdin.write_all(format!("{msg}\n").as_bytes()).await?;
-                    io.stdin.flush().await?;
-                    loop {
-                        let mut line = String::new();
-                        if io.stdout.read_line(&mut line).await? == 0 {
-                            bail!("the server exited");
-                        }
-                        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else { continue };
-                        if v["id"] == json!(id) && v.get("method").is_none() {
-                            return Ok(v);
-                        }
-                        // A request from the server (sampling, roots, …): not supported.
-                        if v.get("method").is_some() && v.get("id").is_some() {
-                            let reply = json!({ "jsonrpc": "2.0", "id": v["id"], "error": { "code": -32601, "message": "not supported by zenbot" } });
-                            io.stdin.write_all(format!("{reply}\n").as_bytes()).await?;
-                        }
-                    }
+                    let (tx, rx) = oneshot::channel();
+                    io.pending.lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
+                    // Unanswered (a timeout, a dropped call): forget the waiter.
+                    let _forget = Forget(io, id);
+                    anyhow::ensure!(io.usable(), "the server exited");
+                    io.write(&msg).await?;
+                    rx.await.map_err(|_| anyhow!("the server exited"))?.map_err(|e| anyhow!(e))
                 }
-                Conn::Http { session } => {
-                    let session = session.clone();
-                    let (body, new_session) = self.post(&msg, session.as_deref()).await?;
-                    if let (Some(s), Some(Conn::Http { session })) = (new_session, self.conn.as_mut()) {
-                        *session = Some(s);
+                Conn::Http { session, .. } => {
+                    let current = session.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    let (body, new_session) = self.post(&msg, current.as_deref()).await?;
+                    if let Some(s) = new_session {
+                        *session.lock().unwrap_or_else(|e| e.into_inner()) = Some(s);
                     }
                     body.into_iter().find(|v| v["id"] == json!(id)).context("the server's answer had no response for the request")
                 }
@@ -348,21 +486,18 @@ impl Server {
         match res {
             // The server answered (perhaps with a JSON-RPC error): the connection is fine.
             Ok(Ok(v)) => answer(v),
-            // A broken pipe, an exited server, a failed HTTP call: connect again next time instead of
-            // failing every later call until the config changes.
+            // Connect again next time instead of failing every later call until the config changes.
             Ok(Err(e)) => {
-                self.conn = None;
+                conn.close(&format!("{e:#}"));
                 Err(e)
             }
-            Err(_) => {
-                // A stdio server that didn't answer may answer late; start it again next time.
-                self.conn = None;
-                bail!("no answer within {}s", timeout.as_secs())
-            }
+            // The server may still answer: its other calls go on, and a late answer is dropped.
+            Err(_) => bail!("no answer within {}s", timeout.as_secs()),
         }
     }
 
-    /// POST a message (streamable HTTP): the answer is JSON or an event stream of JSON messages.
+    /// POST a message (streamable HTTP): the answer is JSON or an event stream of JSON messages,
+    /// read up to MAX_MESSAGE.
     async fn post(&self, msg: &Value, session: Option<&str>) -> Result<(Vec<Value>, Option<String>)> {
         let url = self.cfg.url.as_deref().context("no url")?;
         let mut req = HTTP
@@ -381,12 +516,34 @@ impl Server {
         let status = resp.status();
         let new_session = resp.headers().get("mcp-session-id").and_then(|v| v.to_str().ok()).map(String::from);
         let kind = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-        let text = resp.text().await?;
+        let mut body: Vec<u8> = Vec::new();
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("reading the server's answer")?;
+            anyhow::ensure!(body.len() + chunk.len() <= MAX_MESSAGE, "the server's answer is over {} MB", MAX_MESSAGE / 1024 / 1024);
+            body.extend_from_slice(&chunk);
+        }
+        let text = String::from_utf8_lossy(&body);
         if !status.is_success() {
             bail!("HTTP {status}: {}", zen_proto::head(&text, 300));
         }
         let body = if kind.contains("text/event-stream") { sse_messages(&text) } else if text.trim().is_empty() { Vec::new() } else { vec![serde_json::from_str(&text)?] };
         Ok((body, new_session))
+    }
+}
+
+/// Removes a call's waiter when the call ends, answered or not.
+struct Forget<'a>(&'a StdioConn, i64);
+
+impl Drop for Forget<'_> {
+    fn drop(&mut self) {
+        self.0.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.1);
+    }
+}
+
+impl StdioConn {
+    fn usable(&self) -> bool {
+        !self.closed.load(Ordering::SeqCst)
     }
 }
 
@@ -410,7 +567,8 @@ pub fn sse_messages(text: &str) -> Vec<Value> {
     out
 }
 
-/// Every server's tools (connecting the ones not yet connected), and what went wrong.
+/// Every server's tools (connecting the ones not yet connected, all at once), and what went wrong.
+/// A connected server's tools come from its last listing: no call is waited for.
 async fn catalog() -> (Vec<ToolEntry>, Vec<String>) {
     refresh().await;
     let (mut servers, mut problems) = {
@@ -418,14 +576,13 @@ async fn catalog() -> (Vec<ToolEntry>, Vec<String>) {
         (reg.servers.iter().map(|(n, s)| (n.clone(), Arc::clone(s))).collect::<Vec<_>>(), reg.problems.clone())
     };
     servers.sort_by(|a, b| a.0.cmp(&b.0));
+    let listed = futures_util::future::join_all(servers.iter().map(|(_, s)| s.ensure())).await;
     let mut tools = Vec::new();
-    for (name, handle) in servers {
-        let mut s = handle.lock().await;
-        if let Err(e) = s.ensure().await {
-            problems.push(format!("server `{name}`: {e:#}"));
-            continue;
+    for ((name, _), res) in servers.iter().zip(listed) {
+        match res {
+            Ok((_, t)) => tools.extend(t),
+            Err(e) => problems.push(format!("server `{name}`: {e:#}")),
         }
-        tools.extend(s.tools.iter().cloned());
     }
     // The agent's own tools (workshop.rs), found and called the same way.
     tools.extend(crate::workshop::made_entries());
@@ -560,16 +717,13 @@ async fn call(app: &App, session: Uuid, full: &str, args: &Value) -> Result<(Str
         }
         return Ok((text, is_error));
     }
-    let handle = { REGISTRY.lock().await.servers.get(&t.server).cloned().context("the server went away")? };
-    let (result, untrusted) = {
-        let mut s = handle.lock().await;
-        let untrusted = s.cfg.untrusted;
-        let result = async {
-            s.ensure().await?;
-            s.request("tools/call", json!({ "name": t.name, "arguments": args })).await
-        }.await;
-        (result, untrusted)
-    };
+    let server = { REGISTRY.lock().await.servers.get(&t.server).cloned().context("the server went away")? };
+    let untrusted = server.cfg.untrusted;
+    let result = async {
+        let (conn, _) = server.ensure().await?;
+        server.request(&conn, "tools/call", json!({ "name": t.name, "arguments": args })).await
+    }
+    .await;
     let result = match result {
         Ok(result) => result,
         Err(e) if untrusted => {
@@ -687,6 +841,17 @@ mod tests {
         assert!(problems.iter().any(|p| p.contains("bad name")));
         assert!(problems.iter().any(|p| p.contains("either `command`")));
         assert!(parse_config("{").1[0].contains("not valid JSON"));
+    }
+
+    #[tokio::test]
+    async fn a_line_past_the_limit_is_an_error() {
+        let mut r = BufReader::new(&b"{\"a\":1}\nshort\n0123456789abcdef\nlast"[..]);
+        assert_eq!(read_line_capped(&mut r, 10).await.unwrap().unwrap(), b"{\"a\":1}");
+        assert_eq!(read_line_capped(&mut r, 10).await.unwrap().unwrap(), b"short");
+        assert!(read_line_capped(&mut r, 10).await.unwrap_err().to_string().contains("over"));
+        let mut r = BufReader::new(&b"last"[..]);
+        assert_eq!(read_line_capped(&mut r, 10).await.unwrap().unwrap(), b"last");
+        assert_eq!(read_line_capped(&mut r, 10).await.unwrap(), None);
     }
 
     #[test]
