@@ -185,10 +185,7 @@ fn summarizer_input_within(previous: Option<&str>, msgs: &[&Block], budget: usiz
 
 /// The JSON object in a model's reply (it may be wrapped in a code fence or prose).
 pub fn parse(reply: &str) -> Option<Value> {
-    let start = reply.find('{')?;
-    let end = reply.rfind('}')?;
-    let v: Value = serde_json::from_str(&reply[start..=end]).ok()?;
-    (v.is_object() && v["goal"].is_string()).then_some(v)
+    crate::workers::json_object(reply).filter(|v| v["goal"].is_string())
 }
 
 fn refs(item: &Value) -> String {

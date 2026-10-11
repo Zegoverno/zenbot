@@ -85,7 +85,7 @@ pub fn validate(dir: &Path) -> Vec<String> {
             if n != folder {
                 errs.push(format!("name `{n}` must match the folder name `{folder}`"));
             }
-            if n.len() > 64 || !n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') || n.starts_with('-') || n.ends_with('-') || n.contains("--") {
+            if !crate::valid_name(n, 64) {
                 errs.push(format!("name `{n}`: lowercase letters, digits and single hyphens, at most 64 characters"));
             }
         }

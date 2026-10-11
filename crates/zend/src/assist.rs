@@ -163,9 +163,7 @@ fn tail(s: &str, max: usize) -> String {
 /// `(title, next)` from the model's reply, cleaned: one line each, no wrapping quotes, the title
 /// at most 40 characters and the suggestion at most 500.
 fn parse(reply: &str) -> Option<(String, String)> {
-    let start = reply.find('{')?;
-    let end = reply.rfind('}')?;
-    let v: Value = serde_json::from_str(reply.get(start..=end)?).ok()?;
+    let v = crate::workers::json_object(reply)?;
     let clean = |s: &str, max: usize| -> String {
         let s = s.trim().trim_matches(['"', '\'', '`', '“', '”']).trim();
         s.chars().take(max).collect::<String>().trim().to_string()

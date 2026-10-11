@@ -805,7 +805,7 @@ async fn sleep_inner(app: &AppState, run: i64) -> Result<Value> {
     // The wiki's nightly care: commit the agent's own edits since the last capture, report problems.
     let wiki = crate::wiki::root();
     if wiki.join(".git").exists() {
-        crate::wiki::commit(&wiki, "sleep: edits since the last capture").await;
+        crate::git::commit_all(&wiki, "sleep: edits since the last capture").await;
         for p in crate::wiki::lint(&wiki) {
             notes.push(format!("wiki: {p}"));
         }

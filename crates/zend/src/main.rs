@@ -109,6 +109,14 @@ pub(crate) fn env_num(key: &str, default: f64) -> f64 {
     std::env::var(key).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
 }
 
+/// Whether `n` is a valid name for a skill, a skill domain, a made tool or a job: lowercase letters,
+/// digits and single hyphens, not at either end (agentskills.io's rule for skill names), at most
+/// `max` bytes. The rule is the same everywhere; only the length differs (64 for skills and tools,
+/// from agentskills.io; 40 for jobs, which `zen jobs` shows in a column).
+pub(crate) fn valid_name(n: &str, max: usize) -> bool {
+    !n.is_empty() && n.len() <= max && n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') && !n.starts_with('-') && !n.ends_with('-') && !n.contains("--")
+}
+
 /// One unit of background work in `App::background`, released when dropped (even on a panic).
 pub(crate) struct Background(Arc<std::sync::atomic::AtomicUsize>);
 

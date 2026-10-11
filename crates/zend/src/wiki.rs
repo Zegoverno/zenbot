@@ -186,24 +186,11 @@ pub fn lint(dir: &Path) -> Vec<String> {
     problems
 }
 
-async fn git(dir: &Path, args: &[&str]) -> bool {
-    tokio::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await
-        .is_ok_and(|s| s.success())
-}
-
 /// Make sure the wiki folder exists and is a git repository with an index and a log.
 pub async fn ensure(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     if !dir.join(".git").exists() {
-        git(dir, &["init", "-q"]).await;
+        crate::git::run(dir, &["init", "-q"]).await;
     }
     if !dir.join("log.md").exists() {
         std::fs::write(dir.join("log.md"), "# Wiki log\n\nOne line per capture, newest last.\n\n")?;
@@ -212,12 +199,6 @@ pub async fn ensure(dir: &Path) -> Result<()> {
         std::fs::write(dir.join("index.md"), index_text(&[]))?;
     }
     Ok(())
-}
-
-/// Commit everything in the wiki (captures, and pages the agent edited since).
-pub async fn commit(dir: &Path, message: &str) {
-    git(dir, &["add", "-A"]).await;
-    git(dir, &["-c", "user.name=zenbot", "-c", "user.email=zenbot@localhost", "commit", "-q", "-m", message]).await;
 }
 
 /// Which page a note goes to, as System One judges it: a candidate's slug or "new", whether the
@@ -347,7 +328,7 @@ async fn capture(app: &App, session: Option<Uuid>, args: &Value) -> Result<Strin
     log.push_str(&format!("## [{today}] capture | {slug_}{}\n", if created { " (new page)" } else { "" }));
     std::fs::write(dir.join("log.md"), log)?;
     std::fs::write(dir.join("index.md"), index_text(&pages(&dir)))?;
-    commit(&dir, &format!("capture: {slug_}")).await;
+    crate::git::commit_all(&dir, &format!("capture: {slug_}")).await;
     let page = parse(&slug_, &std::fs::read_to_string(&path)?);
     let needs = if page.summary.contains("[No summary yet") || created {
         "The page has no summary yet: write one (a short paragraph: if someone reads only this, they know the state of play) in place of the placeholder, with edit."

@@ -56,33 +56,9 @@ pub fn tools_root() -> PathBuf {
     std::env::var("ZEN_TOOLS_DIR").map(PathBuf::from).unwrap_or_else(|_| crate::layout::global_dir().join("tools"))
 }
 
-async fn git(dir: &Path, args: &[&str]) -> bool {
-    tokio::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await
-        .is_ok_and(|s| s.success())
-}
-
-/// Commit everything in a folder that is (or becomes) a git repository.
-pub async fn commit(dir: &Path, message: &str) {
-    if std::fs::create_dir_all(dir).is_err() {
-        return;
-    }
-    if !dir.join(".git").exists() {
-        git(dir, &["init", "-q"]).await;
-    }
-    git(dir, &["add", "-A"]).await;
-    git(dir, &["-c", "user.name=zenbot", "-c", "user.email=zenbot@localhost", "commit", "-q", "-m", message]).await;
-}
-
+/// A skill's, domain's or tool's name (agentskills.io: at most 64 characters).
 fn valid_name(n: &str) -> bool {
-    !n.is_empty() && n.len() <= 64 && n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') && !n.starts_with('-') && !n.ends_with('-') && !n.contains("--")
+    crate::valid_name(n, 64)
 }
 
 fn words(t: &str) -> std::collections::BTreeSet<String> {
@@ -199,7 +175,7 @@ async fn save_skill(app: &App, session: Uuid, args: &Value) -> Result<String> {
     }
     write_skill(&dir, &md, &args["files"])?;
     let mark = if tainted { "; it read untrusted content" } else { "" };
-    commit(&root, &format!("{what}: {domain}/{name} (session {}{mark})\n\n{reason}", &session.to_string()[..8])).await;
+    crate::git::commit_all(&root, &format!("{what}: {domain}/{name} (session {}{mark})\n\n{reason}", &session.to_string()[..8])).await;
     let new_domain = current.is_none() && draft.is_none() && !active.iter().any(|x| x.domain == domain);
     let next = if current.is_some() {
         "It's in use from the next session that loads it.".to_string()
@@ -234,7 +210,7 @@ pub async fn decide_draft(db: &sqlx::PgPool, name: &str, accept: bool, by: &str,
         tracing::warn!("clearing {key}'s untrusted mark: {e:#}");
     }
     let verb = if accept { "Activated" } else { "Rejected" };
-    commit(&skills::root(), &format!("{verb} {}/{} ({by})", draft.domain, draft.name)).await;
+    crate::git::commit_all(&skills::root(), &format!("{verb} {}/{} ({by})", draft.domain, draft.name)).await;
     Ok(format!("{verb} {}/{}", draft.domain, draft.name))
 }
 
@@ -357,7 +333,7 @@ pub async fn tend(db: &sqlx::PgPool) -> Vec<String> {
         }
     }
     if !notes.is_empty() {
-        commit(&skills::root(), "sleep: skills tended").await;
+        crate::git::commit_all(&skills::root(), "sleep: skills tended").await;
     }
     notes
 }
@@ -419,7 +395,7 @@ async fn save_tool(app: &App, session: Uuid, args: &Value) -> Result<String> {
     let manifest = json!({ "name": name, "description": description, "parameters": params, "command": command });
     std::fs::write(dir.join("tool.json"), serde_json::to_string_pretty(&manifest)?)?;
     sqlx::query("INSERT INTO made_tools (name) VALUES ($1) ON CONFLICT (name) DO NOTHING").bind(name).execute(&app.db).await?;
-    commit(&tools_root(), &format!("save_tool: {name} (session {})\n\n{reason}", &session.to_string()[..8])).await;
+    crate::git::commit_all(&tools_root(), &format!("save_tool: {name} (session {})\n\n{reason}", &session.to_string()[..8])).await;
     let approved: bool = sqlx::query_scalar("SELECT approved_at IS NOT NULL AND rejected_at IS NULL FROM made_tools WHERE name = $1").bind(name).fetch_one(&app.db).await.unwrap_or(false);
     Ok(format!(
         "Saved tool made_{name} ({}). {}",

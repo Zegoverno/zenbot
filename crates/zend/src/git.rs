@@ -1,5 +1,6 @@
-//! Running git from the kernel (the updater, the workflow's diff baseline): async, with a time
-//! limit, and reading no more output than the caller keeps.
+//! Running git from the kernel (the updater, the workflow's diff baseline, the repositories the
+//! agent keeps: wiki, skills, its own tools): async, with a time limit, and reading no more output
+//! than the caller keeps. The one place the kernel runs git.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -42,6 +43,34 @@ pub async fn git(repo: &Path, args: &[&str]) -> Option<String> {
     ok.then(|| out.trim().to_string())
 }
 
+/// Run git in `dir` for its effect (60s at most), discarding its output: whether it succeeded.
+pub async fn run(dir: &Path, args: &[&str]) -> bool {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .status();
+    matches!(tokio::time::timeout(Duration::from_secs(60), status).await, Ok(Ok(s)) if s.success())
+}
+
+/// Commit everything in `dir` as zenbot, making the folder a git repository first if it isn't one
+/// (the wiki, the skills and the agent's tools are each a repository of their own). Nothing to
+/// commit is not an error; failures are ignored (the files are written either way).
+pub async fn commit_all(dir: &Path, message: &str) {
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    if !dir.join(".git").exists() {
+        run(dir, &["init", "-q"]).await;
+    }
+    run(dir, &["add", "-A"]).await;
+    run(dir, &["-c", "user.name=zenbot", "-c", "user.email=zenbot@localhost", "commit", "-q", "-m", message]).await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,5 +87,18 @@ mod tests {
         let (ok, cut) = output(&repo, &["ls-files", "--others"], 40).await.unwrap();
         assert!(!ok && cut.len() == 40 && all.starts_with(&cut), "{ok} {cut:?}");
         assert_eq!(git(&repo, &["rev-parse", "HEAD"]).await, None, "a failed command gives nothing");
+    }
+
+    #[tokio::test]
+    async fn commit_all_makes_the_repository() {
+        let dir = crate::test_util::TestDir::new("git-commit");
+        let sub = dir.join("wiki");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("a.md"), "a").unwrap();
+        commit_all(&sub, "first").await;
+        assert_eq!(git(&sub, &["log", "--format=%s"]).await.as_deref(), Some("first"));
+        commit_all(&sub, "nothing new").await;
+        assert_eq!(git(&sub, &["rev-list", "--count", "HEAD"]).await.as_deref(), Some("1"), "nothing to commit is no commit");
+        assert!(!run(&sub, &["no-such-command"]).await);
     }
 }

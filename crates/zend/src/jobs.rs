@@ -328,8 +328,7 @@ impl Spec {
 }
 
 fn valid_name(name: &str) -> Result<()> {
-    let ok = !name.is_empty() && name.len() <= 40 && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') && !name.starts_with('-');
-    anyhow::ensure!(ok, "a job name is lowercase letters, digits and hyphens, up to 40 characters (e.g. `morning-brief`)");
+    anyhow::ensure!(crate::valid_name(name, 40), "a job name is lowercase letters, digits and single hyphens, up to 40 characters (e.g. `morning-brief`)");
     Ok(())
 }
 
@@ -1135,6 +1134,6 @@ mod tests {
         assert_eq!(context_of(None).unwrap(), ["soul", "user", "memory"]);
         assert_eq!(context_of(Some(vec!["memory".into(), "Soul".into()])).unwrap(), ["soul", "memory"]);
         assert!(context_of(Some(vec!["secrets".into()])).is_err());
-        assert!(valid_name("morning-brief").is_ok() && valid_name("Morning Brief").is_err() && valid_name("-x").is_err());
+        assert!(valid_name("morning-brief").is_ok() && valid_name("Morning Brief").is_err() && valid_name("-x").is_err() && valid_name("x-").is_err());
     }
 }
