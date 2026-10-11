@@ -54,6 +54,7 @@ pub(crate) async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: 
     let mut turn = Turn::default();
     let mut started = false;
     let mut streamed = false;
+    let mut stopping = false;
     let mut stdout = std::io::stdout();
     loop {
         tokio::select! {
@@ -149,9 +150,16 @@ pub(crate) async fn run_turn(ws: &mut Ws, prompt: &str, show: bool, show_tools: 
                     _ => {}
                 }
             }
+            // The first Ctrl-C stops the turn; a second one leaves without waiting for it to end
+            // (the kernel still stops it). 130 is a shell's exit code for an interrupt.
             _ = tokio::signal::ctrl_c() => {
+                if stopping {
+                    eprintln!("{}", dim("  (left before the turn ended)"));
+                    std::process::exit(130);
+                }
+                stopping = true;
                 ws.send(Message::text(json!({ "type": "abort" }).to_string())).await.ok();
-                eprintln!("{}", dim("  (stopping…)"));
+                eprintln!("{}", dim("  (stopping… Ctrl-C again to leave now)"));
             }
         }
     }
