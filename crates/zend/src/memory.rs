@@ -31,17 +31,6 @@ fn ceiling() -> usize {
     cap() * 2
 }
 
-/// The lower end of the one-sided Wilson score interval for `k` successes in `n` trials (model
-/// routing's evidence, delegate.rs).
-pub fn wilson_lower(k: u64, n: u64, z: f64) -> f64 {
-    if n == 0 {
-        return 0.0;
-    }
-    let (n, p) = (n as f64, k as f64 / n as f64);
-    let z2 = z * z;
-    ((p + z2 / (2.0 * n)) - z * ((p * (1.0 - p) + z2 / (4.0 * n)) / n).sqrt()) / (1.0 + z2 / n)
-}
-
 #[derive(Clone, Debug)]
 pub struct Entry {
     pub id: i64,
@@ -668,31 +657,30 @@ pub(crate) const BACKUPS: &str = "backups/prompt-files";
 /// Days a prompt file's backup is kept in `<zen home>/backups/prompt-files`.
 const BACKUP_DAYS: u64 = 90;
 
-/// Remove backups (`*.md` directly in `dir`) not modified for `days` days; returns how many.
-fn prune_backups(dir: &std::path::Path, days: u64) -> usize {
-    let Ok(read) = std::fs::read_dir(dir) else { return 0 };
-    let limit = std::time::Duration::from_secs(days * 86_400);
-    read.flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && e.file_name().to_string_lossy().ends_with(".md"))
-        .filter(|e| e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > limit))
-        .filter(|e| std::fs::remove_file(e.path()).is_ok())
-        .count()
-}
-
 /// Days a saved tool output (cut bash/MCP output, fetched PDFs) is kept in `<zen home>/outputs`.
 const OUTPUT_DAYS: u64 = 30;
 
-/// Remove regular files directly in `dir` not modified for `days` days; returns how many. Only
-/// files the kernel saves (`*.log`, `mcp-*.txt`, `web-*.pdf`): anything else there is left alone.
-fn prune_outputs(dir: &std::path::Path, days: u64) -> usize {
+/// Remove regular files directly in `dir` whose name `ours` accepts and that weren't modified for
+/// `days` days; returns how many. Anything else there is left alone.
+fn prune(dir: &std::path::Path, days: u64, ours: impl Fn(&str) -> bool) -> usize {
     let Ok(read) = std::fs::read_dir(dir) else { return 0 };
     let limit = std::time::Duration::from_secs(days * 86_400);
-    let ours = |n: &str| n.ends_with(".log") || (n.starts_with("mcp-") && n.ends_with(".txt")) || (n.starts_with("web-") && n.ends_with(".pdf"));
     read.flatten()
         .filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && ours(&e.file_name().to_string_lossy()))
         .filter(|e| e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > limit))
         .filter(|e| std::fs::remove_file(e.path()).is_ok())
         .count()
+}
+
+/// Prompt-file backups (`*.md`) older than `days` days.
+fn prune_backups(dir: &std::path::Path, days: u64) -> usize {
+    prune(dir, days, |n| n.ends_with(".md"))
+}
+
+/// Saved outputs older than `days` days: only files the kernel saves (`*.log`, `mcp-*.txt`,
+/// `web-*.pdf`).
+fn prune_outputs(dir: &std::path::Path, days: u64) -> usize {
+    prune(dir, days, |n| n.ends_with(".log") || (n.starts_with("mcp-") && n.ends_with(".txt")) || (n.starts_with("web-") && n.ends_with(".pdf")))
 }
 
 /// A line about the last sleep for a session's instructions, when it ran in the last day (the
@@ -842,14 +830,6 @@ mod tests {
         }
         assert_eq!(prune_outputs(&dir, 30), 3);
         assert!(dir.join("notes.md").exists() && dir.join("fresh.log").exists());
-    }
-
-    #[test]
-    fn wilson_lower_needs_many_agreeing_outcomes() {
-        assert_eq!(wilson_lower(0, 0, 1.645), 0.0);
-        assert!(wilson_lower(10, 10, 1.645) < 0.95, "ten agreements aren't enough");
-        assert!(wilson_lower(52, 52, 1.645) >= 0.95);
-        assert!(wilson_lower(51, 52, 1.645) < 0.95, "one rejection costs a lot");
     }
 
     #[test]

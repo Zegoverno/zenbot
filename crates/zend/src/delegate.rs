@@ -223,9 +223,20 @@ pub async fn stats(db: &sqlx::PgPool) -> Result<Vec<Value>> {
         .collect())
 }
 
+/// The lower end of the one-sided Wilson score interval for `k` successes in `n` trials (model
+/// routing's evidence).
+fn wilson_lower(k: u64, n: u64, z: f64) -> f64 {
+    if n == 0 {
+        return 0.0;
+    }
+    let (n, p) = (n as f64, k as f64 / n as f64);
+    let z2 = z * z;
+    ((p + z2 / (2.0 * n)) - z * ((p * (1.0 - p) + z2 / (4.0 * n)) / n).sqrt()) / (1.0 + z2 / n)
+}
+
 /// The upper end of the one-sided Wilson interval.
 fn wilson_upper(k: u64, n: u64, z: f64) -> f64 {
-    1.0 - crate::memory::wilson_lower(n - k.min(n), n, z)
+    1.0 - wilson_lower(n - k.min(n), n, z)
 }
 
 /// What the evidence says to change: for each kind with a route, a model whose acceptance's lower
@@ -250,7 +261,7 @@ pub fn suggest(policy: &Value, stats: &[Value], min: u64) -> Vec<(String, String
         let best = stats
             .iter()
             .filter(|s| s["kind"] == kind.as_str() && s["model"] != current && s["judged"].as_u64().unwrap_or(0) >= min)
-            .map(|s| (s["model"].as_str().unwrap_or("").to_string(), crate::memory::wilson_lower(s["accepted"].as_u64().unwrap_or(0), s["judged"].as_u64().unwrap_or(0), z)))
+            .map(|s| (s["model"].as_str().unwrap_or("").to_string(), wilson_lower(s["accepted"].as_u64().unwrap_or(0), s["judged"].as_u64().unwrap_or(0), z)))
             .filter(|(_, lower)| *lower > cur_upper)
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         if let Some((m, lower)) = best {
@@ -285,6 +296,14 @@ pub async fn tune(db: &sqlx::PgPool) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wilson_lower_needs_many_agreeing_outcomes() {
+        assert_eq!(wilson_lower(0, 0, 1.645), 0.0);
+        assert!(wilson_lower(10, 10, 1.645) < 0.95, "ten agreements aren't enough");
+        assert!(wilson_lower(52, 52, 1.645) >= 0.95);
+        assert!(wilson_lower(51, 52, 1.645) < 0.95, "one rejection costs a lot");
+    }
 
     #[test]
     fn pick_follows_the_route_and_explores_a_small_share() {
