@@ -6,7 +6,7 @@ fully before making changes.
 ## Read first
 
 1. [CONTEXT.md](CONTEXT.md): what zenbot is for and how success is measured.
-2. [ROADMAP.md](ROADMAP.md): the active phase and its next step. Start new work from there.
+2. [ROADMAP.md](ROADMAP.md): what's next, open decisions and debt. Start new work from there.
 3. [MAP.md](MAP.md): find what you'll touch, what it depends on and what depends on it. Then read the
    code itself.
 4. [DESIGN.md](DESIGN.md) for how the system works, [DECISIONS.md](DECISIONS.md) before revisiting a
