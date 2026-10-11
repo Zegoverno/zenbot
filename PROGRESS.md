@@ -6,6 +6,28 @@
 
 ---
 
+## 2026-10-11 — Operations hardening: a private database password, safer upgrades, honest security docs
+
+- Postgres used the public password `zen`, so any process on the VM could rewrite zenbot's state.
+  `db_secure` (`scripts/db.sh`) now gives it a random password in `~/.zenbot/db-password`, set over
+  the container's socket and written to `DATABASE_URL` in `env`; `install.sh` runs it, and the
+  next upgrade runs it on existing installs right before the restart (old binaries read the same
+  `env`, so a rollback still works). The kernel treats `db-password` and `env.prev` as secret.
+- `apply-upgrade.sh` waits for idle again right before swapping binaries, goes ahead at once when
+  the kernel doesn't answer at all, aborts (binaries put back, no restart) on a failed copy or an
+  unreadable migration list, and removes the retired `pi` from `ZEN_WORKERS`. The database
+  helpers fall back to `sudo -n docker` (a standard install isn't in the `docker` group).
+- `dev.sh` no longer uses the owner's paid keys or folders (`ZEN_DEV_REAL=1` keeps them). CI pins
+  actions by commit, runs `apt-get update`, and the release job runs the e2e scenarios on the
+  binaries it publishes. `install.sh` checks Node's SHA-256.
+- Docs now say plainly what isn't enforced: an ordinary session's shell isn't sandboxed and, with
+  the install's passwordless `sudo` and Docker, is effectively root; jobs' "no outward action" is
+  prompt-only. The narrowed-sudo plan is in ROADMAP.md debt, awaiting the owner. `check-docs.py`
+  now checks every script and deployment file is in MAP.md.
+- Tested: `db_secure` on a throwaway Postgres (bootstrap password then refused), the Node check
+  with a wrong hash, `dev.sh` environment, e2e on chosen binaries, `scripts/check.sh`, and the
+  real upgrade of this VM (below in the pull request).
+
 ## 2026-10-11 — Taint travels with stored content; tainted shells run offline (D-053)
 
 - A review found web text laundered into durable stores and back as trusted: a tainted session's

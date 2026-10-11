@@ -6,6 +6,9 @@
 #   scripts/e2e.sh              build, then run every scenario
 #   scripts/e2e.sh memory       only scenarios whose name contains "memory"
 #
+# ZEN_E2E_NO_BUILD=1 skips the build; ZEN_E2E_BIN=<dir> tests the binaries there instead of
+# target/release (CI's release job tests the ones it publishes).
+#
 # Needs Docker with Postgres from deploy/compose.yaml, git, curl, jq and bubblewrap.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,7 +20,7 @@ PORT=${ZEN_E2E_PORT:-18377}
 TOKEN=e2e-token-$$
 DB=zen_e2e_$$
 TMP=$(mktemp -d)
-BIN="$REPO/target/release"
+BIN=$(cd "${ZEN_E2E_BIN:-$REPO/target/release}" && pwd)
 URL="http://127.0.0.1:$PORT"
 KERNEL_PID=""
 FAILED=0

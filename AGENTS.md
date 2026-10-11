@@ -27,8 +27,8 @@ The kernel owns all state and executes every tool call. Workers hold no state: t
 for a turn and ask the kernel to run tools. Engines run with their own tools switched off (Claude
 Code `--tools ""`, Codex shell disabled) so every action goes through the kernel. Keep it that way.
 
-Config lives in `~/.zenbot/` (MAP.md lists every file). `token`, `env`, `matrix.env` and
-`matrix/` are secret: never print them.
+Config lives in `~/.zenbot/` (MAP.md lists every file). `token`, `db-password`, `env`, `env.prev`,
+`matrix.env` and `matrix/` are secret: never print them.
 
 ## Making a change
 

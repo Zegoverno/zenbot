@@ -1,6 +1,6 @@
 # zenbot — Roadmap
 
-> Phases run in order; the active one is marked. Specs for what's next live here; what shipped goes to
+> Phases run in order, each marked with its status (all are done; "What's next" holds what follows). Specs for what's next live here; what shipped goes to
 > [PROGRESS.md](PROGRESS.md); why, to [DECISIONS.md](DECISIONS.md). The design these phases build is
 > in [DESIGN.md](DESIGN.md) ("Target design"). Agreed with the owner on 2026-10-06 (D-025 to D-030).
 
@@ -142,7 +142,7 @@ changes. Candidate follow-ups, each only when use calls for it:
 - Prompt files (`SOUL`, `IDENTITY`, `AGENTS`, `USER`), active skills and made tools are guarded
   at `edit`/`write` for child and kernel sessions (subagents, verifiers, jobs) and tainted sessions
   (D-045, D-051), and a tainted session's `bash` can't write them (offline sandbox, D-053); the
-  owner's config and secrets (`mcp.json`, `env`, `token`, `matrix*`, `bin/`) for every session. A
+  owner's config and secrets (`mcp.json`, `env`, `env.prev`, `token`, `db-password`, `matrix*`, `bin/`) for every session. A
   clean session's `bash` can still write all of them. A tainted session's `edit`/`write` can still
   change files outside the workspace that aren't guarded (shell start-up files, other repositories'
   hooks), which a later clean session may run. Unused since D-045: new `memories.tier = 'long'` rows (old ones stay
@@ -150,7 +150,13 @@ changes. Candidate follow-ups, each only when use calls for it:
 - Tools run as the same Unix user as the owner. Shell subprocesses no longer inherit kernel secrets,
   and the verifier's shell has its own processes, no network and an empty home (D-051), but an
   ordinary agent shell can still read the owner's files, `/proc/<zend pid>/environ` included.
-  Strong isolation requires a separate Unix user and a credential the agent cannot read.
+  Strong isolation requires a separate Unix user and a credential the agent cannot read. Worse, on
+  the standard install the service user has passwordless `sudo` and Docker access, so an untainted
+  session's shell is effectively root. The plan, **not built and needing the owner's yes**: run
+  `zend` as its own user without the owner's files; replace blanket `sudo` with a sudoers drop-in
+  allowing only `systemd-run … <repo>/scripts/apply-upgrade.sh`, `systemctl restart zenbot` and
+  `docker compose -f <repo>/deploy/compose.yaml …`; take the user out of the `docker` group (the
+  scripts fall back to `sudo -n docker`, `scripts/db.sh`).
 - What each kind of session may call is decided in one place (`agent::refusal`, an allow-list per
   kind), and what a tainted session may do in another (`taint::limited`, D-053), but each tool still
   asks it and applies the answer itself; the shell sandbox is chosen at the dispatcher.

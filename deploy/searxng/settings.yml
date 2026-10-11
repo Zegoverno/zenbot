@@ -4,7 +4,9 @@ use_default_settings: true
 general:
   instance_name: zenbot-search
 server:
-  # Only reachable from this VM; set SEARXNG_SECRET in the environment to override.
+  # A fixed key, public in this repo. That's acceptable here: SearXNG listens on 127.0.0.1 only
+  # (deploy/compose.yaml), has no accounts, and the image proxy the key signs for is off. compose
+  # doesn't pass SEARXNG_SECRET; adding it to the searxng service's environment would override this.
   secret_key: "zenbot-local-only-change-me"
   limiter: false
   image_proxy: false

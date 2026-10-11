@@ -45,7 +45,9 @@ tools does better on open-ended jobs than a fixed sequence of steps. zenbot owns
 tools, skills, memory and knowledge; any model can do the work. Fixed rules exist only for:
 
 - **authority:** the owner starts jobs and sets the budget; the agent never decides the owner's calls;
-- **safety:** every action runs through the kernel, sandboxed, secrets masked, audited;
+- **safety:** every action runs through the kernel, secrets masked, audited, and sandboxed where it
+  matters most (a verifier's shell, a made tool the owner hasn't approved, a tainted session's
+  shell); an ordinary session's shell is not sandboxed (DESIGN.md, "Security today");
 - **measurement:** the tape records everything, so work can be judged and improved.
 
 ## Principles

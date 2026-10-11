@@ -5,6 +5,20 @@
 # A setting from the service's environment file, ~/.zenbot/env (empty when unset there).
 zen_env() { { grep -E "^$1=" "$HOME/.zenbot/env" 2>/dev/null || true; } | tail -1 | cut -d= -f2-; }
 
+# Set KEY=VALUE in ~/.zenbot/env, replacing any line for KEY. The file is rewritten whole (private,
+# then renamed over the old one).
+env_set() {
+  local env="$HOME/.zenbot/env" tmp
+  mkdir -p "$HOME/.zenbot"
+  tmp=$(umask 077 && mktemp "$env.XXXXXX")
+  { grep -vE "^$1=" "$env" 2>/dev/null || true; echo "$1=$2"; } > "$tmp"
+  chmod 600 "$tmp" && mv -f "$tmp" "$env"
+}
+
+# Keep a copy of ~/.zenbot/env as ~/.zenbot/env.prev (private; the kernel treats it as secret like
+# env itself) before a script rewrites settings the owner didn't pass to it.
+env_backup() { [ ! -f "$HOME/.zenbot/env" ] || cp -p "$HOME/.zenbot/env" "$HOME/.zenbot/env.prev"; }
+
 # wait_healthy URL SECS [PID]: wait until URL (a kernel's /health) reports ok. Fails after SECS
 # seconds, or as soon as process PID, when given, has exited.
 wait_healthy() {

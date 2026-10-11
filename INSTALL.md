@@ -1,6 +1,6 @@
 # Installing zenbot
 
-These steps are written so a coding agent (or a person) can follow them on a fresh Linux VM: Ubuntu or Debian, with systemd and passwordless `sudo`.
+These steps are written so a coding agent (or a person) can follow them on a fresh Linux VM: Ubuntu or Debian, with systemd and passwordless `sudo`. `sudo` is needed because `install.sh` installs packages, Docker and the systemd service, and `scripts/upgrade.sh` restarts the service and runs Docker later without asking; it also means the agent's shell, which runs as that user, can do anything on the VM (DESIGN.md, "Security today").
 
 1. Clone the repository into the home directory and run the installer:
 

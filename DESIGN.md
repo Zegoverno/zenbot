@@ -317,17 +317,24 @@ repositories the owner hasn't listed (`ZEN_TRUSTED_REPOS`) taint the session and
 fails closed. What a tainted session stores carries the mark and is untrusted wherever it's read
 (D-053).
 All tool output is masked before reaching the model or tape, and tool arguments before clients or
-`tool_calls` see them; full outputs stay under `~/.zenbot/outputs`. **This is not a security boundary against the agent:** a clean session's commands still
-run as the owner's Unix user and can read and write the owner's files, including `~/.zenbot/token`
-and the files `edit`/`write` protect. Strong
-isolation needs a separate uid and an owner credential unavailable to it. Outward-facing actions
-are covered by the system prompt ("ask before"), not enforced.
+`tool_calls` see them; full outputs stay under `~/.zenbot/outputs`. The database user has a
+private password (`~/.zenbot/db-password`, set by `db_secure` in `scripts/db.sh` at install and on
+upgrade; the bootstrap `zen` in `deploy/compose.yaml` is only for the first start, CI and throwaway
+setups), so other processes on the VM can't use Postgres without reading the owner's files.
+**This is not a security boundary against the agent:** a clean session's commands still
+run as the owner's Unix user and can read and write the owner's files, including `~/.zenbot/token`,
+`~/.zenbot/db-password` and the files `edit`/`write` protect. On the standard install that user
+also has passwordless `sudo` (`install.sh`, `scripts/upgrade.sh` and the service's unit need it)
+and can run Docker, so **an untainted session's shell is effectively root on the VM**. Strong
+isolation needs a separate uid, narrowed `sudo` and an owner credential unavailable to it (planned,
+ROADMAP.md "Technical debt"). Outward-facing actions, scheduled jobs' included, are covered by the
+system prompt ("ask before"), not enforced.
 
 ### Deployment
 
 - `deploy/compose.yaml` runs Postgres (pgvector) and SearXNG (keyless web search). `zend` runs on the host as the systemd service
-  `zenbot` (installed by `install.sh`) and starts its workers. One port for API, WebSocket and web
-  UI; `/health` reports the database, workers and busy sessions. `zen-matrix` is a separate
+  `zenbot` (installed by `install.sh`) and starts its workers. One port for the API and the WebSocket;
+  `/health` reports the database, workers and busy sessions. `zen-matrix` is a separate
   workspace, built and installed by `scripts/matrix.sh` (not by CI's release), with its own systemd
   service.
 - The kernel's `engines` job updates the Claude Code and Codex CLIs daily, tested, with rollback;

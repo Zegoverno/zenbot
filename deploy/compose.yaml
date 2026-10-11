@@ -5,6 +5,9 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: zen
+      # Bootstrap only (Postgres uses it when it first creates the database, and CI and throwaway
+      # setups keep it): install.sh and scripts/upgrade.sh replace it with a private password in
+      # ~/.zenbot/db-password (db_secure in scripts/db.sh). Changing it here changes nothing later.
       POSTGRES_PASSWORD: zen
       POSTGRES_DB: zen
     ports:

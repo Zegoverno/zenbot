@@ -1,7 +1,7 @@
 //! Masking secrets in tool output before the model or the tape sees it (SPEC 5.18, docs/context.md).
 //!
 //! Two kinds are masked: the values of the kernel's own secrets (environment variables named like a
-//! token, key, secret or password, zenbot's API token and the Claude Code and
+//! token, key, secret or password, zenbot's API token, the database password and the Claude Code and
 //! Codex sign-ins, reloaded when those files change), and text in well-known token
 //! formats (API keys, GitHub, GitLab, Slack, AWS, Google and Hugging Face tokens, private key blocks).
 //! The prefix stays visible so the model knows what was there. A model that needs a secret's value
@@ -45,33 +45,40 @@ pub fn is_secret_var(name: &str) -> bool {
     k == "DATABASE_URL" || ["TOKEN", "KEY", "SECRET", "PASSWORD", "PASSWD"].iter().any(|w| k.contains(w))
 }
 
-/// The files and folders that hold secrets: under the zen home zenbot's API token, the settings
-/// file, the MCP config and the Matrix channel's sign-in; the engines' sign-ins. Hidden from a
+/// The files and folders that hold secrets: under the zen home zenbot's API token, the database
+/// password, the settings file (and the copy an upgrade keeps when it rewrites it), the MCP config
+/// and the Matrix channel's sign-in; the engines' sign-ins. Hidden from a
 /// verifier's sandboxed shell and refused to its `read` (tools.rs). Only those that exist.
 pub fn secret_files() -> Vec<std::path::PathBuf> {
     let home = crate::zen_home();
     let user = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    let mut paths: Vec<std::path::PathBuf> = ["token", "env", "mcp.json", "matrix.env", "matrix"].iter().map(|f| home.join(f)).collect();
+    let mut paths: Vec<std::path::PathBuf> = ["token", "db-password", "env", "env.prev", "mcp.json", "matrix.env", "matrix"].iter().map(|f| home.join(f)).collect();
     paths.push(crate::mcp::config_path());
     paths.extend([user.join(".codex/auth.json"), user.join(".claude/.credentials.json")]);
     paths.retain(|p| p.exists());
     paths
 }
 
-/// Files whose secret values are masked: zenbot's token and the engines' sign-ins.
+/// How many of `known_files` (the first ones) hold a single plain-text value; the rest are JSON.
+const PLAIN_FILES: usize = 2;
+
+/// Files whose secret values are masked: zenbot's token, the database password and the engines'
+/// sign-ins.
 fn known_files() -> Vec<std::path::PathBuf> {
     let home = crate::zen_home();
     let user = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    vec![home.join("token"), user.join(".codex/auth.json"), user.join(".claude/.credentials.json")]
+    vec![home.join("token"), home.join("db-password"), user.join(".codex/auth.json"), user.join(".claude/.credentials.json")]
 }
 
 /// Secret values the kernel knows, longest first (so a value containing another is masked whole).
 fn load_known(files: &[std::path::PathBuf]) -> Vec<String> {
     let mut values: Vec<String> = std::env::vars().filter(|(k, _)| is_secret_var(k)).map(|(_, v)| v).collect();
-    if let Ok(t) = std::fs::read_to_string(&files[0]) {
-        values.push(t.trim().to_string());
+    for f in &files[..PLAIN_FILES.min(files.len())] {
+        if let Ok(t) = std::fs::read_to_string(f) {
+            values.push(t.trim().to_string());
+        }
     }
-    for f in &files[1..] {
+    for f in files.iter().skip(PLAIN_FILES) {
         if let Ok(text) = std::fs::read_to_string(f) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
                 collect_strings(&v, &mut values);

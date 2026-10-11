@@ -2,7 +2,11 @@
 # errors, and the kernel's end-to-end scenarios (scripts/e2e.sh: the scripted faux model, a
 # throwaway database). For a push to main that passes, `release` then publishes Linux binaries, so
 # installs and upgrades download them instead of compiling (scripts/fetch-release.sh). Assets go to
-# the rolling `edge` release, one tarball per commit; the newest 20 are kept.
+# the rolling `edge` release, one tarball per commit; the newest 20 are kept. The binaries it
+# publishes (the `dist` build) pass the same end-to-end scenarios first.
+#
+# Third-party actions are pinned by commit (the tag in the comment): a moved tag can't change
+# what runs with this repository's token. Bump them deliberately.
 name: ci
 
 on:
@@ -24,13 +28,13 @@ jobs:
   check:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch, 2026-10-09
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Tools for the end-to-end scenarios
-        run: sudo apt-get install -y --no-install-recommends bubblewrap jq
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends bubblewrap jq
       - name: Postgres
         run: docker compose -f deploy/compose.yaml up -d --wait postgres
       - name: Build
@@ -47,7 +51,7 @@ jobs:
   docs:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       - name: Check the docs
@@ -66,11 +70,11 @@ jobs:
       run:
         working-directory: crates/zen-matrix
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch, 2026-10-09
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: crates/zen-matrix
       - name: Build
@@ -81,16 +85,16 @@ jobs:
         run: cargo clippy --release --locked --all-targets -- -D warnings
 
   release:
-    needs: check
+    needs: [check, docs]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     # Oldest supported Ubuntu runner: binaries built against its glibc run on newer distros too.
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch, 2026-10-09
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: dist
       - name: Build
@@ -101,6 +105,12 @@ jobs:
           PONG=$(echo '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}' | timeout 15 target/dist/zen-engine | head -1 || true)
           echo "$PONG" | grep -q pong || { echo "zen-engine did not answer ping: $PONG"; exit 1; }
           target/dist/zen --version
+      - name: Tools for the end-to-end scenarios
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends bubblewrap jq
+      - name: Postgres
+        run: docker compose -f deploy/compose.yaml up -d --wait postgres
+      - name: End-to-end scenarios on the binaries to publish
+        run: ZEN_E2E_NO_BUILD=1 ZEN_E2E_BIN=target/dist scripts/e2e.sh
       - name: Package
         # A flat tarball (zend, zen, zen-engine, VERSION), as scripts/fetch-release.sh expects.
         run: |

@@ -6,16 +6,12 @@
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO"
-. "$REPO/scripts/lib.sh"
+. "$REPO/scripts/db.sh" # and scripts/lib.sh
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 ENV_FILE="$HOME/.zenbot/env"
 # Add KEY=VALUE to ~/.zenbot/env unless KEY is set there already, so a re-run keeps the owner's settings.
 env_default() { grep -qE "^$1=" "$ENV_FILE" 2>/dev/null || echo "$1=$2" >> "$ENV_FILE"; }
-# Set KEY=VALUE in ~/.zenbot/env, replacing any line for KEY (for settings passed to this run).
-env_set() {
-  local rest; rest=$(grep -vE "^$1=" "$ENV_FILE" 2>/dev/null || true)
-  { [ -n "$rest" ] && echo "$rest"; echo "$1=$2"; } > "$ENV_FILE"
-}
+# env_set (scripts/lib.sh) replaces KEY's line, for settings passed to this run.
 
 # Prebuilt binaries are downloaded when available (scripts/fetch-release.sh); Rust and a C
 # toolchain are only installed when zenbot has to be compiled here. Set ZEN_BUILD_FROM_SOURCE=1
@@ -40,9 +36,21 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 say "Node.js"
 NODE_DIR="$HOME/.local/node"
+# Pinned, and checked against the SHA-256 nodejs.org publishes for it (SHASUMS256.txt for the
+# version), so a tampered or truncated download is never unpacked. Bump both together.
+NODE_VERSION=v22.20.0
+NODE_TAR=node-$NODE_VERSION-linux-x64.tar.xz
+NODE_SHA256=00bbd05e306ea68b6e13e17360d0e2f680b493ef95f2fea1c4296ff7437530bc
 if ! "$NODE_DIR/bin/node" --version 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])\.'; then
   mkdir -p "$NODE_DIR"
-  curl -fsSL https://nodejs.org/dist/v22.20.0/node-v22.20.0-linux-x64.tar.xz | tar -xJ -C "$NODE_DIR" --strip-components=1
+  NODE_DL=$(mktemp -d)
+  curl -fsSL -o "$NODE_DL/$NODE_TAR" "https://nodejs.org/dist/$NODE_VERSION/$NODE_TAR"
+  if ! echo "$NODE_SHA256  $NODE_DL/$NODE_TAR" | sha256sum -c --quiet -; then
+    echo "The Node.js download doesn't match its published checksum; stopping." >&2
+    exit 1
+  fi
+  tar -xJf "$NODE_DL/$NODE_TAR" -C "$NODE_DIR" --strip-components=1
+  rm -rf "$NODE_DL"
 fi
 export PATH="$NODE_DIR/bin:$PATH"
 grep -q '.local/node/bin' "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="$HOME/.local/bin:$HOME/.local/node/bin:$HOME/.cargo/bin:$PATH"' >> "$HOME/.bashrc"
@@ -75,6 +83,7 @@ ln -sf "$HOME/.zenbot/bin/zen" "$HOME/.local/bin/zen"
 new_token
 touch "$ENV_FILE"
 chmod 600 "$ENV_FILE"
+env_backup
 [ -z "${ZEN_PORT:-}" ] || env_set ZEN_PORT "$ZEN_PORT"
 # The token file is the source of truth (the zen CLI reads it), so the service always gets it.
 env_set ZEN_TOKEN "$(cat "$HOME/.zenbot/token")"
@@ -85,6 +94,12 @@ env_default HOME "$HOME"
 env_default PATH "$HOME/.local/bin:$NODE_DIR/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
 PORT=$(zen_env ZEN_PORT)
 git rev-parse --short HEAD > "$HOME/.zenbot/version" 2>/dev/null || true
+
+say "Database"
+# Postgres starts with the public bootstrap password in deploy/compose.yaml; replace it with a
+# private one before zend first connects (db_secure, scripts/db.sh).
+sudo docker compose -f deploy/compose.yaml up -d --wait postgres >/dev/null
+db_secure
 
 say "Service"
 sed -e "s#__USER__#$USER#g" -e "s#__REPO__#$REPO#g" -e "s#__HOME__#$HOME#g" deploy/zenbot.service \
