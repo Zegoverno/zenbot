@@ -12,11 +12,32 @@ Environment=HOME=__HOME__
 ExecStart=__HOME__/.zenbot/bin/zen-matrix run
 Restart=always
 RestartSec=10
-# It only needs its own state and the kernel's token; keep the rest of the machine out of reach.
-NoNewPrivileges=true
+# It needs its binary, the kernel's token and port, its settings and its own folder: the home
+# folder is an empty tmpfs with exactly those bound in (the folder read-write, the rest read-only).
+ProtectHome=tmpfs
+BindReadOnlyPaths=__HOME__/.zenbot/bin/zen-matrix __HOME__/.zenbot/token -__HOME__/.zenbot/env -__HOME__/.zenbot/matrix.env
+BindPaths=__HOME__/.zenbot/matrix
 ProtectSystem=strict
-ReadWritePaths=__HOME__/.zenbot/matrix
 PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
