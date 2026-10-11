@@ -1,18 +1,12 @@
 # zenbot — Specification
 
-> What zenbot is meant to have: its layers, modules and their contracts (the long-term target).
-> How it is built and works today, and the agreed near-term design: [DESIGN.md](DESIGN.md). Why:
-> [DECISIONS.md](DECISIONS.md). What it's for: [CONTEXT.md](CONTEXT.md). Order of work:
-> [ROADMAP.md](ROADMAP.md). Where DESIGN.md's target design (2026-10-06) refines a module below,
-> DESIGN.md wins until this file is updated. Section numbers are kept stable; code cites them.
-
----
-
-## 1. Vision
-Moved to [CONTEXT.md](CONTEXT.md).
-
-## 2. Principles
-Moved to [CONTEXT.md](CONTEXT.md#principles).
+> The long-term target: zenbot's layers, modules and their contracts. Not built unless it says so.
+> How it works today, and the agreed near-term design: [DESIGN.md](DESIGN.md). Why:
+> [DECISIONS.md](DECISIONS.md). What it's for, principles and success metrics:
+> [CONTEXT.md](CONTEXT.md). Order of work and open questions: [ROADMAP.md](ROADMAP.md). Where
+> DESIGN.md's target design (2026-10-06) refines a module below, DESIGN.md wins until this file is
+> updated. Section numbers are kept stable (code and research cite §5.9, §5.18); sections 1, 2, 7,
+> 8, 9, 11 and 13 moved to the files above.
 
 ## 3. Strategy: three layers
 
@@ -72,13 +66,13 @@ Each module lists what it does, its contract, the default implementation and pos
 ### ENGINE
 
 #### 5.1 Sessions
-- Create, list, rename, archive, restore, fork. Append-only **tape** per session: a chain of blocks, each with a per-session number (`seq`, its address), a link to its parent block and a hash over the parent's hash and its content (as git does). Kinds today: `message`, `context`, `envelope`, `compaction`, `engine_session`; later `model_change`, `attachment`, `taint`. See `docs/context.md`.
+- Create, list, rename, archive, restore, fork. Append-only **tape** per session: a chain of blocks, each with a per-session number (`seq`, its address), a link to its parent block and a hash over the parent's hash and its content (as git does). The kinds built so far are in `docs/context.md`; later `model_change`, `attachment`.
 - Invariant (from qm): *the model reads only what the tape contains, and the tape contains everything the model read.*
 - Borrow: Pi session tree, qm tape.
 
 #### 5.2 Tools & executor
 - **Built-ins:** `bash`, `read`, `write`, `edit`, `move`, `list`, `search`; `service.start|stop|logs` (background processes such as dev servers); `run` (code in any language); `web.search`, `web.fetch`; `browser.*`; and the Mind/Work tools (`memory.*`, `wiki.*`, `taste.*`, `task.*`, `delegate`, `inbox.ask`).
-- Commands run in a **per-project sandbox container** with only that project's scope folder and linked repos mounted (today they run on the host; only a verifier's are sandboxed, read-only). Toolchains via `mise`.
+- Commands run in a **per-project sandbox container** with only that project's scope folder and linked repos mounted (as built: DESIGN.md, "Security today"). Toolchains via `mise`.
 - **Scripts become tools:** a saved script with a typed signature is callable as a tool (Windmill's idea).
 - Large outputs are truncated (e.g. 2000 lines / 50 KB); the full output is stored as a blob and referenced.
 - Alternatives: Windmill (executor + workflows), gVisor/Firecracker (stronger isolation).
@@ -113,13 +107,13 @@ Each module lists what it does, its contract, the default implementation and pos
 #### 5.6 Browser & preview
 1. `web.search` (search API) and `web.fetch` (page → markdown). **Both taint the session.**
 2. Agent browser: headless Chromium in the sandbox via an existing MCP server (Playwright MCP or Chrome DevTools MCP).
-3. **Dev preview:** `service.start` runs a dev server; `zend` proxies it to `/preview/<session>/<port>`; a future web UI shows it next to the chat (none exists today: the web UI was removed on 2026-10-10).
+3. **Dev preview:** `service.start` runs a dev server; `zend` proxies it to `/preview/<session>/<port>`; a web UI (§5.7) shows it next to the chat.
 4. **Point & comment:** click an element in the preview; zenbot attaches its selector, outer HTML, key styles, bounding box and a cropped screenshot to the next message.
 5. **Screenshot & annotate.**
 6. **Shared live browser:** CDP screencast into the UI; the owner can take over.
 
 #### 5.7 Web UI (future)
-- Not built today: the frozen web UI was removed on 2026-10-10; zen (terminal) and Matrix are the clients. If one comes back:
+- Not built (the first one was removed on 2026-10-10; zen and Matrix are the clients). If one comes back:
 - Mobile-friendly (installable PWA, push notifications).
 - Views: sessions · chat (streaming, tool cards, attachments, model picker) · preview · **inbox** · board · wiki · traces & costs · settings · command palette.
 
@@ -172,7 +166,6 @@ The core of the moat: learning the owner's judgment and applying it everywhere.
 
 #### 5.14 Agents, tasks and the closed loop
 - **Briefs and verification are a skill and a tool** the agent uses when they help (D-026; built 2026-10-07, `docs/brief.md`). The kernel-enforced version below was removed then.
-- **Sessions as briefed work** (removed, D-020): frame (read-only, enforced by the kernel) → brief with checkable criteria → approve (owner, or auto-approve per route) → work in a fresh context seeded with the brief → verify (the kernel runs the criteria's commands; a fresh verifier judges the rest) → report → verdict (owner's is the ground truth; the model's is recorded as such). The model can run it end to end; the owner can take any step.
 - **Routing policy:** which model and thinking level per kind of work, versioned. Day-to-day policy changes automatically when evals and metrics show a better fit (logged, undoable); system-level changes need the owner.
 - **Agent definitions:** `agents/<name>.md` with frontmatter (instructions, model policy, tools, skills, scopes, budget, may-delegate).
 - **Delegation:** `delegate(agent, goal, context, output_schema?, background?)` → child session with a fresh context; results return to the parent; background delegations report back through the board and inbox. Children can't widen permissions; nesting depth is capped.
@@ -188,7 +181,7 @@ The core of the moat: learning the owner's judgment and applying it everywhere.
 - This is how zenbot improves itself: an autoresearch-style loop proposes config changes, runs the bench, and keeps what wins. Promotion needs owner approval.
 
 #### 5.16 Scheduler & workflows
-- First step built (D-046): the kernel's scheduler (`jobs.rs`, tables `jobs` and `job_runs`) runs the kernel's own jobs (`sleep`, `engines`) and agent jobs (a prompt in a fresh session); run statuses today are `running | ok | silent | error | interrupted`, plus `missed`.
+- First step built (D-046): the kernel's scheduler, DESIGN.md "Scheduled jobs".
 - Cron entries trigger a script, workflow or agent task, each with its own model and budget; explicit statuses (`ok | failed | skipped | delivery_failed`); silent unless an S1 check says the owner should know.
 - Workflows v1: ordered steps with approvals, retries and waits; state in Postgres. Adopt Windmill if we outgrow this.
 - First crons: nightly backup; nightly `zen-bench`; daily digest to the inbox.
@@ -201,7 +194,7 @@ The core of the moat: learning the owner's judgment and applying it everywhere.
 ### PLATFORM
 
 #### 5.18 Security & trust model
-Threats: prompt injection via web/email/docs, secret exfiltration, destructive commands, malicious skills or MCP servers, runaway spend.
+As built: DESIGN.md, "Security today". Threats: prompt injection via web/email/docs, secret exfiltration, destructive commands, malicious skills or MCP servers, runaway spend.
 - **Auth:** device pairing (new device requests; owner approves from the CLI or an existing session); short-lived session tokens. M0 starts with a single owner token.
 - **Secrets:** encrypted keychain in the kernel. Sandboxes never hold raw keys; the kernel injects credentials when proxying. Secret values are masked in outputs.
 - **Taint rule:** a session that ingested untrusted content is marked tainted. Tainted sessions can't use secrets, send data out, or take outward-facing actions without an inbox approval. Taint propagates to delegated children, and travels with what a tainted session stores (memories, reports, drafts, notes), which is untrusted wherever it's read.
@@ -214,23 +207,13 @@ Threats: prompt injection via web/email/docs, secret exfiltration, destructive c
 - Every model call (provider, model, class, tokens, cost, latency, cache hits) and every tool call (args, duration, size, status) is stored in Postgres and viewable per session, task, project and day. OpenTelemetry/Langfuse export later.
 
 ## 6. Architecture
-Moved to [DESIGN.md](DESIGN.md) (as built) and [MAP.md](MAP.md) (the code). Target layout, not built
-yet: crates `zen-exec`, `zen-store`, `zen-mcp`; `packages/web`; `bench/`; `deploy/Caddyfile` and a
+As built: [DESIGN.md](DESIGN.md) and [MAP.md](MAP.md). Target layout, not built yet: crates `zen-exec`, `zen-store`, `zen-mcp`; `packages/web`; `bench/`; `deploy/Caddyfile` and a
 sandbox image. Target v1 tables: `projects` · `agents` · `attachments` · `sources` · `wiki_pages`
 (index; content in git) · `memory_records` · `taste_records` · `principles` (index) · `chunks` ·
 `goals` · `tasks` · `runs` · `evals` · `crons` · `workflows` · `workflow_runs` · `inbox_items` ·
 `skills` (index) · `scripts` (index) · `mcp_servers` · `secrets` · `devices` · `bench_runs`. Built
 in another shape so far: memory as `memories`, search chunks as `search_docs`, crons as `jobs` and
 `job_runs`, saved scripts as `made_tools`; MCP servers live in `~/.zenbot/mcp.json`, not a table.
-
-## 7. Deployment
-Moved to [DESIGN.md](DESIGN.md#deployment) and [DEVELOPMENT.md](DEVELOPMENT.md).
-
-## 8. Roadmap
-Moved to [ROADMAP.md](ROADMAP.md).
-
-## 9. Success metrics
-Moved to [CONTEXT.md](CONTEXT.md#how-success-is-measured).
 
 ## 10. Risks
 | Risk | Mitigation |
@@ -241,9 +224,6 @@ Moved to [CONTEXT.md](CONTEXT.md#how-success-is-measured).
 | Prompt injection / exfiltration | Taint rule, credential injection, approvals, egress allow-lists |
 | Knowledge rot (wrong wiki pages compound) | Citations, confidence, lint, human-approved writes |
 | Scope creep | Anything not in the current phase goes to ROADMAP.md as a later step |
-
-## 11. Open questions
-Moved to [ROADMAP.md](ROADMAP.md#open-decisions).
 
 ## 12. Prior art (per module)
 | Module | Study |
@@ -257,6 +237,3 @@ Moved to [ROADMAP.md](ROADMAP.md#open-decisions).
 | Work / loop | Paperclip, ClawCompany, Stripe Minions blueprints, autoresearch |
 | Browser | Playwright MCP, Chrome DevTools MCP, gstack |
 | Ship to agents | Continual Company OS, MCP Registry, Cloudflare Monetization Gateway, Stripe metering |
-
-## 13. Decision log
-Moved to [DECISIONS.md](DECISIONS.md).
