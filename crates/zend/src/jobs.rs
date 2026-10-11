@@ -709,12 +709,16 @@ async fn tick(app: &AppState) -> Result<()> {
         }
         sqlx::query("UPDATE jobs SET next_run_at = $2, updated_at = now() WHERE id = $1").bind(job.id).bind(next).execute(&mut *tx).await?;
         let trigger = if late > chrono::Duration::minutes(2) { "catchup" } else { "schedule" };
-        let running: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM job_runs WHERE job_id = $1 AND status = 'running')").bind(job.id).fetch_one(&mut *tx).await?;
-        if running {
-            continue; // still on the previous run: this one is skipped, the next stays scheduled
+        // The database allows one running run per job: one still running (or started by the owner
+        // just now) means this one is skipped, the next stays scheduled, and the tick goes on.
+        let run: Option<i64> = sqlx::query_scalar("INSERT INTO job_runs (job_id, trigger, status) VALUES ($1, $2, 'running') ON CONFLICT DO NOTHING RETURNING id")
+            .bind(job.id)
+            .bind(trigger)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if let Some(run) = run {
+            start.push((job, run));
         }
-        let run: i64 = sqlx::query_scalar("INSERT INTO job_runs (job_id, trigger, status) VALUES ($1, $2, 'running') RETURNING id").bind(job.id).bind(trigger).fetch_one(&mut *tx).await?;
-        start.push((job, run));
     }
     tx.commit().await?;
     for (job, run) in start {
