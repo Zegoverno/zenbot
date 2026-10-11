@@ -134,9 +134,18 @@ pub fn render_message(seq: i32, m: &Value, max: usize) -> String {
     }
 }
 
-/// What the summarizer reads: the previous summary, then the blocks to summarize. Tool output is cut
-/// to 2,000 characters per message (the full text stays on the tape), the whole to about 400 KB.
+/// How much transcript the summarizer reads at most (bytes), the previous summary included.
+const BUDGET: usize = 400_000;
+
+/// What the summarizer reads: the previous summary, then the blocks to summarize. The owner's words
+/// are sent whole; tool output and the agent's lines are cut to 2,000 characters each (the full
+/// text stays on the tape). Over BUDGET, tool lines are cut to their start first, then the agent's;
+/// then tool lines, and last the agent's, are left out but for their numbers.
 fn summarizer_input(previous: Option<&str>, msgs: &[&Block]) -> String {
+    summarizer_input_within(previous, msgs, BUDGET)
+}
+
+fn summarizer_input_within(previous: Option<&str>, msgs: &[&Block], budget: usize) -> String {
     let mut out = String::new();
     if let Some(p) = previous {
         out.push_str("Previous summary:\n");
@@ -144,18 +153,32 @@ fn summarizer_input(previous: Option<&str>, msgs: &[&Block]) -> String {
         out.push_str("\n\n");
     }
     out.push_str("Transcript to summarize:\n");
-    let lines: Vec<String> = msgs.iter().map(|b| render_message(b.seq, &b.payload, 2000)).filter(|l| !l.is_empty()).collect();
-    let total: usize = lines.iter().map(String::len).sum();
-    let budget = 400_000usize;
-    for l in &lines {
-        if total > budget && l.len() > 600 && !l.contains(" User: ") {
-            // Too long overall: keep only the start of tool output and answers, never the user's words.
-            let head: String = l.chars().take(500).collect();
-            out.push_str(&format!("{head} […]\n"));
-        } else {
-            out.push_str(l);
-            out.push('\n');
+    // (role, seq, line)
+    let mut lines: Vec<(&str, i32, String)> = msgs
+        .iter()
+        .map(|b| {
+            let role = b.payload["role"].as_str().unwrap_or("");
+            (role, b.seq, render_message(b.seq, &b.payload, if role == "user" { usize::MAX } else { 2000 }))
+        })
+        .filter(|(_, _, l)| !l.is_empty())
+        .collect();
+    let size = |lines: &[(&str, i32, String)]| out.len() + lines.iter().map(|(_, _, l)| l.len() + 1).sum::<usize>();
+    let steps: [(&str, Option<usize>); 4] = [("toolResult", Some(500)), ("assistant", Some(500)), ("toolResult", None), ("assistant", None)];
+    for (role, keep) in steps {
+        if size(&lines) <= budget {
+            break;
         }
+        for (r, seq, l) in lines.iter_mut().filter(|(r, _, _)| *r == role) {
+            *l = match keep {
+                Some(n) if l.chars().count() > n + 100 => format!("{} […]", l.chars().take(n).collect::<String>()),
+                Some(_) => continue,
+                None => format!("#{seq} {}: […]", if *r == "assistant" { "Assistant" } else { "Tool result" }),
+            };
+        }
+    }
+    for (_, _, l) in &lines {
+        out.push_str(l);
+        out.push('\n');
     }
     out
 }
@@ -442,6 +465,28 @@ async fn history_inner(db: &PgPool, session: Uuid, args: &Value) -> Result<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_owners_words_are_whole_and_the_budget_holds() {
+        let b = |seq: i32, payload: Value| Block { seq, kind: "message".into(), payload };
+        let owner = format!("REQ-START {} REQ-END", "o".repeat(5000));
+        let msgs = vec![
+            b(1, json!({ "role": "user", "content": [{ "type": "text", "text": owner }] })),
+            b(2, json!({ "role": "assistant", "content": [{ "type": "text", "text": "a".repeat(3000) }] })),
+            b(3, json!({ "role": "toolResult", "toolName": "bash", "content": [{ "type": "text", "text": "t".repeat(3000) }] })),
+        ];
+        let refs: Vec<&Block> = msgs.iter().collect();
+        let roomy = summarizer_input_within(None, &refs, BUDGET);
+        assert!(roomy.contains("REQ-END"), "the owner's words are never cut");
+        assert!(roomy.contains(&"t".repeat(2000)) && !roomy.contains(&"t".repeat(2001)), "tool output is cut to 2,000");
+        // Tight: tool output goes to its start first, the agent's line stays.
+        let tight = summarizer_input_within(None, &refs, 5000 + 2000 + 1200);
+        assert!(tight.contains(&"a".repeat(2000)) && !tight.contains(&"t".repeat(501)), "{}", tight.len());
+        // Tighter: both cut, then left out but for their numbers; the owner's words stay whole.
+        let tighter = summarizer_input_within(None, &refs, 5000 + 300);
+        assert!(tighter.contains("REQ-END") && tighter.contains("#2 Assistant: […]") && tighter.contains("#3 Tool result: […]"));
+        assert!(tighter.len() <= 5000 + 300);
+    }
 
     #[test]
     fn a_session_prefix_is_an_id_range() {
