@@ -123,8 +123,16 @@ with questions for the owner. The kernel-enforced workflow (`flow.rs`) was remov
 
 One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
 
-- **System jobs**, seeded at start: `sleep` (03:00 UTC, `memory::sleep`) and `engines` (04:00 UTC,
-  `scripts/update-engines.sh` with the kernel's secrets removed). The owner can pause or run them.
+- **System jobs**, seeded at start (an install from before a job existed gets it at its next
+  start), each with its own run record: `sleep` (03:00 UTC, `memory::sleep`), then the nightly
+  upkeep ten minutes apart: `wiki` (03:10, `wiki::tend`: commit the agent's own wiki edits, report
+  pages without a summary and broken links), `skills` (03:20, `workshop::tend`: flag skills unused
+  for 30 days, archive them at 90), `routes` (03:30, `delegate::tune`: switch a delegation route on
+  clear evidence) and `prune` (03:40: saved tool outputs after 30 days, prompt-file backups after
+  90); and `engines` (04:00 UTC, `scripts/update-engines.sh` with the kernel's secrets removed). An
+  upkeep run that found nothing is `silent`; what they found in the last day joins the sleep's
+  morning note in the next sessions' instructions (`jobs::upkeep_note`). The owner can pause or
+  run them; a system job whose name an agent job already holds isn't seeded (logged).
 - **Agent jobs**: a prompt run in a fresh session of kind `job`, titled `job: <name>` and listed
   with the owner's sessions. Its instructions (a `base` block written before the turn) are the
   parts the job picked (`context`: the soul always, plus identity, agents, user, memory, skills,
@@ -175,7 +183,8 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
   compacted: `turns::run_kernel_session` starts a parentless subagent session on the default model
   that answers with the rewritten file; the kernel checks it (markers, a heading, within the cap,
   not under a quarter of the 80% target), backs up and writes it. Every entry's fate
-  is a `decisions` row; the run is a `sleep_runs` row; the next sessions get a one-line note. System
+  is a `decisions` row; the run is a `sleep_runs` row; the next sessions get a one-line note (with
+  what the nightly upkeep jobs found, "Scheduled jobs"). The sleep tidies memory only. System
   One judges up to 4 entries at once and names what already covers an entry (another entry, the
   profile or the identity); an entry covered by another goes only while that one stays, so of
   entries that say the same thing one always survives. Fates apply in one transaction with the
@@ -204,11 +213,11 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
   one) and catches duplicates and sensitive notes, the kernel appends, masks, labels notes from a
   tainted session (and the sleep's copies of marked memories) `web`, keeps `index.md` and `log.md`,
   and commits; the agent writes the summary. A page with a `web` entry is untrusted content wherever
-  it's read (`search`, `read`). Indexed for `search`; linted and committed by the nightly sleep
-  (whose note doesn't name a page with `web` entries).
+  it's read (`search`, `read`). Indexed for `search`; linted and committed by the nightly `wiki`
+  job (whose report doesn't name a page with `web` entries).
 - **Workshop** (`workshop.rs`, D-037): `save_skill` (reason required, format and size checked,
   near-duplicates refused, drafts in `skills/_proposed` until the owner or an accepted session
-  vouches, new domains the owner's call, commits; the sleep flags and archives unused skills) and
+  vouches, new domains the owner's call, commits; the nightly `skills` job flags and archives unused skills) and
   `save_tool` (made tools in `~/.zenbot/global/tools/`, called as `made_<name>`, sandboxed without network
   until approved in `made_tools`; each run uses a private copy of the tool's folder, which is what
   is checked against the approval). The owner accepts or rejects a draft or a tool by the
@@ -221,7 +230,7 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
   `schedule`; they inherit the parent's taint), several
   tasks per call in parallel; a child (subagent or verifier) is stopped with the turn that waits
   for it (an abort, the turn ending), and so on down; the model from the routing policy (`policies`) by kind of work, with
-  logged exploration; the sleep tunes routes on clear evidence.
+  logged exploration; the nightly `routes` job tunes routes on clear evidence.
 - **Skills** (`skills.rs`): folders in `~/.zenbot/global/skills/<domain>/<name>/` in the agentskills.io
   format, validated when scanned (invalid ones are skipped and logged). The instructions carry an
   index; `find_skills` matches names, descriptions and bodies; `load_skill` returns a SKILL.md or a

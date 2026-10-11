@@ -6,6 +6,32 @@
 
 ---
 
+## 2026-10-11 — Kernel modules: upkeep jobs of their own, one settings module, shared helpers
+
+Toward CONTEXT.md principle 5 (every building block a module with a documented contract).
+
+- The nightly sleep had grown into the orchestrator for unrelated work. It now tidies memory only;
+  the rest are system jobs seeded like `sleep` and `engines` (existing installs get them at the
+  next start), each with its own run record and report: `wiki` (03:10 UTC, commit the agent's wiki
+  edits, report missing summaries and broken links), `skills` (03:20, flag and archive unused
+  skills), `routes` (03:30, switch a delegation route on clear evidence) and `prune` (03:40, old
+  saved outputs and prompt-file backups). A run that found nothing is `silent`. The next sessions'
+  morning note still says what they found, read from their last day's runs. A sleep by hand or at
+  the ceiling no longer does the upkeep; `zen jobs run wiki` (etc.) does.
+- `config.rs` reads the kernel's ~40 tunable settings once at start, typed, with every default in
+  one place: `ZEN_TZ` (America/Sao_Paulo), the summary, assist and embedding models among them. A
+  value that doesn't parse runs on its default and is logged; a blank value is unset; `off`,
+  `false` and `no` now turn off flags that took only `0`. The prompt-cache lifetime that was keyed
+  on the `claude/` prefix is a per-engine setting, `ZEN_CACHE_TTL` (`claude=3600`, others 300).
+  Boot settings, paths and the workers' are still read where used (ROADMAP debt).
+- One git runner (`git::run`, `git::commit_all`) replaces the wiki's and the workshop's; one
+  `workers::json_object` replaces the JSON extraction in `compact` and `assist` (which could panic
+  on a reply with `}` before `{`); one name rule (`valid_name`) replaces three, so a new job name
+  can no longer end in a hyphen or hold `--`.
+- Tested: unit tests (config parsing and fallbacks, cache TTLs, git commits, JSON extraction), e2e
+  `wiki` (the job commits edits, reports a missing summary, the next session hears it) and
+  `scheduled-jobs` (all six system jobs seeded, each upkeep job run by hand), `scripts/check.sh`.
+
 ## 2026-10-11 — zen: a lighter board, paged sessions, safer terminal text
 
 - The sessions board fetched `/api/board` inside the render loop every 2 seconds, so a slow kernel
