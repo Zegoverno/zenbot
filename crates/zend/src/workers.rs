@@ -5,6 +5,8 @@ use super::*;
 
 use std::collections::HashSet;
 
+use zen_proto::worker;
+
 /// A worker process speaking the worker protocol (docs/worker-protocol.md).
 /// The process is restarted by `supervise` when it exits, so `mind` is swapped in place.
 pub(crate) struct Worker {
@@ -98,17 +100,15 @@ pub(crate) async fn supervise(app: AppState, idx: usize, mut exited: tokio::sync
 }
 
 /// Ask the worker that serves `model` for one completion without tools (`complete`, used for
-/// summaries). Returns `{ text, usage, model }`.
-pub(crate) async fn complete(app: &App, model: &str, system: &str, prompt: &str) -> Result<Value> {
+/// summaries).
+pub(crate) async fn complete(app: &App, model: &str, system: &str, prompt: &str) -> Result<worker::Completion> {
     let Some(w) = worker_for(app, model).await else { anyhow::bail!("no worker serves `{model}`") };
-    let res = app.workers[w]
-        .mind()
-        .request_within("complete", json!({ "model": model, "system": system, "prompt": prompt }), Duration::from_secs(600))
-        .await?;
+    let req = worker::Request::Complete(worker::Complete { model: model.into(), system: system.into(), prompt: prompt.into() });
+    let res = app.workers[w].mind().call_within(&req, Duration::from_secs(600)).await?;
     if let Some(e) = res["error"].as_str() {
         anyhow::bail!("{e}");
     }
-    Ok(res)
+    Ok(serde_json::from_value(res)?)
 }
 
 /// The JSON object in a completion's text: from its first `{` to its last `}`, so a reply wrapped
@@ -154,12 +154,12 @@ pub(crate) async fn collect_models(app: &App) -> Value {
     let mut authenticated = serde_json::Map::new();
     let mut failed = Vec::new();
     for (i, w) in app.workers.iter().enumerate() {
-        match w.mind().request("models.list", json!({})).await {
+        let listed = w.mind().call(&worker::Request::ModelsList {}).await.and_then(|res| Ok(serde_json::from_value::<worker::ModelsList>(res)?));
+        match listed {
             Ok(res) => {
-                if let Some(a) = res["authenticated"].as_object() {
-                    authenticated.extend(a.clone());
-                }
-                all.extend(res["models"].as_array().into_iter().flatten().map(|m| (i, m.clone())));
+                authenticated.extend(res.authenticated);
+                // The catalog keeps each model as its worker described it (JSON), for clients.
+                all.extend(res.models.iter().filter_map(|m| serde_json::to_value(m).ok()).map(|m| (i, m)));
             }
             Err(e) => {
                 tracing::warn!("worker `{}` didn't list its models ({e:#}); keeping its previous ones", w.name);

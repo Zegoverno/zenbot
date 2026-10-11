@@ -19,6 +19,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
 
+use zen_proto::worker::{Completion, Model, TurnEvent};
+
+use crate::engine::{BoxFuture, Engine};
 use crate::turn::{enabled, now_ms, prompt_blocks, seed_blocks, StderrTail, TurnCtx, TurnInput, COMPLETE_LIMIT};
 
 /// Codex features zen turns off in every thread: each gives the model a tool of its own (shell,
@@ -84,8 +87,44 @@ fn binary_stamp() -> Option<Stamp> {
     Some((real, modified))
 }
 
-pub fn available() -> bool {
-    version().is_some()
+/// The Codex engine (`codex/*` models), through `codex app-server`.
+pub struct Codex;
+
+impl Engine for Codex {
+    fn name(&self) -> &'static str {
+        "codex"
+    }
+
+    fn version(&self) -> Option<String> {
+        version()
+    }
+
+    fn models(&self) -> BoxFuture<'_, Vec<Model>> {
+        Box::pin(models())
+    }
+
+    fn run_turn<'a>(&'a self, ctx: TurnCtx, input: &'a TurnInput, abort: watch::Receiver<bool>) -> BoxFuture<'a, Result<Option<String>>> {
+        Box::pin(run_turn(ctx, input, abort))
+    }
+
+    fn complete<'a>(&'a self, model: &'a str, system: &'a str, prompt: &'a str) -> BoxFuture<'a, Result<Completion>> {
+        Box::pin(complete(model, system, prompt))
+    }
+
+    fn failover_target(&self) -> Option<String> {
+        Some(std::env::var("ZEN_FAILOVER_CODEX_TO_CLAUDE").unwrap_or_else(|_| "claude/claude-sonnet-5-5".into()))
+    }
+
+    /// No API key or access token in the environment (the CLI would prefer it), and `codex login
+    /// status` says it is signed in with ChatGPT.
+    fn subscription_login(&self) -> bool {
+        if std::env::var_os("OPENAI_API_KEY").is_some() || std::env::var_os("CODEX_ACCESS_TOKEN").is_some() {
+            return false;
+        }
+        let Ok(out) = std::process::Command::new("codex").args(["login", "status"]).output() else { return false };
+        out.status.success()
+            && [out.stdout.as_slice(), out.stderr.as_slice()].iter().any(|bytes| String::from_utf8_lossy(bytes).to_ascii_lowercase().contains("logged in using chatgpt"))
+    }
 }
 
 /// The installed Codex CLI version ("codex-cli 0.155.1" -> "0.155.1"). Asked again when the
@@ -271,7 +310,7 @@ fn is_request(msg: &Value) -> bool {
 struct Listed {
     at: Instant,
     stamp: Option<Stamp>,
-    models: Vec<Value>,
+    models: Vec<Model>,
 }
 
 /// Not held while Codex is asked: a slow lookup must not hold up other callers.
@@ -280,7 +319,7 @@ static MODELS: std::sync::Mutex<Option<Listed>> = std::sync::Mutex::new(None);
 /// Models available to this Codex sign-in, asked from Codex itself. A list is kept for an hour, or
 /// until the binary changes (an update). A failed lookup (within `SETUP_LIMIT`) is logged and the
 /// previous list, if any, is returned; it is tried again next time.
-pub async fn models() -> Vec<Value> {
+async fn models() -> Vec<Model> {
     let stamp = binary_stamp();
     let previous = MODELS.lock().unwrap().as_ref().map(|l| (l.at.elapsed() < MODELS_TTL && l.stamp == stamp, l.models.clone()));
     if let Some((true, models)) = previous {
@@ -300,7 +339,7 @@ pub async fn models() -> Vec<Value> {
 
 /// Ask a new app-server for its models (in zen's private Codex folder, like turns). Dropping the
 /// future (a timeout) kills the app-server.
-async fn list_models() -> Result<Vec<Value>> {
+async fn list_models() -> Result<Vec<Model>> {
     let mut s = AppServer::start(&crate::turn::engine_dir("codex")?).await?;
     let list = s.call("model/list", json!({}), None).await;
     let _ = s.child.start_kill();
@@ -310,9 +349,18 @@ async fn list_models() -> Result<Vec<Value>> {
         .flatten()
         .filter_map(|m| {
             let id = m["id"].as_str().or(m["model"].as_str())?;
-            let efforts: Vec<&Value> = m["supportedReasoningEfforts"].as_array().into_iter().flatten().map(|e| &e["reasoningEffort"]).collect();
-            Some(json!({ "id": format!("codex/{id}"), "name": format!("Codex {}", m["displayName"].as_str().unwrap_or(id)), "engine": "codex", "default": m["isDefault"],
-                         "efforts": efforts, "default_effort": m["defaultReasoningEffort"] }))
+            let efforts = m["supportedReasoningEfforts"].as_array().into_iter().flatten().filter_map(|e| e["reasoningEffort"].as_str()).map(String::from).collect();
+            let mut extra = serde_json::Map::new();
+            extra.insert("default".into(), m["isDefault"].clone());
+            Some(Model {
+                id: format!("codex/{id}"),
+                name: format!("Codex {}", m["displayName"].as_str().unwrap_or(id)),
+                engine: "codex".into(),
+                efforts,
+                default_effort: m["defaultReasoningEffort"].as_str().map(String::from),
+                context: None,
+                extra,
+            })
         })
         .collect())
 }
@@ -323,7 +371,7 @@ fn error_text(v: &Value) -> String {
     serde_json::from_str::<Value>(raw).ok().and_then(|j| j["error"]["message"].as_str().map(String::from)).unwrap_or_else(|| raw.to_string())
 }
 
-pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bool>) -> Result<Option<String>> {
+async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bool>) -> Result<Option<String>> {
     let model = input.model.as_str();
     let effort = input.effort.as_deref();
     let system_prompt = input.system.as_str();
@@ -449,20 +497,20 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
                     let message = json!({ "role": "assistant", "provider": "codex", "model": model, "stopReason": "toolUse", "timestamp": now_ms(),
                         "content": [{ "type": "toolCall", "id": it["id"], "name": it["tool"], "arguments": it["arguments"] }],
                         "usage": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": { "total": 0.0 } } });
-                    ctx.notify("turn.message", json!({ "message": message })).await;
+                    ctx.notify(TurnEvent::Message { message }).await;
                     sent += 1;
                 }
                 "item/agentMessage/delta" => {
-                    ctx.notify("turn.delta", json!({ "delta": p["delta"] })).await;
+                    ctx.notify(TurnEvent::Delta { delta: p["delta"].as_str().unwrap_or("").into() }).await;
                 }
                 "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
-                    ctx.notify("turn.thinking", json!({ "delta": p["delta"] })).await;
+                    ctx.notify(TurnEvent::Thinking { delta: p["delta"].as_str().unwrap_or("").into() }).await;
                 }
                 "item/completed" if p["item"]["type"] == "agentMessage" => {
                     let message = json!({ "role": "assistant", "provider": "codex", "model": model, "stopReason": "stop", "timestamp": now_ms(),
                         "content": [{ "type": "text", "text": p["item"]["text"] }],
                         "usage": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": { "total": 0.0 } } });
-                    ctx.notify("turn.message", json!({ "message": message })).await;
+                    ctx.notify(TurnEvent::Message { message }).await;
                     sent += 1;
                 }
                 "thread/tokenUsage/updated" => {
@@ -499,7 +547,7 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
         }
         let engine_version = tokio::task::spawn_blocking(version).await.ok().flatten();
         ctx
-            .notify("turn.usage", json!({ "engine": "codex", "engine_version": engine_version,
+            .report_usage(json!({ "engine": "codex", "engine_version": engine_version,
                 "provider": "codex", "model": model, "render": render, "fallback_reason": fallback,
                 "engine_session": if sessions { json!({ "id": thread_id, "resumable": error.is_none() && !interrupted }) } else { Value::Null },
                 "input": usage["input"], "output": usage["output"], "cache_read": usage["cacheRead"], "cost_usd": null }))
@@ -512,16 +560,16 @@ pub async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receive
     .await
 }
 
-/// One completion without tools, in an ephemeral thread (summaries). Returns `{ text, usage, model }`.
+/// One completion without tools, in an ephemeral thread (summaries).
 /// Given up after `COMPLETE_LIMIT` (the app-server is killed).
-pub async fn complete(model: &str, system: &str, prompt: &str) -> Result<Value> {
+async fn complete(model: &str, system: &str, prompt: &str) -> Result<Completion> {
     match tokio::time::timeout(COMPLETE_LIMIT, complete_now(model, system, prompt)).await {
         Ok(r) => r,
         Err(_) => bail!("codex didn't complete within {} s", COMPLETE_LIMIT.as_secs()),
     }
 }
 
-async fn complete_now(model: &str, system: &str, prompt: &str) -> Result<Value> {
+async fn complete_now(model: &str, system: &str, prompt: &str) -> Result<Completion> {
     let dir = crate::turn::engine_dir("codex")?;
     let mut s = AppServer::start(&dir).await?;
     let thread = s
@@ -561,7 +609,7 @@ async fn complete_now(model: &str, system: &str, prompt: &str) -> Result<Value> 
         }
     }
     let _ = s.child.start_kill();
-    Ok(json!({ "text": text, "usage": { "input": input, "output": output }, "model": model }))
+    Ok(Completion { text, usage: json!({ "input": input, "output": output }), model: model.to_string() })
 }
 
 /// The kernel's history as Responses API items for `thread/inject_items`: messages as messages,

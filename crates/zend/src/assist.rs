@@ -69,9 +69,9 @@ async fn run(app: &AppState, id: Uuid, may_suggest: bool) -> Result<()> {
     let started = Instant::now();
     let reply = crate::complete(app, &model, SYSTEM, &input).await?;
     let latency = started.elapsed().as_millis() as i32;
-    let parsed = parse(reply["text"].as_str().unwrap_or(""));
+    let parsed = parse(&reply.text);
     let Some((title, next)) = parsed else {
-        anyhow::bail!("no usable JSON from {model}: {}", zen_proto::head(reply["text"].as_str().unwrap_or(""), 200));
+        anyhow::bail!("no usable JSON from {model}: {}", zen_proto::head(&reply.text, 200));
     };
     if want_title && !title.is_empty() {
         // Only while the title is still the kernel's or the model's: the owner may have renamed it meanwhile.
@@ -96,7 +96,7 @@ async fn run(app: &AppState, id: Uuid, may_suggest: bool) -> Result<()> {
         .bind(&model)
         .bind(PROMPT_VERSION)
         .bind(latency)
-        .bind(reply["usage"]["cost_usd"].as_f64())
+        .bind(reply.usage["cost_usd"].as_f64())
         .fetch_one(&app.db)
         .await?;
         app.emit(id, json!({ "type": "suggestion", "id": sid, "text": next })).await;

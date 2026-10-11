@@ -3,12 +3,12 @@
 //! An event a client doesn't know, or one whose fields don't fit, is kept as `Other` (the raw JSON):
 //! a client that predates an event ignores it.
 //!
-//! Messages stay JSON (`Value`) in Pi's format; typing them belongs with the worker protocol.
+//! Messages stay JSON (`Value`) in Pi's format, as in the worker protocol (`worker`).
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::text_of;
+use crate::{or_default, text_of};
 
 /// One event on a session's stream.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -118,11 +118,6 @@ pub struct Question {
     pub question: String,
     #[serde(default)]
     pub options: Vec<String>,
-}
-
-/// A field that may be missing or `null`: its default then.
-fn or_default<'de, D: Deserializer<'de>, T: Default + Deserialize<'de>>(d: D) -> Result<T, D::Error> {
-    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
 impl Event {

@@ -8,6 +8,7 @@
 mod bridge;
 mod claude;
 mod codex;
+mod engine;
 mod faux;
 mod failover;
 mod rpc;
@@ -23,6 +24,7 @@ use tokio::sync::{watch, Mutex};
 
 use rpc::Rpc;
 use turn::{TurnCtx, TurnInput};
+use zen_proto::worker::{Ack, CompleteError, ModelsList, Pong, Request, TurnEvent};
 
 /// Turns running, by the kernel's turn id, and the turns aborted before their `turn.start` came.
 type Running = Arc<Mutex<Turns>>;
@@ -86,7 +88,9 @@ async fn serve() -> Result<()> {
     // Requests being answered. When stdin closes we still finish these, or a reply (e.g. to a
     // piped-in `ping`) could be lost as the process exits.
     let mut answering = tokio::task::JoinSet::new();
-    claude::clean_sessions();
+    for e in engine::all() {
+        e.prepare();
+    }
     eprintln!("[engine] ready");
     while let Some(line) = lines.next_line().await? {
         while answering.try_join_next().is_some() {}
@@ -120,57 +124,54 @@ async fn serve() -> Result<()> {
     Ok(())
 }
 
+/// Answer one request from the kernel. Every engine is reached through the registry (`engine`).
 async fn handle(rpc: &Rpc, running: &Running, method: &str, p: Value) -> Result<Value> {
-    match method {
-        "ping" => Ok(json!({ "pong": true })),
-        "models.list" => {
+    let ack = || Ok(serde_json::to_value(Ack { ok: true })?);
+    match Request::parse(method, p) {
+        Ok(Request::Ping {}) => Ok(serde_json::to_value(Pong { pong: true })?),
+        Ok(Request::ModelsList {}) => {
             // `--version` probes are blocking process runs: off the runtime's threads. "authenticated"
             // means the CLI is installed and answers; the sign-in itself is checked when a turn runs.
-            let (claude, codex) = tokio::task::spawn_blocking(|| (claude::available(), codex::available())).await.unwrap_or((false, false));
-            let mut models: Vec<Value> = if claude { claude::models() } else { vec![] };
-            if codex {
-                models.extend(codex::models().await);
+            let engines = tokio::task::spawn_blocking(|| engine::all().into_iter().map(|e| (e, e.version().is_some())).collect::<Vec<_>>())
+                .await
+                .unwrap_or_else(|_| engine::all().into_iter().map(|e| (e, false)).collect());
+            let mut list = ModelsList::default();
+            for (e, up) in engines {
+                if e.subscription() {
+                    list.authenticated.insert(e.name().into(), json!(up));
+                }
+                if up {
+                    list.models.extend(e.models().await);
+                }
             }
-            if faux::enabled() {
-                models.extend(faux::models());
-            }
-            Ok(json!({ "authenticated": { "claude": claude, "codex": codex }, "models": models }))
+            Ok(serde_json::to_value(list)?)
         }
-        "turn.start" => {
-            let session_id = p["session_id"].as_str().unwrap_or("").to_string();
+        Ok(Request::TurnStart(p)) => {
+            let session_id = p.session_id.clone();
             // A kernel older than turn ids sends none; a local one keeps this turn's entry apart.
-            let turn_id = p["turn_id"].as_str().map(String::from).unwrap_or_else(turn::new_uuid);
-            let engine = p["model"].as_str().unwrap_or("").split_once('/').map(|(e, _)| e.to_string()).unwrap_or_default();
-            let input = TurnInput::from_params(&p);
-            let tools = p["tools"].as_array().cloned().unwrap_or_default();
-            let ctx = TurnCtx::new(rpc.clone(), session_id.clone(), turn_id.clone(), tools);
+            let turn_id = p.turn_id.clone().unwrap_or_else(turn::new_uuid);
+            let model = p.model.clone();
+            let ctx = TurnCtx::new(rpc.clone(), session_id.clone(), turn_id.clone(), p.tools.clone());
+            let input = TurnInput::from(p);
             let Some(abort_rx) = running.lock().await.start(&turn_id, &session_id) else {
                 // Aborted before it started: it ends at once, without running.
-                ctx.notify("turn.end", json!({ "error": "interrupted" })).await;
-                return Ok(json!({ "ok": true }));
+                ctx.notify(TurnEvent::End { error: Some("interrupted".into()) }).await;
+                return ack();
             };
             let running = running.clone();
             tokio::spawn(async move {
-                let result = if engine == "faux" && faux::enabled() {
-                    faux::run_turn(ctx.clone(), &input, abort_rx.clone()).await
-                } else {
-                    failover::run(&engine, ctx.clone(), &input, abort_rx.clone()).await
+                let engine = engine::for_model(&model).map(|(e, _)| e);
+                let result = match engine {
+                    Some(e) => e.run_turn(ctx.clone(), &input, abort_rx.clone()).await,
+                    None => Ok(Some(format!("zen-engine has no `{}` engine", model.split_once('/').map(|(e, _)| e).unwrap_or("")))),
                 };
                 let mut error = match result {
                     Ok(e) => e,
                     Err(e) => Some(e.to_string()),
                 };
-                if let Some(first_error) = error.as_deref() {
+                if let (Some(first_error), Some(engine)) = (error.as_deref(), engine) {
                     if failover::is_hard_usage_limit(first_error) {
-                        if let Some(continued) = failover::try_continue(
-                            &engine,
-                            &input,
-                            &ctx,
-                            abort_rx.clone(),
-                            first_error,
-                        )
-                        .await
-                        {
+                        if let Some(continued) = failover::try_continue(engine, &input, &ctx, abort_rx.clone(), first_error).await {
                             error = continued;
                         }
                     }
@@ -183,28 +184,27 @@ async fn handle(rpc: &Rpc, running: &Running, method: &str, p: Value) -> Result<
                 }
                 failover::publish_usage(&ctx).await;
                 running.lock().await.running.remove(&turn_id);
-                ctx.notify("turn.end", json!({ "error": error })).await;
+                ctx.notify(TurnEvent::End { error }).await;
             });
-            Ok(json!({ "ok": true }))
+            ack()
         }
-        "complete" => {
+        Ok(Request::Complete(p)) => {
             // One completion without tools (summaries, session names and suggestions). Errors are returned in the result.
-            let model_ref = p["model"].as_str().unwrap_or("");
-            let (engine, model) = model_ref.split_once('/').unwrap_or(("", model_ref));
-            let (system, prompt) = (p["system"].as_str().unwrap_or(""), p["prompt"].as_str().unwrap_or(""));
-            let res = match engine {
-                "claude" => claude::complete(model, system, prompt).await,
-                "codex" => codex::complete(model, system, prompt).await,
-                "faux" if faux::enabled() => Ok(faux::complete(system, prompt)),
-                other => Err(anyhow::anyhow!("zen-engine has no `{other}` engine")),
+            let res = match engine::for_model(&p.model) {
+                Some((e, model)) => e.complete(model, &p.system, &p.prompt).await.map(serde_json::to_value),
+                None => Err(anyhow::anyhow!("zen-engine has no `{}` engine", p.model.split_once('/').map(|(e, _)| e).unwrap_or(""))),
             };
-            Ok(res.unwrap_or_else(|e| json!({ "error": e.to_string() })))
+            Ok(match res {
+                Ok(v) => v?,
+                Err(e) => serde_json::to_value(CompleteError { error: e.to_string() })?,
+            })
         }
-        "turn.abort" => {
-            running.lock().await.abort(p["session_id"].as_str().unwrap_or(""), p["turn_id"].as_str());
-            Ok(json!({ "ok": true }))
+        Ok(Request::TurnAbort(p)) => {
+            running.lock().await.abort(&p.session_id, p.turn_id.as_deref());
+            ack()
         }
-        _ => anyhow::bail!("unknown method {method}"),
+        Err(_) if !matches!(method, "ping" | "models.list" | "turn.start" | "turn.abort" | "complete") => anyhow::bail!("unknown method {method}"),
+        Err(e) => anyhow::bail!("invalid `{method}` params: {e}"),
     }
 }
 

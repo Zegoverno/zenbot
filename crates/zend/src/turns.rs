@@ -2,6 +2,7 @@
 //! ending it, recording it (`turns`), and the watchdog for turns that stall.
 
 use super::*;
+use zen_proto::worker;
 
 /// A turn in progress. A session has at most one.
 pub(crate) struct Turn {
@@ -63,7 +64,7 @@ pub(crate) async fn watchdog(app: AppState) {
             let app = &app;
             async move {
                 tracing::warn!("turn in session {id} stalled; aborting");
-                let _ = app.workers[worker].mind().request("turn.abort", json!({ "session_id": id, "turn_id": turn_id })).await;
+                let _ = app.workers[worker].mind().call(&abort_request(id, turn_id)).await;
             }
         }))
         .await;
@@ -504,7 +505,9 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
         let system = agent::system_for(&base, kind.as_deref());
         let (envelope, new_envelope) = compile::envelope(&app.db, id, &blocks, &system, &tools).await?;
         let resume = match (&last, new_envelope) {
-            (Some(b), None) if b.kind == "engine_session" && b.payload["engine"] == engine => Some(json!({ "id": b.payload["id"] })),
+            (Some(b), None) if b.kind == "engine_session" && b.payload["engine"] == engine => {
+                Some(worker::Resume { id: b.payload["id"].as_str().unwrap_or_default().to_string() })
+            }
             _ => None,
         };
         let (history, summary) = compile::history(&blocks);
@@ -561,28 +564,25 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
         busy_sent = true;
         app.workers[widx]
             .mind()
-            .request(
-                "turn.start",
-                json!({
-                    "session_id": id,
-                    "turn_id": turn_id,
-                    "model": model,
-                    "effort": effort,
-                    "system_prompt": envelope.system,
-                    "history": history,
-                    "prompt": text,
-                    "prompt_context": turn_context,
-                    "tools": envelope.tools,
-                    "resume": resume,
-                    "kind": kind,
-                }),
-            )
+            .call(&worker::Request::TurnStart(worker::TurnStart {
+                session_id: id.to_string(),
+                turn_id: Some(turn_id.to_string()),
+                model: model.clone(),
+                effort: effort.clone(),
+                system_prompt: envelope.system.clone(),
+                history,
+                prompt: text.clone(),
+                prompt_context: turn_context.clone(),
+                tools: envelope.tools.as_array().cloned().unwrap_or_default(),
+                resume,
+                kind: kind.clone(),
+            }))
             .await?;
         // An abort that came while `turn.start` was on its way may have reached the worker before
         // the turn did: send it again now that the worker has the turn.
         let aborted = app.turns.lock().await.get(&id).is_some_and(|t| t.turn_id == turn_id && *t.cancel.borrow());
         if aborted {
-            let _ = app.workers[widx].mind().request("turn.abort", json!({ "session_id": id, "turn_id": turn_id })).await;
+            let _ = app.workers[widx].mind().call(&abort_request(id, turn_id)).await;
         }
         Ok(())
     }
@@ -640,6 +640,11 @@ async fn hold(app: &App, id: Uuid, turn_id: Uuid, on: bool) {
     }
 }
 
+/// The worker's `turn.abort` for a session's turn.
+fn abort_request(id: Uuid, turn_id: Uuid) -> worker::Request {
+    worker::Request::TurnAbort(worker::TurnAbort { session_id: id.to_string(), turn_id: Some(turn_id.to_string()) })
+}
+
 /// Stop a session's turn: its tools at once, then the model (the worker's `turn.abort`). The
 /// watchdog ends the turn if it lingers.
 pub(crate) async fn abort_turn(app: &App, id: Uuid) {
@@ -649,7 +654,7 @@ pub(crate) async fn abort_turn(app: &App, id: Uuid) {
         (t.worker, t.turn_id)
     });
     if let Some((w, turn_id)) = worker.and_then(|(i, t)| Some((app.workers.get(i)?, t))) {
-        let _ = w.mind().request("turn.abort", json!({ "session_id": id, "turn_id": turn_id })).await;
+        let _ = w.mind().call(&abort_request(id, turn_id)).await;
     }
 }
 

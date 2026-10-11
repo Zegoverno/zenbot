@@ -6,6 +6,28 @@
 
 ---
 
+## 2026-10-11 — Engines behind one trait; the worker protocol typed
+
+Toward CONTEXT.md principles 5 and 6: adding an engine to `zen-engine` meant edits in several
+match arms (model listing, `complete`, turn routing, failover's target, sign-in check and run), and
+the worker protocol was untyped JSON on both sides.
+
+- `zen-engine`: an `Engine` trait (`engine.rs`: name, version, models, `run_turn`, `complete`,
+  start-up housekeeping, failover target, subscription sign-in check) implemented by `claude`,
+  `codex` and `faux`, and a registry (`engine::all`) the protocol loop and failover go through.
+  Adding an engine is one module and one line. The engines' runtime checks (Claude Code's
+  `system/init` check, Codex's item allowlist, `codex-features`) stay in their modules with their
+  tests.
+- `zen-proto` types the worker protocol (`zen_proto::worker`: every request, answer, `tool.call`
+  and turn notification in docs/worker-protocol.md, with a round-trip test per message). `zend`
+  (`mind`, `dispatch`, `turns`, `workers`) and `zen-engine` build and read messages through them.
+- No behavior change: the wire format is the same bytes (keys still sorted), checked by feeding the
+  same requests to the old and new `zen-engine` (ping, models.list with the real CLIs, complete,
+  faux turns, an unknown engine, an abort before its start, an unknown method), and by the e2e
+  suite unchanged. A misshapen `turn.end` (fields of the wrong type) still ends its turn.
+
+---
+
 ## 2026-10-11 — One client contract: typed session events, one kernel client
 
 Toward CONTEXT.md principles 5 and 6: `zen` and `zen-matrix` each parsed the kernel's session

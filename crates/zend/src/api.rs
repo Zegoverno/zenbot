@@ -48,7 +48,7 @@ pub(crate) async fn health(State(app): State<AppState>) -> Json<Value> {
     let mut workers = serde_json::Map::new();
     for w in &app.workers {
         // Unauthenticated and polled by upgrades: a hung worker must not hold it for 30 s.
-        let ping = w.mind().request_within("ping", json!({}), Duration::from_secs(3)).await.is_ok();
+        let ping = w.mind().call_within(&zen_proto::worker::Request::Ping {}, Duration::from_secs(3)).await.is_ok();
         workers.insert(w.name.clone(), json!(ping));
     }
     let mind = workers.values().all(|v| v == true);

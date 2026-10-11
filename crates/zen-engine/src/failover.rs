@@ -1,8 +1,9 @@
 //! Safe, subscription-only continuation when a CLI reports a hard usage limit.
 
 use serde_json::{json, Value};
+use zen_proto::worker::{Model, TurnEvent};
 
-use crate::{claude, codex};
+use crate::engine::{self, Engine};
 use crate::turn::{TurnCtx, TurnInput};
 
 pub fn enabled() -> bool {
@@ -39,85 +40,29 @@ pub fn is_hard_usage_limit(error: &str) -> bool {
     .any(|phrase| error.contains(phrase))
 }
 
-pub fn target(primary: &str) -> Option<String> {
-    let (key, default) = match primary {
-        "claude" => ("ZEN_FAILOVER_CLAUDE_TO_CODEX", "codex/gpt-6.1-sol"),
-        "codex" => ("ZEN_FAILOVER_CODEX_TO_CLAUDE", "claude/claude-sonnet-5-5"),
-        _ => return None,
-    };
-    Some(std::env::var(key).unwrap_or_else(|_| default.to_string()))
-}
-
-/// Require the signed-in consumer subscription: failover must never silently incur API charges.
-pub async fn subscription_login(engine: &str) -> bool {
-    // The CLIs may prefer an API key over their saved subscription login. Do not switch to a
-    // billable API path, even when the subscription itself is signed in.
-    if match engine {
-        "claude" => std::env::var_os("ANTHROPIC_API_KEY").is_some() || std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN").is_some(),
-        "codex" => std::env::var_os("OPENAI_API_KEY").is_some() || std::env::var_os("CODEX_ACCESS_TOKEN").is_some(),
-        _ => true,
-    } {
-        return false;
-    }
-    let engine = engine.to_string();
-    tokio::time::timeout(std::time::Duration::from_secs(5), tokio::task::spawn_blocking(move || match engine.as_str() {
-        "claude" => {
-            let Ok(out) = std::process::Command::new("claude")
-                .args(["auth", "status", "--json"])
-                .output()
-            else {
-                return false;
-            };
-            if !out.status.success() {
-                return false;
-            }
-            serde_json::from_slice::<Value>(&out.stdout).is_ok_and(|v| {
-                v["loggedIn"] == true && v["authMethod"] == "claude.ai"
-            })
-        }
-        "codex" => {
-            let Ok(out) = std::process::Command::new("codex")
-                .args(["login", "status"])
-                .output()
-            else {
-                return false;
-            };
-            out.status.success()
-                && [out.stdout.as_slice(), out.stderr.as_slice()].iter().any(|bytes| {
-                    String::from_utf8_lossy(bytes).to_ascii_lowercase().contains("logged in using chatgpt")
-                })
-        }
-        _ => false,
-    }))
-    .await
-    .ok()
-    .and_then(Result::ok)
-    .unwrap_or(false)
-}
-
-pub async fn available_target(primary: &str) -> Option<(String, Value)> {
-    let wanted = target(primary)?;
-    let (engine, _) = wanted.split_once('/')?;
-    if engine == primary || !matches!(engine, "claude" | "codex") {
+/// The engine a turn continues on after a hard usage limit on `primary`, and that model's entry:
+/// `primary`'s `failover_target`, if it names another subscription engine that lists the model.
+pub async fn available_target(primary: &dyn Engine) -> Option<(&'static dyn Engine, Model)> {
+    let wanted = primary.failover_target()?;
+    let (engine, _) = engine::for_model(&wanted)?;
+    if engine.name() == primary.name() || !engine.subscription() {
         return None;
     }
-    let models = match engine {
-        "claude" => claude::models(),
-        "codex" => codex::models().await,
-        _ => return None,
-    };
-    models
-        .into_iter()
-        .find(|m| m["id"] == wanted)
-        .map(|m| (wanted, m))
+    let model = engine.models().await.into_iter().find(|m| m.id == wanted)?;
+    Some((engine, model))
 }
 
-pub async fn continuation_input(
-    input: &TurnInput,
-    target: &str,
-    model_info: &Value,
-    ctx: &TurnCtx,
-) -> Option<TurnInput> {
+/// Whether `engine` is signed in with the owner's subscription (`Engine::subscription_login`),
+/// within 5 s: failover must never silently incur API charges.
+pub async fn subscription_login(engine: &'static dyn Engine) -> bool {
+    tokio::time::timeout(std::time::Duration::from_secs(5), tokio::task::spawn_blocking(move || engine.subscription_login()))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or(false)
+}
+
+pub async fn continuation_input(input: &TurnInput, model_info: &Model, ctx: &TurnCtx) -> Option<TurnInput> {
     let (history, partial) = ctx.captured_transcript().await?;
     let mut next = input.clone();
     let mut original = json!({ "role": "user", "content": input.prompt });
@@ -137,42 +82,18 @@ pub async fn continuation_input(
     next.prompt = "Continue the original request from the conversation above. The previous provider stopped because its subscription usage limit was reached. Treat recorded tool calls and their results as completed work: do not repeat completed actions. If a tool call has no recorded result, inspect the current state before retrying it. Finish and verify the original request.".into();
     next.context = None;
     next.resume = None;
-    next.model = target.split_once('/').map(|(_, model)| model)?.to_string();
-    next.effort = if model_info["efforts"]
-        .as_array()
-        .is_some_and(|efforts| efforts.iter().any(|effort| effort.as_str() == input.effort.as_deref()))
-    {
+    next.model = model_info.id.split_once('/').map(|(_, model)| model)?.to_string();
+    next.effort = if model_info.efforts.iter().any(|effort| Some(effort.as_str()) == input.effort.as_deref()) {
         input.effort.clone()
     } else {
-        model_info["default_effort"].as_str().map(String::from)
+        model_info.default_effort.clone()
     };
     Some(next)
 }
 
-pub fn engine_for(model: &str) -> Option<&str> {
-    let (engine, _) = model.split_once('/')?;
-    matches!(engine, "claude" | "codex").then_some(engine)
-}
-
-pub async fn notify_switch(ctx: &TurnCtx, from: &str, to: &str, reason: &str) {
-    ctx.notify(
-        "turn.fallback",
-        json!({ "from": from, "to": to, "reason": reason }),
-    )
-    .await;
-}
-
-pub async fn run(engine: &str, ctx: TurnCtx, input: &TurnInput, abort: tokio::sync::watch::Receiver<bool>) -> anyhow::Result<Option<String>> {
-    match engine {
-        "claude" => claude::run_turn(ctx, input, abort).await,
-        "codex" => codex::run_turn(ctx, input, abort).await,
-        _ => Ok(Some(format!("zen-engine has no `{engine}` engine"))),
-    }
-}
-
 /// Turn a consumer plan quota failure into one bounded cross-provider attempt.
 pub async fn try_continue(
-    primary: &str,
+    primary: &'static dyn Engine,
     input: &TurnInput,
     ctx: &TurnCtx,
     abort: tokio::sync::watch::Receiver<bool>,
@@ -181,37 +102,35 @@ pub async fn try_continue(
     if !enabled() || !is_hard_usage_limit(error) || *abort.borrow() {
         return None;
     }
-    if !subscription_login(primary).await {
+    if !primary.subscription() || !subscription_login(primary).await {
         eprintln!("[engine] failover skipped: primary is not using a subscription login");
         return None;
     }
-    let Some((model_id, info)) = available_target(primary).await else {
+    let Some((fallback, info)) = available_target(primary).await else {
         eprintln!("[engine] failover skipped: target model is unavailable");
         return None;
     };
-    let fallback_engine = engine_for(&model_id)?;
-    if !subscription_login(fallback_engine).await {
+    if !subscription_login(fallback).await {
         eprintln!("[engine] failover skipped: target is not using a subscription login");
         return None;
     }
-    let Some(next) = continuation_input(input, &model_id, &info, ctx).await else {
+    let Some(next) = continuation_input(input, &info, ctx).await else {
         eprintln!("[engine] failover skipped: the current-turn transcript is not safe to replay");
         return None;
     };
-    notify_switch(ctx, primary, &model_id, error).await;
+    ctx.notify(TurnEvent::Fallback { from: primary.name().into(), to: info.id.clone(), reason: error.into() }).await;
     Some(
-        run(fallback_engine, ctx.clone(), &next, abort)
+        fallback
+            .run_turn(ctx.clone(), &next, abort)
             .await
-            .unwrap_or_else(|e| Some(format!("fallback on {model_id} failed: {e:#}"))),
+            .unwrap_or_else(|e| Some(format!("fallback on {} failed: {e:#}", info.id))),
     )
 }
 
+/// Send the turn's one usage report (several providers' reports combined after a failover).
 pub async fn publish_usage(ctx: &TurnCtx) {
-    let report = ctx.combined_usage().await;
-    if let Some(mut report) = report {
-        report["session_id"] = json!(ctx.session_id);
-        report["turn_id"] = json!(ctx.turn_id);
-        ctx.rpc.notify("turn.usage", report).await;
+    if let Some(Value::Object(report)) = ctx.combined_usage().await {
+        ctx.send(&TurnEvent::Usage(report)).await;
     }
 }
 
@@ -231,8 +150,9 @@ mod tests {
 
     #[test]
     fn default_failover_targets_are_on_the_other_provider() {
-        assert_eq!(target("claude").as_deref(), Some("codex/gpt-6.1-sol"));
-        assert_eq!(target("codex").as_deref(), Some("claude/claude-sonnet-5-5"));
-        assert_eq!(target("faux"), None);
+        assert_eq!(crate::claude::Claude.failover_target().as_deref(), Some("codex/gpt-6.1-sol"));
+        assert_eq!(crate::codex::Codex.failover_target().as_deref(), Some("claude/claude-sonnet-5-5"));
+        assert_eq!(crate::faux::Faux.failover_target(), None);
+        assert!(!crate::faux::Faux.subscription(), "never a failover target");
     }
 }

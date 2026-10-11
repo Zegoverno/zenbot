@@ -1,10 +1,18 @@
 //! Helpers shared by the kernel, the engine worker and the CLI, so they read messages the same way.
 //! Messages use Pi's format (docs/worker-protocol.md): `content` is a string or a list of parts.
-//! `client` types the client protocol's events (docs/client-protocol.md).
+//! `client` types the client protocol's events (docs/client-protocol.md), `worker` the worker
+//! protocol's messages (docs/worker-protocol.md).
 
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 pub mod client;
+pub mod worker;
+
+/// A field that may be missing or `null`: its default then.
+pub(crate) fn or_default<'de, D: Deserializer<'de>, T: Default + Deserialize<'de>>(d: D) -> Result<T, D::Error> {
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
 
 /// The text of a message's content: a string as is, or its text parts joined by newlines.
 pub fn text_of(content: &Value) -> String {

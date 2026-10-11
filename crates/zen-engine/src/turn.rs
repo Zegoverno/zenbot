@@ -11,8 +11,9 @@ use tokio::sync::Mutex;
 
 use crate::rpc::Rpc;
 use zen_proto::text_of;
+use zen_proto::worker::{ToolCall, ToolResult, TurnEvent, TurnRef, TurnStart};
 
-/// What the kernel sent for a turn (`turn.start`, docs/worker-protocol.md).
+/// What the kernel sent for a turn (`turn.start`, docs/worker-protocol.md), as the engines use it.
 #[derive(Clone, Debug, Default)]
 pub struct TurnInput {
     /// The model id without its engine prefix (e.g. `claude-opus-5-5`).
@@ -29,18 +30,17 @@ pub struct TurnInput {
     pub kind: Option<String>,
 }
 
-impl TurnInput {
-    pub fn from_params(p: &Value) -> Self {
-        let model_ref = p["model"].as_str().unwrap_or("");
+impl From<TurnStart> for TurnInput {
+    fn from(p: TurnStart) -> Self {
         TurnInput {
-            model: model_ref.split_once('/').map(|(_, m)| m).unwrap_or(model_ref).to_string(),
-            effort: p["effort"].as_str().map(String::from),
-            system: p["system_prompt"].as_str().unwrap_or("").to_string(),
-            history: p["history"].as_array().cloned().unwrap_or_default(),
-            prompt: p["prompt"].as_str().unwrap_or("").to_string(),
-            context: p["prompt_context"].as_str().map(String::from),
-            resume: p["resume"]["id"].as_str().map(String::from),
-            kind: p["kind"].as_str().map(String::from),
+            model: p.model.split_once('/').map(|(_, m)| m.to_string()).unwrap_or(p.model.clone()),
+            effort: p.effort,
+            system: p.system_prompt,
+            history: p.history,
+            prompt: p.prompt,
+            context: p.prompt_context,
+            resume: p.resume.map(|r| r.id),
+            kind: p.kind,
         }
     }
 }
@@ -199,12 +199,13 @@ impl TurnCtx {
         }
     }
 
-    /// Send a notification for this turn: `params` with the session and turn ids added.
-    pub async fn notify(&self, method: &str, mut params: Value) {
-        match method {
-            "turn.message" => {
-                let message = params["message"].clone();
-                if !self.track_calls(&message) {
+    /// Send a notification for this turn (with the session and turn ids), capturing what a
+    /// failover would need. A usage report is kept, not sent: `failover::publish_usage` sends the
+    /// turn's one report at its end.
+    pub async fn notify(&self, event: TurnEvent) {
+        match &event {
+            TurnEvent::Message { message } => {
+                if !self.track_calls(message) {
                     return;
                 }
                 let encoded = message.to_string();
@@ -214,13 +215,12 @@ impl TurnCtx {
                 }
                 if captured.bytes.saturating_add(encoded.len()) <= 2 * 1024 * 1024 {
                     captured.bytes += encoded.len();
-                    captured.messages.push(message);
+                    captured.messages.push(message.clone());
                 } else {
                     captured.overflow = true;
                 }
             }
-            "turn.delta" => {
-                let delta = params["delta"].as_str().unwrap_or("");
+            TurnEvent::Delta { delta } => {
                 let mut captured = self.captured.lock().await;
                 if captured.bytes.saturating_add(delta.len()) <= 2 * 1024 * 1024 {
                     captured.bytes += delta.len();
@@ -229,15 +229,26 @@ impl TurnCtx {
                     captured.overflow = true;
                 }
             }
-            "turn.usage" => {
-                self.captured.lock().await.usage.push(params);
+            TurnEvent::Usage(report) => {
+                self.captured.lock().await.usage.push(Value::Object(report.clone()));
                 return;
             }
             _ => {}
         }
-        params["session_id"] = json!(self.session_id);
-        params["turn_id"] = json!(self.turn_id);
-        self.rpc.notify(method, params).await;
+        self.send(&event).await;
+    }
+
+    /// Keep a usage report of the turn (an engine's `turn.usage`; see `notify`).
+    pub async fn report_usage(&self, report: Value) {
+        if let Value::Object(report) = report {
+            self.notify(TurnEvent::Usage(report)).await;
+        }
+    }
+
+    /// Send a notification for this turn as it is, with the session and turn ids.
+    pub async fn send(&self, event: &TurnEvent) {
+        let ids = TurnRef { session_id: self.session_id.clone(), turn_id: Some(self.turn_id.clone()) };
+        self.rpc.notify(event.method(), event.to_params(&ids)).await;
     }
 
     /// Keep `open_calls` up to date with a message about to go to the tape. False when the message
@@ -266,7 +277,7 @@ impl TurnCtx {
             "role": "toolResult", "toolCallId": id, "toolName": name,
             "content": [{ "type": "text", "text": content }], "isError": is_error, "timestamp": now_ms()
         });
-        self.notify("turn.message", json!({ "message": message })).await;
+        self.notify(TurnEvent::Message { message }).await;
     }
 
     /// Tool calls that ran without an announcement from the model (their ids were invented).
@@ -290,7 +301,7 @@ impl TurnCtx {
                 "role": "toolResult", "toolCallId": id, "toolName": name, "isError": true, "timestamp": now_ms(),
                 "content": [{ "type": "text", "text": "interrupted: the turn ended before this tool call returned a result; whether it ran, and what it changed, is unknown" }]
             });
-            self.notify("turn.message", json!({ "message": message })).await;
+            self.notify(TurnEvent::Message { message }).await;
         }
         self.sealed.store(true, Ordering::SeqCst);
     }
@@ -369,12 +380,10 @@ impl TurnCtx {
             None => self.claim(name, &args).await,
         };
         self.answered.lock().unwrap().insert(call_id.clone());
-        let res = self
-            .rpc
-            .request("tool.call", json!({ "session_id": self.session_id, "turn_id": self.turn_id, "call_id": call_id, "name": name, "args": args }))
-            .await;
-        let (content, is_error) = match res {
-            Ok(v) => (v["content"].as_str().unwrap_or("").to_string(), v["is_error"].as_bool().unwrap_or(false)),
+        let call = ToolCall { session_id: self.session_id.clone(), turn_id: Some(self.turn_id.clone()), call_id: call_id.clone(), name: name.to_string(), args };
+        let res = self.rpc.request(ToolCall::METHOD, serde_json::to_value(&call).unwrap_or_default()).await;
+        let (content, is_error) = match res.map(|v| serde_json::from_value::<ToolResult>(v).unwrap_or_default()) {
+            Ok(r) => (r.content, r.is_error),
             Err(e) => {
                 // The request may have executed before the RPC connection failed. Even though
                 // the model receives an error-shaped result, a second provider must not retry it.
@@ -390,7 +399,7 @@ impl TurnCtx {
             "role": "toolResult", "toolCallId": call_id, "toolName": name,
             "content": [{ "type": "text", "text": content }], "isError": is_error, "timestamp": now_ms()
         });
-        self.notify("turn.message", json!({ "message": message })).await;
+        self.notify(TurnEvent::Message { message }).await;
         flight.complete();
         (content, is_error)
     }
