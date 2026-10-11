@@ -5,7 +5,8 @@
 //! write shows from the next session and the prompt cache holds. The space is fixed
 //! (`ZEN_MEMORY_CHARS`), so entries compete for it: the sleep (nightly, or at once when writes pass
 //! the hard ceiling) ranks them, keeps what fits and archives the rest. Without a System One model
-//! the sleep keeps the most recent entries. Nothing is ever deleted.
+//! the sleep keeps the most recent entries. Nothing is ever deleted. Of entries that say the same
+//! thing, one always stays; an entry changed with `remember` while the sleep runs is left as it is.
 //!
 //! Promotion out of short-term memory (D-045, automatic): a lasting entry about the owner moves to
 //! `USER.md`, lasting guidance on how the agent acts moves to `IDENTITY.md` (each under `## Learned`,
@@ -31,17 +32,6 @@ fn ceiling() -> usize {
     cap() * 2
 }
 
-/// The lower end of the one-sided Wilson score interval for `k` successes in `n` trials (model
-/// routing's evidence, delegate.rs).
-pub fn wilson_lower(k: u64, n: u64, z: f64) -> f64 {
-    if n == 0 {
-        return 0.0;
-    }
-    let (n, p) = (n as f64, k as f64 / n as f64);
-    let z2 = z * z;
-    ((p + z2 / (2.0 * n)) - z * ((p * (1.0 - p) + z2 / (4.0 * n)) / n).sqrt()) / (1.0 + z2 / n)
-}
-
 #[derive(Clone, Debug)]
 pub struct Entry {
     pub id: i64,
@@ -52,6 +42,8 @@ pub struct Entry {
     pub uses: i32,
     /// Already copied into the wiki by an earlier sleep.
     pub captured: bool,
+    /// When it last changed: the sleep writes an entry's fate only if it hasn't changed since.
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 fn line(e: &Entry) -> String {
@@ -60,7 +52,7 @@ fn line(e: &Entry) -> String {
 
 async fn short_entries(db: &PgPool) -> Result<Vec<Entry>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, text, source, uses, proposed IS NOT DISTINCT FROM 'wiki' AS captured,
+        "SELECT id, text, source, uses, proposed IS NOT DISTINCT FROM 'wiki' AS captured, updated_at,
                 (EXTRACT(EPOCH FROM now() - created_at) / 86400)::float8 AS age,
                 (EXTRACT(EPOCH FROM now() - GREATEST(updated_at, COALESCE(used_at, updated_at))) / 86400)::float8 AS idle
          FROM memories WHERE tier = 'short' ORDER BY created_at, id",
@@ -77,6 +69,7 @@ async fn short_entries(db: &PgPool) -> Result<Vec<Entry>, sqlx::Error> {
             idle_days: r.get::<Option<f64>, _>("idle").unwrap_or(0.0),
             uses: r.get("uses"),
             captured: r.get("captured"),
+            updated_at: r.get("updated_at"),
         })
         .collect())
 }
@@ -261,7 +254,8 @@ pub struct Judged {
     /// Likely need in the coming days, 0..1.
     pub needed: f64,
     pub durable: f64,
-    pub covered: f64,
+    /// What already says the same, when System One is sure enough (0.8).
+    pub covered_by: Option<Cover>,
     pub about_owner: f64,
     /// A trait, standing guidance or preference: how the agent should act, rather than where things stand.
     pub guidance: f64,
@@ -269,15 +263,32 @@ pub struct Judged {
     pub knowledge: f64,
 }
 
-/// The questions the sleep asks about each entry (System One via `score.rs`).
-pub fn questions() -> Value {
+/// What already says what an entry says.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Cover {
+    /// The owner's profile or the agent's identity.
+    File,
+    /// Another entry, by id.
+    Entry(i64),
+}
+
+/// The questions the sleep asks about each entry (System One via `score.rs`); `others` are the ids
+/// of the other entries, the choices for what covers it.
+pub fn questions(others: &[i64]) -> Value {
+    let mut covers = serde_json::Map::new();
+    covers.insert("none".into(), json!("Nothing else says it: it says something new"));
+    covers.insert("user_profile".into(), json!("The owner's profile (user_profile) already says the same"));
+    covers.insert("agent_identity".into(), json!("The agent's identity (agent_identity) already says the same"));
+    for id in others {
+        covers.insert(format!("m{id}"), json!(format!("Memory m{id} in other_memories already says the same")));
+    }
     json!({
         "needed": { "type": "score", "instructions": "How likely is the agent to need this memory in its work over the coming days?",
             "criteria": ["Unlikely: a one-off detail", "Possibly", "Likely", "Almost certainly: it comes up all the time"] },
         "durable": { "type": "bool", "instructions": "Will this memory still be true and useful months from now?",
             "criteria": { "true": "A lasting fact, preference, decision or lesson", "false": "About a passing task, state or moment" } },
-        "covered": { "type": "bool", "instructions": "Is this memory already covered by another entry, the owner's profile or the agent's identity (other_memories, user_profile, agent_identity)?",
-            "criteria": { "true": "One of them already says the same", "false": "It says something new" } },
+        "covered_by": { "type": "choice", "instructions": "Does another memory (other_memories, by id), the owner's profile (user_profile) or the agent's identity (agent_identity) already say what this memory says? Pick the one that does, or none.",
+            "criteria": covers },
         "about_owner": { "type": "bool", "instructions": "Is this memory about the owner as a person: who they are, their preferences, their context?",
             "criteria": { "true": "About the owner", "false": "About work, projects, tools or the world" } },
         "guidance": { "type": "bool", "instructions": "Is this memory a trait, standing guidance or preference about how the agent should act, rather than a fact about work or where things stand?",
@@ -292,11 +303,22 @@ fn score01(a: &Value) -> Option<f64> {
     a["probability"].as_f64().or_else(|| a["score"].as_f64().map(|s| (s / 3.0).clamp(0.0, 1.0)))
 }
 
+/// The cover a `covered_by` answer names, if System One is sure enough (0.8 on the choice).
+fn cover_from(a: &Value) -> Option<Cover> {
+    let choice = a["choice"].as_str()?;
+    let p = a["probabilities"][choice].as_f64().or_else(|| a["confidence"].as_f64()).unwrap_or(0.0);
+    match choice {
+        _ if p < 0.8 => None,
+        "user_profile" | "agent_identity" => Some(Cover::File),
+        c => c.strip_prefix('m').and_then(|n| n.parse().ok()).map(Cover::Entry),
+    }
+}
+
 fn judged_from(answers: &Value) -> Option<Judged> {
     Some(Judged {
         needed: score01(&answers["needed"])?,
         durable: score01(&answers["durable"])?,
-        covered: score01(&answers["covered"]).unwrap_or(0.0),
+        covered_by: cover_from(&answers["covered_by"]),
         about_owner: score01(&answers["about_owner"]).unwrap_or(0.0),
         guidance: score01(&answers["guidance"]).unwrap_or(0.0),
         knowledge: score01(&answers["knowledge"]).unwrap_or(0.0),
@@ -326,18 +348,41 @@ pub fn priority(e: &Entry, j: Option<&Judged>) -> f64 {
     }
 }
 
-/// Decide every entry's fate: covered entries go; the rest are ranked and kept while they fit in
-/// `cap`.
+/// Which entries go because something else already says the same, and what. One covered by
+/// another entry goes only while that entry stays, so of two that say the same thing (each
+/// judged covered by the other) one always survives: taken oldest first, the newest is kept. An
+/// entry not in `entries` was promoted out of memory, so what it says is kept there.
+pub fn covered(entries: &[Entry], judged: &[Option<Judged>]) -> Vec<Option<Cover>> {
+    let mut out: Vec<Option<Cover>> = vec![None; entries.len()];
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by(|&a, &b| entries[b].age_days.partial_cmp(&entries[a].age_days).unwrap_or(std::cmp::Ordering::Equal).then(entries[a].id.cmp(&entries[b].id)));
+    for i in order {
+        out[i] = match judged[i].as_ref().and_then(|j| j.covered_by.clone()) {
+            Some(Cover::Entry(id)) if id == entries[i].id => None,
+            Some(Cover::Entry(id)) => match entries.iter().position(|e| e.id == id) {
+                Some(k) if out[k].is_some() => None,
+                _ => Some(Cover::Entry(id)),
+            },
+            c => c,
+        };
+    }
+    out
+}
+
+/// Decide every entry's fate: covered entries go (`covered`); the rest are ranked and kept while
+/// they fit in `cap`. An entry that covers another ranks at least as high as it.
 pub fn plan(entries: &[Entry], judged: &[Option<Judged>], cap: usize) -> Vec<Fate> {
     let mut fates = vec![Fate::Keep; entries.len()];
-    let mut order: Vec<usize> = (0..entries.len()).collect();
-    for (i, j) in judged.iter().enumerate() {
-        if j.as_ref().is_some_and(|j| j.covered >= 0.8) {
-            fates[i] = Fate::Drop("already covered");
+    let mut rank: Vec<f64> = entries.iter().zip(judged).map(|(e, j)| priority(e, j.as_ref())).collect();
+    for (i, c) in covered(entries, judged).into_iter().enumerate() {
+        let Some(c) = c else { continue };
+        fates[i] = Fate::Drop("already covered");
+        if let Some(k) = entries.iter().position(|e| c == Cover::Entry(e.id)) {
+            rank[k] = rank[k].max(rank[i]);
         }
     }
-    order.retain(|&i| fates[i] == Fate::Keep);
-    order.sort_by(|&a, &b| priority(&entries[b], judged[b].as_ref()).partial_cmp(&priority(&entries[a], judged[a].as_ref())).unwrap_or(std::cmp::Ordering::Equal));
+    let mut order: Vec<usize> = (0..entries.len()).filter(|&i| fates[i] == Fate::Keep).collect();
+    order.sort_by(|&a, &b| rank[b].partial_cmp(&rank[a]).unwrap_or(std::cmp::Ordering::Equal));
     let mut size = 0;
     for &i in &order {
         let l = line(&entries[i]).chars().count();
@@ -423,11 +468,16 @@ fn replace_file(home: &std::path::Path, rel: &str, new: &str) -> Result<std::pat
 }
 
 /// Move a memory into a prompt file (`rel` under the zen home) as a dated line under `## Learned`,
-/// after a backup. Returns the backup's path. A file pushed over its size is compacted next.
-fn promote_to_file(home: &std::path::Path, rel: &str, id: i64, text: &str) -> Result<std::path::PathBuf> {
+/// after a backup. Returns the backup's path, or None when the file already has the line (a sleep
+/// that wrote it and then failed to record it). A file pushed over its size is compacted next.
+fn promote_to_file(home: &std::path::Path, rel: &str, id: i64, text: &str) -> Result<Option<std::path::PathBuf>> {
     let old = std::fs::read_to_string(home.join(rel)).unwrap_or_default();
-    let line = format!("- {}: {} (from memory m{id})", chrono::Utc::now().format("%Y-%m-%d"), crate::secrets::mask(text).replace('\n', " "));
-    replace_file(home, rel, &with_learned(&old, &line))
+    let body = format!("{} (from memory m{id})", crate::secrets::mask(text).replace('\n', " "));
+    if old.lines().any(|l| l.ends_with(&body)) {
+        return Ok(None);
+    }
+    let line = format!("- {}: {body}", chrono::Utc::now().format("%Y-%m-%d"));
+    replace_file(home, rel, &with_learned(&old, &line)).map(Some)
 }
 
 /// What a prompt file over its size is cut to when compacted: 80% of its cap, room to grow.
@@ -467,10 +517,10 @@ and don't write the file: answer with the whole new file only, between a line `<
     Ok(format!("compacted {file} from {n} to {} characters (session {}, backup {})", new.chars().count(), &id.to_string()[..8], backup.display()))
 }
 
-/// The material System One judges an entry by: the entry, the other entries and the owner's
-/// profile (to tell whether it's covered).
+/// The material System One judges an entry by: the entry, the other entries by id and the owner's
+/// profile and the agent's identity (to tell whether it's covered, and by what).
 fn state_for(e: &Entry, all: &[Entry], user_md: &str, identity_md: &str) -> Value {
-    let others: Vec<String> = all.iter().filter(|o| o.id != e.id).map(|o| zen_proto::head(&o.text, 300)).collect();
+    let others: serde_json::Map<String, Value> = all.iter().filter(|o| o.id != e.id).map(|o| (format!("m{}", o.id), json!(zen_proto::head(&o.text, 300)))).collect();
     json!({
         "memory": e.text,
         "source": e.source,
@@ -503,6 +553,53 @@ pub async fn sleep(app: &AppState, trigger: &str) -> Result<Value> {
     res
 }
 
+/// How many entries the sleep has System One judge at once.
+const JUDGING_AT_ONCE: usize = 4;
+
+/// System One's judgment of one entry and its raw answers. A move into a prompt file is asked twice
+/// more; the lowest of the three answers counts.
+async fn judge(app: &AppState, e: &Entry, all: &[Entry], user_md: &str, identity_md: &str) -> (Option<Judged>, Value) {
+    let others: Vec<i64> = all.iter().filter(|o| o.id != e.id).map(|o| o.id).collect();
+    let qs = questions(&others);
+    let state = state_for(e, all, user_md, identity_md);
+    let (mut judged, raw) = match crate::score::decide(app, &state, &qs).await {
+        Ok(v) if v["error"].is_null() => (judged_from(&v["answers"]), v["answers"].clone()),
+        Ok(v) => {
+            tracing::warn!("sleep: judging m{}: {}", e.id, v["error"]);
+            (None, Value::Null)
+        }
+        Err(e2) => {
+            tracing::warn!("sleep: judging m{}: {e2:#}", e.id);
+            (None, Value::Null)
+        }
+    };
+    if let Some(j) = judged.as_mut().filter(|j| matches!(belongs_in(j, promote_bar()), Some("USER.md" | "IDENTITY.md"))) {
+        let repeat = json!({ "durable": qs["durable"], "about_owner": qs["about_owner"], "guidance": qs["guidance"] });
+        for _ in 0..2 {
+            let a = match crate::score::decide(app, &state, &repeat).await {
+                Ok(v) if v["error"].is_null() => v["answers"].clone(),
+                _ => Value::Null,
+            };
+            j.durable = j.durable.min(score01(&a["durable"]).unwrap_or(0.0));
+            j.about_owner = j.about_owner.min(score01(&a["about_owner"]).unwrap_or(0.0));
+            j.guidance = j.guidance.min(score01(&a["guidance"]).unwrap_or(0.0));
+        }
+    }
+    (judged, raw)
+}
+
+/// Whether an entry is still as the sleep read it (in short-term memory, unchanged): a `remember`
+/// replace or remove during the sleep wins over the sleep's plan for it.
+fn unchanged(e: &Entry, now: &[(i64, String, chrono::DateTime<chrono::Utc>)]) -> bool {
+    now.iter().any(|(id, tier, at)| *id == e.id && tier == "short" && *at == e.updated_at)
+}
+
+async fn current(db: impl sqlx::PgExecutor<'_>, ids: &[i64], lock: bool) -> Result<Vec<(i64, String, chrono::DateTime<chrono::Utc>)>, sqlx::Error> {
+    let sql = if lock { "SELECT id, tier, updated_at FROM memories WHERE id = ANY($1) FOR UPDATE" } else { "SELECT id, tier, updated_at FROM memories WHERE id = ANY($1)" };
+    let rows = sqlx::query(sql).bind(ids).fetch_all(db).await?;
+    Ok(rows.iter().map(|r| (r.get("id"), r.get("tier"), r.get("updated_at"))).collect())
+}
+
 async fn sleep_inner(app: &AppState, run: i64) -> Result<Value> {
     let db = &app.db;
     let entries = short_entries(db).await?;
@@ -514,65 +611,127 @@ async fn sleep_inner(app: &AppState, run: i64) -> Result<Value> {
     let mut judged: Vec<Option<Judged>> = vec![None; entries.len()];
     let mut raw: Vec<Value> = vec![Value::Null; entries.len()];
     if scorer.is_some() && !entries.is_empty() {
-        let qs = questions();
-        for (i, e) in entries.iter().enumerate() {
-            let state = state_for(e, &entries, &user_md, &identity_md);
-            match crate::score::decide(app, &state, &qs).await {
-                Ok(v) if v["error"].is_null() => {
-                    judged[i] = judged_from(&v["answers"]);
-                    raw[i] = v["answers"].clone();
-                }
-                Ok(v) => tracing::warn!("sleep: judging m{}: {}", e.id, v["error"]),
-                Err(e2) => tracing::warn!("sleep: judging m{}: {e2:#}", e.id),
-            }
-            // A move into a prompt file is asked twice more; the lowest of the three answers counts.
-            if let Some(j) = judged[i].as_mut().filter(|j| matches!(belongs_in(j, promote_bar()), Some("USER.md" | "IDENTITY.md"))) {
-                let repeat = json!({ "durable": qs["durable"], "about_owner": qs["about_owner"], "guidance": qs["guidance"] });
-                for _ in 0..2 {
-                    let a = match crate::score::decide(app, &state, &repeat).await {
-                        Ok(v) if v["error"].is_null() => v["answers"].clone(),
-                        _ => Value::Null,
-                    };
-                    j.durable = j.durable.min(score01(&a["durable"]).unwrap_or(0.0));
-                    j.about_owner = j.about_owner.min(score01(&a["about_owner"]).unwrap_or(0.0));
-                    j.guidance = j.guidance.min(score01(&a["guidance"]).unwrap_or(0.0));
-                }
-            }
+        let slots = tokio::sync::Semaphore::new(JUDGING_AT_ONCE);
+        let mut calls = Vec::new();
+        for e in &entries {
+            let (slots, entries, user_md, identity_md) = (&slots, &entries, &user_md, &identity_md);
+            calls.push(async move {
+                let _slot = slots.acquire().await;
+                judge(app, e, entries, user_md, identity_md).await
+            });
+        }
+        let answers = futures_util::future::join_all(calls).await;
+        for (i, (j, r)) in answers.into_iter().enumerate() {
+            judged[i] = j;
+            raw[i] = r;
         }
     }
+    let cover = covered(&entries, &judged);
     // Promotion: into a prompt file (the entry leaves memory: the file is in every session's
-    // instructions) or a copy into the wiki (the entry stays while it's needed).
+    // instructions; written below, once the entry is locked) or a copy into the wiki (the entry
+    // stays while it's needed). An entry that goes as covered isn't promoted; what covers it may be.
     let mut notes: Vec<String> = Vec::new();
-    let mut moved: Vec<Option<&'static str>> = vec![None; entries.len()];
+    let mut to_file: Vec<Option<&'static str>> = vec![None; entries.len()];
     let mut captured = vec![false; entries.len()];
     for (i, e) in entries.iter().enumerate() {
         let Some(j) = &judged[i] else { continue };
-        if j.covered >= 0.8 {
+        if cover[i].is_some() {
             continue;
         }
         match belongs_in(j, promote_bar()) {
-            Some(file @ ("USER.md" | "IDENTITY.md")) if may_steer(&e.source) => {
-                let rel = if file == "USER.md" { "USER.md" } else { crate::layout::IDENTITY };
-                match promote_to_file(&home, rel, e.id, &e.text) {
-                    Ok(backup) => {
-                        moved[i] = Some(file);
-                        notes.push(format!("promoted m{} to {file} (backup {}): {}", e.id, backup.display(), zen_proto::head(&e.text, 120)));
-                    }
-                    Err(err) => notes.push(format!("m{} belongs in {file} but wasn't moved: {err:#}", e.id)),
-                }
-            }
+            Some(file @ ("USER.md" | "IDENTITY.md")) if may_steer(&e.source) => to_file[i] = Some(file),
             Some(file @ ("USER.md" | "IDENTITY.md")) => {
                 notes.push(format!("m{} looks like it belongs in {file}, but it's an inference: propose it in the conversation: {}", e.id, zen_proto::head(&e.text, 120)));
             }
-            Some(_) if !e.captured => match crate::wiki::capture_memory(app, e.id, &e.text, &e.source).await {
-                Ok(out) => {
-                    captured[i] = true;
-                    notes.push(format!("promoted m{} to the wiki: {}", e.id, out.lines().next().unwrap_or("")));
+            Some(_) if !e.captured => {
+                if !unchanged(e, &current(db, &[e.id], false).await?) {
+                    continue;
                 }
-                Err(err) => notes.push(format!("m{} wasn't copied to the wiki: {err:#}", e.id)),
-            },
+                match crate::wiki::capture_memory(app, e.id, &e.text, &e.source).await {
+                    Ok(out) => {
+                        captured[i] = true;
+                        notes.push(format!("promoted m{} to the wiki: {}", e.id, out.lines().next().unwrap_or("")));
+                    }
+                    Err(err) => notes.push(format!("m{} wasn't copied to the wiki: {err:#}", e.id)),
+                }
+            }
             _ => {}
         }
+    }
+    // What stays competes for the space; entries moving to a prompt file don't count.
+    let rest: Vec<usize> = (0..entries.len()).filter(|&i| to_file[i].is_none()).collect();
+    let rest_entries: Vec<Entry> = rest.iter().map(|&i| entries[i].clone()).collect();
+    let rest_judged: Vec<Option<Judged>> = rest.iter().map(|&i| judged[i].clone()).collect();
+    let mut fates: Vec<Fate> = vec![Fate::Keep; entries.len()];
+    for (k, f) in plan(&rest_entries, &rest_judged, cap()).into_iter().enumerate() {
+        fates[rest[k]] = f;
+    }
+    // All fates and their decisions apply together: a failure midway must not leave memory half
+    // tidied with only some decisions logged. The entries are locked first, and one that changed
+    // since it was read (a `remember` during the sleep) is left as it is now.
+    let mut tx = db.begin().await?;
+    let ids: Vec<i64> = entries.iter().map(|e| e.id).collect();
+    let now = current(&mut *tx, &ids, true).await?;
+    let mut moved: Vec<Option<&'static str>> = vec![None; entries.len()];
+    for (i, e) in entries.iter().enumerate() {
+        let Some(file) = to_file[i].filter(|_| unchanged(e, &now)) else { continue };
+        let rel = if file == "USER.md" { "USER.md" } else { crate::layout::IDENTITY };
+        match promote_to_file(&home, rel, e.id, &e.text) {
+            Ok(backup) => {
+                moved[i] = Some(file);
+                fates[i] = Fate::Drop(if file == "USER.md" { "promoted to USER.md" } else { "promoted to IDENTITY.md" });
+                let backup = backup.map_or("it was already there".to_string(), |b| format!("backup {}", b.display()));
+                notes.push(format!("promoted m{} to {file} ({backup}): {}", e.id, zen_proto::head(&e.text, 120)));
+            }
+            // It stays in memory, and the next sleep tries again.
+            Err(err) => notes.push(format!("m{} belongs in {file} but wasn't moved: {err:#}", e.id)),
+        }
+    }
+    let promoted = moved.iter().filter(|m| m.is_some()).count() + captured.iter().filter(|c| **c).count();
+    let (mut kept, mut dropped, mut changed) = (0, 0, 0);
+    for (i, e) in entries.iter().enumerate() {
+        let scores = if raw[i].is_null() { None } else { Some(json!({ "answers": raw[i] })) };
+        let fresh = unchanged(e, &now);
+        let (tier, reason, chosen) = match &fates[i] {
+            _ if !fresh => {
+                changed += 1;
+                ("", None, "changed")
+            }
+            Fate::Keep => {
+                kept += 1;
+                ("short", None, "keep")
+            }
+            Fate::Drop(why) if moved[i].is_some() => ("archived", Some(*why), "promote"),
+            Fate::Drop(why) => {
+                dropped += 1;
+                ("archived", Some(*why), "drop")
+            }
+        };
+        if fresh {
+            let proposal = captured[i].then_some("wiki");
+            sqlx::query("UPDATE memories SET tier = $2, reason = COALESCE($3, reason), proposed = COALESCE($4, proposed), scores = COALESCE($5, scores), updated_at = CASE WHEN tier = $2 THEN updated_at ELSE now() END WHERE id = $1")
+                .bind(e.id)
+                .bind(tier)
+                .bind(reason)
+                .bind(proposal)
+                .bind(&scores)
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query("INSERT INTO decisions (point, model, input, answer, chosen, probability, acted) VALUES ('sleep', $1, $2, $3, $4, $5, $6)")
+            .bind(&scorer)
+            .bind(json!({ "memory": e.id, "text": e.text, "source": e.source }))
+            .bind(&raw[i])
+            .bind(chosen)
+            .bind(judged[i].as_ref().map(|j| j.needed))
+            .bind(fresh)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    let changed_ids: Vec<String> = entries.iter().filter(|e| !unchanged(e, &now)).map(|e| format!("m{}", e.id)).collect();
+    if !changed_ids.is_empty() {
+        notes.push(format!("changed during the sleep, so left as they are now: {}", changed_ids.join(", ")));
     }
     // A prompt file over its size (after promotions, or edited past it) is compacted, not cut.
     if scorer.is_some() {
@@ -590,51 +749,6 @@ async fn sleep_inner(app: &AppState, run: i64) -> Result<Value> {
     if pruned_backups > 0 {
         notes.push(format!("backups: removed {pruned_backups} prompt-file backup(s) older than {BACKUP_DAYS} days"));
     }
-    // What stays competes for the space; moved entries don't count.
-    let rest: Vec<usize> = (0..entries.len()).filter(|&i| moved[i].is_none()).collect();
-    let rest_entries: Vec<Entry> = rest.iter().map(|&i| entries[i].clone()).collect();
-    let rest_judged: Vec<Option<Judged>> = rest.iter().map(|&i| judged[i].clone()).collect();
-    let mut fates: Vec<Fate> = moved.iter().map(|m| Fate::Drop(if m == &Some("USER.md") { "promoted to USER.md" } else { "promoted to IDENTITY.md" })).collect();
-    for (k, f) in plan(&rest_entries, &rest_judged, cap()).into_iter().enumerate() {
-        fates[rest[k]] = f;
-    }
-    let promoted = moved.iter().filter(|m| m.is_some()).count() + captured.iter().filter(|c| **c).count();
-    let (mut kept, mut dropped) = (0, 0);
-    // All fates and their decisions apply together: a failure midway must not leave memory half
-    // tidied with only some decisions logged.
-    let mut tx = db.begin().await?;
-    for (i, e) in entries.iter().enumerate() {
-        let scores = if raw[i].is_null() { None } else { Some(json!({ "answers": raw[i] })) };
-        let (tier, reason, chosen) = match &fates[i] {
-            Fate::Keep => {
-                kept += 1;
-                ("short", None, "keep")
-            }
-            Fate::Drop(why) if moved[i].is_some() => ("archived", Some(*why), "promote"),
-            Fate::Drop(why) => {
-                dropped += 1;
-                ("archived", Some(*why), "drop")
-            }
-        };
-        let proposal = captured[i].then_some("wiki");
-        sqlx::query("UPDATE memories SET tier = $2, reason = COALESCE($3, reason), proposed = COALESCE($4, proposed), scores = COALESCE($5, scores), updated_at = CASE WHEN tier = $2 THEN updated_at ELSE now() END WHERE id = $1")
-            .bind(e.id)
-            .bind(tier)
-            .bind(reason)
-            .bind(proposal)
-            .bind(&scores)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("INSERT INTO decisions (point, model, input, answer, chosen, probability, acted) VALUES ('sleep', $1, $2, $3, $4, $5, true)")
-            .bind(&scorer)
-            .bind(json!({ "memory": e.id, "text": e.text, "source": e.source }))
-            .bind(&raw[i])
-            .bind(chosen)
-            .bind(judged[i].as_ref().map(|j| j.needed))
-            .execute(&mut *tx)
-            .await?;
-    }
-    tx.commit().await?;
     let pruned = prune_outputs(&crate::zen_home().join("outputs"), OUTPUT_DAYS);
     if pruned > 0 {
         notes.push(format!("outputs: removed {pruned} saved tool output file(s) older than {OUTPUT_DAYS} days"));
@@ -659,7 +773,7 @@ async fn sleep_inner(app: &AppState, run: i64) -> Result<Value> {
         .bind(&note)
         .execute(db)
         .await?;
-    Ok(json!({ "run": run, "entries": entries.len(), "kept": kept, "dropped": dropped, "promoted": promoted, "scorer": scorer, "note": note }))
+    Ok(json!({ "run": run, "entries": entries.len(), "kept": kept, "dropped": dropped, "promoted": promoted, "changed": changed, "scorer": scorer, "note": note }))
 }
 
 /// Where prompt-file backups go, under the zen home (its own folder: `backups/` holds other things).
@@ -668,31 +782,30 @@ pub(crate) const BACKUPS: &str = "backups/prompt-files";
 /// Days a prompt file's backup is kept in `<zen home>/backups/prompt-files`.
 const BACKUP_DAYS: u64 = 90;
 
-/// Remove backups (`*.md` directly in `dir`) not modified for `days` days; returns how many.
-fn prune_backups(dir: &std::path::Path, days: u64) -> usize {
-    let Ok(read) = std::fs::read_dir(dir) else { return 0 };
-    let limit = std::time::Duration::from_secs(days * 86_400);
-    read.flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && e.file_name().to_string_lossy().ends_with(".md"))
-        .filter(|e| e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > limit))
-        .filter(|e| std::fs::remove_file(e.path()).is_ok())
-        .count()
-}
-
 /// Days a saved tool output (cut bash/MCP output, fetched PDFs) is kept in `<zen home>/outputs`.
 const OUTPUT_DAYS: u64 = 30;
 
-/// Remove regular files directly in `dir` not modified for `days` days; returns how many. Only
-/// files the kernel saves (`*.log`, `mcp-*.txt`, `web-*.pdf`): anything else there is left alone.
-fn prune_outputs(dir: &std::path::Path, days: u64) -> usize {
+/// Remove regular files directly in `dir` whose name `ours` accepts and that weren't modified for
+/// `days` days; returns how many. Anything else there is left alone.
+fn prune(dir: &std::path::Path, days: u64, ours: impl Fn(&str) -> bool) -> usize {
     let Ok(read) = std::fs::read_dir(dir) else { return 0 };
     let limit = std::time::Duration::from_secs(days * 86_400);
-    let ours = |n: &str| n.ends_with(".log") || (n.starts_with("mcp-") && n.ends_with(".txt")) || (n.starts_with("web-") && n.ends_with(".pdf"));
     read.flatten()
         .filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && ours(&e.file_name().to_string_lossy()))
         .filter(|e| e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > limit))
         .filter(|e| std::fs::remove_file(e.path()).is_ok())
         .count()
+}
+
+/// Prompt-file backups (`*.md`) older than `days` days.
+fn prune_backups(dir: &std::path::Path, days: u64) -> usize {
+    prune(dir, days, |n| n.ends_with(".md"))
+}
+
+/// Saved outputs older than `days` days: only files the kernel saves (`*.log`, `mcp-*.txt`,
+/// `web-*.pdf`).
+fn prune_outputs(dir: &std::path::Path, days: u64) -> usize {
+    prune(dir, days, |n| n.ends_with(".log") || (n.starts_with("mcp-") && n.ends_with(".txt")) || (n.starts_with("web-") && n.ends_with(".pdf")))
 }
 
 /// A line about the last sleep for a session's instructions, when it ran in the last day (the
@@ -763,7 +876,7 @@ mod tests {
     use super::*;
 
     fn e(id: i64, text: &str, source: &str, idle: f64) -> Entry {
-        Entry { id, text: text.into(), source: source.into(), age_days: idle, idle_days: idle, uses: 0, captured: false }
+        Entry { id, text: text.into(), source: source.into(), age_days: idle, idle_days: idle, uses: 0, captured: false, updated_at: chrono::DateTime::UNIX_EPOCH }
     }
 
     #[test]
@@ -778,9 +891,45 @@ mod tests {
     #[test]
     fn plan_drops_covered_and_keeps_by_need() {
         let all = vec![e(1, "duplicate of the profile", "owner", 1.0), e(2, "rarely needed detail", "inferred", 1.0), e(3, "often needed fact", "inferred", 1.0)];
-        let j = |needed: f64, covered: f64| Some(Judged { needed, durable: 0.5, covered, ..Default::default() });
-        let fates = plan(&all, &[j(0.9, 0.9), j(0.1, 0.0), j(0.9, 0.0)], line(&all[2]).chars().count());
+        let j = |needed: f64, covered_by: Option<Cover>| Some(Judged { needed, durable: 0.5, covered_by, ..Default::default() });
+        let fates = plan(&all, &[j(0.9, Some(Cover::File)), j(0.1, None), j(0.9, None)], line(&all[2]).chars().count());
         assert_eq!(fates, vec![Fate::Drop("already covered"), Fate::Drop("didn't fit"), Fate::Keep]);
+    }
+
+    #[test]
+    fn of_entries_that_say_the_same_one_stays() {
+        let j = |c: Option<Cover>| Some(Judged { needed: 0.5, durable: 0.5, covered_by: c, ..Default::default() });
+        // Each judged covered by the other: the newer stays, whatever order they come in.
+        let pair = vec![e(1, "staging deploys on Fridays", "owner", 5.0), e(2, "staging deploys on Fridays.", "owner", 1.0)];
+        assert_eq!(covered(&pair, &[j(Some(Cover::Entry(2))), j(Some(Cover::Entry(1)))]), vec![Some(Cover::Entry(2)), None]);
+        let swapped = vec![pair[1].clone(), pair[0].clone()];
+        assert_eq!(covered(&swapped, &[j(Some(Cover::Entry(1))), j(Some(Cover::Entry(2)))]), vec![None, Some(Cover::Entry(2))]);
+        let fates = plan(&pair, &[j(Some(Cover::Entry(2))), j(Some(Cover::Entry(1)))], 1000);
+        assert_eq!(fates, vec![Fate::Drop("already covered"), Fate::Keep]);
+        // Three that say the same: one stays. An entry naming itself isn't covered; one covered by
+        // an entry promoted out of memory (not in the list) goes.
+        let three = vec![e(1, "a", "owner", 3.0), e(2, "a", "owner", 2.0), e(3, "a", "owner", 1.0)];
+        let c = covered(&three, &[j(Some(Cover::Entry(2))), j(Some(Cover::Entry(3))), j(Some(Cover::Entry(1)))]);
+        assert_eq!(c.iter().filter(|c| c.is_none()).count(), 1, "{c:?}");
+        assert_eq!(covered(&pair[..1], &[j(Some(Cover::Entry(1)))]), vec![None]);
+        assert_eq!(covered(&pair[..1], &[j(Some(Cover::Entry(9)))]), vec![Some(Cover::Entry(9))]);
+        // The entry that stays ranks at least as high as the one it covers.
+        let all = vec![e(1, "needed often", "owner", 5.0), e(2, "the same, said again", "inferred", 1.0), e(3, "other", "inferred", 1.0)];
+        let judged = [Some(Judged { needed: 1.0, covered_by: Some(Cover::Entry(2)), ..Default::default() }), j(None), Some(Judged { needed: 0.6, ..Default::default() })];
+        assert_eq!(plan(&all, &judged, line(&all[1]).chars().count()), vec![Fate::Drop("already covered"), Fate::Keep, Fate::Drop("didn't fit")]);
+    }
+
+    #[test]
+    fn the_cover_question_offers_the_other_entries() {
+        let q = questions(&[4, 7]);
+        let c = &q["covered_by"]["criteria"];
+        assert!(c.get("none").is_some() && c.get("user_profile").is_some() && c.get("agent_identity").is_some() && c.get("m4").is_some() && c.get("m7").is_some());
+        let state = state_for(&e(4, "x", "owner", 0.0), &[e(4, "x", "owner", 0.0), e(7, "y", "owner", 0.0)], "", "");
+        assert_eq!(state["other_memories"], json!({ "m7": "y" }));
+        assert_eq!(cover_from(&json!({ "choice": "m7", "probabilities": { "m7": 0.9 } })), Some(Cover::Entry(7)));
+        assert_eq!(cover_from(&json!({ "choice": "m7", "probabilities": { "m7": 0.6 } })), None, "not sure enough");
+        assert_eq!(cover_from(&json!({ "choice": "user_profile", "confidence": 0.95 })), Some(Cover::File));
+        assert_eq!(cover_from(&json!({ "choice": "none", "confidence": 1.0 })), None);
     }
 
     #[test]
@@ -806,11 +955,13 @@ mod tests {
     fn promoting_to_a_file_backs_it_up() {
         let home = crate::test_util::TestDir::new("promote");
         std::fs::write(home.join("USER.md"), "# USER.md\n\nJose.\n").unwrap();
-        let backup = promote_to_file(&home, "USER.md", 8, "Jose needs stronger distribution.").unwrap();
+        let backup = promote_to_file(&home, "USER.md", 8, "Jose needs stronger distribution.").unwrap().unwrap();
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), "# USER.md\n\nJose.\n");
         let now = std::fs::read_to_string(home.join("USER.md")).unwrap();
         assert!(now.contains("## Learned\n\n- ") && now.contains("Jose needs stronger distribution. (from memory m8)"), "{now}");
-        assert_ne!(promote_to_file(&home, "USER.md", 9, "again").unwrap(), backup, "each change gets its own backup");
+        assert_ne!(promote_to_file(&home, "USER.md", 9, "again").unwrap(), Some(backup), "each change gets its own backup");
+        assert_eq!(promote_to_file(&home, "USER.md", 8, "Jose needs stronger distribution.").unwrap(), None, "a line already there isn't added again");
+        assert_eq!(std::fs::read_to_string(home.join("USER.md")).unwrap().matches("(from memory m8)").count(), 1);
     }
 
     #[test]
@@ -845,14 +996,6 @@ mod tests {
     }
 
     #[test]
-    fn wilson_lower_needs_many_agreeing_outcomes() {
-        assert_eq!(wilson_lower(0, 0, 1.645), 0.0);
-        assert!(wilson_lower(10, 10, 1.645) < 0.95, "ten agreements aren't enough");
-        assert!(wilson_lower(52, 52, 1.645) >= 0.95);
-        assert!(wilson_lower(51, 52, 1.645) < 0.95, "one rejection costs a lot");
-    }
-
-    #[test]
     fn ids_parse_with_or_without_the_prefix() {
         assert_eq!(parse_id(&json!("m12")), Some(12));
         assert_eq!(parse_id(&json!("12")), Some(12));
@@ -863,7 +1006,7 @@ mod tests {
     #[test]
     fn answers_map_to_probabilities() {
         let j = judged_from(&json!({ "needed": { "score": 3, "confidence": 0.9 }, "durable": { "probability": 0.7 }, "guidance": { "probability": 0.9 } })).unwrap();
-        assert_eq!((j.needed, j.durable, j.covered, j.guidance), (1.0, 0.7, 0.0, 0.9));
+        assert_eq!((j.needed, j.durable, j.covered_by, j.guidance), (1.0, 0.7, None, 0.9));
         assert!(judged_from(&json!({})).is_none());
     }
 }

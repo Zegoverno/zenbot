@@ -166,6 +166,11 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
   that answers with the rewritten file; the kernel checks it (markers, a heading, within the cap,
   not under a quarter of the 80% target), backs up and writes it. Every entry's fate
   is a `decisions` row; the run is a `sleep_runs` row; the next sessions get a one-line note. System
+  One judges up to 4 entries at once and names what already covers an entry (another entry, the
+  profile or the identity); an entry covered by another goes only while that one stays, so of
+  entries that say the same thing one always survives. Fates apply in one transaction with the
+  entries locked: an entry changed by `remember` since the sleep read it is left as it is, and
+  isn't promoted. A promotion already in its file isn't written twice. System
   One sees memories unless `ZEN_S1_PRIVATE=0` (D-032).
 - **Search** (`search.rs`, D-035): an indexer keeps `search_docs` current: one document per turn of
   every session (the owner's words, the answers, the tools called; no tool output) and one per

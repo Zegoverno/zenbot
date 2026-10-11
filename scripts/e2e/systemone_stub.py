@@ -1,23 +1,79 @@
 #!/usr/bin/env python3
-"""OpenRouter System One stand-in: checks auth and the bool→noul wire contract."""
+"""OpenRouter System One stand-in: checks auth and the bool→noul wire contract.
+
+Usage: systemone_stub.py <port> [release-file]. A sleep question about an entry marked HOLD waits
+until the release file exists (at most 30 s), so a scenario can change memory mid-sleep. GET /stats
+reports how many calls are held now and the most that were in flight at once.
+"""
 import json
+import os
 import sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+RELEASE = sys.argv[2] if len(sys.argv) > 2 else None
+LOCK = threading.Lock()
+STATS = {"inflight": 0, "max_inflight": 0, "held": 0}
+
+
+def covered_by(question, state):
+    """The sleep's cover choice: a DUPLICATE entry is covered by another DUPLICATE one, a
+    PROFILE-COPY entry by the owner's profile, anything else by nothing."""
+    memory = str(state.get("memory", ""))
+    others = state.get("other_memories", {})
+    if "DUPLICATE" in memory:
+        return next(k for k, text in others.items() if "DUPLICATE" in text)
+    if "PROFILE-COPY" in memory:
+        return "user_profile"
+    assert "none" in question["criteria"]
+    return "none"
 
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
+    def reply(self, status, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        with LOCK:
+            self.reply(200, dict(STATS))
+
     def do_POST(self):
+        with LOCK:
+            STATS["inflight"] += 1
+            STATS["max_inflight"] = max(STATS["max_inflight"], STATS["inflight"])
+        try:
+            self.answer()
+        finally:
+            with LOCK:
+                STATS["inflight"] -= 1
+
+    def answer(self):
         try:
             assert self.path == "/systemone"
             assert self.headers.get("Authorization") == "Bearer e2e-key"
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             assert request["model"] == "typesafe/jev-1.13"
+            state = request.get("state", {})
             answers = {}
             # The sleep's marker entries: lasting and about the owner, or lasting knowledge.
-            memory = str(request.get("state", {}).get("memory", ""))
+            memory = str(state.get("memory", ""))
+            if "HOLD" in memory and RELEASE:
+                with LOCK:
+                    STATS["held"] += 1
+                deadline = time.time() + 30
+                while not os.path.exists(RELEASE) and time.time() < deadline:
+                    time.sleep(0.05)
+                with LOCK:
+                    STATS["held"] -= 1
             high = {"PROMOTE-USER": {"durable", "about_owner"}, "PROMOTE-WIKI": {"durable", "knowledge"}}
             marked = next((v for k, v in high.items() if k in memory), None)
             for name, question in request["questions"].items():
@@ -27,7 +83,7 @@ class H(BaseHTTPRequestHandler):
                 elif kind == "noul":
                     answers[name] = {"type": "noul", "noul": 0.82}
                 elif kind == "choice":
-                    choice = next(iter(question["criteria"]))
+                    choice = covered_by(question, state) if name == "covered_by" else next(iter(question["criteria"]))
                     answers[name] = {"type": "choice", "choice": choice,
                                      "probabilities": {choice: 1.0}, "confidence": 1.0}
                 elif kind == "score":
@@ -39,14 +95,9 @@ class H(BaseHTTPRequestHandler):
             payload = {"model": "typesafe/jev-1.13-test", "provider": "e2e",
                        "answers": answers, "usage": {"input_tokens": 100,
                        "output_tokens": 10, "cost": 0.00001}}
-        except (AssertionError, KeyError, ValueError) as error:
+        except (AssertionError, KeyError, ValueError, StopIteration) as error:
             status, payload = 400, {"error": str(error)}
-        body = json.dumps(payload).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        self.reply(status, payload)
 
 
-HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()

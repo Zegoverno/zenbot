@@ -35,18 +35,20 @@ pub(crate) fn file_cap(path: &str) -> usize {
 }
 
 /// Text over `cap` characters, cut as OpenClaw does: the first 70% and the last 20% kept, with a
-/// marker saying where to read the rest.
+/// marker saying where to read the rest. Counted in characters, like every size the kernel reports,
+/// and cut on character boundaries.
 pub fn cut_middle(text: &str, cap: usize, path: &str) -> String {
-    if text.len() <= cap {
+    let n = text.chars().count();
+    if n <= cap {
         return text.to_string();
     }
-    let head = text.floor_char_boundary(cap * 7 / 10);
-    let tail = text.ceil_char_boundary(text.len() - cap * 2 / 10);
+    let (head, tail) = (cap * 7 / 10, n - cap * 2 / 10);
+    let at = |c: usize| text.char_indices().nth(c).map_or(text.len(), |(i, _)| i);
     format!(
         "{}\n\n[... {} characters left out here (the file is over {cap}); read {path} for all of it ...]\n\n{}",
-        &text[..head],
+        &text[..at(head)],
         tail - head,
-        &text[tail..]
+        &text[at(tail)..]
     )
 }
 
@@ -100,7 +102,7 @@ pub fn compose(parts: &[&str], workspace: &Path, repo: &str, memory: &str, sleep
     if has("memory") {
         s.push_str(&format!(
             "\n<memory size=\"{}/{}\">\nYour short-term memory as of this session's start (entries by id; change them with the remember tool).\n{}{}</memory>\n",
-            memory.len(),
+            memory.chars().count(),
             crate::memory::cap(),
             if memory.is_empty() { "(empty)\n".to_string() } else { memory.to_string() },
             sleep_note.map(|n| format!("\n{n}\n")).unwrap_or_default()
@@ -284,6 +286,11 @@ mod tests {
         let cut = cut_middle(&text, 100, "/p");
         assert!(cut.starts_with("START") && cut.ends_with("END") && cut.contains("read /p"));
         assert_eq!(cut_middle("short", 100, "/p"), "short");
+        // Sizes are characters, not bytes: 100 two-byte characters fit a cap of 100.
+        let accents = "é".repeat(100);
+        assert_eq!(cut_middle(&accents, 100, "/p"), accents);
+        let cut = cut_middle(&"é".repeat(200), 100, "/p");
+        assert!(cut.starts_with(&"é".repeat(70)) && cut.ends_with(&format!("\n\n{}", "é".repeat(20))) && cut.contains("[... 110 characters left out"), "{cut}");
     }
 
     #[test]
