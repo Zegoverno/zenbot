@@ -679,7 +679,8 @@ engine_boundary() {
   check "a turn still runs" eq "$(zen ask --json -m faux/smoke "hi" | jq -r .error)" null
 }
 
-# A turn aborted while its tool runs: the tape still pairs every tool call with a result.
+# A turn aborted while its tool runs: the tape still pairs every tool call with a result; a
+# subagent the aborted turn waits for is stopped with it.
 abort_tool() {
   local ws; ws=$(new_workspace aborttool)
   start_kernel "$ws" "$(script abort-tool.json)"
@@ -691,6 +692,12 @@ abort_tool() {
   check "with a result saying it was interrupted" grep -q "interrupted" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolCallId' IN ($calls)")"
   check "and only one" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult'")" 1
   check "the next turn runs" eq "$(zen ask --json -s "$sid" "again" | jq -r .error)" null
+  # Aborting a parent stops the subagent it is waiting for, not just the parent's own turn.
+  local parent; parent=$(zen sessions new --json -m faux/smoke | jq -r .id)
+  python3 scripts/e2e/ws_prompt.py "$URL" "$TOKEN" "$parent" '{"type":"prompt","text":"hand off a long nap"}' 1 3 >/dev/null
+  check "the parent was interrupted" poll "SELECT outcome FROM turns WHERE session_id='$parent'" interrupted
+  check "and so was its running subagent" poll "SELECT string_agg(t.outcome, ',') FROM turns t JOIN sessions s ON s.id = t.session_id WHERE s.parent='$parent'" interrupted
+  check "whose command never finished" eq "$(q "SELECT count(*) FROM tape_events WHERE payload::text LIKE '%child-too-late%' AND payload->>'role'='toolResult'")" 0
 }
 
 # A session the old briefed workflow left mid-verification still works after an upgrade.
