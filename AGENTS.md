@@ -19,7 +19,7 @@ fully before making changes.
 | Kernel `zend`: API, WebSocket, sessions, tools, auth, worker routing | `crates/zend` (Rust) | systemd service `zenbot`, binary `~/.zenbot/bin/zend` |
 | CLI `zen`: terminal app and script commands | `crates/zen` (Rust) | `~/.zenbot/bin/zen` (linked from `~/.local/bin/zen`) |
 | Worker `zen-engine`: turns on the Claude Code and Codex CLIs | `crates/zen-engine` (Rust) | child process of `zend` |
-| Shared `zen-proto`: message helpers and the client protocol's events, typed (the worker protocol's messages are still untyped JSON) | `crates/zen-proto` (Rust library) | linked into `zend`, `zen-engine`, `zen` and `zen-matrix` |
+| Shared `zen-proto`: message helpers, the client protocol's events and the worker protocol's messages, typed | `crates/zen-proto` (Rust library) | linked into `zend`, `zen-engine`, `zen` and `zen-matrix` |
 | Client `zen-client`: the kernel client (token, HTTP calls, session stream, `zen_home`, env files) | `crates/zen-client` (Rust library) | linked into `zen` and `zen-matrix` |
 | Channel `zen-matrix`: the owner's Matrix rooms ↔ sessions | `crates/zen-matrix` (Rust, its own Cargo workspace) | systemd service `zen-matrix`, binary `~/.zenbot/bin/zen-matrix` |
 | Database and web search | `deploy/compose.yaml` | Postgres + pgvector, and SearXNG, in Docker |
@@ -42,7 +42,8 @@ Config lives in `~/.zenbot/` (MAP.md lists every file). `token`, `db-password`, 
    Add an e2e scenario when you change the kernel's behavior. Test kernel behavior without a
    subscription with the scripted `faux/smoke` model. `crates/zen-matrix` is built, tested and
    linted in its own CI job; test it end to end with `scripts/matrix-e2e.sh` (not in CI). Changes
-   to the worker protocol update `docs/worker-protocol.md` and every worker.
+   to the worker protocol update `docs/worker-protocol.md`, its types in `zen-proto` (`worker.rs`)
+   and every worker.
 4. **Test it for real** where you can, e.g. `./target/release/zen ask --json "…"` against the running
    service or a dev kernel.
 5. **Update the docs** in the same branch (table below), then run `scripts/check-docs.py`. Docs are

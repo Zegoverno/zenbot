@@ -11,6 +11,13 @@ questions to `noul` on the wire. `ZEN_S1_MODEL` chooses the classifier (off when
 
 JSON-RPC 2.0 over the worker's stdin/stdout, one JSON object per line. The kernel starts each worker as a child process (see "Configuration"). Workers write logs to stderr.
 
+The messages below are typed in `zen_proto::worker` (`crates/zen-proto/src/worker.rs`): `Request`
+(kernel → worker), the answers, `ToolCall`/`ToolResult` and `TurnEvent` (the turn notifications),
+with a round-trip test for each against samples shaped as below. `zend` and `zen-engine` build and
+read them through these types; a worker in another language follows this page. Readers ignore
+unknown fields and default missing or `null` ones; messages (below) and `turn.usage`'s report stay
+open JSON. A change to the protocol changes this page, those types and their tests together.
+
 ## Kernel → worker
 
 | Method | Params | Result |
@@ -93,6 +100,14 @@ Switches: `ZEN_CLAUDE_RESUME=0` and `ZEN_CODEX_RESUME=0` run every turn without 
 - **Late messages.** Messages from a turn that has already ended (another `turn_id`, a session with no turn, or one running on another worker) are dropped; a late `tool.call` gets an `is_error` result. The kernel may end a turn the worker is still running (after an abort, see above), so the worker must key its running turns by `turn_id`, not by session: the session's next turn can start while the old one is still stopping.
 
 So a worker never has to clean up after the kernel, but it must answer `turn.abort` promptly and always finish a turn with `turn.end`.
+
+## Engines in `zen-engine`
+
+`zen-engine` runs each model on an engine (`crates/zen-engine/src/engine.rs`): `claude`, `codex`
+and, with `ZEN_FAUX=1`, `faux`. Each implements the `Engine` trait (its name, the model id prefix;
+its CLI's version; its models; `run_turn`; `complete`; its failover target and subscription
+sign-in check), and `engine::all()` lists them. The protocol loop and failover go through that
+list, so adding an engine is one module implementing the trait and its line in `all`.
 
 ## Testing without a model
 
