@@ -1,4 +1,5 @@
-//! Connection to a model worker: JSON-RPC 2.0, one JSON object per line over stdio.
+//! Connection to a model worker: JSON-RPC 2.0, one JSON object per line over stdio. Requests are
+//! `zen_proto::worker::Request`s; what the worker sends is read in `dispatch.rs`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -9,6 +10,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot, Mutex};
+use zen_proto::worker::Request;
 
 /// A message initiated by the worker: a request (has id) or a notification.
 pub struct Incoming {
@@ -114,12 +116,17 @@ impl Mind {
         Ok(())
     }
 
-    pub async fn request(&self, method: &str, params: Value) -> Result<Value> {
-        self.request_within(method, params, std::time::Duration::from_secs(30)).await
+    /// Send a request (docs/worker-protocol.md) and wait up to 30 seconds for its answer.
+    pub async fn call(&self, req: &Request) -> Result<Value> {
+        self.call_within(req, std::time::Duration::from_secs(30)).await
     }
 
-    /// A request that may take longer than the default 30 seconds (e.g. `complete`).
-    pub async fn request_within(&self, method: &str, params: Value, limit: std::time::Duration) -> Result<Value> {
+    /// A request that may take longer than the default 30 seconds (e.g. `complete`), or must take less.
+    pub async fn call_within(&self, req: &Request, limit: std::time::Duration) -> Result<Value> {
+        self.request_within(req.method(), req.params(), limit).await
+    }
+
+    async fn request_within(&self, method: &str, params: Value, limit: std::time::Duration) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id, tx);
@@ -134,8 +141,9 @@ impl Mind {
         }
     }
 
-    pub async fn respond(&self, id: Value, result: Value) -> Result<()> {
-        self.write(json!({ "jsonrpc": "2.0", "id": id, "result": result })).await
+    /// Answer a worker's request (`tool.call`).
+    pub async fn respond<T: serde::Serialize>(&self, id: Value, result: &T) -> Result<()> {
+        self.write(json!({ "jsonrpc": "2.0", "id": id, "result": serde_json::to_value(result)? })).await
     }
 }
 

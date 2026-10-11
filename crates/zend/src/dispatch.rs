@@ -1,7 +1,20 @@
 //! Messages from workers: tool calls (run by the kernel), streamed text,
-//! finished messages, usage reports and turn ends.
+//! finished messages, usage reports and turn ends (`zen_proto::worker`'s `ToolCall` and `TurnEvent`).
 
 use super::*;
+
+use zen_proto::worker::{ToolCall, ToolResult, TurnEvent};
+
+/// What a worker sent, read: a tool call to run, or a turn's notification.
+enum FromWorker {
+    Call(ToolCall),
+    Event(TurnEvent),
+}
+
+/// The answer to a `tool.call` the kernel doesn't run.
+fn refused(content: impl Into<String>) -> ToolResult {
+    ToolResult { content: content.into(), is_error: true }
+}
 
 /// A session's ordered queue of worker notifications.
 type Queues = Arc<std::sync::Mutex<HashMap<Uuid, tokio::sync::mpsc::UnboundedSender<(usize, Incoming)>>>>;
@@ -16,7 +29,7 @@ pub(crate) async fn dispatch(app: AppState, mut incoming: tokio::sync::mpsc::Unb
     // that requested them. Messages without a session are handled here, in order.
     let queues: Queues = Arc::default();
     while let Some((worker, msg)) = incoming.recv().await {
-        if msg.method == "tool.call" {
+        if msg.method == ToolCall::METHOD {
             let app = app.clone();
             tokio::spawn(async move {
                 if let Err(e) = handle_incoming(&app, worker, msg).await {
@@ -160,31 +173,34 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
         if !touch(app, id, worker, turn_id(p)).await {
             tracing::warn!("dropping `{}` for session {id}: not from the turn running on that worker", msg.method);
             if let Some(req_id) = msg.id {
-                mind.respond(req_id, json!({ "content": "this turn has ended", "is_error": true })).await?;
+                mind.respond(req_id, &refused("this turn has ended")).await?;
             }
             return Ok(());
         }
     }
-    match msg.method.as_str() {
-        "tool.call" => {
+    let read = if msg.method == ToolCall::METHOD {
+        serde_json::from_value(p.clone()).map(FromWorker::Call)
+    } else {
+        TurnEvent::parse(&msg.method, p.clone()).map(FromWorker::Event)
+    };
+    match read {
+        Ok(FromWorker::Call(call)) => {
             let id = match id {
                 Ok(id) => id,
                 Err(e) => {
                     if let Some(req_id) = msg.id {
-                        mind.respond(req_id, json!({ "content": format!("invalid session id: {e}"), "is_error": true })).await?;
+                        mind.respond(req_id, &refused(format!("invalid session id: {e}"))).await?;
                     }
                     return Ok(());
                 }
             };
-            let name = p.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
-            let call_id = p.get("call_id").and_then(Value::as_str).unwrap_or_default().to_string();
-            let args = p.get("args").cloned().unwrap_or(json!({}));
+            let ToolCall { name, call_id, args, .. } = call;
             let (mut cancel, model, turn_id, mut ending, workspace, kind) = {
                 let mut turns = app.turns.lock().await;
                 let Some(t) = turns.get_mut(&id) else {
                     drop(turns);
                     if let Some(req_id) = msg.id {
-                        mind.respond(req_id, json!({ "content": "this turn has ended", "is_error": true })).await?;
+                        mind.respond(req_id, &refused("this turn has ended")).await?;
                     }
                     return Ok(());
                 };
@@ -308,8 +324,9 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             // Every tool's output, instruction files included, is masked before the model or the tape sees it.
             out.content = crate::secrets::mask_off_thread(std::mem::take(&mut out.content)).await;
             // Answer the worker first: a recording failure must not leave the model waiting.
+            let output_bytes = out.content.len() as i64;
             if let Some(req_id) = msg.id {
-                mind.respond(req_id, json!({ "content": out.content, "is_error": out.is_error })).await?;
+                mind.respond(req_id, &ToolResult { content: out.content, is_error: out.is_error }).await?;
             }
             // Cut arguments keep the sha256 and size of the whole (masked) arguments under `_full`.
             let recorded = sqlx::query(
@@ -323,7 +340,7 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             .bind(&shown)
             .bind(out.is_error)
             .bind(ms)
-            .bind(out.content.len() as i64)
+            .bind(output_bytes)
             .bind(turn_id)
             .bind(full)
             .execute(&app.db)
@@ -333,14 +350,14 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             }
             app.emit(id, json!({ "type": "tool_end", "call_id": call_id, "is_error": out.is_error, "ms": ms })).await;
         }
-        "turn.delta" | "turn.thinking" => {
-            let id = id?;
-            let kind = if msg.method == "turn.delta" { "delta" } else { "thinking" };
-            app.emit(id, json!({ "type": kind, "delta": p.get("delta") })).await;
+        Ok(FromWorker::Event(TurnEvent::Delta { delta })) => {
+            app.emit(id?, json!({ "type": "delta", "delta": delta })).await;
         }
-        "turn.message" => {
+        Ok(FromWorker::Event(TurnEvent::Thinking { delta })) => {
+            app.emit(id?, json!({ "type": "thinking", "delta": delta })).await;
+        }
+        Ok(FromWorker::Event(TurnEvent::Message { message })) => {
             let id = id?;
-            let message = p.get("message").cloned().unwrap_or(Value::Null);
             tape::append(&app.db, id, "message", &message).await?;
             if message.get("role").and_then(Value::as_str) == Some("assistant") {
                 let u = &message["usage"];
@@ -371,27 +388,33 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             }
             app.emit(id, json!({ "type": "message", "message": message })).await;
         }
-        "turn.fallback" => {
+        Ok(FromWorker::Event(TurnEvent::Fallback { from, to, .. })) => {
             let id = id?;
-            let from = p["from"].as_str().unwrap_or("unknown");
-            let to = p["to"].as_str().unwrap_or("unknown");
+            let or_unknown = |s: String| if s.is_empty() { "unknown".to_string() } else { s };
+            let (from, to) = (or_unknown(from), or_unknown(to));
             tape::append(&app.db, id, "failover", &json!({ "from": from, "to": to, "reason": "hard_usage_limit" })).await?;
             app.emit(id, json!({ "type": "status", "text": format!("{from} usage limit reached; continuing with {to}") })).await;
         }
-        "turn.usage" => {
+        Ok(FromWorker::Event(TurnEvent::Usage(report))) => {
             // The worker's report for the whole turn (engine, version, totals); recorded when the turn ends.
             let id = id?;
             if let Some(t) = app.turns.lock().await.get_mut(&id) {
-                t.reported = p.clone();
+                t.reported = Value::Object(report);
             }
         }
-        "turn.end" => {
-            finish_turn(app, id?, p.get("error").cloned().unwrap_or(Value::Null)).await;
+        Ok(FromWorker::Event(TurnEvent::End { error })) => {
+            finish_turn(app, id?, json!(error)).await;
         }
-        other => {
-            tracing::warn!("unknown method from worker: {other}");
+        Err(e) => {
+            let known = msg.method == ToolCall::METHOD || TurnEvent::parse(&msg.method, json!({})).is_ok();
+            let why = if known { format!("invalid `{}` from worker: {e}", msg.method) } else { format!("unknown method {}", msg.method) };
+            tracing::warn!("{why}");
             if let Some(req_id) = msg.id {
-                mind.respond(req_id, json!({ "content": format!("unknown method {other}"), "is_error": true })).await?;
+                mind.respond(req_id, &refused(why.clone())).await?;
+            }
+            // A turn must still end when its worker says so, however it said it.
+            if msg.method == "turn.end" {
+                finish_turn(app, id?, json!(why)).await;
             }
         }
     }

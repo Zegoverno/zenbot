@@ -284,9 +284,9 @@ pub async fn prepare(app: &App, session: Uuid, keep_tokens: i64, session_model: 
         }
         tried.push(model.clone());
         match crate::complete(app, &model, SUMMARIZER, &input).await {
-            Ok(reply) => match reply["text"].as_str().and_then(parse) {
+            Ok(reply) => match parse(&reply.text) {
                 Some(data) => {
-                    result = Some((data, model, reply["usage"].clone()));
+                    result = Some((data, model, reply.usage.clone()));
                     break;
                 }
                 None => tracing::warn!("summarizer {model} gave no usable JSON for session {session}"),
