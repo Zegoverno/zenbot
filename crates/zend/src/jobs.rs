@@ -780,12 +780,12 @@ async fn finish(db: &PgPool, job: &Job, run: i64, o: &Outcome) -> Result<()> {
                 tainted = COALESCE((SELECT tainted_at IS NOT NULL FROM sessions WHERE id = job_runs.session_id), false)
          WHERE id = $1",
     )
-        .bind(run)
-        .bind(o.status)
-        .bind(&o.output)
-        .bind(&o.error)
-        .execute(db)
-        .await?;
+    .bind(run)
+    .bind(o.status)
+    .bind(&o.output)
+    .bind(&o.error)
+    .execute(db)
+    .await?;
     let failed = o.status == "error";
     let failures: i32 = sqlx::query_scalar(
         "UPDATE jobs SET last_run_at = now(), last_status = $2, last_error = $3, failures = CASE WHEN $4 THEN failures + 1 ELSE 0 END, updated_at = now()
