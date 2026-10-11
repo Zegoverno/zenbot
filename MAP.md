@@ -240,15 +240,18 @@ by `zend` (`api`, `agent`, `assist`, `compact`, `delegate`, `jobs`, `mcp`, `memo
 
 ---
 
-## Channel: `zen-matrix` (`crates/zen-matrix`, its own Cargo workspace, ~1,200 lines)
+## Channel: `zen-matrix` (`crates/zen-matrix`, its own Cargo workspace, ~1,800 lines)
 
 A separate process, a client of the client protocol (D-049; docs/matrix.md has the file table).
 Not in the root workspace or CI's release tarball: `scripts/matrix.sh` builds and installs it, and
 `apply-upgrade.sh` doesn't upgrade it. Settings come from `~/.zenbot/matrix.env` (the process
 environment wins; see Environment variables).
-`main.rs` (commands `login`/`run`/`status`, the Matrix client, rooms, invites, per-room link tasks,
-job reporter), `relay.rs` (pure: commands, events → posts, numbered answers, job reports),
-`kernel.rs` (the API calls it uses: `POST /api/sessions`, the session WebSocket, `GET /api/jobs/runs`),
+`main.rs` (commands `login`/`run`/`status`/`repin-owner`, the Matrix client, rooms, invites,
+membership watch, posting, per-room link tasks with catch-up, job reporter), `trust.rs` (pure: who
+and where it answers: sender, device trust, room members and encryption, invites, the pinned owner
+identity), `relay.rs` (pure: commands, events → posts, numbered answers, job reports, splitting,
+Markdown → HTML without raw HTML), `kernel.rs` (the API calls it uses: `POST /api/sessions`,
+`GET /api/sessions/{id}?after=` and `?last=1`, the session WebSocket, `GET /api/jobs/runs`),
 `state.rs` (`matrix.env`, `state.json`, private files). `examples/owner.rs`: the scripted owner for
 `scripts/matrix-e2e.sh`. The kernel knows nothing of it.
 
@@ -442,7 +445,7 @@ Read from the process environment, else `~/.zenbot/matrix.env` (`state.rs::Confi
 | `evals/cache/<key>.json` | `eval.sh` | `eval.sh` | Base results reused while young and unchanged (key: base commit, model, effort, the task's files, engine versions, repeat) |
 | `evals/builds/<commit>/` | `eval.sh` | `eval.sh` | Base harness builds (the newest `ZEN_EVAL_KEEP_BUILDS`) |
 | `matrix.env` | the owner | `zen-matrix` | **Secret** (mode 600): `MATRIX_USER`, `MATRIX_OWNER`, `MATRIX_PASSWORD` (first sign-in only), optional `MATRIX_RECOVERY_KEY`, `MATRIX_HOMESERVER` |
-| `matrix/` | `zen-matrix` | `zen-matrix` | Mode 700. **Secrets:** `session.json` (access token), `store.key` (encrypts `store/`, the SQLite key and sync store), `recovery-key`. `state.json`: rooms ↔ sessions, job-report cursor |
+| `matrix/` | `zen-matrix` | `zen-matrix` | Mode 700. **Secrets:** `session.json` (access token), `store.key` (encrypts `store/`, the SQLite key and sync store), `recovery-key`. `state.json`: rooms ↔ sessions, per-room `seen` seq, the owner's pinned master key, job-report cursor. `run.lock`: held while the service runs (`login`, `repin-owner` refuse next to it) |
 
 Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 
@@ -473,8 +476,8 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 | `deploy/searxng/settings.yml` | SearXNG settings mounted read-only: JSON output on, limiter and image proxy off, not a public instance | — |
 | `scripts/matrix.sh` | Build and test `crates/zen-matrix`, install `~/.zenbot/bin/zen-matrix`, `zen-matrix login` if not signed in, install and restart `zen-matrix.service`. `--build` stops after the tests | `~/.zenbot/{bin,matrix}`, `/etc/systemd/system` |
 | `scripts/check-docs.py` | The docs still match the code: the lists the docs keep (routes, tools, settings, tables, events, tape kinds, slash commands, e2e scenarios, crates) against the code, paths, settings and `D-NNN` named in current docs exist; with `--base <ref>`, a change to the code adds a PROGRESS.md entry. CI job `docs` | – |
-| `scripts/matrix-e2e.sh` | The Matrix channel end to end: a throwaway continuwuity homeserver in Docker, a faux kernel (temp DB, own port and home), the bridge and the scripted owner (`examples/owner.rs`) through E2EE; also a stranger's invite declined and a job report delivered | Docker container, temp DB |
-| `deploy/zen-matrix.service` | Runs `~/.zenbot/bin/zen-matrix run` once `~/.zenbot/matrix/session.json` exists; `ProtectSystem=strict`, writable only `~/.zenbot/matrix` | — |
+| `scripts/matrix-e2e.sh` | The Matrix channel end to end: a throwaway continuwuity homeserver in Docker, a faux kernel (temp DB, own port and home), the bridge and the scripted owner (`examples/owner.rs`, cross-signed) through E2EE; also refusals (plaintext, an unverified session, an owner that is the bot), an answer posted after a bridge restart, a stranger's invite and an unencrypted room declined, a room left when a stranger is invited, and a job report delivered | Docker container, temp DB |
+| `deploy/zen-matrix.service` | Runs `~/.zenbot/bin/zen-matrix run` once `~/.zenbot/matrix/session.json` exists; home is an empty tmpfs with only its binary, `token`, `env`, `matrix.env` (read-only) and `matrix/` (read-write) bound in; `ProtectSystem=strict`, no devices, capabilities or new privileges, IP and Unix sockets only, `@system-service` system calls | — |
 | `deploy/zenbot.service` | Runs `~/.zenbot/bin/zend` with `EnvironmentFile=~/.zenbot/env`; `ExecStartPre` brings Postgres up (must succeed) and SearXNG (a failure is ignored); `Restart=always` | — |
 | `.github/workflows/ci.yml` | On PRs and pushes to main: build, `cargo test`, clippy `-D warnings`, `scripts/e2e.sh`; job `docs` runs `scripts/check-docs.py`; job `matrix` builds, tests and lints `crates/zen-matrix`. On main, if green: build `dist` profile, publish `zenbot-x86_64-linux-<sha12>.tar.gz` to the rolling `edge` release (20 newest kept) | GitHub releases |
 
