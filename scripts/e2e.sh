@@ -639,13 +639,17 @@ project_files() {
 
 secrets_masked() {
   local ws; ws=$(new_workspace secret)
-  start_kernel "$ws" "$(script secret.json)" E2E_PLANTED_KEY=planted-value-1234567890
+  start_kernel "$ws" "$(script secret.json "s/BIGCONTENT/$(printf 'y%.0s' $(seq 1 5000))/")" E2E_PLANTED_KEY=planted-value-1234567890
   local sid; sid=$(zen ask --json -m faux/smoke "print the token" | jq -r .session_id)
   check "the kernel's secret variables are not in the agent's shell" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult' AND payload::text LIKE '%vars: 0%'")" 1
   local out; out=$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult'")
   check "the token is masked on the tape" grep -q 'ghp_…\[masked\]' <<<"$out"
   # (The command the model typed still contains it: masking applies to what tools return.)
   check "no tool output holds the token's value" eq "$(q "SELECT count(*) FROM tape_events WHERE payload->>'role'='toolResult' AND payload::text LIKE '%AbCdEfGhIjKlMnOp%'")" 0
+  check "nor do the recorded tool arguments" eq "$(q "SELECT count(*) FROM tool_calls WHERE args::text LIKE '%AbCdEfGhIjKlMnOp%'")" 0
+  check "where the token is masked too" eq "$(q "SELECT count(*) FROM tool_calls WHERE args->>'command' LIKE '%ghp_…[masked]%'")" 1
+  check "a long argument is cut, with the whole one's size and hash" eq "$(q "SELECT length(args->>'content') < 4200 AND (args->'_full'->>'bytes')::int > 5000 AND length(args->'_full'->>'sha256') = 64 FROM tool_calls WHERE name = 'write'")" t
+  check "the file itself is whole" eq "$(wc -c <"$ws/big.txt")" 5000
   check "URL tokens are rejected for HTTP" eq "$(curl -s -o /dev/null -w '%{http_code}' "$URL/api/models?token=$TOKEN")" 401
   check "URL tokens are rejected for the WebSocket too" eq "$(curl -s -o /dev/null -w '%{http_code}' "$URL/api/sessions/$sid/ws?token=$TOKEN")" 401
 }
