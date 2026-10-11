@@ -310,12 +310,18 @@ pub fn drafts() -> Vec<Skill> {
 }
 
 /// Run `find_skills` or `load_skill`. None for other tools. Drafts can be found and loaded too,
-/// marked as drafts: a session that uses one and is accepted makes it active (workshop.rs).
-pub fn run_tool(name: &str, args: &Value) -> Option<(String, bool)> {
+/// marked as drafts: a session that uses one and is accepted makes it active (workshop.rs). Drafts
+/// named in `tainted` (domain/name: a session that read untrusted content wrote them) are marked
+/// untrusted, and the third value says the result shows one: the caller hands it over as
+/// untrusted content (taint.rs).
+pub fn run_tool(name: &str, args: &Value, tainted: &[String]) -> Option<(String, bool, bool)> {
+    let proposed = root().join("_proposed");
+    let marked = |s: &Skill| s.dir.starts_with(&proposed) && tainted.contains(&format!("{}/{}", s.domain, s.name));
     let skills = || {
         let mut all = scan(&root());
         all.extend(drafts().into_iter().map(|mut s| {
-            s.description = format!("(draft) {}", s.description);
+            let what = if marked(&s) { "draft, untrusted" } else { "draft" };
+            s.description = format!("({what}) {}", s.description);
             s
         }));
         all
@@ -324,21 +330,21 @@ pub fn run_tool(name: &str, args: &Value) -> Option<(String, bool)> {
         "find_skills" => {
             let all = skills();
             if all.is_empty() {
-                return Some((format!("No skills yet (none in {}).", root().display()), false));
+                return Some((format!("No skills yet (none in {}).", root().display()), false, false));
             }
             let found = find(&all, args["query"].as_str().unwrap_or(""), 8);
             if found.is_empty() {
                 let list: Vec<String> = all.iter().map(|s| format!("{}/{}", s.domain, s.name)).collect();
-                return Some((format!("No skill matches. All skills: {}", list.join(", ")), false));
+                return Some((format!("No skill matches. All skills: {}", list.join(", ")), false, false));
             }
             let lines: Vec<String> = found.iter().map(|(s, _)| format!("- {}/{}: {}", s.domain, s.name, s.description)).collect();
-            Some((lines.join("\n"), false))
+            Some((lines.join("\n"), false, found.iter().any(|(s, _)| marked(s))))
         }
         "load_skill" => {
             let all = skills();
-            Some(match lookup(&all, args["name"].as_str().unwrap_or("")).and_then(|s| load(s, args["file"].as_str())) {
-                Ok(text) => (text, false),
-                Err(e) => (e, true),
+            Some(match lookup(&all, args["name"].as_str().unwrap_or("")).and_then(|s| load(s, args["file"].as_str()).map(|t| (t, marked(s)))) {
+                Ok((text, untrusted)) => (text, false, untrusted),
+                Err(e) => (e, true, false),
             })
         }
         _ => None,

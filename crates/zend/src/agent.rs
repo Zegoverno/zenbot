@@ -134,6 +134,32 @@ pub fn protected_target(g: &Guarded, workspace: &Path, name: &str, args: &Value)
     None
 }
 
+/// The draft skill (domain/name) an `edit`, `write` or `read` call is about, if any
+/// (`skills/_proposed/<domain>/<name>/…`, however the path is named).
+pub fn draft_target(workspace: &Path, name: &str, args: &Value) -> Option<String> {
+    if !matches!(name, "edit" | "write" | "read") {
+        return None;
+    }
+    let target = real(&tools::resolve(workspace, args["path"].as_str()?));
+    let rest = target.strip_prefix(real(&crate::skills::root().join("_proposed"))).ok()?;
+    let mut parts = rest.components().map(|c| c.as_os_str().to_string_lossy().into_owned());
+    let (domain, skill) = (parts.next()?, parts.next()?);
+    Some(format!("{domain}/{skill}"))
+}
+
+/// Whether a `read` returned stored content marked as tainted: a wiki page with an entry labelled
+/// `web`, or a file of a draft skill a tainted session wrote. Then the dispatcher hands it over as
+/// untrusted content (taint.rs). Returns where it came from.
+pub async fn read_of_tainted(db: &PgPool, workspace: &Path, args: &Value) -> Option<&'static str> {
+    let target = real(&tools::resolve(workspace, args["path"].as_str()?));
+    if target.starts_with(real(&crate::wiki::root())) {
+        let text = tokio::fs::read_to_string(&target).await.ok()?;
+        return crate::wiki::has_web_entry(&text).then_some("wiki");
+    }
+    let skill = draft_target(workspace, "read", args)?;
+    crate::workshop::tainted_drafts(db).await.contains(&skill).then_some("draft skill")
+}
+
 /// The prompt file an `edit` or `write` call targets, if it targets one (it is backed up first).
 pub fn prompt_file_target(workspace: &Path, name: &str, args: &Value) -> Option<PathBuf> {
     match protected_target(&Guarded::current(), workspace, name, args)? {
@@ -162,7 +188,7 @@ pub async fn protected_refusal(db: &PgPool, session: Uuid, kind: Option<&str>, w
     };
     let who = if kind.is_some() {
         "A subagent"
-    } else if crate::taint::tainted(db, session).await {
+    } else if crate::taint::limited(db, session, crate::taint::Limit::Steer).await {
         "A session that has read untrusted content"
     } else {
         return None;
@@ -320,12 +346,10 @@ pub async fn run_tool(app: &AppState, session: Uuid, workspace: &Path, name: &st
             let other = args["session"].as_str().map(str::trim).filter(|s| !s.is_empty());
             if let (Some(other), false) = (other, is_error) {
                 let tainted = crate::taint::prefix_tainted(&app.db, &other.to_lowercase()).await;
-                if tainted {
-                    if let Err(e) = crate::taint::taint(app, session, "history", other).await {
-                        return out(crate::taint::withheld(&e), true);
-                    }
-                    return out(crate::taint::untrusted("history", other, &content), false);
-                }
+                return match crate::taint::hand_over(app, session, tainted, "history", other, &content).await {
+                    Ok(content) => out(content, false),
+                    Err(e) => out(crate::taint::withheld(&e), true),
+                };
             }
             out(content, is_error)
         }
@@ -363,8 +387,14 @@ If a question goes unanswered, take your recommended option and say it was an as
             out(content, is_error)
         }
         "find_skills" | "load_skill" => {
-            let (content, is_error) = crate::skills::run_tool(name, args)?;
-            out(content, is_error)
+            // A draft a tainted session wrote is untrusted wherever it's read.
+            let marked = crate::workshop::tainted_drafts(&app.db).await;
+            let (content, is_error, tainted) = crate::skills::run_tool(name, args, &marked)?;
+            let about = args["name"].as_str().or(args["query"].as_str()).unwrap_or("skills");
+            match crate::taint::hand_over(app, session, tainted, "draft skill", about, &content).await {
+                Ok(content) => out(content, is_error),
+                Err(e) => out(crate::taint::withheld(&e), true),
+            }
         }
         "verify" => Some(verify(app, session, workspace, args).await),
         "web_search" | "web_fetch" => crate::web::run_tool(app, session, name, args).await,
@@ -422,9 +452,9 @@ pub async fn log_decision(db: &PgPool, session: Option<Uuid>, point: &str, input
 // ---------- verify ----------
 
 /// A criterion's check, run by the kernel like the bash tool (its own process group, killed on a
-/// timeout or an abort, output capped and masked).
-async fn run_check(dir: &Path, run: &str, expect: Option<&str>) -> Value {
-    match tools::run_shell(dir, run, &[], false, Duration::from_secs(600)).await {
+/// timeout or an abort, output capped and masked, in the session's shell sandbox).
+async fn run_check(dir: &Path, run: &str, expect: Option<&str>, sandbox: tools::Sandbox) -> Value {
+    match tools::run_shell(dir, run, &[], sandbox, Duration::from_secs(600)).await {
         Ok(tools::Shell { text, status: Some(Ok(status)) }) => {
             let text = crate::secrets::mask_off_thread(text).await;
             let tail = zen_proto::tail(&text, 3000);
@@ -552,9 +582,11 @@ async fn verify(app: &AppState, session: Uuid, workspace: &Path, args: &Value) -
     let base = args["base"].as_str().filter(|b| !b.trim().is_empty()).unwrap_or("HEAD").to_string();
     app.emit(session, json!({ "type": "status", "text": format!("verifying: running {} check(s)", criteria.iter().filter(|c| c["run"].is_string()).count()) })).await;
     let mut checks = serde_json::Map::new();
+    // A criterion's command is the session's shell too: sandboxed once the session is tainted.
+    let sandbox = crate::taint::shell_sandbox(&app.db, session).await;
     for c in &criteria {
         if let Some(run) = c["run"].as_str() {
-            checks.insert(c["id"].as_str().unwrap_or("").to_string(), run_check(&dir, run, c["expect"].as_str()).await);
+            checks.insert(c["id"].as_str().unwrap_or("").to_string(), run_check(&dir, run, c["expect"].as_str(), sandbox).await);
         }
     }
     let any_failed = checks.values().any(|c| c["ok"] != true);

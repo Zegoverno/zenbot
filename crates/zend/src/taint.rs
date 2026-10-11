@@ -1,5 +1,14 @@
-//! Taint tracking and the untrusted-content envelope. Applies to web pages, MCP servers,
-//! subagents and history alike, not just web fetches.
+//! Taint tracking and the untrusted-content envelope (D-034, D-051, D-053). Applies to web pages,
+//! MCP servers, subagents and history alike, not just web fetches.
+//!
+//! Taint is a property of the session that read untrusted content (`sessions.tainted_at`) and of
+//! what it stored: memories (`memories.tainted`), job reports (`job_runs.tainted`), draft skills
+//! (`draft_taint`) and wiki entries (labelled `web`). Two rules keep it from laundering:
+//! - **One read path.** Stored content goes to a session through `hand_over`: tainted content is
+//!   wrapped as untrusted and marks the reader, so it never reaches a clean session as trusted.
+//! - **One set of limits.** What a tainted session may not do, or does only sandboxed, is `limit`:
+//!   change what steers every session, vouch for what it saves, start a job without the owner, run
+//!   a shell with the network.
 
 use serde_json::json;
 use uuid::Uuid;
@@ -48,6 +57,49 @@ pub async fn taint(app: &App, session: Uuid, source: &str, about: &str) -> anyho
 /// The tool result in place of untrusted content whose taint couldn't be recorded.
 pub fn withheld(e: &anyhow::Error) -> String {
     format!("not shown: this session couldn't be marked as having read untrusted content ({e:#}); try again")
+}
+
+/// Give a session stored content that may be tainted: tainted content is wrapped as untrusted and
+/// marks the reading session first (an error when the mark can't be recorded: then the content
+/// must not be shown, see `withheld`); clean content is returned as it is.
+pub async fn hand_over(app: &App, session: Uuid, tainted: bool, source: &str, about: &str, text: &str) -> anyhow::Result<String> {
+    if !tainted {
+        return Ok(text.to_string());
+    }
+    taint(app, session, source, about).await?;
+    Ok(untrusted(source, about, text))
+}
+
+/// What a session that has read untrusted content may not do as it would otherwise.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Limit {
+    /// Change a prompt file, an active skill or a made tool: they steer every session (refused).
+    Steer,
+    /// Save a memory as the owner's words or a checked result (it's saved as an inference, marked).
+    Vouch,
+    /// Start a scheduled job without the owner (it waits for their approval).
+    StartJob,
+    /// Run a shell with the network and the home writable (it runs sandboxed: `tools::Sandbox::Offline`).
+    Shell,
+}
+
+/// Whether this session is held to `limit`: when it has read untrusted content (or that can't be
+/// told). The one place the "may a tainted session do X" rules are decided; each tool says how
+/// it applies the answer.
+pub async fn limited(db: &sqlx::PgPool, session: Uuid, limit: Limit) -> bool {
+    match limit {
+        Limit::Steer | Limit::Vouch | Limit::StartJob | Limit::Shell => tainted(db, session).await,
+    }
+}
+
+/// The sandbox a session's shell (`bash`, a `verify` criterion's command) runs in: none for a
+/// clean session, `Offline` once it has read untrusted content.
+pub async fn shell_sandbox(db: &sqlx::PgPool, session: Uuid) -> crate::tools::Sandbox {
+    if limited(db, session, Limit::Shell).await {
+        crate::tools::Sandbox::Offline
+    } else {
+        crate::tools::Sandbox::None
+    }
 }
 
 /// Whether a session has read untrusted content. When it can't be told (a database error), it

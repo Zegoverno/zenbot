@@ -11,8 +11,10 @@
 //! and says whether the note is already recorded or sensitive, and the kernel appends the dated
 //! entry, updates the index and the log, and commits. Rewriting the summary is writing, so it's the
 //! agent's job: the result says when the summary needs it. Without System One, an exact title or
-//! alias match picks the page, else a new page. Notes from a session that read web content are
-//! labelled `web`. The nightly sleep lints the wiki (missing summaries, broken links).
+//! alias match picks the page, else a new page. Notes from a session that read untrusted content,
+//! and memories one saved (the sleep's copy), are labelled `web`; a page with such an entry is
+//! untrusted content wherever it's read (`search`, `read`: taint.rs). The nightly sleep lints the
+//! wiki (missing summaries, broken links).
 
 use std::path::{Path, PathBuf};
 
@@ -162,17 +164,21 @@ pub fn lint(dir: &Path) -> Vec<String> {
     let slugs: Vec<&str> = all.iter().map(|p| p.slug.as_str()).collect();
     let mut problems = Vec::new();
     for p in &all {
-        if p.summary.contains("[No summary yet") && !p.entries.is_empty() {
-            problems.push(format!("{}: no summary yet ({} entries)", p.slug, p.entries.len()));
-        }
         let text = std::fs::read_to_string(dir.join(format!("{}.md", p.slug))).unwrap_or_default();
+        // The problems go into the sleep's note, in the next sessions' instructions: a page with
+        // entries labelled `web` may be named after (and link to) untrusted text, so it isn't named.
+        let web = has_web_entry(&text);
+        let name = if web { "a page with entries labelled web (search the wiki to find it)" } else { p.slug.as_str() };
+        if p.summary.contains("[No summary yet") && !p.entries.is_empty() {
+            problems.push(format!("{name}: no summary yet ({} entries)", p.entries.len()));
+        }
         let mut rest = text.as_str();
         while let Some(i) = rest.find("[[") {
             let after = &rest[i + 2..];
             let Some(j) = after.find("]]") else { break };
             let target = after[..j].split('|').next().unwrap_or("").trim();
             if !target.is_empty() && !slugs.contains(&target) {
-                problems.push(format!("{}: link to missing page [[{target}]]", p.slug));
+                problems.push(if web { format!("{name}: a link to a missing page") } else { format!("{name}: link to missing page [[{target}]]") });
             }
             rest = &after[j + 2..];
         }
@@ -246,8 +252,15 @@ async fn route(app: &App, note: &str, candidates: &[Page]) -> Option<(String, f6
     Some((page, p, a["known"]["probability"].as_f64().unwrap_or(0.0), a["sensitive"]["probability"].as_f64().unwrap_or(0.0)))
 }
 
-/// Copy a memory into the wiki (the sleep's promotion), as a capture with the memory's source.
-pub async fn capture_memory(app: &App, id: i64, text: &str, source: &str) -> Result<String> {
+/// Whether a page's text has an entry labelled `web` (from a session that read untrusted content).
+pub fn has_web_entry(text: &str) -> bool {
+    text.contains("(web) —")
+}
+
+/// Copy a memory into the wiki (the sleep's promotion), as a capture with the memory's source, or
+/// labelled `web` when a session that read untrusted content saved it.
+pub async fn capture_memory(app: &App, id: i64, text: &str, source: &str, tainted: bool) -> Result<String> {
+    let source = if tainted { "web" } else { source };
     capture(app, None, &json!({ "note": text, "source": source, "from": format!("memory m{id}") })).await
 }
 
@@ -298,12 +311,12 @@ async fn capture(app: &App, session: Option<Uuid>, args: &Value) -> Result<Strin
     }
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let tainted = match session {
-        Some(s) => crate::taint::tainted(&app.db, s).await,
+        Some(s) => crate::taint::limited(&app.db, s, crate::taint::Limit::Vouch).await,
         None => false,
     };
     let source = match args["source"].as_str().unwrap_or("inferred") {
         _ if tainted => "web",
-        s @ ("owner" | "verified" | "inferred") => s,
+        s @ ("owner" | "verified" | "inferred" | "web") => s,
         _ => "inferred",
     };
     let from = args["from"].as_str().map(|f| format!("{}, ", crate::secrets::mask(f))).unwrap_or_default();

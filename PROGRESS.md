@@ -6,6 +6,25 @@
 
 ---
 
+## 2026-10-11 — Taint travels with stored content; tainted shells run offline (D-053)
+
+- A review found web text laundered into durable stores and back as trusted: a tainted session's
+  memory went unlabelled into every later session's instructions, a draft skill it wrote was served
+  as a trusted skill and activated when the owner accepted any session that loaded it, a job's
+  report reached the next run as kernel text, and a tainted session's `bash` had the network.
+- Memories, job runs and draft skills now carry the mark (migration 0022: `memories.tainted`,
+  `job_runs.tainted`, `draft_taint`), and every read path hands stored content over through
+  `taint::hand_over` (wrapped, the reader tainted): search, `history`, `find_skills`/`load_skill`,
+  `read` of a marked draft or a wiki page with `web` entries, a job's `<last_report>`, `schedule
+  runs`. A marked memory stays out of the instructions (by id only), is never promoted to a prompt
+  file, and its wiki copy is labelled `web`; the sleep's note never shows its text. A marked draft
+  is activated only by the owner's own accept; `zen skills` and `zen memory` show `untrusted`.
+- The rules for a tainted session are in one place (`taint::limited`). Its `bash` and `verify`'s
+  commands run in bubblewrap with no network, the workspace writable and the rest read-only.
+- Tested: unit tests; e2e `taint-on-data` (each laundering path, the offline shell building and
+  committing in its workspace but reaching neither the kernel nor the home); offline `cargo build`
+  with dependencies in the sandbox by hand.
+
 ## 2026-10-11 — Claude runs aren't refused for a rate-limit notice before init
 
 - The engine-boundary check (2026-10-10) refused any Claude Code event before `system/init`. Claude

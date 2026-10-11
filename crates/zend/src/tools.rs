@@ -200,15 +200,26 @@ fn save_full_output_in(dir: &Path, text: &str) -> Option<PathBuf> {
     Some(path)
 }
 
-/// Run a tool. `env` is added to the environment of commands (bash). With `read_only` (a verifier),
-/// bash runs in a read-only sandbox (bubblewrap), and only `read` may run besides, inside the
-/// workspace (`confined`).
-pub async fn execute(workspace: &Path, name: &str, args: &Value, env: &[(&str, &str)], read_only: bool) -> ToolOutput {
+/// Where a shell runs (bubblewrap): as the owner's user (`None`), read-only (a verifier), or offline
+/// (a session that has read untrusted content: taint.rs).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Sandbox {
+    None,
+    /// Everything read-only, an empty home with only the work bound back, no network.
+    ReadOnly,
+    /// No network; the workspace writable, everything else (the home, the zen home) read-only.
+    Offline,
+}
+
+/// Run a tool. `env` is added to the environment of commands (bash), which run in `sandbox`. In
+/// a read-only sandbox (a verifier) only `read` may run besides, inside the workspace (`confined`).
+pub async fn execute(workspace: &Path, name: &str, args: &Value, env: &[(&str, &str)], sandbox: Sandbox) -> ToolOutput {
+    let read_only = sandbox == Sandbox::ReadOnly;
     if read_only && !matches!(name, "bash" | "read") {
         return err(format!("`{name}` can't run in a read-only session"));
     }
     let result = match name {
-        "bash" => bash(workspace, args, env, read_only, None).await,
+        "bash" => bash(workspace, args, env, sandbox, None).await,
         "read" if read_only => match confined(workspace, args) {
             Ok(()) => read(workspace, args).await,
             Err(e) => Err(err(e)),
@@ -256,6 +267,30 @@ impl Drop for GroupKill {
 const READ_ONLY_SANDBOX: [&str; 13] =
     ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--unshare-pid", "--unshare-net", "--new-session", "--die-with-parent"];
 
+/// The shell of a session that has read untrusted content: the same view of the machine, with
+/// `/run` emptied too (the sockets there, Docker's and the user's agents, reach past the network
+/// namespace). `run_shell` binds the workspace back writable and hides the secret files.
+const OFFLINE_SANDBOX: [&str; 15] = [
+    "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--tmpfs", "/run", "--unshare-pid", "--unshare-net", "--new-session", "--die-with-parent",
+];
+
+/// What a sandboxed (offline) shell's output ends with, so the model knows why the network and the
+/// files outside the workspace are out of reach.
+pub const OFFLINE_NOTE: &str = "[sandboxed: this session has read untrusted content, so its shell has no network and can write only \
+in the workspace and a private /tmp; ask the owner to continue in a fresh session for anything else]";
+
+/// bubblewrap's arguments to hide the secret files: an empty folder over a folder, `/dev/null`
+/// over a file.
+fn hide_secrets(c: &mut Command, files: impl IntoIterator<Item = PathBuf>) {
+    for f in files {
+        if f.is_dir() {
+            c.arg("--tmpfs").arg(f);
+        } else {
+            c.arg("--ro-bind").arg("/dev/null").arg(f);
+        }
+    }
+}
+
 /// Why a verifier may not `read` this path, if it may not: only files in the work it checks (its
 /// workspace), never a secret file there, however the path is named (symlinks resolved). The same
 /// view as its sandboxed shell, without the rest of the machine it doesn't need.
@@ -279,31 +314,47 @@ pub struct Shell {
 
 /// Run `command` with `bash -c` in `dir`, in a process group of its own: on a timeout, or when the
 /// future is dropped (an abort), the whole group is killed. A command that finishes leaves the
-/// background processes it started running. `read_only` runs it in a read-only sandbox (bubblewrap).
+/// background processes it started running. It runs in `sandbox` (bubblewrap) when there is one.
 /// Errors when it can't be started. The kernel's secret variables are removed from the environment and
-/// the sandbox hides the secret files. Used by the bash tool and `verify`'s criteria checks.
-pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], read_only: bool, timeout: Duration) -> Result<Shell, String> {
-    let mut cmd = if read_only {
-        let mut c = Command::new("bwrap");
-        // The home folder (keys, sign-ins, the zen home) is replaced by an empty one, as for a
-        // made tool (workshop.rs); the workspace is bound back after it and the private /tmp, in
-        // case it lives under either. Secret files still inside it are hidden.
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/home".into());
-        c.args(READ_ONLY_SANDBOX).arg("--tmpfs").arg(&home).arg("--ro-bind").arg(dir).arg(dir);
-        // (Those under the home but outside the work are gone with it already.)
-        for f in crate::secrets::secret_files().into_iter().filter(|f| !f.starts_with(&home) || f.starts_with(dir)) {
-            if f.is_dir() {
-                c.arg("--tmpfs").arg(f);
-            } else {
-                c.arg("--ro-bind").arg("/dev/null").arg(f);
-            }
+/// a sandbox hides the secret files. Used by the bash tool and `verify`'s criteria checks.
+pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox: Sandbox, timeout: Duration) -> Result<Shell, String> {
+    let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/home".into()));
+    let mut cmd = match sandbox {
+        Sandbox::ReadOnly => {
+            let mut c = Command::new("bwrap");
+            // The home folder (keys, sign-ins, the zen home) is replaced by an empty one, as for a
+            // made tool (workshop.rs); the workspace is bound back after it and the private /tmp, in
+            // case it lives under either. Secret files still inside it are hidden.
+            c.args(READ_ONLY_SANDBOX).arg("--tmpfs").arg(&home).arg("--ro-bind").arg(dir).arg(dir);
+            // (Those under the home but outside the work are gone with it already.)
+            hide_secrets(&mut c, crate::secrets::secret_files().into_iter().filter(|f| !f.starts_with(&home) || f.starts_with(dir)));
+            c.arg("--chdir").arg(dir).args(["bash", "-c"]);
+            c
         }
-        c.arg("--chdir").arg(dir).args(["bash", "-c"]);
-        c
-    } else {
-        let mut c = Command::new("bash");
-        c.arg("-c");
-        c
+        Sandbox::Offline => {
+            let mut c = Command::new("bwrap");
+            c.args(OFFLINE_SANDBOX);
+            // A home under the emptied /tmp (a test's) comes back read-only; then the workspace,
+            // writable (a project, its git repository, its build output); then the zen home
+            // read-only again if the workspace holds it (prompt files, skills, the wiki), and the
+            // secret files hidden.
+            if home.starts_with("/tmp") || home.starts_with("/run") {
+                c.arg("--ro-bind").arg(&home).arg(&home);
+            }
+            c.arg("--bind").arg(dir).arg(dir);
+            let zen = crate::zen_home();
+            if zen.starts_with(dir) && zen.exists() {
+                c.arg("--ro-bind").arg(&zen).arg(&zen);
+            }
+            hide_secrets(&mut c, crate::secrets::secret_files());
+            c.arg("--chdir").arg(dir).args(["bash", "-c"]);
+            c
+        }
+        Sandbox::None => {
+            let mut c = Command::new("bash");
+            c.arg("-c");
+            c
+        }
     };
     // The kernel's secrets (API keys, its token, the database URL) stay out of the agent's shell.
     for (k, _) in std::env::vars().filter(|(k, _)| crate::secrets::is_secret_var(k)) {
@@ -319,7 +370,11 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], read_onl
         .process_group(0)
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| if read_only { format!("the read-only shell (bubblewrap) couldn't start: {e}; use read instead") } else { format!("failed to start bash: {e}") })?;
+        .map_err(|e| match sandbox {
+            Sandbox::ReadOnly => format!("the read-only shell (bubblewrap) couldn't start: {e}; use read instead"),
+            Sandbox::Offline => format!("the sandboxed shell (bubblewrap) couldn't start: {e}; this session read untrusted content, so it gets no shell outside the sandbox"),
+            Sandbox::None => format!("failed to start bash: {e}"),
+        })?;
     let mut group = GroupKill(child.id().map(|p| p as i32));
 
     // Stream both pipes into one buffer as data arrives, so a timeout still returns what was printed.
@@ -374,10 +429,10 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], read_onl
     Ok(Shell { text, status })
 }
 
-async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], read_only: bool, output_dir: Option<PathBuf>) -> Result<ToolOutput, ToolOutput> {
+async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], sandbox: Sandbox, output_dir: Option<PathBuf>) -> Result<ToolOutput, ToolOutput> {
     let command = str_arg(args, "command")?;
     let timeout = args.get("timeout_secs").and_then(Value::as_u64).unwrap_or(120).clamp(1, 600);
-    let Shell { text, status } = run_shell(workspace, command, env, read_only, Duration::from_secs(timeout)).await.map_err(err)?;
+    let Shell { text, status } = run_shell(workspace, command, env, sandbox, Duration::from_secs(timeout)).await.map_err(err)?;
     // Cutting and saving (with masking) up to 16 MB of output is blocking work: off the runtime's threads.
     let mut body = if text.len() <= MAX_OUTPUT {
         text
@@ -398,6 +453,10 @@ async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], read_only: b
         cut.await.map_err(|e| err(format!("failed to collect the output: {e}")))?
     };
     if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    if sandbox == Sandbox::Offline {
+        body.push_str(OFFLINE_NOTE);
         body.push('\n');
     }
     match status {
@@ -658,9 +717,9 @@ mod tests {
 
     async fn run(ws: &Path, name: &str, args: Value) -> ToolOutput {
         if name == "bash" {
-            bash(ws, &args, &[], false, Some(ws.join("outputs"))).await.unwrap_or_else(|e| e)
+            bash(ws, &args, &[], Sandbox::None, Some(ws.join("outputs"))).await.unwrap_or_else(|e| e)
         } else {
-            execute(ws, name, &args, &[], false).await
+            execute(ws, name, &args, &[], Sandbox::None).await
         }
     }
 
@@ -672,9 +731,9 @@ mod tests {
         std::fs::write(ws.join("a.txt"), "inside\n").unwrap();
         std::fs::write(root.join("secret.txt"), "outside\n").unwrap();
         std::os::unix::fs::symlink(root.join("secret.txt"), ws.join("link")).unwrap();
-        assert!(!execute(&ws, "read", &json!({ "path": "a.txt" }), &[], true).await.is_error);
+        assert!(!execute(&ws, "read", &json!({ "path": "a.txt" }), &[], Sandbox::ReadOnly).await.is_error);
         for p in ["../secret.txt", "link", "/proc/self/environ"] {
-            let r = execute(&ws, "read", &json!({ "path": p }), &[], true).await;
+            let r = execute(&ws, "read", &json!({ "path": p }), &[], Sandbox::ReadOnly).await;
             assert!(r.is_error && r.content.contains("reads only the work it checks"), "{p}: {}", r.content);
         }
         assert!(!run(&ws, "read", json!({ "path": "../secret.txt" })).await.is_error, "other sessions aren't confined");
@@ -866,7 +925,7 @@ mod tests {
         let ws = scratch("drop");
         let marker = ws.join("done.txt");
         let args = json!({ "command": "sleep 2; touch done.txt" });
-        let fut = execute(&ws, "bash", &args, &[], false);
+        let fut = execute(&ws, "bash", &args, &[], Sandbox::None);
         let _ = tokio::time::timeout(Duration::from_millis(300), fut).await;
         tokio::time::sleep(Duration::from_secs(3)).await;
         assert!(!marker.exists(), "command kept running after its future was dropped");

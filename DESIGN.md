@@ -130,7 +130,9 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
   parts the job picked (`context`: the soul always, plus identity, agents, user, memory, skills,
   project; default user and memory) with its named skills loaded and a `<scheduled_job>` note: no
   one is there, report what needs attention, `[SILENT]` when nothing does, `[FAILED]` when it
-  can't, no outward action. The prompt carries the previous report. A job session can't `ask`,
+  can't, no outward action. The prompt carries the previous report; a run whose session read
+  untrusted content has its report marked (`job_runs.tainted`), so the next run gets it as
+  untrusted content and is tainted from its start, and `schedule runs` shows it wrapped (D-053). A job session can't `ask`,
   `delegate` or `schedule` (`agent::refusal`). A silent run's session is archived.
 - **Creating jobs**: the owner (`zen jobs add`, `POST /api/jobs`) or the agent (`schedule`). An
   agent's job goes live only when System One, reading the owner's own messages in the session,
@@ -157,14 +159,19 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
 - **Short-term memory** (`memory.rs`, table `memories`): `remember` adds, replaces or removes an
   entry with its source (`owner`, `verified`, `inferred`). Rendered into the instructions at a
   session's start (frozen for the session) and exported to `~/.zenbot/global/MEMORY.md`. Size
-  `ZEN_MEMORY_CHARS` (4000); writes past twice that are refused and start a sleep at once.
+  `ZEN_MEMORY_CHARS` (4000); writes past twice that are refused and start a sleep at once. An entry
+  a tainted session saved (or replaced) is `inferred` and marked (`memories.tainted`, D-053): the
+  instructions and the export list only its id, and `search` returns it as untrusted content that
+  taints the reader. (Rendering it as untrusted content instead would taint every session from
+  then on, sandboxing their shells and locking the prompt files.)
 - **Sleep** (`memory::sleep`, the kernel's `sleep` job nightly at 03:00 UTC, `zen memory
   sleep`): ranks entries (System One's "needed soon" when allowed, else recency; the owner's words
   and verified results a little higher), keeps what fits and archives the rest (out of the search
   index). First it promotes on its own (D-045, bar `ZEN_PROMOTE_BAR` 0.9): lasting and about the
   owner → `USER.md`, lasting guidance on how the agent acts → `IDENTITY.md` (each under
   `## Learned`, backup in `~/.zenbot/backups/prompt-files/`, kept 90 days; lowest of three samples,
-  only `owner`/`verified` entries; the entry leaves memory), lasting knowledge → copied into the wiki. A prompt file over its cap is then
+  only unmarked `owner`/`verified` entries; the entry leaves memory), lasting knowledge → copied into the wiki
+  (labelled `web` when the entry is marked). A prompt file over its cap is then
   compacted: `turns::run_kernel_session` starts a parentless subagent session on the default model
   that answers with the rewritten file; the kernel checks it (markers, a heading, within the cap,
   not under a quarter of the 80% target), backs up and writes it. Every entry's fate
@@ -189,19 +196,27 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
   rank fusion, each arm filtering the table through its own index (trigram, GIN, HNSW), and System
   One reranks. A memory found
   counts as used. Every search is a `searches` row. `history` reads any session's messages by
-  number.
+  number. Results from a tainted session's turns, a marked memory or a wiki page with an entry
+  labelled `web` come back as untrusted content and taint the searching session; so does `history`
+  of a tainted session.
 - **Wiki** (`wiki.rs`, D-036): pages in `~/.zenbot/global/wiki/` (git) with a summary over an append-only
   dated timeline; `capture` finds candidate pages with search, System One picks the page (or a new
-  one) and catches duplicates and sensitive notes, the kernel appends, masks, labels web-sourced
-  notes, keeps `index.md` and `log.md`, and commits; the agent writes the summary. Indexed for
-  `search`; linted and committed by the nightly sleep.
+  one) and catches duplicates and sensitive notes, the kernel appends, masks, labels notes from a
+  tainted session (and the sleep's copies of marked memories) `web`, keeps `index.md` and `log.md`,
+  and commits; the agent writes the summary. A page with a `web` entry is untrusted content wherever
+  it's read (`search`, `read`). Indexed for `search`; linted and committed by the nightly sleep
+  (whose note doesn't name a page with `web` entries).
 - **Workshop** (`workshop.rs`, D-037): `save_skill` (reason required, format and size checked,
   near-duplicates refused, drafts in `skills/_proposed` until the owner or an accepted session
   vouches, new domains the owner's call, commits; the sleep flags and archives unused skills) and
   `save_tool` (made tools in `~/.zenbot/global/tools/`, called as `made_<name>`, sandboxed without network
   until approved in `made_tools`; each run uses a private copy of the tool's folder, which is what
   is checked against the approval). The owner accepts or rejects a draft or a tool by the
-  fingerprint `zen skills` showed, refused when the content changed since (D-051).
+  fingerprint `zen skills` showed, refused when the content changed since (D-051). A draft a
+  tainted session wrote (`save_skill`, or `edit`/`write` into it) is marked in `draft_taint`
+  before it's written and in its commit; `find_skills`, `load_skill` and `read` give it as
+  untrusted content that taints the reader, `zen skills` shows it `untrusted`, and only the owner's
+  own accept activates it, never an accepted session that loaded it (D-053).
 - **Delegation** (`delegate.rs`, D-038): subagents (kind `subagent`, no `ask`, `delegate` or
   `schedule`; they inherit the parent's taint), several
   tasks per call in parallel; a child (subagent or verifier) is stopped with the turn that waits
@@ -242,11 +257,21 @@ harness versions with the same model on isolated kernels and databases (`evals/R
   (`TAVILY_API_KEY`), else SearXNG
   (`ZEN_SEARXNG_URL`, the compose service on 127.0.0.1:8888), which also rescues one failed keyed
   call; results deduplicated, http(s) only, reranked by System One.
-- **Untrusted content** (D-034): results are wrapped in `<untrusted …>` (markers inside are
-  defused) and the session is tainted (`sessions.tainted_at`, a `taint` block); `remember` from a
-  tainted session records `inferred`, so web text can't pass as the owner's words, and its `edit` or
-  `write` on a prompt file (`SOUL`, `IDENTITY`, `AGENTS`, `USER`), an active skill or a made tool is
-  refused, as for any subagent or kernel session (D-045, D-051). A main session may write
+- **Untrusted content** (D-034, D-053; `taint.rs`): results are wrapped in `<untrusted …>`
+  (markers inside are defused) and the session is tainted (`sessions.tainted_at`, a `taint` block).
+  Taint is also a property of what a tainted session stores: memories (`memories.tainted`), job
+  reports (`job_runs.tainted`), draft skills (`draft_taint`) and wiki entries (labelled `web`).
+  Every path that gives stored content to a session goes through `taint::hand_over`, which wraps
+  marked content and taints the reader, so it never reaches a clean session as trusted. What a
+  tainted session may not do is `taint::limited`: `remember` records `inferred` and marks the entry,
+  so web text can't pass as the owner's words; its `edit` or `write` on a prompt file (`SOUL`,
+  `IDENTITY`, `AGENTS`, `USER`), an active skill or a made tool is refused, as for any subagent or
+  kernel session (D-045, D-051); a job it schedules waits for the owner; and its `bash` (and
+  `verify`'s commands) run offline in bubblewrap: no network, `/run` and a private `/tmp` emptied,
+  its own processes, the workspace writable and the rest of the machine (the home, the zen home)
+  read-only, the secret files hidden; the result says so. Offline builds and tests and `git
+  commit` in the workspace work; installing packages, `git push` and anything needing the network
+  or a file outside the workspace don't, until the owner continues in a fresh session. A main session may write
   `IDENTITY.md` and `USER.md` itself; each change is backed up first
   (`~/.zenbot/backups/prompt-files/`) and one that passes the file's cap comes back with a request
   to compact it. No session may `edit` or `write` the owner's configuration and secrets
@@ -274,7 +299,8 @@ its `read` stays inside the work. Worker shells do not inherit kernel secret var
 get none of them either (every secret-named variable is removed, except the engines' sign-ins),
 and start without a login shell. Made tools
 run from a private copy of their folder, without network and with an empty home until the owner
-approves the content they reviewed. `edit`/`write` can't change the owner's configuration and
+approves the content they reviewed. A tainted session's shell runs offline in bubblewrap, writing
+only its workspace (D-053). `edit`/`write` can't change the owner's configuration and
 secrets from any session, nor the prompt files, active skills or made tools from a tainted, child or
 kernel session (D-051). `mcp.json` passes a secret-named variable only to a server that lists it in
 `allow_env`.
@@ -288,9 +314,10 @@ naming it. The daily `engines` job also fails when a Codex release turns on a fe
 reviewed (`zen-engine codex-features`).
 Web pages, untrusted MCP output (including tool descriptions) and instruction files from
 repositories the owner hasn't listed (`ZEN_TRUSTED_REPOS`) taint the session and are wrapped; taint
-fails closed.
+fails closed. What a tainted session stores carries the mark and is untrusted wherever it's read
+(D-053).
 All tool output is masked before reaching the model or tape, and tool arguments before clients or
-`tool_calls` see them; full outputs stay under `~/.zenbot/outputs`. **This is not a security boundary against the agent:** ordinary commands still
+`tool_calls` see them; full outputs stay under `~/.zenbot/outputs`. **This is not a security boundary against the agent:** a clean session's commands still
 run as the owner's Unix user and can read and write the owner's files, including `~/.zenbot/token`
 and the files `edit`/`write` protect. Strong
 isolation needs a separate uid and an owner credential unavailable to it. Outward-facing actions

@@ -875,7 +875,9 @@ async fn run(cli: Cli) -> Result<()> {
                 out(&s);
             } else {
                 for x in s["skills"].as_array().into_iter().flatten() {
-                    let draft = if x["status"] == "draft" { format!(" (draft{})", short_sha(x)) } else { String::new() };
+                    // A draft a session that read untrusted content wrote: only the owner activates it.
+                    let mark = if x["untrusted"] == true { ", untrusted" } else { "" };
+                    let draft = if x["status"] == "draft" { format!(" (draft{}{mark})", short_sha(x)) } else { String::new() };
                     let last = x["last_load"].as_str().map(|t| format!(", last {}", t.get(..10).unwrap_or(t))).unwrap_or_default();
                     println!(
                         "{}{draft}  {}",
@@ -1012,7 +1014,8 @@ async fn run(cli: Cli) -> Result<()> {
             } else {
                 for x in m["memories"].as_array().into_iter().flatten() {
                     let tier = if x["tier"] == "short" { String::new() } else { format!(", {}", x["tier"].as_str().unwrap_or("")) };
-                    println!("{:<6} {}  {}", for_stdout(x["id"].as_str().unwrap_or("")), for_stdout(x["text"].as_str().unwrap_or("")), dim(&format!("({}{tier})", x["source"].as_str().unwrap_or(""))));
+                    let mark = if x["untrusted"] == true { ", untrusted" } else { "" };
+                    println!("{:<6} {}  {}", for_stdout(x["id"].as_str().unwrap_or("")), for_stdout(x["text"].as_str().unwrap_or("")), dim(&format!("({}{tier}{mark})", x["source"].as_str().unwrap_or(""))));
                 }
                 println!("{}", dim(&memory_line(&m)));
             }

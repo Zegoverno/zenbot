@@ -711,18 +711,16 @@ async fn run(app: &App, session: Uuid, args: &Value) -> Result<String> {
         listed.len(),
         if reranked { ", ordered by relevance (System One)" } else { "" }
     );
-    // A session that read web content may carry it: recalling from one is reading untrusted content.
+    // A session that read untrusted content may carry it: recalling from one is reading untrusted
+    // content. So is a memory such a session saved, and a wiki page with an entry labelled `web`.
     let sources: Vec<Uuid> = listed.iter().filter(|(f, _)| f.kind == "turn").filter_map(|(f, _)| f.reference.split(':').next().and_then(|s| s.parse().ok())).collect();
     let pages: Vec<String> = listed.iter().filter(|(f, _)| f.kind == "wiki").map(|(f, _)| f.reference.clone()).collect();
-    // So may a wiki page with entries captured after reading the web (labelled `web`).
     let tainted = crate::taint::any_tainted(&app.db, &sources).await
+        || sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM memories WHERE id = ANY($1) AND tainted)").bind(&ids).fetch_one(&app.db).await?
         || sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM search_docs WHERE kind = 'wiki' AND ref = ANY($1) AND body LIKE '%(web) —%')")
             .bind(&pages).fetch_one(&app.db).await?;
-    if tainted {
-        crate::taint::taint(app, session, "search", "results from a session that read web content").await?;
-        return Ok(format!("{header}{}", crate::taint::untrusted("search", q, &render(&listed))));
-    }
-    Ok(format!("{header}{}", render(&listed)))
+    let results = crate::taint::hand_over(app, session, tainted, "search", q, &render(&listed)).await?;
+    Ok(format!("{header}{results}"))
 }
 
 /// Run the `search` tool. None for other tools.

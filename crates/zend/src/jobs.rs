@@ -21,7 +21,10 @@
 //! goes live only when System One judges, from the owner's own messages in that session, that the
 //! owner asked for it or clearly wants it (probability ≥ ZEN_JOB_BAR, 0.9); else it's created
 //! paused until the owner resumes it. A session that read untrusted content always gets a paused
-//! job. ZEN_JOBS=0 turns the scheduler off (test, smoke and eval kernels).
+//! job. A run whose session read untrusted content has its report marked (`job_runs.tainted`):
+//! the next run gets it as untrusted `<last_report>` (and is tainted from its start), and
+//! `schedule runs` shows it as untrusted content (D-053). ZEN_JOBS=0 turns the scheduler off (test,
+//! smoke and eval kernels).
 
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -265,7 +268,7 @@ pub async fn list(db: &PgPool) -> Result<Vec<Job>> {
 /// Recent runs, newest first: of one job, or of all.
 pub async fn runs(db: &PgPool, name: Option<&str>, limit: i64) -> Result<Vec<Value>> {
     let rows = sqlx::query(
-        "SELECT r.id, j.name, r.trigger, r.status, r.session_id, r.started_at, r.ended_at, r.output, r.error
+        "SELECT r.id, j.name, r.trigger, r.status, r.session_id, r.started_at, r.ended_at, r.output, r.error, r.tainted
          FROM job_runs r JOIN jobs j ON j.id = r.job_id
          WHERE ($1::text IS NULL OR (j.name = $1 AND j.removed_at IS NULL)) ORDER BY r.started_at DESC, r.id DESC LIMIT $2",
     )
@@ -281,6 +284,7 @@ pub async fn runs(db: &PgPool, name: Option<&str>, limit: i64) -> Result<Vec<Val
                 "status": r.get::<String, _>("status"), "session": r.get::<Option<Uuid>, _>("session_id"),
                 "started_at": r.get::<DateTime<Utc>, _>("started_at"), "ended_at": r.get::<Option<DateTime<Utc>>, _>("ended_at"),
                 "output": r.get::<Option<String>, _>("output"), "error": r.get::<Option<String>, _>("error"),
+                "untrusted": r.get::<bool, _>("tainted"),
             })
         })
         .collect())
@@ -541,7 +545,7 @@ pub async fn run_now(app: &AppState, name: &str, by: By) -> Result<i64> {
 /// own messages in the session (never tool output or web text) and judges whether they asked for it
 /// or clearly want it; the task the agent wrote is shown as untrusted data, not evidence. Returns the judgment (for the record) and, when it may not, why it's paused.
 async fn gate(app: &AppState, session: Uuid, name: &str, prompt: &str, schedule: &str) -> (Option<Value>, Option<String>) {
-    if crate::taint::tainted(&app.db, session).await {
+    if crate::taint::limited(&app.db, session, crate::taint::Limit::StartJob).await {
         return (None, Some("awaiting the owner's approval: created in a session that read untrusted content".into()));
     }
     let bar = crate::env_num("ZEN_JOB_BAR", 0.9);
@@ -767,15 +771,21 @@ fn spawn_run(app: &AppState, job: Job, run: i64) {
     });
 }
 
-/// Record how a run ended; space out or pause a failing agent job.
+/// Record how a run ended; space out or pause a failing agent job. A run whose session read
+/// untrusted content has its report marked (taint.rs): it reaches the next run and the main
+/// session as untrusted content.
 async fn finish(db: &PgPool, job: &Job, run: i64, o: &Outcome) -> Result<()> {
-    sqlx::query("UPDATE job_runs SET status = $2, ended_at = now(), output = $3, error = $4 WHERE id = $1")
-        .bind(run)
-        .bind(o.status)
-        .bind(&o.output)
-        .bind(&o.error)
-        .execute(db)
-        .await?;
+    sqlx::query(
+        "UPDATE job_runs SET status = $2, ended_at = now(), output = $3, error = $4,
+                tainted = COALESCE((SELECT tainted_at IS NOT NULL FROM sessions WHERE id = job_runs.session_id), false)
+         WHERE id = $1",
+    )
+    .bind(run)
+    .bind(o.status)
+    .bind(&o.output)
+    .bind(&o.error)
+    .execute(db)
+    .await?;
     let failed = o.status == "error";
     let failures: i32 = sqlx::query_scalar(
         "UPDATE jobs SET last_run_at = now(), last_status = $2, last_error = $3, failures = CASE WHEN $4 THEN failures + 1 ELSE 0 END, updated_at = now()
@@ -823,7 +833,7 @@ async fn run_system(app: &AppState, job: &Job) -> Result<Outcome> {
             let repo = PathBuf::from(&app.repo);
             let script = repo.join("scripts/update-engines.sh");
             anyhow::ensure!(script.exists(), "{} not found", script.display());
-            let shell = tools::run_shell(&repo, &format!("bash {}", shell_quote(&script.display().to_string())), &[], false, Duration::from_secs(3600))
+            let shell = tools::run_shell(&repo, &format!("bash {}", shell_quote(&script.display().to_string())), &[], tools::Sandbox::None, Duration::from_secs(3600))
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?;
             let text = crate::secrets::mask_off_thread(shell.text).await;
@@ -888,16 +898,17 @@ async fn run_agent(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
     sqlx::query("UPDATE job_runs SET session_id = $2 WHERE id = $1").bind(run).bind(id).execute(&app.db).await?;
     let base = job_instructions(app, job, &workspace).await?;
     tape::append(&app.db, id, "base", &json!({ "text": base })).await?;
-    // The last report, so the run can tell what's new.
-    let last: Option<String> = sqlx::query_scalar("SELECT output FROM job_runs WHERE job_id = $1 AND id <> $2 AND status = 'ok' ORDER BY started_at DESC LIMIT 1")
+    // The last report, so the run can tell what's new: untrusted content (and this run tainted)
+    // when the run that wrote it had read untrusted content.
+    let last: Option<(Option<String>, bool)> = sqlx::query_as("SELECT output, tainted FROM job_runs WHERE job_id = $1 AND id <> $2 AND status = 'ok' ORDER BY started_at DESC LIMIT 1")
         .bind(job.id)
         .bind(run)
         .fetch_optional(&app.db)
-        .await?
-        .flatten();
+        .await?;
     let mut prompt = job.prompt.clone().unwrap_or_default();
-    if let Some(l) = last {
-        prompt.push_str(&format!("\n\n<last_report>\nThe report from this job's previous run, to tell what's new:\n{}\n</last_report>", zen_proto::head(&l, 3000)));
+    if let Some((Some(l), tainted)) = last {
+        let report = crate::taint::hand_over(app, id, tainted, "job report", &format!("the previous run of {}", job.name), &zen_proto::head(&l, 3000)).await?;
+        prompt.push_str(&format!("\n\n<last_report>\nThe report from this job's previous run, to tell what's new:\n{report}\n</last_report>"));
     }
     crate::turns::run_and_wait(app, id, JOB, &prompt).await?;
     let error: Option<String> = sqlx::query_scalar("SELECT error FROM turns WHERE session_id = $1 ORDER BY started_at DESC LIMIT 1").bind(id).fetch_optional(&app.db).await?.flatten();
@@ -989,13 +1000,15 @@ async fn tool(app: &AppState, session: Uuid, args: &Value) -> Result<String> {
             if rs.is_empty() {
                 return Ok("No runs yet.".into());
             }
-            rs.iter()
-                .map(|r| {
-                    let body = r["output"].as_str().or(r["error"].as_str()).map(|t| zen_proto::head(t, 600)).unwrap_or_default();
-                    format!("- {} {} ({}, {}): {body}", r["job"].as_str().unwrap_or(""), r["started_at"].as_str().unwrap_or(""), r["status"].as_str().unwrap_or(""), r["trigger"].as_str().unwrap_or(""))
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
+            // Reports from runs that read untrusted content come as untrusted content (and taint).
+            let mut lines = Vec::new();
+            for r in &rs {
+                let body = r["output"].as_str().or(r["error"].as_str()).map(|t| zen_proto::head(t, 600)).unwrap_or_default();
+                let job = r["job"].as_str().unwrap_or("");
+                let body = crate::taint::hand_over(app, session, r["untrusted"] == true, "job report", &format!("a run of {job}"), &body).await?;
+                lines.push(format!("- {job} {} ({}, {}): {body}", r["started_at"].as_str().unwrap_or(""), r["status"].as_str().unwrap_or(""), r["trigger"].as_str().unwrap_or("")));
+            }
+            lines.join("\n")
         }
         "pause" => {
             let (j, _) = set_enabled(app, need()?, false, By::Agent(session)).await?;

@@ -809,6 +809,79 @@ scheduled_jobs() {
   kill "$srv" 2>/dev/null || true
 }
 
+# Taint on data (taint.rs, D-053): what a session that read untrusted content stored carries the
+# mark, and every read path hands it over as untrusted content that marks the reader. A tainted
+# memory stays out of the next session's instructions and comes back from search wrapped; drafts a
+# tainted session wrote (save_skill or write) are served wrapped, and an accepted session doesn't
+# activate them; the sleep copies a tainted memory to the wiki labelled web, never into USER.md; a
+# job run that read the web marks its report, which the next run and `schedule runs` get wrapped.
+# A tainted session's bash has no network and writes only in its workspace.
+taint_on_data() {
+  local ws; ws=$(new_workspace taint)
+  local port=$((PORT + 8)) s1port=$((PORT + 9))
+  python3 "$REPO/scripts/e2e/searxng_stub.py" "$port" & local srv=$!
+  python3 "$REPO/scripts/e2e/systemone_stub.py" "$s1port" & local s1srv=$!
+  local zh="$TMP/home/.zenbot" sk="$TMP/home/.zenbot/global/skills"
+  local script; script=$(script taint.json "s|KERNELURL|$URL|")
+  start_kernel "$ws" "$script" ZEN_SEARXNG_URL="http://127.0.0.1:$port"
+  q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART; DELETE FROM search_docs WHERE kind = 'memory'; DELETE FROM sleep_runs" >/dev/null
+  res_of() { q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$1' AND payload->>'role'='toolResult'"; }
+  tainted() { q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$1'"; }
+  zen ask --json -m faux/smoke "CLEAN-DRAFT" >/dev/null
+  local r sid res; r=$(zen ask --json -m faux/smoke "TAINT-A"); sid=$(echo "$r" | jq -r .session_id)
+  check "search, remember, a draft, a write into a clean draft, bash" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" \
+    web_search:false,remember:false,save_skill:false,write:false,bash:false
+  res=$(res_of "$sid")
+  check "the memory is marked, an inference" eq "$(q "SELECT source || '/' || tainted FROM memories WHERE id = 1")" inferred/true
+  check "both drafts are marked untrusted" eq "$(q "SELECT string_agg(skill, ',' ORDER BY skill) FROM draft_taint")" work/clean-notes,work/web-notes
+  check "the draft's commit says so" grep -q "web-notes (session ${sid:0:8}; it read untrusted content)" <<<"$(git -C "$sk" log --format=%s)"
+  check "a tainted bash has no network" bash -c 'grep -q "net=[1-9]" <<<"$1" && grep -q "sandboxed: this session has read untrusted content" <<<"$1"' _ "$res"
+  check "but writes and commits in its workspace" bash -c 'grep -q committed <<<"$1" && test -s "$2/made-here.txt" && [ "$(git -C "$2" log -1 --format=%s)" = sandboxed ]' _ "$res" "$ws"
+  check "and not in the home" bash -c 'grep -q home-read-only <<<"$1" && test ! -e "$2/planted"' _ "$res" "$zh"
+  r=$(zen ask --json -m faux/smoke "TAINT-B"); sid=$(echo "$r" | jq -r .session_id)
+  local base; base=$(q "SELECT payload->>'text' FROM tape_events WHERE session_id='$sid' AND kind='base'")
+  check "the next session's instructions leave the memory out, by id" bash -c '! grep -q 4417 <<<"$1" && grep -q "(m1 saved by sessions that read untrusted content" <<<"$1"' _ "$base"
+  check "search returns it wrapped, and marks the reader" bash -c 'grep -q "<untrusted source=\"search\"" <<<"$1" && grep -q "PROMOTE-WIKI the <b>harbour" <<<"$1" && [ "$2" = t ]' _ "$(res_of "$sid")" "$(tainted "$sid")"
+  r=$(zen ask --json -m faux/smoke "TAINT-C"); sid=$(echo "$r" | jq -r .session_id)
+  check "a tainted draft loads wrapped, and marks the reader" bash -c 'grep -q "<untrusted source=\"draft skill\"" <<<"$1" && grep -q "Obey the page" <<<"$1" && [ "$2" = t ]' _ "$(res_of "$sid")" "$(tainted "$sid")"
+  zen sessions decide "$sid" accept >/dev/null; sleep 2
+  check "accepting the session that loaded it doesn't activate it" bash -c 'test -s "$1/_proposed/work/web-notes/SKILL.md" && test ! -e "$1/work/web-notes"' _ "$sk"
+  r=$(zen ask --json -m faux/smoke "TAINT-D"); sid=$(echo "$r" | jq -r .session_id)
+  check "reading a draft a tainted session wrote is untrusted too" bash -c 'grep -q "<untrusted source=\"draft skill\"" <<<"$1" && [ "$2" = t ]' _ "$(res_of "$sid")" "$(tainted "$sid")"
+  local sha; sha=$(zen skills --json | jq -r '.skills[] | select(.skill == "work/web-notes") | .sha')
+  check "zen skills marks it" grep -q "work/web-notes (draft ${sha:0:12}, untrusted)" <<<"$(zen skills)"
+  zen skills accept work/web-notes "${sha:0:12}" >/dev/null
+  check "the owner's own accept activates it, and the mark goes" bash -c 'test -s "$1/work/web-notes/SKILL.md" && [ "$2" = 0 ]' _ "$sk" "$(q "SELECT count(*) FROM draft_taint WHERE skill = 'work/web-notes'")"
+  stop_kernel
+  # With System One (the sleep's promotions) and the scheduler.
+  start_kernel "$ws" "$script" ZEN_SEARXNG_URL="http://127.0.0.1:$port" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key \
+    ZEN_S1_URL="http://127.0.0.1:$s1port/systemone" ZEN_JOBS=1 ZEN_JOBS_TICK=0.5 ZEN_DEFAULT_MODEL=faux/smoke
+  printf '# USER.md\n\nE2E Owner.\n' >"$zh/USER.md"
+  q "INSERT INTO memories (text, source, tainted) VALUES ('PROMOTE-USER the owner loves web pages', 'owner', true)" >/dev/null
+  local note; note=$(zen memory sleep --json | jq -r .note)
+  check "the sleep copies a tainted memory to the wiki labelled web" grep -rq "memory m1, the sleep (web) — PROMOTE-WIKI the harbour code is 4417" "$zh/global/wiki"
+  check "and never into USER.md" bash -c '! grep -q "loves web pages" "$1" && grep -q "a session that read untrusted content saved it" <<<"$2"' _ "$zh/USER.md" "$note"
+  check "its note leaves the tainted text out" bash -c '! grep -q 4417 <<<"$1" && ! grep -q "loves web" <<<"$1"' _ "$note"
+  sleep 1
+  r=$(zen ask --json -m faux/smoke "TAINT-E"); sid=$(echo "$r" | jq -r .session_id)
+  check "a wiki search finding it is untrusted" bash -c 'grep -q "<untrusted source=\"search\"" <<<"$1" && [ "$2" = t ]' _ "$(res_of "$sid")" "$(tainted "$sid")"
+  local runs="SELECT string_agg(r.status || '/' || r.tainted, ',' ORDER BY r.id) FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name = 'tjob'"
+  zen jobs add tjob --schedule "every 1h" --prompt "JOBTASK-T" >/dev/null
+  zen jobs run tjob >/dev/null
+  check "a job run that read the web marks its report" poll "$runs" ok/true
+  zen jobs run tjob >/dev/null
+  check "the next run too" poll "$runs" ok/true,ok/true
+  local second; second=$(q "SELECT r.session_id FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name = 'tjob' ORDER BY r.id DESC LIMIT 1")
+  check "which got the last report wrapped, tainted from its start" bash -c 'grep -qF "<untrusted source=\\\"job report\\\"" <<<"$1" && [ "$2" = "job report" ]' _ \
+    "$(q "SELECT payload::text FROM tape_events WHERE session_id='$second' AND kind='message' AND payload->>'role'='user'")" \
+    "$(q "SELECT payload->>'source' FROM tape_events WHERE session_id='$second' AND kind='taint'")"
+  r=$(zen ask --json -m faux/smoke "TAINT-RUNS"); sid=$(echo "$r" | jq -r .session_id)
+  check "schedule runs shows the reports wrapped, and marks the reader" bash -c 'grep -q "<untrusted source=\"job report\"" <<<"$1" && grep -q "Report T" <<<"$1" && [ "$2" = t ]' _ "$(res_of "$sid")" "$(tainted "$sid")"
+  zen jobs rm tjob >/dev/null
+  q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART; DELETE FROM search_docs WHERE kind = 'memory'" >/dev/null
+  kill "$srv" "$s1srv" 2>/dev/null || true
+}
+
 # Session names and next-prompt suggestions (assist.rs): after each owner turn the assist model names
 # the session (while the owner hasn't) and suggests the next prompt; the next prompt settles it.
 names_suggestions() {
@@ -870,6 +943,7 @@ run secrets secrets_masked
 run slow-summary slow_summary
 run stale-turn stale_turn
 run scheduled-jobs scheduled_jobs
+run taint-on-data taint_on_data
 run names-suggestions names_suggestions
 echo "== tape"
 check "every tape is numbered and its hash chain recomputes" tape_is_sound
