@@ -2,8 +2,8 @@
 """Checks that the docs still match the code: the mechanical half of keeping them true.
 
 Each check pairs a list the code defines (routes, tools, settings, tables, events, tape kinds,
-slash commands, e2e scenarios, crates) with the doc whose job is to list it, and fails when one
-has an item the other lacks. It also checks that repo paths and decision numbers named in the
+slash commands, e2e scenarios, crates, scripts) with the doc whose job is to list it, and fails
+when one has an item the other lacks. It also checks that repo paths and decision numbers named in the
 docs exist. It can't tell whether a sentence is still true: that stays the job of whoever changes
 the code (AGENTS.md, "Update the docs before shipping").
 
@@ -108,6 +108,15 @@ require("slash command", set(re.findall(r'cmd\("(/[a-z-]+)"', tui)), "README.md"
 
 # End-to-end scenarios: every scenario e2e.sh runs, in MAP.md's list.
 require("e2e scenario", set(re.findall(r"^run ([a-z0-9-]+) ", read("scripts/e2e.sh"), re.M)), "MAP.md")
+
+# Scripts and deployment files: every one, in MAP.md (by path, or by name in backticks beside its
+# folder's entry; the faux scripts in scripts/e2e/ by their `scripts/e2e/*.json` glob).
+map_text = read("MAP.md")
+for path in tracked("scripts/*", "scripts/**/*", "deploy/*", "deploy/**/*", "install.sh"):
+    if path.startswith("scripts/e2e/") and path.endswith(".json"):
+        path = "scripts/e2e/*.json"
+    if path not in map_text and f"`{os.path.basename(path)}`" not in map_text:
+        problems.append(f"MAP.md: {path} is in the repo but not in this doc")
 
 # Crates: every crate, in AGENTS.md's "What runs where" and in MAP.md.
 crates = {os.path.basename(p) for p in glob.glob("crates/*") if os.path.isdir(p)}
