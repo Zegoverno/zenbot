@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
-"""A tiny MCP server for the e2e tests (scripts/e2e.sh): two tools, `echo` and `add`.
+"""A tiny MCP server for the e2e tests (scripts/e2e.sh): tools `echo`, `add`, `slow` (answers after
+some seconds) and `huge` (answers with over 8 MB).
 
-stdio by default (one JSON-RPC message per line); `--http PORT` serves streamable HTTP on
-127.0.0.1:PORT/mcp instead, answering tools/call as an event stream (text/event-stream) and
-everything else as JSON, with an Mcp-Session-Id, so both answer kinds are exercised.
+stdio by default (one JSON-RPC message per line, each request answered from its own thread, so a
+slow call doesn't hold up the others); `--child-pidfile FILE` starts a long `sleep` beside it and
+writes its pid there (a server's own child, which must die with it). `--http PORT` serves
+streamable HTTP on 127.0.0.1:PORT/mcp instead, answering tools/call as an event stream
+(text/event-stream) and everything else as JSON, with an Mcp-Session-Id, so both answer kinds are
+exercised.
 """
 import json
+import subprocess
 import sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 TOOLS = [
     {"name": "echo", "description": "Echo a message back.\nSecond line of the description.",
      "inputSchema": {"type": "object", "properties": {"message": {"type": "string"}}, "required": ["message"]}},
     {"name": "add", "description": "Add two numbers.",
      "inputSchema": {"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}, "required": ["a", "b"]}},
+    {"name": "slow", "description": "Wait some seconds.",
+     "inputSchema": {"type": "object", "properties": {"seconds": {"type": "number"}}}},
+    {"name": "huge", "description": "Answer at great length.", "inputSchema": {"type": "object", "properties": {}}},
 ]
 
 
@@ -32,6 +42,11 @@ def handle(msg):
             result = {"content": [{"type": "text", "text": "echo: " + str(args.get("message"))}]}
         elif params.get("name") == "add":
             result = {"content": [{"type": "text", "text": str(args["a"] + args["b"])}]}
+        elif params.get("name") == "slow":
+            time.sleep(float(args.get("seconds", 5)))
+            result = {"content": [{"type": "text", "text": "slow: done"}]}
+        elif params.get("name") == "huge":
+            result = {"content": [{"type": "text", "text": "h" * (9 * 1024 * 1024)}]}
         else:
             return {"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32602, "message": "unknown tool"}}
     else:
@@ -62,9 +77,20 @@ class Http(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     if len(sys.argv) > 2 and sys.argv[1] == "--http":
-        HTTPServer(("127.0.0.1", int(sys.argv[2])), Http).serve_forever()
+        HTTPServer.allow_reuse_address = True
+        ThreadingHTTPServer(("127.0.0.1", int(sys.argv[2])), Http).serve_forever()
+    if len(sys.argv) > 2 and sys.argv[1] == "--child-pidfile":
+        child = subprocess.Popen(["sleep", "300"], stdin=subprocess.DEVNULL)
+        with open(sys.argv[2], "w") as f:
+            f.write(str(child.pid))
+    out_lock = threading.Lock()
+
+    def answer(msg):
+        out = handle(msg)
+        if out is not None:
+            with out_lock:
+                print(json.dumps(out), flush=True)
+
     for line in sys.stdin:
         if line.strip():
-            out = handle(json.loads(line))
-            if out is not None:
-                print(json.dumps(out), flush=True)
+            threading.Thread(target=answer, args=(json.loads(line),), daemon=True).start()

@@ -154,6 +154,9 @@ changes. Candidate follow-ups, each only when use calls for it:
 - A draft activated because a session that loaded it was accepted (`workshop::on_accept`) isn't
   tied to the content that session loaded; the owner's own accept is (D-051). Reading a project's
   files with `read` or `bash` isn't taint, only its AGENTS.md is.
+- MCP over HTTP doesn't open the server's event stream, so only stdio servers' `tools/list_changed`
+  is seen; an HTTP server's tools are listed again only when it reconnects or `mcp.json` changes. A
+  stdio server that times out is started again only when no other call to it is running.
 - Paths never run with real models: the new tools (`remember`, `load_skill`, `verify`, `ask`) on
   Codex, a model switch mid-session, a failed verification followed by a real fix.
 

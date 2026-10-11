@@ -3,7 +3,8 @@
 
 Usage: systemone_stub.py <port> [release-file]. A sleep question about an entry marked HOLD waits
 until the release file exists (at most 30 s), so a scenario can change memory mid-sleep. GET /stats
-reports how many calls are held now and the most that were in flight at once.
+reports how many calls are held now and the most sleep questions (a state with a `memory`) that
+were in flight at once; other calls (a `remember` turn's) aren't counted.
 """
 import json
 import os
@@ -47,22 +48,29 @@ class H(BaseHTTPRequestHandler):
             self.reply(200, dict(STATS))
 
     def do_POST(self):
-        with LOCK:
-            STATS["inflight"] += 1
-            STATS["max_inflight"] = max(STATS["max_inflight"], STATS["inflight"])
-        try:
-            self.answer()
-        finally:
+        request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        sleep = isinstance(request.get("state"), dict) and "memory" in request["state"]
+        if sleep:
             with LOCK:
-                STATS["inflight"] -= 1
+                STATS["inflight"] += 1
+                STATS["max_inflight"] = max(STATS["max_inflight"], STATS["inflight"])
+        try:
+            self.answer(request)
+        finally:
+            if sleep:
+                with LOCK:
+                    STATS["inflight"] -= 1
 
-    def answer(self):
+    def answer(self, request):
         try:
             assert self.path == "/systemone"
             assert self.headers.get("Authorization") == "Bearer e2e-key"
-            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             assert request["model"] == "typesafe/jev-1.13"
             state = request.get("state", {})
+            # The job gate: the task the agent wrote comes as untrusted data, never as evidence.
+            if "job" in state:
+                assert "task" not in state["job"]
+                assert state["job"]["task_written_by_agent"].startswith('<untrusted source="agent"')
             answers = {}
             # The sleep's marker entries: lasting and about the owner, or lasting knowledge.
             memory = str(state.get("memory", ""))

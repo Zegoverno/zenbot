@@ -359,6 +359,9 @@ pub(crate) async fn run_kernel_session(app: &AppState, kind: &str, title: &str, 
 pub(crate) async fn run_and_wait(app: &AppState, id: Uuid, kind: &str, prompt: &str) -> Result<()> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.waiters.lock().await.insert(id, tx);
+    // Armed from the start: a caller that stops waiting (the parent's tool call dropped by an abort
+    // or the parent's turn ending) stops this session's turn too, and so on down its own children.
+    let mut guard = StopOnDrop { app: app.clone(), id, armed: true };
     if let Err(e) = begin_turn(app, id, prompt.to_string(), Origin::Kernel).await {
         app.waiters.lock().await.remove(&id);
         return Err(e);
@@ -367,8 +370,33 @@ pub(crate) async fn run_and_wait(app: &AppState, id: Uuid, kind: &str, prompt: &
         tracing::warn!("{kind} session {id} took over 30 minutes; stopping it");
         abort_turn(app, id).await;
     }
+    guard.armed = false;
     app.waiters.lock().await.remove(&id);
     Ok(())
+}
+
+/// Stops a kernel-started session's turn when whoever waits for it goes away before it ends: a child
+/// (a verifier, a subagent) must not keep running, and spending, after its parent was stopped.
+struct StopOnDrop {
+    app: AppState,
+    id: Uuid,
+    armed: bool,
+}
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let (app, id) = (self.app.clone(), self.id);
+        tokio::spawn(async move {
+            app.waiters.lock().await.remove(&id);
+            if app.turns.lock().await.contains_key(&id) {
+                tracing::info!("stopping session {id}: whoever waited for it stopped");
+                abort_turn(&app, id).await;
+            }
+        });
+    }
 }
 
 pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: Origin) -> Result<()> {

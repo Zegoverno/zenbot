@@ -83,6 +83,9 @@ every turn after it is smaller. Rules, from qm unless noted:
   structured summary), and every item cites the blocks it came from (`#156-#162`).
 - Each summary is built from the previous one plus the turns since. If the summarizer fails, a
   plain summary is built without a model (first request, later requests, files touched, last answer).
+- The summarizer reads the owner's words whole; tool output and the agent's lines are cut to 2,000
+  characters each, and over about 400 KB tool lines are cut to their start first, then the agent's,
+  then left out but for their numbers (`#12`), tool lines before the agent's.
 - The model has a `history` tool: read blocks by number or search the session. Nothing summarized
   is lost.
 - The summarizer is `ZEN_SUMMARY_MODEL` (default `claude/claude-sonnet-5-5`), run through the

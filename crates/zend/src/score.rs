@@ -313,16 +313,16 @@ pub async fn score_session(app: &App, session: Uuid, trigger: &str) -> Result<()
 }
 
 /// Score sessions that have gone quiet: their latest turn ended more than ZEN_SCORE_IDLE_SECS
-/// (default 2 hours) ago and hasn't been scored. A few per round, so turning scoring on doesn't
-/// send a burst.
+/// (default 2 hours) ago and hasn't been scored. A few per round, the longest-waiting first, so
+/// turning scoring on doesn't send a burst and no session waits behind others for ever. A session
+/// whose scoring keeps failing is retried after 1, 2, 4, … hours (at most about 5 days).
 pub async fn idle_loop(app: std::sync::Arc<App>) {
     let Some(model) = scorer() else { return };
     let idle = crate::env_num("ZEN_SCORE_IDLE_SECS", 7200.0) as i64;
     tracing::info!("scoring sessions with {model} once idle for {idle}s");
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;
-        // Each session's latest turn, quiet long enough and not scored yet (a failed score is
-        // retried after an hour); a few per round.
+        // Each session's latest turn, quiet long enough, not scored yet and not failing recently.
         let due: Vec<Uuid> = sqlx::query_scalar(
             // One index lookup per session (turns_session), not a sort of every turn.
             "SELECT s.id AS session_id FROM sessions s
@@ -331,19 +331,28 @@ pub async fn idle_loop(app: std::sync::Arc<App>) {
                  WHERE t.session_id = s.id AND t.ended_at IS NOT NULL AND t.model NOT LIKE 'faux/%'
                  ORDER BY t.started_at DESC LIMIT 1) l
              WHERE l.ended_at < now() - make_interval(secs => $1)
-               AND NOT EXISTS (SELECT 1 FROM session_scores s WHERE s.turn_id = l.id AND s.trigger = 'idle' AND s.questions = $2
-                               AND (s.error IS NULL OR s.created_at > now() - interval '1 hour'))
-             LIMIT 5",
+               AND NOT EXISTS (SELECT 1 FROM session_scores s WHERE s.turn_id = l.id AND s.trigger = 'idle' AND s.questions = $2 AND s.error IS NULL)
+               AND COALESCE((SELECT max(f.created_at) + interval '1 hour' * power(2, LEAST(count(*), 8) - 1)
+                             FROM session_scores f WHERE f.turn_id = l.id AND f.trigger = 'idle' AND f.questions = $2 AND f.error IS NOT NULL),
+                            '-infinity') < now()
+             ORDER BY l.ended_at
+             LIMIT 20",
         )
         .bind(idle as f64)
         .bind(QUESTIONS_VERSION)
         .fetch_all(&app.db)
         .await
         .unwrap_or_default();
+        // A busy session is passed over without taking one of the round's places.
+        let mut scored = 0;
         for session in due {
+            if scored == 5 {
+                break;
+            }
             if app.is_busy(session).await {
                 continue;
             }
+            scored += 1;
             if let Err(e) = score_session(&app, session, "idle").await {
                 tracing::warn!("scoring idle session {session}: {e:#}");
             }

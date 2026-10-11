@@ -187,7 +187,7 @@ mcp_tools() {
   mkdir -p "$TMP/home/.zenbot"
   cat >"$TMP/home/.zenbot/mcp.json" <<JSON
 { "mcpServers": {
-  "local": { "command": "python3", "args": ["$REPO/scripts/e2e/mcp_server.py"] },
+  "local": { "command": "python3", "args": ["$REPO/scripts/e2e/mcp_server.py", "--child-pidfile", "$TMP/mcp-child.pid"] },
   "remote": { "url": "http://127.0.0.1:$port/mcp", "headers": { "Authorization": "Bearer \${ZEN_E2E_MCP_TOKEN}" }, "allow_env": ["ZEN_E2E_MCP_TOKEN"] },
   "greedy": { "url": "http://127.0.0.1:$port/mcp", "headers": { "Authorization": "Bearer \${ZEN_TOKEN}" }, "exclude": ["echo", "add"] } } }
 JSON
@@ -205,6 +205,25 @@ JSON
   check "the remote call tainted the session" eq "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")" t
   check "the kernel's token is filled in only where allow_env lists it" grep -q 'server `greedy`: environment variables left empty: ZEN_TOKEN (a secret' <<<"$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/mcp" | jq -r '.problems[]')"
   check "the tool list is still fixed" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND kind='envelope'")" 1
+  check "a local server is untrusted by default" grep -q 'source="mcp" about="local_echo"' <<<"$res"
+  # One slow call holds up neither the same server's other calls nor the catalog.
+  zen ask --json -m faux/smoke "tool slow" >"$TMP/mcp-slow.json" & local slow=$!
+  sleep 1.5
+  local t0=$SECONDS; r=$(zen ask --json -m faux/smoke "tool quick")
+  check "a call runs while another is slow" bash -c '[ "$1" -lt 5 ] && grep -q "echo: quick" <<<"$2"' _ "$((SECONDS - t0))" \
+    "$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$(echo "$r" | jq -r .session_id)' AND payload->>'role'='toolResult'")"
+  wait "$slow"
+  check "and the slow one finishes" grep -q "slow: done" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$(jq -r .session_id "$TMP/mcp-slow.json")' AND payload->>'role'='toolResult'")"
+  r=$(zen ask --json -m faux/smoke "tool huge")
+  check "an answer over 8 MB is an error, stdio and HTTP" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" call_tool:true,call_tool:true
+  check "saying so" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$(echo "$r" | jq -r .session_id)' AND payload->>'role'='toolResult' AND payload::text LIKE '%over 8 MB%'")" 2
+  # A server's own children go with it: changing mcp.json restarts the servers.
+  local child; child=$(cat "$TMP/mcp-child.pid")
+  check "the local server's child runs" kill -0 "$child"
+  sed -i 's/"exclude": \["echo", "add"\]/"exclude": ["echo"]/' "$TMP/home/.zenbot/mcp.json"
+  zen ask --json -m faux/smoke "tool find" >/dev/null
+  local i; for i in $(seq 1 20); do kill -0 "$child" 2>/dev/null || break; sleep 0.25; done
+  check "and is gone when the server is replaced" bash -c '! kill -0 "$1" 2>/dev/null' _ "$child"
   kill "$srv" 2>/dev/null || true
 }
 
@@ -639,13 +658,17 @@ project_files() {
 
 secrets_masked() {
   local ws; ws=$(new_workspace secret)
-  start_kernel "$ws" "$(script secret.json)" E2E_PLANTED_KEY=planted-value-1234567890
+  start_kernel "$ws" "$(script secret.json "s/BIGCONTENT/$(printf 'y%.0s' $(seq 1 5000))/")" E2E_PLANTED_KEY=planted-value-1234567890
   local sid; sid=$(zen ask --json -m faux/smoke "print the token" | jq -r .session_id)
   check "the kernel's secret variables are not in the agent's shell" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult' AND payload::text LIKE '%vars: 0%'")" 1
   local out; out=$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult'")
   check "the token is masked on the tape" grep -q 'ghp_…\[masked\]' <<<"$out"
   # (The command the model typed still contains it: masking applies to what tools return.)
   check "no tool output holds the token's value" eq "$(q "SELECT count(*) FROM tape_events WHERE payload->>'role'='toolResult' AND payload::text LIKE '%AbCdEfGhIjKlMnOp%'")" 0
+  check "nor do the recorded tool arguments" eq "$(q "SELECT count(*) FROM tool_calls WHERE args::text LIKE '%AbCdEfGhIjKlMnOp%'")" 0
+  check "where the token is masked too" eq "$(q "SELECT count(*) FROM tool_calls WHERE args->>'command' LIKE '%ghp_…[masked]%' AND session_id = '$sid'")" 1
+  check "a long argument is cut, with the whole one's size and hash" eq "$(q "SELECT length(args->>'content') < 4200 AND (args->'_full'->>'bytes')::int > 5000 AND length(args->'_full'->>'sha256') = 64 FROM tool_calls WHERE name = 'write' AND session_id = '$sid'")" t
+  check "the file itself is whole" eq "$(wc -c <"$ws/big.txt")" 5000
   check "URL tokens are rejected for HTTP" eq "$(curl -s -o /dev/null -w '%{http_code}' "$URL/api/models?token=$TOKEN")" 401
   check "URL tokens are rejected for the WebSocket too" eq "$(curl -s -o /dev/null -w '%{http_code}' "$URL/api/sessions/$sid/ws?token=$TOKEN")" 401
 }
@@ -679,7 +702,8 @@ engine_boundary() {
   check "a turn still runs" eq "$(zen ask --json -m faux/smoke "hi" | jq -r .error)" null
 }
 
-# A turn aborted while its tool runs: the tape still pairs every tool call with a result.
+# A turn aborted while its tool runs: the tape still pairs every tool call with a result; a
+# subagent the aborted turn waits for is stopped with it.
 abort_tool() {
   local ws; ws=$(new_workspace aborttool)
   start_kernel "$ws" "$(script abort-tool.json)"
@@ -691,6 +715,12 @@ abort_tool() {
   check "with a result saying it was interrupted" grep -q "interrupted" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolCallId' IN ($calls)")"
   check "and only one" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult'")" 1
   check "the next turn runs" eq "$(zen ask --json -s "$sid" "again" | jq -r .error)" null
+  # Aborting a parent stops the subagent it is waiting for, not just the parent's own turn.
+  local parent; parent=$(zen sessions new --json -m faux/smoke | jq -r .id)
+  python3 scripts/e2e/ws_prompt.py "$URL" "$TOKEN" "$parent" '{"type":"prompt","text":"hand off a long nap"}' 1 3 >/dev/null
+  check "the parent was interrupted" poll "SELECT outcome FROM turns WHERE session_id='$parent'" interrupted
+  check "and so was its running subagent" poll "SELECT string_agg(t.outcome, ',') FROM turns t JOIN sessions s ON s.id = t.session_id WHERE s.parent='$parent'" interrupted
+  check "whose command never finished" eq "$(q "SELECT count(*) FROM tape_events WHERE payload::text LIKE '%child-too-late%' AND payload->>'role'='toolResult'")" 0
 }
 
 # A session the old briefed workflow left mid-verification still works after an upgrade.

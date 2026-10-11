@@ -146,6 +146,7 @@ impl Updater {
                     if let Some(j) = job.lock().await.as_mut() {
                         j.log.push_str(&line);
                         j.log.push('\n');
+                        keep_tail(&mut j.log, LOG_CAP);
                     }
                 }
             };
@@ -173,6 +174,40 @@ impl Updater {
     }
 }
 
+/// How much of an upgrade's output the kernel keeps for `GET /api/upgrade`: its end, where the result is.
+const LOG_CAP: usize = 64 * 1024;
+
+/// Cut `log` to about its last `cap` bytes, at a line start when there is one.
+fn keep_tail(log: &mut String, cap: usize) {
+    if log.len() <= cap {
+        return;
+    }
+    let mut cut = log.ceil_char_boundary(log.len() - cap);
+    if let Some(nl) = log[cut..].find('\n').filter(|&i| i + 1 < log.len() - cut) {
+        cut += nl + 1;
+    }
+    log.drain(..cut);
+}
+
 fn short(sha: &str) -> String {
     sha.chars().take(7).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_log_keeps_its_end() {
+        let mut log = String::new();
+        for i in 0..10_000 {
+            log.push_str(&format!("line {i} é\n"));
+            keep_tail(&mut log, 1000);
+        }
+        assert!(log.len() <= 1000);
+        assert!(log.starts_with("line ") && log.ends_with("line 9999 é\n"), "whole lines, the newest kept");
+        let mut one = "x".repeat(5000);
+        keep_tail(&mut one, 1000);
+        assert_eq!(one.len(), 1000, "a single long line is cut too");
+    }
 }

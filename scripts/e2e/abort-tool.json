@@ -1,5 +1,8 @@
 [
   { "when": "slow", "tool": "bash", "args": { "command": "sleep 20; echo too-late" } },
   { "when": "slow", "text": "never reached" },
-  { "when": "again", "text": "second turn done" }
+  { "when": "again", "text": "second turn done" },
+  { "when": "hand off a long nap", "tool": "delegate", "args": { "task": "nap through it" } },
+  { "when": "nap through it", "tool": "bash", "args": { "command": "sleep 30; echo child-too-late" } },
+  { "text": "Done." }
 ]

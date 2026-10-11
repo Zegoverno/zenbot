@@ -6,6 +6,35 @@
 
 ---
 
+## 2026-10-11 — Kernel robustness: children stop with their parent, masked arguments, jobs, MCP
+
+- Aborting a parent left its subagent or verifier running (and spending) for up to 30 minutes. A
+  child's turn now stops as soon as the turn waiting for it does (`StopOnDrop` in `run_and_wait`),
+  and so on down.
+- Tool arguments reached clients (`tool_start`) and `tool_calls.args` unmasked, and every `write`
+  stored its whole file: strings are now masked and cut at 4 KB, with the whole arguments' sha256
+  and size under `_full`.
+- Jobs: a huge duration panicked the turn (`every 9999999999999d`), the 5-minute minimum looked at a
+  cron's first two runs only (`0,30-35 * * * *` passed), `every Nh` drifted by the tick's lateness,
+  a run started between the tick's check and insert rolled back the whole tick, and the approval
+  gate showed System One the agent's own task as if it were evidence. Each is fixed (checked
+  arithmetic, shortest gap of 50 runs, `due + k·d`, `ON CONFLICT DO NOTHING`, the task wrapped as
+  untrusted data).
+- The summarizer cut the owner's words at 2,000 characters and didn't hold its 400 KB budget: the
+  owner's words go whole; tool lines, then the agent's, are cut and then left out to fit.
+- MCP: one slow call froze every MCP tool for every session (a server's lock held across the call,
+  and every lookup locked every server). Calls now run concurrently (a stdio reader hands answers
+  out by id; tools come from the last listing). Messages over 8 MB fail the call; stdio servers run
+  in their own process group, killed whole. Every server is untrusted unless the owner sets
+  `"untrusted": false` (D-052).
+- Idle scoring takes the longest-waiting sessions first and backs off one that keeps failing; a
+  self-update's output is kept to its last 64 KB; the flaky "at most four at a time" check in
+  `memory-sleep-judged` counts only the sleep's questions.
+- Tested: unit tests for jobs, compaction, argument masking, the capped line reader and the update
+  log; e2e: `abort-tool` (a parent aborted mid-delegation), `secrets` (recorded arguments), `mcp`
+  (a call returns while another is slow, 9 MB answers, a server's child killed, local untrusted),
+  `scheduled-jobs` (the gate's state).
+
 ## 2026-10-11 — Search index: indexes used, no skipped memories, embeddings off the lock
 
 - Every search read the whole `search_docs` table: the query's filtered `docs` CTE was referenced

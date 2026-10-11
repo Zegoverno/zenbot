@@ -122,6 +122,36 @@ impl Drop for ToolCounted {
     }
 }
 
+/// The longest a string in a tool call's arguments is kept (clients, `tool_calls.args`).
+const ARG_CAP: usize = 4096;
+
+/// A tool call's arguments as clients see them and the database keeps them: every string masked
+/// (the model may echo a secret into a command) and cut at ARG_CAP (a `write` carries a whole file).
+/// Also returns the whole masked arguments as text when something was cut, to keep their hash.
+pub(crate) fn shown_args(args: &Value) -> (Value, Option<String>) {
+    /// Every string masked (`cap` None), or cut at `cap`; `cut` is set when one was.
+    fn walk(v: &Value, cap: Option<usize>, cut: &mut bool) -> Value {
+        match v {
+            Value::String(s) => match cap {
+                None => json!(crate::secrets::mask(s)),
+                Some(cap) if s.len() > cap => {
+                    *cut = true;
+                    json!(format!("{}… [cut: {} bytes]", &s[..s.floor_char_boundary(cap)], s.len()))
+                }
+                Some(_) => v.clone(),
+            },
+            Value::Array(a) => Value::Array(a.iter().map(|x| walk(x, cap, cut)).collect()),
+            Value::Object(o) => Value::Object(o.iter().map(|(k, x)| (k.clone(), walk(x, cap, cut))).collect()),
+            other => other.clone(),
+        }
+    }
+    let mut cut = false;
+    let masked = walk(args, None, &mut cut);
+    let shown = walk(&masked, Some(ARG_CAP), &mut cut);
+    let full = cut.then(|| masked.to_string());
+    (shown, full)
+}
+
 pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming) -> Result<()> {
     let mind = app.workers[worker].mind();
     let p = &msg.params;
@@ -165,7 +195,9 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             // Commands can tell which session runs them (e.g. the commit-trailer hook in scripts/git-hooks).
             let session_env = id.to_string();
             let env = [("ZEN_SESSION_ID", session_env.as_str()), ("ZEN_MODEL", model.as_str())];
-            app.emit(id, json!({ "type": "tool_start", "call_id": call_id, "name": name, "args": args })).await;
+            // What clients see and the database keeps of the call: secrets masked, long strings cut.
+            let (shown, full) = shown_args(&args);
+            app.emit(id, json!({ "type": "tool_start", "call_id": call_id, "name": name, "args": shown })).await;
             let started = Instant::now();
             // Abort (or the turn ending) drops the tool future, which kills a running command.
             let run = async {
@@ -258,18 +290,21 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             if let Some(req_id) = msg.id {
                 mind.respond(req_id, json!({ "content": out.content, "is_error": out.is_error })).await?;
             }
+            // Cut arguments keep the sha256 and size of the whole (masked) arguments under `_full`.
             let recorded = sqlx::query(
                 "INSERT INTO tool_calls (session_id, call_id, name, args, is_error, duration_ms, output_bytes, turn_id)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                 VALUES ($1, $2, $3, CASE WHEN $9::text IS NULL THEN $4 ELSE $4 || jsonb_build_object('_full', jsonb_build_object(
+                         'sha256', encode(sha256(convert_to($9, 'UTF8')), 'hex'), 'bytes', octet_length($9))) END, $5, $6, $7, $8)",
             )
             .bind(id)
             .bind(&call_id)
             .bind(&name)
-            .bind(&args)
+            .bind(&shown)
             .bind(out.is_error)
             .bind(ms)
             .bind(out.content.len() as i64)
             .bind(turn_id)
+            .bind(full)
             .execute(&app.db)
             .await;
             if let Err(e) = recorded {
@@ -340,4 +375,23 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_arguments_are_masked_and_cut() {
+        let big = "x".repeat(10_000);
+        let (shown, full) = shown_args(&json!({ "command": "echo ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", "n": 3, "files": [{ "content": big }] }));
+        assert!(!shown.to_string().contains("AbCdEfGhIjKlMnOp"), "a token the model typed is masked");
+        assert_eq!(shown["n"], 3);
+        let content = shown["files"][0]["content"].as_str().unwrap();
+        assert!(content.len() < 4200 && content.ends_with("[cut: 10000 bytes]"));
+        let full = full.expect("the whole arguments, for their hash");
+        assert!(full.contains(&big) && !full.contains("AbCdEfGhIjKlMnOp"));
+        let (small, none) = shown_args(&json!({ "path": "a.txt" }));
+        assert_eq!((small, none), (json!({ "path": "a.txt" }), None), "nothing cut: no hash");
+    }
 }
