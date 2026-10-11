@@ -666,8 +666,8 @@ secrets_masked() {
   # (The command the model typed still contains it: masking applies to what tools return.)
   check "no tool output holds the token's value" eq "$(q "SELECT count(*) FROM tape_events WHERE payload->>'role'='toolResult' AND payload::text LIKE '%AbCdEfGhIjKlMnOp%'")" 0
   check "nor do the recorded tool arguments" eq "$(q "SELECT count(*) FROM tool_calls WHERE args::text LIKE '%AbCdEfGhIjKlMnOp%'")" 0
-  check "where the token is masked too" eq "$(q "SELECT count(*) FROM tool_calls WHERE args->>'command' LIKE '%ghp_…[masked]%'")" 1
-  check "a long argument is cut, with the whole one's size and hash" eq "$(q "SELECT length(args->>'content') < 4200 AND (args->'_full'->>'bytes')::int > 5000 AND length(args->'_full'->>'sha256') = 64 FROM tool_calls WHERE name = 'write'")" t
+  check "where the token is masked too" eq "$(q "SELECT count(*) FROM tool_calls WHERE args->>'command' LIKE '%ghp_…[masked]%' AND session_id = '$sid'")" 1
+  check "a long argument is cut, with the whole one's size and hash" eq "$(q "SELECT length(args->>'content') < 4200 AND (args->'_full'->>'bytes')::int > 5000 AND length(args->'_full'->>'sha256') = 64 FROM tool_calls WHERE name = 'write' AND session_id = '$sid'")" t
   check "the file itself is whole" eq "$(wc -c <"$ws/big.txt")" 5000
   check "URL tokens are rejected for HTTP" eq "$(curl -s -o /dev/null -w '%{http_code}' "$URL/api/models?token=$TOKEN")" 401
   check "URL tokens are rejected for the WebSocket too" eq "$(curl -s -o /dev/null -w '%{http_code}' "$URL/api/sessions/$sid/ws?token=$TOKEN")" 401
