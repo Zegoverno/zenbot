@@ -49,10 +49,9 @@ Config lives in `~/.zenbot/` (MAP.md lists every file). `token`, `db-password`, 
 5. **Update the docs** in the same branch (table below), then run `scripts/check-docs.py`. Docs are
    not a follow-up task. Before you merge, reread what your docs say against the branch's final
    diff: later commits often change what an earlier commit's docs describe.
-6. **Apply it** with `scripts/upgrade.sh`, then check `~/.zenbot/upgrade.log`. It is safe to run from
-   inside your own session: it restarts when no session is working (after 30 minutes it restarts
-   anyway, ending running turns), and rolls back if the new version isn't healthy. It doesn't
-   touch `zen-matrix`: `scripts/matrix.sh` builds, installs and restarts that.
+6. **Apply it** with `scripts/upgrade.sh` (safe from inside your own session; what it does:
+   DEVELOPMENT.md, "Applying a change"), then check `~/.zenbot/upgrade.log`. `zen-matrix` is
+   applied by `scripts/matrix.sh` instead.
 7. **Ship.** Commit (one concern per commit), push the branch, open a pull request, merge when CI is
    green. Harness changes (system prompt, history, tools, workers, model or effort handling) also get
    an eval first: `scripts/eval.sh --plan` shows which tasks the change affects and why, then

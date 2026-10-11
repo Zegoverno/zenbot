@@ -350,9 +350,8 @@ system prompt ("ask before"), not enforced.
   its `sleep` job runs the memory sleep nightly ("Scheduled jobs"). The systemd timers that ran
   them before D-046 are removed by `install.sh` and by the first healthy upgrade.
 - CI publishes binaries for every commit on `main` that passes its checks; installs and upgrades
-  download them or compile. `scripts/upgrade.sh` checks, smoke-tests on a throwaway database copy,
-  backs up before migrations, restarts when no session is busy, and rolls back if unhealthy
-  (DEVELOPMENT.md).
+  download them or compile. Changes are installed only by `scripts/upgrade.sh` (DEVELOPMENT.md,
+  "Applying a change").
 - `INSTALL.md` is written for a coding agent to follow on a fresh Linux VM.
 - Not built yet: `zend` in compose, a reverse proxy with TLS, a sandbox image, nightly off-VM backups.
 

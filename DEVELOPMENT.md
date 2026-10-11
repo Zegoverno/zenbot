@@ -10,12 +10,9 @@ How to build, test, verify and ship a change to zenbot from this checkout. Writt
 
 ## What runs where
 
-The processes are listed in `AGENTS.md` and, file by file, in `MAP.md`. The kernel owns all state and runs every tool call; engines run with their own tools switched off. Keep it that way.
-
-Config and state live in `~/.zenbot/`; MAP.md ("`~/.zenbot/`") lists every file, who writes it and
-who reads it. The secrets there are `env`, `token`, `matrix.env`
-and `matrix/`: never print them. The dev kernel has its own home, `~/.zenbot-dev` (below). Claude
-Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
+The processes, and which files in `~/.zenbot/` are secret, are in `AGENTS.md` ("What runs where");
+every file, route, table and setting in `MAP.md`. The dev kernel has its own home, `~/.zenbot-dev`
+(below).
 
 ## Prerequisites
 
@@ -90,13 +87,6 @@ Run the same locally before a pull request: `scripts/check.sh` does it in one co
 
 **Limit build parallelism on this VM.** It has 2 CPUs and 7.7 GB of RAM, and parallel release builds have been OOM-killed. Set `CARGO_BUILD_JOBS=2` (e.g. `export CARGO_BUILD_JOBS=2` in your shell) and don't run two release builds at once (for example `cargo build` while `scripts/e2e.sh` or `scripts/upgrade.sh` is building).
 
-UI changes (`crates/zen/src/tui/`, `editor.rs`) come with render or key tests: build an `App` at a fixed size with output captured (see tests beside the modules in `tui/`).
-
-### Model workers and System One
-
-Changes to the worker protocol must update `docs/worker-protocol.md` and every worker.
-System One runs in `zend/src/score.rs` and calls OpenRouter directly; the `system-one` e2e
-scenario uses a local HTTP stub to check its auth, model id and `bool` ↔ `noul` mapping.
 
 ## End-to-end scenarios
 
@@ -418,22 +408,10 @@ scripts/matrix.sh          # build, test, install, sign in if needed, restart th
 The first build compiles matrix-sdk (about 15 minutes on 2 cores; relinking takes a few minutes).
 The e2e test needs nothing paid: the kernel runs only the faux model with OpenRouter keys unset.
 
-## Git flow
+## Git flow and rules
 
-1. One branch per feature or fix, off `main`.
-2. One concern per commit. The subject says what changed; the body says why, and what was tested.
-3. Commits made from a zen session get `Zen-Session` and `Co-Authored-By` trailers from `scripts/git-hooks/prepare-commit-msg`. Don't remove them.
-4. Push the branch and open a pull request (`gh pr create`). Merge only when CI is green; harness changes also need the owner's OK on an eval.
-5. Update the docs in the same pull request (the table in `AGENTS.md`). Design decisions change only with the owner's OK.
-6. After a merge: `git checkout main && git pull`.
-
-## Hard rules
-
-- **Never** run `systemctl restart zenbot` (or stop/start) or kill `zend` from inside a session. Use `scripts/upgrade.sh`.
-- Migrations are **expand-only**, in new files; never edit an applied one.
-- No secrets in the repo, logs or tool output. **Never print `~/.zenbot/token`** or `~/.zenbot/env` (it holds the token and API keys, such as search keys). Put secrets an MCP server needs in `env` and refer to them as `${VAR}` in `mcp.json`, listed in that server's `allow_env`.
-- Keep engines' own tools switched off; every action goes through the kernel.
-- Don't add dependencies without a good reason.
+How a change is branched, committed, shipped and merged, and the hard rules (never restart `zend`
+yourself, expand-only migrations, no secrets), are in `AGENTS.md` ("Making a change", "Rules").
 
 ## Troubleshooting
 
