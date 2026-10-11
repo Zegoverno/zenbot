@@ -2,7 +2,10 @@
 //! Archived), whether each is running, idle or waiting on the owner's answers (questions asked
 //! with `ask` and not yet answered), and the subagents and verifiers working under it.
 //! Enter dives into the chosen session (subagents and verifiers read-only); `/board`, or esc on
-//! an empty input, comes back. It refreshes from `GET /api/board` while it's shown.
+//! an empty input, comes back. It refreshes from `GET /api/board` while it's shown, in a task of
+//! its own: the answer comes back as a `board` event, and the rows are rebuilt only if it changed.
+//! The kernel sends the latest sessions and children (`api::board` says how many), archived ones
+//! only while they're shown.
 
 use super::*;
 use std::collections::HashMap;
@@ -38,6 +41,10 @@ pub(super) struct Board {
     pub(super) running: usize,
     /// Sessions waiting on the owner's answers at the last load (archived ones aside).
     pub(super) waiting: usize,
+    /// Archived sessions the kernel has, when it didn't send them (`a` asks for them).
+    pub(super) archived_count: usize,
+    /// A fetch is on its way; the poll waits for it.
+    pub(super) loading: bool,
 }
 
 /// A session isn't the owner's to type into: the kernel or a parent session drives it.
@@ -138,11 +145,13 @@ impl Board {
             group.sort_by_key(|s| (!waiting(s), !active(s)));
             let archived = name == "Archived";
             let hidden = archived && !self.archived && needle.is_empty();
-            let mut head = vec![(format!(" {}", name.to_uppercase()), Sty::Bold), (format!("  {}", group.len()), Sty::Dim)];
+            // Archived sessions the kernel didn't send still count.
+            let count = if archived && !self.archived { group.len().max(self.archived_count) } else { group.len() };
+            let mut head = vec![(format!(" {}", name.to_uppercase()), Sty::Bold), (format!("  {count}"), Sty::Dim)];
             if archived {
                 head.push((if self.archived { "  · a hides" } else { "  · a shows" }.into(), Sty::Dim));
             }
-            if group.is_empty() && name != "Main" {
+            if count == 0 && name != "Main" {
                 continue;
             }
             rows.push(BoardRow { id: None, line: head });
@@ -157,8 +166,11 @@ impl Board {
                 ks.retain(|c| needle.is_empty() || hit(s) || hit(c));
                 let (run, done): (Vec<&Value>, Vec<&Value>) = ks.into_iter().partition(|c| busy(c));
                 let shown_done = if archived { 0 } else { FINISHED_CHILDREN };
-                let more = done.len().saturating_sub(shown_done);
-                rows.push(BoardRow { id: Some(s_id(s).to_string()), line: Self::session_line(s, 0, now, spin, run.len(), done.len() + run.len(), more) });
+                // The kernel sends only the latest children; `children` counts them all.
+                let sent = done.len() + run.len();
+                let all_kids = if needle.is_empty() { s["children"].as_u64().map_or(sent, |n| n as usize).max(sent) } else { sent };
+                let more = all_kids - run.len() - done.len().min(shown_done);
+                rows.push(BoardRow { id: Some(s_id(s).to_string()), line: Self::session_line(s, 0, now, spin, run.len(), all_kids, more) });
                 for c in run.iter().chain(done.iter().take(shown_done)) {
                     rows.push(BoardRow { id: Some(s_id(c).to_string()), line: Self::session_line(c, 1, now, spin, 0, 0, 0) });
                 }
@@ -237,7 +249,7 @@ impl Board {
 
 impl App {
     /// Show the board (leaving the current session; a turn running in it keeps going).
-    pub(super) async fn open_board(&mut self) {
+    pub(super) fn open_board(&mut self) {
         if self.inline {
             self.note("the sessions board needs full screen (zen without --inline); /resume switches sessions", Sty::Dim);
             return;
@@ -251,21 +263,53 @@ impl App {
         self.picker = None;
         self.side_focus = false;
         self.board = Some(Board { selected, ..Board::default() });
-        self.refresh_board().await;
+        self.refresh_board();
     }
 
-    /// Fetch what's running from the kernel and rebuild the board's rows.
-    pub(super) async fn refresh_board(&mut self) {
-        let got = self.c.get("/api/board").await;
+    /// Ask the kernel what's running, in a task of its own; `board_loaded` takes the answer.
+    pub(super) fn refresh_board(&mut self) {
         let Some(b) = &mut self.board else { return };
-        match got {
-            Ok(v) => {
-                b.sessions = Some(v["sessions"].as_array().cloned().unwrap_or_default());
-                b.error = None;
-            }
-            Err(e) => b.error = Some(format!("{e:#}")),
+        b.loading = true;
+        self.board_fetch += 1;
+        let (fetch, archived) = (self.board_fetch, b.archived);
+        let (c, tx) = (self.c.clone(), self.tx.clone());
+        tokio::spawn(async move {
+            let path = if archived { "/api/board?archived=true" } else { "/api/board" };
+            let ev = match c.get(path).await {
+                Ok(v) => json!({ "type": "board", "fetch": fetch, "board": v }),
+                Err(e) => json!({ "type": "board", "fetch": fetch, "error": format!("{e:#}") }),
+            };
+            let _ = tx.send((String::new(), 0, ev));
+        });
+    }
+
+    /// The kernel's answer to the latest board fetch: rebuild and draw only if something changed.
+    pub(super) fn board_loaded(&mut self, ev: Value) {
+        if ev["fetch"].as_u64() != Some(self.board_fetch) {
+            return;
         }
-        self.rebuild_board();
+        let Some(b) = &mut self.board else { return };
+        b.loading = false;
+        let changed = match ev["error"].as_str() {
+            Some(e) => b.error.as_deref() != Some(e) && {
+                b.error = Some(e.to_string());
+                true
+            },
+            None => {
+                let v = &ev["board"];
+                let sessions = v["sessions"].as_array().cloned().unwrap_or_default();
+                let archived_count = v["archived"].as_u64().unwrap_or(0) as usize;
+                let changed = b.error.is_some() || b.sessions.as_ref() != Some(&sessions) || b.archived_count != archived_count;
+                b.sessions = Some(sessions);
+                b.archived_count = archived_count;
+                b.error = None;
+                changed
+            }
+        };
+        if changed {
+            self.rebuild_board();
+            self.draw();
+        }
     }
 
     pub(super) fn rebuild_board(&mut self) {
@@ -295,7 +339,7 @@ impl App {
         let Some(id) = self.board.as_ref().and_then(|b| b.selected.clone()) else { return Ok(()) };
         self.board = None;
         if let Err(e) = self.switch_session(id).await {
-            self.open_board().await;
+            self.open_board();
             return Err(e);
         }
         Ok(())
@@ -335,11 +379,13 @@ impl App {
             KeyCode::Enter => return self.open_from_board().await,
             KeyCode::Char('n') if !ctrl => self.fresh_session(),
             KeyCode::Char('/') => b.filtering = true,
+            // The kernel sends archived sessions only when asked.
             KeyCode::Char('a') if !ctrl => {
                 b.archived = !b.archived;
                 self.rebuild_board();
+                self.refresh_board();
             }
-            KeyCode::Char('r') if !ctrl => self.refresh_board().await,
+            KeyCode::Char('r') if !ctrl => self.refresh_board(),
             KeyCode::Esc if !b.filter.is_empty() => {
                 b.filter.clear();
                 self.rebuild_board();
@@ -607,6 +653,30 @@ mod tests {
         b.inline = true;
         b.command("/board").await.unwrap();
         assert!(b.board.is_none() && b.notice.as_ref().is_some_and(|(t, _)| t.contains("full screen")));
+    }
+
+    #[tokio::test]
+    async fn the_board_takes_only_the_latest_fetch_and_counts_what_the_kernel_left_out() {
+        let mut a = app(100, 30);
+        a.open_board();
+        assert!(a.board.as_ref().unwrap().loading, "fetched in the background");
+        let mine = a.board_fetch;
+        let mut list: Vec<Value> = sample().into_iter().filter(|s| s["archived"] == false).collect();
+        list[1]["children"] = json!(9);
+        a.board_loaded(json!({ "type": "board", "fetch": mine - 1, "board": { "sessions": [], "archived": 0 } }));
+        assert!(a.board.as_ref().unwrap().sessions.is_none(), "an older fetch's answer is dropped");
+        a.board_loaded(json!({ "type": "board", "fetch": mine, "board": { "sessions": list, "archived": 7 } }));
+        let b = a.board.as_ref().unwrap();
+        assert!(!b.loading && b.sessions.is_some());
+        let text = plain_rows(&a).join("\n");
+        assert!(text.contains("ARCHIVED  7  · a shows"), "archived sessions not sent still count: {text}");
+        assert!(text.contains("1/9 subagents working (7 older not shown)"), "children not sent still count: {text}");
+        // The same answer again changes nothing; an error shows until the kernel answers again.
+        a.board.as_mut().unwrap().rows.clear();
+        a.board_loaded(json!({ "type": "board", "fetch": mine, "board": { "sessions": list, "archived": 7 } }));
+        assert!(a.board.as_ref().unwrap().rows.is_empty(), "not rebuilt");
+        a.board_loaded(json!({ "type": "board", "fetch": mine, "error": "connection refused" }));
+        assert!(plain_rows(&a).join("\n").contains("can't reach zenbot: connection refused"));
     }
 
     #[test]

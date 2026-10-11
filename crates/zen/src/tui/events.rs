@@ -55,6 +55,7 @@ impl App {
         let text = clean(ev["text"].as_str().or(ev["line"].as_str()).unwrap_or(""));
         match ev["type"].as_str().unwrap_or("") {
             "update_available" => self.commit(vec![line(text, Sty::Warn), Vec::new()]),
+            "board" => self.board_loaded(ev),
             "upgrade_log" => self.commit(vec![line(text, Sty::Dim)]),
             "upgrade_done" => {
                 self.upgrading = false;

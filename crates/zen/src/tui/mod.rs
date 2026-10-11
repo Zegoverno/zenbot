@@ -141,7 +141,7 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
             }
         });
         match start {
-            Start::Board if !inline => app.open_board().await,
+            Start::Board if !inline => app.open_board(),
             Start::Board | Start::New => {}
             Start::Continue => {
                 let list = app.c.get("/api/sessions?archived=false").await?;
@@ -182,11 +182,9 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
                     app.spin = app.spin.wrapping_add(1);
                     app.draw();
                 }
-                // The board follows what runs in every session.
-                _ = board_poll.tick(), if app.board.is_some() => {
-                    app.refresh_board().await;
-                    app.draw();
-                }
+                // The board follows what runs in every session (fetched apart from this loop, so
+                // a slow kernel never holds up keys or drawing; the answer comes as an event).
+                _ = board_poll.tick(), if app.board.as_ref().is_some_and(|b| !b.loading) => app.refresh_board(),
                 // The side panel follows its file as it changes (e.g. while zenbot edits it).
                 _ = watch.tick(), if app.panel.is_some() => {
                     if app.panel.as_mut().is_some_and(Panel::reload_if_changed) {
