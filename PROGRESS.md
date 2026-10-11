@@ -6,6 +6,14 @@
 
 ---
 
+## 2026-10-11 — Claude runs aren't refused for a rate-limit notice before init
+
+- The engine-boundary check (2026-10-10) refused any Claude Code event before `system/init`. Claude
+  Code can send `rate_limit_event` first, so a normal run failed in 4 s without reaching the model
+  (seen in an eval). Notices (`rate_limit_event`, other `system` events) may now come before init;
+  anything that can carry model output or tool use (`assistant`, `user`, `result`, `stream_event`)
+  is still refused. Tested: unit tests.
+
 ## 2026-10-11 — Kernel robustness: children stop with their parent, masked arguments, jobs, MCP
 
 - Aborting a parent left its subagent or verifier running (and spending) for up to 30 minutes. A
