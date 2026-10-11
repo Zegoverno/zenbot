@@ -1,11 +1,13 @@
 //! The bridge's settings and what it remembers between runs, all under `~/.zenbot/matrix/` (mode
-//! 700): the Matrix login, the encrypted key store, the room ↔ session map and the job-report
-//! cursor. Secrets are written with mode 600 and never logged.
+//! 700): the Matrix login, the encrypted key store, the room ↔ session map, how far each room has
+//! got, the owner's pinned identity and the job-report cursor. Secrets are written with mode 600 and never logged.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+
+use crate::kernel::valid_id;
 
 /// zenbot's home: `ZEN_HOME`, else `~/.zenbot`.
 pub fn zen_home() -> PathBuf {
@@ -58,11 +60,7 @@ impl Config {
         let zen_env = env_file(&home.join("env"));
         let user = get("MATRIX_USER").context("MATRIX_USER is not set (in ~/.zenbot/matrix.env): the bot's Matrix ID, like @zen-bot:matrix.org")?;
         let owner = get("MATRIX_OWNER").context("MATRIX_OWNER is not set (in ~/.zenbot/matrix.env): the owner's Matrix ID, the only one the bot answers")?;
-        for (k, v) in [("MATRIX_USER", &user), ("MATRIX_OWNER", &owner)] {
-            if !is_user_id(v) {
-                bail!("{k} must be a full Matrix ID like @name:server.org, not `{v}`");
-            }
-        }
+        check_ids(&user, &owner)?;
         let port = std::env::var("ZEN_PORT").ok().or_else(|| zen_env.get("ZEN_PORT").cloned()).unwrap_or_else(|| "8100".into());
         let kernel_url = get("ZEN_URL").unwrap_or_else(|| format!("http://127.0.0.1:{port}"));
         let kernel_token = match get("ZEN_TOKEN") {
@@ -87,12 +85,26 @@ impl Config {
     }
 }
 
+/// Both ids are full Matrix ids, and different: a bot that is its own owner would answer itself.
+pub fn check_ids(user: &str, owner: &str) -> Result<()> {
+    for (k, v) in [("MATRIX_USER", user), ("MATRIX_OWNER", owner)] {
+        if !is_user_id(v) {
+            bail!("{k} must be a full Matrix ID like @name:server.org, not `{v}`");
+        }
+    }
+    if user.eq_ignore_ascii_case(owner) {
+        bail!("MATRIX_OWNER is the bot's own account ({user}): it must be yours, a different account");
+    }
+    Ok(())
+}
+
 pub fn is_user_id(s: &str) -> bool {
     s.starts_with('@') && s.split_once(':').is_some_and(|(l, srv)| l.len() > 1 && !srv.is_empty()) && !s.contains(char::is_whitespace)
 }
 
-/// Rooms and sessions, and how far job reports have gone.
+/// Rooms and sessions, how far each room and job reports have gone, and the owner's pinned identity.
 #[derive(Default, Serialize, Deserialize, Debug, PartialEq)]
+#[serde(default)]
 pub struct State {
     /// The room that's the owner's main zen chat.
     pub main_room: Option<String>,
@@ -104,14 +116,44 @@ pub struct State {
     pub jobs_floor: Option<i64>,
     /// Runs above the floor already reported.
     pub jobs_reported: BTreeSet<i64>,
+    /// Room id → the `seq` of the last session message the room has had: after a reconnect, a
+    /// resync or a restart the bridge posts what came after it.
+    pub seen: BTreeMap<String, i64>,
+    /// The owner's cross-signing master key (base64), pinned when the first message was accepted.
+    /// A different key is refused until `zen-matrix repin-owner` clears it.
+    pub owner_key: Option<String>,
 }
 
 impl State {
     pub fn load(dir: &Path) -> Result<Self> {
-        match std::fs::read_to_string(dir.join("state.json")) {
-            Ok(t) => serde_json::from_str(&t).context("reading ~/.zenbot/matrix/state.json"),
-            Err(_) => Ok(State::default()),
+        let mut s: State = match std::fs::read_to_string(dir.join("state.json")) {
+            Ok(t) => serde_json::from_str(&t).context("reading ~/.zenbot/matrix/state.json")?,
+            Err(_) => State::default(),
+        };
+        for bad in s.drop_bad_ids() {
+            eprintln!("state.json: ignoring {bad}");
         }
+        Ok(s)
+    }
+
+    /// Drops ids that aren't well-formed (a hand-edited or damaged file), so nothing later slices
+    /// or routes one; returns what was dropped.
+    fn drop_bad_ids(&mut self) -> Vec<String> {
+        let mut bad = vec![];
+        for r in [&mut self.main_room, &mut self.jobs_room] {
+            if r.as_deref().is_some_and(|id| !is_room_id(id)) {
+                bad.push(format!("room {:?}", r.take().unwrap_or_default()));
+            }
+        }
+        self.rooms.retain(|room, session| {
+            let ok = is_room_id(room) && valid_id(session);
+            if !ok {
+                bad.push(format!("room {room:?} → session {session:?}"));
+            }
+            ok
+        });
+        self.seen.retain(|room, _| is_room_id(room));
+        bad
     }
 
     pub fn save(&self, dir: &Path) -> Result<()> {
@@ -140,6 +182,11 @@ impl State {
         }
         out
     }
+}
+
+/// A Matrix room id (`!opaque:server`, or `!opaque` in room version 12).
+pub fn is_room_id(s: &str) -> bool {
+    matrix_sdk::ruma::RoomId::parse(s).is_ok()
 }
 
 /// Write a file only its owner can read (create the directory 700 first).
@@ -178,6 +225,24 @@ mod tests {
         assert!(!is_user_id("ze:beeper.com"));
         assert!(!is_user_id("@ze"));
         assert!(!is_user_id("@:beeper.com"));
+        assert!(check_ids("@zen-bot:matrix.org", "@ze:beeper.com").is_ok());
+        assert!(check_ids("@zen-bot:matrix.org", "@Zen-Bot:matrix.org").is_err(), "the bot can't be its own owner");
+        assert!(check_ids("zen-bot", "@ze:beeper.com").is_err());
+    }
+
+    #[test]
+    fn bad_ids_in_state_are_dropped_before_use() {
+        let mut s: State = serde_json::from_value(json!({
+            "main_room": "not a room",
+            "jobs_room": "!jobs:matrix.org",
+            "rooms": { "!a:matrix.org": "0f9e3c1a-7b2d-4c1e-9a8b-1234567890ab", "!b:matrix.org": "é-not-a-session", "lobby": "0f9e3c1a" },
+        }))
+        .unwrap();
+        assert_eq!(s.drop_bad_ids().len(), 3);
+        assert_eq!(s.main_room, None);
+        assert_eq!(s.jobs_room.as_deref(), Some("!jobs:matrix.org"));
+        assert_eq!(s.rooms.keys().collect::<Vec<_>>(), vec!["!a:matrix.org"]);
+        assert!(s.seen.is_empty() && s.owner_key.is_none(), "fields a v1 state.json lacks default");
     }
 
     #[test]
