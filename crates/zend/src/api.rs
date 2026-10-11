@@ -390,13 +390,29 @@ pub(crate) async fn session_ws(State(app): State<AppState>, Path(id): Path<Uuid>
     ws.on_upgrade(move |socket| handle_socket(app, id, socket))
 }
 
+/// How long a session's WebSocket may stay quiet before the kernel pings the client.
+const WS_KEEPALIVE: Duration = Duration::from_secs(30);
+
 pub(crate) async fn handle_socket(app: AppState, id: Uuid, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
     let mut rx = app.subscribe(id).await;
     let fwd_app = app.clone();
     let forward = tokio::spawn(async move {
+        // A ping when nothing else was sent for a while, so proxies don't close a connection
+        // that's quiet during a long tool call (clients answer pings on their own).
+        let mut keepalive = tokio::time::interval(WS_KEEPALIVE);
+        keepalive.reset();
         loop {
-            let msg = match rx.recv().await {
+            let got = tokio::select! {
+                got = rx.recv() => got,
+                _ = keepalive.tick() => {
+                    if sink.send(Message::Ping(Default::default())).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+            };
+            let msg = match got {
                 Ok(msg) => msg,
                 // This client fell behind and missed events: say so and carry on. `busy` lets the
                 // client finish a turn whose `end` it may have missed.
@@ -408,6 +424,7 @@ pub(crate) async fn handle_socket(app: AppState, id: Uuid, socket: WebSocket) {
             if sink.send(Message::Text(msg.into())).await.is_err() {
                 break;
             }
+            keepalive.reset();
         }
     });
     while let Some(Ok(msg)) = stream.next().await {

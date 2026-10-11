@@ -38,6 +38,9 @@ Every request, the WebSocket upgrade included, carries the owner's token in
 
 ## WebSocket: `/api/sessions/{id}/ws`
 
+When it has sent nothing for 30 seconds, the kernel sends a WebSocket ping (clients answer with a
+pong on their own), so proxies don't close a connection that's quiet during a long tool call.
+
 The client sends:
 
 | Message | Effect |
