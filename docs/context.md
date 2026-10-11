@@ -28,7 +28,7 @@ the discount, so anything that changes must come after everything that doesn't.
   `{{zen_home}}` and `{{repo}}` filled in), `~/.zenbot/USER.md` (the owner), short-term memory as it
   was at the session's start (entries `[m12] …`; an entry a session that read untrusted content
   saved only by its id, D-053, so it neither steers the session as trusted nor taints it; plus a
-  note on last night's sleep when there was one, which never shows such an entry's text), the skills index (each skill's name and description, or only the domains when that's over
+  note on last night's sleep and what the nightly upkeep jobs found, when there was any, which never shows such an entry's text), the skills index (each skill's name and description, or only the domains when that's over
   `ZEN_SKILL_INDEX_CHARS`), the projects' instruction files, and last the tools' working directory.
   A scheduled job's session gets only the parts its `context` names (`compile::PARTS`; the soul is
   always in). Each prompt file has a size cap

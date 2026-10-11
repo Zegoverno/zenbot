@@ -128,8 +128,14 @@ changes. Candidate follow-ups, each only when use calls for it:
   entries expire after 15 minutes. The untrusted-content boundary and SSRF filtering remain security-critical.
 - The kernel `read` tool refuses files over 16 MiB before loading them; it should eventually stream
   bounded lines so large text files can be paged without `bash`.
-- Settings are read from the environment in ~50 places across the kernel's modules (about 55
-  `ZEN_*` variables; no single config).
+- The kernel's tunable settings go through `config.rs` (read once, typed, defaults in one place),
+  but these are still read from the environment where they're used: the boot settings in
+  `main.rs` (`ZEN_TOKEN`, `ZEN_PORT`, `ZEN_BIND`, `ZEN_WORKSPACE`, `ZEN_REPO`, `ZEN_DEFAULT_MODEL`,
+  `ZEN_HARNESS`), the paths (`ZEN_HOME`, `ZEN_SKILLS_DIR`, `ZEN_WIKI_DIR`, `ZEN_TOOLS_DIR`,
+  `ZEN_MCP_CONFIG`, read by `layout.rs` and their modules), the workers' (`ZEN_WORKERS`,
+  `ZEN_ENGINE_CMD`, `ZEN_WORKER_<NAME>_CMD`, `ZEN_MODELS`) and `ZEN_FAUX`. `zen-engine`, `zen`
+  and `zen-matrix` read their own settings directly. Moving the rest into `config.rs` needs the
+  tests that set `ZEN_WORKERS` to pass values instead.
 - Client events are untyped JSON (`docs/client-protocol.md` documents them; `zen-proto` has no
   event types), so `zen` and `zen-matrix` each parse them by hand.
 - The old workflow's schema stays (expand-only): `sessions.state` and old tape block kinds.

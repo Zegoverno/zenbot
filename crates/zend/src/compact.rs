@@ -31,14 +31,14 @@ pub struct Settings {
 
 impl Settings {
     pub fn from_env(window: Option<i64>) -> Self {
-        let num = crate::env_num;
-        let budget = num("ZEN_CONTEXT_TOKENS", 200_000.0) as i64;
+        let c = crate::config::get();
+        let budget = c.context_tokens;
         Settings {
             budget: window.filter(|w| *w > 0).map(|w| w.min(budget)).unwrap_or(budget),
-            soft: num("ZEN_COMPACT_SOFT", 0.7),
-            hard: num("ZEN_COMPACT_HARD", 0.9),
-            keep: num("ZEN_COMPACT_KEEP", 0.3),
-            idle_secs: num("ZEN_COMPACT_IDLE_SECS", 300.0) as i64,
+            soft: c.compact_soft,
+            hard: c.compact_hard,
+            keep: c.compact_keep,
+            idle_secs: c.compact_idle_secs,
         }
     }
     /// How much of the session stays word for word after a summary.
@@ -55,7 +55,7 @@ impl Settings {
 
 /// The summarizer: ZEN_SUMMARY_MODEL, default Sonnet through the owner's Claude subscription.
 pub fn summary_model() -> String {
-    std::env::var("ZEN_SUMMARY_MODEL").ok().filter(|m| !m.trim().is_empty()).unwrap_or_else(|| "claude/claude-sonnet-5-5".into())
+    crate::config::get().summary_model.clone()
 }
 
 fn est_tokens(v: &Value) -> i64 {
@@ -185,10 +185,7 @@ fn summarizer_input_within(previous: Option<&str>, msgs: &[&Block], budget: usiz
 
 /// The JSON object in a model's reply (it may be wrapped in a code fence or prose).
 pub fn parse(reply: &str) -> Option<Value> {
-    let start = reply.find('{')?;
-    let end = reply.rfind('}')?;
-    let v: Value = serde_json::from_str(&reply[start..=end]).ok()?;
-    (v.is_object() && v["goal"].is_string()).then_some(v)
+    crate::workers::json_object(reply).filter(|v| v["goal"].is_string())
 }
 
 fn refs(item: &Value) -> String {

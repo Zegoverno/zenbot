@@ -111,6 +111,15 @@ pub(crate) async fn complete(app: &App, model: &str, system: &str, prompt: &str)
     Ok(res)
 }
 
+/// The JSON object in a completion's text: from its first `{` to its last `}`, so a reply wrapped
+/// in a code fence or a sentence still parses. None when there's no object there.
+pub(crate) fn json_object(reply: &str) -> Option<Value> {
+    let start = reply.find('{')?;
+    let end = reply.rfind('}')?;
+    let v: Value = serde_json::from_str(reply.get(start..=end)?).ok()?;
+    v.is_object().then_some(v)
+}
+
 fn visible_models(all: &[(usize, Value)], wanted: Option<&str>) -> Vec<Value> {
     let mut result = Vec::new();
     let mut seen = HashSet::new();
@@ -241,6 +250,14 @@ pub(crate) async fn check_effort(app: &App, model: &str, effort: Option<&str>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_json_object_is_found_in_prose_or_a_fence() {
+        assert_eq!(json_object("Sure:\n```json\n{\"a\": 1}\n```"), Some(json!({ "a": 1 })));
+        assert_eq!(json_object("} then {"), None, "a closing brace before the opening one");
+        assert_eq!(json_object("[1, 2]"), None);
+        assert_eq!(json_object("{not json}"), None);
+    }
 
     fn id(models: &[Value]) -> Vec<&str> {
         models.iter().filter_map(|m| m["id"].as_str()).collect()

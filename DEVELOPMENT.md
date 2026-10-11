@@ -299,7 +299,7 @@ Tasks live in `evals/tasks/<name>/` (`task.json` plus `files/` and, for hidden t
 
 ## Scheduled jobs
 
-The kernel runs a scheduler (`jobs.rs`, D-046; DESIGN.md "Scheduled jobs"). Its own jobs are seeded at start: `sleep` (03:00 UTC) and `engines` (04:00 UTC). Agent jobs run a prompt in a fresh session of kind `job` and record its report; the owner adds them with `zen jobs add`, the agent with the `schedule` tool (live only past the System One gate, else paused until `zen jobs resume`).
+The kernel runs a scheduler (`jobs.rs`, D-046; DESIGN.md "Scheduled jobs"). Its own jobs are seeded at start: `sleep` (03:00 UTC), the nightly upkeep `wiki` (03:10), `skills` (03:20), `routes` (03:30) and `prune` (03:40), and `engines` (04:00 UTC); `zen jobs run <name>` runs one now and `zen jobs runs <name>` shows what it found. Agent jobs run a prompt in a fresh session of kind `job` and record its report; the owner adds them with `zen jobs add`, the agent with the `schedule` tool (live only past the System One gate, else paused until `zen jobs resume`).
 
 ```bash
 zen jobs                                      # every job: schedule, next run, last result
@@ -369,7 +369,7 @@ zen policy set build claude/claude-opus-5-5 --candidates codex/gpt-6.1-sol --exp
 zen policy undo                                   # a new version with the previous data
 ```
 
-Every choice is a `decisions` row (`point = 'model'`); the owner's verdict on the parent session is the evidence. The nightly sleep switches a route only on clear evidence (`ZEN_POLICY_MIN_JUDGED` judged subtasks per model, default 20), as a new policy version. The `delegation` e2e scenario (`scripts/e2e/delegate.json`) shows it without a subscription.
+Every choice is a `decisions` row (`point = 'model'`); the owner's verdict on the parent session is the evidence. The nightly `routes` job switches a route only on clear evidence (`ZEN_POLICY_MIN_JUDGED` judged subtasks per model, default 20), as a new policy version. The `delegation` e2e scenario (`scripts/e2e/delegate.json`) shows it without a subscription.
 
 ## Engine updates
 

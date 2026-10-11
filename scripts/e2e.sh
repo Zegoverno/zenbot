@@ -348,8 +348,9 @@ search_index() {
 }
 
 # Wiki: capture makes a page and appends to it (same title), commits, keeps the index and the log,
-# masks secrets; search finds the page; a capture after reading the web is labelled web; the sleep
-# reports a page that still has no summary.
+# masks secrets; search finds the page; a capture after reading the web is labelled web; the `wiki`
+# job commits the agent's own edits and reports a page that still has no summary, and the next
+# session hears it in the morning note.
 wiki_capture() {
   local ws; ws=$(new_workspace wiki)
   local port=$((PORT + 2))
@@ -369,8 +370,13 @@ wiki_capture() {
   check "search finds the page" grep -q "wiki \[\[dom-smoothie\]\]" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='search'")"
   zen ask --json -m faux/smoke "web" >/dev/null
   check "a capture after reading the web is labelled web" grep -q "(web) — SearXNG answers JSON" "$w/searxng.md"
-  local note; note=$(zen memory sleep --json | jq -r .note)
-  check "the sleep reports pages without a summary" grep -q "wiki: dom-smoothie: no summary yet" <<<"$note"
+  echo "an edit by hand" >>"$w/searxng.md"
+  zen jobs run wiki >/dev/null
+  check "the wiki job runs" poll "SELECT string_agg(r.status, ',') FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name = 'wiki'" ok
+  check "it reports pages without a summary" grep -q "wiki: dom-smoothie: no summary yet" <<<"$(zen jobs runs wiki)"
+  check "and commits the agent's edits" eq "$(git -C "$w" log -1 --format=%s):$(git -C "$w" status --porcelain | wc -l)" "wiki job: edits since the last capture:0"
+  sid=$(zen ask --json -m faux/smoke "after the upkeep" | jq -r .session_id)
+  check "the next session hears it in the morning note" grep -q "wiki: dom-smoothie: no summary yet" <<<"$(q "SELECT payload->>'text' FROM tape_events WHERE session_id='$sid' AND kind='base'")"
   kill "$srv" 2>/dev/null || true
 }
 
@@ -770,7 +776,7 @@ scheduled_jobs() {
   local s1=(ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone")
   start_kernel "$ws" "$(script jobs.json)" ZEN_JOBS=1 ZEN_JOBS_TICK=0.5 ZEN_DEFAULT_MODEL=faux/smoke "${s1[@]}"
   local runs="SELECT string_agg(r.status || '/' || r.trigger, ',' ORDER BY r.id) FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name ="
-  check "the system jobs are seeded" eq "$(zen jobs --json | jq -r '[.jobs[] | select(.kind == "system") | .name] | sort | join(",")')" engines,sleep
+  check "the system jobs are seeded" eq "$(zen jobs --json | jq -r '[.jobs[] | select(.kind == "system") | .name] | sort | join(",")')" engines,prune,routes,skills,sleep,wiki
   zen jobs add report-a --schedule "every 1h" --prompt "JOBTASK-A" >/dev/null
   q "UPDATE jobs SET next_run_at = now() WHERE name = 'report-a'" >/dev/null
   check "a due job runs once" poll "$runs 'report-a'" ok/schedule
@@ -814,6 +820,11 @@ scheduled_jobs() {
   zen jobs run sleep >/dev/null
   check "a system job runs through the same engine" poll "$runs 'sleep'" ok/owner
   check "the sleep ran as the nightly one" eq "$(q "SELECT trigger FROM sleep_runs")" nightly
+  local job before; before=$(q "SELECT coalesce(max(id), 0) FROM job_runs")
+  for job in wiki skills routes prune; do zen jobs run "$job" >/dev/null; done
+  check "each upkeep job runs by hand and records its run" poll \
+    "SELECT string_agg(j.name || ':' || (r.status IN ('ok', 'silent')), ',' ORDER BY j.name) FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name IN ('wiki', 'skills', 'routes', 'prune') AND r.id > $before AND r.status <> 'running'" \
+    prune:true,routes:true,skills:true,wiki:true
   check "zen status shows the jobs" grep -q "^jobs .*jobs (" <<<"$(zen status)"
   kill "$srv" 2>/dev/null || true
 }

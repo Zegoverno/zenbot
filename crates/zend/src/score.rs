@@ -27,7 +27,7 @@ const MAX_MESSAGE_CHARS: usize = 3_000;
 
 /// The classifier to score with, if scoring is on.
 pub fn scorer() -> Option<String> {
-    std::env::var("ZEN_S1_MODEL").ok().map(|m| m.trim().to_string()).filter(|m| !m.is_empty())
+    crate::config::get().s1_model.clone()
 }
 
 /// Whether the kernel holds an OpenRouter key. The kernel makes every OpenRouter call itself
@@ -43,7 +43,7 @@ pub fn openrouter_key() -> bool {
 /// System One to the conversation; the tools that would send it more then do without it (the
 /// sleep ranks by recency).
 pub fn private_ok() -> bool {
-    std::env::var("ZEN_S1_PRIVATE").map(|v| v.trim() != "0").unwrap_or(true)
+    crate::config::get().s1_private
 }
 
 /// A fast, typed classification through OpenRouter's System One API. The kernel owns this call;
@@ -95,7 +95,7 @@ fn parse_answers(body: &Value, questions: &Value) -> Result<Value> {
 async fn decide_with_model(model: &str, state: &Value, questions: &Value) -> Result<Value> {
     let key = std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY is not set")?;
     let model_id = model.strip_prefix("openrouter/").unwrap_or(model);
-    let url = std::env::var("ZEN_S1_URL").unwrap_or_else(|_| "https://openrouter.ai/api/v1/systemone".into());
+    let url = &crate::config::get().s1_url;
     let response = SYSTEM_ONE.post(url).bearer_auth(key).json(&json!({
         "model": model_id, "state": state, "questions": wire_questions(questions)?
     })).send().await.context("calling OpenRouter System One")?;
@@ -318,7 +318,7 @@ pub async fn score_session(app: &App, session: Uuid, trigger: &str) -> Result<()
 /// whose scoring keeps failing is retried after 1, 2, 4, … hours (at most about 5 days).
 pub async fn idle_loop(app: std::sync::Arc<App>) {
     let Some(model) = scorer() else { return };
-    let idle = crate::env_num("ZEN_SCORE_IDLE_SECS", 7200.0) as i64;
+    let idle = crate::config::get().score_idle_secs;
     tracing::info!("scoring sessions with {model} once idle for {idle}s");
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;

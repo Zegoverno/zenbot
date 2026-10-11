@@ -41,8 +41,8 @@ pub(crate) struct Turn {
 /// ZEN_TURN_IDLE_SECS (default 600). First ask the worker to abort; if the turn is still
 /// there ZEN_TURN_ABORT_GRACE_SECS (default 30) after any abort, end it in the kernel.
 pub(crate) async fn watchdog(app: AppState) {
-    let idle_limit = Duration::from_secs(crate::env_num("ZEN_TURN_IDLE_SECS", 600.0) as u64);
-    let grace = Duration::from_secs(crate::env_num("ZEN_TURN_ABORT_GRACE_SECS", 30.0) as u64);
+    let idle_limit = Duration::from_secs(crate::config::get().turn_idle_secs);
+    let grace = Duration::from_secs(crate::config::get().turn_abort_grace_secs);
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
         let mut to_abort = Vec::new();

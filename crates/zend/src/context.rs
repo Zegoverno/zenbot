@@ -115,8 +115,8 @@ pub fn paths_in_call(workspace: &Path, name: &str, args: &Value) -> Vec<PathBuf>
 /// The repositories whose instruction files are followed: zenbot's checkout (`repo`, ZEN_REPO)
 /// and the paths in ZEN_TRUSTED_REPOS (comma-separated), with symlinks resolved.
 pub fn trusted_roots(repo: &Path) -> Vec<PathBuf> {
-    let listed = std::env::var("ZEN_TRUSTED_REPOS").unwrap_or_default();
-    let roots = std::iter::once(repo.to_path_buf()).chain(listed.split(',').map(str::trim).filter(|p| !p.is_empty()).map(|p| crate::tools::resolve(Path::new("/"), p)));
+    let listed = &crate::config::get().trusted_repos;
+    let roots = std::iter::once(repo.to_path_buf()).chain(listed.iter().map(|p| crate::tools::resolve(Path::new("/"), p)));
     roots.filter_map(|p| p.canonicalize().ok()).collect()
 }
 
