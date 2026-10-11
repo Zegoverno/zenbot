@@ -1,6 +1,6 @@
 //! Claude engine: runs each turn with the official `claude` CLI on the owner's Claude plan.
 //! Built-in tools are off; the only tools are zenbot's (via the MCP bridge), and zenbot's system
-//! prompt replaces Claude Code's. Every run must first show its tool list (`system/init`), with
+//! prompt replaces Claude Code's. Every run must show its tool list (`system/init`, only notices may come before it), with
 //! nothing but zenbot's tools in it, or it is stopped (`check_init`).
 //!
 //! Engine sessions (docs/context.md): Claude Code caches earlier turns only within its own session,
@@ -86,11 +86,14 @@ fn unmediated_tools(init: &Value) -> Option<String> {
 /// Every action must go through the kernel: the run must start with `system/init` listing its
 /// tools (as an array), none but zenbot's; if a CLI release stops honoring `--tools ""` or stops
 /// showing its tools, the run is refused before the model can use a built-in tool.
+/// Notices the CLI may send before `system/init` (rate-limit status, other `system` events) carry
+/// no model output or tool use, so they pass; anything else before init is refused.
 /// Returns Ok(true) for the init event, Ok(false) for any other allowed event, Err(why) to refuse.
 fn check_init(ev: &Value, init_seen: bool) -> Result<bool, String> {
     let is_init = ev["type"] == "system" && ev["subtype"] == "init";
     if !is_init {
-        return if init_seen { Ok(false) } else { Err(format!("claude sent `{}` before its system/init event, so its tools can't be checked; refusing the run (has the stream format changed?)", ev["type"].as_str().unwrap_or("?"))) };
+        let notice = matches!(ev["type"].as_str(), Some("rate_limit_event" | "system"));
+        return if init_seen || notice { Ok(false) } else { Err(format!("claude sent `{}` before its system/init event, so its tools can't be checked; refusing the run (has the stream format changed?)", ev["type"].as_str().unwrap_or("?"))) };
     }
     if !ev["tools"].is_array() {
         return Err("claude's system/init event has no tool list, so its tools can't be checked; refusing the run (has the stream format changed?)".into());
@@ -580,6 +583,10 @@ mod tests {
         assert_eq!(check_init(&init(json!([format!("{PREFIX}bash")])), false), Ok(true));
         assert_eq!(check_init(&json!({ "type": "assistant" }), true), Ok(false));
         assert!(check_init(&json!({ "type": "assistant" }), false).is_err(), "an event before init");
+        assert_eq!(check_init(&json!({ "type": "rate_limit_event" }), false), Ok(false), "a notice before init");
+        assert_eq!(check_init(&json!({ "type": "system", "subtype": "status" }), false), Ok(false));
+        assert!(check_init(&json!({ "type": "result" }), false).is_err());
+        assert!(check_init(&json!({ "type": "stream_event" }), false).is_err());
         assert!(check_init(&json!({ "type": "system", "subtype": "init" }), false).is_err(), "init without a tool list");
         assert!(check_init(&init(json!(["Bash"])), false).unwrap_err().contains("Bash"));
     }
