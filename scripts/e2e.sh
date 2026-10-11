@@ -69,6 +69,14 @@ eq() { [ "$1" = "$2" ] || { echo "        expected [$2], got [$1]" >&2; return 1
 # poll <query> <expected>: wait up to 30 s for a query's result (background work in the kernel).
 poll() { local i; for i in $(seq 1 60); do [ "$(q "$1")" = "$2" ] && return 0; sleep 0.5; done; echo "        waited for [$2], got [$(q "$1")]" >&2; return 1; }
 
+# Append a message to a session's tape as tape::append does, a minute old (so the indexer takes it now).
+append_msg() {
+  q "WITH last AS (SELECT id, seq, hash FROM tape_events WHERE session_id = '$1' AND seq IS NOT NULL ORDER BY seq DESC LIMIT 1)
+     INSERT INTO tape_events (session_id, kind, payload, seq, parent, hash, created_at)
+     SELECT '$1', 'message', '$2'::jsonb, COALESCE((SELECT seq FROM last), 0) + 1, (SELECT id FROM last),
+            zen_block_hash((SELECT hash FROM last), 'message', '$2'::jsonb), now() - interval '1 minute'" >/dev/null
+}
+
 # Every session's tape is numbered 1..n without gaps, and its hash chain recomputes.
 tape_is_sound() {
   eq "$(q "SELECT count(*) FROM (SELECT session_id, bool_and(seq IS NOT NULL) AND max(seq) = count(*) AS ok FROM tape_events GROUP BY session_id) s WHERE NOT ok")" 0 &&
@@ -244,6 +252,76 @@ search_recall() {
   check "history read the other session" grep -q "purple elephant" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='history'")"
   check "every search is logged" eq "$(q "SELECT count(*) FROM searches WHERE session_id='$sid'")" 3
   q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART; DELETE FROM search_docs WHERE kind='memory'" >/dev/null
+}
+
+# The search index (with an embeddings stub): memories are indexed from a queue, so ones with old
+# times and ones a long transaction changed are not missed; a document the provider rejects is tried
+# alone 3 times while the rest are embedded; a kernel prompt doesn't split its turn; a search doesn't
+# wait for the embeddings provider; and each arm filtering `search_docs` itself ranks a fixture as
+# the query did before (search_reference.sql). Each fixture document has its own number of `filler`
+# words, so no two are the same distance from a query (ties in the vector arm come in any order).
+search_index() {
+  local ws; ws=$(new_workspace search-index)
+  local port=$((PORT + 7)) release="$TMP/embed-release"; rm -f "$release"
+  python3 "$REPO/scripts/e2e/embed_stub.py" "$port" "$release" & local srv=$!
+  start_kernel "$ws" "$(script search-index.json)" OPENROUTER_API_KEY=e2e-key ZEN_EMBED_URL="http://127.0.0.1:$port" ZEN_INDEX_SECS=1
+  q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART WITH 701; DELETE FROM search_docs" >/dev/null
+  q "INSERT INTO memories (text, source, created_at, updated_at)
+       SELECT CASE g % 6 WHEN 0 THEN 'the lighthouse keeper logs the harbour lights, entry ' || g
+                         WHEN 1 THEN 'the keeper of the harbour wrote note ' || g
+                         WHEN 2 THEN 'a car parked by the harbour, number ' || g
+                         WHEN 3 THEN 'the lighthouse code is in the fixture crate, part ' || g
+                         WHEN 4 THEN 'red car, blue car, car ' || g
+                         ELSE 'an unrelated note about tea, ' || g END || repeat(' filler', g), 'owner', now() - interval '3 days', now() - interval '3 days'
+       FROM generate_series(1, 36) g;
+     INSERT INTO memories (text, source) VALUES ('REJECT-EMBED the lighthouse keeper, rejected', 'owner'), ('LONGTX a memory archived in a long transaction', 'owner');
+     INSERT INTO search_docs (kind, ref, ident, title, body)
+       SELECT 'turn', 'fixture:' || g, CASE WHEN g % 3 = 0 THEN 'crates/fixture/engine_core.rs' ELSE 'crates/fixture/engine_core_' || g || '.rs' END,
+              'fixture', 'Owner: change crates/fixture/engine_core_' || g || '.rs near the lighthouse harbour' || repeat(' filler', g)
+       FROM generate_series(1, 12) g" >/dev/null
+  check "memories with old times are indexed, the rest embedded, a rejected one alone 3 times" poll \
+    "SELECT count(*) FILTER (WHERE kind = 'memory') || '/' || count(*) FILTER (WHERE embedding IS NOT NULL) || '/' || string_agg(embed_attempts || ':' || (embed_error LIKE '%input rejected by the e2e stub%'), ',') FILTER (WHERE embedding IS NULL) FROM search_docs" \
+    "38/49/3:true"
+  # A long transaction archives a memory while a later, short one adds another and is indexed first.
+  db_psql -d "$DB" -c "BEGIN; UPDATE memories SET tier = 'archived' WHERE text LIKE 'LONGTX%'; SELECT pg_sleep(3); COMMIT;" >/dev/null & local longtx=$!
+  sleep 1
+  q "INSERT INTO memories (text, source) VALUES ('AFTER-LONGTX committed first', 'owner')" >/dev/null
+  check "a change committed during a long transaction is indexed" poll "SELECT count(*) FROM search_docs WHERE body LIKE 'AFTER-LONGTX%'" 1
+  wait "$longtx"
+  check "and the long transaction's archive is too" poll "SELECT count(*) FROM search_docs WHERE body LIKE 'LONGTX%'" 0
+  # A turn a kernel prompt continues stays one document when the indexer reads it in two passes.
+  local ks; ks=$(q "INSERT INTO sessions (id, title, model) VALUES (gen_random_uuid(), 'kernel split', 'faux/smoke') RETURNING id")
+  append_msg "$ks" '{"role": "user", "content": "OWNER-ASKS for the kernel split"}'
+  append_msg "$ks" '{"role": "assistant", "content": [{"type": "text", "text": "working on it"}]}'
+  append_msg "$ks" '{"role": "user", "kernel": true, "content": "KERNEL-CONTINUES"}'
+  check "the turn is indexed" poll "SELECT count(*) FROM search_docs WHERE session_id = '$ks'" 1
+  append_msg "$ks" '{"role": "assistant", "content": [{"type": "text", "text": "after the continuation"}]}'
+  check "a kernel prompt doesn't split it" poll \
+    "SELECT string_agg(ref || ':' || (body LIKE '%after the continuation%'), ',') FROM search_docs WHERE session_id = '$ks'" "$ks:1:true"
+  check "the tape stays sound" tape_is_sound
+  # A search while the provider holds an embedding batch.
+  q "INSERT INTO memories (text, source) VALUES ('SLOW-EMBED the provider takes its time', 'owner')" >/dev/null
+  local i held=0; for i in $(seq 1 100); do held=$(curl -s "http://127.0.0.1:$port/stats" | jq -r .held); [ "$held" = 1 ] && break; sleep 0.2; done
+  local r; r=$(zen ask --json -m faux/smoke "quick search")
+  check "a search runs while an embedding batch is held" bash -c '[ "$1" = 1 ] && [ "$2" = search:false ] && [ "$3" = 1 ]' _ "$held" \
+    "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" "$(curl -s "http://127.0.0.1:$port/stats" | jq -r .held)"
+  touch "$release"
+  local qs; qs=$(echo "$r" | jq -r .session_id)
+  check "everything is embedded once the turn ended" poll \
+    "SELECT count(*) FROM search_docs WHERE embedding IS NULL AND embed_attempts < 3 OR session_id = '$qs' AND embedding IS NOT NULL" 1
+  # The same ranking as the query before each arm filtered the table itself.
+  local query kinds expected=() want
+  for query in "crates/fixture/engine_core.rs|{turn,memory,wiki}|crates/fixture/engine_core.rs" "lighthouse keeper harbour|{memory}|" "automobile|{memory}|"; do
+    IFS='|' read -r want kinds exact <<<"$query"
+    local vec; vec=$(curl -s -H "Authorization: Bearer e2e-key" -d "{\"input\": [\"$want\"], \"dimensions\": 1536}" "http://127.0.0.1:$port/embeddings" | jq -c '.data[0].embedding')
+    expected+=("$(db_psql -d "$DB" -v q="$want" -v vec="$vec" -v exact="$exact" -v kinds="$kinds" -v lim=8 <"$REPO/scripts/e2e/search_reference.sql")")
+  done
+  local sid; sid=$(zen ask --json -m faux/smoke "compare the rankings" | jq -r .session_id)
+  local got; got=$(q "SELECT string_agg((SELECT string_agg(x->>'ref', ',' ORDER BY n) FROM jsonb_array_elements(results) WITH ORDINALITY AS a(x, n)), '|' ORDER BY id) FROM searches WHERE session_id = '$sid'")
+  check "the exact arm, words and meaning rank as before" eq "$got" "$(IFS='|'; echo "${expected[*]}")"
+  check "meaning finds the car notes" bash -c 'q=$(cut -d"|" -f3 <<<"$1"); [ -n "$q" ] && [ "$q" != "$(cut -d"|" -f2 <<<"$1")" ]' _ "$got"
+  kill "$srv" 2>/dev/null || true
+  q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART; DELETE FROM search_docs" >/dev/null
 }
 
 # Wiki: capture makes a page and appends to it (same title), commits, keeps the index and the log,
@@ -500,7 +578,7 @@ memory_sleep_judged() {
   python3 "$REPO/scripts/e2e/systemone_stub.py" "$port" "$release" & local srv=$!
   start_kernel "$ws" "$(script sleep-judged.json)" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone"
   local zh="$TMP/home/.zenbot"; printf '# USER.md\n\nE2E Owner.\n' >"$zh/USER.md"
-  q "DELETE FROM decisions WHERE point='sleep'; DELETE FROM sleep_runs; DELETE FROM memories; DELETE FROM search_docs WHERE kind='memory'; DELETE FROM search_state WHERE key='memories'; ALTER SEQUENCE memories_id_seq RESTART WITH 901" >/dev/null
+  q "DELETE FROM decisions WHERE point='sleep'; DELETE FROM sleep_runs; DELETE FROM memories; DELETE FROM search_docs WHERE kind='memory'; ALTER SEQUENCE memories_id_seq RESTART WITH 901" >/dev/null
   q "INSERT INTO memories (text, source, created_at, updated_at) VALUES
        ('HOLD the build machine is called osprey', 'owner', now() - interval '4 days', now() - interval '4 days'),
        ('HOLD PROMOTE-USER the owner runs every night', 'owner', now() - interval '3 days', now() - interval '3 days'),
@@ -745,6 +823,7 @@ run skills skills_on_demand
 run mcp mcp_tools
 run web web_tools
 run search search_recall
+run search-index search_index
 run wiki wiki_capture
 run workshop workshop
 run delegation delegation

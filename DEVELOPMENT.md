@@ -102,7 +102,7 @@ scenario uses a local HTTP stub to check its auth, model id and `bool` ↔ `noul
 
 `scripts/e2e.sh` builds (unless `ZEN_E2E_NO_BUILD=1`), then runs each scenario on a kernel built from this checkout with the scripted faux model. It uses a throwaway database (`zen_e2e_<pid>`), throwaway git workspaces and a throwaway `HOME`, on port 18377 (`ZEN_E2E_PORT`). No subscription is used, nothing reaches the internet and the live service isn't touched. It needs Postgres running, plus `git`, `curl`, `jq`, `bubblewrap` and `python3`.
 
-There are 26 scenarios (`run …` lines at the bottom of the script). Some start small test programs from `scripts/e2e/`:
+There are 27 scenarios (`run …` lines at the bottom of the script). Some start small test programs from `scripts/e2e/`:
 
 | Program | Started by | What it is |
 |---|---|---|
@@ -110,6 +110,7 @@ There are 26 scenarios (`run …` lines at the bottom of the script). Some start
 | `mcp_server.py` | `mcp` | an MCP server with `echo` and `add`: over stdio, and with `--http PORT` as streamable HTTP on the e2e port + 1 |
 | `searxng_stub.py` | `web`, `wiki` (`ZEN_SEARXNG_URL`) | answers `/search?format=json` with fixed results, on the e2e port + 2 |
 | `systemone_stub.py` | `system-one`, `scheduled-jobs` (`ZEN_S1_URL`) | an OpenRouter System One stand-in that checks auth and the `bool` → `noul` mapping, on the e2e port + 3 |
+| `embed_stub.py` | `search-index` (`ZEN_EMBED_URL`) | an OpenAI-compatible `/embeddings` stand-in (word counts, a few synonyms sharing a dimension) that refuses `REJECT-EMBED` and holds `SLOW-EMBED` until a release file exists, on the e2e port + 7; `search_reference.sql` beside it is the previous search query, to compare rankings |
 | `ws_prompt.py` | `names-suggestions`, `abort-tool` | a client, not a server: sends one message on a session's WebSocket as the terminal app does (and, given a delay, an `abort` after it) and prints the events that follow |
 
 ```bash
@@ -319,11 +320,14 @@ The sleep promotes on its own (D-045): lasting entries about the owner move to `
 
 ## Search index
 
-The kernel indexes every session's turns, every short-term memory (and old `long` rows) and every wiki page into `search_docs` in the background (`search::index_loop`, every `ZEN_INDEX_SECS`, default 20 s), for the `search` tool. Exact-name and full-text search need nothing else. Vector search needs embeddings, which the indexer fetches only when `OPENROUTER_API_KEY` is set and `ZEN_S1_PRIVATE` isn't `0` (`ZEN_EMBED_MODEL`, `ZEN_EMBED_URL`; `ZEN_EMBED=0` turns them off). That sends turn, memory and wiki text to the provider, so leave the key out of a dev kernel's environment unless you mean to test embeddings: `dev.sh` loads `~/.zenbot/env`, and the e2e kernels unset `OPENROUTER_API_KEY`. Migration 0017 needs the `vector` and `pg_trgm` extensions, which the `pgvector/pgvector:pg16` image has.
+The kernel indexes every session's turns, every short-term memory (and old `long` rows) and every wiki page into `search_docs` in the background (`search::index_loop`, every `ZEN_INDEX_SECS`, default 20 s), for the `search` tool. Exact-name and full-text search need nothing else. Vector search needs embeddings, which the indexer fetches only when `OPENROUTER_API_KEY` is set and `ZEN_S1_PRIVATE` isn't `0` (`ZEN_EMBED_MODEL`, `ZEN_EMBED_URL`; `ZEN_EMBED=0` turns them off). That sends turn, memory and wiki text to the provider, so leave the key out of a dev kernel's environment unless you mean to test embeddings: `dev.sh` loads `~/.zenbot/env`, and the e2e kernels unset `OPENROUTER_API_KEY` (`search-index` sets it with `ZEN_EMBED_URL` pointing at its stub). Memories reach the index through `search_queue`, which triggers on `memories` fill (migration 0021). Migration 0017 needs the `vector` and `pg_trgm` extensions, which the `pgvector/pgvector:pg16` image has.
 
 ```bash
 docker compose -f deploy/compose.yaml exec -T postgres psql -U zen -d zen_dev \
   -c "SELECT kind, count(*), count(embedding) FROM search_docs GROUP BY kind"   # what the dev kernel indexed
+# documents the embeddings provider refused (tried 3 times, then found by text only)
+docker compose -f deploy/compose.yaml exec -T postgres psql -U zen -d zen_dev \
+  -c "SELECT id, kind, ref, embed_attempts, embed_error FROM search_docs WHERE embed_attempts > 0"
 ```
 
 

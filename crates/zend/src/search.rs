@@ -12,7 +12,7 @@
 //! results when it's configured. A memory a search returns counts as used (the sleep's recency).
 //! Every search is logged in `searches`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -40,19 +40,53 @@ fn embed_key() -> Option<String> {
 
 static HTTP: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| reqwest::Client::builder().timeout(Duration::from_secs(60)).build().expect("http client"));
 
-/// Embeddings for `texts` (OpenAI-compatible `/embeddings` on OpenRouter), as pgvector literals.
+/// The embeddings provider's refusal: its status and what it said.
+#[derive(Debug)]
+struct Refused {
+    status: u16,
+    message: String,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the embeddings provider refused ({}): {}", self.status, zen_proto::head(&self.message, 300))
+    }
+}
+
+impl std::error::Error for Refused {}
+
+impl Refused {
+    /// Whether it refused the input (too long, malformed, flagged), as opposed to the request:
+    /// sign-in, access, an unknown model or address, a timeout or the rate limit, which a smaller
+    /// batch wouldn't change.
+    fn rejects_input(&self) -> bool {
+        (400..500).contains(&self.status) && !matches!(self.status, 401 | 402 | 403 | 404 | 408 | 429)
+    }
+}
+
+/// Embeddings for `texts` (OpenAI-compatible `/embeddings` on OpenRouter), as pgvector literals. A
+/// refusal (an error status, or an `error` in the answer, as OpenRouter gives for some) is a
+/// [`Refused`].
 async fn embed(texts: &[String]) -> Result<Vec<String>> {
     let key = embed_key().context("no embedding key")?;
     let base = std::env::var("ZEN_EMBED_URL").unwrap_or_else(|_| "https://openrouter.ai/api/v1".into());
-    let v: Value = HTTP
+    let res = HTTP
         .post(format!("{}/embeddings", base.trim_end_matches('/')))
         .bearer_auth(key)
         .json(&json!({ "model": embed_model(), "input": texts, "dimensions": 1536 }))
         .send()
-        .await?
-        .error_for_status()?
-        .json()
         .await?;
+    let status = res.status().as_u16();
+    let v: Value = if res.status().is_success() {
+        res.json().await?
+    } else {
+        let message = res.text().await.unwrap_or_default();
+        return Err(Refused { status, message }.into());
+    };
+    if let Some(e) = v.get("error").filter(|e| e.is_object()) {
+        let status = e["code"].as_u64().and_then(|c| u16::try_from(c).ok()).unwrap_or(status);
+        return Err(Refused { status, message: e["message"].as_str().map(str::to_string).unwrap_or_else(|| e.to_string()) }.into());
+    }
     let data = v["data"].as_array().context("no `data` in the embeddings answer")?;
     anyhow::ensure!(data.len() == texts.len(), "asked for {} embeddings, got {}", texts.len(), data.len());
     let mut out = vec![String::new(); texts.len()];
@@ -132,6 +166,23 @@ pub fn turn_text(messages: &[Value]) -> String {
     crate::secrets::mask(&out)
 }
 
+/// A session's messages split into turns, each starting at an owner message. A kernel prompt (a
+/// continuation, a verifier's review) belongs to the turn it's in; the first message starts a turn
+/// whoever wrote it. Messages are `(seq, time, message)`.
+pub fn split_turns(msgs: Vec<(i32, chrono::DateTime<chrono::Utc>, Value)>) -> Vec<(i32, chrono::DateTime<chrono::Utc>, Vec<Value>)> {
+    let mut turns: Vec<(i32, chrono::DateTime<chrono::Utc>, Vec<Value>)> = Vec::new();
+    for (seq, at, m) in msgs {
+        let is_owner = m["role"] == "user" && m["kernel"] != true;
+        if is_owner || turns.is_empty() {
+            turns.push((seq, at, Vec::new()));
+        }
+        if let Some(t) = turns.last_mut() {
+            t.2.push(m);
+        }
+    }
+    turns
+}
+
 /// Index the turns that got new messages since the last pass. Returns how many documents changed.
 async fn index_turns(db: &PgPool) -> Result<usize> {
     let wm: i64 = state_get(db, "tape").await.and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -139,7 +190,8 @@ async fn index_turns(db: &PgPool) -> Result<usize> {
         "SELECT e.id, e.session_id, e.seq FROM tape_events e JOIN sessions s ON s.id = e.session_id
          WHERE e.id > $1 AND e.kind = 'message' AND e.seq IS NOT NULL AND s.kind IS DISTINCT FROM 'verifier'
            -- Ids are handed out before commit, so a later id can commit first: only events a few
-           -- seconds old are taken, so the watermark never passes one still being written.
+           -- seconds old are taken, so the watermark never passes one still being written (each
+           -- event is written in a short transaction of its own, tape::append).
            AND e.created_at < now() - interval '5 seconds'
          ORDER BY e.id LIMIT 3000",
     )
@@ -158,44 +210,52 @@ async fn index_turns(db: &PgPool) -> Result<usize> {
     }
     let mut changed = 0;
     for (session, from) in first {
+        // The turn starts at the owner's last message before it (not at a kernel prompt within the
+        // turn), or at the session's first message when the owner hasn't written.
         let start: Option<i32> = sqlx::query_scalar(
-            "SELECT max(seq) FROM tape_events WHERE session_id = $1 AND kind = 'message' AND seq <= $2 AND payload->>'role' = 'user'",
+            "SELECT coalesce(
+               (SELECT max(seq) FROM tape_events WHERE session_id = $1 AND kind = 'message' AND seq <= $2
+                  AND payload->>'role' = 'user' AND (payload->>'kernel') IS DISTINCT FROM 'true'),
+               (SELECT min(seq) FROM tape_events WHERE session_id = $1 AND kind = 'message'))",
         )
         .bind(session)
         .bind(from)
         .fetch_one(db)
         .await?;
         let start = start.unwrap_or(from);
-        let msgs = sqlx::query("SELECT seq, payload, created_at FROM tape_events WHERE session_id = $1 AND kind = 'message' AND seq >= $2 ORDER BY seq")
-            .bind(session)
-            .bind(start)
-            .fetch_all(db)
-            .await?;
+        // Only what a document holds: tool results (the bulk of a long turn) aren't read.
+        let msgs = sqlx::query(
+            "SELECT seq, created_at, payload->>'role' AS role, coalesce(payload->'kernel' = 'true'::jsonb, false) AS kernel,
+                    CASE WHEN payload->>'role' IN ('user', 'assistant') THEN payload->'content' END AS content
+             FROM tape_events WHERE session_id = $1 AND kind = 'message' AND seq >= $2 ORDER BY seq",
+        )
+        .bind(session)
+        .bind(start)
+        .fetch_all(db)
+        .await?;
+        let msgs = msgs
+            .iter()
+            .map(|m| {
+                let content: Option<Value> = m.get("content");
+                (m.get("seq"), m.get("created_at"), json!({ "role": m.get::<Option<String>, _>("role"), "kernel": m.get::<bool, _>("kernel"), "content": content }))
+            })
+            .collect();
         let title: String = sqlx::query_scalar("SELECT title FROM sessions WHERE id = $1").bind(session).fetch_one(db).await.unwrap_or_default();
-        // Split into turns at each owner message.
-        let mut turns: Vec<(i32, chrono::DateTime<chrono::Utc>, Vec<Value>)> = Vec::new();
-        for m in &msgs {
-            let p: Value = m.get("payload");
-            let is_user = p["role"] == "user" && p["kernel"] != true;
-            if is_user || turns.is_empty() {
-                turns.push((m.get("seq"), m.get("created_at"), Vec::new()));
-            }
-            if let Some(t) = turns.last_mut() {
-                t.2.push(p);
-            }
-        }
-        for (seq, at, messages) in turns {
+        for (seq, at, messages) in split_turns(msgs) {
             let body = turn_text(&messages);
             if body.trim().is_empty() {
                 continue;
             }
             let ident = identifiers(&body).join(" ");
-            sqlx::query(
+            // Unchanged documents aren't written, so they keep their embedding and their time.
+            let n = sqlx::query(
                 "INSERT INTO search_docs (kind, ref, session_id, ident, title, body, at)
                  VALUES ('turn', $1, $2, $3, $4, $5, $6)
                  ON CONFLICT (kind, ref) DO UPDATE SET ident = EXCLUDED.ident, title = EXCLUDED.title, body = EXCLUDED.body,
                      embedding = CASE WHEN search_docs.body = EXCLUDED.body THEN search_docs.embedding END,
-                     updated_at = now()",
+                     embed_attempts = CASE WHEN search_docs.body = EXCLUDED.body THEN search_docs.embed_attempts ELSE 0 END,
+                     updated_at = now()
+                 WHERE (search_docs.ident, search_docs.title, search_docs.body) IS DISTINCT FROM (EXCLUDED.ident, EXCLUDED.title, EXCLUDED.body)",
             )
             .bind(format!("{session}:{seq}"))
             .bind(session)
@@ -204,35 +264,47 @@ async fn index_turns(db: &PgPool) -> Result<usize> {
             .bind(&body)
             .bind(at)
             .execute(db)
-            .await?;
-            changed += 1;
+            .await?
+            .rows_affected();
+            changed += n as usize;
         }
     }
     state_set(db, "tape", &last.to_string()).await?;
     Ok(changed)
 }
 
-/// Index memories that changed since the last pass: short- and long-term ones are searchable,
-/// archived ones are taken out.
+/// Index the memories a change queued (migrations/0021: a trigger queues each memory whose text,
+/// tier or source changes, in the change's own transaction, so none is missed however long that
+/// transaction ran): short- and long-term ones are searchable, archived and deleted ones are taken
+/// out. Queue rows are deleted once indexed; a change made meanwhile has queued a row of its own.
 async fn index_memories(db: &PgPool) -> Result<usize> {
-    let wm = state_get(db, "memories").await.unwrap_or_else(|| "1970-01-01T00:00:00Z".into());
-    let rows = sqlx::query("SELECT id, text, tier, source, created_at, updated_at::text AS u FROM memories WHERE updated_at > $1::timestamptz ORDER BY updated_at LIMIT 2000")
-        .bind(&wm)
-        .fetch_all(db)
-        .await?;
-    let Some(last) = rows.last().map(|r| r.get::<String, _>("u")) else { return Ok(0) };
+    let rows = sqlx::query(
+        "SELECT q.id AS qid, q.ref, m.text, m.tier, m.source, m.created_at FROM search_queue q LEFT JOIN memories m ON m.id = q.ref
+         WHERE q.kind = 'memory' ORDER BY q.id LIMIT 2000",
+    )
+    .fetch_all(db)
+    .await?;
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let mut seen: HashSet<i64> = HashSet::new();
     for r in &rows {
-        let id: i64 = r.get("id");
-        let tier: String = r.get("tier");
-        if tier == "archived" {
-            sqlx::query("DELETE FROM search_docs WHERE kind = 'memory' AND ref = $1").bind(format!("m{id}")).execute(db).await?;
+        let id: i64 = r.get("ref");
+        if !seen.insert(id) {
             continue;
         }
+        let tier: Option<String> = r.get("tier");
+        let Some(tier) = tier.filter(|t| t != "archived") else {
+            sqlx::query("DELETE FROM search_docs WHERE kind = 'memory' AND ref = $1").bind(format!("m{id}")).execute(db).await?;
+            continue;
+        };
         let text: String = r.get("text");
         sqlx::query(
             "INSERT INTO search_docs (kind, ref, ident, title, body, at) VALUES ('memory', $1, $1, $2, $3, $4)
              ON CONFLICT (kind, ref) DO UPDATE SET title = EXCLUDED.title, body = EXCLUDED.body,
-                 embedding = CASE WHEN search_docs.body = EXCLUDED.body THEN search_docs.embedding END, updated_at = now()",
+                 embedding = CASE WHEN search_docs.body = EXCLUDED.body THEN search_docs.embedding END,
+                 embed_attempts = CASE WHEN search_docs.body = EXCLUDED.body THEN search_docs.embed_attempts ELSE 0 END, updated_at = now()
+             WHERE (search_docs.title, search_docs.body) IS DISTINCT FROM (EXCLUDED.title, EXCLUDED.body)",
         )
         .bind(format!("m{id}"))
         .bind(format!("{tier}-term memory ({})", r.get::<String, _>("source")))
@@ -241,8 +313,9 @@ async fn index_memories(db: &PgPool) -> Result<usize> {
         .execute(db)
         .await?;
     }
-    state_set(db, "memories", &last).await?;
-    Ok(rows.len())
+    let done: Vec<i64> = rows.iter().map(|r| r.get("qid")).collect();
+    sqlx::query("DELETE FROM search_queue WHERE id = ANY($1)").bind(&done).execute(db).await?;
+    Ok(seen.len())
 }
 
 /// Index wiki pages whose file changed since they were indexed (by each page's own time, so a page
@@ -271,7 +344,8 @@ async fn index_wiki(db: &PgPool) -> Result<usize> {
         sqlx::query(
             "INSERT INTO search_docs (kind, ref, ident, title, body, at) VALUES ('wiki', $1, $2, $3, $4, $5)
              ON CONFLICT (kind, ref) DO UPDATE SET ident = EXCLUDED.ident, title = EXCLUDED.title, body = EXCLUDED.body, at = EXCLUDED.at,
-                 embedding = CASE WHEN search_docs.body = EXCLUDED.body THEN search_docs.embedding END, updated_at = now()",
+                 embedding = CASE WHEN search_docs.body = EXCLUDED.body THEN search_docs.embedding END,
+                 embed_attempts = CASE WHEN search_docs.body = EXCLUDED.body THEN search_docs.embed_attempts ELSE 0 END, updated_at = now()",
         )
         .bind(&slug)
         .bind(&ident)
@@ -285,30 +359,82 @@ async fn index_wiki(db: &PgPool) -> Result<usize> {
     Ok(changed)
 }
 
-/// Embed documents that have none yet, a batch at a time.
+/// Embed documents that have none yet, a batch at a time. Runs outside the indexing lock: the
+/// provider can take a minute, and a document that changes meanwhile isn't given the old text's
+/// embedding (it's stored only while `updated_at` is the one read).
 async fn embed_pending(db: &PgPool) -> Result<usize> {
     if embed_key().is_none() {
         return Ok(0);
     }
-    // Rows without an embedding, or with one from another model (after ZEN_EMBED_MODEL changed).
-    let rows = sqlx::query("SELECT id, coalesce(title, '') || E'\\n' || body AS text FROM search_docs WHERE embedding IS NULL OR embed_model IS DISTINCT FROM $1 ORDER BY id LIMIT 64")
-        .bind(embed_model())
-        .fetch_all(db)
-        .await?;
-    if rows.is_empty() {
-        return Ok(0);
-    }
-    let texts: Vec<String> = rows.iter().map(|r| zen_proto::head(&r.get::<String, _>("text"), 8000)).collect();
-    let vecs = embed(&texts).await?;
-    for (r, v) in rows.iter().zip(vecs) {
-        sqlx::query("UPDATE search_docs SET embedding = $2::vector, embed_model = $3 WHERE id = $1")
-            .bind(r.get::<i64, _>("id"))
-            .bind(v)
-            .bind(embed_model())
+    let model = embed_model();
+    // Embeddings from another model (after ZEN_EMBED_MODEL changed) are made again: cleared once
+    // per start, so the batches below need only the index of rows without one.
+    static MODEL_CHECKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !MODEL_CHECKED.load(std::sync::atomic::Ordering::Relaxed) {
+        sqlx::query("UPDATE search_docs SET embedding = NULL, embed_attempts = 0 WHERE embedding IS NOT NULL AND embed_model IS DISTINCT FROM $1")
+            .bind(&model)
             .execute(db)
             .await?;
+        MODEL_CHECKED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    Ok(rows.len())
+    let rows = sqlx::query(
+        "SELECT d.id, d.updated_at, coalesce(d.title, '') || E'\\n' || d.body AS text FROM search_docs d
+         -- A document the provider rejected is tried 3 times (the same 3 as the index
+         -- search_docs_to_embed, migrations/0021, so the query uses it).
+         WHERE d.embedding IS NULL AND d.embed_attempts < 3
+           -- A turn still going changes with every message: it's embedded once its session has no
+           -- turn running (ended 10 seconds ago, so the indexer has its last messages), or once
+           -- it hasn't changed for 2 minutes.
+           AND (d.kind <> 'turn' OR d.updated_at < now() - interval '2 minutes'
+                OR NOT EXISTS (SELECT 1 FROM turns t WHERE t.session_id = d.session_id AND (t.ended_at IS NULL OR t.ended_at > now() - interval '10 seconds')))
+         ORDER BY d.id LIMIT 64",
+    )
+    .fetch_all(db)
+    .await?;
+    let docs: Vec<(i64, chrono::DateTime<chrono::Utc>, String)> =
+        rows.iter().map(|r| (r.get("id"), r.get("updated_at"), zen_proto::head(&r.get::<String, _>("text"), 8000))).collect();
+    // A batch the provider rejects is split in halves until the document it rejects is alone; that
+    // one's attempt and error are recorded. Any other failure (network, sign-in, rate limit, the
+    // provider down) ends the pass, to be tried again on the next.
+    let mut stack: Vec<&[(i64, chrono::DateTime<chrono::Utc>, String)]> = if docs.is_empty() { vec![] } else { vec![&docs] };
+    let mut stored = 0;
+    while let Some(batch) = stack.pop() {
+        let texts: Vec<String> = batch.iter().map(|d| d.2.clone()).collect();
+        match embed(&texts).await {
+            Ok(vecs) => {
+                for ((id, updated, _), v) in batch.iter().zip(vecs) {
+                    let n = sqlx::query("UPDATE search_docs SET embedding = $2::vector, embed_model = $3, embed_error = NULL WHERE id = $1 AND updated_at = $4 AND embedding IS NULL")
+                        .bind(id)
+                        .bind(v)
+                        .bind(&model)
+                        .bind(updated)
+                        .execute(db)
+                        .await?;
+                    stored += n.rows_affected() as usize;
+                }
+            }
+            Err(e) if e.downcast_ref::<Refused>().is_some_and(Refused::rejects_input) => {
+                if let [(id, _, _)] = batch {
+                    tracing::warn!("search document {id} not embedded: {e:#}");
+                    sqlx::query("UPDATE search_docs SET embed_attempts = embed_attempts + 1, embed_error = $2 WHERE id = $1")
+                        .bind(id)
+                        .bind(zen_proto::head(&format!("{e:#}"), 500))
+                        .execute(db)
+                        .await?;
+                } else {
+                    let (a, b) = batch.split_at(batch.len() / 2);
+                    stack.push(b);
+                    stack.push(a);
+                }
+            }
+            Err(e) if stored == 0 => return Err(e),
+            Err(e) => {
+                tracing::warn!("embedding search documents: {e:#}");
+                break;
+            }
+        }
+    }
+    Ok(stored)
 }
 
 /// One index pass at a time: the background loop, `search`'s pre-index and `capture` would
@@ -321,11 +447,13 @@ pub(crate) async fn refresh_wiki(db: &PgPool) -> Result<usize> {
     index_wiki(db).await
 }
 
-/// One indexing pass (turns, memories, embeddings).
+/// One indexing pass (turns, memories, wiki), then embeddings. Only the first holds the indexing
+/// lock, so a search or capture never waits on the embeddings provider.
 pub async fn index_once(db: &PgPool) -> Result<(usize, usize, usize)> {
-    let _one = INDEXING.lock().await;
-    let t = index_turns(db).await?;
-    let m = index_memories(db).await? + index_wiki(db).await?;
+    let (t, m) = {
+        let _one = INDEXING.lock().await;
+        (index_turns(db).await?, index_memories(db).await? + index_wiki(db).await?)
+    };
     let e = match embed_pending(db).await {
         Ok(n) => n,
         Err(e) => {
@@ -397,27 +525,39 @@ pub async fn query(db: &PgPool, q: &str, kinds: &[&str], session: Option<Uuid>, 
     };
     let kinds: Vec<String> = kinds.iter().map(|k| k.to_string()).collect();
     let mut tx = db.begin().await?;
+    // The vector arm's filters (kind, session) apply as the index is walked: keep walking until
+    // enough rows pass them, in order (pgvector 0.8 iterative scans).
     sqlx::query("SET LOCAL hnsw.ef_search = 100").execute(&mut *tx).await?;
+    sqlx::query("SET LOCAL hnsw.iterative_scan = strict_order").execute(&mut *tx).await?;
+    // Planned for its parameters every time: a generic plan (Postgres's choice for a statement
+    // prepared often enough) can't walk the HNSW index for a parameter vector, so it sorts every
+    // row, parsing the vector once per row (seconds on 30,000 documents).
+    sqlx::query("SET LOCAL plan_cache_mode = force_custom_plan").execute(&mut *tx).await?;
+    // Each arm filters `search_docs` itself, so each uses its own index (trigram, GIN over `tsv`,
+    // HNSW); only the candidates they return are read in full. Ties go to the older document.
     let rows = sqlx::query(
-        "WITH q AS (SELECT websearch_to_tsquery('simple', $1) AS tsq),
-         docs AS (SELECT * FROM search_docs WHERE kind = ANY($4) AND ($6::uuid IS NULL OR session_id = $6)),
-         exact AS (
-           SELECT id, row_number() OVER (ORDER BY (ident ILIKE '%' || $3 || '%') DESC, similarity(ident, $3) DESC) AS r
-           FROM docs WHERE $3 IS NOT NULL AND ident ILIKE '%' || replace(replace($3, '%', '\\%'), '_', '\\_') || '%'
-           LIMIT 10),
+        "WITH exact AS (
+           SELECT id, row_number() OVER (ORDER BY (ident ILIKE '%' || $3 || '%') DESC, similarity(ident, $3) DESC, id) AS r
+           FROM search_docs
+           WHERE $3 IS NOT NULL AND ident ILIKE '%' || replace(replace($3, '%', '\\%'), '_', '\\_') || '%'
+             AND kind = ANY($4) AND ($6::uuid IS NULL OR session_id = $6)
+           ORDER BY r LIMIT 10),
          fts AS (
-           SELECT id, row_number() OVER (ORDER BY ts_rank_cd(tsv, q.tsq, 32) DESC) AS r
-           FROM docs, q WHERE tsv @@ q.tsq ORDER BY ts_rank_cd(tsv, q.tsq, 32) DESC LIMIT 50),
+           SELECT id, row_number() OVER (ORDER BY ts_rank_cd(tsv, websearch_to_tsquery('simple', $1), 32) DESC, id) AS r
+           FROM search_docs
+           WHERE tsv @@ websearch_to_tsquery('simple', $1) AND kind = ANY($4) AND ($6::uuid IS NULL OR session_id = $6)
+           ORDER BY r LIMIT 50),
          vec AS (
            SELECT id, row_number() OVER () AS r FROM (
-             SELECT id FROM docs WHERE $2::text IS NOT NULL AND embedding IS NOT NULL AND embed_model = $7 ORDER BY embedding <=> $2::text::vector LIMIT 50) v)
+             SELECT id FROM search_docs
+             WHERE $2::text IS NOT NULL AND embedding IS NOT NULL AND embed_model = $7 AND kind = ANY($4) AND ($6::uuid IS NULL OR session_id = $6)
+             ORDER BY embedding <=> $2::text::vector LIMIT 50) v)
          SELECT d.kind, d.ref, coalesce(d.title, '') AS title, d.at, (e.id IS NOT NULL) AS exact_hit,
                 coalesce(1.0 / (60 + f.r), 0) + coalesce(1.0 / (60 + v.r), 0) AS rrf,
-                ts_headline('simple', d.body, (SELECT tsq FROM q), 'MaxFragments=2,MaxWords=35,MinWords=12,FragmentDelimiter= … ') AS snippet,
+                ts_headline('simple', d.body, websearch_to_tsquery('simple', $1), 'MaxFragments=2,MaxWords=35,MinWords=12,FragmentDelimiter= … ') AS snippet,
                 left(d.body, 250) AS head, right(d.body, 450) AS tail, left(d.body, 700) AS whole, length(d.body) AS len, (f.id IS NOT NULL) AS text_hit
-         FROM docs d LEFT JOIN exact e USING (id) LEFT JOIN fts f USING (id) LEFT JOIN vec v USING (id)
-         WHERE e.id IS NOT NULL OR f.id IS NOT NULL OR v.id IS NOT NULL
-         ORDER BY exact_hit DESC, e.r NULLS LAST, rrf DESC LIMIT $5",
+         FROM exact e FULL JOIN fts f USING (id) FULL JOIN vec v USING (id) JOIN search_docs d USING (id)
+         ORDER BY exact_hit DESC, e.r NULLS LAST, rrf DESC, d.id LIMIT $5",
     )
     .bind(q)
     .bind(qvec)
@@ -607,6 +747,24 @@ mod tests {
         assert_eq!(exact_candidate("compile.rs"), Some("compile.rs".into()));
         assert_eq!(exact_candidate("where did we change \"flow.rs\" last"), Some("flow.rs".into()));
         assert_eq!(exact_candidate("how does memory work"), None);
+    }
+
+    #[test]
+    fn a_kernel_prompt_continues_the_turn_it_is_in() {
+        let at = chrono::Utc::now();
+        let m = |seq: i32, v: Value| (seq, at, v);
+        let turns = split_turns(vec![
+            m(1, json!({ "role": "user", "kernel": true, "content": "brief from the kernel" })),
+            m(2, json!({ "role": "assistant", "content": [] })),
+            m(3, json!({ "role": "user", "content": "owner asks" })),
+            m(4, json!({ "role": "assistant", "content": [] })),
+            m(5, json!({ "role": "user", "kernel": true, "content": "continue" })),
+            m(6, json!({ "role": "assistant", "content": [] })),
+        ]);
+        let starts: Vec<(i32, usize)> = turns.iter().map(|t| (t.0, t.2.len())).collect();
+        assert_eq!(starts, [(1, 2), (3, 4)]);
+        // Rebuilt from a kernel prompt (an indexer pass that starts there), it's still one turn.
+        assert_eq!(split_turns(vec![m(5, json!({ "role": "user", "kernel": true })), m(6, json!({ "role": "assistant" }))]).len(), 1);
     }
 
     #[test]

@@ -134,6 +134,11 @@ changes. Candidate follow-ups, each only when use calls for it:
   event types), so `zen` and `zen-matrix` each parse them by hand.
 - The old workflow's schema stays (expand-only): `sessions.state` and old tape block kinds.
   Drop them in a later release; `policies` is in use by model routing.
+- Unused since migration 0021 (expand-only): the index `search_docs_unembedded` (replaced by
+  `search_docs_to_embed`) and the `memories` and `wiki` keys of `search_state`; drop them in a later
+  release. The tape watermark still relies on events being committed within 5 seconds of their id
+  (each is its own short transaction, `tape::append`); a queue like the memories' would remove that
+  assumption.
 - Prompt files (`SOUL`, `IDENTITY`, `AGENTS`, `USER`), active skills and made tools are guarded
   only at `edit`/`write`, and only for child and kernel sessions (subagents, verifiers, jobs) and
   tainted sessions (D-045, D-051); the owner's config and secrets (`mcp.json`, `env`, `token`,

@@ -174,11 +174,17 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
   One sees memories unless `ZEN_S1_PRIVATE=0` (D-032).
 - **Search** (`search.rs`, D-035): an indexer keeps `search_docs` current: one document per turn of
   every session (the owner's words, the answers, the tools called; no tool output) and one per
-  short-term memory (and each `long` row from before D-045) and wiki page. `search` runs exact names and paths first (trigram over identifiers),
+  short-term memory (and each `long` row from before D-045) and wiki page. Memories come through a
+  queue their changes fill in the same transaction (no time watermark, so a long transaction such as
+  the sleep is never skipped). Embeddings are made outside the indexing lock, so a search never waits
+  on the provider; a turn is embedded once it has ended (or has been still for 2 minutes), and a
+  document the provider refuses is isolated by halving its batch and left to text search after 3
+  tries. `search` runs exact names and paths first (trigram over identifiers),
   then full text (`simple`) and meaning (pgvector; `ZEN_EMBED_MODEL`, default
   `openai/text-embedding-3-small` through OpenRouter, filled in the background; off with
   `ZEN_EMBED=0` or `ZEN_S1_PRIVATE=0`) merged by reciprocal
-  rank fusion, and System One reranks. A memory found
+  rank fusion, each arm filtering the table through its own index (trigram, GIN, HNSW), and System
+  One reranks. A memory found
   counts as used. Every search is a `searches` row. `history` reads any session's messages by
   number.
 - **Wiki** (`wiki.rs`, D-036): pages in `~/.zenbot/global/wiki/` (git) with a summary over an append-only

@@ -6,6 +6,27 @@
 
 ---
 
+## 2026-10-11 — Search index: indexes used, no skipped memories, embeddings off the lock
+
+- Every search read the whole `search_docs` table: the query's filtered `docs` CTE was referenced
+  four times, so Postgres materialized it and the HNSW, full-text and trigram indexes went unused.
+  Each arm now filters the table itself; on a 30,000-document test database a search went from
+  837 ms to 17 ms with each arm on its index, and ranks the same (120 queries compared, the vector
+  arm exact; HNSW's approximation aside). Planned per call (`force_custom_plan`): a generic plan
+  can't use HNSW for a parameter vector and took 8 s.
+- Memories were indexed by an `updated_at` watermark; a long transaction (the sleep) committing
+  after a later one fell behind it, so an archived memory stayed searchable. Triggers now queue each
+  changed memory in the change's own transaction (`search_queue`, migration 0021).
+- Embedding ran under the indexing lock (searches and captures waited up to a minute), and one
+  document the provider refused failed its batch forever. Embeddings now run after the lock, a
+  refused batch is halved until the document is alone, which is tried 3 times
+  (`embed_attempts`, `embed_error`), and a turn is embedded once it has ended instead of after every
+  message. The indexer no longer reads tool results, nor rewrites unchanged documents.
+- A kernel prompt inside a turn no longer splits its search document; `tool_calls(name)` is
+  indexed; `history`'s session-prefix lookup is a primary-key range.
+- Tested: unit tests, a new e2e scenario `search-index` with an embeddings stub (7 of its checks
+  fail on the previous `search.rs`), and EXPLAIN on the test database (in the pull request).
+
 ## 2026-10-11 — Memory sleep: no lost duplicates, no lost updates
 
 - Two entries saying the same thing were each judged "covered" by the other, and both were
