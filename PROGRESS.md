@@ -6,6 +6,22 @@
 
 ---
 
+## 2026-10-11 — Memory sleep: no lost duplicates, no lost updates
+
+- Two entries saying the same thing were each judged "covered" by the other, and both were
+  archived (and left search). System One now names *what* covers an entry; one covered by another
+  entry goes only while that entry stays, so one copy always survives (the newer), and it ranks at
+  least as high as the copy it replaces.
+- A `remember` replace or remove during a sleep was overwritten when the sleep wrote its fates
+  (the old text could even be promoted into `USER.md`). Fates now apply with the entries locked,
+  and an entry changed since the sleep read it is left as it is; the note names them.
+- A promotion written to a prompt file before a failed transaction was appended again by the next
+  sleep; it's now skipped when the line is already there. Prompt-file and memory sizes are counted
+  in characters everywhere (non-ASCII files were cut early). System One judges up to 4 entries at
+  once instead of one after another.
+- Tested: unit tests, a new e2e scenario `memory-sleep-judged` with the System One stub (holds
+  questions mid-sleep to change entries under it). The eval barely exercises the sleep (it runs
+  nightly), so the e2e is the main evidence.
 ## 2026-10-10 — Matrix channel: trust, rooms, no lost answers, a confined service
 
 - A review of `zen-matrix` found it trusted the sender's user ID alone, joined any room the owner

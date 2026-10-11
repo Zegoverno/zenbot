@@ -490,6 +490,43 @@ system_one_direct() {
   kill "$srv" 2>/dev/null || true
 }
 
+# The sleep with System One (stub): of two entries that say the same thing, one stays (and stays
+# searchable); one the owner's profile covers goes; several entries are judged at once (at most 4);
+# and an entry changed with `remember` while the sleep runs is left as it is now, its old text not
+# promoted. The stub holds the questions about the HOLD entries until the scenario has changed them.
+memory_sleep_judged() {
+  local ws; ws=$(new_workspace sleep-judged)
+  local port=$((PORT + 5)) release="$TMP/s1-release"; rm -f "$release"
+  python3 "$REPO/scripts/e2e/systemone_stub.py" "$port" "$release" & local srv=$!
+  start_kernel "$ws" "$(script sleep-judged.json)" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone"
+  local zh="$TMP/home/.zenbot"; printf '# USER.md\n\nE2E Owner.\n' >"$zh/USER.md"
+  q "DELETE FROM decisions WHERE point='sleep'; DELETE FROM sleep_runs; DELETE FROM memories; DELETE FROM search_docs WHERE kind='memory'; DELETE FROM search_state WHERE key='memories'; ALTER SEQUENCE memories_id_seq RESTART WITH 901" >/dev/null
+  q "INSERT INTO memories (text, source, created_at, updated_at) VALUES
+       ('HOLD the build machine is called osprey', 'owner', now() - interval '4 days', now() - interval '4 days'),
+       ('HOLD PROMOTE-USER the owner runs every night', 'owner', now() - interval '3 days', now() - interval '3 days'),
+       ('DUPLICATE staging deploys on Fridays', 'owner', now() - interval '2 days', now() - interval '2 days'),
+       ('DUPLICATE: staging is deployed on Fridays', 'owner', now() - interval '1 day', now() - interval '1 day'),
+       ('PROFILE-COPY the owner is called E2E Owner', 'owner', now(), now())" >/dev/null
+  zen memory sleep --json >"$TMP/sleep-judged.json" & local sleeper=$!
+  local i held=0; for i in $(seq 1 100); do held=$(curl -s "http://127.0.0.1:$port/stats" | jq -r .held); [ "$held" = 2 ] && break; sleep 0.2; done
+  check "System One judges entries at once" eq "$held" 2
+  zen ask --json -m faux/smoke "change memories mid-sleep" >/dev/null
+  touch "$release"; wait "$sleeper"
+  local r; r=$(cat "$TMP/sleep-judged.json")
+  check "at most four at a time" test "$(curl -s "http://127.0.0.1:$port/stats" | jq -r .max_inflight)" -le 4
+  check "of two entries that say the same, the newer stays" eq "$(q "SELECT string_agg(id || ':' || tier || ':' || coalesce(reason, ''), ',' ORDER BY id) FROM memories WHERE text LIKE 'DUPLICATE%'")" "903:archived:already covered,904:short:"
+  check "an entry the profile covers goes" eq "$(q "SELECT tier || '/' || reason FROM memories WHERE id = 905")" "archived/already covered"
+  check "a replace during the sleep stands" eq "$(q "SELECT tier || '/' || text FROM memories WHERE id = 901")" "short/the build machine is now called kestrel"
+  check "a remove during the sleep stands" eq "$(q "SELECT tier || '/' || reason FROM memories WHERE id = 902")" "archived/removed by the agent"
+  check "and its old text isn't promoted" bash -c '! grep -q "runs every night" "$1" && [ "$2" = 0 ]' _ "$zh/USER.md" "$(echo "$r" | jq -r .promoted)"
+  check "the sleep says what it left alone" bash -c 'grep -q "changed during the sleep, so left as they are now: m901, m902" <<<"$1" && [ "$2" = 2 ]' _ "$(echo "$r" | jq -r .note)" "$(echo "$r" | jq -r .changed)"
+  check "and logs it" eq "$(q "SELECT string_agg(chosen || ':' || acted, ',' ORDER BY (input->>'memory')::int) FROM decisions WHERE point = 'sleep'")" "changed:false,changed:false,drop:true,keep:true,drop:true"
+  local sid; sid=$(zen ask --json -m faux/smoke "find the staging day" | jq -r .session_id)
+  local res; res=$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='search'")
+  check "the copy that stays is still found" bash -c 'grep -q "m904 — short-term memory" <<<"$1" && ! grep -q "m903 —" <<<"$1"' _ "$res"
+  kill "$srv" 2>/dev/null || true
+}
+
 kernel_tools() {
   local ws; ws=$(new_workspace kernel-tools)
   printf 'foo  \nbar\n' > "$ws/a.txt"
@@ -717,6 +754,7 @@ run ask ask_and_gone_tools
 run verifier verifier
 run summaries summaries
 run system-one system_one_direct
+run memory-sleep-judged memory_sleep_judged
 run kernel-tools kernel_tools
 run project-files project_files
 run secrets secrets_masked
