@@ -106,10 +106,14 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
     terminal::enable_raw_mode()?;
     let enhanced = terminal::supports_keyboard_enhancement().unwrap_or(false);
     app.enhanced = enhanced;
+    // A panic anywhere (a spawned task too) gives the terminal back and ends zen: a task that
+    // died would otherwise leave the app running on a restored, garbled terminal. 101 is the
+    // exit code of a Rust panic.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore_terminal(inline, enhanced);
         default_hook(info);
+        std::process::exit(101);
     }));
     let mut out = std::io::stdout();
     if let Err(e) = out.write_all(setup_sequence(inline, enhanced).as_bytes()).and_then(|_| out.flush()) {

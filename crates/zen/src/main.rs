@@ -988,7 +988,7 @@ async fn run(cli: Cli) -> Result<()> {
                 } else {
                     for x in r.as_array().into_iter().flatten() {
                         let when = x["started_at"].as_str().map(|t| t.get(..16).unwrap_or(t).replace('T', " ")).unwrap_or_default();
-                        let session = x["session"].as_str().map(|s| format!(", session {}", &s[..8])).unwrap_or_default();
+                        let session = x["session"].as_str().map(|s| format!(", session {}", short(s))).unwrap_or_default();
                         println!("{} {}  {}", for_stdout(x["job"].as_str().unwrap_or("")), when, dim(&format!("{} ({}{session})", x["status"].as_str().unwrap_or(""), x["trigger"].as_str().unwrap_or(""))));
                         if let Some(body) = x["output"].as_str().or(x["error"].as_str()) {
                             for line in body.lines().take(12) {
