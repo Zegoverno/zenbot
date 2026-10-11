@@ -140,20 +140,26 @@ changes. Candidate follow-ups, each only when use calls for it:
   (each is its own short transaction, `tape::append`); a queue like the memories' would remove that
   assumption.
 - Prompt files (`SOUL`, `IDENTITY`, `AGENTS`, `USER`), active skills and made tools are guarded
-  only at `edit`/`write`, and only for child and kernel sessions (subagents, verifiers, jobs) and
-  tainted sessions (D-045, D-051); the owner's config and secrets (`mcp.json`, `env`, `token`,
-  `matrix*`, `bin/`) for every session. `bash` can still write all of them. Unused since D-045: new `memories.tier = 'long'` rows (old ones stay
+  at `edit`/`write` for child and kernel sessions (subagents, verifiers, jobs) and tainted sessions
+  (D-045, D-051), and a tainted session's `bash` can't write them (offline sandbox, D-053); the
+  owner's config and secrets (`mcp.json`, `env`, `token`, `matrix*`, `bin/`) for every session. A
+  clean session's `bash` can still write all of them. A tainted session's `edit`/`write` can still
+  change files outside the workspace that aren't guarded (shell start-up files, other repositories'
+  hooks), which a later clean session may run. Unused since D-045: new `memories.tier = 'long'` rows (old ones stay
   searchable) and `sleep_runs.proposed` (always 0); drop them in a later release.
 - Tools run as the same Unix user as the owner. Shell subprocesses no longer inherit kernel secrets,
   and the verifier's shell has its own processes, no network and an empty home (D-051), but an
   ordinary agent shell can still read the owner's files, `/proc/<zend pid>/environ` included.
   Strong isolation requires a separate Unix user and a credential the agent cannot read.
 - What each kind of session may call is decided in one place (`agent::refusal`, an allow-list per
-  kind), but taint rules are still checked inside each tool (memory, wiki, skills, jobs,
-  delegation); they belong at the dispatch boundary too.
+  kind), and what a tainted session may do in another (`taint::limited`, D-053), but each tool still
+  asks it and applies the answer itself; the shell sandbox is chosen at the dispatcher.
 - A draft activated because a session that loaded it was accepted (`workshop::on_accept`) isn't
   tied to the content that session loaded; the owner's own accept is (D-051). Reading a project's
-  files with `read` or `bash` isn't taint, only its AGENTS.md is.
+  files with `read` or `bash` isn't taint, only its AGENTS.md is; reading stored tainted content
+  (a wiki page with `web` entries, a marked draft) with `bash` (`cat`) isn't either, only with
+  `read`, `search`, `history`, `load_skill` and `schedule runs`. The wiki's `index.md` lists a
+  page's title even when the title came from untrusted text.
 - MCP over HTTP doesn't open the server's event stream, so only stdio servers' `tools/list_changed`
   is seen; an HTTP server's tools are listed again only when it reconnects or `mcp.json` changes. A
   stdio server that times out is started again only when no other call to it is running.

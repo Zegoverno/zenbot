@@ -6,6 +6,60 @@
 
 ---
 
+## D-053 — Taint is a property of stored content; a tainted session's shell has no network
+
+**Date:** 2026-10-11 · **Status:** accepted (owner, taint review) · **Supersedes:** D-034's "what a
+tainted session saves to memory counts as inference" as the whole rule for stored content, and
+D-051's trade-off that `bash` in a tainted session runs as the owner with the network
+
+**Decision:** Taint belongs to the data as well as the session. What a session that read untrusted
+content stores carries the mark: memories (`memories.tainted`), job reports (`job_runs.tainted`),
+draft skills (`draft_taint`, kept out of the agent's reach, and in the draft's commit) and wiki
+entries (labelled `web`, including the sleep's copy of a marked memory).
+- **One read path.** Every way stored content reaches a session goes through `taint::hand_over`:
+  marked content is wrapped as untrusted and taints the reader (search results for memories, wiki
+  pages and turns; `history`; `find_skills`/`load_skill` and `read` of a marked draft or a page with
+  `web` entries; a job's `<last_report>`, which taints the next run from its start; `schedule
+  runs`).
+- **Memory in the instructions.** A marked memory is left out of the instructions, listed by id
+  only; `search` returns it as untrusted. Putting it in as an untrusted block would taint every
+  session from then on (sandboxed shells, prompt files locked) because of one web page. The sleep
+  never moves a marked memory into `USER.md` or `IDENTITY.md`, its wiki copy is labelled `web`, a
+  marked entry never stands in for a clean one it "covers", and the sleep's note (in the next
+  sessions' instructions) never shows its text or names a page with `web` entries.
+- **Drafts.** A draft a tainted session writes (`save_skill`, or `edit`/`write` into it) is
+  marked before it's written; an accepted session that loaded it never activates it, only the
+  owner's own `zen skills accept`, which clears the mark. `zen skills` shows `untrusted`.
+- **One set of limits.** What a tainted session may not do is decided in `taint::limited`: change
+  what steers every session, vouch for a memory, start a job without the owner, or run a shell
+  with the network.
+- **Tainted shells run offline.** Once a session is tainted, its `bash` and `verify`'s commands run
+  in bubblewrap with no network, their own processes and terminal session, a private `/tmp`, `/run`
+  emptied (Docker's and the user's agent sockets), the workspace writable (its git repository
+  included) and the rest of the filesystem read-only (the zen home read-only again when the
+  workspace holds it), the secret files hidden. The result says why.
+
+**Why:** A review found web text laundered into durable stores and back into clean sessions as
+trusted: a tainted session's memory rendered unlabelled into every later session, a draft it wrote
+served as a trusted `<skill>` and activated when the owner accepted any session that loaded it, a
+job's report fed to the next run as kernel text, and the shell of a tainted session free to send
+data out or fetch more instructions. Checking the session's taint in each tool can't see content
+that outlives the session.
+
+**Considered:** rendering marked memories as an untrusted block in the instructions (taints every
+session; rejected); keeping drafts' marks in a sidecar file or frontmatter (the agent's file tools
+and a clean shell can edit the draft's folder; the table can't be); an empty home for the tainted
+shell, as for the verifier (breaks `cargo`, `git` config and tools under the home; read-only keeps
+offline builds working).
+
+**Trade-off:** A tainted session's shell can't install packages, `git push`, reach a local service
+or write outside its workspace; the owner continues such work in a fresh session. A marked memory
+is out of sight until searched for. `cat` of a marked page in `bash` isn't caught (only `read`), and
+a tainted session's `edit`/`write` still reach unguarded files outside the workspace (ROADMAP.md,
+debt).
+
+---
+
 ## D-052 — Every MCP server is untrusted until the owner says otherwise
 
 **Date:** 2026-10-11 · **Status:** accepted (owner, taint review) · **Supersedes:** the part of
@@ -27,6 +81,9 @@ server trusted.
 ---
 
 ## D-051 — Trust gates: what steers every session, project instructions, the verifier, reviews
+
+*Superseded in part by D-053: a tainted session's `bash` runs offline in a sandbox, and what it
+stores is marked.*
 
 **Date:** 2026-10-10 · **Status:** proposed (pending the owner's OK in the pull request) ·
 **Extends:** D-045 (who may change the prompt files), D-034 (untrusted content), D-037 (the workshop)
@@ -492,7 +549,8 @@ and the owner writes in more than one language), promoting on System One's proba
 
 ## D-034 — Web access: keyless search by default, untrusted content taints
 
-*Superseded in part by D-052: every MCP server, not only remote ones, is untrusted by default.*
+*Superseded in part by D-052: every MCP server, not only remote ones, is untrusted by default; and
+by D-053: what a tainted session stores is marked and untrusted wherever it's read.*
 
 **Decision:** `web_search` uses Brave or Tavily when their key is set, else a self-hosted SearXNG
 started with the service (deploy/compose.yaml, bound to 127.0.0.1), which also rescues one failed

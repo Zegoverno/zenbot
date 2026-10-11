@@ -26,8 +26,9 @@ the discount, so anything that changes must come after everything that doesn't.
 - **What the instructions hold** (`compile::system_prompt`, D-027), in this order: `~/.zenbot/agents/zenbot/SOUL.md`
   (who the agent is), `~/.zenbot/agents/zenbot/IDENTITY.md` (how it works, D-045), `~/.zenbot/AGENTS.md` (its environment; `{{workspace}}`, `{{home}}`,
   `{{zen_home}}` and `{{repo}}` filled in), `~/.zenbot/USER.md` (the owner), short-term memory as it
-  was at the session's start (entries `[m12] …`, plus a note on last night's sleep when there was
-  one), the skills index (each skill's name and description, or only the domains when that's over
+  was at the session's start (entries `[m12] …`; an entry a session that read untrusted content
+  saved only by its id, D-053, so it neither steers the session as trusted nor taints it; plus a
+  note on last night's sleep when there was one, which never shows such an entry's text), the skills index (each skill's name and description, or only the domains when that's over
   `ZEN_SKILL_INDEX_CHARS`), the projects' instruction files, and last the tools' working directory.
   A scheduled job's session gets only the parts its `context` names (`compile::PARTS`; the soul is
   always in). Each prompt file has a size cap
@@ -37,6 +38,9 @@ the discount, so anything that changes must come after everything that doesn't.
   never overwrites one. How to use each tool is in the tool's description, not the instructions.
 - **Loaded on demand, appended.** A skill (`load_skill`) arrives as a tool result, so the
   instructions never change mid-session; a memory saved with `remember` shows from the next session.
+  Stored content a tainted session wrote (a memory, a draft skill, a wiki page with `web` entries, a
+  job's report) arrives as untrusted content and taints the session that reads it
+  (`taint::hand_over`); a job run's `<last_report>` from such a run taints the run from its start.
 - **Instructions are fixed for the session.** They are written once on the first turn (a `base`
   block on the tape), stored with the tools (`envelopes`), and reused unchanged, so editing an AGENTS.md takes effect in the next session. An instruction file found
   mid-session (a project below the workspace) arrives once, attached to the tool result that touched

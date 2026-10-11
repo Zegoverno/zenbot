@@ -204,7 +204,7 @@ The core of the moat: learning the owner's judgment and applying it everywhere.
 Threats: prompt injection via web/email/docs, secret exfiltration, destructive commands, malicious skills or MCP servers, runaway spend.
 - **Auth:** device pairing (new device requests; owner approves from the CLI or an existing session); short-lived session tokens. M0 starts with a single owner token.
 - **Secrets:** encrypted keychain in the kernel. Sandboxes never hold raw keys; the kernel injects credentials when proxying. Secret values are masked in outputs.
-- **Taint rule:** a session that ingested untrusted content is marked tainted. Tainted sessions can't use secrets, send data out, or take outward-facing actions without an inbox approval. Taint propagates to delegated children.
+- **Taint rule:** a session that ingested untrusted content is marked tainted. Tainted sessions can't use secrets, send data out, or take outward-facing actions without an inbox approval. Taint propagates to delegated children, and travels with what a tainted session stores (memories, reports, drafts, notes), which is untrusted wherever it's read.
 - **Policy:** per-agent tool allow-lists; a hard deny list for destructive commands; approvals for high-risk actions; outward-facing actions (post, email, publish, spend) always need approval unless explicitly delegated.
 - **Isolation:** sandbox per project; egress allow-list for sensitive projects.
 - **Spend:** hard budget caps per agent, project and day.
