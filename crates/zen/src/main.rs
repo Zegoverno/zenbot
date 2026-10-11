@@ -37,7 +37,7 @@ async fn run(cli: Cli) -> Result<()> {
     if let Some(Cmd::Login { which }) = &cli.cmd {
         return login(which.as_deref());
     }
-    let c = Client::new(cli.url, cli.token)?;
+    let c = Client::new(&cli.url, cli.token)?;
     let json = cli.json;
     let out = |v: &Value| emit(true, v, String::new);
     let Some(cmd) = cli.cmd else {
@@ -91,7 +91,7 @@ async fn run(cli: Cli) -> Result<()> {
                     }
                 }
             } else {
-                let msg = c.upgrade(|l| eprintln!("{}", dim(&l))).await?;
+                let msg = client::upgrade(&c, |l| eprintln!("{}", dim(&l))).await?;
                 emit(json, &json!({ "ok": true, "message": msg }), || msg.clone());
             }
         }

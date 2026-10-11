@@ -216,7 +216,7 @@ pub(crate) async fn ask(c: &Client, json_out: bool, prompt: Option<String>, sess
     let text = read_prompt(prompt)?;
     let id = match session {
         Some(s) => c.resolve(&s).await?,
-        None => c.new_session(new.model, new.effort).await?,
+        None => c.new_session(new.body()).await?,
     };
     let mut ws = c.connect(&id).await?;
     let turn = run_turn(&mut ws, &text, !json_out, !json_out && !quiet).await?;
@@ -238,7 +238,7 @@ pub(crate) async fn ask(c: &Client, json_out: bool, prompt: Option<String>, sess
 pub(crate) async fn chat(c: &Client, session: Option<String>, new: NewSession) -> Result<()> {
     let id = match session {
         Some(s) => c.resolve(&s).await?,
-        None => c.new_session(new.model, new.effort).await?,
+        None => c.new_session(new.body()).await?,
     };
     let info = c.get(&format!("/api/sessions/{id}")).await?;
     eprintln!("{}", dim(&format!("zenbot · {} · session {} · Ctrl-C stops a turn, Ctrl-D exits", info["model"].as_str().unwrap_or(""), short(&id))));
@@ -285,7 +285,7 @@ mod tests {
             }
             prompt
         });
-        (Client::new(url, Some("t".into())).unwrap(), server)
+        (Client::new(&url, Some("t".into())).unwrap(), server)
     }
 
     #[tokio::test]

@@ -29,7 +29,7 @@ impl App {
         let (c, tx) = (self.c.clone(), self.tx.clone());
         tokio::spawn(async move {
             let log_tx = tx.clone();
-            let res = c.upgrade(move |l| {
+            let res = crate::client::upgrade(&c, move |l| {
                 let _ = log_tx.send((String::new(), 0, json!({ "type": "upgrade_log", "line": l })));
             });
             let ev = match res.await {

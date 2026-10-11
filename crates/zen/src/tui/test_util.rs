@@ -40,7 +40,7 @@ impl Drop for TempDir {
 
 /// An app on a fake terminal of `cols` x `rows`, capturing output, with no kernel behind it.
 pub(super) fn app(cols: usize, rows: usize) -> App {
-    let c = Client::new("http://127.0.0.1:9".into(), Some("test".into())).unwrap();
+    let c = Client::new("http://127.0.0.1:9", Some("test".into())).unwrap();
     let (tx, _rx) = mpsc::unbounded_channel();
     let mut a = App::new(c, tx, "claude/claude-opus-5-5".into(), "claude/claude-opus-5-5".into(), vec![], None, (cols, rows), false);
     a.capture = Some(String::new());

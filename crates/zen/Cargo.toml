@@ -7,6 +7,7 @@ description = "zenbot command-line interface"
 
 [dependencies]
 zen-proto = { path = "../zen-proto" }
+zen-client = { path = "../zen-client" }
 anyhow = "1"
 # No colored help or "did you mean" suggestions: a smaller binary.
 clap = { version = "4", default-features = false, features = ["std", "help", "usage", "error-context", "derive", "env"] }
