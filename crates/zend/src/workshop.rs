@@ -311,7 +311,7 @@ pub async fn stats(db: &sqlx::PgPool) -> Result<Value> {
     Ok(json!({ "skills": out, "tools": tools }))
 }
 
-/// The sleep's care for skills: active skills unused for 30 days are flagged, for 90 archived.
+/// The nightly `skills` job (jobs.rs): active skills unused for 30 days are flagged, for 90 archived.
 /// A skill's age counts from when it was written (its SKILL.md), so new skills aren't flagged.
 pub async fn tend(db: &sqlx::PgPool) -> Vec<String> {
     let mut notes = Vec::new();
@@ -333,7 +333,7 @@ pub async fn tend(db: &sqlx::PgPool) -> Vec<String> {
         }
     }
     if !notes.is_empty() {
-        crate::git::commit_all(&skills::root(), "sleep: skills tended").await;
+        crate::git::commit_all(&skills::root(), "skills job: skills tended").await;
     }
     notes
 }

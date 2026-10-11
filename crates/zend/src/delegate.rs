@@ -11,7 +11,7 @@
 //! `zen policy`) maps it to a model. A small share of subtasks (ZEN_EXPLORE, default 0.1) try another
 //! of the route's candidates, and each choice is logged with its probability (`decisions`, point
 //! `model`) so the comparison stays unbiased. Outcomes are the owner's verdict on the parent
-//! session, and cost. The nightly sleep switches a route to another model only when the lower bound
+//! session, and cost. The nightly `routes` job (jobs.rs) switches a route to another model only when the lower bound
 //! of that model's acceptance beats the upper bound of the current one's (at least 20 judged
 //! subtasks each); every change is a new policy version with its reason, and `zen policy undo`
 //! reverts.
@@ -271,7 +271,7 @@ pub fn suggest(policy: &Value, stats: &[Value], min: u64) -> Vec<(String, String
     out
 }
 
-/// The sleep's part: apply what the evidence clearly says (a new policy version per change).
+/// The nightly `routes` job (jobs.rs): apply what the evidence clearly says (a new policy version per change).
 pub async fn tune(db: &sqlx::PgPool) -> Vec<String> {
     let (version, mut p) = policy(db).await;
     let Ok(st) = stats(db).await else { return Vec::new() };
@@ -286,7 +286,7 @@ pub async fn tune(db: &sqlx::PgPool) -> Vec<String> {
         }
         p["routes"][&kind]["candidates"] = Value::Array(cands);
         let reason = format!("{kind}: {old} -> {model}, {why} (from policy v{version})");
-        if set_policy(db, &p, &reason, "sleep").await.is_ok() {
+        if set_policy(db, &p, &reason, "routes").await.is_ok() {
             notes.push(format!("policy: {reason}; `zen policy undo` reverts"));
         }
     }

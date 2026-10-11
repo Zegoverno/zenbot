@@ -794,24 +794,6 @@ async fn sleep_inner(app: &AppState, run: i64) -> Result<Value> {
             }
         }
     }
-    let pruned_backups = prune_backups(&home.join(BACKUPS), BACKUP_DAYS);
-    if pruned_backups > 0 {
-        notes.push(format!("backups: removed {pruned_backups} prompt-file backup(s) older than {BACKUP_DAYS} days"));
-    }
-    let pruned = prune_outputs(&crate::zen_home().join("outputs"), OUTPUT_DAYS);
-    if pruned > 0 {
-        notes.push(format!("outputs: removed {pruned} saved tool output file(s) older than {OUTPUT_DAYS} days"));
-    }
-    // The wiki's nightly care: commit the agent's own edits since the last capture, report problems.
-    let wiki = crate::wiki::root();
-    if wiki.join(".git").exists() {
-        crate::git::commit_all(&wiki, "sleep: edits since the last capture").await;
-        for p in crate::wiki::lint(&wiki) {
-            notes.push(format!("wiki: {p}"));
-        }
-    }
-    notes.extend(crate::workshop::tend(db).await);
-    notes.extend(crate::delegate::tune(db).await);
     let note = if notes.is_empty() { None } else { Some(notes.join("\n")) };
     sqlx::query("UPDATE sleep_runs SET ended_at = now(), entries = $2, kept = $3, dropped = $4, promoted = $5, proposed = 0, note = $6 WHERE id = $1")
         .bind(run)
@@ -827,35 +809,6 @@ async fn sleep_inner(app: &AppState, run: i64) -> Result<Value> {
 
 /// Where prompt-file backups go, under the zen home (its own folder: `backups/` holds other things).
 pub(crate) const BACKUPS: &str = "backups/prompt-files";
-
-/// Days a prompt file's backup is kept in `<zen home>/backups/prompt-files`.
-const BACKUP_DAYS: u64 = 90;
-
-/// Days a saved tool output (cut bash/MCP output, fetched PDFs) is kept in `<zen home>/outputs`.
-const OUTPUT_DAYS: u64 = 30;
-
-/// Remove regular files directly in `dir` whose name `ours` accepts and that weren't modified for
-/// `days` days; returns how many. Anything else there is left alone.
-fn prune(dir: &std::path::Path, days: u64, ours: impl Fn(&str) -> bool) -> usize {
-    let Ok(read) = std::fs::read_dir(dir) else { return 0 };
-    let limit = std::time::Duration::from_secs(days * 86_400);
-    read.flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && ours(&e.file_name().to_string_lossy()))
-        .filter(|e| e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > limit))
-        .filter(|e| std::fs::remove_file(e.path()).is_ok())
-        .count()
-}
-
-/// Prompt-file backups (`*.md`) older than `days` days.
-fn prune_backups(dir: &std::path::Path, days: u64) -> usize {
-    prune(dir, days, |n| n.ends_with(".md"))
-}
-
-/// Saved outputs older than `days` days: only files the kernel saves (`*.log`, `mcp-*.txt`,
-/// `web-*.pdf`).
-fn prune_outputs(dir: &std::path::Path, days: u64) -> usize {
-    prune(dir, days, |n| n.ends_with(".log") || (n.starts_with("mcp-") && n.ends_with(".txt")) || (n.starts_with("web-") && n.ends_with(".pdf")))
-}
 
 /// A line about the last sleep for a session's instructions, when it ran in the last day (the
 /// "morning note": what was kept, archived and promoted, and where).
@@ -1041,20 +994,6 @@ mod tests {
         let all = vec![e(1, "stale", "inferred", 30.0), e(2, "fresh", "inferred", 0.0)];
         let fates = plan(&all, &[None, None], line(&all[1]).chars().count());
         assert_eq!(fates, vec![Fate::Drop("didn't fit"), Fate::Keep]);
-    }
-
-    #[test]
-    fn old_saved_outputs_are_pruned_and_others_kept() {
-        let dir = crate::test_util::TestDir::new("outputs");
-        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86_400);
-        for name in ["1.log", "mcp-a.txt", "web-a.pdf", "notes.md", "fresh.log"] {
-            std::fs::write(dir.join(name), "x").unwrap();
-            if name != "fresh.log" {
-                std::fs::File::options().write(true).open(dir.join(name)).unwrap().set_modified(old).unwrap();
-            }
-        }
-        assert_eq!(prune_outputs(&dir, 30), 3);
-        assert!(dir.join("notes.md").exists() && dir.join("fresh.log").exists());
     }
 
     #[test]

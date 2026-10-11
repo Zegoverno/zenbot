@@ -13,8 +13,8 @@
 //! agent's job: the result says when the summary needs it. Without System One, an exact title or
 //! alias match picks the page, else a new page. Notes from a session that read untrusted content,
 //! and memories one saved (the sleep's copy), are labelled `web`; a page with such an entry is
-//! untrusted content wherever it's read (`search`, `read`: taint.rs). The nightly sleep lints the
-//! wiki (missing summaries, broken links).
+//! untrusted content wherever it's read (`search`, `read`: taint.rs). The nightly `wiki` job
+//! (`tend`, jobs.rs) commits the agent's own edits and lints the wiki (missing summaries, broken links).
 
 use std::path::{Path, PathBuf};
 
@@ -156,6 +156,17 @@ pub fn index_text(pages: &[Page]) -> String {
         out.push_str(&format!("- [[{}]] {} ({}, {} entries): {}\n", p.slug, p.title, if p.kind.is_empty() { "page" } else { &p.kind }, p.entries.len(), zen_proto::head(line, 160)));
     }
     out
+}
+
+/// The nightly `wiki` job: commit the agent's own edits since the last capture, then report what's
+/// wrong (one line each, `wiki: ` first). Nothing when there's no wiki yet.
+pub async fn tend() -> Vec<String> {
+    let wiki = root();
+    if !wiki.join(".git").exists() {
+        return Vec::new();
+    }
+    crate::git::commit_all(&wiki, "wiki job: edits since the last capture").await;
+    lint(&wiki).into_iter().map(|p| format!("wiki: {p}")).collect()
 }
 
 /// What's wrong with the wiki: pages without a summary, links to pages that don't exist.

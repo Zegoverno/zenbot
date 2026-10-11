@@ -1,9 +1,15 @@
 //! Scheduled jobs (DESIGN.md, "Scheduled jobs"; D-046). One scheduler in the kernel, backed by the
 //! `jobs` and `job_runs` tables, runs two kinds of job:
 //!
-//! - **system** jobs, the kernel's own maintenance, seeded at start: `sleep` (the nightly memory
-//!   sleep, `memory::sleep`) and `engines` (`scripts/update-engines.sh`). The owner can pause and
-//!   run them; nobody can remove them.
+//! - **system** jobs, the kernel's own maintenance, seeded at start (an install from before a job
+//!   existed gets it at its next start): `sleep` (the nightly memory sleep, `memory::sleep`),
+//!   `wiki` (commit the agent's wiki edits, report problems: `wiki::tend`), `skills` (flag and
+//!   archive unused skills: `workshop::tend`), `routes` (switch a delegation route on clear
+//!   evidence: `delegate::tune`), `prune` (old saved outputs and prompt-file backups) and `engines`
+//!   (`scripts/update-engines.sh`). Each records its own run; a run with nothing to report is
+//!   `silent`. What `wiki`, `skills`, `routes` and `prune` found in the last day reaches the next
+//!   sessions with the sleep's morning note (`upkeep_note`). The owner can pause and run them;
+//!   nobody can remove them.
 //! - **agent** jobs: a prompt run in a fresh session (kind `job`) with the instructions the job
 //!   picks (`context`: the soul always, plus any of identity, agents, user, memory, skills,
 //!   project) and the skills it names loaded. The session can't ask, delegate or schedule; its final
@@ -53,9 +59,14 @@ const MAX_FAILURES: i32 = 5;
 /// How long a failing agent job waits at least before its next run, by failures in a row.
 const BACKOFF_SECS: [i64; 4] = [60, 300, 900, 3600];
 
-/// The kernel's own jobs: (name, action, schedule in UTC, what it does).
-const SYSTEM: [(&str, &str, &str, &str); 2] = [
+/// The kernel's own jobs: (name, action, schedule in UTC, what it does). The nightly ones run ten
+/// minutes apart after the sleep, so each has the machine to itself and its own record.
+const SYSTEM: [(&str, &str, &str, &str); 6] = [
     ("sleep", "sleep", "0 3 * * *", "tidy short-term memory: promote, rank, archive (memory::sleep)"),
+    ("wiki", "wiki", "10 3 * * *", "commit the agent's wiki edits since the last capture, report pages without a summary and broken links (wiki::tend)"),
+    ("skills", "skills", "20 3 * * *", "flag skills unused for 30 days, archive them at 90 (workshop::tend)"),
+    ("routes", "routes", "30 3 * * *", "switch a delegation route where the owner's verdicts clearly favour another model (delegate::tune)"),
+    ("prune", "prune", "40 3 * * *", "remove saved tool outputs older than 30 days and prompt-file backups older than 90 (jobs::prune_files)"),
     ("engines", "engines", "0 4 * * *", "update the Claude Code and Codex CLIs, tested, with rollback (scripts/update-engines.sh)"),
 ];
 
@@ -613,12 +624,13 @@ async fn owner_words(db: &PgPool, session: Uuid) -> Vec<String> {
 
 // ---------- the scheduler ----------
 
-/// Create the kernel's own jobs if they aren't there.
+/// Create the kernel's own jobs if they aren't there (an install from before a job existed gets it
+/// here). One whose name an agent job already has isn't created: logged, so the owner can rename theirs.
 pub async fn seed(db: &PgPool) -> Result<()> {
     for (name, action, schedule, _) in SYSTEM {
         let (s, canon) = parse_schedule(schedule, Tz::UTC, Utc::now())?;
         let next = next_after(&s, Tz::UTC, Utc::now());
-        sqlx::query(
+        let made = sqlx::query(
             "INSERT INTO jobs (name, kind, action, schedule, tz, created_by, next_run_at)
              SELECT $1, 'system', $2, $3, 'UTC', 'kernel', $4
              WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE kind = 'system' AND action = $2 AND removed_at IS NULL)
@@ -630,6 +642,12 @@ pub async fn seed(db: &PgPool) -> Result<()> {
         .bind(next)
         .execute(db)
         .await?;
+        if made.rows_affected() == 0 {
+            let have: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM jobs WHERE kind = 'system' AND action = $1 AND removed_at IS NULL)").bind(action).fetch_one(db).await?;
+            if !have {
+                tracing::warn!("the system job `{name}` wasn't created: another job has that name (rename it and restart)");
+            }
+        }
     }
     Ok(())
 }
@@ -828,6 +846,10 @@ async fn run_system(app: &AppState, job: &Job) -> Result<Outcome> {
             );
             Ok(Outcome { status: "ok", output: Some(line), error: None })
         }
+        Some("wiki") => Ok(upkeep(crate::wiki::tend().await)),
+        Some("skills") => Ok(upkeep(crate::workshop::tend(&app.db).await)),
+        Some("routes") => Ok(upkeep(crate::delegate::tune(&app.db).await)),
+        Some("prune") => Ok(upkeep(prune_files(&crate::zen_home()))),
         Some("engines") => {
             let repo = PathBuf::from(&app.repo);
             let script = repo.join("scripts/update-engines.sh");
@@ -845,6 +867,76 @@ async fn run_system(app: &AppState, job: &Job) -> Result<Outcome> {
         }
         other => bail!("unknown system action {other:?}"),
     }
+}
+
+/// A nightly upkeep job's outcome: its findings, one per line, or `silent` when it found nothing.
+fn upkeep(notes: Vec<String>) -> Outcome {
+    if notes.is_empty() {
+        Outcome { status: "silent", output: None, error: None }
+    } else {
+        Outcome { status: "ok", output: Some(notes.join("\n")), error: None }
+    }
+}
+
+/// The system jobs whose findings go into the morning note.
+const UPKEEP: [&str; 4] = ["wiki", "skills", "routes", "prune"];
+
+/// What the nightly upkeep jobs found in the last day (each one's latest run that found something),
+/// for a session's instructions next to the sleep's morning note. None when they found nothing.
+pub async fn upkeep_note(db: &PgPool) -> Result<Option<String>, sqlx::Error> {
+    let found: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT ON (j.action) r.output FROM job_runs r JOIN jobs j ON j.id = r.job_id
+         WHERE j.kind = 'system' AND j.action = ANY($1) AND r.status = 'ok' AND r.output IS NOT NULL
+           AND r.ended_at > now() - interval '1 day'
+         ORDER BY j.action, r.id DESC",
+    )
+    .bind(UPKEEP.as_slice())
+    .fetch_all(db)
+    .await?;
+    Ok((!found.is_empty()).then(|| format!("Last night's upkeep:\n{}", zen_proto::head(&found.join("\n"), 1500))))
+}
+
+/// Days a prompt file's backup is kept in `<zen home>/backups/prompt-files`.
+const BACKUP_DAYS: u64 = 90;
+
+/// Days a saved tool output (cut bash/MCP output, fetched PDFs) is kept in `<zen home>/outputs`.
+const OUTPUT_DAYS: u64 = 30;
+
+/// The `prune` job: old saved outputs and prompt-file backups under the zen home `home`.
+fn prune_files(home: &std::path::Path) -> Vec<String> {
+    let mut notes = Vec::new();
+    let backups = prune_backups(&home.join(crate::memory::BACKUPS), BACKUP_DAYS);
+    if backups > 0 {
+        notes.push(format!("backups: removed {backups} prompt-file backup(s) older than {BACKUP_DAYS} days"));
+    }
+    let outputs = prune_outputs(&home.join("outputs"), OUTPUT_DAYS);
+    if outputs > 0 {
+        notes.push(format!("outputs: removed {outputs} saved tool output file(s) older than {OUTPUT_DAYS} days"));
+    }
+    notes
+}
+
+/// Remove regular files directly in `dir` whose name `ours` accepts and that weren't modified for
+/// `days` days; returns how many. Anything else there is left alone.
+fn prune(dir: &std::path::Path, days: u64, ours: impl Fn(&str) -> bool) -> usize {
+    let Ok(read) = std::fs::read_dir(dir) else { return 0 };
+    let limit = std::time::Duration::from_secs(days * 86_400);
+    read.flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && ours(&e.file_name().to_string_lossy()))
+        .filter(|e| e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > limit))
+        .filter(|e| std::fs::remove_file(e.path()).is_ok())
+        .count()
+}
+
+/// Prompt-file backups (`*.md`) older than `days` days.
+fn prune_backups(dir: &std::path::Path, days: u64) -> usize {
+    prune(dir, days, |n| n.ends_with(".md"))
+}
+
+/// Saved outputs older than `days` days: only files the kernel saves (`*.log`, `mcp-*.txt`,
+/// `web-*.pdf`).
+fn prune_outputs(dir: &std::path::Path, days: u64) -> usize {
+    prune(dir, days, |n| n.ends_with(".log") || (n.starts_with("mcp-") && n.ends_with(".txt")) || (n.starts_with("web-") && n.ends_with(".pdf")))
 }
 
 fn shell_quote(s: &str) -> String {
@@ -1045,6 +1137,20 @@ pub async fn run_tool(app: &AppState, session: Uuid, name: &str, args: &Value) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_saved_outputs_are_pruned_and_others_kept() {
+        let dir = crate::test_util::TestDir::new("outputs");
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86_400);
+        for name in ["1.log", "mcp-a.txt", "web-a.pdf", "notes.md", "fresh.log"] {
+            std::fs::write(dir.join(name), "x").unwrap();
+            if name != "fresh.log" {
+                std::fs::File::options().write(true).open(dir.join(name)).unwrap().set_modified(old).unwrap();
+            }
+        }
+        assert_eq!(prune_outputs(&dir, 30), 3);
+        assert!(dir.join("notes.md").exists() && dir.join("fresh.log").exists());
+    }
 
     fn t(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
