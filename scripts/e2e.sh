@@ -116,6 +116,7 @@ open_loop() {
     "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/sessions/$sid?last=1" | jq '.messages | length')" \
     "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/sessions/$sid?after=$last" | jq '.messages | length')" \
     "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/sessions/$sid?after=$first" | jq '.messages | length')" "$((all - 1))"
+  check "a page says how many messages there are in all" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/sessions/$sid?last=1" | jq .message_count)" "$all"
 }
 
 # The prompt files: installed when missing, never overwritten, read at session start.
@@ -446,7 +447,8 @@ delegation() {
   r=$(zen ask --json -m faux/smoke "waitless")
   check "ask with wait=false keeps working" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" ask:false,bash:false
   # The sessions board: a session whose questions the owner hasn't answered is waiting on them,
-  # until the owner's next message; a running subagent shows with its task under its running parent. subagent shows with its task under its running parent.
+  # until the owner's next message; a running subagent shows with its task under its running parent.
+# Archived sessions are counted, and sent only when asked for.
   board() { curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/board"; }
   local asked; asked=$(echo "$r" | jq -r .session_id)
   waiting() { board | jq -r --arg s "$1" '.sessions[] | select(.id == $s) | .waiting'; }
@@ -467,6 +469,10 @@ delegation() {
   wait "$asker"
   check "all idle once it's done" eq "$(board | jq '[.sessions[] | select(.busy)] | length')" 0
   check "finished subagents stay listed under their parent" eq "$(board | jq --arg p "$sid" '[.sessions[] | select(.parent == $p and .kind == "subagent")] | length')" 2
+  check "a session says how many children it has" eq "$(board | jq --arg p "$sid" '(.sessions[] | select(.id == $p) | .children) == ([.sessions[] | select(.parent == $p)] | length)')" true
+  curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"archived":true}' "$URL/api/sessions/$asked" >/dev/null
+  check "an archived session is counted, not sent" eq "$(board | jq -c --arg s "$asked" '[.archived >= 1, ([.sessions[] | select(.id == $s)] | length)]')" '[true,0]'
+  check "until asked for" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/board?archived=true" | jq --arg s "$asked" '[.sessions[] | select(.id == $s)] | length')" 1
 }
 
 # remember: a memory saved in one session is in the next session's instructions, not the current one's.
