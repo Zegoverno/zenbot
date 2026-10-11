@@ -143,7 +143,7 @@ impl App {
                 self.status = "Writing".into();
                 self.tool_since = None;
                 if !self.inline {
-                    self.draw(); // the whole reply so far shows in the conversation
+                    self.draw_soon(); // the whole reply so far shows in the conversation
                     return;
                 }
                 let mut out = Vec::new();
@@ -153,7 +153,7 @@ impl App {
                     self.committed += pos + 1;
                 }
                 if out.is_empty() {
-                    self.draw();
+                    self.draw_soon();
                 } else {
                     self.commit(out);
                 }

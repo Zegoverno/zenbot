@@ -115,6 +115,10 @@ pub(super) struct App {
     pub(super) board: Option<Board>,
     /// The session is a subagent's or a verifier's: watch it, don't type into it or stop it.
     pub(super) read_only: bool,
+    /// When the last frame was drawn, and whether something changed since that waits for the
+    /// next frame tick (`draw_soon`).
+    pub(super) last_draw: Option<Instant>,
+    pub(super) dirty: bool,
 }
 
 /// A suggested next prompt (the kernel's `suggestion` event) and whether the owner took it into
@@ -215,6 +219,8 @@ impl App {
             turn_files: Default::default(),
             board: None,
             read_only: false,
+            last_draw: None,
+            dirty: false,
         }
     }
 

@@ -163,6 +163,8 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
         let mut watch = tokio::time::interval(Duration::from_millis(500));
         let mut install_check = tokio::time::interval(Duration::from_secs(5));
         let mut board_poll = tokio::time::interval(BOARD_REFRESH);
+        let mut frame = tokio::time::interval(FRAME);
+        frame.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         while !app.quit {
             tokio::select! {
                 ev = events.next() => match ev {
@@ -171,6 +173,8 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
                     None => break,
                 },
                 Some(msg) = rx.recv() => app.on_incoming(msg).await,
+                // Streamed text that arrived since the last frame.
+                _ = frame.tick(), if app.dirty => app.draw(),
                 _ = tick.tick(), if app.busy || app.board_running() => {
                     if app.board.is_some() {
                         app.rebuild_board();
