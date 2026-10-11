@@ -102,7 +102,7 @@ scenario uses a local HTTP stub to check its auth, model id and `bool` ↔ `noul
 
 `scripts/e2e.sh` builds (unless `ZEN_E2E_NO_BUILD=1`), then runs each scenario on a kernel built from this checkout (or the binaries in `ZEN_E2E_BIN`) with the scripted faux model. It uses a throwaway database (`zen_e2e_<pid>`), throwaway git workspaces and a throwaway `HOME`, on port 18377 (`ZEN_E2E_PORT`). No subscription is used, nothing reaches the internet and the live service isn't touched. It needs Postgres running, plus `git`, `curl`, `jq`, `bubblewrap` and `python3`.
 
-There are 27 scenarios (`run …` lines at the bottom of the script). Some start small test programs from `scripts/e2e/`:
+The scenarios are the `run …` lines at the bottom of the script; the comment above each function says what it checks. Some start small test programs from `scripts/e2e/`:
 
 | Program | Started by | What it is |
 |---|---|---|
