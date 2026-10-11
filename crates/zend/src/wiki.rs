@@ -164,17 +164,21 @@ pub fn lint(dir: &Path) -> Vec<String> {
     let slugs: Vec<&str> = all.iter().map(|p| p.slug.as_str()).collect();
     let mut problems = Vec::new();
     for p in &all {
-        if p.summary.contains("[No summary yet") && !p.entries.is_empty() {
-            problems.push(format!("{}: no summary yet ({} entries)", p.slug, p.entries.len()));
-        }
         let text = std::fs::read_to_string(dir.join(format!("{}.md", p.slug))).unwrap_or_default();
+        // The problems go into the sleep's note, in the next sessions' instructions: a page with
+        // entries labelled `web` may be named after (and link to) untrusted text, so it isn't named.
+        let web = has_web_entry(&text);
+        let name = if web { "a page with entries labelled web (search the wiki to find it)" } else { p.slug.as_str() };
+        if p.summary.contains("[No summary yet") && !p.entries.is_empty() {
+            problems.push(format!("{name}: no summary yet ({} entries)", p.entries.len()));
+        }
         let mut rest = text.as_str();
         while let Some(i) = rest.find("[[") {
             let after = &rest[i + 2..];
             let Some(j) = after.find("]]") else { break };
             let target = after[..j].split('|').next().unwrap_or("").trim();
             if !target.is_empty() && !slugs.contains(&target) {
-                problems.push(format!("{}: link to missing page [[{target}]]", p.slug));
+                problems.push(if web { format!("{name}: a link to a missing page") } else { format!("{name}: link to missing page [[{target}]]") });
             }
             rest = &after[j + 2..];
         }
