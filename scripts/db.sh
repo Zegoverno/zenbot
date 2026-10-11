@@ -66,6 +66,36 @@ db_backup() {
   echo "$out"
 }
 
+# Give the database user a private password, once per install: Postgres starts with the public
+# bootstrap password in deploy/compose.yaml (`zen`), which any process on the VM could use to rewrite
+# zenbot's state. This makes a random one in ~/.zenbot/db-password (private; secret to the kernel's
+# tools), sets it with ALTER USER over the container's local socket (fed on stdin, so it never shows
+# in a process list or a log), then points DATABASE_URL in ~/.zenbot/env at it (callers keep the
+# old file with env_backup first). Done when DATABASE_URL already carries it; leaves a DATABASE_URL
+# for another server or user alone. install.sh runs it, and apply-upgrade.sh right before the restart (old binaries read
+# DATABASE_URL from env too, so a rollback keeps working). Prints what it did, never the password.
+DB_PASSWORD_FILE="$HOME/.zenbot/db-password"
+db_secure() {
+  local cur pw want
+  cur=$(zen_env DATABASE_URL)
+  if [ -n "$cur" ] && ! [[ $cur =~ ^postgres(ql)?://zen(:[^@]*)?@(127\.0\.0\.1|localhost):5432/ ]]; then
+    return 0 # not the bundled Postgres
+  fi
+  if [ ! -s "$DB_PASSWORD_FILE" ]; then
+    mkdir -p "$(dirname "$DB_PASSWORD_FILE")"
+    (umask 077 && head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 32 > "$DB_PASSWORD_FILE")
+  fi
+  chmod 600 "$DB_PASSWORD_FILE"
+  pw=$(cat "$DB_PASSWORD_FILE")
+  [[ $pw =~ ^[A-Za-z0-9]{16,}$ ]] || { echo "db_secure: $DB_PASSWORD_FILE isn't a password this script made" >&2; return 1; }
+  want="postgres://zen:$pw@127.0.0.1:5432/$(db_live_name)"
+  [ "$cur" != "$want" ] || return 0
+  printf "ALTER USER zen PASSWORD '%s';\n" "$pw" | db_exec psql -U zen -d postgres -v ON_ERROR_STOP=1 -q >/dev/null || {
+    echo "db_secure: setting the database password failed" >&2; return 1; }
+  env_set DATABASE_URL "$want"
+  echo "database password replaced with a private one (~/.zenbot/db-password); DATABASE_URL updated in ~/.zenbot/env"
+}
+
 # How to put a backup back (stop zenbot first). Printed, never run by the scripts.
 db_restore_cmd() {
   echo "sudo systemctl stop zenbot && sudo docker compose -f $DB_REPO/deploy/compose.yaml exec -T postgres pg_restore -U zen --clean --if-exists -d $(db_live_name) < $1 && sudo systemctl start zenbot"
@@ -83,6 +113,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   case ${1:-} in
     pending) db_pending ;;
     backup) db_backup "${2:-manual}" ;;
-    *) echo "usage: $0 pending | backup [label]" >&2; exit 2 ;;
+    secure) env_backup; db_secure ;;
+    *) echo "usage: $0 pending | backup [label] | secure" >&2; exit 2 ;;
   esac
 fi

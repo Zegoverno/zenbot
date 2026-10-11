@@ -59,7 +59,7 @@ const PROMPT_FILES: [&str; 4] = [crate::layout::SOUL, crate::layout::IDENTITY, "
 
 /// The owner's configuration and secrets under the zen home: the agent never changes them with
 /// `edit` or `write` (the owner edits them by hand). `matrix` and `bin` are folders.
-const OWNER_FILES: [&str; 6] = ["mcp.json", "env", "token", "matrix.env", "matrix", "bin"];
+const OWNER_FILES: [&str; 8] = ["mcp.json", "env", "env.prev", "token", "db-password", "matrix.env", "matrix", "bin"];
 
 /// A file an `edit` or `write` call may not change freely.
 #[derive(Debug, PartialEq)]
@@ -659,7 +659,7 @@ mod tests {
         assert!(at("edit", "zenbot/notes.md").is_none());
         assert!(at("edit", "/home/nobody/USER.md").is_none());
         let owner = |path: &str| matches!(at("write", path), Some(Protected::OwnerOnly(_)));
-        for p in ["../mcp.json", "../token", "../env", "../matrix.env", "../matrix/store/x", "../bin/zend"] {
+        for p in ["../mcp.json", "../token", "../env", "../env.prev", "../db-password", "../matrix.env", "../matrix/store/x", "../bin/zend"] {
             assert!(owner(p), "{p}");
         }
         let steering = |path: &str| matches!(at("write", path), Some(Protected::Steering(_)));

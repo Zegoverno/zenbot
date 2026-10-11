@@ -6,16 +6,12 @@
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO"
-. "$REPO/scripts/lib.sh"
+. "$REPO/scripts/db.sh" # and scripts/lib.sh
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 ENV_FILE="$HOME/.zenbot/env"
 # Add KEY=VALUE to ~/.zenbot/env unless KEY is set there already, so a re-run keeps the owner's settings.
 env_default() { grep -qE "^$1=" "$ENV_FILE" 2>/dev/null || echo "$1=$2" >> "$ENV_FILE"; }
-# Set KEY=VALUE in ~/.zenbot/env, replacing any line for KEY (for settings passed to this run).
-env_set() {
-  local rest; rest=$(grep -vE "^$1=" "$ENV_FILE" 2>/dev/null || true)
-  { [ -n "$rest" ] && echo "$rest"; echo "$1=$2"; } > "$ENV_FILE"
-}
+# env_set (scripts/lib.sh) replaces KEY's line, for settings passed to this run.
 
 # Prebuilt binaries are downloaded when available (scripts/fetch-release.sh); Rust and a C
 # toolchain are only installed when zenbot has to be compiled here. Set ZEN_BUILD_FROM_SOURCE=1
@@ -75,6 +71,7 @@ ln -sf "$HOME/.zenbot/bin/zen" "$HOME/.local/bin/zen"
 new_token
 touch "$ENV_FILE"
 chmod 600 "$ENV_FILE"
+env_backup
 [ -z "${ZEN_PORT:-}" ] || env_set ZEN_PORT "$ZEN_PORT"
 # The token file is the source of truth (the zen CLI reads it), so the service always gets it.
 env_set ZEN_TOKEN "$(cat "$HOME/.zenbot/token")"
@@ -85,6 +82,12 @@ env_default HOME "$HOME"
 env_default PATH "$HOME/.local/bin:$NODE_DIR/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
 PORT=$(zen_env ZEN_PORT)
 git rev-parse --short HEAD > "$HOME/.zenbot/version" 2>/dev/null || true
+
+say "Database"
+# Postgres starts with the public bootstrap password in deploy/compose.yaml; replace it with a
+# private one before zend first connects (db_secure, scripts/db.sh).
+sudo docker compose -f deploy/compose.yaml up -d --wait postgres >/dev/null
+db_secure
 
 say "Service"
 sed -e "s#__USER__#$USER#g" -e "s#__REPO__#$REPO#g" -e "s#__HOME__#$HOME#g" deploy/zenbot.service \
