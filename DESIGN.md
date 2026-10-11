@@ -134,18 +134,21 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
   `delegate` or `schedule` (`agent::refusal`). A silent run's session is archived.
 - **Creating jobs**: the owner (`zen jobs add`, `POST /api/jobs`) or the agent (`schedule`). An
   agent's job goes live only when System One, reading the owner's own messages in the session,
-  gives ≥ `ZEN_JOB_BAR` (0.9) that the owner asked for it (decision point `job_approval`);
+  gives ≥ `ZEN_JOB_BAR` (0.9) that the owner asked for it (decision point `job_approval`; the
+  task the agent wrote is shown as untrusted data, never as evidence);
   otherwise, or in a tainted session, it's saved paused with the reason, and the owner's
   `zen jobs resume` approves it. The agent can't set a job's model.
 - **Running**: the loop sleeps until the earliest due job (at most `ZEN_JOBS_TICK`, 60 s), claims
-  due jobs with `FOR UPDATE SKIP LOCKED` and sets their next run in the same transaction; a partial
-  unique index allows one `running` run per job; a running job counts as busy for upgrades. At
+  due jobs with `FOR UPDATE SKIP LOCKED` and sets their next run in the same transaction (an
+  interval keeps its rhythm from the due time, `due + k·d`, so it doesn't drift); a partial
+  unique index allows one `running` run per job, and a tick skips a job that has one; a running job counts as busy for upgrades. At
   start, runs left `running` are marked `interrupted`. A run later than its grace (half its period,
   2 minutes to 2 hours) is recorded `missed`; within it, it runs once (`catchup`). A failing agent
   job's next run waits at least 1, 5, 15, then 60 minutes, and the 5th failure in a row pauses it.
 - **Schedules**: 5-field cron in the job's IANA zone (`croner`, `chrono-tz`; default
   America/Sao_Paulo, `ZEN_TZ`), `every <duration>`, `at <time>`, `in <duration>` (stored as `at`);
-  agent jobs at most every 5 minutes.
+  agent jobs at most every 5 minutes (a cron's shortest gap over its next 50 runs). A duration
+  or time out of range is an error, never a panic.
 - `ZEN_JOBS=0` turns the scheduler off (smoke, e2e, eval and dev kernels); system jobs are still
   seeded.
 
@@ -201,7 +204,8 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
   fingerprint `zen skills` showed, refused when the content changed since (D-051).
 - **Delegation** (`delegate.rs`, D-038): subagents (kind `subagent`, no `ask`, `delegate` or
   `schedule`; they inherit the parent's taint), several
-  tasks per call in parallel; the model from the routing policy (`policies`) by kind of work, with
+  tasks per call in parallel; a child (subagent or verifier) is stopped with the turn that waits
+  for it (an abort, the turn ending), and so on down; the model from the routing policy (`policies`) by kind of work, with
   logged exploration; the sleep tunes routes on clear evidence.
 - **Skills** (`skills.rs`): folders in `~/.zenbot/global/skills/<domain>/<name>/` in the agentskills.io
   format, validated when scanned (invalid ones are skipped and logged). The instructions carry an
@@ -285,8 +289,8 @@ reviewed (`zen-engine codex-features`).
 Web pages, untrusted MCP output (including tool descriptions) and instruction files from
 repositories the owner hasn't listed (`ZEN_TRUSTED_REPOS`) taint the session and are wrapped; taint
 fails closed.
-All tool output is masked before reaching the model or tape; full outputs stay under
-`~/.zenbot/outputs`. **This is not a security boundary against the agent:** ordinary commands still
+All tool output is masked before reaching the model or tape, and tool arguments before clients or
+`tool_calls` see them; full outputs stay under `~/.zenbot/outputs`. **This is not a security boundary against the agent:** ordinary commands still
 run as the owner's Unix user and can read and write the owner's files, including `~/.zenbot/token`
 and the files `edit`/`write` protect. Strong
 isolation needs a separate uid and an owner credential unavailable to it. Outward-facing actions

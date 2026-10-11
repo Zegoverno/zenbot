@@ -52,7 +52,7 @@ The kernel sends events, in order:
 | `message` | `message` | a message added to the session (Pi's format; the event carries no `seq`: `GET /api/sessions/{id}?after=` returns messages with theirs, which is how `zen-matrix` catches up). A user message with `kernel: true` is the kernel talking to the model (the prompt of a verifier, subagent, job or sleep session), not the owner |
 | `busy` | `busy: true, turn_id, harness, model, effort` | a turn started (also turns the kernel started itself) |
 | `delta`, `thinking` | `delta` | streamed answer text / reasoning |
-| `tool_start` | `call_id, name, args` | a tool call began |
+| `tool_start` | `call_id, name, args` | a tool call began (`args` with secrets masked and each string cut at 4 KB) |
 | `tool_end` | `call_id, is_error, ms` | it finished |
 | `end` | `error, cost, turn, next` | the turn ended. `turn` is the kernel's record (tokens, cost, time, `cache_break`, `context_tokens`, `render`); `cost` is the session's total (absent when the turn failed to start). `next` is always false today; with `next: true` a client keeps waiting for `idle` |
 | `child_end` | `turn` | a child session's turn ended (a verifier); count its cost with the job |
