@@ -470,7 +470,7 @@ mod tests {
     fn the_owners_words_are_whole_and_the_budget_holds() {
         let b = |seq: i32, payload: Value| Block { seq, kind: "message".into(), payload };
         let owner = format!("REQ-START {} REQ-END", "o".repeat(5000));
-        let msgs = vec![
+        let msgs = [
             b(1, json!({ "role": "user", "content": [{ "type": "text", "text": owner }] })),
             b(2, json!({ "role": "assistant", "content": [{ "type": "text", "text": "a".repeat(3000) }] })),
             b(3, json!({ "role": "toolResult", "toolName": "bash", "content": [{ "type": "text", "text": "t".repeat(3000) }] })),
