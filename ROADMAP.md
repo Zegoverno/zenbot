@@ -1,112 +1,36 @@
 # zenbot — Roadmap
 
-> Phases run in order, each marked with its status (all are done; "What's next" holds what follows). Specs for what's next live here; what shipped goes to
-> [PROGRESS.md](PROGRESS.md); why, to [DECISIONS.md](DECISIONS.md). The design these phases build is
-> in [DESIGN.md](DESIGN.md) ("Target design"). Agreed with the owner on 2026-10-06 (D-025 to D-030).
+> What's being built next, open decisions and technical debt. What shipped goes to
+> [PROGRESS.md](PROGRESS.md); why, to [DECISIONS.md](DECISIONS.md); how it works, to
+> [DESIGN.md](DESIGN.md).
 
-Rules for every phase: each choice follows the best known practice, checked in reference projects'
+Rules for every step: each choice follows the best known practice, checked in reference projects'
 code, and says where it comes from (security included); what ships is used on real work the week it
 ships; harness changes are evaluated against the installed version (`scripts/eval.sh`) and the owner
 decides; every load and call is recorded per turn; System One is built into each tool as it lands.
 
 ## Where things stand
 
-Every phase below is merged and installed, with what came after (scheduled jobs, the sessions
-board, the Matrix channel): `main` is what runs. The kernel, the `zen` terminal app, the Claude
-Code / Codex engines (through `zen-engine`; the Pi worker is retired, D-043) and context v2
-(`docs/context.md`) were built before. See PROGRESS.md. These phases replaced the old next steps
-(old "Phase 2b", "Phase 3 memory", "Phase 4 search", "Phase 5 wiki").
+`main` is what runs. The kernel, the `zen` terminal app, the Claude Code / Codex engines (through
+`zen-engine`; the Pi worker is retired, D-043) and context v2 (`docs/context.md`) came first. The
+redesign agreed with the owner on 2026-10-06 (D-025 to D-030) was built in the phases below, all
+done; scheduled jobs (D-046), session names and suggestions (D-047), the sessions board (D-048) and
+the Matrix channel (D-049) followed, then a weekend of hardening (D-050 to D-053; PROGRESS.md,
+2026-10-10 and 2026-10-11).
 
-| Phase | Name | Delivers | Status |
+| Phase | Name | Delivered | Where it's recorded |
 |---|---|---|---|
-| 0 | Ground | Research the reference projects in their code; merge the open fix PRs | done (`docs/research/`) |
-| 1 | Foundation | Prompt files, tool descriptions, short-term memory with sleep, skills, workflow into skills | done (#17): 12/12 → 12/12, cost +27% |
-| 2 | Reach | `web_search`, `web_fetch`, MCP client, `find_tools` / `load_tool` / `call_tool` | done (#18) |
-| 3 | Recall | `search` (exact, full-text and semantic) over sessions and memories | done (#19): 12/12, cost −6% |
-| 4 | Knowledge | The wiki and `capture` | done (#20) |
-| 5 | Self-improvement | The agent creates and improves skills and tools, without sprawl | done (#21) |
-| 6 | Delegation | `delegate`: subagents; model choice from real usage | done (#22) |
-
----
-
-## Phase 0 — Ground `[ done ]`
-
-The reference projects were studied in their code (2026-10-06); the reports, with file paths, are in
-`docs/research/`: `hermes-openclaw.md` (prompt files, memory caps, frozen snapshot, skill sprawl),
-`skills-tools-mcp.md` (agentskills.io, deferred tools and the cache, FastMCP, rmcp, Voyager; with a
-spike on Claude Code), `memory-search-web.md` (Letta, LLM Wiki and gbrain, hybrid search in
-Postgres, web search providers, web fetch safety). DESIGN.md's target design cites them. The fix
-PRs (#8, #9, #10, #13) were merged on 2026-10-06 without an eval.
-
-## Phase 1 — Foundation `[ done ]`
-
-Merged in #17. Eval against the installed build: 12/12 → 12/12 passed; cost +27% and tokens +37%
-on these short tasks (long sessions +16%), cache hit unchanged, time −4%. The extra cost is the
-larger fixed prefix (prompt files, memory, skills index, richer tool descriptions: about 7.9k →
-16k characters), paid once per session before the cache takes over. Lever if wanted: shorter
-descriptions for `verify`, `remember` and `decide`.
-
-## Phase 2 — Reach `[ done ]`
-
-1. **Spike** (`docs/research/skills-tools-mcp.md`): a changed tool list reaches Claude Code
-   mid-turn but rewrites the whole cached prefix, on every engine. So the tool list stays fixed:
-   `find_tools` (names and one-liners), `load_tool` (the schema, as a tool result) and `call_tool`.
-2. `web_search` (Brave or Tavily with a key; SearXNG in `deploy/compose.yaml` without one, which
-   also rescues a failed keyed call; System One reranks) and `web_fetch` (readable markdown, public
-   addresses only, paging, `focus` through System One, PDFs for pdftotext). Web content is wrapped
-   as untrusted and taints the session.
-3. MCP client written against the spec (stdio and streamable HTTP; not `rmcp`, D-033), configured
-   in `~/.zenbot/mcp.json`.
-
-## Phase 3 — Recall `[ done ]`
-
-- `search` over every session's turns and over memories: an indexer keeps
-  `search_docs` current; exact names and paths first (trigram), then full text (`simple` config) and
-  meaning (pgvector, `openai/text-embedding-3-small` through OpenRouter) merged by reciprocal rank
-  fusion; System One reranks; a memory found counts as used; every search is logged. `history` stays
-  for reading messages by number, now in any session.
-- Long-term promotion (D-035) was retired by D-045: traits and guidance go to `IDENTITY.md` or
-  `USER.md`, which the agent writes and keeps compact.
-
-## Phase 4 — Knowledge `[ done ]`
-
-The wiki (`~/.zenbot/global/wiki/`, in git): one page per concept, entity, decision, playbook, project or
-person, in gbrain's shape (a summary over an append-only, dated timeline with sources), plus
-`index.md` and `log.md` kept by the kernel. `capture` (D-036): search finds candidate pages, System
-One picks the page (or a new one) and catches notes already recorded or sensitive, the kernel
-appends the entry, masks secrets, labels notes from web-tainted sessions `web`, and commits; the
-agent keeps the summary current with `edit`. `search` covers the wiki; the nightly sleep commits the
-agent's wiki edits and reports pages without a summary and broken links.
-
-## Phase 5 — Self-improvement `[ done ]`
-
-`save_skill` and `save_tool` (D-037). Skills: the agentskills.io format under 10,000 characters,
-a reason (the evidence) required, a near-duplicate in the domain refused with "extend X instead"
-(System One, or word overlap), new skills as drafts (`skills/_proposed`) that become active when the
-owner accepts them or a session that used them is accepted, a new domain always the owner's call,
-every change a commit; the sleep flags skills unused for 30 days and archives them at 90. Tools: a
-manifest and files in `~/.zenbot/global/tools/<name>/`, found and called like MCP tools (`made_<name>`),
-JSON on stdin, never the kernel's secrets, sandboxed with no network and read-only files until the
-owner approves (`made_tools`, out of the agent's reach). A default `work/close` skill says when to
-remember, capture and improve skills. `zen skills`, `zen skills accept|reject`, `zen tools
-accept|reject`.
-
-## Phase 6 — Delegation and model choice `[ done ]`
-
-`delegate` (D-038): subagents are child sessions with a fresh context and the same instructions,
-memory and tools, except `ask` and `delegate`; one call can hand out several `tasks`, which the
-kernel runs at the same time (engines may serialize separate tool calls). Taint flows both ways.
-Model choice from real usage (D-030): System One classifies the kind of work, the versioned policy
-(`zen policy`, `zen policy set|undo`) maps it to a model, a share of subtasks (ZEN_EXPLORE, 0.1)
-tries the route's other candidates with the choice probability logged, outcomes are the owner's
-verdict on the parent and cost, and the nightly sleep switches a route only when the evidence is
-clear (lower bound beats upper bound, 20 judged subtasks each). `ask` takes `wait: false`.
+| 0 | Ground | The reference projects studied in their code; the open fix PRs (#8, #9, #10, #13) merged | `docs/research/`, PROGRESS.md 2026-10-06 |
+| 1 | Foundation | Prompt files, tool descriptions, short-term memory with sleep, skills (#17; eval 12/12 → 12/12, cost +27%) | D-027, D-028, D-029, PROGRESS.md |
+| 2 | Reach | `web_search`, `web_fetch`, MCP client, `find_tools` / `load_tool` / `call_tool` (#18) | D-033, D-034 |
+| 3 | Recall | `search` (exact, full-text and semantic) over sessions and memories (#19) | D-035 |
+| 4 | Knowledge | The wiki and `capture` (#20) | D-036 |
+| 5 | Self-improvement | `save_skill`, `save_tool`, without sprawl (#21) | D-037 |
+| 6 | Delegation | `delegate`: subagents; model choice from real usage (#22) | D-030, D-038 |
 
 ## What's next
 
-The redesign's phases are done, and so are scheduled jobs (D-046), session names and suggested
-prompts (D-047), the sessions board (D-048) and the Matrix channel (D-049, docs/matrix.md). Next:
-keep dogfooding zenbot on real work and let sessions, verdicts and what the owner reviews (the
+Keep dogfooding zenbot on real work and let sessions, verdicts and what the owner reviews (the
 sleep's promotions into `IDENTITY.md` and `USER.md`, skill drafts, tools, routes) drive what
 changes. Candidate follow-ups, each only when use calls for it:
 
@@ -115,6 +39,8 @@ changes. Candidate follow-ups, each only when use calls for it:
 - **Jobs:** pre-run checks that skip the model when nothing changed, if job costs call for it.
 - **Board:** a kernel-wide event stream instead of the 2 s poll, if that feels slow.
 - **Suggestions:** improve the suggestion prompt from `zen suggestions` data after a few weeks.
+- **Prefix cost:** shorter descriptions for `verify`, `remember` and `decide`, if the fixed prefix's
+  cost (Phase 1's +27%) calls for it.
 
 ## Open decisions
 
@@ -181,7 +107,7 @@ changes. Candidate follow-ups, each only when use calls for it:
 ## Long-term milestones
 
 The original milestones (SPEC v0.2). Each is used on a real side project the week it ships. The
-phases above deliver parts of them; what remains is planned after Phase 6.
+phases above delivered parts of them; what remains isn't planned yet.
 
 | | Milestone | Scope | Status |
 |---|---|---|---|
@@ -199,6 +125,7 @@ phases above deliver parts of them; what remains is planned after Phase 6.
 1. License for the public repo (Apache-2.0, MIT or AGPL-3.0).
 2. Web UI framework (Svelte, React, Lit), if the web UI comes back.
 3. Sandbox granularity (per project or per session); when to move to gVisor.
-4. Search provider for `web_search`; first embedding model.
+4. ~~Search provider for `web_search`; first embedding model~~: decided (D-034: SearXNG keyless,
+   Brave or Tavily with a key; D-035: `openai/text-embedding-3-small`).
 5. Own minimal workflow engine or Windmill.
 6. Public handle and devlog cadence.

@@ -102,6 +102,8 @@ run() { # run <name> <function>
 
 # ---------- scenarios ----------
 
+# The open loop: one default faux turn runs the bash tool and answers; a session's messages page by
+# `last` and `after`, and a page says how many messages there are in all.
 open_loop() {
   local ws; ws=$(new_workspace open)
   start_kernel "$ws" ""
@@ -183,7 +185,9 @@ skills_on_demand() {
 }
 
 # MCP: tools from a local (stdio) and a remote (HTTP) server, found, loaded and called through the
-# three fixed tools; a call missing a required argument is refused by the kernel.
+# three fixed tools; a call missing a required argument is refused by the kernel; remote output is
+# wrapped and taints the session; the kernel's token isn't filled into a header for a server that
+# doesn't list it in `allow_env`. Starts mcp_server.py (stdio, and `--http` on the e2e port + 1).
 mcp_tools() {
   local ws; ws=$(new_workspace mcp)
   local port=$((PORT + 1))
@@ -232,7 +236,9 @@ JSON
 }
 
 # Web: private addresses are refused; search results come back numbered and wrapped as untrusted,
-# with markers inside them defused; what a tainted session saves to memory counts as inference.
+# with markers inside them defused; what a tainted session saves to memory counts as inference, and
+# its writes to USER.md, an active skill and mcp.json are refused. Search goes through
+# searxng_stub.py on the e2e port + 2 (ZEN_SEARXNG_URL).
 web_tools() {
   local ws; ws=$(new_workspace web)
   local port=$((PORT + 2))
@@ -256,7 +262,7 @@ web_tools() {
 }
 
 # Search: a fact from one session is found from another (by words, and by its exact path first), a
-# memory is found and counted as used, and history reads the other session.
+# memory is found and counted as used, history reads the other session, and every search is logged.
 search_recall() {
   local ws; ws=$(new_workspace search)
   q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART" >/dev/null
@@ -382,7 +388,10 @@ wiki_capture() {
 
 # Workshop: a new skill is a draft, a near-duplicate is refused, a reason is required, a new domain
 # waits for the owner; drafts can be found and loaded; accepting a session that loaded a draft
-# activates it; a made tool runs sandboxed (files read-only) until the owner approves it.
+# activates it; a made tool runs sandboxed (files read-only) until the owner approves it. `zen skills`
+# lists use and fingerprints, and an accept naming a stale fingerprint is refused; `zen skills accept`
+# activates the new domain's draft; after `zen tools accept` the tool can write, from a copy, and
+# keeps its approval after its own writes; both folders are git repositories.
 workshop() {
   local ws; ws=$(new_workspace workshop)
   start_kernel "$ws" "$(script workshop.json)"
@@ -494,7 +503,8 @@ memory_across_sessions() {
   check "in the next session's instructions" grep -q "\[m1\] The owner prefers tabs" <<<"$(q "SELECT payload->>'text' FROM tape_events WHERE session_id='$s2' AND kind='base'")"
 }
 
-# The sleep tidies short-term memory to its size, archives (never deletes) and records what it did.
+# The sleep tidies short-term memory to its size, archives (never deletes) and records what it did;
+# writes past the ceiling are refused and start a sleep; the next session gets the morning note.
 memory_sleep() {
   local ws; ws=$(new_workspace sleep)
   start_kernel "$ws" "$(script agent.json)" ZEN_MEMORY_CHARS=1000
@@ -527,7 +537,9 @@ ask_and_gone_tools() {
   check "README not moved" test -e "$ws/README"
 }
 
-# verify: the kernel runs the commands, a fresh read-only verifier judges the rest.
+# verify: the kernel runs the commands, a fresh read-only verifier judges the rest; the verifier
+# sees no kernel process, no network and an empty home, and reads only its work; a failed command
+# skips it.
 verifier() {
   local ws; ws=$(new_workspace verifier)
   start_kernel "$ws" "$(script judgment.json 's/TARGET/done.txt/' "s/KERNELPORT/$PORT/")"
@@ -549,6 +561,9 @@ verifier() {
   check "and fails the criterion" eq "$(q "SELECT payload->'results'->0->>'result' FROM tape_events WHERE session_id='$sid' AND kind='verification'")" fail
 }
 
+# Summaries: past the soft limit a summary is prepared in the background and applied after a pause
+# (a `compaction` block, recorded as an expected `summary` cache break); it keeps the facts, and the
+# history tool still finds the summarized messages.
 summaries() {
   local ws; ws=$(new_workspace summary)
   start_kernel "$ws" "$(script summary.json)" ZEN_CONTEXT_TOKENS=4000 ZEN_COMPACT_IDLE_SECS=0 ZEN_SUMMARY_MODEL=faux/smoke
@@ -562,6 +577,11 @@ summaries() {
   check "the history tool finds summarized messages" grep -q "Tool result (bash): FACT: the error code is E4127" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='history' ORDER BY seq DESC LIMIT 1")"
 }
 
+# The direct System One call (systemone_stub.py on the e2e port + 3, ZEN_S1_URL): the stub checks the
+# auth and model id; `decide` answers are parsed (`bool` from `noul`, choice, score) and logged. The
+# sleep promotes the owner's lasting fact into USER.md under `## Learned` with a backup (an inference
+# stays out), copies lasting knowledge into the wiki once; an agent's edit of USER.md is backed up
+# and told to compact it when over its cap, and the sleep compacts it through a kernel session.
 system_one_direct() {
   local ws; ws=$(new_workspace systemone)
   local port=$((PORT + 3))
@@ -605,7 +625,8 @@ system_one_direct() {
 # The sleep with System One (stub): of two entries that say the same thing, one stays (and stays
 # searchable); one the owner's profile covers goes; several entries are judged at once (at most 4);
 # and an entry changed with `remember` while the sleep runs is left as it is now, its old text not
-# promoted. The stub holds the questions about the HOLD entries until the scenario has changed them.
+# promoted. The stub (systemone_stub.py on the e2e port + 5, with a release file) holds the questions
+# about the HOLD entries until the scenario has changed them; its `GET /stats` counts calls in flight.
 memory_sleep_judged() {
   local ws; ws=$(new_workspace sleep-judged)
   local port=$((PORT + 5)) release="$TMP/s1-release"; rm -f "$release"
@@ -639,6 +660,9 @@ memory_sleep_judged() {
   kill "$srv" 2>/dev/null || true
 }
 
+# The file tools: the zen home's files aren't attached as project context; edit keeps exactly one
+# trailing newline; a read over 16 MiB is refused before loading; even the owner's own session can't
+# write mcp.json; no OpenRouter key shows as not signed in.
 kernel_tools() {
   local ws; ws=$(new_workspace kernel-tools)
   printf 'foo  \nbar\n' > "$ws/a.txt"
@@ -671,6 +695,9 @@ project_files() {
   check "without tainting the session" eq "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")" f
 }
 
+# Secrets: the kernel's secret variables don't reach the agent's shell; a token in tool output is
+# masked on the tape and in the recorded tool arguments (a long argument is cut, keeping its size
+# and hash); a token in the URL (`?token=`) is refused for HTTP and the WebSocket: only the header counts.
 secrets_masked() {
   local ws; ws=$(new_workspace secret)
   start_kernel "$ws" "$(script secret.json "s/BIGCONTENT/$(printf 'y%.0s' $(seq 1 5000))/")" E2E_PLANTED_KEY=planted-value-1234567890
@@ -750,7 +777,8 @@ restart_recovery() {
 }
 
 # A summary made at the hard limit by a summarizer slower than the watchdog's idle limit: the turn
-# waits for it instead of being taken for stalled.
+# waits for it instead of being taken for stalled. The `slow` worker is slow_worker.py
+# (ZEN_WORKER_SLOW_CMD).
 slow_summary() {
   local ws; ws=$(new_workspace slow)
   start_kernel "$ws" "$(script summary.json)" ZEN_CONTEXT_TOKENS=4000 ZEN_COMPACT_SOFT=100 ZEN_COMPACT_HARD=0.7 \
@@ -768,7 +796,11 @@ slow_summary() {
 # kind `job` with the context it picked and can't schedule; its report is recorded, a silent run is
 # kept out of sight, failures pause the job; a run missed beyond its grace is skipped, one within it
 # catches up once, a run cut by a restart is marked interrupted; a job the agent creates stays
-# paused unless System One judges the owner asked for it; a system job runs through the same engine.
+# paused unless System One judges the owner asked for it (below ZEN_JOB_BAR paused, above live; the
+# owner's resume approves); a second run of a running job is refused; all six system jobs are
+# seeded, the `sleep` job runs through the same engine and each upkeep job (`wiki`, `skills`,
+# `routes`, `prune`) by hand once; `zen status` shows jobs. Uses `jobs.json`, the System One stub,
+# ZEN_JOBS=1 and ZEN_JOBS_TICK=0.5 so runs start within a second.
 scheduled_jobs() {
   local ws; ws=$(new_workspace jobs)
   local port=$((PORT + 3))

@@ -25,8 +25,9 @@ some. `--native claude|codex` makes the base the vendor's own CLI with its own t
 Every run starts from a fresh copy of the task's files, on its own kernel, port, database and zenbot
 home (the default prompt files and skills, not the owner's; scheduled jobs off), so the live service
 and its data are never touched and runs at the same time can't see each other. Prompts go through
-`zen ask`, so the whole harness is measured: system prompt, history, tools, engine. Results are in
-`~/.zenbot/evals/<run>/`.
+`zen ask`, so the whole harness is measured: system prompt, history, tools, engine. The new side is
+this checkout, uncommitted changes included. Stopping `eval.sh` (Ctrl-C) stops every kernel it
+started and drops their databases. Results and `report.md` are in `~/.zenbot/evals/<run>/`.
 
 ## Which tasks run, and how fast
 

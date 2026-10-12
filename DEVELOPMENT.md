@@ -10,12 +10,9 @@ How to build, test, verify and ship a change to zenbot from this checkout. Writt
 
 ## What runs where
 
-The processes are listed in `AGENTS.md` and, file by file, in `MAP.md`. The kernel owns all state and runs every tool call; engines run with their own tools switched off. Keep it that way.
-
-Config and state live in `~/.zenbot/`; MAP.md ("`~/.zenbot/`") lists every file, who writes it and
-who reads it. The secrets there are `env`, `token`, `matrix.env`
-and `matrix/`: never print them. The dev kernel has its own home, `~/.zenbot-dev` (below). Claude
-Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
+The processes, and which files in `~/.zenbot/` are secret, are in `AGENTS.md` ("What runs where");
+every file, route, table and setting in `MAP.md`. The dev kernel has its own home, `~/.zenbot-dev`
+(below).
 
 ## Prerequisites
 
@@ -27,7 +24,7 @@ Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 | `git`, `curl`, `jq` | apt | every script |
 | `python3` | preinstalled on Ubuntu | the e2e test servers (`scripts/e2e/*.py`) |
 | `pdftotext` (`poppler-utils`) | apt (`install.sh` installs it) | reading PDFs that `web_fetch` saves |
-| `bubblewrap` | apt | the verifier's read-only shell and the sandbox for unapproved made tools; the e2e scenarios need it |
+| `bubblewrap` | apt | the verifier's read-only shell, a tainted session's offline shell and the sandbox for unapproved made tools; the e2e scenarios need it |
 | Node.js 22+ | `install.sh` puts it in `~/.local/node` | installing and running the Codex CLI (an npm package: Node runs it on every Codex turn) |
 | `gh` | GitHub CLI | pull requests, checking CI |
 
@@ -90,19 +87,12 @@ Run the same locally before a pull request: `scripts/check.sh` does it in one co
 
 **Limit build parallelism on this VM.** It has 2 CPUs and 7.7 GB of RAM, and parallel release builds have been OOM-killed. Set `CARGO_BUILD_JOBS=2` (e.g. `export CARGO_BUILD_JOBS=2` in your shell) and don't run two release builds at once (for example `cargo build` while `scripts/e2e.sh` or `scripts/upgrade.sh` is building).
 
-UI changes (`crates/zen/src/tui/`, `editor.rs`) come with render or key tests: build an `App` at a fixed size with output captured (see tests beside the modules in `tui/`).
-
-### Model workers and System One
-
-Changes to the worker protocol must update `docs/worker-protocol.md` and every worker.
-System One runs in `zend/src/score.rs` and calls OpenRouter directly; the `system-one` e2e
-scenario uses a local HTTP stub to check its auth, model id and `bool` ↔ `noul` mapping.
 
 ## End-to-end scenarios
 
 `scripts/e2e.sh` builds (unless `ZEN_E2E_NO_BUILD=1`), then runs each scenario on a kernel built from this checkout (or the binaries in `ZEN_E2E_BIN`) with the scripted faux model. It uses a throwaway database (`zen_e2e_<pid>`), throwaway git workspaces and a throwaway `HOME`, on port 18377 (`ZEN_E2E_PORT`). No subscription is used, nothing reaches the internet and the live service isn't touched. It needs Postgres running, plus `git`, `curl`, `jq`, `bubblewrap` and `python3`.
 
-There are 27 scenarios (`run …` lines at the bottom of the script). Some start small test programs from `scripts/e2e/`:
+The scenarios are the `run …` lines at the bottom of the script; the comment above each function says what it checks. Some start small test programs from `scripts/e2e/`:
 
 | Program | Started by | What it is |
 |---|---|---|
@@ -277,29 +267,21 @@ sudo systemctl stop zenbot && docker compose -f deploy/compose.yaml exec -T post
 
 ## Harness evals
 
-Changes to the harness (system prompt, history, tools, workers, model or effort handling) get an eval before they are merged. The eval is **advisory**: run it, show the owner the report (in the pull request too), and ask whether to merge. The owner decides. It is never an automatic gate.
+Harness changes get an eval before they merge; it is advisory (AGENTS.md, "Making a change").
+Commands, which tasks run, isolation, caching and the report: [evals/README.md](evals/README.md).
 
 ```bash
-scripts/eval.sh --plan                             # which tasks the change affects, and why; runs nothing
-scripts/eval.sh                                    # those tasks: this checkout (new) vs the installed version (base)
-scripts/eval.sh --full                             # every task: a large harness change, or when the owner asks
-scripts/eval.sh --base main --tasks repo-question --repeat 3
-scripts/eval.sh --model claude/claude-sonnet-5-5 --effort low
-scripts/eval.sh --model faux/smoke --tasks smoke   # self-test of the runner, no subscription used
-scripts/eval-report.sh ~/.zenbot/evals/<run>       # print a run's report again
+scripts/eval.sh --plan    # which tasks the change affects, and why; runs nothing
+scripts/eval.sh           # those tasks: this checkout (new) vs the installed version (base)
 ```
 
-Other options: `--jobs N` (runs at once, default 3 or `ZEN_EVAL_JOBS`), `--fresh` (run the base again instead of using the cache), `--native claude|codex` (the base is the vendor's own CLI), `--base-model`, `--base-effort`, `--only new|base`, `--keep`. Without `--model` it asks the running service (`/api/models`) for its default model, so the service must be up.
-
-Which tasks run (D-050): the files that differ between the base and this checkout, uncommitted ones included, are mapped to areas by `evals/areas.txt`; the tasks whose `areas` meet them run, plus the `core` tasks. A change to `crates/zen-engine` or `crates/zen-proto` runs every task; a change outside the harness (docs, the `zen` client, scripts) needs no eval, and `eval.sh` says so and stops. The selection and its reasons are at the end of the report.
-
-Each run (harness × task × repeat) gets a fresh copy of the task's files, its own kernel on its own port (18301 and up), its own database (`zen_eval_<run>_<n>`, dropped after it) and its own `ZEN_HOME` (default prompt files and skills, not the owner's), so runs at the same time can't see each other. Base and new runs of a task are interleaved. Stopping `eval.sh` (Ctrl-C) stops every kernel it started and drops their databases. The new side is this checkout, uncommitted changes included. The base build is cached in `~/.zenbot/evals/builds/`, and base results that completed in `~/.zenbot/evals/cache/` for `ZEN_EVAL_CACHE_DAYS` (7) days, keyed by base commit, model, effort, the task's files and the engine versions; the report lists the ones it reused. Results and `report.md` go to `~/.zenbot/evals/<run>/`. Real models use the owner's subscription, so `--jobs` also sets how many turns run on it at once.
-
-Tasks live in `evals/tasks/<name>/` (`task.json` plus `files/` and, for hidden tests, `hidden/`). See `evals/README.md` for the format and what makes a good task.
+Without `--model` it asks the running service (`/api/models`) for its default model, so the service
+must be up. Real models use the owner's subscription, so `--jobs` also sets how many turns run on it
+at once.
 
 ## Scheduled jobs
 
-The kernel runs a scheduler (`jobs.rs`, D-046; DESIGN.md "Scheduled jobs"). Its own jobs are seeded at start: `sleep` (03:00 UTC), the nightly upkeep `wiki` (03:10), `skills` (03:20), `routes` (03:30) and `prune` (03:40), and `engines` (04:00 UTC); `zen jobs run <name>` runs one now and `zen jobs runs <name>` shows what it found. Agent jobs run a prompt in a fresh session of kind `job` and record its report; the owner adds them with `zen jobs add`, the agent with the `schedule` tool (live only past the System One gate, else paused until `zen jobs resume`).
+How the scheduler and its jobs work: DESIGN.md, "Scheduled jobs".
 
 ```bash
 zen jobs                                      # every job: schedule, next run, last result
@@ -313,7 +295,7 @@ Throwaway kernels must not run the copy's jobs (an engine update on the real CLI
 
 ## Memory sleep
 
-The kernel's `sleep` job tidies short-term memory nightly (03:00 UTC); `zen memory sleep` runs it now.
+What the sleep does: DESIGN.md, "Memory and skills". `zen memory sleep` runs it now.
 
 ```bash
 zen memory                                   # short-term memory and the last sleep
@@ -321,7 +303,8 @@ zen memory --tier archived                   # what the sleeps archived
 zen jobs runs sleep                          # when it ran and what it did
 ```
 
-The sleep promotes on its own (D-045): lasting entries about the owner move to `USER.md`, lasting guidance to `IDENTITY.md` (under `## Learned`; only `owner`/`verified` entries), lasting knowledge is copied into the wiki. `ZEN_PROMOTE_BAR` (0.9) sets the bar. A prompt file over its cap (`ZEN_USER_CHARS`, `ZEN_IDENTITY_CHARS`) is compacted by a session the sleep starts (`sleep: compact USER.md` in `zen sessions`). Every change to a prompt file, by the sleep or the agent, first saves the old version to `~/.zenbot/backups/prompt-files/<name>-<time>.md` (kept 90 days); to undo, copy it back.
+A prompt file's old versions are in `~/.zenbot/backups/prompt-files/<name>-<time>.md`; to undo a
+change, copy one back.
 
 ## Search index
 
@@ -338,7 +321,7 @@ docker compose -f deploy/compose.yaml exec -T postgres psql -U zen -d zen_dev \
 
 ## Wiki
 
-The `capture` tool writes the wiki: markdown pages in `ZEN_WIKI_DIR` (default `<zen home>/global/wiki`, so `~/.zenbot-dev/global/wiki` for the dev kernel), a git repository the kernel creates and commits to (`index.md` lists the pages, `log.md` records each capture). The agent edits page summaries itself; those edits are committed by the next capture or the nightly sleep, which also lists wiki problems (pages with no summary, links to missing pages) in its note. Pages are indexed for `search` (scope `wiki`) by file modification time.
+How the wiki works: DESIGN.md, "Memory and skills". It lives in `ZEN_WIKI_DIR` (default `<zen home>/global/wiki`, so `~/.zenbot-dev/global/wiki` for the dev kernel).
 
 ```bash
 git -C ~/.zenbot-dev/global/wiki log --oneline | head   # what the dev kernel captured
@@ -356,7 +339,7 @@ zen tools accept word-count 81c2d0a7f3e9     # let the made tool you reviewed ru
 git -C ~/.zenbot-dev/global/skills log --oneline   # every change the dev kernel made to its skills
 ```
 
-A draft also becomes active when the owner accepts a session that loaded it (`zen sessions decide <id> accept`), unless it opens a new domain. Accepting or rejecting names the fingerprint `zen skills` showed and is refused when the content changed since. Each run of a made tool uses a temporary copy of its folder (what it writes there is dropped). Unapproved tools run in bubblewrap with the filesystem read-only and no network; approval is stored in the `made_tools` table. The nightly sleep flags skills unused for 30 days and archives them at 90. To test without a subscription, see the `workshop` e2e scenario and `scripts/e2e/workshop.json`.
+How drafts become active and how made tools are sandboxed and approved: DESIGN.md, "Memory and skills" (Workshop). To test without a subscription, see the `workshop` e2e scenario and `scripts/e2e/workshop.json`.
 
 ## Delegation and the routing policy
 
@@ -418,22 +401,10 @@ scripts/matrix.sh          # build, test, install, sign in if needed, restart th
 The first build compiles matrix-sdk (about 15 minutes on 2 cores; relinking takes a few minutes).
 The e2e test needs nothing paid: the kernel runs only the faux model with OpenRouter keys unset.
 
-## Git flow
+## Git flow and rules
 
-1. One branch per feature or fix, off `main`.
-2. One concern per commit. The subject says what changed; the body says why, and what was tested.
-3. Commits made from a zen session get `Zen-Session` and `Co-Authored-By` trailers from `scripts/git-hooks/prepare-commit-msg`. Don't remove them.
-4. Push the branch and open a pull request (`gh pr create`). Merge only when CI is green; harness changes also need the owner's OK on an eval.
-5. Update the docs in the same pull request (the table in `AGENTS.md`). Design decisions change only with the owner's OK.
-6. After a merge: `git checkout main && git pull`.
-
-## Hard rules
-
-- **Never** run `systemctl restart zenbot` (or stop/start) or kill `zend` from inside a session. Use `scripts/upgrade.sh`.
-- Migrations are **expand-only**, in new files; never edit an applied one.
-- No secrets in the repo, logs or tool output. **Never print `~/.zenbot/token`** or `~/.zenbot/env` (it holds the token and API keys, such as search keys). Put secrets an MCP server needs in `env` and refer to them as `${VAR}` in `mcp.json`, listed in that server's `allow_env`.
-- Keep engines' own tools switched off; every action goes through the kernel.
-- Don't add dependencies without a good reason.
+How a change is branched, committed, shipped and merged, and the hard rules (never restart `zend`
+yourself, expand-only migrations, no secrets), are in `AGENTS.md` ("Making a change", "Rules").
 
 ## Troubleshooting
 

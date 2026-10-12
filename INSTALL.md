@@ -9,7 +9,7 @@ These steps are written so a coding agent (or a person) can follow them on a fre
    ~/zenbot/install.sh
    ```
 
-   The installer is safe to re-run. It installs Docker, Node.js 22, `git`, `curl`, `jq`, bubblewrap (for the read-only shell and sandboxed tools), `pdftotext`, and the Claude Code and Codex CLIs if they're missing, downloads zenbot's prebuilt binaries for the checked-out commit, writes `~/.zenbot/env` and the API token, installs the `zenbot` systemd service (starts on boot, restarts on failure; it brings up Postgres and the SearXNG search container in Docker before the kernel), and links the `zen` command into `~/.local/bin`.
+   The installer is safe to re-run. It installs Docker, Node.js 22, `git`, `curl`, `jq`, bubblewrap (for the sandboxed shells and tools), `pdftotext`, and the Claude Code and Codex CLIs if they're missing, downloads zenbot's prebuilt binaries for the checked-out commit, writes `~/.zenbot/env` and the API token, installs the `zenbot` systemd service (starts on boot, restarts on failure; it brings up Postgres and the SearXNG search container in Docker before the kernel), and links the `zen` command into `~/.local/bin`.
 
    Prebuilt binaries exist for every commit on `main` that passed CI's checks (built for x86_64 Linux after the tests, clippy and end-to-end scenarios pass). On other platforms, for commits CI hasn't published yet, or with `ZEN_BUILD_FROM_SOURCE=1`, the installer installs Rust and compiles instead, which takes several minutes on a small VM.
 
@@ -43,24 +43,16 @@ zenbot checks GitHub for a newer `main` about once an hour. `zen` mentions it wh
 zen upgrade            # or /upgrade inside zen; `zen upgrade --check` only checks
 ```
 
-This runs `scripts/self-update.sh`: it pulls `main` (refusing if the checkout has local changes or is on another branch) and runs `scripts/upgrade.sh`, showing progress until zenbot is back on the new version. Doing it by hand is the same thing:
-
-```bash
-cd ~/zenbot && git pull --ff-only origin main && ./scripts/upgrade.sh
-```
-
-`upgrade.sh` uses the prebuilt binaries for the new commit (or builds them if there are none yet, or if you changed the code locally), checks them, runs one scripted test turn against them, and then restarts zenbot as soon as no session is working. If the new version isn't healthy it rolls back by itself. The result is in `~/.zenbot/upgrade.log`, and `~/.zenbot/version` holds the running commit.
+It pulls `main` (refusing local changes or another branch) and runs `scripts/upgrade.sh`, which tests the new version, restarts zenbot once no session is working and rolls back if it isn't healthy; the result is in `~/.zenbot/upgrade.log`. Every step: [DEVELOPMENT.md, "Applying a change"](DEVELOPMENT.md#applying-a-change-scriptsupgradesh).
 
 ### Engines
 
-The Claude Code and Codex CLIs are kept on their latest versions by the kernel's daily `engines` job (04:00 UTC, running `scripts/update-engines.sh`). Each new version must pass a real test turn (and, for Codex, turn on no feature zenbot hasn't reviewed); if it doesn't, the previous version is put back. The CLIs need no restart, and the job never commits, builds or restarts zenbot. Results are in `~/.zenbot/upgrade.log` (`engines:` lines), and `zen status` shows the versions.
+The Claude Code and Codex CLIs are kept on their latest versions by the kernel's daily `engines` job: each new version must pass a real test turn, else the previous one is put back ([DEVELOPMENT.md, "Engine updates"](DEVELOPMENT.md#engine-updates)). Results are in `~/.zenbot/upgrade.log` (`engines:` lines), and `zen status` shows the versions.
 
 ```bash
 ~/zenbot/scripts/update-engines.sh --check   # installed vs latest, changes nothing
 ~/zenbot/scripts/update-engines.sh           # update now
 zen jobs                                     # next run of every scheduled job
 ```
-
-Right after a push to `main`, CI needs a few minutes to check and publish the binaries; an upgrade started before that (or for a commit whose checks failed) compiles locally instead.
 
 Troubleshooting: `journalctl -u zenbot -n 50` shows the service logs. The service listens on port 8100 (change it by re-running the installer with `ZEN_PORT=…`; a re-run keeps your other settings in `~/.zenbot/env`).

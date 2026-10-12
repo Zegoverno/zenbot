@@ -6,6 +6,34 @@
 
 ---
 
+## 2026-10-11 — Docs trimmed: each fact in one place
+
+The docs repeated the same facts across files (the upgrade flow in six, the tool list, jobs and
+taint rules in several), so every change had to touch many of them. Now each fact lives in one
+file and the others link to it; no fact was dropped.
+
+- The upgrade and engine-update flow: only DEVELOPMENT.md; AGENTS, MAP, INSTALL and DESIGN link.
+  DEVELOPMENT.md drops what AGENTS.md owns (git flow, hard rules, secret files) and what
+  DESIGN.md and evals/README.md own (jobs, sleep, wiki, workshop, evals), keeping the commands.
+- MAP.md: no per-file line counts; the Tests section lists e2e scenario names, and what each
+  checks is the comment above its function in `scripts/e2e.sh` (all 29 have one now).
+- ROADMAP.md: finished phases 0–6 are one table row each with where they're recorded; every debt
+  item was checked against the code and is still open.
+- SPEC.md: the "Moved to" stubs are gone; as-built details link to DESIGN.md.
+- README.md: install, use, settings people set, and links.
+- DESIGN.md: the tool list links to MAP.md (check-docs.py now checks tools there only); "Security
+  today" links to "Untrusted content".
+- Stale statements fixed: routes and skills are tended by their own nightly jobs, not the sleep;
+  `verify`'s commands run in the session's sandbox; bubblewrap also runs tainted shells; 29 e2e
+  scenarios, not 27; decisions run to D-053.
+- Lines (before → after): AGENTS 140 → 139, DESIGN 533 → 523, DEVELOPMENT 466 → 437, INSTALL
+  66 → 58, MAP 681 → 596, README 135 → 115, ROADMAP 204 → 131, SPEC 262 → 239, evals/README
+  101 → 102; the current docs 3,238 → 2,990 lines (MAP.md 113 → 104 KB). History (PROGRESS,
+  DECISIONS, docs/research) unchanged.
+- Tested: `scripts/check-docs.py`, `scripts/check.sh`.
+
+---
+
 ## 2026-10-11 — Engines behind one trait; the worker protocol typed
 
 Toward CONTEXT.md principles 5 and 6: adding an engine to `zen-engine` meant edits in several
