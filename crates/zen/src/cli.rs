@@ -225,8 +225,11 @@ pub(crate) enum JobsCmd {
         /// Directory it works in (default: the workspace)
         #[arg(long)]
         dir: Option<String>,
+        /// A file in its directory the run writes the report to; the kernel posts the file, not the run's answer
+        #[arg(long)]
+        report_file: Option<String>,
     },
-    /// Change an agent job's schedule, prompt, timezone, context, skills or model
+    /// Change an agent job's schedule, prompt, timezone, context, skills, model or report file
     Set {
         name: String,
         #[arg(short, long)]
@@ -241,6 +244,9 @@ pub(crate) enum JobsCmd {
         skills: Option<String>,
         #[arg(short, long)]
         model: Option<String>,
+        /// A file in its directory the run writes the report to (`""` goes back to the run's answer)
+        #[arg(long)]
+        report_file: Option<String>,
     },
     /// Pause a job
     Pause { name: String },

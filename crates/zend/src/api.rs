@@ -632,7 +632,7 @@ pub(crate) async fn list_jobs(State(app): State<AppState>) -> ApiResult<Json<Val
     Ok(Json(json!({ "jobs": jobs.iter().map(jobs::job_json).collect::<Vec<_>>(), "scheduler": jobs::enabled() })))
 }
 
-/// The owner creates an agent job: {name, prompt, schedule, tz?, context?, skills?, model?, workspace?}.
+/// The owner creates an agent job: {name, prompt, schedule, tz?, context?, skills?, model?, workspace?, report_file?}.
 pub(crate) async fn create_job(State(app): State<AppState>, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
     let (job, _) = jobs::create(&app, jobs::Spec::from_json(&body), jobs::By::Owner).await.map_err(bad_request)?;
     Ok(Json(jobs::job_json(&job)))
@@ -641,7 +641,7 @@ pub(crate) async fn create_job(State(app): State<AppState>, Json(body): Json<Val
 /// The owner changes a job: `enabled` pauses or resumes it; other fields change an agent job.
 pub(crate) async fn update_job(State(app): State<AppState>, Path(name): Path<String>, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
     let spec = jobs::Spec::from_json(&body);
-    let changes = spec.prompt.is_some() || spec.schedule.is_some() || spec.tz.is_some() || spec.context.is_some() || spec.skills.is_some() || spec.model.is_some() || spec.workspace.is_some();
+    let changes = spec.prompt.is_some() || spec.schedule.is_some() || spec.tz.is_some() || spec.context.is_some() || spec.skills.is_some() || spec.model.is_some() || spec.workspace.is_some() || spec.report_file.is_some();
     let mut job = if changes { Some(jobs::update(&app, &name, spec, jobs::By::Owner).await.map_err(bad_request)?.0) } else { None };
     if let Some(on) = body["enabled"].as_bool() {
         job = Some(jobs::set_enabled(&app, &name, on, jobs::By::Owner).await.map_err(bad_request)?.0);

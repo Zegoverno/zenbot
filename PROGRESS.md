@@ -6,6 +6,19 @@
 
 ---
 
+## 2026-10-13 — A job's report can come from a file (D-055)
+
+The `daily-readings` job sends the Mass readings, which a script builds and checks word for word
+against the source, but the report was the run's final answer, so the model retyped the text. Now
+a job can name a `report_file` (`zen jobs add/set --report-file`, `{report_file}` in `POST/PATCH
+/api/jobs`, the `schedule` tool's `report_file`; new column `jobs.report_file`, migration 0023).
+When the run ends `ok`, the kernel posts that file, and the final answer stays in the session. It
+fails closed: a file missing, older than the run, a symlink, outside the job's workspace, a secret
+file, over 60 KB or not UTF-8 makes the run an error naming why; an empty file makes it silent.
+Taint is unchanged. Tested: e2e `job-report-file` (the report is the file, not the answer; refused
+outside the workspace when set; missing, stale, a symlink to the token, outside at run time each an
+error; empty is silent; `""` clears it), unit tests for the path and file rules.
+
 ## 2026-10-13 — `/trust`: the owner trusts a session again (D-054)
 
 A session that read anything from outside (a web search, a subagent's answer: about half of
