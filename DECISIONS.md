@@ -20,7 +20,8 @@ path taints the reader), D-051 (only listed repositories are trusted)
   outside content, to grant the outward actions it asks for ("push and open a PR").
 - **Built: search lists, doesn't hand over.** A marked result `search` merely comes across (a turn
   of a tainted session, a memory a tainted session saved, a wiki page with `web` entries) is listed
-  by reference with none of its text; asked for by name (an exact match, e.g. `` `m12` ``) it's
+  by reference with none of its text (a wiki page without its name either, which is made from its
+  content); asked for by name (an exact match, e.g. `` `m12` ``) it's
   handed over wrapped and taints the reader, as `history` and `read` still do.
 - **Built: worktrees are trusted.** A git worktree of a trusted repository is as trusted as the
   repository (its `.git` file and the repository's worktree entry must name each other).

@@ -965,7 +965,7 @@ taint_on_data() {
   check "its note leaves the tainted text out" bash -c '! grep -q 4417 <<<"$1" && ! grep -q "loves web" <<<"$1"' _ "$note"
   sleep 1
   r=$(zen ask --json -m faux/smoke "TAINT-E"); sid=$(echo "$r" | jq -r .session_id)
-  check "a wiki search finding it lists the page without its text" bash -c '! grep -q 4417 <<<"$1" && grep -q "wiki page .*: read .*\.md" <<<"$1" && [ "$2" = f ]' _ "$(res_of "$sid")" "$(tainted "$sid")"
+  check "a wiki search finding it lists the page without its text or name" bash -c '! grep -q 4417 <<<"$1" && ! grep -q harbour-code <<<"$1" && grep -q "a wiki page with entries from outside .*name withheld" <<<"$1" && [ "$2" = f ]' _ "$(res_of "$sid")" "$(tainted "$sid")"
   local runs="SELECT string_agg(r.status || '/' || r.tainted, ',' ORDER BY r.id) FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name = 'tjob'"
   zen jobs add tjob --schedule "every 1h" --prompt "JOBTASK-T" >/dev/null
   zen jobs run tjob >/dev/null

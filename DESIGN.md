@@ -276,7 +276,7 @@ harness versions with the same model on isolated kernels and databases (`evals/R
   Every path that gives stored content to a session goes through `taint::hand_over`, which wraps
   marked content and taints the reader, so it never reaches a clean session as trusted. `search`
   hands over a marked result only when asked for it by name (an exact match); any other marked
-  result is listed by reference with none of its text, so coming across one doesn't spread the
+  result is listed by reference with none of its text (a wiki page without its name), so coming across one doesn't spread the
   mark (D-055). What a
   tainted session may not do is `taint::limited`: `remember` records `inferred` and marks the entry,
   so web text can't pass as the owner's words; its `edit` or `write` on a prompt file (`SOUL`,

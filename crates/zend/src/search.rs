@@ -761,7 +761,8 @@ async fn marked_results(app: &App, listed: &[(Found, Option<f64>)]) -> Vec<bool>
 }
 
 /// Marked results listed without their text: where they are and how to open them. Nothing in it
-/// comes from the result's content but its reference (a memory id, a session id, a page name).
+/// comes from the result's content: only opaque references (a memory id, a session id), never a
+/// wiki page's name, which is made from its content.
 fn render_withheld(found: &[Found]) -> String {
     let mut out = format!(
         "\n{} more from content read outside (a web page, a subagent, an untrusted file), text withheld. Opening one marks this session as having read untrusted content:\n",
@@ -769,11 +770,11 @@ fn render_withheld(found: &[Found]) -> String {
     );
     for f in found {
         let when = f.at.format("%Y-%m-%d");
-        // A page name can come from what a tainted session captured: only a short slug passes.
-        let slug: String = f.reference.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(60).collect();
         let line = match f.kind.as_str() {
             "memory" => format!("memory {} ({when}): search \"`{}`\" to read it", f.reference, f.reference),
-            "wiki" => format!("wiki page {slug} ({when}): read {}", crate::wiki::root().join(format!("{slug}.md")).display()),
+            // A page's name is made from what was captured, so it's withheld too (as the sleep's
+            // note never names a page with `web` entries, D-053).
+            "wiki" => format!("a wiki page with entries from outside (updated {when}), its name withheld too: search for it by name if you know it"),
             "turn" => {
                 let (s, seq) = f.reference.split_once(':').unwrap_or((&f.reference, ""));
                 format!("session {}, message #{seq} ({when}): read it with history", &s[..s.len().min(8)])
