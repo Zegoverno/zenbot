@@ -110,6 +110,6 @@ In `~/.zenbot/env` (every setting, with defaults: [MAP.md](MAP.md#environment-va
   OPENROUTER_API_KEY=sk-or-…
   ```
   `ZEN_SCORE_IDLE_SECS` sets the quiet time before a session is scored (default 7200).
-- **Trusted repositories:** `ZEN_TRUSTED_REPOS` lists repositories whose `AGENTS.md` zenbot follows; any other project's instructions come as untrusted content.
+- **Trusted repositories:** `ZEN_TRUSTED_REPOS` lists repositories whose `AGENTS.md` zenbot follows (their git worktrees too); any other project's instructions come as untrusted content.
 
 Every turn is recorded with what produced it (build, engine and version, model, thinking level), tokens, cost, time and cache use; evals compare two harness versions on fixed tasks ([evals/README.md](evals/README.md)).

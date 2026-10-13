@@ -34,6 +34,13 @@ Keep dogfooding zenbot on real work and let sessions, verdicts and what the owne
 sleep's promotions into `IDENTITY.md` and `USER.md`, skill drafts, tools, routes) drive what
 changes. Candidate follow-ups, each only when use calls for it:
 
+- **Action gate (D-055), in order:** a session that reads outside content becomes *risky*, not
+  limited; its actions are checked before they run by fixed rules over parsed facts (run, run in
+  the offline sandbox, or ask the owner, with a one-tap `/allow`); then System One reads only the
+  owner's own request to grant the turn's outward actions (push, PR, deploy). Step 0's replay
+  backs the rules (none of 36 attacks escaped; 71% of recorded commands run unchecked) and found
+  System One scoring the actions themselves too weak to gate them. The first step, search not
+  spreading the mark and worktrees of trusted repositories trusted, is built.
 - **Matrix:** interactive (emoji) verification of the bot; streaming answers by editing a message,
   if waiting for the whole answer feels slow.
 - **Jobs:** pre-run checks that skip the model when nothing changed, if job costs call for it.
