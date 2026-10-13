@@ -6,7 +6,7 @@
 
 ---
 
-## 2026-10-13 — Search no longer spreads the taint mark; worktrees are trusted (D-055)
+## 2026-10-13 — Search no longer spreads the taint mark; worktrees are trusted (D-056)
 
 Most tainted sessions weren't reading the web: `search` came across a memory an earlier tainted
 session saved and tainted the reader. Now a marked result `search` only comes across is listed by
@@ -18,6 +18,9 @@ taints) and `project_files` (a worktree's AGENTS.md is followed); unit tests for
 including a forged one-way link.
 
 ---
+
+---
+
 ## 2026-10-13 — A job's report can come from a file (D-055)
 
 The `daily-readings` job sends the Mass readings, which a script builds and checks word for word

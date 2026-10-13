@@ -122,7 +122,7 @@ pub fn trusted_roots(repo: &Path) -> Vec<PathBuf> {
 
 /// Whether an instruction file lies in a trusted repository (its real path, under one of `roots`),
 /// or in a `git worktree` of one: a worktree shares the trusted repository's objects and refs, so
-/// its files are as trusted as a branch checked out in the repository itself (D-055).
+/// its files are as trusted as a branch checked out in the repository itself (D-056).
 pub fn trusted(path: &Path, roots: &[PathBuf]) -> bool {
     let Ok(real) = path.canonicalize() else { return false };
     roots.iter().any(|r| real.starts_with(r)) || worktree_root(&real).is_some_and(|main| roots.contains(&main))

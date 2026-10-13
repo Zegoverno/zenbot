@@ -84,7 +84,7 @@ changed. The system prompt is the prompt files (laid out by scope, `layout.rs`, 
 and `USER.md`, short-term memory as of the session's start, the skills index, then `AGENTS.md` (or
 `CLAUDE.md`) from `/` down to the workspace; a project's file found later by a tool is attached to
 that tool result and kept: as instructions when the project is a trusted repository (zenbot's
-checkout, `ZEN_TRUSTED_REPOS`, or a git worktree of one, D-055), otherwise as untrusted content that taints the session (D-051). The kernel writes missing default prompt files and skills at start
+checkout, `ZEN_TRUSTED_REPOS`, or a git worktree of one, D-056), otherwise as untrusted content that taints the session (D-051). The kernel writes missing default prompt files and skills at start
 (`crates/zend/defaults/`), never overwriting. Each zenbot session keeps a matching Claude Code session (`--resume`) or Codex thread, so
 earlier turns come from the provider's cache. Past 70% of the context budget, older turns are
 summarized in the background with block addresses; the `history` tool reads any block back.
@@ -277,7 +277,7 @@ harness versions with the same model on isolated kernels and databases (`evals/R
   marked content and taints the reader, so it never reaches a clean session as trusted. `search`
   hands over a marked result only when asked for it by name (an exact match); any other marked
   result is listed by reference with none of its text (a wiki page without its name), so coming across one doesn't spread the
-  mark (D-055). What a
+  mark (D-056). What a
   tainted session may not do is `taint::limited`: `remember` records `inferred` and marks the entry,
   so web text can't pass as the owner's words; its `edit` or `write` on a prompt file (`SOUL`,
   `IDENTITY`, `AGENTS`, `USER`), an active skill or a made tool is refused, as for any subagent or

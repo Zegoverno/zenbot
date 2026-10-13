@@ -714,7 +714,7 @@ async fn run(app: &App, session: Uuid, args: &Value) -> Result<String> {
     // A session that read untrusted content may carry it: recalling from one is reading untrusted
     // content. So is a memory such a session saved, and a wiki page with an entry labelled `web`.
     // A marked result asked for by name (an exact match) is handed over in full, and taints the
-    // session; any other is listed by reference only, with none of its text (D-055), so a search
+    // session; any other is listed by reference only, with none of its text (D-056), so a search
     // that merely comes across one doesn't spread the mark.
     let marked = marked_results(app, &listed).await;
     let (full, withheld): (Vec<_>, Vec<_>) = listed.iter().cloned().zip(marked).partition(|((f, _), m)| !m || f.exact);

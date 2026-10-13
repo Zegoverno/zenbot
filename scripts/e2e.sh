@@ -698,7 +698,7 @@ project_files() {
   "${g[@]}" -C "$ws/mine" worktree add -q -b side "$ws/mine-wt"
   sid=$(zen ask --json -m faux/smoke "read worktree" | jq -r .session_id)
   res=$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='read'")
-  check "a git worktree of a listed repository is trusted too (D-055)" bash -c 'grep -qF "Instructions for work under $2/mine-wt. Follow them." <<<"$1" && [ "$3" = f ]' _ "$res" "$ws" "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")"
+  check "a git worktree of a listed repository is trusted too (D-056)" bash -c 'grep -qF "Instructions for work under $2/mine-wt. Follow them." <<<"$1" && [ "$3" = f ]' _ "$res" "$ws" "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")"
 }
 
 # Secrets: the kernel's secret variables don't reach the agent's shell; a token in tool output is
@@ -910,7 +910,7 @@ job_report_file() {
 # Taint on data (taint.rs, D-053): what a session that read untrusted content stored carries the
 # mark, and every read path hands it over as untrusted content that marks the reader. A tainted
 # memory stays out of the next session's instructions; search lists it by id without its text
-# unless asked for it by name, then wraps it (D-055); drafts a
+# unless asked for it by name, then wraps it (D-056); drafts a
 # tainted session wrote (save_skill or write) are served wrapped, and an accepted session doesn't
 # activate them; the sleep copies a tainted memory to the wiki labelled web, never into USER.md; a
 # job run that read the web marks its report, which the next run and `schedule runs` get wrapped.
@@ -940,7 +940,7 @@ taint_on_data() {
   r=$(zen ask --json -m faux/smoke "TAINT-B"); sid=$(echo "$r" | jq -r .session_id)
   local base; base=$(q "SELECT payload->>'text' FROM tape_events WHERE session_id='$sid' AND kind='base'")
   check "the next session's instructions leave the memory out, by id" bash -c '! grep -q 4417 <<<"$1" && grep -q "(m1 saved by sessions that read untrusted content" <<<"$1"' _ "$base"
-  check "a search that comes across it lists it without its text, and doesn't mark the reader (D-055)" bash -c '! grep -q 4417 <<<"$1" && ! grep -q "<untrusted" <<<"$1" && grep -q "memory m1 (.*): search \"\`m1\`\" to read it" <<<"$1" && [ "$2" = f ]' _ "$(res_of "$sid")" "$(tainted "$sid")"
+  check "a search that comes across it lists it without its text, and doesn't mark the reader (D-056)" bash -c '! grep -q 4417 <<<"$1" && ! grep -q "<untrusted" <<<"$1" && grep -q "memory m1 (.*): search \"\`m1\`\" to read it" <<<"$1" && [ "$2" = f ]' _ "$(res_of "$sid")" "$(tainted "$sid")"
   r=$(zen ask --json -m faux/smoke "TAINT-EXACT"); sid=$(echo "$r" | jq -r .session_id)
   check "searching it by name returns it wrapped, and marks the reader" bash -c 'grep -q "<untrusted source=\"search\"" <<<"$1" && grep -q "PROMOTE-WIKI the" <<<"$1" && [ "$2" = t ]' _ "$(res_of "$sid")" "$(tainted "$sid")"
   r=$(zen ask --json -m faux/smoke "TAINT-C"); sid=$(echo "$r" | jq -r .session_id)

@@ -6,7 +6,7 @@
 
 ---
 
-## D-055 — Judge the action, not the reading; first step: search doesn't spread the mark
+## D-056 — Judge the action, not the reading; first step: search doesn't spread the mark
 
 **Date:** 2026-10-13 · **Status:** accepted (owner); built in part · **Amends:** D-053 (every read
 path taints the reader), D-051 (only listed repositories are trusted)
@@ -35,6 +35,9 @@ median 0.39, attacks 0.43 to 0.89), so it would have to flag half of what it jud
 **Considered:** a classifier on the content read (it reads the attacker's text, so the attacker can
 talk to it); System One scoring each action as the gate (too weak, above); tainting only on a
 flagged action without the gate (unsafe until the gate exists, so the target ships with it).
+
+---
+
 ## D-055 — A job's report can come from a file the run wrote, not the final answer
 
 **Date:** 2026-10-13 · **Status:** accepted (owner asked for the feature; design confirmed in the
