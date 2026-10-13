@@ -205,6 +205,10 @@ fn save_full_output_in(dir: &Path, text: &str) -> Option<PathBuf> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Sandbox {
     None,
+    /// Gate-checked fixed read binary with no inherited environment or shell startup hooks.
+    SafeRead,
+    /// Kernel file effects confined by directory descriptors; never follow mutable symlinks.
+    GatedFile,
     /// Everything read-only, an empty home with only the work bound back, no network.
     ReadOnly,
     /// No network; the workspace writable, everything else (the home, the zen home) read-only.
@@ -225,8 +229,8 @@ pub async fn execute(workspace: &Path, name: &str, args: &Value, env: &[(&str, &
             Err(e) => Err(err(e)),
         },
         "read" => read(workspace, args).await,
-        "write" => write(workspace, args).await,
-        "edit" => edit(workspace, args).await,
+        "write" => write(workspace, args, sandbox == Sandbox::GatedFile).await,
+        "edit" => edit(workspace, args, sandbox == Sandbox::GatedFile).await,
         _ => Err(err(format!("unknown tool `{name}`"))),
     };
     // Secrets are masked once for every tool, where the dispatcher hands the result back.
@@ -350,6 +354,22 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox:
             c.arg("--chdir").arg(dir).args(["bash", "-c"]);
             c
         }
+        Sandbox::SafeRead => {
+            // Read operations retain access to ordinary host files, but mounts protect secrets
+            // even if a path is swapped after policy checking or a utility recurses into a home.
+            // This is a read-only view, not the writable build sandbox.
+            let mut c = Command::new("bwrap");
+            c.args(OFFLINE_SANDBOX);
+            if home.starts_with("/tmp") || home.starts_with("/run") {
+                c.arg("--ro-bind").arg(&home).arg(&home);
+            }
+            c.arg("--ro-bind").arg(dir).arg(dir);
+            hide_secrets(&mut c, crate::secrets::secret_files());
+            c.env_clear().env("PATH", "/usr/bin:/bin").env("LANG", "C.UTF-8");
+            c.arg("--chdir").arg(dir).args(["/bin/bash", "--noprofile", "--norc", "-c"]);
+            c
+        }
+        Sandbox::GatedFile => return Err("file policy cannot execute shell commands".into()),
         Sandbox::None => {
             let mut c = Command::new("bash");
             c.arg("-c");
@@ -373,7 +393,7 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox:
         .map_err(|e| match sandbox {
             Sandbox::ReadOnly => format!("the read-only shell (bubblewrap) couldn't start: {e}; use read instead"),
             Sandbox::Offline => format!("the sandboxed shell (bubblewrap) couldn't start: {e}; this session read untrusted content, so it gets no shell outside the sandbox"),
-            Sandbox::None => format!("failed to start bash: {e}"),
+            Sandbox::None | Sandbox::SafeRead | Sandbox::GatedFile => format!("failed to start bash: {e}"),
         })?;
     let mut group = GroupKill(child.id().map(|p| p as i32));
 
@@ -482,11 +502,23 @@ fn is_binary(bytes: &[u8]) -> bool {
 async fn read(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> {
     const MAX_READ_FILE: u64 = 16 * 1024 * 1024;
     let path = resolve(workspace, str_arg(args, "path")?);
-    let file = tokio::fs::File::open(&path).await.map_err(|e| err(format!("cannot read {}: {e}", path.display())))?;
+    let file = tokio::fs::OpenOptions::new().read(true).custom_flags(0x800).open(&path).await
+        .map_err(|e| err(format!("cannot read {}: {e}", path.display())))?;
     let meta = file.metadata().await.map_err(|e| err(format!("cannot stat {}: {e}", path.display())))?;
+    // Check the opened object, not just its name, to defeat symlink swaps and hardlink aliases.
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
+    let opened = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+        .map_err(|e| err(format!("cannot validate opened file: {e}")))?;
+    if ["/proc", "/sys", "/dev", "/run"].iter().any(|p| opened.starts_with(p))
+        || crate::secrets::secret_files().iter().any(|p| opened.starts_with(p)
+            || std::fs::metadata(p).is_ok_and(|s| s.dev() == meta.dev() && s.ino() == meta.ino())) {
+        return Err(err("cannot read a secret or process/device file"));
+    }
     if meta.is_dir() {
         return Err(err(format!("{} is a directory; list it with bash (e.g. `ls -la {}`)", path.display(), path.display())));
     }
+    if !meta.is_file() { return Err(err("read accepts only regular files, not pipes or devices")); }
     let size = meta.len();
     if size > MAX_READ_FILE {
         return Err(err(format!("{} is {} bytes, over read's 16 MiB limit; use bash to inspect a range", path.display(), size)));
@@ -552,18 +584,18 @@ async fn read(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> 
 /// Replace a file's content all at once: a temporary file next to it, then a rename, so a crash or a
 /// concurrent reader never sees it half written. A symlink is followed (its target is replaced, not
 /// the link), and an existing file keeps its permissions.
-async fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    let target = match tokio::fs::canonicalize(path).await {
-        Ok(real) => real,
-        Err(_) => path.to_path_buf(),
-    };
+async fn write_atomic(path: &Path, content: &[u8], follow: bool) -> std::io::Result<()> {
+    let target = if follow {
+        tokio::fs::canonicalize(path).await.unwrap_or_else(|_| path.to_path_buf())
+    } else { path.to_path_buf() };
     let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let tmp = target.with_file_name(format!(".{name}.zen-{}", uuid::Uuid::new_v4().simple()));
     let perms = tokio::fs::metadata(&target).await.ok().map(|m| m.permissions());
     let result = async {
-        tokio::fs::write(&tmp, content).await?;
+        let mut file = tokio::fs::OpenOptions::new().write(true).create_new(true).open(&tmp).await?;
+        tokio::io::AsyncWriteExt::write_all(&mut file, content).await?;
         if let Some(p) = perms {
-            tokio::fs::set_permissions(&tmp, p).await?;
+            file.set_permissions(p).await?;
         }
         tokio::fs::rename(&tmp, &target).await
     }
@@ -574,14 +606,44 @@ async fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
     result
 }
 
-async fn write(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> {
+/// Anchor every parent directory in an open descriptor. Concurrent symlink replacements cannot
+/// redirect the write. The final rename replaces a link itself, never writes through it.
+fn anchored(workspace: &Path, path: &Path) -> std::io::Result<(std::fs::File, PathBuf)> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let root = workspace.canonicalize()?;
+    let relative = path.strip_prefix(workspace).map_err(|_| std::io::Error::other("outside workspace"))?;
+    let components: Vec<_> = relative.components().collect();
+    if components.is_empty() || components.iter().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+        return Err(std::io::Error::other("non-normal file path"));
+    }
+    let open_dir = |p: &Path| std::fs::OpenOptions::new().read(true).custom_flags(0x10000 | 0x20000).open(p);
+    let mut dir = open_dir(&root)?;
+    for component in &components[..components.len() - 1] {
+        let next = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd())).join(component.as_os_str());
+        match std::fs::create_dir(&next) {
+            Ok(()) => {},
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
+            Err(e) => return Err(e),
+        }
+        dir = open_dir(&next)?;
+    }
+    let file = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd())).join(components.last().unwrap().as_os_str());
+    Ok((dir, file))
+}
+
+async fn write(workspace: &Path, args: &Value, gated: bool) -> Result<ToolOutput, ToolOutput> {
     let path = resolve(workspace, str_arg(args, "path")?);
     let content = str_arg(args, "content")?;
     let _guard = lock_files(&[&path]).await;
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| err(format!("cannot create {}: {e}", parent.display())))?;
+    let anchor = if gated { Some(anchored(workspace, &path).map_err(|e| err(format!("cannot confine write: {e}")))?) } else { None };
+    if !gated {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| err(format!("cannot create {}: {e}", parent.display())))?;
+        }
     }
-    write_atomic(&path, content.as_bytes()).await.map_err(|e| err(format!("cannot write {}: {e}", path.display())))?;
+    let target = anchor.as_ref().map(|(_, p)| p.as_path()).unwrap_or(&path);
+    write_atomic(target, content.as_bytes(), !gated).await.map_err(|e| err(format!("cannot write {}: {e}", path.display())))?;
     Ok(ok(format!("wrote {} bytes to {}", content.len(), path.display())))
 }
 
@@ -649,7 +711,7 @@ fn find_matches(hay: &str, needle: &str) -> (Vec<(usize, usize)>, bool) {
     (found, true)
 }
 
-async fn edit(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> {
+async fn edit(workspace: &Path, args: &Value, gated: bool) -> Result<ToolOutput, ToolOutput> {
     let path = resolve(workspace, str_arg(args, "path")?);
     let old = str_arg(args, "old_text")?.replace("\r\n", "\n");
     let new = str_arg(args, "new_text")?.replace("\r\n", "\n");
@@ -661,7 +723,26 @@ async fn edit(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> 
         return Err(err("old_text and new_text are identical; nothing to change"));
     }
     let _guard = lock_files(&[&path]).await;
-    let bytes = tokio::fs::read(&path).await.map_err(|e| err(format!("cannot read {}: {e}", path.display())))?;
+    let anchor = if gated { Some(anchored(workspace, &path).map_err(|e| err(format!("cannot confine edit: {e}")))?) } else { None };
+    let target = anchor.as_ref().map(|(_, p)| p.as_path()).unwrap_or(&path);
+    let bytes = if gated {
+        let file = tokio::fs::OpenOptions::new().read(true).custom_flags(0x20000).open(target).await
+            .map_err(|e| err(format!("cannot open confined edit: {e}")))?;
+        let meta = file.metadata().await.map_err(|e| err(format!("cannot stat confined edit: {e}")))?;
+        use std::os::unix::fs::MetadataExt;
+        if !meta.is_file() || meta.len() > 16 * 1024 * 1024 ||
+            crate::secrets::secret_files().iter().any(|p| std::fs::metadata(p)
+                .is_ok_and(|s| s.dev() == meta.dev() && s.ino() == meta.ino())) {
+            return Err(err("confined edit refuses a secret, non-regular or oversized file"));
+        }
+        let mut bytes = Vec::new();
+        file.take(16 * 1024 * 1024 + 1).read_to_end(&mut bytes).await
+            .map_err(|e| err(format!("cannot read confined edit: {e}")))?;
+        if bytes.len() > 16 * 1024 * 1024 { return Err(err("confined edit exceeds 16 MiB")); }
+        bytes
+    } else {
+        tokio::fs::read(&path).await.map_err(|e| err(format!("cannot read {}: {e}", path.display())))?
+    };
     let original = String::from_utf8(bytes).map_err(|_| err(format!("{} is not a UTF-8 text file", path.display())))?;
 
     // Match on LF text without a BOM; restore both when writing back.
@@ -698,7 +779,7 @@ async fn edit(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> 
         return Err(err("the replacement produced identical content; nothing changed"));
     }
     let updated = if crlf { updated.replace('\n', "\r\n") } else { updated };
-    write_atomic(&path, format!("{bom}{updated}").as_bytes())
+    write_atomic(target, format!("{bom}{updated}").as_bytes(), !gated)
         .await
         .map_err(|e| err(format!("cannot write {}: {e}", path.display())))?;
     let n = if all { matches.len() } else { 1 };
@@ -721,6 +802,35 @@ mod tests {
         } else {
             execute(ws, name, &args, &[], Sandbox::None).await
         }
+    }
+
+    #[tokio::test]
+    async fn reading_a_fifo_is_refused_without_blocking() {
+        let root = scratch("fifo");
+        assert!(std::process::Command::new("mkfifo").arg(root.join("pipe")).status().unwrap().success());
+        let result = tokio::time::timeout(Duration::from_secs(2),
+            execute(&root, "read", &json!({"path":"pipe"}), &[], Sandbox::None)).await.unwrap();
+        assert!(result.is_error && result.content.contains("regular files"));
+    }
+
+    #[tokio::test]
+    async fn gated_writes_never_follow_symlinks() {
+        let root = scratch("gated-write");
+        let ws = root.join("work");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(root.join("outside.txt"), "untouched").unwrap();
+        std::os::unix::fs::symlink(root.join("outside.txt"), ws.join("link.txt")).unwrap();
+        let r = execute(&ws, "write", &json!({"path":"link.txt","content":"local"}), &[], Sandbox::GatedFile).await;
+        assert!(!r.is_error, "{}", r.content);
+        assert_eq!(std::fs::read_to_string(root.join("outside.txt")).unwrap(), "untouched");
+        assert_eq!(std::fs::read_to_string(ws.join("link.txt")).unwrap(), "local");
+        std::os::unix::fs::symlink(&*root, ws.join("escape")).unwrap();
+        let r = execute(&ws, "write", &json!({"path":"escape/outside.txt","content":"bad"}), &[], Sandbox::GatedFile).await;
+        assert!(r.is_error);
+        assert_eq!(std::fs::read_to_string(root.join("outside.txt")).unwrap(), "untouched");
+        let r = execute(&ws, "edit", &json!({"path":"link.txt","old_text":"local","new_text":"edited"}), &[], Sandbox::GatedFile).await;
+        assert!(!r.is_error, "{}", r.content);
+        assert_eq!(std::fs::read_to_string(ws.join("link.txt")).unwrap(), "edited");
     }
 
     #[tokio::test]
@@ -780,25 +890,6 @@ mod tests {
         let file = std::fs::File::create(ws.join("huge.txt")).unwrap();
         file.set_len(16 * 1024 * 1024 + 1).unwrap();
         let r = run(&ws, "read", json!({ "path": "huge.txt" })).await;
-        assert!(r.is_error);
-        assert!(r.content.contains("16 MiB limit"), "{}", r.content);
-    }
-
-    #[tokio::test]
-    async fn read_caps_a_zero_size_stream_too() {
-        use std::io::Write;
-        let ws = scratch("fifo-read");
-        let path = ws.join("stream.txt");
-        assert!(std::process::Command::new("mkfifo").arg(&path).status().unwrap().success());
-        let writer = std::thread::spawn(move || {
-            let mut f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
-            let chunk = [b'a'; 8192];
-            for _ in 0..(16 * 1024 * 1024 / chunk.len() + 1) {
-                if f.write_all(&chunk).is_err() { break; }
-            }
-        });
-        let r = run(&ws, "read", json!({ "path": "stream.txt" })).await;
-        writer.join().unwrap();
         assert!(r.is_error);
         assert!(r.content.contains("16 MiB limit"), "{}", r.content);
     }

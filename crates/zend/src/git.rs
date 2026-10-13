@@ -9,13 +9,26 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+/// Kernel Git must not execute user configuration, fsmonitor commands or hooks. Shell Git used
+/// for development is separate and keeps its normal configuration inside its execution boundary.
+fn command(repo: &Path) -> Command {
+    let mut c = Command::new("/usr/bin/git");
+    c.env_clear().env("PATH", "/usr/bin:/bin").env("HOME", "/nonexistent")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+               "-c", "core.pager=cat", "-c", "core.attributesFile=/dev/null",
+               "-c", "commit.gpgSign=false", "-c", "credential.helper=",
+               "-c", "core.sshCommand=/usr/bin/ssh -F /dev/null"])
+        .arg("-C").arg(repo);
+    c
+}
+
 /// Run git in `repo` (60s at most). Returns whether it succeeded and its stdout, of which at most
 /// `cap` bytes are read (git is stopped once that much has arrived, and then counts as failed).
 /// None when git couldn't run or took too long.
 pub async fn output(repo: &Path, args: &[&str], cap: usize) -> Option<(bool, String)> {
-    let mut child = Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    let mut child = command(repo)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -45,9 +58,7 @@ pub async fn git(repo: &Path, args: &[&str]) -> Option<String> {
 
 /// Run git in `dir` for its effect (60s at most), discarding its output: whether it succeeded.
 pub async fn run(dir: &Path, args: &[&str]) -> bool {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    let status = command(dir)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -74,6 +85,24 @@ pub async fn commit_all(dir: &Path, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn kernel_git_does_not_execute_fsmonitor_or_hooks() {
+        let repo = crate::test_util::TestDir::new("git-no-hooks");
+        assert!(git(&repo, &["init", "-q"]).await.is_some());
+        let marker = repo.join("executed");
+        let hook = repo.join("hook.sh");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::copy(&hook, repo.join(".git/hooks/pre-commit")).unwrap();
+        // Supply hostile local config through an ordinary external Git invocation.
+        assert!(std::process::Command::new("/usr/bin/git").arg("-C").arg(&*repo)
+            .args(["config", "core.fsmonitor"]).arg(&hook).status().unwrap().success());
+        std::fs::write(repo.join("file.txt"), "work").unwrap();
+        commit_all(&repo, "safe").await;
+        assert!(!marker.exists(), "kernel Git executed fsmonitor");
+    }
 
     #[tokio::test]
     async fn output_is_capped() {

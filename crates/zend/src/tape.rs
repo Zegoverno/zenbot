@@ -21,7 +21,14 @@ pub struct Block {
 /// Returns the new block's number and hash.
 pub async fn append(db: &PgPool, session: Uuid, kind: &str, payload: &Value) -> Result<(i32, String), sqlx::Error> {
     let mut tx = db.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 7))").bind(session).execute(&mut *tx).await?;
+    let result = append_in(&mut tx, session, kind, payload).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+/// Append in the caller's transaction, so an approval and its audit become visible together.
+pub async fn append_in(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, session: Uuid, kind: &str, payload: &Value) -> Result<(i32, String), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 7))").bind(session).execute(&mut **tx).await?;
     let row = sqlx::query(
         "WITH last AS (SELECT id, seq, hash FROM tape_events WHERE session_id = $1 AND seq IS NOT NULL ORDER BY seq DESC LIMIT 1)
          INSERT INTO tape_events (session_id, kind, payload, seq, parent, hash)
@@ -31,10 +38,9 @@ pub async fn append(db: &PgPool, session: Uuid, kind: &str, payload: &Value) -> 
     .bind(session)
     .bind(kind)
     .bind(payload)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
-    sqlx::query("UPDATE sessions SET updated_at = now() WHERE id = $1").bind(session).execute(&mut *tx).await?;
-    tx.commit().await?;
+    sqlx::query("UPDATE sessions SET updated_at = now() WHERE id = $1").bind(session).execute(&mut **tx).await?;
     Ok((row.get("seq"), row.get("hash")))
 }
 

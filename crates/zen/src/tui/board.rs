@@ -218,6 +218,8 @@ impl Board {
         // It read untrusted content and runs limited until the owner trusts it (`/trust`).
         if !s["tainted_at"].is_null() {
             meta.push_str(" · untrusted");
+        } else if !s["risky_at"].is_null() {
+            meta.push_str(" · risky");
         }
         if kids > 0 {
             let what = if running_kids > 0 { format!("{running_kids}/{kids} subagents working") } else { format!("{kids} subagent{}", if kids == 1 { "" } else { "s" }) };

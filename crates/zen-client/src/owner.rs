@@ -37,6 +37,8 @@ pub enum OwnerCmd {
     /// `trust`: what marked the chat's session as having read untrusted content; `trust yes`
     /// lifts the mark, as the owner last looked at it.
     Trust { yes: bool },
+    /// Inspect held actions or allow the exact action last inspected.
+    Allow { yes: bool },
 }
 
 /// What a chat client keeps between owner commands: the prefix it reads them by (`/` or `!`) and,
@@ -45,11 +47,12 @@ pub enum OwnerCmd {
 pub struct Chat {
     pub prefix: &'static str,
     looked: HashMap<String, i64>,
+    actions: HashMap<String, i64>,
 }
 
 impl Chat {
     pub fn new(prefix: &'static str) -> Self {
-        Chat { prefix, looked: HashMap::new() }
+        Chat { prefix, looked: HashMap::new(), actions: HashMap::new() }
     }
 }
 
@@ -63,7 +66,9 @@ pub const USAGE: &[(&str, &str)] = &[
     ("skills", "skills and made tools, with the fingerprint to review a draft"),
     ("skills accept|reject <domain/name> <sha>", "activate or archive a draft skill"),
     ("tools accept|reject <name> <sha>", "approve a made tool (network, no sandbox) or reject it"),
-    ("trust", "what made this session untrusted (it read content from outside)"),
+    ("allow", "inspect the latest held action"),
+    ("allow yes", "allow that exact action once, for ten minutes"),
+    ("trust", "what made this session risky or tainted"),
     ("trust yes", "trust it again, as you just looked at it"),
 ];
 
@@ -99,6 +104,11 @@ pub fn parse(text: &str) -> Option<Result<OwnerCmd, String>> {
                 Ok(OwnerCmd::Tool { name: name.trim_start_matches("made_").to_string(), decision: decision(d).unwrap_or("reject"), sha: sha.to_string() })
             }
             _ => usage("tools [accept|reject <name> <sha>]"),
+        },
+        "allow" => match &words[1..] {
+            [] => Ok(OwnerCmd::Allow { yes: false }),
+            [v] if v.eq_ignore_ascii_case("yes") => Ok(OwnerCmd::Allow { yes: true }),
+            _ => usage("allow [yes]"),
         },
         "trust" => match words.get(1).map(|w| w.to_ascii_lowercase()).as_deref() {
             None if words.len() == 1 => Ok(OwnerCmd::Trust { yes: false }),
@@ -146,12 +156,31 @@ pub async fn run(c: &Client, cmd: &OwnerCmd, session: Option<&str>, chat: &mut C
             let r = c.post(&format!("/api/tools/{}/review", enc(name)), json!({ "decision": decision, "sha": sha })).await?;
             r["result"].as_str().unwrap_or("done").to_string()
         }
+        OwnerCmd::Allow { yes } => {
+            let Some(id) = session else { return Ok("No session here yet.".into()) };
+            let p = chat.prefix;
+            if !yes {
+                let r = c.get(&format!("/api/sessions/{}/allow", enc(id))).await?;
+                chat.actions.remove(id);
+                let Some(a) = r["actions"].as_array().and_then(|v| v.first()) else {
+                    return Ok("No held actions waiting.".into());
+                };
+                let gate = a["id"].as_i64().unwrap_or(0);
+                chat.actions.insert(id.to_string(), gate);
+                return Ok(format!("**Held action #{gate}**: {}\n\n```json\n{}\n```\n\nThis allows the exact workspace, tool and arguments once, for ten minutes. It does not trust the session. Review any scripts/files it will run too.\n\n`{p}allow yes` to allow it.",
+                    a["reason"].as_str().unwrap_or(""), a["action"].as_str().unwrap_or("")));
+            }
+            let Some(gate) = chat.actions.remove(id) else { return Ok(format!("Look first: `{p}allow`.")) };
+            let r = c.post(&format!("/api/sessions/{}/allow", enc(id)), json!({"id":gate})).await?;
+            if r["allowed"] == true { "Allowed once: ask the agent to retry unchanged.".into() }
+            else { "That action is no longer waiting: look again.".into() }
+        }
         OwnerCmd::Trust { yes } => {
             let Some(id) = session else { return Ok("No session here yet: nothing to trust.".into()) };
             let p = chat.prefix;
             if !yes {
                 let r = c.get(&format!("/api/sessions/{}/taint", enc(id))).await?;
-                if r["tainted_at"].is_null() {
+                if r["tainted_at"].is_null() && r["risky_at"].is_null() {
                     chat.looked.remove(id);
                     return Ok("This session hasn't read untrusted content: nothing to trust.".into());
                 }
@@ -165,7 +194,7 @@ pub async fn run(c: &Client, cmd: &OwnerCmd, session: Option<&str>, chat: &mut C
             chat.looked.remove(id);
             let r = r?;
             match r["seq"].as_i64() {
-                Some(seq) => format!("Trusted from #{seq} on: its shell has the network again and its limits are lifted. The next untrusted read limits it again."),
+                Some(seq) => format!("Trusted from #{seq} on: the risky and tainted marks are lifted. The next outside read makes it risky again."),
                 None => r["result"].as_str().unwrap_or("done").to_string(),
             }
         }
@@ -182,10 +211,13 @@ pub fn taint_report(r: &Value, prefix: &str) -> String {
         format!(
             "**This session read untrusted content** (since {} UTC), so it runs limited: its shell has no network, \
              and it can't change the prompt files, skills or tools, vouch for a memory or start a job.",
-            minute(&r["tainted_at"])
+            minute(if r["tainted_at"].is_null() { &r["risky_at"] } else { &r["tainted_at"] })
         ),
         String::new(),
     ];
+    if r["tainted_at"].is_null() {
+        out[0] = "**This session is risky, not tainted.** It read outside content. Safe reads run normally; programmable work runs sandboxed; dangerous actions wait for approval.".into();
+    }
     let taints = r["taints"].as_array().cloned().unwrap_or_default();
     if !taints.is_empty() {
         out.push("What marked it:".into());
@@ -205,7 +237,7 @@ pub fn taint_report(r: &Value, prefix: &str) -> String {
     out.push(String::new());
     out.push(
         "Trusting it lifts the limits from now on. What it read stays in its context, so trust it only if you trust that; \
-         the next untrusted read limits it again, and what it saved meanwhile stays marked."
+         the next outside read makes it risky again, and what it saved meanwhile stays marked."
             .into(),
     );
     if r["busy"] == true {
@@ -301,6 +333,9 @@ mod tests {
             Some(Ok(OwnerCmd::Skill { name: "work/brief".into(), decision: "accept", sha: "abc123def456".into() }))
         );
         assert_eq!(parse("tools reject made_fetch 0123abcd"), Some(Ok(OwnerCmd::Tool { name: "fetch".into(), decision: "reject", sha: "0123abcd".into() })));
+        assert_eq!(parse("allow"), Some(Ok(OwnerCmd::Allow { yes: false })));
+        assert_eq!(parse("ALLOW YES"), Some(Ok(OwnerCmd::Allow { yes: true })));
+        assert!(matches!(parse("allow everything"), Some(Err(_))));
         assert_eq!(parse("trust"), Some(Ok(OwnerCmd::Trust { yes: false })));
         assert_eq!(parse("Trust YES"), Some(Ok(OwnerCmd::Trust { yes: true })));
         assert_eq!(parse("hello"), None);

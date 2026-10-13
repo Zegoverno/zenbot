@@ -544,7 +544,7 @@ impl Bridge {
                 let msg = match s {
                     Some(id) => {
                         let limited = if self.kernel.tainted(&id).await.unwrap_or(false) {
-                            "\nIt read untrusted content, so it runs limited (no network in its shell): `!trust` shows what."
+                            "\nAn action was held, so it runs limited: `!allow` reviews that action; `!trust` shows the session-wide override."
                         } else {
                             ""
                         };

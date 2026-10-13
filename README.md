@@ -99,6 +99,17 @@ How each of these works is in [DESIGN.md](DESIGN.md) ("As built"); here is what 
   ```
   Per server: `enabled`, `timeout_s`, `include` / `exclude` (tool names), `allow_env`, `untrusted` (default true: its output is untrusted and taints the session; set `"untrusted": false` for a server you trust). Only you edit `mcp.json`. `curl -H "Authorization: Bearer $(cat ~/.zenbot/token)" localhost:8100/api/mcp` shows what loaded.
 
+### Actions after outside reads
+
+Outside content makes a session **risky**, not blanket-limited. Read utilities run automatically
+with credential protection; Git and builds run offline; outward, unknown or steering actions
+are held before effect. A held action makes the session **untrusted**.
+
+`/allow` shows the latest held action; `/allow yes` grants that exact workspace, tool and arguments
+once for ten minutes. In Matrix use `!allow` and `!allow yes`. This does not trust the whole
+session. Review scripts/configuration the action will execute too: approval binds arguments,
+not every referenced file's contents. `/trust` remains the broader session override.
+
 ## Settings you might set
 
 In `~/.zenbot/env` (every setting, with defaults: [MAP.md](MAP.md#environment-variables)):

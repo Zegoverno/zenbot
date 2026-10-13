@@ -737,7 +737,7 @@ async fn marked_results(app: &App, listed: &[(Found, Option<f64>)]) -> Vec<bool>
     let refs = |kind: &str| listed.iter().filter(|(f, _)| f.kind == kind).map(|(f, _)| f.reference.clone()).collect::<Vec<_>>();
     let sessions: Vec<Uuid> = refs("turn").iter().filter_map(|r| r.split(':').next().and_then(|s| s.parse().ok())).collect();
     let memories: Vec<i64> = refs("memory").iter().filter_map(|r| r.trim_start_matches('m').parse().ok()).collect();
-    let tainted_sessions: Option<Vec<Uuid>> = sqlx::query_scalar("SELECT id FROM sessions WHERE id = ANY($1) AND tainted_at IS NOT NULL")
+    let tainted_sessions: Option<Vec<Uuid>> = sqlx::query_scalar("SELECT id FROM sessions WHERE id = ANY($1) AND (risky_at IS NOT NULL OR tainted_at IS NOT NULL)")
         .bind(&sessions).fetch_all(&app.db).await.ok();
     let tainted_memories: Option<Vec<i64>> = sqlx::query_scalar("SELECT id FROM memories WHERE id = ANY($1) AND tainted")
         .bind(&memories).fetch_all(&app.db).await.ok();

@@ -325,8 +325,8 @@ pub(crate) async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result
 pub(crate) async fn run_child(app: &AppState, parent: Uuid, kind: &str, prompt: &str, dir: &std::path::Path, model: Option<&str>) -> Result<Uuid> {
     let child = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO sessions (id, title, model, effort, state, parent, kind, workspace, tainted_at)
-         SELECT $1, $2 || ': ' || title, COALESCE($6, model), CASE WHEN $6 IS NULL THEN effort END, NULL, id, $3, $5, tainted_at
+        "INSERT INTO sessions (id, title, model, effort, state, parent, kind, workspace, tainted_at, risky_at)
+         SELECT $1, $2 || ': ' || title, COALESCE($6, model), CASE WHEN $6 IS NULL THEN effort END, NULL, id, $3, $5, tainted_at, risky_at
          FROM sessions WHERE id = $4",
     )
     .bind(child)

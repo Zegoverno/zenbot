@@ -119,6 +119,7 @@ pub(super) struct App {
     pub(super) read_only: bool,
     /// The session has read untrusted content and runs limited, until the owner trusts it (`/trust`).
     pub(super) tainted: bool,
+    pub(super) risky: bool,
     /// What the owner commands (`/jobs`, `/trust`, …) keep between calls.
     pub(super) chat: zen_client::owner::Chat,
     /// When the last frame was drawn, and whether something changed since that waits for the
@@ -227,6 +228,7 @@ impl App {
             board_fetch: 0,
             read_only: false,
             tainted: false,
+            risky: false,
             chat: zen_client::owner::Chat::new("/"),
             last_draw: None,
             dirty: false,
@@ -273,6 +275,7 @@ impl App {
         self.title.clear();
         self.read_only = false;
         self.tainted = false;
+        self.risky = false;
         self.session_tokens = 0;
         self.busy = false;
         self.aborting = false;
@@ -299,6 +302,7 @@ impl App {
         self.effort = s["effort"].as_str().map(String::from);
         self.read_only = s["kind"].as_str().is_some_and(read_only_kind);
         self.tainted = !s["tainted_at"].is_null();
+        self.risky = !s["risky_at"].is_null();
         self.connect(&id).await?;
         self.show_history(&s);
         Ok(())

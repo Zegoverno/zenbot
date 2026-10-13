@@ -819,7 +819,7 @@ fn spawn_run(app: &AppState, job: Job, run: i64) {
 async fn finish(db: &PgPool, job: &Job, run: i64, o: &Outcome) -> Result<()> {
     sqlx::query(
         "UPDATE job_runs SET status = $2, ended_at = now(), output = $3, error = $4,
-                tainted = COALESCE((SELECT tainted_at IS NOT NULL FROM sessions WHERE id = job_runs.session_id), false)
+                tainted = COALESCE((SELECT risky_at IS NOT NULL OR tainted_at IS NOT NULL FROM sessions WHERE id = job_runs.session_id), false)
          WHERE id = $1",
     )
     .bind(run)
@@ -1172,7 +1172,9 @@ fn describe(j: &Job) -> String {
     format!("- {} ({}, `{}` {}): {when}{last}", j.name, j.kind, j.schedule, j.tz)
 }
 
-async fn tool(app: &AppState, session: Uuid, args: &Value) -> Result<String> {
+async fn tool(app: &AppState, session: Uuid, args: &Value, owner_allowed: bool) -> Result<String> {
+    // Only dispatch can supply this after consuming an audited exact owner grant.
+    let by = if owner_allowed { By::Owner } else { By::Agent(session) };
     let name = args["name"].as_str().unwrap_or("").trim().to_string();
     let need = || -> Result<&str> {
         anyhow::ensure!(!name.is_empty(), "this action needs the job's `name`");
@@ -1184,11 +1186,11 @@ async fn tool(app: &AppState, session: Uuid, args: &Value) -> Result<String> {
     };
     Ok(match args["action"].as_str().unwrap_or("") {
         "create" => {
-            let (j, p) = create(app, Spec::from_json(args), By::Agent(session)).await?;
+            let (j, p) = create(app, Spec::from_json(args), by).await?;
             live(&j, p)
         }
         "update" => {
-            let (j, p) = update(app, need()?, Spec::from_json(args), By::Agent(session)).await?;
+            let (j, p) = update(app, need()?, Spec::from_json(args), by).await?;
             live(&j, p)
         }
         "list" => {
@@ -1216,11 +1218,11 @@ async fn tool(app: &AppState, session: Uuid, args: &Value) -> Result<String> {
             lines.join("\n")
         }
         "pause" => {
-            let (j, _) = set_enabled(app, need()?, false, By::Agent(session)).await?;
+            let (j, _) = set_enabled(app, need()?, false, by).await?;
             format!("Paused `{}`.", j.name)
         }
         "resume" => {
-            let (j, p) = set_enabled(app, need()?, true, By::Agent(session)).await?;
+            let (j, p) = set_enabled(app, need()?, true, by).await?;
             live(&j, p)
         }
         "remove" => {
@@ -1230,7 +1232,7 @@ async fn tool(app: &AppState, session: Uuid, args: &Value) -> Result<String> {
             format!("Removed `{}` (its runs stay on record).", j.name)
         }
         "run" => {
-            let run = run_now(app, need()?, By::Agent(session)).await?;
+            let run = run_now(app, need()?, by).await?;
             format!("Started run {run} of `{name}` in the background; its report shows in `runs` when it ends.")
         }
         other => bail!("action must be create, update, list, runs, pause, resume, remove or run, not `{other}`"),
@@ -1238,11 +1240,11 @@ async fn tool(app: &AppState, session: Uuid, args: &Value) -> Result<String> {
 }
 
 /// Run `schedule`. None for other tools.
-pub async fn run_tool(app: &AppState, session: Uuid, name: &str, args: &Value) -> Option<tools::ToolOutput> {
+pub async fn run_tool(app: &AppState, session: Uuid, name: &str, args: &Value, owner_allowed: bool) -> Option<tools::ToolOutput> {
     if name != "schedule" {
         return None;
     }
-    Some(match tool(app, session, args).await {
+    Some(match tool(app, session, args, owner_allowed).await {
         Ok(content) => tools::ToolOutput { content, is_error: false },
         Err(e) => tools::ToolOutput { content: format!("schedule failed: {e:#}"), is_error: true },
     })

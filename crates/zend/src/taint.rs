@@ -1,14 +1,15 @@
 //! Taint tracking and the untrusted-content envelope (D-034, D-051, D-053). Applies to web pages,
 //! MCP servers, subagents and history alike, not just web fetches.
 //!
-//! Taint is a property of the session that read untrusted content (`sessions.tainted_at`) and of
+//! Outside reads mark the session risky (`sessions.risky_at`); gate.rs marks it tainted
+//! (`sessions.tainted_at`) only when an action is held. Provenance is also a property of
 //! what it stored: memories (`memories.tainted`), job reports (`job_runs.tainted`), draft skills
 //! (`draft_taint`) and wiki entries (labelled `web`). Two rules keep it from laundering:
 //! - **One read path.** Stored content goes to a session through `hand_over`: tainted content is
 //!   wrapped as untrusted and marks the reader, so it never reaches a clean session as trusted.
-//! - **One set of limits.** What a tainted session may not do, or does only sandboxed, is `limit`:
-//!   change what steers every session, vouch for what it saves, start a job without the owner, run
-//!   a shell with the network.
+//! - **One effect gate.** gate.rs checks actions before dispatch (run / sandbox / hold).
+//!   `limited` keeps risky data from vouching for itself or activating persistent drafts.
+//!   `Limit::Shell` is the capability revoked only by a held action, not by reading.
 //!
 //! Only the owner lifts a session's mark (`trust`, D-054), after looking at what set it (`report`).
 //! It works forward only: the next untrusted read marks the session again, and what it stored while
@@ -44,7 +45,7 @@ fn envelope_pattern() -> String {
 /// last block, which `trust` takes back as `seen`. None when there's no such session.
 pub async fn report(app: &App, session: Uuid) -> anyhow::Result<Option<Value>> {
     let Some(row) = sqlx::query(
-        "SELECT s.tainted_at,
+        "SELECT s.tainted_at, s.risky_at,
                 COALESCE((SELECT max(seq) FROM tape_events WHERE session_id = s.id), 0) AS checked,
                 COALESCE((SELECT max(seq) FROM tape_events WHERE session_id = s.id AND kind = 'trust'), 0) AS since
          FROM sessions s WHERE s.id = $1",
@@ -56,7 +57,7 @@ pub async fn report(app: &App, session: Uuid) -> anyhow::Result<Option<Value>> {
         return Ok(None);
     };
     let since: i32 = row.get("since");
-    let taints: Vec<Value> = sqlx::query("SELECT seq, payload, created_at FROM tape_events WHERE session_id = $1 AND kind = 'taint' AND seq > $2 ORDER BY seq")
+    let taints: Vec<Value> = sqlx::query("SELECT seq, payload, created_at FROM tape_events WHERE session_id = $1 AND kind IN ('taint', 'risky') AND seq > $2 ORDER BY seq")
         .bind(session)
         .bind(since)
         .fetch_all(&app.db)
@@ -87,6 +88,7 @@ pub async fn report(app: &App, session: Uuid) -> anyhow::Result<Option<Value>> {
     .collect();
     Ok(Some(json!({
         "tainted_at": row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("tainted_at"),
+        "risky_at": row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("risky_at"),
         "checked": row.get::<i32, _>("checked"),
         "taints": taints,
         "sources": sources,
@@ -111,21 +113,25 @@ pub enum Trusted {
 /// when the mark was set and where it came from). The caller refuses while a turn runs, when
 /// content could be read but not yet recorded.
 pub async fn trust(app: &App, session: Uuid, seen: i32) -> anyhow::Result<Trusted> {
+    let mut tx = app.db.begin().await?;
+    // Match tape append's lock order: chain lock before the session row.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 7))")
+        .bind(session).execute(&mut *tx).await?;
     let lifted = sqlx::query(
-        "WITH old AS (SELECT id, tainted_at FROM sessions WHERE id = $1 AND tainted_at IS NOT NULL FOR UPDATE)
-         UPDATE sessions s SET tainted_at = NULL FROM old
+        "WITH old AS (SELECT id, COALESCE(tainted_at, risky_at) AS tainted_at FROM sessions WHERE id = $1 AND (risky_at IS NOT NULL OR tainted_at IS NOT NULL) FOR UPDATE)
+         UPDATE sessions s SET tainted_at = NULL, risky_at = NULL FROM old
          WHERE s.id = old.id AND NOT EXISTS (
            SELECT 1 FROM tape_events e WHERE e.session_id = $1 AND e.seq > $2
-             AND (e.kind = 'taint' OR (e.kind = 'message' AND e.payload::text ~ $3)))
+             AND (e.kind IN ('taint', 'risky') OR (e.kind = 'message' AND e.payload::text ~ $3)))
          RETURNING old.tainted_at",
     )
     .bind(session)
     .bind(seen)
     .bind(envelope_pattern())
-    .fetch_optional(&app.db)
+    .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = lifted else {
-        let state: Option<bool> = sqlx::query_scalar("SELECT tainted_at IS NOT NULL FROM sessions WHERE id = $1").bind(session).fetch_optional(&app.db).await?;
+        let state: Option<bool> = sqlx::query_scalar("SELECT risky_at IS NOT NULL OR tainted_at IS NOT NULL FROM sessions WHERE id = $1").bind(session).fetch_optional(&app.db).await?;
         return Ok(match state {
             None => Trusted::NotFound,
             Some(false) => Trusted::Clean,
@@ -133,10 +139,12 @@ pub async fn trust(app: &App, session: Uuid, seen: i32) -> anyhow::Result<Truste
         });
     };
     let tainted_at: chrono::DateTime<chrono::Utc> = row.get("tainted_at");
-    let last = crate::tape::load(&app.db, session, &["taint"]).await?.pop().map(|b| b.payload).unwrap_or(Value::Null);
+    let last: Value = sqlx::query_scalar("SELECT payload FROM tape_events WHERE session_id = $1 AND kind IN ('taint', 'risky') ORDER BY seq DESC LIMIT 1")
+        .bind(session).fetch_optional(&mut *tx).await?.unwrap_or(Value::Null);
     let block = json!({ "by": "the owner", "seen": seen, "tainted_at": tainted_at, "source": last["source"], "about": last["about"] });
-    let (seq, _) = crate::tape::append(&app.db, session, "trust", &block).await?;
-    app.emit(session, json!({ "type": "taint", "tainted": false })).await;
+    let (seq, _) = crate::tape::append_in(&mut tx, session, "trust", &block).await?;
+    tx.commit().await?;
+    app.emit(session, json!({ "type": "taint", "tainted": false, "risky": false })).await;
     Ok(Trusted::Done(seq))
 }
 
@@ -160,15 +168,24 @@ fn defuse(text: &str) -> String {
 /// recorded: then the caller must not hand the content to the model (an unmarked session could
 /// still change what steers every session); `withheld` says so.
 pub async fn taint(app: &App, session: Uuid, source: &str, about: &str) -> anyhow::Result<()> {
-    let first = sqlx::query("UPDATE sessions SET tainted_at = now() WHERE id = $1 AND tainted_at IS NULL")
+    let first = sqlx::query("UPDATE sessions SET risky_at = now() WHERE id = $1 AND risky_at IS NULL")
         .bind(session).execute(&app.db).await?.rows_affected() == 1;
     if first {
         // The mark is the column; the tape block only says where it came from.
-        if let Err(e) = crate::tape::append(&app.db, session, "taint", &json!({ "source": source, "about": about })).await {
+        if let Err(e) = crate::tape::append(&app.db, session, "risky", &json!({ "source": source, "about": about })).await {
             tracing::warn!("recording where session {session}'s taint came from: {e:#}");
         }
-        app.emit(session, json!({ "type": "taint", "tainted": true, "source": source, "about": about })).await;
+        app.emit(session, json!({ "type": "taint", "risky": true, "source": source, "about": about })).await;
     }
+    Ok(())
+}
+
+/// Revoke shell capabilities only when an action was held (D-056).
+pub async fn escalate(app: &App, session: Uuid, source: &str, about: &str) -> anyhow::Result<()> {
+    sqlx::query("UPDATE sessions SET tainted_at = COALESCE(tainted_at, now()), risky_at = COALESCE(risky_at, now()) WHERE id = $1")
+        .bind(session).execute(&app.db).await?;
+    crate::tape::append(&app.db, session, "taint", &json!({"source":source,"about":about})).await?;
+    app.emit(session, json!({"type":"taint","risky":true,"tainted":true})).await;
     Ok(())
 }
 
@@ -206,14 +223,16 @@ pub enum Limit {
 /// it applies the answer.
 pub async fn limited(db: &sqlx::PgPool, session: Uuid, limit: Limit) -> bool {
     match limit {
-        Limit::Steer | Limit::Vouch | Limit::StartJob | Limit::Shell => tainted(db, session).await,
+        Limit::Vouch | Limit::Steer | Limit::StartJob => tainted(db, session).await,
+        Limit::Shell => sqlx::query_scalar::<_, bool>("SELECT tainted_at IS NOT NULL FROM sessions WHERE id = $1")
+            .bind(session).fetch_optional(db).await.map(|t| t.unwrap_or(true)).unwrap_or(true),
     }
 }
 
 /// The sandbox a session's shell (`bash`, a `verify` criterion's command) runs in: none for a
 /// clean session, `Offline` once it has read untrusted content.
 pub async fn shell_sandbox(db: &sqlx::PgPool, session: Uuid) -> crate::tools::Sandbox {
-    if limited(db, session, Limit::Shell).await {
+    if tainted(db, session).await {
         crate::tools::Sandbox::Offline
     } else {
         crate::tools::Sandbox::None
@@ -223,14 +242,14 @@ pub async fn shell_sandbox(db: &sqlx::PgPool, session: Uuid) -> crate::tools::Sa
 /// Whether a session has read untrusted content. When it can't be told (a database error), it
 /// counts as tainted: the checks that use this fail closed.
 pub async fn tainted(db: &sqlx::PgPool, session: Uuid) -> bool {
-    sqlx::query_scalar::<_, bool>("SELECT tainted_at IS NOT NULL FROM sessions WHERE id = $1")
-        .bind(session).fetch_optional(db).await.map(|t| t.unwrap_or(false)).unwrap_or(true)
+    sqlx::query_scalar::<_, bool>("SELECT risky_at IS NOT NULL OR tainted_at IS NOT NULL FROM sessions WHERE id = $1")
+        .bind(session).fetch_optional(db).await.map(|t| t.unwrap_or(true)).unwrap_or(true)
 }
 
 /// Whether any session matching a history tool's unique-prefix lookup is tainted.
 pub async fn prefix_tainted(db: &sqlx::PgPool, prefix: &str) -> bool {
     let Some((lo, hi)) = crate::compact::id_prefix_range(prefix) else { return false };
-    sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM sessions WHERE id BETWEEN $1 AND $2 AND tainted_at IS NOT NULL)")
+    sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM sessions WHERE id BETWEEN $1 AND $2 AND (risky_at IS NOT NULL OR tainted_at IS NOT NULL))")
         .bind(lo).bind(hi).fetch_one(db).await.unwrap_or(true)
 }
 

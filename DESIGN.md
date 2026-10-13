@@ -270,25 +270,23 @@ harness versions with the same model on isolated kernels and databases (`evals/R
 - **Untrusted content** (D-034, D-053; `taint.rs`): web pages, untrusted MCP servers' output
   and tool descriptions (D-052), instruction files from repositories the owner hasn't listed
   (`ZEN_TRUSTED_REPOS`, D-051) and a tainted subagent's answer are wrapped in `<untrusted …>`
-  (markers inside are defused) and the session is tainted (`sessions.tainted_at`, a `taint` block).
+  (markers inside are defused) and the session is risky (`sessions.risky_at`, a `risky` block). `gate.rs` checks effects before they run: fixed read utilities use a credential-protected read-only view, Git/builds run offline in the workspace, and outward, unknown or steering effects are held. A held effect sets `sessions.tainted_at` and a `taint` block before any effect. `/allow` inspects the latest held action; `/allow yes` grants the exact workspace/tool/arguments once within ten minutes. The grant and audit commit together and consumption is atomic. `/trust` clears both marks (D-056).
   Taint is also a property of what a tainted session stores: memories (`memories.tainted`), job
   reports (`job_runs.tainted`), draft skills (`draft_taint`) and wiki entries (labelled `web`).
   Every path that gives stored content to a session goes through `taint::hand_over`, which wraps
-  marked content and taints the reader, so it never reaches a clean session as trusted. `search`
+  marked content and makes the reader risky, so it never reaches a clean session as trusted. `search`
   hands over a marked result only when asked for it by name (an exact match); any other marked
   result is listed by reference with none of its text (a wiki page without its name), so coming across one doesn't spread the
   mark (D-056). What a
-  tainted session may not do is `taint::limited`: `remember` records `inferred` and marks the entry,
+  risky session may not vouch for is `taint::limited`: `remember` records `inferred` and marks the entry,
   so web text can't pass as the owner's words; its `edit` or `write` on a prompt file (`SOUL`,
   `IDENTITY`, `AGENTS`, `USER`), an active skill or a made tool is refused, as for any subagent or
-  kernel session (D-045, D-051); a job it schedules waits for the owner; and its `bash` (and
-  `verify`'s commands) run offline in bubblewrap: no network, `/run` and a private `/tmp` emptied,
+  kernel session (D-045, D-051), unless an exact owner grant overrides a main session's steering limit. Persistent scheduling is held, and an exact grant supplies owner authorization. Programmable `bash` and verification commands run offline in bubblewrap: no network, `/run` and a private `/tmp` emptied,
   its own processes, the workspace writable and the rest of the machine (the home, the zen home)
   read-only, the secret files hidden; the result says so. Offline builds and tests and `git
   commit` in the workspace work; installing packages, `git push` and anything needing the network
-  or a file outside the workspace don't, until the owner trusts the session again (`/trust`, D-054:
-  after looking at what marked it, forward only; what it stored keeps its marks) or continues in a
-  fresh session. A main session may write
+  or a file outside the workspace require exact approval or the owner trusting the session again (`/trust`, D-054:
+  after looking at what marked it, forward only; what it stored keeps its marks) or continues in a fresh session. Unsupported shell syntax is held conservatively; the narrow grammar is not a promise that the prototype's unchecked fraction is preserved. Workspace code can still change project files; programmable commands in a workspace containing the home are held for exact approval instead of running automatically. Immutable snapshots and a separate Unix user are not supplied by this gate. A main session may write
   `IDENTITY.md` and `USER.md` itself; each change is backed up first
   (`~/.zenbot/backups/prompt-files/`) and one that passes the file's cap comes back with a request
   to compact it. No session may `edit` or `write` the owner's configuration and secrets

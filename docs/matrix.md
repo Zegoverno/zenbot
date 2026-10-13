@@ -31,8 +31,9 @@ client protocol (docs/client-protocol.md), like `zen`: the kernel doesn't know M
 - **Commands:** `!new [title]`, `!stop` (abort the turn), `!session` (the session id, for `zen -r`, and whether it's untrusted),
   `!help`, and the owner commands `!jobs [run|resume|pause <name> | runs [name]]`,
   `!skills [accept|reject <domain/name> <sha>]`, `!tools accept|reject <name> <sha>` and
+  `!allow [yes]` (review and approve the exact latest held action once) and
   `!trust [yes]` (what made the room's session untrusted; `yes` trusts it again, D-054)
-  (`zen_client::owner`, the same as zen's `/jobs`, `/skills`, `/tools`, `/trust`). They work in every room,
+  (`zen_client::owner`, the same as zen's `/jobs`, `/skills`, `/tools`, `/allow`, `/trust`). They work in every room,
   **zen jobs** included; the bridge runs them against the kernel with the owner's token and posts
   the answer as a notice, so they never reach the agent and nothing it read can approve a job, a
   skill or a tool. Removing or creating a job stays in the terminal.

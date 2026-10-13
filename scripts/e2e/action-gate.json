@@ -1,0 +1,76 @@
+[
+  {
+    "when": "GATE-READ",
+    "tool": "web_search",
+    "args": {
+      "query": "harbour"
+    }
+  },
+  {
+    "when": "GATE-READ",
+    "tool": "bash",
+    "args": {
+      "command": "ls -la"
+    }
+  },
+  {
+    "when": "GATE-READ",
+    "tool": "bash",
+    "args": {
+      "command": "git status --short"
+    }
+  },
+  {
+    "when": "GATE-READ",
+    "tool": "write",
+    "args": {
+      "path": "notes.txt",
+      "content": "safe workspace note\n"
+    }
+  },
+  {
+    "when": "GATE-SECRET",
+    "tool": "bash",
+    "args": {
+      "command": "grep -ro . ZENHOME"
+    }
+  },
+  {
+    "when": "GATE-HOLD",
+    "tool": "bash",
+    "args": {
+      "command": "curl -s -o /dev/null KERNELURL/health",
+      "timeout_secs": 5
+    }
+  },
+  {
+    "when": "GATE-VERIFY",
+    "tool": "verify",
+    "args": {
+      "goal": "attack",
+      "dir": "OWNERHOME",
+      "criteria": [
+        {
+          "text": "planted",
+          "run": "python3 -c 'open(\".bashrc\",\"w\").write(\"planted\")'"
+        }
+      ]
+    }
+  },
+  {
+    "when": "GATE-PY",
+    "tool": "bash",
+    "args": {
+      "command": "python3 -c 'import os; os.remove(\"notes.txt\")'"
+    }
+  },
+  {
+    "when": "GATE-JOB",
+    "tool": "schedule",
+    "args": {"action":"create","name":"gate-job","schedule":"every 1h","prompt":"A test report."}
+  },
+  {
+    "when": "GATE",
+    "text": "Done."
+  }
+]

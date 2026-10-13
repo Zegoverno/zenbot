@@ -705,7 +705,7 @@ pub fn result_text(result: &Value) -> String {
     parts.join("\n")
 }
 
-async fn call(app: &App, session: Uuid, full: &str, args: &Value) -> Result<(String, bool)> {
+async fn call(app: &App, session: Uuid, full: &str, args: &Value, force_sandbox: bool) -> Result<(String, bool)> {
     let t = lookup(full).await?;
     let args = if args.is_null() { json!({}) } else { args.clone() };
     let missing = missing_args(&t.schema, &args);
@@ -718,7 +718,7 @@ async fn call(app: &App, session: Uuid, full: &str, args: &Value) -> Result<(Str
         anyhow::bail!("{error}");
     }
     if t.server == "made" {
-        let (text, is_error, networked) = crate::workshop::run_made(&app.db, &t.name, &args).await?;
+        let (text, is_error, networked) = crate::workshop::run_made(&app.db, &t.name, &args, force_sandbox).await?;
         // An approved tool can reach the network: what it returns may be web content.
         if networked {
             crate::taint::taint(app, session, "made", &t.full()).await?;
@@ -785,7 +785,7 @@ match its parameters. Ask the owner before calls that send, publish, delete or s
 }
 
 /// Run `find_tools`, `load_tool` or `call_tool`. None for other tools.
-pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value) -> Option<tools::ToolOutput> {
+pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value, force_sandbox: bool) -> Option<tools::ToolOutput> {
     let (content, is_error) = match name {
         "find_tools" => find(app, session, args["query"].as_str().unwrap_or("")).await,
         "load_tool" => match lookup(args["name"].as_str().unwrap_or("")).await {
@@ -801,7 +801,7 @@ pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value) -> Opt
             }
             Err(e) => (format!("{e:#}"), true),
         },
-        "call_tool" => match call(app, session, args["name"].as_str().unwrap_or(""), &args["arguments"]).await {
+        "call_tool" => match call(app, session, args["name"].as_str().unwrap_or(""), &args["arguments"], force_sandbox).await {
             Ok(r) => r,
             Err(e) => (format!("call_tool failed: {e:#}"), true),
         },

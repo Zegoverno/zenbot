@@ -175,7 +175,7 @@ pub fn prompt_file_target(workspace: &Path, name: &str, args: &Value) -> Option<
 /// refused, so text from outside can't rewrite what steers every session. The owner's configuration
 /// and secrets are refused to every session: an MCP server's `command` runs as the kernel. `bash`
 /// can still write files as the owner's Unix user (ROADMAP.md, debt).
-pub async fn protected_refusal(db: &PgPool, session: Uuid, kind: Option<&str>, workspace: &Path, name: &str, args: &Value) -> Option<String> {
+pub async fn protected_refusal(db: &PgPool, session: Uuid, kind: Option<&str>, workspace: &Path, name: &str, args: &Value, allowed: bool) -> Option<String> {
     let (path, what) = match protected_target(&Guarded::current(), workspace, name, args)? {
         Protected::OwnerOnly(p) => {
             return Some(format!(
@@ -188,7 +188,7 @@ pub async fn protected_refusal(db: &PgPool, session: Uuid, kind: Option<&str>, w
     };
     let who = if kind.is_some() {
         "A subagent"
-    } else if crate::taint::limited(db, session, crate::taint::Limit::Steer).await {
+    } else if !allowed && crate::taint::limited(db, session, crate::taint::Limit::Shell).await {
         "A session that has read untrusted content"
     } else {
         return None;
@@ -337,7 +337,7 @@ pub fn system_for(base: &str, kind: Option<&str>) -> String {
 
 /// Run one of the agent's tools (anything not a file or shell built-in). None for other tools.
 /// `ending` is set when the tool ends the model's turn (further calls are refused).
-pub async fn run_tool(app: &AppState, session: Uuid, workspace: &Path, name: &str, args: &Value, ending: &mut Option<&'static str>) -> Option<tools::ToolOutput> {
+pub async fn run_tool(app: &AppState, session: Uuid, workspace: &Path, name: &str, args: &Value, ending: &mut Option<&'static str>, policy: &crate::gate::Policy) -> Option<tools::ToolOutput> {
     let out = |content: String, is_error: bool| Some(tools::ToolOutput { content, is_error });
     match name {
         "history" => {
@@ -402,8 +402,8 @@ If a question goes unanswered, take your recommended option and say it was an as
         "capture" => crate::wiki::run_tool(app, session, name, args).await,
         "save_skill" | "save_tool" => crate::workshop::run_tool(app, session, name, args).await,
         "delegate" => crate::delegate::run_tool(app, session, workspace, name, args).await,
-        "schedule" => crate::jobs::run_tool(app, session, name, args).await,
-        "find_tools" | "load_tool" | "call_tool" => crate::mcp::run_tool(app, session, name, args).await,
+        "schedule" => crate::jobs::run_tool(app, session, name, args, matches!(policy, crate::gate::Policy::Granted)).await,
+        "find_tools" | "load_tool" | "call_tool" => crate::mcp::run_tool(app, session, name, args, matches!(policy, crate::gate::Policy::Sandbox)).await,
         "decide" => {
             let res = crate::score::decide(app, &args["state"], &args["questions"]).await;
             let (answer, error) = match &res {
@@ -470,14 +470,14 @@ async fn run_check(dir: &Path, run: &str, expect: Option<&str>, sandbox: tools::
 /// The diff from `base` (and untracked files), masked and capped.
 async fn diff_from(repo: &Path, base: &str) -> String {
     const CAP: usize = 60_000;
-    if crate::git::git(repo, &["rev-parse", "--git-dir"]).await.is_none() {
-        return "(not a git repository: no diff; read the files)".into();
-    }
-    // Read a little past the cap, so a secret at the cut is still whole when it is masked.
-    let read = |out: Option<(bool, String)>| out.map(|(_, text)| text).unwrap_or_default();
-    // `--end-of-options`: a base like `--output=/x` is a revision, never an option.
-    let mut d = read(crate::git::output(repo, &["diff", "--end-of-options", base], CAP + 4096).await);
-    let untracked = read(crate::git::output(repo, &["ls-files", "--others", "--exclude-standard"], CAP + 4096).await);
+    // Git reads programmable local configuration; even gathering a diff stays read-only/offline.
+    let quoted = format!("'{}'", base.replace('\'', "'\\''"));
+    let output = |command: String| async move {
+        tools::run_shell(repo, &command, &[], tools::Sandbox::ReadOnly, Duration::from_secs(30))
+            .await.map(|s| s.text).unwrap_or_default()
+    };
+    let mut d = output(format!("git diff --end-of-options {quoted}")).await;
+    let untracked = output("git ls-files --others --exclude-standard".into()).await;
     if !untracked.trim().is_empty() {
         d.push_str(&format!("\nUntracked files:\n{untracked}"));
     }
@@ -586,7 +586,14 @@ async fn verify(app: &AppState, session: Uuid, workspace: &Path, args: &Value) -
     let sandbox = crate::taint::shell_sandbox(&app.db, session).await;
     for c in &criteria {
         if let Some(run) = c["run"].as_str() {
-            checks.insert(c["id"].as_str().unwrap_or("").to_string(), run_check(&dir, run, c["expect"].as_str(), sandbox).await);
+            let route = if crate::taint::tainted(&app.db, session).await {
+                crate::gate::shell(&dir, run)
+            } else { crate::gate::Policy::Run };
+            let (command, boundary) = match &route {
+                crate::gate::Policy::SafeRead(normalized) => (normalized.as_str(), tools::Sandbox::SafeRead),
+                _ => (run, sandbox),
+            };
+            checks.insert(c["id"].as_str().unwrap_or("").to_string(), run_check(&dir, command, c["expect"].as_str(), boundary).await);
         }
     }
     let any_failed = checks.values().any(|c| c["ok"] != true);

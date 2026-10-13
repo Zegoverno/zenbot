@@ -547,7 +547,7 @@ impl Drop for RunCopy {
 /// its folder, which is what is checked against the approval (nothing can change it in between)
 /// and what it writes to (dropped after the run).
 /// Returns the output, whether it failed, and whether it ran with the network (approved).
-pub async fn run_made(db: &sqlx::PgPool, name: &str, args: &Value) -> Result<(String, bool, bool)> {
+pub async fn run_made(db: &sqlx::PgPool, name: &str, args: &Value, force_sandbox: bool) -> Result<(String, bool, bool)> {
     anyhow::ensure!(valid_name(name) && tools_root().join(name).join("tool.json").is_file(), "no such tool");
     let copy = RunCopy::of(name)?;
     let dir = copy.dir(name);
@@ -561,7 +561,7 @@ pub async fn run_made(db: &sqlx::PgPool, name: &str, args: &Value) -> Result<(St
     anyhow::ensure!(!rejected, "the owner rejected this tool");
     // Approval covers the content the owner saw: a changed tool runs sandboxed again.
     let changed = approved && sha.as_deref() != Some(fingerprint(db, &dir).await?.as_str());
-    let approved = approved && !changed;
+    let approved = approved && !changed && !force_sandbox;
     let keep = ["PATH", "HOME", "USER", "LANG", "LC_ALL", "TZ"];
     let mut cmd = if approved {
         // `bash -c`, not a login shell: a profile could export secrets.
