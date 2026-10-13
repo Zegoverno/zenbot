@@ -4,5 +4,10 @@
   {"when": "JOBTASK-A", "tool": "schedule", "args": {"action": "list"}},
   {"when": "JOBTASK-A", "text": "Report A: all good."},
   {"when": "JOBTASK-S", "text": "[SILENT]"},
-  {"when": "JOBTASK-F", "text": "[FAILED] the thing is broken"}
+  {"when": "JOBTASK-F", "text": "[FAILED] the thing is broken"},
+  {"when": "JOBTASK-R", "tool": "bash", "args": {"command": "mkdir -p out && printf 'REPORT FROM FILE: Palavra do Senhor.\\n' > out/message.md"}},
+  {"when": "JOBTASK-R", "text": "Done: the answer, not the report."},
+  {"when": "JOBTASK-N", "text": "Done, but no file written."},
+  {"when": "JOBTASK-E", "tool": "bash", "args": {"command": "mkdir -p out && : > out/empty.md"}},
+  {"when": "JOBTASK-E", "text": "Done."}
 ]

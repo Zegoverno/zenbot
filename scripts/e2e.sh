@@ -861,6 +861,46 @@ scheduled_jobs() {
   kill "$srv" 2>/dev/null || true
 }
 
+# Report files (jobs.rs, D-055): a job with `report_file` reports the file its run wrote, not the
+# run's final answer; the path is stored absolute and must lie inside the job's workspace when set;
+# a run that wrote no file, left an old one, or whose file is a symlink (to the token) or outside the
+# workspace is an error with the reason; an empty file is a silent run; `--report-file ""` clears it.
+job_report_file() {
+  local ws; ws=$(new_workspace report-file)
+  start_kernel "$ws" "$(script jobs.json)" ZEN_JOBS=1 ZEN_JOBS_TICK=0.5 ZEN_DEFAULT_MODEL=faux/smoke
+  local runs="SELECT string_agg(r.status, ',' ORDER BY r.id) FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name ="
+  local last="SELECT coalesce(r.error, r.output) FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE r.status <> 'running' AND j.name ="
+  zen jobs add rfile --schedule "every 1h" --prompt "JOBTASK-R" --report-file out/message.md >/dev/null
+  check "the report file is stored absolute" eq "$(zen jobs --json | jq -r '.jobs[] | select(.name == "rfile") | .report_file')" "$ws/out/message.md"
+  zen jobs run rfile >/dev/null
+  check "a run that writes it is ok" poll "$runs 'rfile'" ok
+  check "its report is the file, not the final answer" eq "$(q "$last 'rfile' ORDER BY r.id DESC LIMIT 1")" "REPORT FROM FILE: Palavra do Senhor."
+  check "a path outside the workspace is refused when set" grep -q "inside the job's workspace" <<<"$(zen jobs add rout --schedule "every 1h" --prompt "JOBTASK-N" --report-file /etc/hostname 2>&1)"
+  zen jobs add rmiss --schedule "every 1h" --prompt "JOBTASK-N" --report-file out/none.md >/dev/null
+  zen jobs run rmiss >/dev/null
+  check "a run that wrote no file is an error" poll "$runs 'rmiss'" error
+  check "saying so, not posting the answer" grep -q "didn't write its report file" <<<"$(q "$last 'rmiss' ORDER BY r.id DESC LIMIT 1")"
+  echo "yesterday's readings" >"$ws/out/stale.md" && touch -d '1 hour ago' "$ws/out/stale.md"
+  zen jobs set rmiss --report-file out/stale.md >/dev/null
+  zen jobs run rmiss >/dev/null
+  check "a file older than the run is an error" poll "$runs 'rmiss'" error,error
+  check "named as stale" grep -q "older than the run" <<<"$(q "$last 'rmiss' ORDER BY r.id DESC LIMIT 1")"
+  ln -s "$TMP/home/.zenbot/token" "$ws/out/token.md"
+  q "UPDATE jobs SET report_file = '$ws/out/token.md' WHERE name = 'rmiss'" >/dev/null
+  zen jobs run rmiss >/dev/null
+  check "a symlink to the token is an error" poll "$runs 'rmiss'" error,error,error
+  check "named as a symlink" grep -q "is a symlink" <<<"$(q "$last 'rmiss' ORDER BY r.id DESC LIMIT 1")"
+  q "UPDATE jobs SET report_file = '/etc/hostname' WHERE name = 'rmiss'" >/dev/null
+  zen jobs run rmiss >/dev/null
+  check "a file outside the workspace is an error at run time too" poll "$runs 'rmiss'" error,error,error,error
+  check "named as outside" grep -q "inside the job's workspace" <<<"$(q "$last 'rmiss' ORDER BY r.id DESC LIMIT 1")"
+  zen jobs add rempty --schedule "every 1h" --prompt "JOBTASK-E" --report-file out/empty.md >/dev/null
+  zen jobs run rempty >/dev/null
+  check "an empty file is a silent run" poll "$runs 'rempty'" silent
+  zen jobs set rfile --report-file "" >/dev/null
+  check "an empty --report-file clears it" eq "$(zen jobs --json | jq -r '.jobs[] | select(.name == "rfile") | .report_file')" null
+}
+
 # Taint on data (taint.rs, D-053): what a session that read untrusted content stored carries the
 # mark, and every read path hands it over as untrusted content that marks the reader. A tainted
 # memory stays out of the next session's instructions and comes back from search wrapped; drafts a
@@ -1036,6 +1076,7 @@ run secrets secrets_masked
 run slow-summary slow_summary
 run stale-turn stale_turn
 run scheduled-jobs scheduled_jobs
+run job-report-file job_report_file
 run taint-on-data taint_on_data
 run trust trust_session
 run names-suggestions names_suggestions

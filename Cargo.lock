@@ -3438,6 +3438,7 @@ dependencies = [
  "dom_smoothie",
  "futures-util",
  "htmd",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",

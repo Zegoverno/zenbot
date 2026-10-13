@@ -137,6 +137,12 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
   untrusted content has its report marked (`job_runs.tainted`), so the next run gets it as
   untrusted content and is tainted from its start, and `schedule runs` shows it wrapped (D-053). A job session can't `ask`,
   `delegate` or `schedule` (`agent::refusal`). A silent run's session is archived.
+- **Report files** (D-055): a job with `report_file` (a path inside its workspace, stored
+  absolute) reports what its run wrote there, not the final answer, when the run ends `ok`. The
+  file must be a regular file opened without following a symlink, really inside the workspace
+  (read back from `/proc/self/fd`), not a secret file, modified after the run started, UTF-8 and
+  at most 60 KB; otherwise the run is an `error` naming why. An empty file makes the run
+  `silent`. The workspace, not `/tmp`, because a tainted run's shell has a private `/tmp`.
 - **Creating jobs**: the owner (`zen jobs add`, `POST /api/jobs`) or the agent (`schedule`). An
   agent's job goes live only when System One, reading the owner's own messages in the session,
   gives ≥ `ZEN_JOB_BAR` (0.9) that the owner asked for it (decision point `job_approval`; the

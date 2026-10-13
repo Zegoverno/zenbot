@@ -6,6 +6,39 @@
 
 ---
 
+## D-055 — A job's report can come from a file the run wrote, not the final answer
+
+**Date:** 2026-10-13 · **Status:** accepted (owner asked for the feature; design confirmed in the
+pull request)
+
+**Decision:** An agent job may name a `report_file`. When a run ends `ok` (not `[SILENT]`,
+`[FAILED]` or a turn error), the kernel reads that file and records it as the run's report; the
+final answer stays in the session. Everything fails closed, so the run becomes `error` with the
+reason and the answer is never posted instead:
+- the file must lie inside the job's workspace, judged on the file actually opened (opened without
+  following a final symlink, its real path read back from `/proc/self/fd`), and must be a regular
+  file, not a secret file (`secrets::secret_files`, the guard a verifier's `read` has);
+- modified after the run started (yesterday's message is never posted again);
+- UTF-8, at most 60 KB; an empty file (whitespace only) makes the run `silent`.
+The path is checked when it's set too (where it would really be, inside the workspace) and stored
+absolute. It's a job field like the others: `zen jobs add/set --report-file`, `POST/PATCH
+/api/jobs` `{report_file}` (`""` clears it), the `schedule` tool's `report_file`; an agent's change
+passes the same gate (its judgment sees the file), and in a tainted session waits for the owner.
+Taint is unchanged: a tainted run's report is marked (`job_runs.tainted`). The report is masked
+like tool output.
+
+**Why:** Some reports must reach the owner exactly as a script built and checked them (the daily
+Mass readings, checked word for word against the source). As the final answer, the model retypes
+that text and can change it; from a file, the kernel posts what the script wrote. The workspace,
+not `/tmp`: a tainted session's shell has a private `/tmp` the kernel can't see.
+
+**Considered:** a job whose task is a command, with no model (fits only when nothing needs
+judgment; the readings job still decides what to do when the source fails); having the model
+quote the file (still retyped); falling back to the answer when the file is wrong (a stale or
+missing message would go out unnoticed).
+
+---
+
 ## D-054 — The owner can trust a session again (`/trust`), forward only
 
 **Date:** 2026-10-13 · **Status:** accepted (owner) · **Amends:** D-053 ("continue in a fresh
