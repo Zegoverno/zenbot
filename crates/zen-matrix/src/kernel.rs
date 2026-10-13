@@ -2,20 +2,25 @@
 //! like the `zen` terminal app, through the same client (`zen-client`: the token in a header,
 //! never a URL; timeouts; path encoding; the plain-http warning).
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use serde_json::{json, Value};
-use zen_client::{enc, Client};
+use tokio::sync::Mutex;
+use zen_client::{enc, owner::Chat, Client};
 
 pub use zen_client::Ws;
 
 #[derive(Clone)]
 pub struct Kernel {
     c: Client,
+    /// What the owner commands keep between calls (`!trust`'s last look per session).
+    chat: Arc<Mutex<Chat>>,
 }
 
 impl Kernel {
     pub fn new(url: &str, token: String) -> Result<Self> {
-        Ok(Kernel { c: Client::new(url, Some(token))? })
+        Ok(Kernel { c: Client::new(url, Some(token))?, chat: Arc::new(Mutex::new(Chat::new("!"))) })
     }
 
     /// A new session; its title is the owner's when given (the kernel won't rename it).
@@ -42,11 +47,17 @@ impl Kernel {
         Ok(v["messages"].as_array().and_then(|m| m.last()).and_then(|m| m["seq"].as_i64()).unwrap_or(0))
     }
 
-    /// An owner command (`!jobs …`, `!skills …`, `!tools …`) run against the kernel: its answer as
-    /// Markdown, or the usage when it doesn't fit.
-    pub async fn owner(&self, text: &str) -> Result<String> {
+    /// Whether the session has read untrusted content and runs limited (`tainted_at` is set).
+    pub async fn tainted(&self, id: &str) -> Result<bool> {
+        let v = self.c.get(&format!("/api/sessions/{}?last=0", enc(id))).await?;
+        Ok(!v["tainted_at"].is_null())
+    }
+
+    /// An owner command (`!jobs …`, `!skills …`, `!tools …`, `!trust …`) run against the kernel,
+    /// for the room's `session`: its answer as Markdown, or the usage when it doesn't fit.
+    pub async fn owner(&self, text: &str, session: Option<&str>) -> Result<String> {
         match zen_client::owner::parse(text) {
-            Some(Ok(cmd)) => zen_client::owner::run(&self.c, &cmd).await,
+            Some(Ok(cmd)) => zen_client::owner::run(&self.c, &cmd, session, &mut *self.chat.lock().await).await,
             Some(Err(usage)) => Ok(format!("`{usage}`")),
             None => Ok("Unknown command: `!help` lists them.".into()),
         }

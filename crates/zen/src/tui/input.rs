@@ -29,6 +29,7 @@ pub(super) const COMMANDS: &[Command] = &[
     cmd("/jobs", "scheduled jobs: /jobs [run|resume|pause <name> | runs [name]]", false),
     cmd("/skills", "skills and made tools: /skills [accept|reject <domain/name> <sha>]", false),
     cmd("/tools", "review a made tool: /tools accept|reject <name> <sha>", false),
+    cmd("/trust", "what made this session untrusted; /trust yes trusts it again", false),
     cmd("/upgrade", "update zenbot to the latest version and restart it", false),
     cmd("/restart", "restart zen on the installed version, back in this session", false),
     cmd("/help", "keys and commands", false),
@@ -457,7 +458,7 @@ impl App {
             }
             Some("/mouse") => self.note("inline mode leaves the mouse to the terminal", Sty::Dim),
             // Read here and sent to the kernel with the owner's token, never to the agent.
-            Some(c @ ("/jobs" | "/skills" | "/tools")) => self.owner_command(&format!("{} {arg}", &c[1..])).await,
+            Some(c @ ("/jobs" | "/skills" | "/tools" | "/trust")) => self.owner_command(&format!("{} {arg}", &c[1..])).await,
             Some("/upgrade") => self.start_upgrade(),
             Some("/restart") => {
                 self.restart = true;
@@ -469,11 +470,11 @@ impl App {
         Ok(())
     }
 
-    /// `/jobs`, `/skills`, `/tools` (`zen_client::owner`): the kernel's answer, or why not, in the
-    /// transcript. A failed call is shown like any other, as an error note.
+    /// `/jobs`, `/skills`, `/tools`, `/trust` (`zen_client::owner`): the kernel's answer, or why
+    /// not, in the transcript. A failed call is shown like any other, as an error note.
     async fn owner_command(&mut self, text: &str) {
         let out = match zen_client::owner::parse(text) {
-            Some(Ok(cmd)) => match zen_client::owner::run(&self.c, &cmd).await {
+            Some(Ok(cmd)) => match zen_client::owner::run(&self.c, &cmd, self.session.as_deref(), &mut self.chat).await {
                 Ok(s) => s,
                 Err(e) => return self.note(format!("{e:#}"), Sty::Err),
             },

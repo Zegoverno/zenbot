@@ -117,6 +117,10 @@ pub(super) struct App {
     pub(super) board_fetch: u64,
     /// The session is a subagent's or a verifier's: watch it, don't type into it or stop it.
     pub(super) read_only: bool,
+    /// The session has read untrusted content and runs limited, until the owner trusts it (`/trust`).
+    pub(super) tainted: bool,
+    /// What the owner commands (`/jobs`, `/trust`, …) keep between calls.
+    pub(super) chat: zen_client::owner::Chat,
     /// When the last frame was drawn, and whether something changed since that waits for the
     /// next frame tick (`draw_soon`).
     pub(super) last_draw: Option<Instant>,
@@ -222,6 +226,8 @@ impl App {
             board: None,
             board_fetch: 0,
             read_only: false,
+            tainted: false,
+            chat: zen_client::owner::Chat::new("/"),
             last_draw: None,
             dirty: false,
         }
@@ -266,6 +272,7 @@ impl App {
         self.session = None;
         self.title.clear();
         self.read_only = false;
+        self.tainted = false;
         self.session_tokens = 0;
         self.busy = false;
         self.aborting = false;
@@ -291,6 +298,7 @@ impl App {
         self.model = s["model"].as_str().unwrap_or(&self.default_model).to_string();
         self.effort = s["effort"].as_str().map(String::from);
         self.read_only = s["kind"].as_str().is_some_and(read_only_kind);
+        self.tainted = !s["tainted_at"].is_null();
         self.connect(&id).await?;
         self.show_history(&s);
         Ok(())
