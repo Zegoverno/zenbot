@@ -277,7 +277,9 @@ harness versions with the same model on isolated kernels and databases (`evals/R
   its own processes, the workspace writable and the rest of the machine (the home, the zen home)
   read-only, the secret files hidden; the result says so. Offline builds and tests and `git
   commit` in the workspace work; installing packages, `git push` and anything needing the network
-  or a file outside the workspace don't, until the owner continues in a fresh session. A main session may write
+  or a file outside the workspace don't, until the owner trusts the session again (`/trust`, D-054:
+  after looking at what marked it, forward only; what it stored keeps its marks) or continues in a
+  fresh session. A main session may write
   `IDENTITY.md` and `USER.md` itself; each change is backed up first
   (`~/.zenbot/backups/prompt-files/`) and one that passes the file's cap comes back with a request
   to compact it. No session may `edit` or `write` the owner's configuration and secrets

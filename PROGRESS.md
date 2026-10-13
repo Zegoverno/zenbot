@@ -6,6 +6,21 @@
 
 ---
 
+## 2026-10-13 — `/trust`: the owner trusts a session again (D-054)
+
+A session that read anything from outside (a web search, a subagent's answer: about half of
+them) ran limited for good: no network in its shell, no skill or prompt-file changes. The only
+way out was a fresh session, losing the work's context. Now `/trust` in zen (`!trust` in Matrix)
+shows what marked the session: its `taint` blocks and the untrusted content it was handed, from
+the new `GET /api/sessions/{id}/taint`. `/trust yes` lifts the mark through `POST
+/api/sessions/{id}/trust`, which records a `trust` block. It works forward only: the next
+untrusted read marks the session again, and what it stored meanwhile keeps its marks. It's refused
+while a turn runs and when the session read more after the owner looked. Sessions now carry
+`tainted_at`: the board and zen's footer mark `untrusted`, and the stream sends `taint`. Tested:
+e2e `trust` (a tainted shell can't reach the route even with the token; refused on a stale look;
+lifted; the stored memory keeps its mark; the shell gets the network back; the next web search
+marks it again), unit tests for parsing, the report and the TUI marks.
+
 ## 2026-10-13 — Owner commands in the chat: `/jobs`, `/skills`, `/tools` (and `!` in Matrix)
 
 Approving a job zenbot created paused, running one to test it, or accepting a draft skill or a
