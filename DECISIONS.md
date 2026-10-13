@@ -6,6 +6,40 @@
 
 ---
 
+## D-054 — The owner can trust a session again (`/trust`), forward only
+
+**Date:** 2026-10-13 · **Status:** accepted (owner) · **Amends:** D-053 ("continue in a fresh
+session" was the only way out of a tainted session's limits)
+
+**Decision:** Only the owner lifts a session's taint, after looking at what set it.
+- **Look, then trust.** `GET /api/sessions/{id}/taint` lists what marked the session since the last
+  trust: its `taint` blocks and the untrusted envelopes in its messages (by source and about, with
+  the first block), and `checked`, the tape's last block. `POST /api/sessions/{id}/trust` with
+  `seen` (that block) sets `tainted_at` back to null and records a `trust` block (by whom, when the
+  taint was set, where it came from). It's refused while a turn runs (content can be read but not
+  yet on the tape) and when the session was marked or handed untrusted content after `seen`: the
+  owner trusts what they saw, as the fingerprint does for a skill review.
+- **Forward only.** The next untrusted read marks the session again. What it stored while marked
+  keeps its marks (memories, job reports, drafts, wiki `web` entries): trusting a session doesn't
+  launder its data. What it read stays in its context: trusting means vouching for that.
+- **The owner's own command.** zen's `/trust` and Matrix's `!trust` (`zen_client::owner`) show the
+  report; `trust yes` confirms what the client last showed. The client runs them with the owner's
+  token; they never reach the agent. A tainted session can't call the route: its shell has no
+  network and the token file is hidden (e2e `trust`).
+- **Shown.** Sessions carry `tainted_at` (the board marks `untrusted`, zen's footer `untrusted
+  (/trust)`, Matrix's `!session` says so), and the stream sends `taint` when the mark is set or
+  lifted.
+
+**Why:** Half of the sessions read something from outside (a web search, a subagent's answer), and
+then can't push, install or change a skill until the owner starts over in a fresh session, losing
+the work's context. The owner can judge what was read; the limits exist because the agent can't.
+
+**Considered:** trusting with no look (one tap, but a page read after the owner looked would be
+trusted unseen); clearing the stored marks too (launders web text into the owner's words); a
+trusted session per source (more state, and the owner trusts a session, not a site).
+
+---
+
 ## D-053 — Taint is a property of stored content; a tainted session's shell has no network
 
 **Date:** 2026-10-11 · **Status:** accepted (owner, taint review) · **Supersedes:** D-034's "what a

@@ -131,7 +131,9 @@ From `main.rs` (router) and `api.rs`. Everything under `/api` needs the token in
 | POST | `/api/sessions` | `create_session` | `{title?, model?, effort?}` |
 | GET | `/api/sessions/{id}?last=&after=` | `get_session` | Session, its `message` blocks (with `seq`; all, the `last` N, or those after `after`), `message_count`, `tokens` and `busy` |
 | PATCH | `/api/sessions/{id}` | `update_session` | Title, model, effort (`"default"` clears it), archived |
-| GET | `/api/sessions/{id}/ws` | `session_ws` | WebSocket; its session's event hub is created on connect and freed when the last client leaves. Client sends `{type:"prompt",text}` or `{type:"abort"}`. A `prompt` may carry `suggestion: {id, taken}` (what the owner did with the suggested prompt). Server events: `message`, `delta`, `thinking`, `tool_start`, `tool_end`, `busy`, `end`, `status`, `questions`, `child_end`, `title`, `suggestion`, `error`, `resync` |
+| GET | `/api/sessions/{id}/ws` | `session_ws` | WebSocket; its session's event hub is created on connect and freed when the last client leaves. Client sends `{type:"prompt",text}` or `{type:"abort"}`. A `prompt` may carry `suggestion: {id, taken}` (what the owner did with the suggested prompt). Server events: `message`, `delta`, `thinking`, `tool_start`, `tool_end`, `busy`, `end`, `status`, `questions`, `taint`, `child_end`, `title`, `suggestion`, `error`, `resync` |
+| GET | `/api/sessions/{id}/taint` | `session_taint` | What marked the session since the last trust (`taint::report`): `tainted_at`, `taints` (its `taint` blocks), `sources` (untrusted envelopes in its messages by source and about: first block, count), `checked` (the tape's last block), `busy` |
+| POST | `/api/sessions/{id}/trust` | `trust_session` | `{seen}`: the owner lifts the taint (`taint::trust`, D-054): a `trust` block, `taint` event; 409 while a turn runs or when it read untrusted content after `seen`; `{trusted: false}` when it's clean |
 | POST | `/api/sessions/{id}/decision` | `decide` | `{decision: accept\|more\|reshape\|drop, note?}` → `session_decisions`; triggers scoring; `accept` activates draft skills the session loaded (`workshop::on_accept`) |
 | GET | `/api/memory?tier=` | `list_memory` | Memories of a tier (`short` by default, `archived`, `all`; `long` and `proposed` only hold rows from before D-045), the last sleep and the size |
 | POST | `/api/memory/sleep?trigger=` | `run_sleep` | Tidy short-term memory now (`trigger=nightly` is recorded as the nightly sleep, else `owner`; the scheduled `sleep` job calls `memory::sleep` directly) |
@@ -261,9 +263,11 @@ The kernel client both clients use: `zen_home` (`ZEN_HOME`, else `~/.zenbot`), `
 `Authorization` header; `call`/`get`/`post`/`patch`/`delete`, `health`, `new_session`, `resolve`,
 `connect` to a session's WebSocket; 5 s connect and 120 s request timeouts; a warning when the
 token would go over plain http to another machine), `enc` (a path segment, percent-encoded), `Ws`.
-`owner.rs`: the owner's chat commands (`jobs`, `skills`, `tools`: parse, call `/api/jobs…`,
-`/api/skills…`, `/api/tools/{name}/review`, answer as Markdown), used by zen's `/jobs`, `/skills`,
-`/tools` (`tui/input.rs`) and zen-matrix's `!jobs`, `!skills`, `!tools` (`kernel.rs`).
+`owner.rs`: the owner's chat commands (`jobs`, `skills`, `tools`, `trust`: parse, call `/api/jobs…`,
+`/api/skills…`, `/api/tools/{name}/review`, `/api/sessions/{id}/taint` and `…/trust`, answer as
+Markdown; `Chat` keeps the prefix and `trust`'s last look per session), used by zen's `/jobs`,
+`/skills`, `/tools`, `/trust` (`tui/input.rs`) and zen-matrix's `!jobs`, `!skills`, `!tools`,
+`!trust` (`kernel.rs`).
 Used by `zen` (`client`, `setup`) and `zen-matrix` (`kernel`, `state`, through a path dependency).
 
 ---
@@ -538,7 +542,7 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
   `prompt-files`, `layout-move`, `skills`, `mcp`, `web`, `search`, `search-index`, `wiki`,
   `workshop`, `delegation`, `memory-across-sessions`, `memory-sleep`, `ask`, `verifier`,
   `summaries`, `system-one`, `memory-sleep-judged`, `kernel-tools`, `project-files`, `secrets`,
-  `slow-summary`, `stale-turn`, `scheduled-jobs`, `taint-on-data`, `names-suggestions`.
+  `slow-summary`, `stale-turn`, `scheduled-jobs`, `taint-on-data`, `trust`, `names-suggestions`.
 - **Evals:** `evals/tasks/<name>/{task.json,files/,hidden/}` (23 tasks: 13 on how zenbot works,
   9 `coding-*` with hidden tests, and the runner self-test `smoke`), run by `scripts/eval.sh` on the
   tasks a change affects (`evals/areas.txt`, plus the `core` tasks); see `evals/README.md`. Harness

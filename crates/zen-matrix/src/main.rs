@@ -534,14 +534,22 @@ impl Bridge {
             // Read here, run with the owner's token, answered by the bridge: never sent to the agent.
             // Allowed in every room, the jobs room included (where its reports arrive).
             Input::Owner(cmd) => {
-                let msg = self.kernel.owner(&cmd).await.unwrap_or_else(|e| format!("⚠️ {e:#}"));
+                let session = self.state.lock().await.rooms.get(rid.as_str()).cloned();
+                let msg = self.kernel.owner(&cmd, session.as_deref()).await.unwrap_or_else(|e| format!("⚠️ {e:#}"));
                 self.note(&room, &msg).await;
             }
             _ if is_jobs => self.note(&room, "This room only carries job reports; write to zen in the **zen** room.").await,
             Input::Which => {
                 let s = self.state.lock().await.rooms.get(rid.as_str()).cloned();
                 let msg = match s {
-                    Some(id) => format!("Session `{id}`: in the terminal, `zen -r {}`.", short(&id)),
+                    Some(id) => {
+                        let limited = if self.kernel.tainted(&id).await.unwrap_or(false) {
+                            "\nIt read untrusted content, so it runs limited (no network in its shell): `!trust` shows what."
+                        } else {
+                            ""
+                        };
+                        format!("Session `{id}`: in the terminal, `zen -r {}`.{limited}", short(&id))
+                    }
                     None => "No session yet: the first message starts one.".into(),
                 };
                 self.note(&room, &msg).await;

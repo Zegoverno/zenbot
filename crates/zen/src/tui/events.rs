@@ -189,6 +189,11 @@ impl App {
                 self.suggestion = Some(Suggestion { id, text: text.trim().to_string(), taken: false });
                 self.draw();
             }
+            // Marked as having read untrusted content, or trusted again by the owner.
+            Ev::Taint { tainted, .. } => {
+                self.tainted = tainted;
+                self.draw();
+            }
             Ev::Status { text } => {
                 self.status = clean(if text.is_empty() { "Working" } else { &text });
                 self.draw();
@@ -395,5 +400,15 @@ mod tests {
         // A disconnect seen on the old connection doesn't drop the new one.
         a.on_incoming(("s1".into(), 1, json!({ "type": "disconnected" }))).await;
         assert!(a.busy);
+    }
+
+    #[test]
+    fn the_footer_marks_an_untrusted_session_until_it_is_trusted() {
+        let mut a = app(100, 20);
+        assert!(!footer(&a).contains("untrusted"), "{}", footer(&a));
+        a.on_event(json!({ "type": "taint", "tainted": true, "source": "web_search", "about": "harbour" }));
+        assert!(footer(&a).contains(" · untrusted (/trust) · "), "{}", footer(&a));
+        a.on_event(json!({ "type": "taint", "tainted": false }));
+        assert!(!footer(&a).contains("untrusted"), "{}", footer(&a));
     }
 }

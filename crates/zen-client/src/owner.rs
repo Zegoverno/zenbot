@@ -1,11 +1,14 @@
-//! The owner's commands typed in a chat: `jobs`, `skills` and `tools`, as the `zen` terminal app's
-//! `/jobs …` and the Matrix bridge's `!jobs …`. They do what `zen jobs`, `zen skills` and `zen tools`
-//! do, with the owner's token, so they can approve what only the owner may (resume an agent's paused
-//! job, accept a draft skill or a made tool).
+//! The owner's commands typed in a chat: `jobs`, `skills`, `tools` and `trust`, as the `zen`
+//! terminal app's `/jobs …` and the Matrix bridge's `!jobs …`. They do what `zen jobs`, `zen skills`
+//! and `zen tools` do, with the owner's token, so they can approve what only the owner may (resume an
+//! agent's paused job, accept a draft skill or a made tool, trust a session that read untrusted
+//! content, D-054).
 //!
 //! The client reads them before anything reaches the agent and calls the kernel itself: the agent
 //! never sees or relays them, so text it read can't approve anything. Parsing is pure and tested;
 //! [`run`] makes the calls and returns Markdown for the chat.
+
+use std::collections::HashMap;
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -31,6 +34,23 @@ pub enum OwnerCmd {
     Skill { name: String, decision: &'static str, sha: String },
     /// `tools accept|reject <name> <sha>`.
     Tool { name: String, decision: &'static str, sha: String },
+    /// `trust`: what marked the chat's session as having read untrusted content; `trust yes`
+    /// lifts the mark, as the owner last looked at it.
+    Trust { yes: bool },
+}
+
+/// What a chat client keeps between owner commands: the prefix it reads them by (`/` or `!`) and,
+/// per session, the last block the owner looked at with `trust`, which `trust yes` confirms.
+#[derive(Debug, Default)]
+pub struct Chat {
+    pub prefix: &'static str,
+    looked: HashMap<String, i64>,
+}
+
+impl Chat {
+    pub fn new(prefix: &'static str) -> Self {
+        Chat { prefix, looked: HashMap::new() }
+    }
 }
 
 /// How to use the commands, one line each, without the prefix (`/` or `!`) the client adds.
@@ -43,6 +63,8 @@ pub const USAGE: &[(&str, &str)] = &[
     ("skills", "skills and made tools, with the fingerprint to review a draft"),
     ("skills accept|reject <domain/name> <sha>", "activate or archive a draft skill"),
     ("tools accept|reject <name> <sha>", "approve a made tool (network, no sandbox) or reject it"),
+    ("trust", "what made this session untrusted (it read content from outside)"),
+    ("trust yes", "trust it again, as you just looked at it"),
 ];
 
 /// The command in `text` (after the client's prefix), or None when its first word isn't one of
@@ -78,13 +100,19 @@ pub fn parse(text: &str) -> Option<Result<OwnerCmd, String>> {
             }
             _ => usage("tools [accept|reject <name> <sha>]"),
         },
+        "trust" => match words.get(1).map(|w| w.to_ascii_lowercase()).as_deref() {
+            None if words.len() == 1 => Ok(OwnerCmd::Trust { yes: false }),
+            Some("yes") if words.len() == 2 => Ok(OwnerCmd::Trust { yes: true }),
+            _ => usage("trust [yes]"),
+        },
         _ => return None,
     };
     Some(parsed)
 }
 
-/// Run `cmd` against the kernel; the result as Markdown for the chat.
-pub async fn run(c: &Client, cmd: &OwnerCmd) -> Result<String> {
+/// Run `cmd` against the kernel for the chat's `session` (if it has one yet); the result as
+/// Markdown for the chat.
+pub async fn run(c: &Client, cmd: &OwnerCmd, session: Option<&str>, chat: &mut Chat) -> Result<String> {
     Ok(match cmd {
         OwnerCmd::Jobs => {
             let r = c.get("/api/jobs").await?;
@@ -118,7 +146,74 @@ pub async fn run(c: &Client, cmd: &OwnerCmd) -> Result<String> {
             let r = c.post(&format!("/api/tools/{}/review", enc(name)), json!({ "decision": decision, "sha": sha })).await?;
             r["result"].as_str().unwrap_or("done").to_string()
         }
+        OwnerCmd::Trust { yes } => {
+            let Some(id) = session else { return Ok("No session here yet: nothing to trust.".into()) };
+            let p = chat.prefix;
+            if !yes {
+                let r = c.get(&format!("/api/sessions/{}/taint", enc(id))).await?;
+                if r["tainted_at"].is_null() {
+                    chat.looked.remove(id);
+                    return Ok("This session hasn't read untrusted content: nothing to trust.".into());
+                }
+                chat.looked.insert(id.to_string(), r["checked"].as_i64().unwrap_or(0));
+                return Ok(taint_report(&r, p));
+            }
+            let Some(seen) = chat.looked.get(id).copied() else {
+                return Ok(format!("Look first: `{p}trust` shows what made this session untrusted."));
+            };
+            let r = c.post(&format!("/api/sessions/{}/trust", enc(id)), json!({ "seen": seen })).await;
+            chat.looked.remove(id);
+            let r = r?;
+            match r["seq"].as_i64() {
+                Some(seq) => format!("Trusted from #{seq} on: its shell has the network again and its limits are lifted. The next untrusted read limits it again."),
+                None => r["result"].as_str().unwrap_or("done").to_string(),
+            }
+        }
     })
+}
+
+/// What made a session untrusted (`GET /api/sessions/{id}/taint`), and what trusting it means.
+pub fn taint_report(r: &Value, prefix: &str) -> String {
+    let cut = |v: &Value| {
+        let s: String = v.as_str().unwrap_or("").chars().take(100).collect();
+        if s.is_empty() { String::new() } else { format!(": {s}") }
+    };
+    let mut out = vec![
+        format!(
+            "**This session read untrusted content** (since {} UTC), so it runs limited: its shell has no network, \
+             and it can't change the prompt files, skills or tools, vouch for a memory or start a job.",
+            minute(&r["tainted_at"])
+        ),
+        String::new(),
+    ];
+    let taints = r["taints"].as_array().cloned().unwrap_or_default();
+    if !taints.is_empty() {
+        out.push("What marked it:".into());
+        for t in &taints {
+            out.push(format!("- #{} {}{}", t["seq"], t["source"].as_str().unwrap_or("?"), cut(&t["about"])));
+        }
+    }
+    let sources = r["sources"].as_array().cloned().unwrap_or_default();
+    if !sources.is_empty() {
+        out.push("What it was handed as untrusted:".into());
+        for x in &sources {
+            let n = x["count"].as_i64().unwrap_or(1);
+            let times = if n > 1 { format!(" ({n}×)") } else { String::new() };
+            out.push(format!("- #{} {}{times}{}", x["first"], x["source"].as_str().unwrap_or("?"), cut(&x["about"])));
+        }
+    }
+    out.push(String::new());
+    out.push(
+        "Trusting it lifts the limits from now on. What it read stays in its context, so trust it only if you trust that; \
+         the next untrusted read limits it again, and what it saved meanwhile stays marked."
+            .into(),
+    );
+    if r["busy"] == true {
+        out.push("A turn is running: wait for it to end, then look again.".into());
+    } else {
+        out.push(format!("`{prefix}trust yes` to trust it."));
+    }
+    out.join("\n")
 }
 
 /// A UTC timestamp's date and minutes: "2026-10-13 09:30".
@@ -206,6 +301,8 @@ mod tests {
             Some(Ok(OwnerCmd::Skill { name: "work/brief".into(), decision: "accept", sha: "abc123def456".into() }))
         );
         assert_eq!(parse("tools reject made_fetch 0123abcd"), Some(Ok(OwnerCmd::Tool { name: "fetch".into(), decision: "reject", sha: "0123abcd".into() })));
+        assert_eq!(parse("trust"), Some(Ok(OwnerCmd::Trust { yes: false })));
+        assert_eq!(parse("Trust YES"), Some(Ok(OwnerCmd::Trust { yes: true })));
         assert_eq!(parse("hello"), None);
         assert_eq!(parse(""), None);
     }
@@ -217,6 +314,8 @@ mod tests {
         assert!(matches!(parse("jobs delete x"), Some(Err(_))), "removing a job stays in the terminal (`zen jobs rm`)");
         assert!(matches!(parse("skills accept work/brief"), Some(Err(_))), "a review always names the fingerprint reviewed");
         assert!(matches!(parse("tools approve x abc"), Some(Err(_))));
+        assert!(matches!(parse("trust me"), Some(Err(u)) if u == "usage: trust [yes]"));
+        assert!(matches!(parse("trust yes please"), Some(Err(_))));
     }
 
     #[test]
@@ -230,5 +329,29 @@ mod tests {
         assert_eq!(skills_list(&s), "- `work/brief`\n- `ops/x` (draft abcdef012345, untrusted)\n- tool `made_fetch` 001122334455: sandboxed until approved");
         let r = json!({ "job": "n", "started_at": "2026-10-13T09:30:00Z", "status": "ok", "trigger": "manual", "output": "line 1\nline 2" });
         assert_eq!(run_block(&r), "**n** 2026-10-13 09:30 UTC: ok (manual)\n> line 1\n> line 2");
+    }
+
+    #[test]
+    fn the_taint_report_says_what_and_what_trusting_means() {
+        let r = json!({ "tainted_at": "2026-10-13T09:30:12Z", "checked": 40, "busy": false,
+            "taints": [{ "seq": 12, "source": "web_search", "about": "harbour" }],
+            "sources": [{ "first": 12, "source": "web", "about": "harbour", "count": 3 }, { "first": 30, "source": "subagent", "about": "", "count": 1 }] });
+        let t = taint_report(&r, "!");
+        assert!(t.starts_with("**This session read untrusted content** (since 2026-10-13 09:30 UTC)"), "{t}");
+        assert!(t.contains("What marked it:\n- #12 web_search: harbour\n"), "{t}");
+        assert!(t.contains("- #12 web (3×): harbour\n- #30 subagent\n"), "{t}");
+        assert!(t.ends_with("`!trust yes` to trust it."), "{t}");
+        let busy = taint_report(&json!({ "tainted_at": "2026-10-13T09:30:12Z", "busy": true }), "/");
+        assert!(busy.ends_with("wait for it to end, then look again.") && !busy.contains("trust yes"), "{busy}");
+    }
+
+    #[tokio::test]
+    async fn trust_yes_needs_a_look_first() {
+        let c = Client::new("http://127.0.0.1:9", Some("t".into())).unwrap();
+        let mut chat = Chat::new("/");
+        let out = run(&c, &OwnerCmd::Trust { yes: true }, Some("s1"), &mut chat).await.unwrap();
+        assert_eq!(out, "Look first: `/trust` shows what made this session untrusted.");
+        let out = run(&c, &OwnerCmd::Trust { yes: false }, None, &mut chat).await.unwrap();
+        assert!(out.starts_with("No session here yet"), "{out}");
     }
 }

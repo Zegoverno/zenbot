@@ -215,6 +215,10 @@ impl Board {
                 meta.push_str(&format!(" · {a}"));
             }
         }
+        // It read untrusted content and runs limited until the owner trusts it (`/trust`).
+        if !s["tainted_at"].is_null() {
+            meta.push_str(" · untrusted");
+        }
         if kids > 0 {
             let what = if running_kids > 0 { format!("{running_kids}/{kids} subagents working") } else { format!("{kids} subagent{}", if kids == 1 { "" } else { "s" }) };
             meta.push_str(&format!(" · {what}"));
@@ -551,6 +555,21 @@ mod tests {
         assert!(rows[at("sessions board feature")].starts_with("›"), "the first session is highlighted: {text}");
         assert!(rows.last().unwrap().contains("enter open · n new session"), "{text}");
         assert!(rows.iter().all(|r| width(r) < 100), "rows fit");
+    }
+
+    #[test]
+    fn an_untrusted_session_is_marked() {
+        let mut a = app(100, 20);
+        let list = vec![s("web", "harbour research", json!({ "tainted_at": "2026-10-09T10:30:00Z" })), s("clean", "notes", json!({ "tainted_at": null }))];
+        let mut b = Board { sessions: Some(list), ..Board::default() };
+        b.rebuild(epoch_secs(NOW).unwrap(), 0);
+        a.board = Some(b);
+        a.draw();
+        let rows = plain_rows(&a);
+        let text = rows.join("\n");
+        let row = |needle: &str| rows.iter().find(|r| r.contains(needle)).cloned().unwrap_or_else(|| panic!("no {needle}: {text}"));
+        assert!(row("harbour research").contains("· claude-opus-5-5 · 1h · untrusted"), "{text}");
+        assert!(!row("notes").contains("untrusted"), "{text}");
     }
 
     #[test]

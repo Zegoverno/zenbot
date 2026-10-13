@@ -180,7 +180,7 @@ pub(crate) async fn board(State(app): State<AppState>, Query(q): Query<BoardQuer
 }
 
 /// The columns `session_json` reads, without the cost (each query computes it its own way).
-const SESSION_COLUMNS: &str = "id, title, model, effort, archived, created_at, updated_at, kind, parent";
+const SESSION_COLUMNS: &str = "id, title, model, effort, archived, created_at, updated_at, kind, parent, tainted_at";
 
 pub(crate) fn session_json(r: &sqlx::postgres::PgRow) -> Value {
     json!({
@@ -194,6 +194,8 @@ pub(crate) fn session_json(r: &sqlx::postgres::PgRow) -> Value {
         "parent": r.get::<Option<Uuid>, _>("parent"),
         "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
         "updated_at": r.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
+        // When it first read untrusted content since the owner last trusted it; null when clean.
+        "tainted_at": r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("tainted_at").ok().flatten(),
         "cost": r.try_get::<f64, _>("cost").unwrap_or(0.0),
     })
 }
@@ -384,6 +386,35 @@ pub(crate) async fn decide(State(app): State<AppState>, Path(id): Path<Uuid>, Js
         "note": row.get::<Option<String>, _>("note"),
         "created_at": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
     })))
+}
+
+/// What marked a session as having read untrusted content (`taint::report`), for the owner to look
+/// at before `trust`; `busy` says whether a turn is running (trust is refused while one does).
+pub(crate) async fn session_taint(State(app): State<AppState>, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
+    let mut r = taint::report(&app, id).await?.ok_or_else(not_found)?;
+    r["busy"] = json!(app.is_busy(id).await);
+    Ok(Json(r))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct Trust {
+    /// The last block the owner looked at (`checked` from GET …/taint).
+    seen: i32,
+}
+
+/// The owner lifts a session's taint (D-054), as they saw it: refused while a turn runs and when
+/// it read untrusted content after `seen`. Owner token only, like every route: a tainted session's
+/// shell has no network and can't read the token, so it can't call this.
+pub(crate) async fn trust_session(State(app): State<AppState>, Path(id): Path<Uuid>, Json(body): Json<Trust>) -> ApiResult<Json<Value>> {
+    if app.is_busy(id).await {
+        return Err(ApiError(StatusCode::CONFLICT, "a turn is running in this session: wait for it to end (or stop it), then look again".into()));
+    }
+    Ok(Json(match taint::trust(&app, id, body.seen).await? {
+        taint::Trusted::Done(seq) => json!({ "trusted": true, "seq": seq }),
+        taint::Trusted::Clean => json!({ "trusted": false, "result": "this session hasn't read untrusted content: nothing to trust" }),
+        taint::Trusted::Changed => return Err(ApiError(StatusCode::CONFLICT, "it read untrusted content after what you looked at: look again".into())),
+        taint::Trusted::NotFound => return Err(not_found()),
+    }))
 }
 
 pub(crate) async fn session_ws(State(app): State<AppState>, Path(id): Path<Uuid>, ws: WebSocketUpgrade) -> Response {

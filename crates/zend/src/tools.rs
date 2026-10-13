@@ -277,7 +277,7 @@ const OFFLINE_SANDBOX: [&str; 15] = [
 /// What a sandboxed (offline) shell's output ends with, so the model knows why the network and the
 /// files outside the workspace are out of reach.
 pub const OFFLINE_NOTE: &str = "[sandboxed: this session has read untrusted content, so its shell has no network and can write only \
-in the workspace and a private /tmp; ask the owner to continue in a fresh session for anything else]";
+in the workspace and a private /tmp; for anything else, the owner can trust this session again (`/trust`) or continue in a fresh one]";
 
 /// bubblewrap's arguments to hide the secret files: an empty folder over a folder, `/dev/null`
 /// over a file.

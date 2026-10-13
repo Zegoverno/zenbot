@@ -934,6 +934,47 @@ taint_on_data() {
   kill "$srv" "$s1srv" 2>/dev/null || true
 }
 
+# The owner trusts a session again (taint.rs `report` and `trust`, D-054): a tainted session's shell
+# can't reach the route even with the token; GET …/taint says what marked it; a trust that didn't
+# see the latest untrusted read is refused; trusting lifts the mark (a `trust` block) but not the
+# marks on what it stored; its bash has the network again; the next untrusted read marks it again.
+trust_session() {
+  local ws; ws=$(new_workspace trust)
+  local port=$((PORT + 10))
+  python3 "$REPO/scripts/e2e/searxng_stub.py" "$port" & local srv=$!
+  local script; script=$(script trust.json "s|KERNELURL|$URL|g" "s|E2ETOKEN|$TOKEN|")
+  start_kernel "$ws" "$script" ZEN_SEARXNG_URL="http://127.0.0.1:$port"
+  api() { curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
+  res_of() { q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$1' AND payload->>'role'='toolResult' AND seq > ${2:-0}"; }
+  local r sid; r=$(zen ask --json -m faux/smoke "TRUST-A"); sid=$(echo "$r" | jq -r .session_id)
+  check "a web search taints the session" eq "$(api "$URL/api/sessions/$sid?last=0" | jq -r '.tainted_at != null')" true
+  sed -i "s|SESSIONID|$sid|" "$script"
+  local before; before=$(q "SELECT max(seq) FROM tape_events WHERE session_id='$sid'")
+  zen ask --json -s "$sid" "TRUST-B" >/dev/null
+  check "its shell can't call the trust route, even with the token, nor read the token" bash -c 'grep -q "net=[1-9]" <<<"$1" && grep -q no-token <<<"$1" && [ "$2" = t ]' _ \
+    "$(res_of "$sid" "$before")" "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")"
+  local t; t=$(api "$URL/api/sessions/$sid/taint")
+  check "GET taint says what marked it and what it read" bash -c 'jq -e ".taints | length == 1 and .[0].source == \"web_search\" and .[0].about == \"harbour\"" <<<"$1" >/dev/null && jq -e ".sources[0].source == \"web_search\" and .sources[0].about == \"harbour\" and .busy == false" <<<"$1" >/dev/null' _ "$t"
+  local checked; checked=$(echo "$t" | jq .checked)
+  check "a trust that didn't see the latest untrusted read is refused" bash -c 'grep -q "look again" <<<"$1" && [ "$2" = t ]' _ \
+    "$(api -X POST -d '{"seen": 1}' "$URL/api/sessions/$sid/trust")" "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")"
+  check "the owner trusts it as seen" eq "$(api -X POST -d "{\"seen\": $checked}" "$URL/api/sessions/$sid/trust" | jq -r .trusted)" true
+  check "the mark is lifted, with a trust block saying where it came from" eq \
+    "$(q "SELECT (s.tainted_at IS NULL) || '/' || (e.payload->>'by') || '/' || (e.payload->>'source') FROM sessions s JOIN tape_events e ON e.session_id = s.id AND e.kind = 'trust' WHERE s.id='$sid'")" "true/the owner/web_search"
+  check "the board shows it clean" eq "$(api "$URL/api/board" | jq -r --arg id "$sid" '.sessions[] | select(.id == $id) | .tainted_at')" null
+  check "trusting a clean session does nothing" eq "$(api -X POST -d "{\"seen\": $checked}" "$URL/api/sessions/$sid/trust" | jq -r .trusted)" false
+  check "what it stored while tainted keeps its mark" eq "$(q "SELECT tainted FROM memories WHERE text LIKE 'TRUST-MEM%'")" t
+  before=$(q "SELECT max(seq) FROM tape_events WHERE session_id='$sid'")
+  zen ask --json -s "$sid" "TRUST-C" >/dev/null
+  check "its shell has the network again" bash -c 'grep -q "net=0" <<<"$1" && ! grep -q sandboxed <<<"$1"' _ "$(res_of "$sid" "$before")"
+  zen ask --json -s "$sid" "TRUST-D" >/dev/null
+  t=$(api "$URL/api/sessions/$sid/taint")
+  check "the next web search taints it again, and GET taint shows only what came after the trust" bash -c '[ "$2" = t ] && jq -e ".taints | length == 1 and .[0].about == \"lighthouse\"" <<<"$1" >/dev/null && jq -e "[.sources[].about] == [\"lighthouse\"]" <<<"$1" >/dev/null' _ \
+    "$t" "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")"
+  q "DELETE FROM memories WHERE text LIKE 'TRUST-MEM%'" >/dev/null
+  kill "$srv" 2>/dev/null || true
+}
+
 # Session names and next-prompt suggestions (assist.rs): after each owner turn the assist model names
 # the session (while the owner hasn't) and suggests the next prompt; the next prompt settles it.
 names_suggestions() {
@@ -996,6 +1037,7 @@ run slow-summary slow_summary
 run stale-turn stale_turn
 run scheduled-jobs scheduled_jobs
 run taint-on-data taint_on_data
+run trust trust_session
 run names-suggestions names_suggestions
 echo "== tape"
 check "every tape is numbered and its hash chain recomputes" tape_is_sound

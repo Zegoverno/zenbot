@@ -247,6 +247,8 @@ async fn main() -> Result<()> {
         .route("/sessions/{id}", get(get_session).patch(update_session))
         .route("/sessions/{id}/ws", get(session_ws))
         .route("/sessions/{id}/decision", axum::routing::post(decide))
+        .route("/sessions/{id}/taint", get(session_taint))
+        .route("/sessions/{id}/trust", axum::routing::post(trust_session))
         .route("/suggestions", get(assist::stats))
         .route("/memory", get(list_memory))
         .route("/mcp", get(mcp_status))

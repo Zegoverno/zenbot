@@ -48,7 +48,7 @@ zen -e xhigh     # thinking level (default: the model's; `zen models` lists them
 zen --inline     # no full screen: the conversation goes to terminal scrollback, like Claude Code (or ZEN_INLINE=1)
 ```
 
-Inside: `/new`, `/resume`, `/board`, `/model`, `/effort`, `/done`, `/rename <title>`, `/files`, `/open [file]`, `/close`, `/mouse` (wheel scrolling off, so the terminal can select text), `/archive`, `/jobs`, `/skills`, `/tools` (see below), `/upgrade`, `/restart`, `/help`, `/exit`. After each turn zenbot names the session (until you `/rename` it) and may suggest your next prompt in grey in the input: Tab takes it, then Enter sends it or you edit it first; typing your own replaces it (`zen suggestions` shows what became of them). Enter sends; Shift+Enter (or Alt+Enter, Ctrl+J) starts a new line; Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
+Inside: `/new`, `/resume`, `/board`, `/model`, `/effort`, `/done`, `/rename <title>`, `/files`, `/open [file]`, `/close`, `/mouse` (wheel scrolling off, so the terminal can select text), `/archive`, `/jobs`, `/skills`, `/tools` (see below), `/trust` (see Web), `/upgrade`, `/restart`, `/help`, `/exit`. After each turn zenbot names the session (until you `/rename` it) and may suggest your next prompt in grey in the input: Tab takes it, then Enter sends it or you edit it first; typing your own replaces it (`zen suggestions` shows what became of them). Enter sends; Shift+Enter (or Alt+Enter, Ctrl+J) starts a new line; Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
 
 `/done` records your verdict on the work so far: *accept* (done and good), *more* (same goal, keep working), *reshape* (the framing was wrong) or *drop*. Verdicts are the ground truth zenbot is measured and tuned by.
 
@@ -90,7 +90,7 @@ How each of these works is in [DESIGN.md](DESIGN.md) ("As built"); here is what 
 
 ## The web and connected services
 
-- **Web**: `web_search` and `web_fetch` work out of the box through a SearXNG container next to Postgres; set `BRAVE_API_KEY` or `TAVILY_API_KEY` in `~/.zenbot/env` to use those instead. Everything read from the web is untrusted, and so is what a session that read it saves (`zen memory` and `zen skills` show `untrusted`). Once a session has read untrusted content its shell runs offline and writes only in the workspace (builds, tests and commits work; installs and pushes don't), so continue in a fresh session for those.
+- **Web**: `web_search` and `web_fetch` work out of the box through a SearXNG container next to Postgres; set `BRAVE_API_KEY` or `TAVILY_API_KEY` in `~/.zenbot/env` to use those instead. Everything read from the web is untrusted, and so is what a session that read it saves (`zen memory` and `zen skills` show `untrusted`). Once a session has read untrusted content its shell runs offline and writes only in the workspace (builds, tests and commits work; installs and pushes don't); zen marks it `untrusted` on the board and in the footer. `/trust` (Matrix: `!trust`) shows what it read; if you trust that, `/trust yes` lifts the limits from then on (the next untrusted read sets them again, and what it saved meanwhile stays marked). Or continue in a fresh session.
 - **MCP servers** (email, calendar, documents, your own services): list them in `~/.zenbot/mcp.json`, the same shape Claude Code uses. Secrets go in `~/.zenbot/env` and are referenced as `${VAR}`; a variable named like a secret (`…TOKEN`, `…KEY`, `…SECRET`, `…PASSWORD`) is passed only to a server that lists it in `allow_env`:
   ```json
   { "mcpServers": {
