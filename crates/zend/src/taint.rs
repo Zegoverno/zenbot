@@ -227,13 +227,6 @@ pub async fn tainted(db: &sqlx::PgPool, session: Uuid) -> bool {
         .bind(session).fetch_optional(db).await.map(|t| t.unwrap_or(false)).unwrap_or(true)
 }
 
-/// Whether any of these sessions has read untrusted content.
-pub async fn any_tainted(db: &sqlx::PgPool, sessions: &[Uuid]) -> bool {
-    if sessions.is_empty() { return false; }
-    sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM sessions WHERE id = ANY($1) AND tainted_at IS NOT NULL)")
-        .bind(sessions).fetch_one(db).await.unwrap_or(true)
-}
-
 /// Whether any session matching a history tool's unique-prefix lookup is tainted.
 pub async fn prefix_tainted(db: &sqlx::PgPool, prefix: &str) -> bool {
     let Some((lo, hi)) = crate::compact::id_prefix_range(prefix) else { return false };
