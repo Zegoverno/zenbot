@@ -120,9 +120,29 @@ pub fn trusted_roots(repo: &Path) -> Vec<PathBuf> {
     roots.filter_map(|p| p.canonicalize().ok()).collect()
 }
 
-/// Whether an instruction file lies in a trusted repository (its real path, under one of `roots`).
+/// Whether an instruction file lies in a trusted repository (its real path, under one of `roots`),
+/// or in a `git worktree` of one: a worktree shares the trusted repository's objects and refs, so
+/// its files are as trusted as a branch checked out in the repository itself (D-055).
 pub fn trusted(path: &Path, roots: &[PathBuf]) -> bool {
-    path.canonicalize().is_ok_and(|real| roots.iter().any(|r| real.starts_with(r)))
+    let Ok(real) = path.canonicalize() else { return false };
+    roots.iter().any(|r| real.starts_with(r)) || worktree_root(&real).is_some_and(|main| roots.contains(&main))
+}
+
+/// The main checkout of the git worktree that holds `path`, if git links them both ways: the
+/// worktree's `.git` file names `<main>/.git/worktrees/<name>`, and that entry's `gitdir` names
+/// the worktree's `.git` file back.
+fn worktree_root(path: &Path) -> Option<PathBuf> {
+    let top = path.ancestors().skip(1).find(|d| d.join(".git").exists())?;
+    let dot_git = top.join(".git");
+    let link = std::fs::read_to_string(&dot_git).ok()?;
+    let entry = PathBuf::from(link.strip_prefix("gitdir:")?.trim()).canonicalize().ok()?;
+    let back = std::fs::read_to_string(entry.join("gitdir")).ok()?;
+    if PathBuf::from(back.trim()).canonicalize().ok()? != dot_git.canonicalize().ok()? {
+        return None;
+    }
+    let worktrees = entry.parent()?;
+    let git_dir = worktrees.parent()?;
+    (worktrees.file_name()? == "worktrees" && git_dir.file_name()? == ".git").then(|| git_dir.parent().map(Path::to_path_buf))?
 }
 
 /// How an instruction file from a repository the owner hasn't listed is shown: content to weigh,
@@ -198,5 +218,35 @@ mod tests {
         assert_eq!(p, vec![ws.join("proj/src/deep/a.rs")]);
         let cmd = format!("cd {} && cargo build; ls /definitely/not/here", ws.join("proj").display());
         assert_eq!(paths_in_call(&ws, "bash", &json!({ "command": cmd })), vec![ws.join("proj")]);
+    }
+
+    #[test]
+    fn a_worktree_of_a_trusted_repo_is_trusted_and_a_forged_link_is_not() {
+        let root = crate::test_util::TestDir::new("worktree");
+        let git = |dir: &Path, args: &[&str]| {
+            let ok = std::process::Command::new("git").current_dir(dir).args(args)
+                .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t").env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t")
+                .output().unwrap().status.success();
+            assert!(ok, "git {args:?}");
+        };
+        let main = root.join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q"]);
+        std::fs::write(main.join("AGENTS.md"), "rules").unwrap();
+        git(&main, &["add", "."]);
+        git(&main, &["-c", "core.hooksPath=/dev/null", "commit", "-qm", "init"]);
+        git(&main, &["worktree", "add", "-q", "-b", "side", root.join("wt").to_str().unwrap()]);
+        let roots = vec![main.canonicalize().unwrap()];
+        assert!(trusted(&main.join("AGENTS.md"), &roots));
+        assert!(trusted(&root.join("wt/AGENTS.md"), &roots));
+        // Not trusted: a worktree of a repository nobody listed.
+        assert!(!trusted(&root.join("wt/AGENTS.md"), &[root.join("elsewhere")]));
+        // A `.git` file pointing at the trusted repo's worktree entry, without the link back.
+        let fake = root.join("fake");
+        std::fs::create_dir_all(&fake).unwrap();
+        std::fs::write(fake.join("AGENTS.md"), "evil").unwrap();
+        let entry = std::fs::read_dir(main.join(".git/worktrees")).unwrap().next().unwrap().unwrap().path();
+        std::fs::write(fake.join(".git"), format!("gitdir: {}\n", entry.display())).unwrap();
+        assert!(!trusted(&fake.join("AGENTS.md"), &roots));
     }
 }
