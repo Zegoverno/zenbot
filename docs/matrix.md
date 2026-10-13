@@ -29,7 +29,12 @@ client protocol (docs/client-protocol.md), like `zen`: the kernel doesn't know M
 - **Questions.** An `ask` is posted numbered, recommended option first. Replying with one number
   per question (`1 2`) sends the chosen options' text as the answer; anything else goes as is.
 - **Commands:** `!new [title]`, `!stop` (abort the turn), `!session` (the session id, for `zen -r`),
-  `!help`.
+  `!help`, and the owner commands `!jobs [run|resume|pause <name> | runs [name]]`,
+  `!skills [accept|reject <domain/name> <sha>]` and `!tools accept|reject <name> <sha>`
+  (`zen_client::owner`, the same as zen's `/jobs`, `/skills`, `/tools`). They work in every room,
+  **zen jobs** included; the bridge runs them against the kernel with the owner's token and posts
+  the answer as a notice, so they never reach the agent and nothing it read can approve a job, a
+  skill or a tool. Removing or creating a job stays in the terminal.
 - **Job reports.** Every minute it reads `GET /api/jobs/runs` and posts each finished run (`ok` with
   its report, `error`, `missed`, `interrupted`; not `silent`) once to **zen jobs**. Runs from before
   the bridge first started aren't replayed.

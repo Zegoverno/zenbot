@@ -531,6 +531,12 @@ impl Bridge {
                 drop(s);
                 self.note(&room, &format!("New session `{}` in the room **{name}**: accept the invite.", short(&session))).await;
             }
+            // Read here, run with the owner's token, answered by the bridge: never sent to the agent.
+            // Allowed in every room, the jobs room included (where its reports arrive).
+            Input::Owner(cmd) => {
+                let msg = self.kernel.owner(&cmd).await.unwrap_or_else(|e| format!("⚠️ {e:#}"));
+                self.note(&room, &msg).await;
+            }
             _ if is_jobs => self.note(&room, "This room only carries job reports; write to zen in the **zen** room.").await,
             Input::Which => {
                 let s = self.state.lock().await.rooms.get(rid.as_str()).cloned();

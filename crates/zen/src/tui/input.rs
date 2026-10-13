@@ -26,6 +26,9 @@ pub(super) const COMMANDS: &[Command] = &[
     cmd("/close", "close the side panel", false),
     cmd("/mouse", "mouse wheel scrolling on/off (off lets the terminal select text)", false),
     cmd("/archive", "archive this session and start a new one", false),
+    cmd("/jobs", "scheduled jobs: /jobs [run|resume|pause <name> | runs [name]]", false),
+    cmd("/skills", "skills and made tools: /skills [accept|reject <domain/name> <sha>]", false),
+    cmd("/tools", "review a made tool: /tools accept|reject <name> <sha>", false),
     cmd("/upgrade", "update zenbot to the latest version and restart it", false),
     cmd("/restart", "restart zen on the installed version, back in this session", false),
     cmd("/help", "keys and commands", false),
@@ -453,6 +456,8 @@ impl App {
                 self.note(format!("mouse {state}"), Sty::Dim);
             }
             Some("/mouse") => self.note("inline mode leaves the mouse to the terminal", Sty::Dim),
+            // Read here and sent to the kernel with the owner's token, never to the agent.
+            Some(c @ ("/jobs" | "/skills" | "/tools")) => self.owner_command(&format!("{} {arg}", &c[1..])).await,
             Some("/upgrade") => self.start_upgrade(),
             Some("/restart") => {
                 self.restart = true;
@@ -462,6 +467,22 @@ impl App {
             _ => self.note(format!("unknown command {input}; try /help"), Sty::Warn),
         }
         Ok(())
+    }
+
+    /// `/jobs`, `/skills`, `/tools` (`zen_client::owner`): the kernel's answer, or why not, in the
+    /// transcript. A failed call is shown like any other, as an error note.
+    async fn owner_command(&mut self, text: &str) {
+        let out = match zen_client::owner::parse(text) {
+            Some(Ok(cmd)) => match zen_client::owner::run(&self.c, &cmd).await {
+                Ok(s) => s,
+                Err(e) => return self.note(format!("{e:#}"), Sty::Err),
+            },
+            Some(Err(usage)) => return self.note(usage, Sty::Warn),
+            None => return,
+        };
+        let mut lines: Vec<Line> = out.lines().map(|l| line(clean(l), Sty::Plain)).collect();
+        lines.push(Vec::new());
+        self.commit(lines);
     }
 }
 
@@ -582,6 +603,18 @@ mod tests {
         assert!(!a.quit);
         assert!(a.notice.as_ref().is_some_and(|(t, s)| t.contains("cannot reach zenbot") && *s == Sty::Err), "{:?}", a.notice);
         assert!(a.screen.rows().join("\n").contains("cannot reach zenbot"), "the note is drawn");
+    }
+
+    #[tokio::test]
+    async fn owner_commands_go_to_the_kernel_never_to_the_agent() {
+        let mut a = app(80, 20); // its kernel address refuses connections
+        a.command("/jobs run").await.unwrap();
+        assert!(a.notice.as_ref().is_some_and(|(t, s)| t.starts_with("usage: jobs") && *s == Sty::Warn), "{:?}", a.notice);
+        a.command("/jobs resume daily-readings").await.unwrap();
+        assert!(a.notice.as_ref().is_some_and(|(t, s)| t.contains("cannot reach zenbot") && *s == Sty::Err), "{:?}", a.notice);
+        a.command("/skills accept work/brief").await.unwrap();
+        assert!(a.notice.as_ref().is_some_and(|(t, _)| t.starts_with("usage: skills")), "a review names the fingerprint");
+        assert!(a.entries.is_empty() && !a.busy && a.pending_prompt.is_none(), "nothing was sent as a prompt");
     }
 
     #[tokio::test]

@@ -42,6 +42,16 @@ impl Kernel {
         Ok(v["messages"].as_array().and_then(|m| m.last()).and_then(|m| m["seq"].as_i64()).unwrap_or(0))
     }
 
+    /// An owner command (`!jobs …`, `!skills …`, `!tools …`) run against the kernel: its answer as
+    /// Markdown, or the usage when it doesn't fit.
+    pub async fn owner(&self, text: &str) -> Result<String> {
+        match zen_client::owner::parse(text) {
+            Some(Ok(cmd)) => zen_client::owner::run(&self.c, &cmd).await,
+            Some(Err(usage)) => Ok(format!("`{usage}`")),
+            None => Ok("Unknown command: `!help` lists them.".into()),
+        }
+    }
+
     /// The session's event stream.
     pub async fn connect(&self, id: &str) -> Result<Ws> {
         self.c.connect(id).await
