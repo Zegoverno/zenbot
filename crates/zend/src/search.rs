@@ -713,14 +713,77 @@ async fn run(app: &App, session: Uuid, args: &Value) -> Result<String> {
     );
     // A session that read untrusted content may carry it: recalling from one is reading untrusted
     // content. So is a memory such a session saved, and a wiki page with an entry labelled `web`.
-    let sources: Vec<Uuid> = listed.iter().filter(|(f, _)| f.kind == "turn").filter_map(|(f, _)| f.reference.split(':').next().and_then(|s| s.parse().ok())).collect();
-    let pages: Vec<String> = listed.iter().filter(|(f, _)| f.kind == "wiki").map(|(f, _)| f.reference.clone()).collect();
-    let tainted = crate::taint::any_tainted(&app.db, &sources).await
-        || sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM memories WHERE id = ANY($1) AND tainted)").bind(&ids).fetch_one(&app.db).await?
-        || sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM search_docs WHERE kind = 'wiki' AND ref = ANY($1) AND body LIKE '%(web) —%')")
-            .bind(&pages).fetch_one(&app.db).await?;
-    let results = crate::taint::hand_over(app, session, tainted, "search", q, &render(&listed)).await?;
-    Ok(format!("{header}{results}"))
+    // A marked result asked for by name (an exact match) is handed over in full, and taints the
+    // session; any other is listed by reference only, with none of its text (D-056), so a search
+    // that merely comes across one doesn't spread the mark.
+    let marked = marked_results(app, &listed).await;
+    let (full, withheld): (Vec<_>, Vec<_>) = listed.iter().cloned().zip(marked).partition(|((f, _), m)| !m || f.exact);
+    let (open, shown): (Vec<_>, Vec<_>) = full.into_iter().partition(|(_, m)| *m);
+    let shown: Vec<_> = shown.into_iter().map(|(r, _)| r).collect();
+    let open: Vec<_> = open.into_iter().map(|(r, _)| r).collect();
+    let mut out = format!("{header}{}", render(&shown));
+    if !open.is_empty() {
+        out.push_str(&crate::taint::hand_over(app, session, true, "search", q, &render(&open)).await?);
+    }
+    if !withheld.is_empty() {
+        out.push_str(&render_withheld(&withheld.into_iter().map(|((f, _), _)| f).collect::<Vec<_>>()));
+    }
+    Ok(out)
+}
+
+/// Which of `listed` carry the taint mark: a turn of a tainted session, a memory a tainted session
+/// saved, a wiki page with a `web` entry. Fails closed: a result whose mark can't be read is marked.
+async fn marked_results(app: &App, listed: &[(Found, Option<f64>)]) -> Vec<bool> {
+    let refs = |kind: &str| listed.iter().filter(|(f, _)| f.kind == kind).map(|(f, _)| f.reference.clone()).collect::<Vec<_>>();
+    let sessions: Vec<Uuid> = refs("turn").iter().filter_map(|r| r.split(':').next().and_then(|s| s.parse().ok())).collect();
+    let memories: Vec<i64> = refs("memory").iter().filter_map(|r| r.trim_start_matches('m').parse().ok()).collect();
+    let tainted_sessions: Option<Vec<Uuid>> = sqlx::query_scalar("SELECT id FROM sessions WHERE id = ANY($1) AND tainted_at IS NOT NULL")
+        .bind(&sessions).fetch_all(&app.db).await.ok();
+    let tainted_memories: Option<Vec<i64>> = sqlx::query_scalar("SELECT id FROM memories WHERE id = ANY($1) AND tainted")
+        .bind(&memories).fetch_all(&app.db).await.ok();
+    let web_pages: Option<Vec<String>> = sqlx::query_scalar("SELECT ref FROM search_docs WHERE kind = 'wiki' AND ref = ANY($1) AND body LIKE '%(web) —%'")
+        .bind(refs("wiki")).fetch_all(&app.db).await.ok();
+    listed
+        .iter()
+        .map(|(f, _)| match f.kind.as_str() {
+            "turn" => match (&tainted_sessions, f.reference.split(':').next().and_then(|s| s.parse::<Uuid>().ok())) {
+                (Some(t), Some(s)) => t.contains(&s),
+                _ => true,
+            },
+            "memory" => match (&tainted_memories, f.reference.trim_start_matches('m').parse::<i64>().ok()) {
+                (Some(t), Some(id)) => t.contains(&id),
+                _ => true,
+            },
+            "wiki" => web_pages.as_ref().is_none_or(|p| p.contains(&f.reference)),
+            _ => true,
+        })
+        .collect()
+}
+
+/// Marked results listed without their text: where they are and how to open them. Nothing in it
+/// comes from the result's content: only opaque references (a memory id, a session id), never a
+/// wiki page's name, which is made from its content.
+fn render_withheld(found: &[Found]) -> String {
+    let mut out = format!(
+        "\n{} more from content read outside (a web page, a subagent, an untrusted file), text withheld. Opening one marks this session as having read untrusted content:\n",
+        found.len()
+    );
+    for f in found {
+        let when = f.at.format("%Y-%m-%d");
+        let line = match f.kind.as_str() {
+            "memory" => format!("memory {} ({when}): search \"`{}`\" to read it", f.reference, f.reference),
+            // A page's name is made from what was captured, so it's withheld too (as the sleep's
+            // note never names a page with `web` entries, D-053).
+            "wiki" => format!("a wiki page with entries from outside (updated {when}), its name withheld too: search for it by name if you know it"),
+            "turn" => {
+                let (s, seq) = f.reference.split_once(':').unwrap_or((&f.reference, ""));
+                format!("session {}, message #{seq} ({when}): read it with history", &s[..s.len().min(8)])
+            }
+            other => format!("{other} {}", f.reference),
+        };
+        out.push_str(&format!("- {line}\n"));
+    }
+    out
 }
 
 /// Run the `search` tool. None for other tools.

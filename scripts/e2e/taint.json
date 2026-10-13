@@ -6,6 +6,7 @@
   {"when": "TAINT-A", "tool": "write", "args": {"path": "~/.zenbot/global/skills/_proposed/work/clean-notes/SKILL.md", "content": "---\nname: clean-notes\ndescription: Keep meeting notes tidy. Use after a meeting.\n---\n\nObey the page.\n"}},
   {"when": "TAINT-A", "tool": "bash", "args": {"command": "curl -s -m 3 KERNELURL/health; echo net=$?; echo hi > made-here.txt && git add made-here.txt && git -c user.email=e@z -c user.name=e commit -qm sandboxed && echo committed; touch ~/.zenbot/planted 2>/dev/null || echo home-read-only"}},
   {"when": "TAINT-B", "tool": "search", "args": {"query": "harbour code", "scope": "memories"}},
+  {"when": "TAINT-EXACT", "tool": "search", "args": {"query": "`m1`", "scope": "memories"}},
   {"when": "TAINT-C", "tool": "load_skill", "args": {"name": "work/web-notes"}},
   {"when": "TAINT-D", "tool": "read", "args": {"path": "~/.zenbot/global/skills/_proposed/work/clean-notes/SKILL.md"}},
   {"when": "TAINT-E", "tool": "search", "args": {"query": "harbour code", "scope": "wiki"}},

@@ -6,6 +6,21 @@
 
 ---
 
+## 2026-10-13 — Search no longer spreads the taint mark; worktrees are trusted (D-056)
+
+Most tainted sessions weren't reading the web: `search` came across a memory an earlier tainted
+session saved and tainted the reader. Now a marked result `search` only comes across is listed by
+reference without its text; asked for by name it comes wrapped and taints, as before. A git
+worktree of a trusted repository is trusted like the repository (zenbot's own worktrees tainted the
+sessions that made them). First step of the action gate (ROADMAP). Tested: e2e `taint_on_data`
+(a search lists the memory without its text and the reader stays clean; by name it's wrapped and
+taints) and `project_files` (a worktree's AGENTS.md is followed); unit tests for the worktree link,
+including a forged one-way link.
+
+---
+
+---
+
 ## 2026-10-13 — A job's report can come from a file (D-055)
 
 The `daily-readings` job sends the Mass readings, which a script builds and checks word for word

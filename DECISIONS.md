@@ -6,6 +6,38 @@
 
 ---
 
+## D-056 — Judge the action, not the reading; first step: search doesn't spread the mark
+
+**Date:** 2026-10-13 · **Status:** accepted (owner); built in part · **Amends:** D-053 (every read
+path taints the reader), D-051 (only listed repositories are trusted)
+
+**Decision:** Reading outside content should cost little; acting on it is what's checked.
+- **Target (not built yet):** a session that reads outside content is marked *risky*, which limits
+  nothing. Before any action with effect runs (shell, writes, saves, jobs), the kernel parses it
+  into facts and fixed rules decide: run, run in the offline sandbox (code the session may have
+  written: builds, tests, scripts), or ask the owner (outward, persistent, secret, destructive), who
+  allows it with one tap. System One then reads only the owner's own request for the turn, never the
+  outside content, to grant the outward actions it asks for ("push and open a PR").
+- **Built: search lists, doesn't hand over.** A marked result `search` merely comes across (a turn
+  of a tainted session, a memory a tainted session saved, a wiki page with `web` entries) is listed
+  by reference with none of its text (a wiki page without its name either, which is made from its
+  content); asked for by name (an exact match, e.g. `` `m12` ``) it's
+  handed over wrapped and taints the reader, as `history` and `read` still do.
+- **Built: worktrees are trusted.** A git worktree of a trusted repository is as trusted as the
+  repository (its `.git` file and the repository's worktree entry must name each other).
+
+**Why:** 5 of the 11 tainted main sessions were tainted by `search` recalling a marked memory, not
+by reading the web; a worktree of zenbot's own checkout tainted the session that made it. A replay
+of 2,396 recorded commands and 36 attacks: fixed rules over parsed facts run 71% unchecked, sandbox
+10%, ask 18%, and no attack escapes; System One scoring the action's facts separates poorly (routine
+median 0.39, attacks 0.43 to 0.89), so it would have to flag half of what it judges to miss none.
+
+**Considered:** a classifier on the content read (it reads the attacker's text, so the attacker can
+talk to it); System One scoring each action as the gate (too weak, above); tainting only on a
+flagged action without the gate (unsafe until the gate exists, so the target ships with it).
+
+---
+
 ## D-055 — A job's report can come from a file the run wrote, not the final answer
 
 **Date:** 2026-10-13 · **Status:** accepted (owner asked for the feature; design confirmed in the
