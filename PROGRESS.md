@@ -6,6 +6,18 @@
 
 ---
 
+## 2026-10-13 — Owner commands in the chat: `/jobs`, `/skills`, `/tools` (and `!` in Matrix)
+
+Approving a job zenbot created paused, running one to test it, or accepting a draft skill or a
+made tool needed the terminal (`zen jobs …`), out of reach from the chat or the phone. Now zen's
+input takes `/jobs [run|resume|pause <name> | runs [name]]`, `/skills [accept|reject <domain/name>
+<sha>]` and `/tools accept|reject <name> <sha>`, and Matrix takes the same with `!` (in every room,
+zen jobs included). One module, `zen_client::owner`, parses and runs them for both clients. The
+client reads them before anything is sent and calls the kernel with the owner's token, so they
+never reach the agent: text it read can't approve anything. Removing and creating jobs stay in
+the terminal. Tested: parsing and formatting unit tests, a TUI test that a command is never sent as
+a prompt, zen-matrix's parse tests.
+
 ## 2026-10-11 — Docs trimmed: each fact in one place
 
 The docs repeated the same facts across files (the upgrade flow in six, the tool list, jobs and

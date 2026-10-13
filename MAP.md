@@ -261,6 +261,9 @@ The kernel client both clients use: `zen_home` (`ZEN_HOME`, else `~/.zenbot`), `
 `Authorization` header; `call`/`get`/`post`/`patch`/`delete`, `health`, `new_session`, `resolve`,
 `connect` to a session's WebSocket; 5 s connect and 120 s request timeouts; a warning when the
 token would go over plain http to another machine), `enc` (a path segment, percent-encoded), `Ws`.
+`owner.rs`: the owner's chat commands (`jobs`, `skills`, `tools`: parse, call `/api/jobs…`,
+`/api/skills…`, `/api/tools/{name}/review`, answer as Markdown), used by zen's `/jobs`, `/skills`,
+`/tools` (`tui/input.rs`) and zen-matrix's `!jobs`, `!skills`, `!tools` (`kernel.rs`).
 Used by `zen` (`client`, `setup`) and `zen-matrix` (`kernel`, `state`, through a path dependency).
 
 ---
@@ -277,7 +280,8 @@ and where it answers: sender, device trust, room members and encryption, invites
 identity), `relay.rs` (pure: commands, events → posts, numbered answers, job reports, splitting,
 Markdown → HTML without raw HTML; session events read as `zen_proto::client::Event`),
 `kernel.rs` (the API calls it uses, over `zen-client`: `POST /api/sessions`,
-`GET /api/sessions/{id}?after=` and `?last=1`, the session WebSocket, `GET /api/jobs/runs`),
+`GET /api/sessions/{id}?after=` and `?last=1`, the session WebSocket, `GET /api/jobs/runs`, and the
+owner commands through `zen_client::owner`),
 `state.rs` (`matrix.env` read with `zen_client::parse_env`, `state.json`, private files). `examples/owner.rs`: the scripted owner for
 `scripts/matrix-e2e.sh`. The kernel knows nothing of it.
 
