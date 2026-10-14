@@ -41,7 +41,16 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
+        # Complete the measured work before publishing its response: the client can
+        # start its next request as soon as it receives this body.
+        self.finish_counted_request()
         self.wfile.write(body)
+
+    def finish_counted_request(self):
+        if getattr(self, "counted", False):
+            with LOCK:
+                STATS["inflight"] -= 1
+                self.counted = False
 
     def do_GET(self):
         with LOCK:
@@ -52,14 +61,13 @@ class H(BaseHTTPRequestHandler):
         sleep = isinstance(request.get("state"), dict) and "memory" in request["state"]
         if sleep:
             with LOCK:
+                self.counted = True
                 STATS["inflight"] += 1
                 STATS["max_inflight"] = max(STATS["max_inflight"], STATS["inflight"])
         try:
             self.answer(request)
         finally:
-            if sleep:
-                with LOCK:
-                    STATS["inflight"] -= 1
+            self.finish_counted_request()
 
     def answer(self, request):
         try:
