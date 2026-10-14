@@ -247,6 +247,15 @@ pub(crate) async fn check_effort(app: &App, model: &str, effort: Option<&str>) -
     Err(ApiError(StatusCode::BAD_REQUEST, msg))
 }
 
+/// The thinking level a session keeps when it moves to `model`: its own, if `model` takes it;
+/// else None (the model's default).
+pub(crate) async fn effort_on(app: &App, model: &str, effort: Option<String>) -> Option<String> {
+    match effort {
+        Some(e) if check_effort(app, model, Some(&e)).await.is_err() => None,
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

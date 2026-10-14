@@ -52,6 +52,27 @@ directories and Docker cache grew without bound. A rollback needs only the newes
 enough. Build directories are trimmed by the scripts rather than the kernel: the scripts own the
 checkout and the builds, and they run when no session is working.
 
+## D-058 — After a usage-limit failover, the session keeps the new model
+
+**Date:** 2026-10-14 · **Status:** accepted (owner) · **Amends:** D-044 (the switch lasted one turn)
+
+**Decision:** When a turn fails over at a hard usage limit (D-044), the session switches to the
+model it continued on and keeps it until the owner picks another with `/model`. The kernel sets
+`sessions.model` (the thinking level kept only if the new model takes it, as for `/model`) and the
+running turn's model, and sends clients a `model` event, so the status line shows the model the
+session is on. The kernel's own small calls retry once on the session's model at a hard usage
+limit: the summarizer already tried the session's model on any failure, and the assist model
+(names, next-prompt suggestions) now does too.
+
+**Why:** Before, nothing changed the session's model, so every next prompt went back to the
+exhausted model, failed, and failed over again (or failed outright when failover couldn't run),
+while the terminal kept showing the old model. A limit that has been hit stays hit for hours: the
+working model is the right default until the owner chooses otherwise.
+
+**Considered:** going back to the original model after each turn or after a delay (an extra failed
+call per turn, and the owner doesn't see which model runs); asking the owner (a question at a
+moment the owner is often away, for a choice with an obvious default).
+
 ## D-057 — A job run's session is archived when the run ends
 
 **Date:** 2026-10-14 · **Status:** accepted (owner) · **Amends:** D-048 (the board's Jobs section)
@@ -520,7 +541,7 @@ technical debt).
 
 ## D-044 — One safe cross-provider continuation on hard usage limits
 
-**Date:** 2026-10-08 · **Status:** accepted (owner) · **Exception to:** D-030's no-per-turn-switch rule
+**Date:** 2026-10-08 · **Status:** accepted (owner); amended by D-058 (the session keeps the model it failed over to) · **Exception to:** D-030's no-per-turn-switch rule
 
 **Decision:** List every worker-reported model by default; `ZEN_MODELS` remains an optional visible allowlist. On an explicitly recognized hard subscription usage limit, `zen-engine` may continue once on the other provider: Claude → Codex GPT-6.1 Sol; Codex → Claude Sonnet 5.5. It first checks subscription sign-ins and refuses API-key environments, carries forward the original prompt and completed current-turn transcript, never repeats a tool call with an unknown result, emits a visible switch event, and stops if safe continuation is not possible. Temporary throttles and generic 429s do not trigger it. The switch is configurable or disabled by environment variable.
 

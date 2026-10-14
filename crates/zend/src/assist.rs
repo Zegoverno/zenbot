@@ -54,8 +54,9 @@ pub(crate) fn after_turn(app: &AppState, id: Uuid, kind: Option<&str>, ending: O
 }
 
 async fn run(app: &AppState, id: Uuid, may_suggest: bool) -> Result<()> {
-    let row = sqlx::query("SELECT title_source FROM sessions WHERE id = $1").bind(id).fetch_one(&app.db).await?;
+    let row = sqlx::query("SELECT title_source, model FROM sessions WHERE id = $1").bind(id).fetch_one(&app.db).await?;
     let source: String = row.get("title_source");
+    let session_model: String = row.get("model");
     let blocks = tape::load(&app.db, id, &["message"]).await?;
     let owner_turns = blocks.iter().filter(|b| is_owner(&b.payload)).count();
     let want_title = source != "owner" && owner_turns <= NAME_TURNS;
@@ -65,9 +66,17 @@ async fn run(app: &AppState, id: Uuid, may_suggest: bool) -> Result<()> {
     }
     let Some(last_seq) = blocks.last().map(|b| b.seq) else { return Ok(()) };
     let input = input(&blocks, want_title);
-    let model = model();
+    let mut model = model();
     let started = Instant::now();
-    let reply = crate::complete(app, &model, SYSTEM, &input).await?;
+    // At a hard usage limit, once more on the session's model (after a failover, the other engine's).
+    let reply = match crate::complete(app, &model, SYSTEM, &input).await {
+        Err(e) if session_model != model && zen_proto::worker::is_hard_usage_limit(&format!("{e:#}")) => {
+            tracing::warn!("assist model {model} is at its usage limit; trying {session_model}: {e:#}");
+            model = session_model;
+            crate::complete(app, &model, SYSTEM, &input).await?
+        }
+        reply => reply?,
+    };
     let latency = started.elapsed().as_millis() as i32;
     let parsed = parse(&reply.text);
     let Some((title, next)) = parsed else {

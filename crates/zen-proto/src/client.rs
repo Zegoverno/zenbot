@@ -84,6 +84,15 @@ pub enum Event {
     },
     /// The owner's likely next prompt, after a turn; its `id` goes back with the next prompt.
     Suggestion { id: i64, text: String },
+    /// The session's model changed without the owner choosing it: a usage-limit failover moved it
+    /// to another model, which it keeps until the owner picks one (D-058). `effort` is the
+    /// session's thinking level on it (None: the model's default).
+    Model {
+        #[serde(default, deserialize_with = "or_default")]
+        model: String,
+        #[serde(default)]
+        effort: Option<String>,
+    },
     /// Progress the kernel reports (a long tool, a delegation, a summary, a failover).
     Status {
         #[serde(default, deserialize_with = "or_default")]
@@ -158,6 +167,7 @@ impl Event {
             Event::Idle {} => "idle",
             Event::Title { .. } => "title",
             Event::Suggestion { .. } => "suggestion",
+            Event::Model { .. } => "model",
             Event::Status { .. } => "status",
             Event::Questions { .. } => "questions",
             Event::Taint { .. } => "taint",
@@ -228,6 +238,7 @@ mod tests {
         assert_eq!(Event::from_value(json!({ "type": "title", "title": "Taxes" })), Event::Title { title: "Taxes".into() });
         assert_eq!(Event::from_value(json!({ "type": "suggestion", "id": 4, "text": "go on" })), Event::Suggestion { id: 4, text: "go on".into() });
         assert_eq!(Event::from_value(json!({ "type": "status", "text": "verifying" })), Event::Status { text: "verifying".into() });
+        assert_eq!(Event::from_value(json!({ "type": "model", "model": "codex/gpt-6.1-sol", "effort": null })), Event::Model { model: "codex/gpt-6.1-sol".into(), effort: None });
         let qs = Event::from_value(json!({ "type": "questions", "questions": [{ "question": "Which?", "options": ["a", "b"] }] }));
         assert_eq!(qs, Event::Questions { questions: vec![Question { question: "Which?".into(), options: vec!["a".into(), "b".into()] }] });
         assert_eq!(Event::from_value(json!({ "type": "error", "error": "session is busy" })), Event::Error { error: "session is busy".into() });

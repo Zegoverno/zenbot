@@ -335,6 +335,35 @@ fn args_or_empty<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Value, D::Err
     Ok(Option::<Value>::deserialize(d)?.filter(|v| !v.is_null()).unwrap_or_else(|| Value::Object(Map::new())))
 }
 
+/// Whether a model call's error is a hard subscription usage or spend limit (zen-engine fails a
+/// turn over on it; the kernel retries its own small calls on another model). Only explicit
+/// exhausted-usage messages qualify. Throttles, overloads, and generic 429s do not.
+pub fn is_hard_usage_limit(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    if error.contains("temporarily") || error.contains("rate limit") {
+        return false;
+    }
+    [
+        "you've hit your session limit",
+        "you have hit your session limit",
+        "you've hit your weekly limit",
+        "you have hit your weekly limit",
+        "you've hit your opus limit",
+        "you've hit your sonnet limit",
+        "you've reached your usage limit",
+        "you have reached your usage limit",
+        "you've hit your usage limit",
+        "you have hit your usage limit",
+        "you've hit your monthly spend limit",
+        "you've hit your org's monthly spend limit",
+        "you've hit your individual spend limit",
+        "you've hit your team's shared budget",
+        "you've hit your individual usage limit",
+    ]
+    .iter()
+    .any(|phrase| error.contains(phrase))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

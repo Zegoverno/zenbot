@@ -248,13 +248,8 @@ pub(crate) async fn update_session(State(app): State<AppState>, Path(id): Path<U
             Some(e.to_string())
         }
         // A new model keeps the session's effort only if it supports it.
-        None => {
-            let kept: Option<String> = current.get("effort");
-            match kept {
-                Some(e) if body.model.is_some() && check_effort(&app, &model, Some(&e)).await.is_err() => None,
-                other => other,
-            }
-        }
+        None if body.model.is_some() => effort_on(&app, &model, current.get("effort")).await,
+        None => current.get("effort"),
     };
     let row = sqlx::query(&format!(
         "UPDATE sessions SET title = COALESCE($2, title), title_source = CASE WHEN $2 IS NULL THEN title_source ELSE 'owner' END, model = COALESCE($3, model), effort = $5,

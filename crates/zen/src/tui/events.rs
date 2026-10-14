@@ -189,6 +189,12 @@ impl App {
                 self.suggestion = Some(Suggestion { id, text: text.trim().to_string(), taken: false });
                 self.draw();
             }
+            // A usage-limit failover moved the session to another model, which it keeps.
+            Ev::Model { model, effort } if !model.is_empty() => {
+                self.model = model;
+                self.effort = effort;
+                self.draw();
+            }
             // Marked as having read untrusted content, or trusted again by the owner.
             Ev::Taint { tainted, risky, .. } => {
                 self.tainted = tainted;
@@ -401,6 +407,18 @@ mod tests {
         // A disconnect seen on the old connection doesn't drop the new one.
         a.on_incoming(("s1".into(), 1, json!({ "type": "disconnected" }))).await;
         assert!(a.busy);
+    }
+
+    #[test]
+    fn the_footer_shows_the_model_a_failover_moved_the_session_to() {
+        let mut a = app_with_models(100, 20);
+        a.effort = Some("xhigh".into());
+        assert!(footer(&a).starts_with("  claude-opus-5-5 · xhigh · "), "{}", footer(&a));
+        a.on_event(json!({ "type": "model", "model": "faux/smoke", "effort": null }));
+        assert_eq!((a.model.as_str(), a.effort.as_deref()), ("faux/smoke", None));
+        assert!(footer(&a).starts_with("  smoke · "), "{}", footer(&a));
+        let shown = plain_rows(&a).join("\n");
+        assert!(shown.contains("smoke · new session"), "drawn: {shown}");
     }
 
     #[test]

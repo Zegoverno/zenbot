@@ -264,7 +264,8 @@ pub fn fallback(previous: Option<&Value>, msgs: &[&Block]) -> Value {
 // ---------- preparing and applying ----------
 
 /// Summarize the blocks `plan` picks and store the result, unapplied. Uses the summarizer model
-/// through its worker; falls back to a summary built without a model.
+/// through its worker, then (when it fails, e.g. at its usage limit) the session's model, which
+/// after a failover is the other engine's (D-058); falls back to a summary built without a model.
 pub async fn prepare(app: &App, session: Uuid, keep_tokens: i64, session_model: &str) -> Result<Option<i64>> {
     let blocks = tape::load(&app.db, session, &["message", "compaction"]).await?;
     let Some((from, to)) = plan(&blocks, keep_tokens) else { return Ok(None) };
