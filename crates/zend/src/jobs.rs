@@ -5,7 +5,7 @@
 //!   existed gets it at its next start): `sleep` (the nightly memory sleep, `memory::sleep`),
 //!   `wiki` (commit the agent's wiki edits, report problems: `wiki::tend`), `skills` (flag and
 //!   archive unused skills: `workshop::tend`), `routes` (switch a delegation route on clear
-//!   evidence: `delegate::tune`), `prune` (old saved outputs and prompt-file backups) and `engines`
+//!   evidence: `delegate::tune`), `prune` (old saved outputs, prompt-file backups, database dumps and eval runs) and `engines`
 //!   (`scripts/update-engines.sh`). Each records its own run; a run with nothing to report is
 //!   `silent`. What `wiki`, `skills`, `routes` and `prune` found in the last day reaches the next
 //!   sessions with the sleep's morning note (`upkeep_note`). The owner can pause and run them;
@@ -68,7 +68,7 @@ const SYSTEM: [(&str, &str, &str, &str); 6] = [
     ("wiki", "wiki", "10 3 * * *", "commit the agent's wiki edits since the last capture, report pages without a summary and broken links (wiki::tend)"),
     ("skills", "skills", "20 3 * * *", "flag skills unused for 30 days, archive them at 90 (workshop::tend)"),
     ("routes", "routes", "30 3 * * *", "switch a delegation route where the owner's verdicts clearly favour another model (delegate::tune)"),
-    ("prune", "prune", "40 3 * * *", "remove saved tool outputs older than 30 days and prompt-file backups older than 90 (jobs::prune_files)"),
+    ("prune", "prune", "40 3 * * *", "remove saved tool outputs older than 30 days, prompt-file backups older than 90, database dumps but the newest 3 and eval runs older than 7 days (jobs::prune_files)"),
     ("engines", "engines", "0 4 * * *", "update the Claude Code and Codex CLIs, tested, with rollback (scripts/update-engines.sh)"),
 ];
 
@@ -937,7 +937,8 @@ const BACKUP_DAYS: u64 = 90;
 /// Days a saved tool output (cut bash/MCP output, fetched PDFs) is kept in `<zen home>/outputs`.
 const OUTPUT_DAYS: u64 = 30;
 
-/// The `prune` job: old saved outputs and prompt-file backups under the zen home `home`.
+/// The `prune` job: old saved outputs, prompt-file backups, database dumps and eval runs under the
+/// zen home `home`.
 fn prune_files(home: &std::path::Path) -> Vec<String> {
     let mut notes = Vec::new();
     let backups = prune_backups(&home.join(crate::memory::BACKUPS), BACKUP_DAYS);
@@ -948,7 +949,62 @@ fn prune_files(home: &std::path::Path) -> Vec<String> {
     if outputs > 0 {
         notes.push(format!("outputs: removed {outputs} saved tool output file(s) older than {OUTPUT_DAYS} days"));
     }
+    let dumps = prune_dumps(&home.join("backups"), DUMP_KEEP);
+    if dumps > 0 {
+        notes.push(format!("backups: removed {dumps} database dump(s), keeping the newest {DUMP_KEEP}"));
+    }
+    let evals = prune_eval_runs(&home.join("evals"), EVAL_DAYS, Utc::now());
+    if evals > 0 {
+        notes.push(format!("evals: removed {evals} eval run(s) older than {EVAL_DAYS} days"));
+    }
     notes
+}
+
+/// Database dumps (`<zen home>/backups/<UTC time>-<label>.dump`, scripts/db.sh `db_backup`) kept.
+/// The install takes one right before applying migrations, and a failed install's rollback names
+/// that one (the newest) in its restore hint, so the newest few always stay.
+const DUMP_KEEP: usize = 3;
+
+/// Days an eval run (`<zen home>/evals/<UTC time>/`, scripts/eval.sh) is kept. The base results
+/// it reuses live in `evals/cache` and the base builds in `evals/builds`; eval.sh prunes those.
+const EVAL_DAYS: i64 = 7;
+
+/// Whether `name` starts with the UTC time stamp the scripts name things with (`20261013T203126Z`),
+/// which is returned.
+fn stamp(name: &str) -> Option<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(name.get(..16)?, "%Y%m%dT%H%M%SZ").ok()
+}
+
+/// Remove all but the newest `keep` database dumps directly in `dir` (by the time stamp in their
+/// name); returns how many. Only `<stamp>-<label>.dump` regular files count; anything else stays.
+fn prune_dumps(dir: &std::path::Path, keep: usize) -> usize {
+    let Ok(read) = std::fs::read_dir(dir) else { return 0 };
+    let mut dumps: Vec<(NaiveDateTime, PathBuf)> = read
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let at = stamp(&name).filter(|_| name.as_bytes().get(16) == Some(&b'-') && name.ends_with(".dump"))?;
+            Some((at, e.path()))
+        })
+        .collect();
+    dumps.sort_by(|a, b| b.cmp(a));
+    dumps.into_iter().skip(keep.max(1)).filter(|(_, p)| std::fs::remove_file(p).is_ok()).count()
+}
+
+/// Remove eval run directories directly in `dir` named exactly by a UTC time stamp more than `days`
+/// days before `now`; returns how many. `builds`, `cache` and anything else stay.
+fn prune_eval_runs(dir: &std::path::Path, days: i64, now: DateTime<Utc>) -> usize {
+    let Ok(read) = std::fs::read_dir(dir) else { return 0 };
+    let limit = now.naive_utc() - chrono::Duration::days(days);
+    read.flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.len() == 16 && stamp(&name).is_some_and(|at| at < limit)
+        })
+        .filter(|e| std::fs::remove_dir_all(e.path()).is_ok())
+        .count()
 }
 
 /// Remove regular files directly in `dir` whose name `ours` accepts and that weren't modified for
@@ -1271,6 +1327,48 @@ mod tests {
         }
         assert_eq!(prune_outputs(&dir, 30), 3);
         assert!(dir.join("notes.md").exists() && dir.join("fresh.log").exists());
+    }
+
+    #[test]
+    fn only_the_newest_database_dumps_are_kept() {
+        let dir = crate::test_util::TestDir::new("dumps");
+        let names = [
+            "20261007T133742Z-c9945db.dump",
+            "20261009T164854Z-b78e535.dump",
+            "20261013T004556Z-26f9477.dump",
+            "20261013T203736Z-282d1b3.dump",
+            "20261013T221423Z-manual.dump",
+            "old.dump",
+            "20261001T000000Z-x.tgz",
+            "env.bak",
+        ];
+        for name in names {
+            std::fs::write(dir.join(name), "x").unwrap();
+        }
+        std::fs::create_dir(dir.join("20261001T000000Z-dir.dump")).unwrap();
+        assert_eq!(prune_dumps(&dir, 3), 2);
+        assert!(!dir.join("20261007T133742Z-c9945db.dump").exists() && !dir.join("20261009T164854Z-b78e535.dump").exists());
+        for kept in &names[2..] {
+            assert!(dir.join(kept).exists(), "{kept}");
+        }
+        assert!(dir.join("20261001T000000Z-dir.dump").is_dir());
+        // The newest always stays, even when asked to keep none.
+        assert_eq!(prune_dumps(&dir, 0), 2);
+        assert!(dir.join("20261013T221423Z-manual.dump").exists());
+    }
+
+    #[test]
+    fn old_eval_runs_are_pruned_and_builds_kept() {
+        let dir = crate::test_util::TestDir::new("evals");
+        for name in ["20261001T000000Z", "20261006T235959Z", "20261008T000001Z", "builds", "cache", "20261001T000000Z-x"] {
+            std::fs::create_dir_all(dir.join(name).join("work")).unwrap();
+        }
+        std::fs::write(dir.join("20261002T000000Z"), "a file, not a run").unwrap();
+        assert_eq!(prune_eval_runs(&dir, 7, t("2026-10-14T00:00:00Z")), 2);
+        assert!(!dir.join("20261001T000000Z").exists() && !dir.join("20261006T235959Z").exists());
+        for kept in ["20261008T000001Z", "builds", "cache", "20261001T000000Z-x", "20261002T000000Z"] {
+            assert!(dir.join(kept).exists(), "{kept}");
+        }
     }
 
     fn t(s: &str) -> DateTime<Utc> {
