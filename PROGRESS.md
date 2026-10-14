@@ -6,6 +6,17 @@
 
 ---
 
+## 2026-10-14 — Lighter docs, checks and e2e (D-061)
+
+Phase 1 of slimming zenbot, with no change to what it does. Docs a contributor reads and keeps
+shrank from ~6.7k to ~4.4k lines: old progress, superseded decisions and `docs/research/` moved to
+`docs/archive/`. A change now updates five docs, not ten, and `scripts/check-docs.py` dropped the
+hand-kept lists (client-protocol routes, events, tape kinds, slash commands, every script) and
+gained line budgets. e2e: 34 scenarios merged into 21 by shared setup, each isolated and run four at
+once, with fewer fixed waits: 244 s to 117 s on this VM. CI's `check` job runs `scripts/check.sh`
+(the docs job folded in), and `scripts/size-budget.sh` fails a build whose binaries outgrow their
+measured size by ~15%.
+
 ## 2026-10-14 — A job's report can go into a session (D-060)
 
 The owner wants a daily check-in in his main Matrix room that he can answer right there. A job's

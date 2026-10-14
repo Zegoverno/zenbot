@@ -23,7 +23,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
 
 HISTORY = ("PROGRESS.md", "DECISIONS.md", "docs/archive/")
-# Line budgets (D-060): when one is exceeded, move old history to docs/archive/ (AGENTS.md) or
+# Line budgets (D-061): when one is exceeded, move old history to docs/archive/ (AGENTS.md) or
 # tighten the doc; raise a budget only on purpose.
 BUDGETS = {"PROGRESS.md": 500, "docs": 4700}
 problems = []

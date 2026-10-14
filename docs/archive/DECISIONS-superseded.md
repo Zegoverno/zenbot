@@ -1,6 +1,6 @@
 # zenbot — Superseded decisions (archived)
 
-> Moved unchanged from DECISIONS.md on 2026-10-14 (D-060): decisions a later one superseded.
+> Moved unchanged from DECISIONS.md on 2026-10-14 (D-061): decisions a later one superseded.
 > DECISIONS.md keeps a one-line entry for each, linking here. Newest first.
 
 ## D-021 — A session is one job; briefs opt-in

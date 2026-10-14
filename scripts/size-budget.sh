@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fails when a binary outgrows its size budget (D-060): the size measured on 2026-10-14 plus about
+# Fails when a binary outgrows its size budget (D-061): the size measured on 2026-10-14 plus about
 # 15%, per build profile. A dependency or a feature that pushes past it is a choice to make on
 # purpose: raise the number here and say why in the commit.
 #

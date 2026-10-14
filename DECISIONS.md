@@ -6,6 +6,24 @@
 
 ---
 
+## D-061 — Lighter docs and checks
+
+**Date:** 2026-10-14 · **Status:** accepted (owner); built
+
+**Decision:** a change updates five things (PROGRESS.md, DECISIONS.md when a decision changes,
+MAP.md, README.md when user-facing, the module's header comment); every other doc is fixed when it
+becomes wrong. Old progress, superseded decisions and research move to `docs/archive/` (history,
+not required reading). `scripts/check-docs.py` keeps only the cheap drift checks and adds line
+budgets. The e2e suite runs 21 scenarios (34 merged by shared setup), four at once. CI runs
+`scripts/check.sh` itself, which also enforces size budgets on the binaries.
+
+**Why:** the owner found zenbot heavy and slow to change: ~6.7k lines of docs, up to ten docs per
+change, hand-kept lists, a 4-minute e2e run. From vercel-labs/fx: budgets enforced by CI, focused
+tests locally and the full suite in CI. Coverage of the security invariants (taint, trust, action
+gate, engine boundary) is unchanged; checks moved, not dropped, except duplicates of unit tests.
+
+---
+
 ## D-060 — A job's report can be posted into one of the owner's sessions
 
 **Date:** 2026-10-14 · **Status:** accepted (owner asked for it: a daily check-in in the main
