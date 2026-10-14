@@ -2,7 +2,7 @@
 //! Knowledge; Phase 4).
 //!
 //! Pages are markdown files in `<zen home>/global/wiki/` (ZEN_WIKI_DIR), in git, in gbrain's shape
-//! (docs/research/memory-search-web.md §C): frontmatter, a title, a summary above a `---` that is
+//! (docs/archive/research/memory-search-web.md §C): frontmatter, a title, a summary above a `---` that is
 //! rewritten from the timeline, and below it an append-only timeline, newest first, each entry
 //! dated with its source. `index.md` lists the pages (rebuilt by the kernel) and `log.md` records
 //! every capture.

@@ -2,7 +2,7 @@
 //! (DESIGN.md, "Skills and tools that improve themselves"; D-029, D-037; Phase 5).
 //!
 //! Hermes sprawls because creating a skill is cheaper than finding and improving one, a fork after
-//! busy turns is told to save something, and nothing is ever retired (docs/research/
+//! busy turns is told to save something, and nothing is ever retired (docs/archive/research/
 //! hermes-openclaw.md). Here, `save_skill` is the way to create or change a skill and the kernel
 //! enforces the rules:
 //! - the agentskills.io format, a SKILL.md under 10,000 characters, and a reason (the evidence);

@@ -4,7 +4,7 @@
   {"when": "mcp", "tool": "call_tool", "args": {"name": "local_echo", "arguments": {"message": "hi"}}},
   {"when": "mcp", "tool": "call_tool", "args": {"name": "remote_add", "arguments": {"a": 2, "b": 3}}},
   {"when": "mcp", "tool": "call_tool", "args": {"name": "remote_add", "arguments": {"a": 2}}},
-  {"when": "tool slow", "tool": "call_tool", "args": {"name": "local_slow", "arguments": {"seconds": 8}}},
+  {"when": "tool slow", "tool": "call_tool", "args": {"name": "local_slow", "arguments": {"seconds": 5}}},
   {"when": "tool quick", "tool": "call_tool", "args": {"name": "local_echo", "arguments": {"message": "quick"}}},
   {"when": "tool huge", "tool": "call_tool", "args": {"name": "local_huge", "arguments": {}}},
   {"when": "tool huge", "tool": "call_tool", "args": {"name": "remote_huge", "arguments": {}}},
