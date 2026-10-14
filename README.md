@@ -72,7 +72,7 @@ zen tools accept|reject <name> <fingerprint>
 zen policy                                        # which model gets delegated work, and the evidence
 zen policy set <kind> <model> [--candidates a,b] | undo
 zen models                                        # models and their thinking levels, [default]
-zen status
+zen status                                        # health, versions, jobs; warns when the disk is over 80% full
 zen upgrade [--check]
 ```
 

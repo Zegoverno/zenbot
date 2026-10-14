@@ -6,6 +6,19 @@
 
 ---
 
+## 2026-10-14 — Disk hygiene: dumps, eval runs, build dirs, Docker (D-059)
+
+The VM's 25 GB disk once filled up; four kinds of growth had no cleanup. The nightly `prune` job
+now also keeps only the newest 3 database dumps (`db.sh` keeps 3 too, down from 10) and removes eval
+run directories older than 7 days, touching only names the scripts make. After a healthy install,
+`apply-upgrade.sh` trims a cargo target directory of the checkout over 2 GiB (incremental caches and
+`debug/` first, the whole directory only if still over; never while cargo runs) and prunes dangling
+Docker images and week-old build cache. `zen status` shows the root filesystem's use and warns over
+80%. Tested: unit tests for both prune rules and the status line; `trim_target` on scratch dirs.
+
+---
+
+
 ## 2026-10-14 — Job sessions archive themselves when the run ends (D-057)
 
 Every finished job run left its session on the board's Jobs section. Now the kernel archives a run's

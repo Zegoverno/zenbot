@@ -6,6 +6,21 @@
 
 ---
 
+## D-059 — Bounded disk use: prune our own leftovers, warn at 80%
+
+**Date:** 2026-10-14 · **Status:** accepted (owner); built
+
+**Decision:** zen cleans up what it leaves on the disk, by fixed rules that only touch names it
+makes: database dumps beyond the newest 3 and eval runs older than 7 days (the nightly `prune`
+job), cargo target directories over 2 GiB and dangling Docker images and week-old build cache
+(after a healthy install, `apply-upgrade.sh`). `zen status` warns when the root filesystem is over
+80% full.
+
+**Why:** the VM's 25 GB disk filled up once; dumps (one per migrating upgrade), eval runs, build
+directories and Docker cache grew without bound. A rollback needs only the newest dump, so 3 is
+enough. Build directories are trimmed by the scripts rather than the kernel: the scripts own the
+checkout and the builds, and they run when no session is working.
+
 ## D-057 — A job run's session is archived when the run ends
 
 **Date:** 2026-10-14 · **Status:** accepted (owner) · **Amends:** D-048 (the board's Jobs section)

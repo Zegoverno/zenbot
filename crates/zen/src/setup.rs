@@ -1,5 +1,5 @@
 //! The machine zen runs on: the installer's `env` file, the engines' state and signing in to
-//! them (`zen login`), and git's identity for `zen status`.
+//! them (`zen login`), and git's identity and the root filesystem's use for `zen status`.
 
 use std::collections::BTreeMap;
 
@@ -56,6 +56,41 @@ pub(crate) fn engines_line(state: &Value) -> Option<String> {
         line += &format!("; {}", problems.join("; "));
     }
     Some(line + ")")
+}
+
+/// Share of the root filesystem above which `zen status` warns (the VM's disk once filled up).
+pub(crate) const DISK_WARN_PERCENT: u64 = 80;
+
+/// The root filesystem's use from `df -Pk /`: `{ total, used, avail }` in bytes and `percent` as
+/// df counts it (used of what non-root users can use); null when df isn't there or says nothing.
+pub(crate) fn root_disk() -> Value {
+    std::process::Command::new("df")
+        .args(["-Pk", "/"])
+        .output()
+        .ok()
+        .and_then(|o| parse_df(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or(Value::Null)
+}
+
+/// The figures of `df -P` output's first filesystem (sizes in 1024-byte blocks).
+fn parse_df(out: &str) -> Option<Value> {
+    let f: Vec<&str> = out.lines().nth(1)?.split_whitespace().collect();
+    let n = |i: usize| f.get(i)?.parse::<u64>().ok();
+    let (total, used, avail) = (n(1)?, n(2)?, n(3)?);
+    let percent: u64 = f.get(4)?.trim_end_matches('%').parse().ok()?;
+    Some(serde_json::json!({ "total": total * 1024, "used": used * 1024, "avail": avail * 1024, "percent": percent }))
+}
+
+/// The `zen status` line for the root filesystem: "12.3G of 24.5G used (51%)", with a warning
+/// above [`DISK_WARN_PERCENT`].
+pub(crate) fn disk_line(disk: &Value) -> Option<String> {
+    let gib = |k: &str| disk[k].as_u64().map(|b| format!("{:.1}G", b as f64 / (1u64 << 30) as f64));
+    let percent = disk["percent"].as_u64()?;
+    let mut line = format!("{} of {} used ({percent}%)", gib("used")?, gib("total")?);
+    if percent > DISK_WARN_PERCENT {
+        line += &format!("  WARNING: over {DISK_WARN_PERCENT}% full; free space (the `prune` job and scripts/upgrade.sh clean zen's own leftovers)");
+    }
+    Some(line)
 }
 
 /// Whether a model engine (Claude Code, Codex) is signed in, from `/api/models`. OpenRouter is
@@ -132,5 +167,17 @@ mod tests {
         );
         assert_eq!(engines_line(&Value::Null), None);
         assert_eq!(engines_line(&json!({ "engines": {} })), None);
+    }
+
+    #[test]
+    fn disk_line_shows_use_and_warns_over_80_percent() {
+        let df = "Filesystem     1024-blocks     Used Available Capacity Mounted on\n/dev/root        25671908 12345678  13309846      49% /\n";
+        let disk = parse_df(df).unwrap();
+        assert_eq!(disk["used"], 12345678u64 * 1024);
+        assert_eq!(disk_line(&disk).unwrap(), "11.8G of 24.5G used (49%)");
+        let full = parse_df("Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/root 25671908 21823122 3848786 85% /").unwrap();
+        assert!(disk_line(&full).unwrap().starts_with("20.8G of 24.5G used (85%)  WARNING: over 80% full"));
+        assert_eq!(parse_df("df: /: No such file or directory\n"), None);
+        assert_eq!(disk_line(&Value::Null), None);
     }
 }

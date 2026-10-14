@@ -4,7 +4,7 @@
 # Sourced by the other scripts (it also loads scripts/lib.sh); also usable by hand:
 #
 #   scripts/db.sh pending          migrations in this checkout the live database hasn't applied
-#   scripts/db.sh backup [label]   dump the live database to ~/.zenbot/backups (keeps the last 10)
+#   scripts/db.sh backup [label]   dump the live database to ~/.zenbot/backups (keeps the last 3)
 #   scripts/db.sh secure           give the database user a private password (db_secure, below)
 #
 # The live database is the one in DATABASE_URL (from ~/.zenbot/env if set there), else zend's
@@ -13,7 +13,7 @@
 DB_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$DB_REPO/scripts/lib.sh"
 DB_BACKUPS="$HOME/.zenbot/backups"
-DB_KEEP=10
+DB_KEEP=3 # the nightly `prune` job keeps the same number (jobs::prune_dumps)
 
 db_live_url() {
   local url=${DATABASE_URL:-}

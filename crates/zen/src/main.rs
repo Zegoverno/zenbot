@@ -102,12 +102,14 @@ async fn run(cli: Cli) -> Result<()> {
             let version = c.get("/api/version").await.unwrap_or(Value::Null);
             let git_identity = git_identity();
             let engines = engines_state();
+            let disk = root_disk();
             let memory = c.get("/api/memory").await.unwrap_or(Value::Null);
             let jobs = c.get("/api/jobs").await.unwrap_or(Value::Null);
             let status = json!({
                 "memory": memory_summary(&memory),
                 "jobs": jobs,
                 "engines": engines,
+                "disk": disk,
                 "git_identity": git_identity,
                 "commit": health["commit"],
                 "update": version,
@@ -128,6 +130,9 @@ async fn run(cli: Cli) -> Result<()> {
                 let mark = |b: bool| if b { "ok" } else { "FAIL" };
                 println!("kernel    {}  ({})", mark(true), for_stdout(&c.url));
                 println!("database  {}", mark(health["db"] == true));
+                if let Some(line) = disk_line(&disk) {
+                    println!("disk      {}", for_stdout(&line));
+                }
                 for (name, ok) in health["workers"].as_object().into_iter().flatten() {
                     println!("{:<9} {}", format!("worker:{}", for_stdout(name)), mark(*ok == true));
                 }

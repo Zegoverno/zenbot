@@ -124,7 +124,7 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
   pages without a summary and broken links), `skills` (03:20, `workshop::tend`: flag skills unused
   for 30 days, archive them at 90), `routes` (03:30, `delegate::tune`: switch a delegation route on
   clear evidence) and `prune` (03:40: saved tool outputs after 30 days, prompt-file backups after
-  90); and `engines` (04:00 UTC, `scripts/update-engines.sh` with the kernel's secrets removed). An
+  90, database dumps but the newest 3, eval runs after 7 days); and `engines` (04:00 UTC, `scripts/update-engines.sh` with the kernel's secrets removed). An
   upkeep run that found nothing is `silent`; what they found in the last day joins the sleep's
   morning note in the next sessions' instructions (`jobs::upkeep_note`). The owner can pause or
   run them; a system job whose name an agent job already holds isn't seeded (logged).
