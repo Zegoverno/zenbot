@@ -85,7 +85,7 @@ pub enum Event {
     /// The owner's likely next prompt, after a turn; its `id` goes back with the next prompt.
     Suggestion { id: i64, text: String },
     /// The session's model changed without the owner choosing it: a usage-limit failover moved it
-    /// to another model, which it keeps until the owner picks one (D-057). `effort` is the
+    /// to another model, which it keeps until the owner picks one (D-058). `effort` is the
     /// session's thinking level on it (None: the model's default).
     Model {
         #[serde(default, deserialize_with = "or_default")]

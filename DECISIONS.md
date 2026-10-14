@@ -52,7 +52,7 @@ directories and Docker cache grew without bound. A rollback needs only the newes
 enough. Build directories are trimmed by the scripts rather than the kernel: the scripts own the
 checkout and the builds, and they run when no session is working.
 
-## D-057 — After a usage-limit failover, the session keeps the new model
+## D-058 — After a usage-limit failover, the session keeps the new model
 
 **Date:** 2026-10-14 · **Status:** accepted (owner) · **Amends:** D-044 (the switch lasted one turn)
 
@@ -541,7 +541,7 @@ technical debt).
 
 ## D-044 — One safe cross-provider continuation on hard usage limits
 
-**Date:** 2026-10-08 · **Status:** accepted (owner); amended by D-057 (the session keeps the model it failed over to) · **Exception to:** D-030's no-per-turn-switch rule
+**Date:** 2026-10-08 · **Status:** accepted (owner); amended by D-058 (the session keeps the model it failed over to) · **Exception to:** D-030's no-per-turn-switch rule
 
 **Decision:** List every worker-reported model by default; `ZEN_MODELS` remains an optional visible allowlist. On an explicitly recognized hard subscription usage limit, `zen-engine` may continue once on the other provider: Claude → Codex GPT-6.1 Sol; Codex → Claude Sonnet 5.5. It first checks subscription sign-ins and refuses API-key environments, carries forward the original prompt and completed current-turn transcript, never repeats a tool call with an unknown result, emits a visible switch event, and stops if safe continuation is not possible. Temporary throttles and generic 429s do not trigger it. The switch is configurable or disabled by environment variable.
 

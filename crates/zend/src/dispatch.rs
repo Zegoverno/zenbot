@@ -419,7 +419,7 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             tape::append(&app.db, id, "failover", &json!({ "from": from, "to": to, "reason": "hard_usage_limit" })).await?;
             app.emit(id, json!({ "type": "status", "text": format!("{from} usage limit reached; continuing with {to}") })).await;
             // The session stays on the model it failed over to until the owner picks another
-            // (D-057): its next turns, tools' ZEN_MODEL and summaries use it, and clients show it.
+            // (D-058): its next turns, tools' ZEN_MODEL and summaries use it, and clients show it.
             if to != "unknown" {
                 if let Some(t) = app.turns.lock().await.get_mut(&id) {
                     t.model = to.clone();

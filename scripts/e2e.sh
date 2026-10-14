@@ -1150,7 +1150,7 @@ action_gate() {
 }
 
 # A usage-limit failover moves the session to the model it failed over to, which it keeps until the
-# owner picks another (D-057): the tape records the switch, the session and its clients show the new
+# owner picks another (D-058): the tape records the switch, the session and its clients show the new
 # model, and the next turn runs on it.
 failover_model() {
   local ws; ws=$(new_workspace failover)
