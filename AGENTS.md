@@ -39,7 +39,7 @@ Config lives in `~/.zenbot/` (MAP.md lists every file). `token`, `db-password`, 
 3. **Build and check** exactly as CI does: `scripts/check.sh` builds once, then runs the tests,
    clippy as errors, `scripts/e2e.sh` and the docs check, timing each step and stopping at the
    first failure (`scripts/check.sh <filter>` runs only matching e2e scenarios; DEVELOPMENT.md).
-   Add an e2e scenario when you change the kernel's behavior. Test kernel behavior without a
+   Extend an e2e scenario (or add one for a new setup) when you change the kernel's behavior. Test kernel behavior without a
    subscription with the scripted `faux/smoke` model. `crates/zen-matrix` is built, tested and
    linted in its own CI job; test it end to end with `scripts/matrix-e2e.sh` (not in CI). Changes
    to the worker protocol update `docs/worker-protocol.md`, its types in `zen-proto` (`worker.rs`)
@@ -63,22 +63,19 @@ Config lives in `~/.zenbot/` (MAP.md lists every file). `token`, `db-password`, 
 
 ## Update the docs before shipping
 
+Every change updates only these, in the same branch:
+
 | File | Update when |
 |---|---|
-| `PROGRESS.md` | Always: add a dated entry at the top saying what shipped and why |
-| `ROADMAP.md` | A step is done, the active phase changes, a plan or an open decision changes, debt is found or paid |
+| `PROGRESS.md` | Always: a short dated entry at the top saying what shipped and why |
 | `DECISIONS.md` | A decision is made or changed (new `D-NNN` entry; mark what it supersedes) |
-| `DESIGN.md` | How the system works changes, or the target design changes |
-| `MAP.md` | Files, routes, tables, settings or scripts are added, removed or change role |
-| `DEVELOPMENT.md` | The dev loop, scripts, tests or CI change |
-| `SPEC.md` | The long-term target of a module changes |
-| `CONTEXT.md` | What zenbot is for, the success measure, principles or constraints change |
+| `MAP.md` | Files, routes, tools, tables, settings, scripts or e2e scenarios are added, removed or change role |
 | `README.md` | How people use zen changes (commands, keys, settings they'd set) |
-| `INSTALL.md` | How zen is installed changes (`install.sh`, services, prerequisites) |
-| `AGENTS.md` | What runs where, the way changes are made or shipped, or a rule changes |
-| `docs/*.md` | The subsystem they describe changes (protocols, context, Matrix, evals in `evals/README.md`) |
-| `crates/zend/defaults/` | Tools, paths or the home layout the agent's default prompt files and skills name change |
-| Doc comments | The item they describe changes (a module's header comment is its design note) |
+| The module's header comment | What the module does or guarantees changes (it is the module's design note) |
+
+Every other doc (DESIGN, ROADMAP, DEVELOPMENT, SPEC, CONTEXT, INSTALL, `docs/*.md`, this file,
+`crates/zend/defaults/`) is updated when it becomes wrong: when you notice, or when your change
+makes a sentence in it false. `docs/archive/` is history: never updated, not required reading.
 
 ### Keeping the docs true
 
@@ -89,14 +86,16 @@ The docs are worth reading only while they match the code, and every session bui
 - **Present tense means shipped.** Describe what `main` does now. What's planned goes to ROADMAP.md
   (or a "target" section), marked as not built; statuses (`built`, `done`, "next") change when the
   thing merges, not when it's started.
-- **History stays history.** PROGRESS.md entries, DECISIONS.md entries and `docs/research/` say
+- **History stays history.** PROGRESS.md entries, DECISIONS.md entries and `docs/archive/` say
   what was true when written: don't rewrite them; mark a superseded decision `Superseded by D-NNN`.
+  Move, don't edit: PROGRESS.md entries older than a week or two go to `docs/archive/` when the file
+  outgrows its budget, and a fully superseded decision moves to
+  `docs/archive/DECISIONS-superseded.md`, leaving its heading line in DECISIONS.md.
 - **`scripts/check-docs.py`** (CI runs it on every pull request) fails when a route, tool, setting,
-  table, event, tape kind, slash command, e2e scenario or crate in the code is missing from the doc
-  that lists it, when a current doc names a setting, repo path or decision that doesn't exist, and
-  when a change to the code adds no PROGRESS.md entry (`[no-progress]` in a commit message if
-  nothing shipped). It can't tell whether a sentence is still true: that's on you. When you add a
-  kind of list a doc keeps, add it to the check too.
+  e2e scenario or crate in the code is missing from MAP.md, when a current doc names a setting,
+  repo path or decision that doesn't exist, when the docs outgrow their line budgets, and when a
+  change to the code adds no PROGRESS.md entry (`[no-progress]` in a commit message if nothing
+  shipped). It can't tell whether a sentence is still true: that's on you.
 
 Keep each fact in one file and link to it from the others. Repo docs are for whoever works on the
 code next: no conversation notes, no memory-system link syntax (`[[…]]`), no perishable usage data.

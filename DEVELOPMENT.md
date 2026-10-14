@@ -372,7 +372,7 @@ Code that depends on a CLI's flags or output should fail loudly, so the post-upd
 
 - **`check`**: on every pull request and every push to `main`. Build, unit tests, clippy, e2e (commands above). A newer push to a pull request cancels its running check.
 - **`matrix`**: on the same events as `check`, beside it. Build, unit tests and clippy of `crates/zen-matrix` (its own workspace); not in the release tarball, and `release` doesn't wait for it.
-- **`docs`**: on the same events. `scripts/check-docs.py` (with `--base` on a pull request): the lists the docs keep (routes, tools, settings, tables, events, tape kinds, slash commands, e2e scenarios, crates) match the code, the paths, settings and decisions the docs name exist, and a change to the code adds a PROGRESS.md entry. AGENTS.md, "Keeping the docs true".
+- **`docs`**: on the same events. `scripts/check-docs.py` (with `--base` on a pull request): MAP.md names every route, tool, setting, table, e2e scenario and crate; the paths, settings and decisions the docs name exist; the docs stay within their line budgets; and a change to the code adds a PROGRESS.md entry. AGENTS.md, "Keeping the docs true".
 - **`release`**: only on a push to `main` that passed `check` and `docs`. Builds the `dist` profile (fat LTO), checks `zen-engine` answers `ping` and `zen --version` runs, runs the e2e scenarios on those `dist` binaries (`ZEN_E2E_BIN=target/dist`), and uploads `zenbot-x86_64-linux-<sha12>.tar.gz` plus `.sha256` to the rolling `edge` prerelease (newest 20 builds kept).
 
 So binaries exist only for commits on `main` that passed. `install.sh`, `upgrade.sh` and `eval.sh` use them via `scripts/fetch-release.sh`; when there are none (yet), they compile locally. Right after a merge, CI needs a few minutes.

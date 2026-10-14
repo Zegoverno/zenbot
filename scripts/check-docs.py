@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Checks that the docs still match the code: the mechanical half of keeping them true.
+"""Checks that the docs still match the code: the cheap, mechanical half of keeping them true.
 
-Each check pairs a list the code defines (routes, tools, settings, tables, events, tape kinds,
-slash commands, e2e scenarios, crates, scripts) with the doc whose job is to list it, and fails
-when one has an item the other lacks. It also checks that repo paths and decision numbers named in the
-docs exist. It can't tell whether a sentence is still true: that stays the job of whoever changes
-the code (AGENTS.md, "Update the docs before shipping").
+MAP.md must name every route, tool, setting, table, e2e scenario and crate the code defines; the
+repo paths, settings and decision numbers the current docs name must exist; the docs must stay
+within their line budgets (BUDGETS). It can't tell whether a sentence is still true: that stays the
+job of whoever changes the code (AGENTS.md, "Update the docs before shipping").
 
   scripts/check-docs.py                    # the checks above
   scripts/check-docs.py --base origin/main # also: a change to the code must add to PROGRESS.md
 
-Test-only settings (ZEN_TEST_*) are exempt. History is exempt from the "current docs" checks: PROGRESS.md, DECISIONS.md and docs/research/
-describe what was true when they were written. CI runs this on every pull request.
+Test-only settings (ZEN_TEST_*) are exempt. History is exempt from the "current docs" checks:
+PROGRESS.md, DECISIONS.md and docs/archive/ describe what was true when they were written. CI runs
+this on every pull request.
 """
 import glob
 import os
@@ -22,7 +22,10 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
 
-HISTORY = ("PROGRESS.md", "DECISIONS.md", "docs/research/")
+HISTORY = ("PROGRESS.md", "DECISIONS.md", "docs/archive/")
+# Line budgets (D-060): when one is exceeded, move old history to docs/archive/ (AGENTS.md) or
+# tighten the doc; raise a budget only on purpose.
+BUDGETS = {"PROGRESS.md": 500, "docs": 4700}
 problems = []
 
 
@@ -60,11 +63,10 @@ def require(kind, items, doc, text=None, fmt="`{}`", whole=False):
 
 kernel = code(["crates/zend/src/*.rs"])
 
-# Routes: every HTTP route, in MAP.md and in the client protocol.
+# Routes: every HTTP route, in MAP.md.
 routes = set(re.findall(r'\.route\("([^"]+)"', kernel))
 api_routes = {r if r in ("/", "/health") else "/api" + r for r in routes}
-for doc in ("MAP.md", "docs/client-protocol.md"):
-    require("route", api_routes - {"/"}, doc, fmt="{}", whole=True)
+require("route", api_routes - {"/"}, "MAP.md", fmt="{}", whole=True)
 
 # Tools: every tool the kernel offers, in MAP.md's list.
 tools = set(re.findall(r'^\s*"name": "([a-z_]+)",\s*$', kernel, re.M))
@@ -90,45 +92,12 @@ for doc in current_docs():
 tables = set(re.findall(r"CREATE TABLE (?:IF NOT EXISTS )?(\w+)", code(["crates/zend/migrations/*.sql"]), re.I))
 require("table", tables, "MAP.md")
 
-# WebSocket events: every event type the kernel sends, in the client protocol.
-events = set()
-for m in re.finditer(r"emit\(", kernel):
-    events |= set(re.findall(r'"type": "([a-z_]+)"', kernel[m.end():m.end() + 300].split(".await")[0]))
-events |= set(re.findall(r'json!\(\{ "type": "(resync)"', kernel))
-require("event", events, "docs/client-protocol.md")
-
-# Tape kinds: every kind of block the kernel appends, in docs/context.md.
-kinds = set(re.findall(r'tape::append\([^;]*?"([a-z_]+)"', kernel, re.S))
-require("tape kind", kinds, "docs/context.md")
-
-# Slash commands: every command zen offers, in the README.
-tui = code(["crates/zen/src/**/*.rs", "crates/zen/src/*.rs"])
-require("slash command", set(re.findall(r'cmd\("(/[a-z-]+)"', tui)), "README.md", fmt="{}", whole=True)
-
 # End-to-end scenarios: every scenario e2e.sh runs, in MAP.md's list.
 require("e2e scenario", set(re.findall(r"^run ([a-z0-9-]+) ", read("scripts/e2e.sh"), re.M)), "MAP.md")
 
-# Scripts and deployment files: every one, in MAP.md (by path, or by name in backticks beside its
-# folder's entry; the faux scripts in scripts/e2e/ by their `scripts/e2e/*.json` glob).
-map_text = read("MAP.md")
-for path in tracked("scripts/*", "scripts/**/*", "deploy/*", "deploy/**/*", "install.sh"):
-    if path.startswith("scripts/e2e/") and path.endswith(".json"):
-        path = "scripts/e2e/*.json"
-    if path not in map_text and f"`{os.path.basename(path)}`" not in map_text:
-        problems.append(f"MAP.md: {path} is in the repo but not in this doc")
-
-# Crates: every crate, in AGENTS.md's "What runs where" and in MAP.md.
+# Crates: every crate, in MAP.md.
 crates = {os.path.basename(p) for p in glob.glob("crates/*") if os.path.isdir(p)}
-for doc in ("AGENTS.md", "MAP.md"):
-    require("crate", {f"crates/{c}" for c in crates}, doc)
-
-# Docs: every root doc and docs/*.md is in AGENTS.md's table of what to update when.
-agents = read("AGENTS.md")
-for doc in tracked("*.md", "docs/*.md"):
-    if "/" in doc and not doc.startswith("docs/") or doc.startswith("docs/research/") or doc == "AGENTS.md":
-        continue
-    if f"`{doc}`" not in agents and not (doc.startswith("docs/") and "`docs/*.md`" in agents):
-        problems.append(f"AGENTS.md: {doc} is missing from the table of docs to update")
+require("crate", {f"crates/{c}" for c in crates}, "MAP.md")
 
 # --- Names the docs use must exist ------------------------------------------------------------------
 
@@ -148,6 +117,19 @@ for doc in tracked("*.md"):
     for ref in set(re.findall(r"\bD-\d{3}\b", read(doc))):
         if ref not in decisions:
             problems.append(f"{doc}: {ref} isn't in DECISIONS.md")
+
+# --- The docs stay within their budgets -----------------------------------------------------------
+
+def lines(path):
+    return read(path).count("\n")
+
+# "docs": the root docs and docs/*.md, what a contributor reads and keeps (the archive excluded).
+total = sum(lines(d) for d in tracked("*.md") if os.path.dirname(d) in ("", "docs"))
+for name, budget in BUDGETS.items():
+    n = total if name == "docs" else lines(name)
+    if n > budget:
+        problems.append(f"{name}: {n} lines, over its budget of {budget} (move old history to "
+                        "docs/archive/, tighten the doc, or raise the budget in check-docs.py on purpose)")
 
 # --- A change to the code says what shipped ---------------------------------------------------------
 
