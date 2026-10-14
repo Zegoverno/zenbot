@@ -54,7 +54,8 @@ It listens on `127.0.0.1:8888` only (`ZEN_SEARXNG_URL` points elsewhere). The se
 git switch -c fix/short-name
 
 # 2. edit, then check exactly as CI does: build, tests, clippy, e2e, docs (AGENTS.md)
-scripts/check.sh                                 # scripts/check.sh memory: only matching e2e scenarios
+scripts/check.sh memory                          # focused: only the e2e scenarios matching "memory"
+scripts/check.sh                                 # everything, as CI does (before the pull request)
 
 # 3. try it for real (faux model, own database, own port)
 ZEN_FAUX=1 scripts/dev.sh                       # in a second terminal
@@ -90,30 +91,23 @@ Run the same locally before a pull request: `scripts/check.sh` does it in one co
 
 ## End-to-end scenarios
 
-`scripts/e2e.sh` builds (unless `ZEN_E2E_NO_BUILD=1`), then runs each scenario on a kernel built from this checkout (or the binaries in `ZEN_E2E_BIN`) with the scripted faux model. It uses a throwaway database (`zen_e2e_<pid>`), throwaway git workspaces and a throwaway `HOME`, on port 18377 (`ZEN_E2E_PORT`). No subscription is used, nothing reaches the internet and the live service isn't touched. It needs Postgres running, plus `git`, `curl`, `jq`, `bubblewrap` and `python3`.
+`scripts/e2e.sh` builds (unless `ZEN_E2E_NO_BUILD=1`), then runs each scenario on a kernel built from this checkout (or the binaries in `ZEN_E2E_BIN`) with the scripted faux model. Each scenario gets its own throwaway database (`zen_e2e_<pid>_<n>`), git workspaces, `HOME` and ports (`ZEN_E2E_PORT` + 20 × n, default 18377, and the next few for its test servers), so `ZEN_E2E_JOBS` of them (default 4) run at once. No subscription is used, nothing reaches the internet and the live service isn't touched. It needs Postgres running, plus `git`, `curl`, `jq`, `bubblewrap` and `python3`.
 
-The scenarios are the `run …` lines at the bottom of the script; the comment above each function says what it checks. Some start small test programs from `scripts/e2e/`:
-
-| Program | Started by | What it is |
-|---|---|---|
-| `slow_worker.py` | `slow-summary` (`ZEN_WORKER_SLOW_CMD`), `engine-boundary` (`ZEN_WORKER_ENVDUMP_CMD`, after writing its environment to a file) | a worker whose `complete` is deliberately slow (`ZEN_SLOW_SECS`) |
-| `mcp_server.py` | `mcp` | an MCP server with `echo` and `add`: over stdio, and with `--http PORT` as streamable HTTP on the e2e port + 1 |
-| `searxng_stub.py` | `web`, `wiki` (`ZEN_SEARXNG_URL`) | answers `/search?format=json` with fixed results, on the e2e port + 2 |
-| `systemone_stub.py` | `system-one`, `scheduled-jobs` (`ZEN_S1_URL`) | an OpenRouter System One stand-in that checks auth and the `bool` → `noul` mapping, on the e2e port + 3 |
-| `embed_stub.py` | `search-index` (`ZEN_EMBED_URL`) | an OpenAI-compatible `/embeddings` stand-in (word counts, a few synonyms sharing a dimension) that refuses `REJECT-EMBED` and holds `SLOW-EMBED` until a release file exists, on the e2e port + 7; `search_reference.sql` beside it is the previous search query, to compare rankings |
-| `ws_prompt.py` | `names-suggestions`, `abort-tool`, `failover-model` | a client, not a server: sends one message on a session's WebSocket as the terminal app does (and, given a delay, an `abort` after it) and prints the events that follow |
+The scenarios are the `run …` lines at the bottom of the script: a name, then the functions run as its parts (each on a fresh kernel); the comment above each function says what it checks. The test servers some parts start (`scripts/e2e/*.py`) are listed in MAP.md ("Scripts").
 
 ```bash
-scripts/e2e.sh                # build, then every scenario
-scripts/e2e.sh memory         # only scenarios whose name contains "memory"
-ZEN_E2E_KEEP=1 scripts/e2e.sh # keep the database and files afterwards (it prints where)
+scripts/check.sh search       # the fast local path: build, tests, clippy, only the matching e2e scenarios, docs
+scripts/e2e.sh search         # only scenarios whose name or part function contains "search"
+scripts/e2e.sh                # build, then every scenario (CI runs them all on every pull request)
+ZEN_E2E_JOBS=1 scripts/e2e.sh # one at a time, e.g. to rule out a timing problem
+ZEN_E2E_KEEP=1 scripts/e2e.sh # keep the databases and files afterwards (it prints where)
 ```
 
-It prints `ok` / `FAIL` per check, the kernel log path for a failed scenario, and exits non-zero if any check failed. After all scenarios it checks that every session's tape is numbered without gaps and its hash chain recomputes.
+Locally, run the scenarios your change touches (`scripts/check.sh <filter>`); CI runs the full suite. It prints `ok` / `FAIL` per check, the kernel log path for a failed scenario, the seconds each scenario took, and exits non-zero if any check failed. Each scenario ends by checking that every session's tape is numbered without gaps and its hash chain recomputes.
 
 ### Adding a scenario
 
-Add one when you change the kernel's behavior.
+Extend an existing scenario when you change the kernel's behavior; add a new one only for a new setup (there are 20; a check that needs no running kernel is a unit test instead).
 
 1. If the turn needs a scripted model, add a faux script in `scripts/e2e/<name>.json` (format below). Placeholders like `ROUTE` or `TARGET` are filled by `script <file> 's/ROUTE/bounded/' …`.
 2. Write a function in the scenarios section of `scripts/e2e.sh`:
@@ -122,7 +116,8 @@ Add one when you change the kernel's behavior.
    - `zen ask --json -m faux/smoke "…"` runs a turn; `zen ask --json -s "$sid" "…"` continues a session.
    - `q "SQL"` queries the scenario's database.
    - `check "description" <command…>` records a result; `eq actual expected` compares strings.
-3. Register it at the bottom with `run <name> <function>`.
+   - A test server listens on `$PORT` + 1 to + 19, never the base port of another scenario.
+3. Register it at the bottom with `run <name> <function…>` (or add the function as a part of a scenario with the same setup).
 
 ## Testing without a subscription: the faux model
 
@@ -167,7 +162,7 @@ Local endpoints:
 | Installed service | `http://127.0.0.1:8100` (or `ZEN_PORT` in `~/.zenbot/env`) |
 | Dev kernel (`scripts/dev.sh`) | `http://127.0.0.1:18100`, database `zen_dev` |
 | Upgrade smoke kernel (`upgrade.sh`) | `http://127.0.0.1:18199` (`ZEN_SMOKE_PORT`), on a throwaway copy of the live database |
-| e2e kernel | `http://127.0.0.1:18377` (`ZEN_E2E_PORT`), database `zen_e2e_<pid>` |
+| e2e kernels | `http://127.0.0.1:18377` (`ZEN_E2E_PORT`) + 20 per scenario, database `zen_e2e_<pid>_<n>` |
 | Eval kernels | `http://127.0.0.1:18301` (`ZEN_EVAL_PORT`) and the next ports, one per run at once (`--jobs`); one database `zen_eval_<run>_<n>` per run |
 | Postgres | `127.0.0.1:5432`, user `zen`, password in `~/.zenbot/db-password` (`zen` before `db_secure`) |
 | SearXNG | `http://127.0.0.1:8888` (`ZEN_SEARXNG_URL`) |
@@ -291,7 +286,7 @@ zen jobs add morning-brief -s "0 7 * * 1-5" -p "…"   # an agent job (America/S
 zen jobs pause|resume|rm <name>
 ```
 
-Throwaway kernels must not run the copy's jobs (an engine update on the real CLIs, agent jobs on real models): `upgrade.sh`'s smoke kernel, the e2e and eval kernels set `ZEN_JOBS=0`, and so does `dev.sh` unless you set `ZEN_JOBS=1`. The `scheduled-jobs` e2e scenario turns it on with `ZEN_JOBS_TICK=0.5` so runs start within a second.
+Throwaway kernels must not run the copy's jobs (an engine update on the real CLIs, agent jobs on real models): `upgrade.sh`'s smoke kernel, the e2e and eval kernels set `ZEN_JOBS=0`, and so does `dev.sh` unless you set `ZEN_JOBS=1`. The `jobs` e2e scenario turns it on with `ZEN_JOBS_TICK=0.5` so runs start within a second.
 
 ## Memory sleep
 
@@ -427,7 +422,8 @@ scripts/db.sh pending               # migrations not yet applied
 | `ROLLBACK ALSO UNHEALTHY` | `journalctl -u zenbot -n 50`; tell the owner |
 | e2e `kernel did not start` | the kernel log path it printed; check the port isn't taken and Postgres is up |
 | e2e check fails on the read-only shell | `bubblewrap` missing |
-| e2e `mcp`, `web` or `wiki` fails to start its server | `python3` missing, or the e2e port + 1 / + 2 is taken |
+| e2e `reach` or `wiki` fails to start its server | `python3` missing, or the scenario's port + 1 / + 2 is taken |
+| an e2e check fails only with others running | timing under load: rerun it alone (`ZEN_E2E_JOBS=1 scripts/e2e.sh <name>`) and make the check wait for the state (`poll`, `until_ok`) instead of sleeping |
 | `web_search failed: … searxng at http://127.0.0.1:8888` | SearXNG not running: `docker compose -f deploy/compose.yaml up -d searxng` |
 | `find_tools` lists problems | `~/.zenbot/mcp.json` (invalid JSON, a server with both or neither of `command`/`url`, an unset `${VAR}`, or a secret-named one the server doesn't list in `allow_env`); `GET /api/mcp` shows the same |
 | `search` finds nothing recent | the indexer runs every `ZEN_INDEX_SECS`; `search` also indexes before it queries. Warnings `search index:` / `embedding search documents:` in the kernel log |

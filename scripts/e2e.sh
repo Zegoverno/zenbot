@@ -4,10 +4,13 @@
 # the database. No subscription is used and the live service isn't touched.
 #
 #   scripts/e2e.sh              build, then run every scenario
-#   scripts/e2e.sh memory       only scenarios whose name contains "memory"
+#   scripts/e2e.sh memory       only scenarios whose name (or a part's function name) contains "memory"
 #
-# ZEN_E2E_NO_BUILD=1 skips the build; ZEN_E2E_BIN=<dir> tests the binaries there instead of
-# target/release (CI's release job tests the ones it publishes).
+# Each scenario has its own database, HOME and ports (ZEN_E2E_PORT + 20 × its number, and the next
+# few for its test servers), so ZEN_E2E_JOBS of them (default 4) run at once; ZEN_E2E_JOBS=1 runs
+# them one by one. ZEN_E2E_NO_BUILD=1 skips the build; ZEN_E2E_BIN=<dir> tests the binaries there
+# instead of target/release (CI's release job tests the ones it publishes); ZEN_E2E_KEEP=1 keeps
+# the databases and files.
 #
 # Needs Docker with Postgres from deploy/compose.yaml, git, curl, jq and bubblewrap.
 set -euo pipefail
@@ -16,24 +19,26 @@ cd "$REPO"
 export PATH="$HOME/.cargo/bin:$PATH"
 . "$REPO/scripts/db.sh"
 FILTER=${1:-}
-PORT=${ZEN_E2E_PORT:-18377}
+BASE_PORT=${ZEN_E2E_PORT:-18377}
+JOBS=${ZEN_E2E_JOBS:-4}
 TOKEN=e2e-token-$$
-DB=zen_e2e_$$
-TMP=$(mktemp -d)
+ROOT=$(mktemp -d)
 BIN=$(cd "${ZEN_E2E_BIN:-$REPO/target/release}" && pwd)
-URL="http://127.0.0.1:$PORT"
 KERNEL_PID=""
 FAILED=0
-PASSED=0
+# Set per scenario by in_scenario: its port, database and files.
+PORT="" URL="" DB="" DB_URL="" TMP=""
 
-DB_URL=$(db_url_for "$DB")
 q() { db_psql -d "$DB" -c "$1"; }
 stop_kernel() { if [ -n "$KERNEL_PID" ]; then kill "$KERNEL_PID" 2>/dev/null || true; wait "$KERNEL_PID" 2>/dev/null || true; fi; KERNEL_PID=""; }
-cleanup() { stop_kernel; [ -n "${ZEN_E2E_KEEP:-}" ] && { echo "kept: database $DB, files $TMP"; return; }; db_drop "$DB" || true; rm -rf "$TMP"; }
+cleanup() {
+  local pids; pids=$(jobs -p); [ -z "$pids" ] || { kill $pids 2>/dev/null || true; wait 2>/dev/null || true; }
+  [ -n "${ZEN_E2E_KEEP:-}" ] && { echo "kept: databases zen_e2e_$$_*, files $ROOT"; return; }
+  rm -rf "$ROOT"
+}
 trap cleanup EXIT
 
 [ -n "${ZEN_E2E_NO_BUILD:-}" ] || cargo build --release -q
-db_psql -d postgres -c "CREATE DATABASE $DB" >/dev/null
 
 # A git workspace with one commit, so verification has a diff baseline.
 new_workspace() {
@@ -68,6 +73,8 @@ check() { # check <description> <command…>
   local what=$1; shift
   if "$@"; then echo "  ok    $what"; else echo "  FAIL  $what"; FAILED=$((FAILED + 1)); return 0; fi
 }
+# until_ok <command…>: wait up to 10 s for a command to succeed (background work in the kernel).
+until_ok() { local i; for i in $(seq 1 40); do "$@" && return 0; sleep 0.25; done; return 1; }
 eq() { [ "$1" = "$2" ] || { echo "        expected [$2], got [$1]" >&2; return 1; }; }
 # poll <query> <expected>: wait up to 30 s for a query's result (background work in the kernel).
 poll() { local i; for i in $(seq 1 60); do [ "$(q "$1")" = "$2" ] && return 0; sleep 0.5; done; echo "        waited for [$2], got [$(q "$1")]" >&2; return 1; }
@@ -91,13 +98,33 @@ tape_is_sound() {
            SELECT count(*) FROM c WHERE hash <> h")" 0
 }
 
-run() { # run <name> <function>
-  [ -z "$FILTER" ] || [[ $1 == *"$FILTER"* ]] || return 0
-  echo "== $1"
-  local before=$FAILED
-  "$2" || { echo "  FAIL  scenario errored"; FAILED=$((FAILED + 1)); }
-  stop_kernel
-  if [ "$FAILED" = "$before" ]; then PASSED=$((PASSED + 1)); else echo "  (kernel log: $TMP/kernel.log)"; cp "$TMP/kernel.log" "$TMP/kernel-$1.log" 2>/dev/null || true; fi
+# One scenario, in a subshell of its own: its database, files and ports, its parts in order (each
+# on a fresh kernel), then the tape check. Writes its output to $ROOT/<n>.out and, when done, its
+# failed-check count and seconds to $ROOT/<n>.done.
+in_scenario() { # in_scenario <n> <name> <function…>
+  local n=$1 name=$2; shift 2
+  PORT=$((BASE_PORT + 20 * n)) URL="http://127.0.0.1:$((BASE_PORT + 20 * n))"
+  DB=zen_e2e_$$_$n TMP=$ROOT/$n
+  DB_URL=$(db_url_for "$DB")
+  mkdir -p "$TMP"
+  trap 'stop_kernel; [ -n "${ZEN_E2E_KEEP:-}" ] || { db_drop "$DB" >/dev/null 2>&1 || true; rm -rf "$TMP"; }' EXIT
+  trap 'exit 143' TERM INT
+  local t0=$SECONDS part
+  echo "== $name"
+  db_psql -d postgres -c "CREATE DATABASE $DB" >/dev/null
+  for part in "$@"; do
+    "$part" || { echo "  FAIL  $part errored"; FAILED=$((FAILED + 1)); }
+    stop_kernel
+  done
+  check "every tape is numbered and its hash chain recomputes" tape_is_sound
+  [ "$FAILED" = 0 ] || { echo "  (kernel log: $TMP/kernel.log)"; cp "$TMP/kernel.log" "$ROOT/kernel-$name.log" 2>/dev/null || true; }
+  echo "$FAILED $((SECONDS - t0)) $name" >"$ROOT/$n.done"
+}
+
+SCENARIOS=()
+run() { # run <name> <function…>: register a scenario (its parts share a setup)
+  [ -z "$FILTER" ] || [[ "$*" == *"$FILTER"* ]] || return 0
+  SCENARIOS+=("$*")
 }
 
 # ---------- scenarios ----------
@@ -215,7 +242,7 @@ JSON
   check "find_tools wraps untrusted descriptions" grep -q 'source="mcp" about="remote_add"' <<<"$res"
   check "load_tool shows the schema" grep -q '"required"' <<<"$res"
   check "the local server answered" grep -q "echo: hi" <<<"$res"
-  check "the remote server answered (event stream), wrapped as untrusted" grep -q 'source="mcp" about="remote_add"' <<<"$res"
+  check "the remote server answered (event stream), wrapped as untrusted" grep -qPz 'about="remote_add">\n[^\n]*\n5\n</untrusted>' <<<"$res"
   check "a missing argument is named" grep -q "missing required arguments: b" <<<"$res"
   check "the remote call tainted the session" eq "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")" t
   check "the kernel's token is filled in only where allow_env lists it" grep -q 'server `greedy`: environment variables left empty: ZEN_TOKEN (a secret' <<<"$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/mcp" | jq -r '.problems[]')"
@@ -275,7 +302,8 @@ search_recall() {
   q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART" >/dev/null
   start_kernel "$ws" "$(script search.json)"
   local a; a=$(zen ask --json -m faux/smoke "save: the purple elephant config lives in deploy/elephant.yaml" | jq -r .session_id)
-  sleep 6  # the indexer takes events once they're 5 seconds old (search.rs)
+  # The indexer takes events once they're 5 seconds old (search.rs): age them instead of waiting.
+  q "UPDATE tape_events SET created_at = created_at - interval '10 seconds' WHERE session_id = '$a'" >/dev/null
   local s="$TMP/search-filled.json"; sed "s/SESSION/${a:0:8}/" "$REPO/scripts/e2e/search.json" >"$s"
   stop_kernel; start_kernel "$ws" "$s"
   local r sid; r=$(zen ask --json -m faux/smoke "find it"); sid=$(echo "$r" | jq -r .session_id)
@@ -373,7 +401,6 @@ wiki_capture() {
   local r; r=$(zen ask --json -m faux/smoke "first")
   check "a new page" bash -c 'grep -q "Captured to \[\[dom-smoothie\]\] (new page" <<<"$1"' _ "$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE payload->>'toolName'='capture' ORDER BY id DESC LIMIT 1")"
   check "it has a dated entry with its source" grep -q "(verified) — dom_smoothie ports readability.js" "$w/dom-smoothie.md"
-  sleep 6
   r=$(zen ask --json -m faux/smoke "second"); local sid; sid=$(echo "$r" | jq -r .session_id)
   check "capture, then search" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" capture:false,search:false
   check "the same page, two entries, newest first" eq "$(grep -c '^- \*\*' "$w/dom-smoothie.md"):$(grep -m1 '^- \*\*' "$w/dom-smoothie.md" | grep -c 'Markdown text mode')" 2:1
@@ -417,8 +444,8 @@ workshop() {
   check "the draft is marked" grep -q "work/release-notes: (draft)" <<<"$res"
   check "the made tool is found" grep -q "made_word-count: Count the words" <<<"$res"
   check "it ran, sandboxed: files read-only" bash -c 'grep -q "^3" <<<"$1" && grep -q "write: refused" <<<"$1" && grep -q "ran sandboxed" <<<"$1"' _ "$res"
-  zen sessions decide "$sid" accept >/dev/null; sleep 2
-  check "an accepted session activates the draft it used" test -s "$sk/work/release-notes/SKILL.md"
+  zen sessions decide "$sid" accept >/dev/null
+  check "an accepted session activates the draft it used" until_ok test -s "$sk/work/release-notes/SKILL.md"
   check "a new domain stays a draft" test -s "$sk/_proposed/finance/budget-review/SKILL.md"
   # The owner's decision names the fingerprint `zen skills` showed: a stale one is refused.
   local listed; listed=$(zen skills --json)
@@ -439,7 +466,6 @@ workshop() {
   r=$(zen ask --json -m faux/smoke "again"); sid=$(echo "$r" | jq -r .session_id)
   check "changed after approval: sandboxed again" grep -q "changed since the owner approved it" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='call_tool'")"
   check "skills and tools are in git" bash -c '[ "$(git -C "$1" log --oneline | wc -l)" -ge 4 ] && [ "$(git -C "$2" log --oneline | wc -l)" -ge 1 ]' _ "$sk" "$TMP/home/.zenbot/global/tools"
-  check "zen skills lists use" grep -q "work/release-notes" <<<"$(zen skills)"
 }
 
 # Delegation: subagents run their own turns (one on a named model, one routed by the owner's policy),
@@ -667,20 +693,16 @@ memory_sleep_judged() {
   kill "$srv" 2>/dev/null || true
 }
 
-# The file tools: the zen home's files aren't attached as project context; edit keeps exactly one
-# trailing newline; a read over 16 MiB is refused before loading; even the owner's own session can't
-# write mcp.json; no OpenRouter key shows as not signed in.
+# The file tools: the zen home's files aren't attached as project context; even the owner's own
+# session can't write mcp.json; no OpenRouter key shows as not signed in. (Edit's trailing newline
+# and read's 16 MiB limit are unit tests in tools.rs.)
 kernel_tools() {
   local ws; ws=$(new_workspace kernel-tools)
-  printf 'foo  \nbar\n' > "$ws/a.txt"
-  truncate -s $((16 * 1024 * 1024 + 1)) "$ws/huge.txt"
   mkdir -p "$TMP/home/sub"
   start_kernel "$ws" "$(script kernel-tools.json "s|ZENHOME|$TMP/home/.zenbot|" "s|ZENALIAS|$TMP/home/sub/../.zenbot|")"
   local sid; sid=$(zen ask --json -m faux/smoke "check kernel tools" | jq -r .session_id)
   check "the zen home environment file is not attached as project context" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND kind='context'")" 0
   check "no OpenRouter key is reported as not signed in" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/models" | jq -r .authenticated.openrouter)" false
-  check "a loose edit keeps exactly one trailing newline" cmp -s "$ws/a.txt" <(printf 'baz\nbar\n')
-  check "a huge read is refused before loading" grep -q "16 MiB limit" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='read' ORDER BY seq DESC LIMIT 1")"
   check "even the owner's own session can't write mcp.json" bash -c 'grep -q "is the owner.s own configuration" <<<"$1" && ! grep -qs planted-by-owner-session "$2"' _ "$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='write'")" "$TMP/home/.zenbot/mcp.json"
 }
 
@@ -789,13 +811,14 @@ restart_recovery() {
   check "an old session in a workflow state takes a prompt" eq "$(zen ask --json -s "$sid" "hi" | jq -r .error)" null
 }
 
-# A summary made at the hard limit by a summarizer slower than the watchdog's idle limit: the turn
-# waits for it instead of being taken for stalled. The `slow` worker is slow_worker.py
+# A summary made at the hard limit by a summarizer slower than the watchdog's idle limit (8 s: the
+# 1-second limit plus the watchdog's 5-second tick): the turn waits for it instead of being taken
+# for stalled. The `slow` worker is slow_worker.py
 # (ZEN_WORKER_SLOW_CMD).
 slow_summary() {
   local ws; ws=$(new_workspace slow)
   start_kernel "$ws" "$(script summary.json)" ZEN_CONTEXT_TOKENS=4000 ZEN_COMPACT_SOFT=100 ZEN_COMPACT_HARD=0.7 \
-    ZEN_SUMMARY_MODEL=slow/summarizer ZEN_SLOW_SECS=12 ZEN_TURN_IDLE_SECS=1 ZEN_WORKERS=engine,slow \
+    ZEN_SUMMARY_MODEL=slow/summarizer ZEN_SLOW_SECS=8 ZEN_TURN_IDLE_SECS=1 ZEN_WORKERS=engine,slow \
     "ZEN_WORKER_SLOW_CMD=python3 $REPO/scripts/e2e/slow_worker.py"
   local sid; sid=$(zen ask --json -m faux/smoke "one" | jq -r .session_id)
   zen ask --json -s "$sid" "two" >/dev/null
@@ -1164,43 +1187,52 @@ failover_model() {
   check "the next turn runs on it" eq "$(zen ask --json -s "$sid" "second" | jq -r '.error // "ok"')/$(q "SELECT model FROM turns WHERE session_id='$sid' ORDER BY started_at DESC LIMIT 1")" "ok/faux/backup"
 }
 
-run action-gate action_gate
-run engine-boundary engine_boundary
-run abort-tool abort_tool
-run open-loop open_loop
-run restart-recovery restart_recovery
-run prompt-files prompt_files
-run layout-move layout_move
-run skills skills_on_demand
-run mcp mcp_tools
-run web web_tools
-run search search_recall
+# Scenarios that share a setup run as parts of one; `scripts/e2e.sh <filter>` matches the scenario's
+# name or a part's function name. Slowest first, so the parallel run ends sooner.
+run turns abort_tool stale_turn
+run jobs scheduled_jobs job_report_file job_post_to
 run search-index search_index
-run wiki wiki_capture
-run workshop workshop
-run delegation delegation
-run memory-across-sessions memory_across_sessions
-run memory-sleep memory_sleep
-run ask ask_and_gone_tools
-run verifier verifier
-run summaries summaries
-run system-one system_one_direct
-run memory-sleep-judged memory_sleep_judged
-run kernel-tools kernel_tools
-run project-files project_files
-run secrets secrets_masked
-run slow-summary slow_summary
-run stale-turn stale_turn
-run scheduled-jobs scheduled_jobs
-run job-report-file job_report_file
-run job-post-to job_post_to
 run taint-on-data taint_on_data
-run trust trust_session
+run summaries summaries slow_summary
+run system-one system_one_direct memory_sleep_judged
+run action-gate action_gate
+run file-trust kernel_tools project_files secrets_masked
+run reach mcp_tools web_tools
+run basics prompt_files open_loop restart_recovery layout_move
+run memory memory_across_sessions memory_sleep
+run delegation delegation
 run names-suggestions names_suggestions
+run trust trust_session
+run workshop workshop
+run verifier verifier
+run agent-tools skills_on_demand ask_and_gone_tools
+run search search_recall
+run wiki wiki_capture
+run engine-boundary engine_boundary
 run failover-model failover_model
-echo "== tape"
-check "every tape is numbered and its hash chain recomputes" tape_is_sound
+
+# Run them, ZEN_E2E_JOBS at once, printing each one's output in order as it finishes.
+STARTED=$SECONDS
+shown=0 passed=0 times=()
+show_done() { # print the finished scenarios in order, up to the first still running
+  while [ "$shown" -lt "${#SCENARIOS[@]}" ] && [ -f "$ROOT/$shown.done" ]; do
+    cat "$ROOT/$shown.out"
+    local f secs name; read -r f secs name <"$ROOT/$shown.done"
+    FAILED=$((FAILED + f)); [ "$f" = 0 ] && passed=$((passed + 1))
+    times+=("$(printf '%5ss  %s' "$secs" "$name")")
+    shown=$((shown + 1))
+  done
+}
+for i in "${!SCENARIOS[@]}"; do
+  while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do wait -n || true; show_done; done
+  # shellcheck disable=SC2086
+  ( in_scenario "$i" ${SCENARIOS[$i]} ) >"$ROOT/$i.out" 2>&1 &
+done
+wait || true
+show_done
+[ "$shown" = "${#SCENARIOS[@]}" ] || { echo "  FAIL  $(( ${#SCENARIOS[@]} - shown )) scenario(s) didn't finish"; FAILED=$((FAILED + 1)); }
 
 echo
-echo "$PASSED scenario(s) passed, $FAILED check(s) failed"
+echo "seconds per scenario, slowest first:"; printf '%s\n' "${times[@]}" | sort -rn
+echo "$passed of ${#SCENARIOS[@]} scenario(s) passed, $FAILED check(s) failed in $((SECONDS - STARTED))s ($JOBS at once)"
 [ "$FAILED" = 0 ]

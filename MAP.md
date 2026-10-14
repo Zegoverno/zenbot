@@ -436,7 +436,7 @@ Set by the kernel for every `bash` command: `ZEN_SESSION_ID`, `ZEN_MODEL` (read 
 | `ZEN_SMOKE_PORT` | `18199` | `upgrade.sh` | Smoke-test kernel port |
 | `ZEN_DEV_PORT` / `ZEN_DEV_DB` / `ZEN_DEV_HOME` | `18100` / `zen_dev` / `~/.zenbot-dev` | `dev.sh` | Dev kernel port, database and zenbot home |
 | `ZEN_DEV_REAL` | off | `dev.sh` | `1` keeps the service's paid keys and folder settings (workspace, wiki, skills, tools, MCP config) in the dev kernel |
-| `ZEN_E2E_PORT` / `ZEN_E2E_KEEP` / `ZEN_E2E_NO_BUILD` / `ZEN_E2E_BIN` | `18377` / – / – / `target/release` | `e2e.sh` | e2e kernel port (the test MCP server, SearXNG stub and System One stub use the next three ports); keep DB and files; skip the build (CI); the binaries to test (CI's release job: `target/dist`) |
+| `ZEN_E2E_PORT` / `ZEN_E2E_JOBS` / `ZEN_E2E_KEEP` / `ZEN_E2E_NO_BUILD` / `ZEN_E2E_BIN` | `18377` / `4` / – / – / `target/release` | `e2e.sh` | base port (scenario n uses base + 20 × n, its test servers the next ports); scenarios run at once; keep DBs and files; skip the build (CI); the binaries to test (CI's release job: `target/dist`) |
 | `ZEN_E2E_MCP_TOKEN` | set by `e2e.sh` | `e2e.sh` (`mcp` scenario) | Tests `${VAR}` expansion in `mcp.json` headers (listed in the server's `allow_env`) |
 | `ZEN_MATRIX_E2E_PORT` / `ZEN_MATRIX_E2E_HS_PORT` | `18197` / `16167` | `matrix-e2e.sh` | Faux kernel port; throwaway homeserver port |
 | `ZEN_SLOW_SECS` | `12` | `scripts/e2e/slow_worker.py` | How long the test summarizer's `complete` takes |
@@ -512,7 +512,7 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 | `scripts/db.sh` | DB helpers run inside the Postgres container (`docker`, else `sudo -n docker`): `pending` (fails when it can't ask), `backup`, `secure` (`db_secure`: the private password), copy/drop/restore helpers | live DB, `~/.zenbot/backups` |
 | `scripts/lib.sh` | `zen_env`, `env_set`, `env_backup`, `wait_healthy`, `ensure_rust`, `new_token`, `remove_old_timers` (stops and deletes the `zen-sleep`/`zen-engines` timers older versions installed; `install.sh` and, after a healthy upgrade, `apply-upgrade.sh`), `trim_target` (a cargo target dir over 2 GiB loses its incremental caches and `debug/`, then all of it if still over; skipped while cargo runs) and `docker_prune` (dangling images, build cache unused for 168h), both after a healthy upgrade | `/etc/systemd/system`, `target/` dirs, Docker |
 | `scripts/dev.sh` | Dev kernel in the foreground on `:18100` with database `zen_dev` and `ZEN_HOME` `~/.zenbot-dev`, using `~/.zenbot/env` settings without the paid keys and with the dev home's folders (workspace `~/.zenbot-dev/workspace`) unless `ZEN_DEV_REAL=1` | `zen_dev` DB, `~/.zenbot-dev` |
-| `scripts/e2e.sh` | End-to-end scenarios (Tests, below); scripts in `scripts/e2e/*.json`, plus test servers in Python: `slow_worker.py` (a worker serving `slow/summarizer`, a deliberately slow `complete`; started as `ZEN_WORKER_SLOW_CMD`, and as `ZEN_WORKER_ENVDUMP_CMD` to write a worker's environment), `mcp_server.py` (an MCP server with `echo` and `add`, stdio or `--http PORT`), `searxng_stub.py` (answers `/search?format=json`), `systemone_stub.py` (validates the direct classifier call), `embed_stub.py` (an `/embeddings` stand-in; `search_reference.sql` beside it is the previous search query, to compare rankings), `ws_prompt.py` (sends one WebSocket message as zen's terminal app does and prints the events); DEVELOPMENT.md has the table of which scenario starts which | temp DB, workspace and `HOME` |
+| `scripts/e2e.sh` | End-to-end scenarios (Tests, below); scripts in `scripts/e2e/*.json`, plus test servers in Python: `slow_worker.py` (a worker serving `slow/summarizer`, a deliberately slow `complete`; started as `ZEN_WORKER_SLOW_CMD`, and as `ZEN_WORKER_ENVDUMP_CMD` to write a worker's environment), `mcp_server.py` (an MCP server with `echo` and `add`, stdio or `--http PORT`), `searxng_stub.py` (answers `/search?format=json`), `systemone_stub.py` (validates the direct classifier call), `embed_stub.py` (an `/embeddings` stand-in; `search_reference.sql` beside it is the previous search query, to compare rankings), `ws_prompt.py` (sends one WebSocket message as zen's terminal app does and prints the events) | temp DB, workspace and `HOME` |
 | `scripts/check.sh [filter]` | What CI checks, in one command: build once, unit tests, clippy `-D warnings`, `scripts/e2e.sh [filter]` on that build, `scripts/check-docs.py --base origin/main`; times each step, stops at the first failure | `target/`, e2e's temp DB |
 | `scripts/eval.sh`, `scripts/eval-report.sh` | Harness eval: this checkout vs installed (or `--base REF`), same model, on the tasks the change affects (`evals/areas.txt`; `--plan` shows which and why, `--full` all). Runs `--jobs` at once, each with its own kernel, port, database and `ZEN_HOME` next to the task workspace (default prompt files and skills); base results cached. `--native claude\|codex` makes the base the vendor's CLI. Report for the owner, never a gate | `zen_eval_*` DBs, `~/.zenbot/evals/` |
 | `scripts/eval-native.sh` | One eval turn through the vendor's own CLI (Claude Code or Codex, with their own tools), printed like `zen ask --json`: the base of `eval.sh --native` | the task workspace |
@@ -539,12 +539,10 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 - **End to end:** `scripts/e2e.sh [filter]` (how it runs and how to add a scenario: DEVELOPMENT.md,
   "End-to-end scenarios"). What each scenario checks is the comment above its function in
   `scripts/e2e.sh`; the faux scripts are `scripts/e2e/*.json` and the test servers
-  `scripts/e2e/*.py`. Scenarios: `engine-boundary`, `abort-tool`, `open-loop`, `restart-recovery`,
-  `prompt-files`, `layout-move`, `skills`, `mcp`, `web`, `search`, `search-index`, `wiki`,
-  `workshop`, `delegation`, `memory-across-sessions`, `memory-sleep`, `ask`, `verifier`,
-  `summaries`, `system-one`, `memory-sleep-judged`, `kernel-tools`, `project-files`, `secrets`,
-  `slow-summary`, `stale-turn`, `scheduled-jobs`, `job-report-file`, `job-post-to`, `taint-on-data`, `trust`, `action-gate`, `names-suggestions`,
-  `failover-model`.
+  `scripts/e2e/*.py`. Scenarios (each runs its parts, the functions after its name):
+  `turns`, `jobs`, `search-index`, `taint-on-data`, `summaries`, `system-one`, `action-gate`,
+  `file-trust`, `reach`, `basics`, `memory`, `delegation`, `names-suggestions`, `trust`,
+  `workshop`, `verifier`, `agent-tools`, `search`, `wiki`, `engine-boundary`, `failover-model`.
 - **Evals:** `evals/tasks/<name>/{task.json,files/,hidden/}` (23 tasks: 13 on how zenbot works,
   9 `coding-*` with hidden tests, and the runner self-test `smoke`), run by `scripts/eval.sh` on the
   tasks a change affects (`evals/areas.txt`, plus the `core` tasks); see `evals/README.md`. Harness
