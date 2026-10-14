@@ -6,6 +6,12 @@
 
 ---
 
+## 2026-10-14 — Sleep stub concurrency measurement
+
+- Finish the System One stub's inflight accounting before sending the response body. The client
+  can start its next request immediately on receipt; counting response-handler cleanup as active
+  judging falsely exceeded the four-call limit in post-merge CI. Kernel limits are unchanged.
+
 ## 2026-10-13 — Three-way action gate (D-056)
 
 Outside reads mark provenance as risky, without blanket shell taint. The kernel checks effects
