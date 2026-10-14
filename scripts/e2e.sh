@@ -806,8 +806,8 @@ slow_summary() {
 }
 
 # Scheduled jobs (jobs.rs): the kernel's own are seeded; an owner's job runs in a fresh session of
-# kind `job` with the context it picked and can't schedule; its report is recorded, a silent run is
-# kept out of sight, failures pause the job; a run missed beyond its grace is skipped, one within it
+# kind `job` with the context it picked and can't schedule; its report is recorded, its session is
+# archived however the run ends, failures pause the job; a run missed beyond its grace is skipped, one within it
 # catches up once, a run cut by a restart is marked interrupted; a job the agent creates stays
 # paused unless System One judges the owner asked for it (below ZEN_JOB_BAR paused, above live; the
 # owner's resume approves); a second run of a running job is refused; all six system jobs are
@@ -828,7 +828,7 @@ scheduled_jobs() {
   check "its report is recorded" grep -q "Report A: all good." <<<"$(zen jobs runs report-a)"
   check "and its next run is an hour on" eq "$(q "SELECT next_run_at BETWEEN now() + interval '55 minutes' AND now() + interval '61 minutes' FROM jobs WHERE name = 'report-a'")" t
   local sid; sid=$(q "SELECT session_id FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name = 'report-a'")
-  check "in a session of kind job, listed for the owner" eq "$(zen sessions ls --json | jq -r --arg s "$sid" '.[] | select(.id == $s) | .title')" "job: report-a"
+  check "in a session of kind job, archived once it ends" eq "$(zen sessions ls --archived --json | jq -r --arg s "$sid" '.[] | select(.id == $s) | .title')" "job: report-a"
   check "which can't schedule" grep -q "available in a scheduled job" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id = '$sid' AND payload->>'toolName' = 'schedule'")"
   local base; base=$(q "SELECT payload->>'text' FROM tape_events WHERE session_id = '$sid' AND kind = 'base'")
   check "with the job's context only: soul, owner, memory, the job note" bash -c 'grep -q "<soul" <<<"$1" && grep -q "<memory" <<<"$1" && grep -q "<scheduled_job name=\"report-a\"" <<<"$1" && ! grep -q "<identity" <<<"$1" && ! grep -q "<skills>" <<<"$1"' _ "$base"
@@ -840,6 +840,7 @@ scheduled_jobs() {
   q "UPDATE jobs SET failures = 4 WHERE name = 'broken'" >/dev/null
   zen jobs run broken >/dev/null
   check "a failed run is an error" poll "$runs 'broken'" error/owner
+  check "and its session is archived too" eq "$(q "SELECT s.archived FROM sessions s JOIN job_runs r ON r.session_id = s.id JOIN jobs j ON j.id = r.job_id WHERE j.name = 'broken'")" t
   check "the fifth failure in a row pauses the job" grep -q "paused after 5 failed runs in a row; last: the thing is broken" <<<"$(q "SELECT paused_reason FROM jobs WHERE name = 'broken' AND NOT enabled")"
   q "UPDATE jobs SET next_run_at = now() - interval '3 hours' WHERE name = 'report-a'" >/dev/null
   check "a run missed beyond its grace is skipped" poll "$runs 'report-a'" ok/schedule,missed/schedule

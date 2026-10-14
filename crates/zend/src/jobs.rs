@@ -13,7 +13,8 @@
 //! - **agent** jobs: a prompt run in a fresh session (kind `job`) with the instructions the job
 //!   picks (`context`: the soul always, plus any of identity, agents, user, memory, skills,
 //!   project) and the skills it names loaded. The session can't ask, delegate or schedule; its final
-//!   answer is the report, `[SILENT]` when there's nothing worth the owner's attention. A job with
+//!   answer is the report, `[SILENT]` when there's nothing worth the owner's attention; however the
+//!   run ends, its session is archived (D-057). A job with
 //!   a `report_file` (D-055) reports that file instead, as the run left it, when the run ends `ok`:
 //!   inside its workspace, not a symlink or secret file, written during the run, UTF-8, at most
 //!   60 KB (`read_report`); anything else makes the run an error, never the answer posted instead.
@@ -694,7 +695,8 @@ pub async fn run_loop(app: AppState) {
     // Runs this kernel didn't finish: the previous kernel stopped during them.
     match sqlx::query(
         "WITH r AS (UPDATE job_runs SET status = 'interrupted', ended_at = now(), error = 'the kernel stopped during the run'
-                    WHERE status = 'running' RETURNING job_id)
+                    WHERE status = 'running' RETURNING job_id, session_id),
+              s AS (UPDATE sessions SET archived = true WHERE id IN (SELECT session_id FROM r))
          UPDATE jobs SET last_status = 'interrupted', updated_at = now() WHERE id IN (SELECT job_id FROM r)",
     )
     .execute(&app.db)
@@ -778,6 +780,13 @@ async fn tick(app: &AppState) -> Result<()> {
     Ok(())
 }
 
+/// Archive a finished run's session (a system job's run has none): the report reaches the owner
+/// through the jobs room and `zen jobs runs`, and the session stays in the board's Archived section.
+async fn archive_session(db: &PgPool, run: i64) -> Result<()> {
+    sqlx::query("UPDATE sessions SET archived = true WHERE id = (SELECT session_id FROM job_runs WHERE id = $1)").bind(run).execute(db).await?;
+    Ok(())
+}
+
 /// A `running` row for a run of this job, unless one is running (None).
 async fn start_run(db: &PgPool, job: i64, trigger: &str) -> Result<Option<i64>> {
     let r = sqlx::query_scalar("INSERT INTO job_runs (job_id, trigger, status) VALUES ($1, $2, 'running') ON CONFLICT DO NOTHING RETURNING id")
@@ -815,8 +824,9 @@ fn spawn_run(app: &AppState, job: Job, run: i64) {
 
 /// Record how a run ended; space out or pause a failing agent job. A run whose session read
 /// untrusted content has its report marked (taint.rs): it reaches the next run and the main
-/// session as untrusted content.
+/// session as untrusted content. Its session, however it ended, is archived (D-057).
 async fn finish(db: &PgPool, job: &Job, run: i64, o: &Outcome) -> Result<()> {
+    archive_session(db, run).await?;
     sqlx::query(
         "UPDATE job_runs SET status = $2, ended_at = now(), output = $3, error = $4,
                 tainted = COALESCE((SELECT risky_at IS NOT NULL OR tainted_at IS NOT NULL FROM sessions WHERE id = job_runs.session_id), false)
@@ -1039,8 +1049,6 @@ async fn run_agent(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
         return Ok(Outcome { status: "error", output: None, error: Some("the run ended without a report".into()) });
     }
     if trimmed.starts_with("[SILENT]") {
-        // Nothing for the owner: the session is kept, out of the session list.
-        sqlx::query("UPDATE sessions SET archived = true WHERE id = $1").bind(id).execute(&app.db).await?;
         return Ok(Outcome { status: "silent", output: None, error: None });
     }
     if let Some(why) = trimmed.strip_prefix("[FAILED]") {
@@ -1056,10 +1064,7 @@ async fn run_agent(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
     let report = tokio::task::spawn_blocking(move || read_report(&workspace, &path, started, &secrets)).await?;
     Ok(match report {
         Ok(Some(text)) => Outcome { status: "ok", output: Some(crate::secrets::mask_off_thread(text).await), error: None },
-        Ok(None) => {
-            sqlx::query("UPDATE sessions SET archived = true WHERE id = $1").bind(id).execute(&app.db).await?;
-            Outcome { status: "silent", output: None, error: None }
-        }
+        Ok(None) => Outcome { status: "silent", output: None, error: None },
         Err(e) => Outcome { status: "error", output: None, error: Some(format!("{e:#}")) },
     })
 }
