@@ -33,6 +33,17 @@ Docker images and week-old build cache. `zen status` shows the root filesystem's
 ---
 
 
+## 2026-10-14 — A failover's model sticks to the session (D-057)
+
+After a hard usage limit made a turn continue on another model, the next prompt went back to the
+exhausted one, and the terminal's status line kept showing it. Now the kernel moves the session to
+the model it failed over to (effort kept only if that model takes it, the same rule as `/model`,
+now one helper) and tells clients with a new `model` event; `zen` updates its status line from it.
+The model stays until the owner picks another. The assist model (names, suggestions) retries once
+on the session's model when it hits its own usage limit; the summarizer already did. The faux
+engine has a `fallback` step and a second model, `faux/backup`, for the new `failover-model` e2e
+scenario.
+
 ## 2026-10-14 — Job sessions archive themselves when the run ends (D-057)
 
 Every finished job run left its session on the board's Jobs section. Now the kernel archives a run's
@@ -47,6 +58,8 @@ The e2e `scheduled_jobs` scenario checks an ok and a failed run's sessions are a
 - Finish the System One stub's inflight accounting before sending the response body. The client
   can start its next request immediately on receipt; counting response-handler cleanup as active
   judging falsely exceeded the four-call limit in post-merge CI. Kernel limits are unchanged.
+
+---
 
 ## 2026-10-13 — Three-way action gate (D-056)
 

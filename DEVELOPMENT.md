@@ -101,7 +101,7 @@ The scenarios are the `run …` lines at the bottom of the script; the comment a
 | `searxng_stub.py` | `web`, `wiki` (`ZEN_SEARXNG_URL`) | answers `/search?format=json` with fixed results, on the e2e port + 2 |
 | `systemone_stub.py` | `system-one`, `scheduled-jobs` (`ZEN_S1_URL`) | an OpenRouter System One stand-in that checks auth and the `bool` → `noul` mapping, on the e2e port + 3 |
 | `embed_stub.py` | `search-index` (`ZEN_EMBED_URL`) | an OpenAI-compatible `/embeddings` stand-in (word counts, a few synonyms sharing a dimension) that refuses `REJECT-EMBED` and holds `SLOW-EMBED` until a release file exists, on the e2e port + 7; `search_reference.sql` beside it is the previous search query, to compare rankings |
-| `ws_prompt.py` | `names-suggestions`, `abort-tool` | a client, not a server: sends one message on a session's WebSocket as the terminal app does (and, given a delay, an `abort` after it) and prints the events that follow |
+| `ws_prompt.py` | `names-suggestions`, `abort-tool`, `failover-model` | a client, not a server: sends one message on a session's WebSocket as the terminal app does (and, given a delay, an `abort` after it) and prints the events that follow |
 
 ```bash
 scripts/e2e.sh                # build, then every scenario

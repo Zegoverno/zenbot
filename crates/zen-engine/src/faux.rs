@@ -1,13 +1,15 @@
 //! Faux engine: a scripted model for tests and the upgrade smoke check. It drives a real turn
 //! through the kernel (tool calls included) without any subscription.
 //!
-//! Listed as `faux/smoke` when ZEN_FAUX=1. The script is read from the JSON file in
+//! Listed as `faux/smoke` (and `faux/backup`, a second model to fail over to) when ZEN_FAUX=1. The script is read from the JSON file in
 //! ZEN_FAUX_SCRIPT if set: a list of steps (or an object of lists by kind of session, see `script`),
 //! each one of
 //!   {"tool": "<name>", "args": {...}}   call a kernel tool
 //!   {"text": "..."}                    answer (streamed as deltas, then a message)
 //!   {"sleep": <seconds>}               do nothing for a while (to test abort and the watchdog)
 //!   {"exit": <code>}                   crash the worker (to test supervision)
+//!   {"fallback": "<model>"}            report a usage-limit failover to that model (`turn.fallback`),
+//!                                      then go on with the next steps as if on it
 //! A step with `"when": "<text>"` runs only in turns whose prompt contains the text, and one with
 //! `"ignore_abort": true` keeps running through an abort (a worker that is slow to stop).
 
@@ -41,7 +43,10 @@ impl Engine for Faux {
     }
 
     fn models(&self) -> BoxFuture<'_, Vec<Model>> {
-        Box::pin(async { vec![Model { id: "faux/smoke".into(), name: "Test model (scripted)".into(), engine: "faux".into(), ..Model::default() }] })
+        Box::pin(async {
+            let model = |id: &str, name: &str| Model { id: id.into(), name: name.into(), engine: "faux".into(), ..Model::default() };
+            vec![model("faux/smoke", "Test model (scripted)"), model("faux/backup", "Test model to fail over to (scripted)")]
+        })
     }
 
     fn run_turn<'a>(&'a self, ctx: TurnCtx, input: &'a TurnInput, abort: watch::Receiver<bool>) -> BoxFuture<'a, Result<Option<String>>> {
@@ -99,6 +104,9 @@ async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bo
                 }
                 let msg = assistant(vec![json!({ "type": "text", "text": text })], "stop", sent);
                 ctx.notify(TurnEvent::Message { message: msg }).await;
+            } else if let Some(to) = step["fallback"].as_str() {
+                let reason = "You've hit your session limit (scripted)".to_string();
+                ctx.notify(TurnEvent::Fallback { from: "faux".into(), to: to.into(), reason }).await;
             } else if let Some(secs) = step["sleep"].as_f64() {
                 tokio::time::sleep(std::time::Duration::from_secs_f64(secs)).await;
             } else if let Some(code) = step["exit"].as_i64() {

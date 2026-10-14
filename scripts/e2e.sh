@@ -1149,6 +1149,21 @@ action_gate() {
   kill "$srv" 2>/dev/null || true
 }
 
+# A usage-limit failover moves the session to the model it failed over to, which it keeps until the
+# owner picks another (D-057): the tape records the switch, the session and its clients show the new
+# model, and the next turn runs on it.
+failover_model() {
+  local ws; ws=$(new_workspace failover)
+  start_kernel "$ws" "$(script failover.json)"
+  api() { curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
+  local sid; sid=$(api -X POST -d '{"model":"faux/smoke"}' "$URL/api/sessions" | jq -r .id)
+  local ev; ev=$(python3 scripts/e2e/ws_prompt.py "$URL" "$TOKEN" "$sid" '{"type":"prompt","text":"first"}' 1)
+  check "the failover is on the tape" eq "$(q "SELECT (payload->>'from') || '>' || (payload->>'to') FROM tape_events WHERE session_id='$sid' AND kind='failover'")" "faux>faux/backup"
+  check "clients are told the session's new model" eq "$(echo "$ev" | jq -r 'select(.type == "model") | .model')" faux/backup
+  check "the session keeps the model it failed over to" eq "$(api "$URL/api/sessions/$sid" | jq -r .model)" faux/backup
+  check "the next turn runs on it" eq "$(zen ask --json -s "$sid" "second" | jq -r '.error // "ok"')/$(q "SELECT model FROM turns WHERE session_id='$sid' ORDER BY started_at DESC LIMIT 1")" "ok/faux/backup"
+}
+
 run action-gate action_gate
 run engine-boundary engine_boundary
 run abort-tool abort_tool
@@ -1182,6 +1197,7 @@ run job-post-to job_post_to
 run taint-on-data taint_on_data
 run trust trust_session
 run names-suggestions names_suggestions
+run failover-model failover_model
 echo "== tape"
 check "every tape is numbered and its hash chain recomputes" tape_is_sound
 

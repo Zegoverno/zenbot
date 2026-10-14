@@ -68,6 +68,7 @@ every client uses; `zen-client` (`crates/zen-client`) opens the stream and makes
 | `idle` | | reserved: the kernel's own turns are over (after `end` with `next: true`); nothing sends it today |
 | `title` | `title` | the kernel named the session (after one of the owner's first turns, unless the owner set the title; not in job, subagent or verifier sessions) |
 | `suggestion` | `id, text` | after an owner's turn: the owner's likely next prompt. Show it until the next prompt is sent (zen: grey in the empty input, tab takes it); send its `id` back with that prompt |
+| `model` | `model, effort` | the session's model changed without the owner choosing it: a usage-limit failover moved it to the model it continued on, which it keeps until the owner picks another (D-057). `effort` is its thinking level there (`null`: the model's default) |
 | `status` | `text` | progress the kernel reports: a long tool ("verifying: running 3 check(s)"), a delegation, a summary being made, a usage-limit failover |
 | `questions` | `questions: [{ question, options }]` | the `ask` tool's questions for the owner, recommended option first; the answers are the owner's next prompt |
 | `taint` | `risky, tainted, source?, about?` | an outside read sets `risky`; a held action sets `tainted` and revokes unsandboxed shell execution; trusting clears both |
