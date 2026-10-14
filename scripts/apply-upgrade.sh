@@ -7,7 +7,9 @@
 # serialized by a lock, and a request superseded by a newer one steps aside instead of installing
 # over it, so the log and ~/.zenbot/version always name the commit actually running. If the new build brings migrations the
 # live database hasn't applied, the database is backed up first (scripts/db.sh); a rollback
-# doesn't restore it (migrations are expand-only, see AGENTS.md) but logs how to.
+# doesn't restore it (migrations are expand-only, see AGENTS.md) but logs how to. After a healthy
+# install it trims the checkout's cargo target directories over 2 GiB and prunes dangling Docker
+# images and old build cache (trim_target, docker_prune in scripts/lib.sh).
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$REPO/scripts/db.sh"
@@ -119,6 +121,14 @@ if wait_healthy "$HEALTH" 45; then
   remove_old_timers 2>>"$LOG" || log "removing the old zen-sleep/zen-engines timers failed; remove them by hand"
   # Services a new version brings in deploy/compose.yaml (e.g. SearXNG for web search).
   sudo docker compose -f "$REPO/deploy/compose.yaml" up -d >>"$LOG" 2>&1 || log "starting the compose services failed; see the log above"
+  # Disk hygiene (the VM's disk once filled up): build directories over 2 GiB and old Docker
+  # leftovers. The installed binaries are in ~/.zenbot/bin, so nothing here can break the install.
+  SRC=$(zen_env ZEN_REPO); SRC=${SRC:-$HOME/zenbot}
+  for t in "$SRC/target" "$SRC/crates/zen-matrix/target"; do
+    TRIMMED=$(trim_target "$t" 2>>"$LOG") || true
+    [ -z "$TRIMMED" ] || log "$TRIMMED"
+  done
+  docker_prune >>"$LOG" 2>&1 || true
   exit 0
 fi
 

@@ -62,3 +62,29 @@ remove_old_timers() {
   done
   [ -z "$removed" ] || sudo systemctl daemon-reload
 }
+
+# trim_target DIR [LIMIT_BYTES]: keep a cargo target directory under LIMIT (default 2 GiB). Over it,
+# first the incremental caches and target/debug go (every script builds --release), then, if still
+# over, the whole directory (`cargo clean`'s effect; the next build compiles from scratch). Only
+# directories cargo made (with its CACHEDIR.TAG) are touched, and nothing while a cargo process
+# runs. Prints what it did; apply-upgrade.sh calls it after a successful install.
+trim_target() {
+  local dir=$1 limit=${2:-$((2 << 30))}
+  [ -f "$dir/CACHEDIR.TAG" ] || return 0
+  (($(du -sb "$dir" | cut -f1) > limit)) || return 0
+  if pgrep -x cargo >/dev/null; then echo "$dir is over $((limit >> 20)) MiB, but cargo is running; left alone"; return 0; fi
+  rm -rf "$dir"/debug "$dir"/*/incremental
+  if (($(du -sb "$dir" | cut -f1) > limit)); then
+    rm -rf "${dir:?}"
+    echo "$dir was still over $((limit >> 20)) MiB without its incremental caches: removed it"
+  else
+    echo "$dir was over $((limit >> 20)) MiB: removed its incremental caches and debug build ($(($(du -sb "$dir" | cut -f1) >> 20)) MiB left)"
+  fi
+}
+
+# Dangling Docker images and build cache unused for a week, removed; volumes and images a container
+# uses are never touched. Failures are ignored. apply-upgrade.sh calls it after a successful install.
+docker_prune() {
+  sudo docker image prune -f 2>&1 | tail -1 || true
+  sudo docker builder prune -f --filter until=168h 2>&1 | tail -1 || true
+}
