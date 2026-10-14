@@ -180,7 +180,7 @@ pub(crate) async fn board(State(app): State<AppState>, Query(q): Query<BoardQuer
 }
 
 /// The columns `session_json` reads, without the cost (each query computes it its own way).
-const SESSION_COLUMNS: &str = "id, title, model, effort, archived, created_at, updated_at, kind, parent, tainted_at";
+const SESSION_COLUMNS: &str = "id, title, model, effort, archived, created_at, updated_at, kind, parent, tainted_at, risky_at";
 
 pub(crate) fn session_json(r: &sqlx::postgres::PgRow) -> Value {
     json!({
@@ -196,6 +196,7 @@ pub(crate) fn session_json(r: &sqlx::postgres::PgRow) -> Value {
         "updated_at": r.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
         // When it first read untrusted content since the owner last trusted it; null when clean.
         "tainted_at": r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("tainted_at").ok().flatten(),
+        "risky_at": r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("risky_at").ok().flatten(),
         "cost": r.try_get::<f64, _>("cost").unwrap_or(0.0),
     })
 }
@@ -415,6 +416,22 @@ pub(crate) async fn trust_session(State(app): State<AppState>, Path(id): Path<Uu
         taint::Trusted::Changed => return Err(ApiError(StatusCode::CONFLICT, "it read untrusted content after what you looked at: look again".into())),
         taint::Trusted::NotFound => return Err(not_found()),
     }))
+}
+
+/// Owner-only exact action approvals; shell/network tools cannot read the owner token.
+pub(crate) async fn session_gates(State(app): State<AppState>, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
+    Ok(Json(json!({"actions":crate::gate::waiting(&app, id).await?, "busy":app.is_busy(id).await})))
+}
+#[derive(Deserialize)]
+pub(crate) struct Allow { id: i64 }
+pub(crate) async fn allow_action(State(app): State<AppState>, Path(id): Path<Uuid>, Json(body): Json<Allow>) -> ApiResult<Json<Value>> {
+    let turns = app.turns.lock().await;
+    if turns.contains_key(&id) {
+        return Err(ApiError(StatusCode::CONFLICT, "wait for the turn to end before allowing an action".into()));
+    }
+    let allowed = crate::gate::allow(&app, id, body.id).await?;
+    drop(turns);
+    Ok(Json(json!({"allowed":allowed})))
 }
 
 pub(crate) async fn session_ws(State(app): State<AppState>, Path(id): Path<Uuid>, ws: WebSocketUpgrade) -> Response {

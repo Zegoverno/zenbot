@@ -12,6 +12,7 @@ mod layout;
 mod delegate;
 mod dispatch;
 mod git;
+mod gate;
 mod jobs;
 mod mcp;
 mod measure;
@@ -249,6 +250,7 @@ async fn main() -> Result<()> {
         .route("/sessions/{id}/decision", axum::routing::post(decide))
         .route("/sessions/{id}/taint", get(session_taint))
         .route("/sessions/{id}/trust", axum::routing::post(trust_session))
+        .route("/sessions/{id}/allow", axum::routing::get(session_gates).post(allow_action))
         .route("/suggestions", get(assist::stats))
         .route("/memory", get(list_memory))
         .route("/mcp", get(mcp_status))

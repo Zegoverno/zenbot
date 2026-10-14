@@ -289,7 +289,7 @@ impl App {
             };
             let effort = self.shown_effort().map(|e| format!(" · {e}")).unwrap_or_default();
             let watch = if self.read_only { " · read-only" } else { "" };
-            let taint = if self.tainted { " · untrusted (/trust)" } else { "" };
+            let taint = if self.tainted { " · untrusted (/allow or /trust)" } else if self.risky { " · risky" } else { "" };
             let footer = format!("  {model}{effort} · {session}{watch}{taint} · {} tokens", fmt_tokens(self.session_tokens));
             lines.push(line(footer, Sty::Dim));
         }

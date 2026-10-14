@@ -26,6 +26,21 @@ path taints the reader), D-051 (only listed repositories are trusted)
 - **Built: worktrees are trusted.** A git worktree of a trusted repository is as trusted as the
   repository (its `.git` file and the repository's worktree entry must name each other).
 
+**Implementation note (2026-10-13, PR B):** the three-way gate uses a deliberately narrow grammar;
+unsupported syntax is held, not guessed. Automatic read utilities use fixed binaries, a cleared
+environment and a read-only view with known credentials hidden; this is distinct from the writable
+offline build route. Git is programmable (even status can execute fsmonitor), so it stays in the
+build route. Plain source/data edits are descriptor-confined; dotfiles, executable configuration
+and unknown effects wait for approval. Unapproved made tools retain their existing read-only
+runner. Draft/provenance writes keep their D-053 marks and require separate owner activation.
+Approval covers exact arguments/workspace once for ten minutes, not immutable snapshots of all
+referenced files; the owner must inspect those too. Unsupported syntax and opaque interpreters are
+held conservatively, so the prototype's 71% figure is not a production promise.
+Offline builds can still change their project workspace; programmable commands in a workspace
+containing the owner's home are held for exact approval to protect persistent steering. Strong
+copy-on-write isolation and a separate Unix user are not supplied by this change.
+System One grants from the owner's request remain the next step.
+
 **Why:** 5 of the 11 tainted main sessions were tainted by `search` recalling a marked memory, not
 by reading the web; a worktree of zenbot's own checkout tainted the session that made it. A replay
 of 2,396 recorded commands and 36 attacks: fixed rules over parsed facts run 71% unchecked, sandbox

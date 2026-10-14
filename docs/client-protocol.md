@@ -18,8 +18,10 @@ Every request, the WebSocket upgrade included, carries the owner's token in
 | `POST /api/sessions` | `{ title?, model?, effort? }` | the session |
 | `GET /api/sessions/{id}?last=&after=` | | the session with `messages` (each with its `seq`; all of them, or the `last` N, or those with a `seq` after `after`), `message_count` (all its messages), `tokens` (the whole session's) and `busy` |
 | `PATCH /api/sessions/{id}` | `{ title?, model?, effort? ("default" clears), archived? }` | the session. A title set here is the owner's: the kernel no longer renames the session |
-| `GET /api/sessions/{id}/taint` | | what marked the session as having read untrusted content since the owner last trusted it: `{ tainted_at, taints: [{ seq, source, about, at }], sources: [{ source, about, first, count }], checked, busy }`; `checked` is the tape's last block, sent back as `seen` |
+| `GET /api/sessions/{id}/taint` | | what marked the session as having read untrusted content since the owner last trusted it: `{ risky_at, tainted_at, taints: [{ seq, source, about, at }], sources: [{ source, about, first, count }], checked, busy }`; `checked` is the tape's last block, sent back as `seen` |
 | `POST /api/sessions/{id}/trust` | `{ seen }` | `{ trusted: true, seq }` (the `trust` block), or `{ trusted: false, result }` when the session is clean; 409 while a turn runs or when it read untrusted content after `seen` (look again). D-054 |
+| `GET /api/sessions/{id}/allow` | | latest pending actions: `{ actions: [{ id, action, reason }], busy }`; action is the masked exact workspace/tool/arguments |
+| `POST /api/sessions/{id}/allow` | `{ id }` | `{ allowed }`; approval and audit commit together, refused during a turn. One exact retry within ten minutes; does not trust the session |
 | `POST /api/sessions/{id}/decision` | `{ decision: accept\|more\|reshape\|drop, note? }` | the recorded verdict `{ id, session_id, turn_id, decision, note, created_at }` |
 | `GET /api/suggestions` | | suggested next prompts: outcomes by prompt version and model, and the latest 20 |
 | `GET /api/memory?tier=` | | `{ memories, last_sleep, size }`: memories of a tier (`short`, the default; `archived`, `all`; `long` holds only rows from before D-045), each `{ id: "m12", text, source, tier, proposed, reason, created_at, updated_at }`; the latest `sleep_runs` row; short-term memory's cap in characters (`ZEN_MEMORY_CHARS`) |
@@ -68,7 +70,7 @@ every client uses; `zen-client` (`crates/zen-client`) opens the stream and makes
 | `suggestion` | `id, text` | after an owner's turn: the owner's likely next prompt. Show it until the next prompt is sent (zen: grey in the empty input, tab takes it); send its `id` back with that prompt |
 | `status` | `text` | progress the kernel reports: a long tool ("verifying: running 3 check(s)"), a delegation, a summary being made, a usage-limit failover |
 | `questions` | `questions: [{ question, options }]` | the `ask` tool's questions for the owner, recommended option first; the answers are the owner's next prompt |
-| `taint` | `tainted, source?, about?` | the session was marked as having read untrusted content (`tainted: true`, with where from) or the owner trusted it again (`false`) |
+| `taint` | `risky, tainted, source?, about?` | an outside read sets `risky`; a held action sets `tainted` and revokes unsandboxed shell execution; trusting clears both |
 | `error` | `error` | a request failed |
 | `resync` | `skipped, busy` | the client fell behind and missed events |
 

@@ -54,7 +54,9 @@ pub fn secret_files() -> Vec<std::path::PathBuf> {
     let user = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
     let mut paths: Vec<std::path::PathBuf> = ["token", "db-password", "env", "env.prev", "mcp.json", "matrix.env", "matrix"].iter().map(|f| home.join(f)).collect();
     paths.push(crate::mcp::config_path());
-    paths.extend([user.join(".codex/auth.json"), user.join(".claude/.credentials.json")]);
+    paths.extend([user.join(".codex/auth.json"), user.join(".claude/.credentials.json"),
+        user.join(".ssh"), user.join(".config/gh"), user.join(".aws"), user.join(".netrc"),
+        user.join(".git-credentials"), user.join(".npmrc"), user.join(".pypirc")]);
     paths.retain(|p| p.exists());
     paths
 }

@@ -201,7 +201,14 @@ mcp_tools() {
 JSON
   start_kernel "$ws" "$(script reach.json)" ZEN_E2E_MCP_TOKEN=e2e
   local r sid; r=$(zen ask --json -m faux/smoke "mcp please"); sid=$(echo "$r" | jq -r .session_id)
-  check "find, load, call local, call remote, refused without an argument" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" \
+  check "untrusted descriptions make external effects wait for approval" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" \
+    find_tools:false,load_tool:false,call_tool:true,call_tool:true,call_tool:true
+  local gate
+  for gate in $(q "SELECT id FROM action_gates WHERE session_id='$sid' AND allowed_at IS NULL"); do
+    curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d "{\"id\":$gate}" "$URL/api/sessions/$sid/allow" >/dev/null
+  done
+  r=$(zen ask --json -s "$sid" "mcp please")
+  check "approved exact MCP calls run, argument validation still applies" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" \
     find_tools:false,load_tool:false,call_tool:false,call_tool:false,call_tool:true
   local res; res=$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult'")
   check "find_tools lists namespaced tools" grep -q "local_echo: Echo a message back." <<<"$res"
@@ -224,7 +231,7 @@ JSON
   check "and the slow one finishes" grep -q "slow: done" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$(jq -r .session_id "$TMP/mcp-slow.json")' AND payload->>'role'='toolResult'")"
   r=$(zen ask --json -m faux/smoke "tool huge")
   check "an answer over 8 MB is an error, stdio and HTTP" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" call_tool:true,call_tool:true
-  check "saying so" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$(echo "$r" | jq -r .session_id)' AND payload->>'role'='toolResult' AND payload::text LIKE '%over 8 MB%'")" 2
+  check "the first oversized result is refused, and the next outside call is held" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$(echo "$r" | jq -r .session_id)' AND payload->>'role'='toolResult' AND (payload::text LIKE '%over 8 MB%' OR payload::text LIKE '%not run:%')")" 2
   # A server's own children go with it: changing mcp.json restarts the servers.
   local child; child=$(cat "$TMP/mcp-child.pid")
   check "the local server's child runs" kill -0 "$child"
@@ -253,8 +260,8 @@ web_tools() {
   check "results numbered, non-http dropped" bash -c 'grep -q "\[2\] Another" <<<"$1" && ! grep -q "javascript:" <<<"$1"' _ "$res"
   check "one envelope, its marker defused" eq "$(grep -o '</untrusted>' <<<"$res" | wc -l)" 1
   check "the session is tainted" eq "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")" t
-  check "a tainted session can't change USER.md" bash -c 'grep -q "A session that has read untrusted content can.t change" <<<"$1" && ! grep -q "Rewritten by a web page" "$2"' _ "$res" "$TMP/home/.zenbot/USER.md"
-  check "a tainted session can't write an active skill" bash -c 'grep -q "active skills and the tools you made steer every session" <<<"$1" && ! grep -q "Rewritten by a web page" "$2"' _ "$res" "$TMP/home/.zenbot/global/skills/work/verify/SKILL.md"
+  check "a tainted session can't change USER.md" bash -c 'grep -q "not run:" <<<"$1" && ! grep -q "Rewritten by a web page" "$2"' _ "$res" "$TMP/home/.zenbot/USER.md"
+  check "a tainted session can't write an active skill" bash -c 'grep -q "persistent steering" <<<"$1" && ! grep -q "Rewritten by a web page" "$2"' _ "$res" "$TMP/home/.zenbot/global/skills/work/verify/SKILL.md"
   check "no session writes mcp.json" bash -c 'grep -q "mcp.json is the owner.s own configuration" <<<"$1" && ! grep -qs planted "$2"' _ "$res" "$TMP/home/.zenbot/mcp.json"
   check "its memory counts as inference" eq "$(q "SELECT source FROM memories WHERE text LIKE 'Something read on the web.%'")" inferred
   q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART" >/dev/null  # the memory scenarios start from none
@@ -687,7 +694,7 @@ project_files() {
   local sid res; sid=$(zen ask --json -m faux/smoke "read cloned" | jq -r .session_id)
   res=$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='read'")
   check "an unlisted repository's instructions come as untrusted content" bash -c 'grep -qF "<untrusted source=\"project file\" about=\"$2/cloned/AGENTS.md\">" <<<"$1" && grep -q PLANTED-cloned <<<"$1" && ! grep -q "Follow them" <<<"$1"' _ "$res" "$ws"
-  check "and taint the session" eq "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")" t
+  check "and mark it risky without taint" eq "$(q "SELECT (risky_at IS NOT NULL) || '/' || (tainted_at IS NULL) FROM sessions WHERE id='$sid'")" true/true
   check "recorded as untrusted" eq "$(q "SELECT payload->>'trusted' FROM tape_events WHERE session_id='$sid' AND kind='context'")" false
   sid=$(zen ask --json -m faux/smoke "read mine" | jq -r .session_id)
   res=$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='read'")
@@ -925,18 +932,18 @@ taint_on_data() {
   start_kernel "$ws" "$script" ZEN_SEARXNG_URL="http://127.0.0.1:$port"
   q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART; DELETE FROM search_docs WHERE kind = 'memory'; DELETE FROM sleep_runs" >/dev/null
   res_of() { q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$1' AND payload->>'role'='toolResult'"; }
-  tainted() { q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$1'"; }
+  tainted() { q "SELECT risky_at IS NOT NULL FROM sessions WHERE id='$1'"; }
   zen ask --json -m faux/smoke "CLEAN-DRAFT" >/dev/null
   local r sid res; r=$(zen ask --json -m faux/smoke "TAINT-A"); sid=$(echo "$r" | jq -r .session_id)
   check "search, remember, a draft, a write into a clean draft, bash" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" \
-    web_search:false,remember:false,save_skill:false,write:false,bash:false
+    web_search:false,remember:false,save_skill:false,write:true,write:false,bash:false,bash:true
   res=$(res_of "$sid")
   check "the memory is marked, an inference" eq "$(q "SELECT source || '/' || tainted FROM memories WHERE id = 1")" inferred/true
-  check "both drafts are marked untrusted" eq "$(q "SELECT string_agg(skill, ',' ORDER BY skill) FROM draft_taint")" work/clean-notes,work/web-notes
+  check "the saved draft is marked; a held overwrite leaves the clean one alone" eq "$(q "SELECT string_agg(skill, ',' ORDER BY skill) FROM draft_taint")" work/web-notes
   check "the draft's commit says so" grep -q "web-notes (session ${sid:0:8}; it read untrusted content)" <<<"$(git -C "$sk" log --format=%s)"
-  check "a tainted bash has no network" bash -c 'grep -q "net=[1-9]" <<<"$1" && grep -q "sandboxed: this session has read untrusted content" <<<"$1"' _ "$res"
-  check "but writes and commits in its workspace" bash -c 'grep -q committed <<<"$1" && test -s "$2/made-here.txt" && [ "$(git -C "$2" log -1 --format=%s)" = sandboxed ]' _ "$res" "$ws"
-  check "and not in the home" bash -c 'grep -q home-read-only <<<"$1" && test ! -e "$2/planted"' _ "$res" "$zh"
+  check "a network command is held and programmable git runs offline" bash -c 'grep -q "not run:" <<<"$1" && grep -q "sandboxed: this session has read untrusted content" <<<"$1"' _ "$res"
+  check "but writes and commits in its workspace" bash -c 'test -s "$2/made-here.txt" && [ "$(git -C "$2" log -1 --format=%s)" = sandboxed ]' _ "$res" "$ws"
+  check "and not in the home" bash -c 'grep -q "not run:" <<<"$1" && test ! -e "$2/planted"' _ "$res" "$zh"
   r=$(zen ask --json -m faux/smoke "TAINT-B"); sid=$(echo "$r" | jq -r .session_id)
   local base; base=$(q "SELECT payload->>'text' FROM tape_events WHERE session_id='$sid' AND kind='base'")
   check "the next session's instructions leave the memory out, by id" bash -c '! grep -q 4417 <<<"$1" && grep -q "(m1 saved by sessions that read untrusted content" <<<"$1"' _ "$base"
@@ -948,7 +955,7 @@ taint_on_data() {
   zen sessions decide "$sid" accept >/dev/null; sleep 2
   check "accepting the session that loaded it doesn't activate it" bash -c 'test -s "$1/_proposed/work/web-notes/SKILL.md" && test ! -e "$1/work/web-notes"' _ "$sk"
   r=$(zen ask --json -m faux/smoke "TAINT-D"); sid=$(echo "$r" | jq -r .session_id)
-  check "reading a draft a tainted session wrote is untrusted too" bash -c 'grep -q "<untrusted source=\"draft skill\"" <<<"$1" && [ "$2" = t ]' _ "$(res_of "$sid")" "$(tainted "$sid")"
+  check "a held draft overwrite never contaminates its reader" bash -c '! grep -q "Obey the page" <<<"$1" && [ "$2" = f ]' _ "$(res_of "$sid")" "$(tainted "$sid")"
   local sha; sha=$(zen skills --json | jq -r '.skills[] | select(.skill == "work/web-notes") | .sha')
   check "zen skills marks it" grep -q "work/web-notes (draft ${sha:0:12}, untrusted)" <<<"$(zen skills)"
   zen skills accept work/web-notes "${sha:0:12}" >/dev/null
@@ -975,7 +982,7 @@ taint_on_data() {
   local second; second=$(q "SELECT r.session_id FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name = 'tjob' ORDER BY r.id DESC LIMIT 1")
   check "which got the last report wrapped, tainted from its start" bash -c 'grep -qF "<untrusted source=\\\"job report\\\"" <<<"$1" && [ "$2" = "job report" ]' _ \
     "$(q "SELECT payload::text FROM tape_events WHERE session_id='$second' AND kind='message' AND payload->>'role'='user'")" \
-    "$(q "SELECT payload->>'source' FROM tape_events WHERE session_id='$second' AND kind='taint'")"
+    "$(q "SELECT payload->>'source' FROM tape_events WHERE session_id='$second' AND kind='risky'")"
   r=$(zen ask --json -m faux/smoke "TAINT-RUNS"); sid=$(echo "$r" | jq -r .session_id)
   check "schedule runs shows the reports wrapped, and marks the reader" bash -c 'grep -q "<untrusted source=\"job report\"" <<<"$1" && grep -q "Report T" <<<"$1" && [ "$2" = t ]' _ "$(res_of "$sid")" "$(tainted "$sid")"
   zen jobs rm tjob >/dev/null
@@ -996,20 +1003,20 @@ trust_session() {
   api() { curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
   res_of() { q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$1' AND payload->>'role'='toolResult' AND seq > ${2:-0}"; }
   local r sid; r=$(zen ask --json -m faux/smoke "TRUST-A"); sid=$(echo "$r" | jq -r .session_id)
-  check "a web search taints the session" eq "$(api "$URL/api/sessions/$sid?last=0" | jq -r '.tainted_at != null')" true
+  check "a web search marks risk without taint" eq "$(api "$URL/api/sessions/$sid?last=0" | jq -c '[.risky_at != null, .tainted_at == null]')" '[true,true]'
   sed -i "s|SESSIONID|$sid|" "$script"
   local before; before=$(q "SELECT max(seq) FROM tape_events WHERE session_id='$sid'")
   zen ask --json -s "$sid" "TRUST-B" >/dev/null
-  check "its shell can't call the trust route, even with the token, nor read the token" bash -c 'grep -q "net=[1-9]" <<<"$1" && grep -q no-token <<<"$1" && [ "$2" = t ]' _ \
+  check "its shell can't call the trust route, even with the token, nor read the token" bash -c 'grep -q "not run:" <<<"$1" && ! grep -q "exit code: 0" <<<"$1" && [ "$2" = t ]' _ \
     "$(res_of "$sid" "$before")" "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")"
   local t; t=$(api "$URL/api/sessions/$sid/taint")
-  check "GET taint says what marked it and what it read" bash -c 'jq -e ".taints | length == 1 and .[0].source == \"web_search\" and .[0].about == \"harbour\"" <<<"$1" >/dev/null && jq -e ".sources[0].source == \"web_search\" and .sources[0].about == \"harbour\" and .busy == false" <<<"$1" >/dev/null' _ "$t"
+  check "GET taint says what marked it and what it read" bash -c 'jq -e ".taints | length == 2 and .[0].source == \"web_search\" and .[0].about == \"harbour\"" <<<"$1" >/dev/null && jq -e ".sources[0].source == \"web_search\" and .sources[0].about == \"harbour\" and .busy == false" <<<"$1" >/dev/null' _ "$t"
   local checked; checked=$(echo "$t" | jq .checked)
   check "a trust that didn't see the latest untrusted read is refused" bash -c 'grep -q "look again" <<<"$1" && [ "$2" = t ]' _ \
     "$(api -X POST -d '{"seen": 1}' "$URL/api/sessions/$sid/trust")" "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")"
   check "the owner trusts it as seen" eq "$(api -X POST -d "{\"seen\": $checked}" "$URL/api/sessions/$sid/trust" | jq -r .trusted)" true
   check "the mark is lifted, with a trust block saying where it came from" eq \
-    "$(q "SELECT (s.tainted_at IS NULL) || '/' || (e.payload->>'by') || '/' || (e.payload->>'source') FROM sessions s JOIN tape_events e ON e.session_id = s.id AND e.kind = 'trust' WHERE s.id='$sid'")" "true/the owner/web_search"
+    "$(q "SELECT (s.tainted_at IS NULL) || '/' || (e.payload->>'by') || '/' || (e.payload->>'source') FROM sessions s JOIN tape_events e ON e.session_id = s.id AND e.kind = 'trust' WHERE s.id='$sid'")" "true/the owner/bash"
   check "the board shows it clean" eq "$(api "$URL/api/board" | jq -r --arg id "$sid" '.sessions[] | select(.id == $id) | .tainted_at')" null
   check "trusting a clean session does nothing" eq "$(api -X POST -d "{\"seen\": $checked}" "$URL/api/sessions/$sid/trust" | jq -r .trusted)" false
   check "what it stored while tainted keeps its mark" eq "$(q "SELECT tainted FROM memories WHERE text LIKE 'TRUST-MEM%'")" t
@@ -1018,7 +1025,7 @@ trust_session() {
   check "its shell has the network again" bash -c 'grep -q "net=0" <<<"$1" && ! grep -q sandboxed <<<"$1"' _ "$(res_of "$sid" "$before")"
   zen ask --json -s "$sid" "TRUST-D" >/dev/null
   t=$(api "$URL/api/sessions/$sid/taint")
-  check "the next web search taints it again, and GET taint shows only what came after the trust" bash -c '[ "$2" = t ] && jq -e ".taints | length == 1 and .[0].about == \"lighthouse\"" <<<"$1" >/dev/null && jq -e "[.sources[].about] == [\"lighthouse\"]" <<<"$1" >/dev/null' _ \
+  check "the next web search taints it again, and GET taint shows only what came after the trust" bash -c '[ "$2" = f ] && jq -e ".risky_at != null and .tainted_at == null" <<<"$1" >/dev/null && jq -e ".taints | length == 1 and .[0].about == \"lighthouse\"" <<<"$1" >/dev/null && jq -e "[.sources[].about] == [\"lighthouse\"]" <<<"$1" >/dev/null' _ \
     "$t" "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")"
   q "DELETE FROM memories WHERE text LIKE 'TRUST-MEM%'" >/dev/null
   kill "$srv" 2>/dev/null || true
@@ -1058,6 +1065,54 @@ names_suggestions() {
   check "outcomes by prompt version" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/suggestions" | jq -c '.by_version[0] | [.prompt_version, .accepted, .edited, .declined, .unseen]')" '["v1",1,1,1,2]'
 }
 
+# D-056: reading makes a session risky, safe reads do not taint; code runs offline;
+# outward/destructive actions are held before effect, and only an owner grants an exact retry.
+action_gate() {
+  local ws; ws=$(new_workspace action-gate)
+  local port=$((PORT + 12))
+  python3 "$REPO/scripts/e2e/searxng_stub.py" "$port" & local srv=$!
+  start_kernel "$ws" "$(script action-gate.json "s|ZENHOME|$TMP/home/.zenbot|g" "s|OWNERHOME|$TMP/home|g" "s|KERNELURL|$URL|g")" ZEN_SEARXNG_URL="http://127.0.0.1:$port"
+  api() { curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
+  res_of() { q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$1' AND payload->>'role'='toolResult' AND seq > ${2:-0}"; }
+  local sid r before gate
+  r=$(zen ask --json -m faux/smoke "GATE-READ"); sid=$(echo "$r" | jq -r .session_id)
+  check "outside read is risky, not tainted" eq "$(q "SELECT (risky_at IS NOT NULL) || '/' || (tainted_at IS NULL) FROM sessions WHERE id='$sid'")" true/true
+  check "safe file effect runs without approval" grep -q "safe workspace note" "$ws/notes.txt"
+  check "programmable git ran offline without taint" grep -q "sandboxed:" <<<"$(res_of "$sid")"
+  before=$(q "SELECT max(seq) FROM tape_events WHERE session_id='$sid'")
+  zen ask --json -s "$sid" "GATE-SECRET" >/dev/null
+  check "recursive read cannot print credential characters" bash -c '! grep -q "/token:" <<<"$1"' _ "$(res_of "$sid" "$before")"
+  zen ask --json -s "$sid" "GATE-HOLD" >/dev/null
+  check "outward action taints before running" eq "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")" t
+  gate=$(api "$URL/api/sessions/$sid/allow" | jq -r '.actions[0].id')
+  check "unauthenticated approval refused" eq "$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d "{\"id\":$gate}" "$URL/api/sessions/$sid/allow")" 401
+  check "owner allows exact action" eq "$(api -X POST -d "{\"id\":$gate}" "$URL/api/sessions/$sid/allow" | jq -r .allowed)" true
+  check "duplicate approval refused" eq "$(api -X POST -d "{\"id\":$gate}" "$URL/api/sessions/$sid/allow" | jq -r .allowed)" false
+  before=$(q "SELECT max(seq) FROM tape_events WHERE session_id='$sid'")
+  zen ask --json -s "$sid" "GATE-HOLD" >/dev/null
+  check "one exact retry ran successfully" grep -q "exit code: 0" <<<"$(res_of "$sid" "$before")"
+  check "grant consumption audited and once" eq "$(q "SELECT (used_at IS NOT NULL) || '/' || (SELECT count(*) FROM tape_events WHERE session_id='$sid' AND kind='allow') FROM action_gates WHERE id=$gate")" true/1
+  before=$(q "SELECT max(seq) FROM tape_events WHERE session_id='$sid'")
+  zen ask --json -s "$sid" "GATE-HOLD" >/dev/null
+  check "second retry held again" grep -q "not run:" <<<"$(res_of "$sid" "$before")"
+  zen ask --json -s "$sid" "GATE-VERIFY" >/dev/null
+  check "nested verification cannot change home" bash -c '! grep -q planted "$1/.bashrc" 2>/dev/null' _ "$TMP/home"
+  zen ask --json -s "$sid" "GATE-PY" >/dev/null
+  check "opaque destructive interpreter held" grep -q "safe workspace note" "$ws/notes.txt"
+  zen ask --json -s "$sid" "GATE-JOB" >/dev/null
+  check "unapproved persistent job does not exist" eq "$(q "SELECT count(*) FROM jobs WHERE name='gate-job'")" 0
+  gate=$(api "$URL/api/sessions/$sid/allow" | jq -r '.actions[0].id')
+  api -X POST -d "{\"id\":$gate}" "$URL/api/sessions/$sid/allow" >/dev/null
+  zen ask --json -s "$sid" "GATE-JOB" >/dev/null
+  check "exact approved schedule creates a live job without a second approval" eq "$(q "SELECT enabled FROM jobs WHERE name='gate-job'")" t
+  q "UPDATE sessions SET risky_at = NULL, tainted_at = now() WHERE id='$sid'" >/dev/null
+  before=$(q "SELECT max(seq) FROM tape_events WHERE session_id='$sid'")
+  zen ask --json -s "$sid" "GATE-HOLD" >/dev/null
+  check "legacy taint after rollback still gates effects" grep -q "not run:" <<<"$(res_of "$sid" "$before")"
+  kill "$srv" 2>/dev/null || true
+}
+
+run action-gate action_gate
 run engine-boundary engine_boundary
 run abort-tool abort_tool
 run open-loop open_loop

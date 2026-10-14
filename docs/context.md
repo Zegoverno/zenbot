@@ -69,7 +69,8 @@ Kinds: `message` (user, assistant, toolResult, in Pi's message format; a user me
 turn), `context` (an instruction file the session picked up), `envelope` (the session's instructions
 and tools changed), `compaction` (a summary now replaces older blocks), `engine_session` (an
 engine's own session is in sync with the tape up to a block), `failover` (a usage-limit switch to
-another engine), `taint` (untrusted content entered the session), `trust` (the owner lifted the
+another engine), `risky` (outside content entered the session), `taint` (an action was held),
+`allow` (the owner granted an exact action once), `trust` (the owner lifted the
 taint, D-054: by whom, when it was set, where it came from), and the agent tools' records
 `questions`, `verification`, `verdict` (docs/brief.md).
 

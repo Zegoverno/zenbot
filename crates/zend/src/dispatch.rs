@@ -225,11 +225,27 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                         // Nothing more after a tool ended the turn; then the agent's own tools
                         // (agent.rs), or the kernel's built-ins.
                         let read_only = agent::read_only(kind.as_deref());
+                        // Immutable owner-only and kind boundaries cannot be overridden by a grant.
+                        if let Some(why) = agent::refusal(kind.as_deref(), &name) {
+                            return tools::ToolOutput { content: why, is_error: true };
+                        }
+                        if let Some(why) = agent::protected_refusal(&app.db, id, kind.as_deref(), &workspace, &name, &args, true).await {
+                            return tools::ToolOutput { content: why, is_error: true };
+                        }
+                        let policy = if read_only { Ok(crate::gate::Policy::Run) }
+                            else { crate::gate::check(app, id, &workspace, &name, &args).await };
+                        let policy = match policy {
+                            Ok(p) => p,
+                            Err(e) => return tools::ToolOutput { content: format!("not run: action gate unavailable ({e})"), is_error: true },
+                        };
+                        if let crate::gate::Policy::Hold(why) = &policy {
+                            return tools::ToolOutput { content: crate::gate::held_note(why), is_error: true };
+                        }
                         if let Some(why) = agent::refuse(ending) {
                             tools::ToolOutput { content: why, is_error: true }
                         } else if let Some(why) = agent::refusal(kind.as_deref(), &name) {
                             tools::ToolOutput { content: why, is_error: true }
-                        } else if let Some(why) = agent::protected_refusal(&app.db, id, kind.as_deref(), &workspace, &name, &args).await {
+                        } else if let Some(why) = agent::protected_refusal(&app.db, id, kind.as_deref(), &workspace, &name, &args, matches!(policy, crate::gate::Policy::Granted)).await {
                             tools::ToolOutput { content: why, is_error: true }
                         } else if let Some(why) = crate::workshop::mark_draft_write(app, id, &workspace, &name, &args).await {
                             tools::ToolOutput { content: why, is_error: true }
@@ -242,18 +258,26 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                                     tracing::warn!("backing up {}: {e:#}", p.display());
                                 }
                             }
-                            let mut out = if let Some(out) = agent::run_tool(app, id, &workspace, &name, &args, &mut ending).await {
+                            let mut out = if let Some(out) = agent::run_tool(app, id, &workspace, &name, &args, &mut ending, &policy).await {
                                 out
                             } else {
                                 // A verifier's shell is read-only; a tainted session's has no network.
                                 let sandbox = if read_only {
                                     tools::Sandbox::ReadOnly
-                                } else if name == "bash" {
-                                    crate::taint::shell_sandbox(&app.db, id).await
                                 } else {
-                                    tools::Sandbox::None
+                                    match &policy {
+                                        crate::gate::Policy::Sandbox => tools::Sandbox::Offline,
+                                        crate::gate::Policy::SafeRead(_) => tools::Sandbox::SafeRead,
+                                        crate::gate::Policy::Run if matches!(name.as_str(), "write" | "edit")
+                                            && crate::taint::tainted(&app.db, id).await => tools::Sandbox::GatedFile,
+                                        _ => tools::Sandbox::None,
+                                    }
                                 };
-                                let mut out = tools::execute(&workspace, &name, &args, &env, sandbox).await;
+                                let mut execute_args = args.clone();
+                                if let crate::gate::Policy::SafeRead(command) = &policy {
+                                    execute_args["command"] = json!(command);
+                                }
+                                let mut out = tools::execute(&workspace, &name, &execute_args, &env, sandbox).await;
                                 // Stored content a tainted session wrote is untrusted however it's read.
                                 if name == "read" && !out.is_error {
                                     if let Some(source) = agent::read_of_tainted(&app.db, &workspace, &args).await {

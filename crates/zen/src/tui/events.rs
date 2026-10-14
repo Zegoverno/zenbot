@@ -190,8 +190,9 @@ impl App {
                 self.draw();
             }
             // Marked as having read untrusted content, or trusted again by the owner.
-            Ev::Taint { tainted, .. } => {
+            Ev::Taint { tainted, risky, .. } => {
                 self.tainted = tainted;
+                self.risky = risky || tainted;
                 self.draw();
             }
             Ev::Status { text } => {
@@ -406,8 +407,10 @@ mod tests {
     fn the_footer_marks_an_untrusted_session_until_it_is_trusted() {
         let mut a = app(100, 20);
         assert!(!footer(&a).contains("untrusted"), "{}", footer(&a));
+        a.on_event(json!({ "type": "taint", "risky": true }));
+        assert!(footer(&a).contains(" · risky · ") && !a.tainted);
         a.on_event(json!({ "type": "taint", "tainted": true, "source": "web_search", "about": "harbour" }));
-        assert!(footer(&a).contains(" · untrusted (/trust) · "), "{}", footer(&a));
+        assert!(footer(&a).contains(" · untrusted (/allow or /trust) · "), "{}", footer(&a));
         a.on_event(json!({ "type": "taint", "tainted": false }));
         assert!(!footer(&a).contains("untrusted"), "{}", footer(&a));
     }

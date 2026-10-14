@@ -6,6 +6,23 @@
 
 ---
 
+## 2026-10-13 — Three-way action gate (D-056)
+
+Outside reads mark provenance as risky, without blanket shell taint. The kernel checks effects
+before dispatch: fixed read utilities run in a hardened read-only view, programmable builds/Git
+run in the offline workspace sandbox, and unsupported, outward or steering actions are held.
+A held action taints the session before anything runs. `/allow` and `/allow yes` (`!` in Matrix)
+review and grant the latest exact workspace/tool/arguments once for ten minutes, without trusting
+the session. Approval and its audit commit together; the grant is consumed atomically.
+Approved scheduling uses owner authorization without a second job activation prompt. Kernel Git
+ignores global configuration and hooks/fsmonitor, closing the indirect Git-config escape.
+Reads validate the opened object, and unapproved file writes use directory descriptors instead
+of following mutable symlinks. Verification checks its commands and directory before running,
+and collecting its Git diff is read-only/offline too. Secret mounts now also hide SSH, GitHub,
+AWS and package-registry credentials. Request-based System One grants remain a follow-up.
+
+---
+
 ## 2026-10-13 — Search no longer spreads the taint mark; worktrees are trusted (D-056)
 
 Most tainted sessions weren't reading the web: `search` came across a memory an earlier tainted

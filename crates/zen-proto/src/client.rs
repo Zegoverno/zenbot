@@ -97,6 +97,8 @@ pub enum Event {
     /// The session was marked as having read untrusted content (`tainted`, with where it came
     /// from), or the owner lifted the mark (D-054).
     Taint {
+        #[serde(default)]
+        risky: bool,
         #[serde(default, deserialize_with = "or_default")]
         tainted: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
