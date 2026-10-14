@@ -6,6 +6,20 @@
 
 ---
 
+## 2026-10-14 — A job's report can go into a session (D-060)
+
+The owner wants a daily check-in in his main Matrix room that he can answer right there. A job's
+new `post_to` (a session id or prefix, or `this`) makes the kernel append a clean `ok` run's report
+to that session as an assistant message, after any running turn, and record it in
+`job_runs.posted_to`; the Matrix bridge posts it in that session's room and leaves it out of
+**zen jobs**. A run that read untrusted content still reports to the jobs feed. `zen jobs add/set
+--post-to`, the API and the `schedule` tool take it (migration 0026). Tested: e2e `job-post-to`
+(posted once, recorded, restart recovery, the session goes on, a marked run stays in the feed,
+refusals, clearing),
+the bridge's unit tests.
+
+---
+
 ## 2026-10-14 — Disk hygiene: dumps, eval runs, build dirs, Docker (D-059)
 
 The VM's 25 GB disk once filled up; four kinds of growth had no cleanup. The nightly `prune` job

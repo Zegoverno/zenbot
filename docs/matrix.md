@@ -38,7 +38,9 @@ client protocol (docs/client-protocol.md), like `zen`: the kernel doesn't know M
   the answer as a notice, so they never reach the agent and nothing it read can approve a job, a
   skill or a tool. Removing or creating a job stays in the terminal.
 - **Job reports.** Every minute it reads `GET /api/jobs/runs` and posts each finished run (`ok` with
-  its report, `error`, `missed`, `interrupted`; not `silent`) once to **zen jobs**. Runs from before
+  its report, `error`, `missed`, `interrupted`; not `silent`) once to **zen jobs**. A run posted
+  into a session (`posted_to`, a job's `post_to`, D-060) is left out: its report arrives in that
+  session's room as zen's message, where the owner can answer it. Runs from before
   the bridge first started aren't replayed.
 
 ## Security

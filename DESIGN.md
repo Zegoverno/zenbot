@@ -145,6 +145,14 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
   (read back from `/proc/self/fd`), not a secret file, modified after the run started, UTF-8 and
   at most 60 KB; otherwise the run is an `error` naming why. An empty file makes the run
   `silent`. The workspace, not `/tmp`, because a tainted run's shell has a private `/tmp`.
+- **Posting into a session** (D-060): a job with `post_to` (one of the owner's own sessions) has a
+  clean `ok` run's report appended to that session as an assistant message, once no turn is
+  running there (under the turns lock; up to 2 hours), and emitted to its clients, so the Matrix
+  room of that session shows it and the next turn sees it (a new message ends engine-session
+  resume). `job_runs.pending_to` makes the queue durable across restarts; appending to the tape
+  and setting `posted_to` commit atomically. The bridge leaves queued and posted runs out of
+  **zen jobs**; an expired queue entry falls back to the feed. A run that read untrusted content
+  reports to the jobs feed only.
 - **Creating jobs**: the owner (`zen jobs add`, `POST /api/jobs`) or the agent (`schedule`). An
   agent's job goes live only when System One, reading the owner's own messages in the session,
   gives ≥ `ZEN_JOB_BAR` (0.9) that the owner asked for it (decision point `job_approval`; the

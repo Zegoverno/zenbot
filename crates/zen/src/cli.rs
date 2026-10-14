@@ -228,8 +228,11 @@ pub(crate) enum JobsCmd {
         /// A file in its directory the run writes the report to; the kernel posts the file, not the run's answer
         #[arg(long)]
         report_file: Option<String>,
+        /// A session (id or its first 8+ characters) its reports are posted into, e.g. the Matrix main room's
+        #[arg(long)]
+        post_to: Option<String>,
     },
-    /// Change an agent job's schedule, prompt, timezone, context, skills, model or report file
+    /// Change an agent job's schedule, prompt, timezone, context, skills, model, report file or target session
     Set {
         name: String,
         #[arg(short, long)]
@@ -247,6 +250,9 @@ pub(crate) enum JobsCmd {
         /// A file in its directory the run writes the report to (`""` goes back to the run's answer)
         #[arg(long)]
         report_file: Option<String>,
+        /// A session its reports are posted into (`""` goes back to the jobs feed only)
+        #[arg(long)]
+        post_to: Option<String>,
     },
     /// Pause a job
     Pause { name: String },

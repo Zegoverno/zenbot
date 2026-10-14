@@ -43,7 +43,8 @@ changes. Candidate follow-ups, each only when use calls for it:
   spreading the mark and worktrees of trusted repositories trusted, is built.
 - **Matrix:** interactive (emoji) verification of the bot; streaming answers by editing a message,
   if waiting for the whole answer feels slow.
-- **Jobs:** pre-run checks that skip the model when nothing changed, if job costs call for it.
+- **Jobs:** reports can now be posted into an existing owner session (D-060), with a durable
+  delivery queue; pre-run checks that skip the model when nothing changed, if job costs call for it.
 - **Board:** a kernel-wide event stream instead of the 2 s poll, if that feels slow.
 - **Suggestions:** improve the suggestion prompt from `zen suggestions` data after a few weeks.
 - **Prefix cost:** shorter descriptions for `verify`, `remember` and `decide`, if the fixed prefix's

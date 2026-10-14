@@ -126,6 +126,9 @@ for _ in $(seq 240); do grep -q "rooms checked" "$TMP/owner.log" && break; kill 
 curl -fs -XPOST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' "$K/api/jobs" \
   -d '{"name":"matrix-e2e","prompt":"hello from a job","schedule":"every 24h","model":"faux/smoke"}' >/dev/null
 curl -fs -XPOST -H "Authorization: Bearer $TOKEN" "$K/api/jobs/matrix-e2e/run" >/dev/null
+curl -fs -XPOST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' "$K/api/jobs" \
+  -d "{\"name\":\"matrix-e2e-main\",\"prompt\":\"hello from a targeted job\",\"schedule\":\"every 24h\",\"model\":\"faux/smoke\",\"post_to\":\"$SID\"}" >/dev/null
+curl -fs -XPOST -H "Authorization: Bearer $TOKEN" "$K/api/jobs/matrix-e2e-main/run" >/dev/null
 wait $OWNER || { cat "$TMP/owner.log"; fail "the owner's conversation"; }
 cat "$TMP/owner.log" | grep '^ok'
 

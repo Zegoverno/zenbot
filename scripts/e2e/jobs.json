@@ -9,5 +9,6 @@
   {"when": "JOBTASK-R", "text": "Done: the answer, not the report."},
   {"when": "JOBTASK-N", "text": "Done, but no file written."},
   {"when": "JOBTASK-E", "tool": "bash", "args": {"command": "mkdir -p out && : > out/empty.md"}},
-  {"when": "JOBTASK-E", "text": "Done."}
+  {"when": "JOBTASK-E", "text": "Done."},
+  {"when": "OWNER-HELLO", "text": "Hello, owner."}
 ]

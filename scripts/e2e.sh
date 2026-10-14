@@ -915,6 +915,42 @@ job_report_file() {
   check "an empty --report-file clears it" eq "$(zen jobs --json | jq -r '.jobs[] | select(.name == "rfile") | .report_file')" null
 }
 
+# Reports posted into a session (jobs.rs, D-060): a job with `post_to` (a session id or its prefix,
+# stored whole; only the owner's own sessions) has a clean `ok` run's report appended to that session
+# as one assistant message, recorded in `job_runs.posted_to` (so the Matrix bridge leaves it out of
+# the jobs room); the session goes on afterwards; a run that read untrusted content stays in the
+# jobs feed; `--post-to ""` clears it.
+job_post_to() {
+  local ws; ws=$(new_workspace post-to)
+  start_kernel "$ws" "$(script jobs.json)" ZEN_JOBS=1 ZEN_JOBS_TICK=0.5 ZEN_DEFAULT_MODEL=faux/smoke
+  local runs="SELECT string_agg(r.status, ',' ORDER BY r.id) FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name ="
+  local sid; sid=$(zen ask --json -m faux/smoke "OWNER-HELLO" | jq -r .session_id)
+  local posted="SELECT count(*) FROM tape_events WHERE session_id = '$sid' AND kind = 'message' AND payload->>'job' = 'ppost'"
+  zen jobs add ppost --schedule "every 1h" --prompt "JOBTASK-A" --post-to "${sid:0:8}" >/dev/null
+  check "the target is stored whole" eq "$(zen jobs --json | jq -r '.jobs[] | select(.name == "ppost") | .post_to')" "$sid"
+  zen jobs run ppost >/dev/null
+  check "the run is ok" poll "$runs 'ppost'" ok
+  check "and recorded as posted into the session" poll "SELECT posted_to FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name = 'ppost'" "$sid"
+  check "its report is one assistant message there, attributed to the job" poll \
+    "SELECT count(*) || ':' || bool_and(payload->>'role' = 'assistant' AND payload->'content'->0->>'text' LIKE '%ppost%Report A: all good.%') FROM tape_events WHERE session_id = '$sid' AND kind = 'message' AND payload->>'job' = 'ppost'" 1:true
+  stop_kernel
+  q "INSERT INTO job_runs (job_id, trigger, status, output, ended_at, pending_to)
+     SELECT id, 'owner', 'ok', 'QUEUED BEFORE RESTART', now(), '$sid' FROM jobs WHERE name = 'ppost'" >/dev/null
+  start_kernel "$ws" "$(script jobs.json)" ZEN_JOBS=1 ZEN_JOBS_TICK=0.5 ZEN_DEFAULT_MODEL=faux/smoke
+  check "durable queued reports survive restart without reposting the first" poll "$posted" 2
+  check "the session goes on after it" eq "$(zen ask --json -s "$sid" "OWNER-HELLO" | jq -r .text)" "Hello, owner."
+  q "UPDATE job_runs SET tainted = true WHERE job_id = (SELECT id FROM jobs WHERE name = 'ppost')" >/dev/null
+  zen jobs run ppost >/dev/null
+  check "a run after a marked report is ok" poll "$runs 'ppost'" ok,ok,ok
+  check "but its report stays in the jobs feed" eq "$(q "SELECT coalesce(posted_to::text, 'feed') || '/' || tainted FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name = 'ppost' ORDER BY r.id DESC LIMIT 1")" feed/true
+  check "and nothing more reached the session" eq "$(q "$posted")" 2
+  local jsid; jsid=$(q "SELECT session_id FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name = 'ppost' LIMIT 1")
+  check "a job's own session is refused as a target" grep -q "no session of the owner's" <<<"$(zen jobs add pjob --schedule "every 1h" --prompt "JOBTASK-A" --post-to "$jsid" 2>&1)"
+  check "an unknown one too" grep -q "no session of the owner's" <<<"$(zen jobs add pnone --schedule "every 1h" --prompt "JOBTASK-A" --post-to deadbeef 2>&1)"
+  zen jobs set ppost --post-to "" >/dev/null
+  check "an empty --post-to clears it" eq "$(zen jobs --json | jq -r '.jobs[] | select(.name == "ppost") | .post_to')" null
+}
+
 # Taint on data (taint.rs, D-053): what a session that read untrusted content stored carries the
 # mark, and every read path hands it over as untrusted content that marks the reader. A tainted
 # memory stays out of the next session's instructions; search lists it by id without its text
@@ -1142,6 +1178,7 @@ run slow-summary slow_summary
 run stale-turn stale_turn
 run scheduled-jobs scheduled_jobs
 run job-report-file job_report_file
+run job-post-to job_post_to
 run taint-on-data taint_on_data
 run trust trust_session
 run names-suggestions names_suggestions
