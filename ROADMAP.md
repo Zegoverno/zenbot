@@ -20,7 +20,7 @@ the Matrix channel (D-049) followed, then a weekend of hardening (D-050 to D-053
 
 | Phase | Name | Delivered | Where it's recorded |
 |---|---|---|---|
-| 0 | Ground | The reference projects studied in their code; the open fix PRs (#8, #9, #10, #13) merged | `docs/research/`, PROGRESS.md 2026-10-06 |
+| 0 | Ground | The reference projects studied in their code; the open fix PRs (#8, #9, #10, #13) merged | `docs/archive/research/`, PROGRESS.md 2026-10-06 |
 | 1 | Foundation | Prompt files, tool descriptions, short-term memory with sleep, skills (#17; eval 12/12 → 12/12, cost +27%) | D-027, D-028, D-029, PROGRESS.md |
 | 2 | Reach | `web_search`, `web_fetch`, MCP client, `find_tools` / `load_tool` / `call_tool` (#18) | D-033, D-034 |
 | 3 | Recall | `search` (exact, full-text and semantic) over sessions and memories (#19) | D-035 |

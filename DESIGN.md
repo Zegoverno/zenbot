@@ -371,7 +371,7 @@ system prompt ("ask before"), not enforced.
 
 Not built yet unless marked; most of it has shipped since (see "As built"). The roadmap builds it
 in phases. Sources: the Phase 0 research in
-`docs/research/` (Hermes, OpenClaw, agentskills.io, Anthropic's tool search, FastMCP, rmcp, Voyager,
+`docs/archive/research/` (Hermes, OpenClaw, agentskills.io, Anthropic's tool search, FastMCP, rmcp, Voyager,
 Letta, LLM Wiki and gbrain, Postgres hybrid search, web providers and fetch safety), each claim with
 file paths in the projects' code.
 

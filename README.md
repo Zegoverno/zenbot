@@ -18,7 +18,7 @@ Status: early, in daily use by the owner. What's built and what's next: [ROADMAP
 | [PROGRESS.md](PROGRESS.md) | What shipped, newest first |
 | [AGENTS.md](AGENTS.md) | Rules for agents (and people) working on this repo |
 | [INSTALL.md](INSTALL.md) | Installing on a fresh VM (written for a coding agent) |
-| `docs/` | Deep dives: [context.md](docs/context.md) (what the model reads each turn), [brief.md](docs/brief.md) (briefs and verification), [worker-protocol.md](docs/worker-protocol.md), [client-protocol.md](docs/client-protocol.md), [matrix.md](docs/matrix.md) (the Matrix channel); `docs/research/` holds dated research snapshots (history) |
+| `docs/` | Deep dives: [context.md](docs/context.md) (what the model reads each turn), [brief.md](docs/brief.md) (briefs and verification), [worker-protocol.md](docs/worker-protocol.md), [client-protocol.md](docs/client-protocol.md), [matrix.md](docs/matrix.md) (the Matrix channel); `docs/archive/research/` holds dated research snapshots (history) |
 | [evals/README.md](evals/README.md) | Eval tasks and the report |
 
 ## Install

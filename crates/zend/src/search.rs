@@ -6,7 +6,7 @@
 //! afterwards when an embedding model is reachable (OpenRouter, `ZEN_EMBED_MODEL`, default
 //! `openai/text-embedding-3-small`, 1536 dimensions); until then a document is found by text.
 //!
-//! A search runs three arms in one query (the recipe in docs/research/memory-search-web.md §D):
+//! A search runs three arms in one query (the recipe in docs/archive/research/memory-search-web.md §D):
 //! exact names and paths first (trigram over `ident`, for queries that look like an identifier),
 //! then full text and meaning merged by reciprocal rank fusion (k = 60). System One reranks the top
 //! results when it's configured. A memory a search returns counts as used (the sleep's recency).
