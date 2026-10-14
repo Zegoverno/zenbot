@@ -33,7 +33,7 @@ Docker images and week-old build cache. `zen status` shows the root filesystem's
 ---
 
 
-## 2026-10-14 — A failover's model sticks to the session (D-057)
+## 2026-10-14 — A failover's model sticks to the session (D-058)
 
 After a hard usage limit made a turn continue on another model, the next prompt went back to the
 exhausted one, and the terminal's status line kept showing it. Now the kernel moves the session to
