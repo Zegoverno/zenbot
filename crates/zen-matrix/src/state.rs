@@ -147,7 +147,7 @@ impl State {
         let mut out = vec![];
         for r in runs.iter().rev() {
             let Some(id) = r["id"].as_i64() else { continue };
-            let done = !matches!(r["status"].as_str(), Some("running") | None);
+            let done = !matches!(r["status"].as_str(), Some("running") | None) && !r["pending_to"].is_string();
             if id > floor && done && self.jobs_reported.insert(id) {
                 out.push(r);
             }
@@ -226,6 +226,15 @@ mod tests {
         let ids: Vec<i64> = s.new_runs(&runs).iter().map(|r| r["id"].as_i64().unwrap()).collect();
         assert_eq!(ids, vec![10]);
         assert_eq!(s.jobs_reported, BTreeSet::from([9, 10]), "ids the kernel no longer lists are forgotten");
+    }
+
+    #[test]
+    fn queued_reports_wait_until_delivered_or_fallback() {
+        let mut s = State { jobs_floor: Some(0), ..State::default() };
+        assert!(s.new_runs(&[json!({ "id": 1, "status": "ok", "pending_to": "target" })]).is_empty());
+        assert!(!s.jobs_reported.contains(&1), "pending is not consumed");
+        assert_eq!(s.new_runs(&[json!({ "id": 1, "status": "ok", "pending_to": null })]).len(), 1, "fallback is still reported");
+        assert!(s.new_runs(&[json!({ "id": 1, "status": "ok" })]).is_empty(), "reported once");
     }
 
     #[test]

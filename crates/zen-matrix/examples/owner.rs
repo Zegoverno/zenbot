@@ -76,9 +76,11 @@ async fn main() -> Result<()> {
 
     // Everything the bot posts, decrypted.
     let (tx, mut rx) = mpsc::unbounded_channel::<(bool, String)>();
+    let (post_tx, mut post_rx) = mpsc::unbounded_channel::<String>();
     let me = c.user_id().unwrap().to_owned();
     c.add_event_handler(move |ev: OriginalSyncRoomMessageEvent, r: Room| {
         let tx = tx.clone();
+        let post_tx = post_tx.clone();
         let me = me.clone();
         async move {
             if ev.sender == me || r.state() != RoomState::Joined {
@@ -89,6 +91,9 @@ async fn main() -> Result<()> {
                 MessageType::Notice(n) => (true, n.body.clone()),
                 _ => return,
             };
+            if body.contains("⏰ *matrix-e2e-main*") {
+                post_tx.send(r.room_id().to_string()).ok();
+            }
             tx.send((notice, body)).ok();
         }
     });
@@ -169,6 +174,13 @@ async fn main() -> Result<()> {
         println!("waiting for the report of job {job}");
         wait_for(&mut rx, &format!("**{job}**")).await?;
         println!("ok: the job's report reached the jobs room");
+        let rid = tokio::time::timeout(Duration::from_secs(90), post_rx.recv())
+            .await.context("no report posted into the main room")?
+            .context("posted-report stream ended")?;
+        if rid != room.room_id().as_str() {
+            bail!("the targeted report went to {rid}, not the main room");
+        }
+        println!("ok: a targeted job report reached the encrypted main room");
     }
     Ok(())
 }

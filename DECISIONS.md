@@ -6,6 +6,37 @@
 
 ---
 
+## D-060 — A job's report can be posted into one of the owner's sessions
+
+**Date:** 2026-10-14 · **Status:** accepted (owner asked for it: a daily check-in in the main
+Matrix room that he answers right there); built
+
+**Decision:** An agent job may name `post_to`, one of the owner's own sessions (kind none: not a
+job's, a subagent's or a verifier's session), given as its id, an 8+ character prefix, or `this`
+for the agent's session; stored whole. When a run ends `ok` with a report, and its session read no
+untrusted content, the kernel appends the report to that session as one assistant message
+(`⏰ *job*` above the report; the payload names `job` and `job_run`) and emits it to the session's
+clients, so the Matrix bridge posts it in that session's room and the terminal shows it. The run
+records delivery intent in `job_runs.pending_to` with its status. The scheduler retries it after
+a restart; the tape append and `posted_to` marker commit atomically, preventing loss or duplicate
+session messages. The bridge leaves queued and posted runs out of the **zen jobs** room. Errors, missed and interrupted runs still go to **zen jobs**. A
+run that read untrusted content keeps its report in the jobs feed: in the session it would be text
+from a marked run that the next turn reads as zen's own. The report waits for a running turn to
+end (appended under the turns lock, so no turn starts in between; given up after 2 hours, saying
+so in the run's `error`). A new message on the tape means the next turn doesn't resume the
+engine's session, so the model sees the report. `zen jobs add/set --post-to`, `POST/PATCH
+/api/jobs` `{post_to}` (`""` clears it), the `schedule` tool's `post_to`; an agent's change passes
+the same gate.
+
+**Why:** A report that asks for an answer ("up for a session today?") belongs where the owner
+answers it, in a session that then has both the question and the answer. The jobs room takes no
+replies, and a job session can't converse.
+
+**Considered:** the bridge posting the report into another room (the session behind it wouldn't
+have it, so the agent answering wouldn't know what was asked); a kernel-origin user message (it
+would read as the owner's words); posting a marked run's report as untrusted content (it would mark
+the owner's main session and cut its shell off the network for a check-in).
+
 ## D-059 — Bounded disk use: prune our own leftovers, warn at 80%
 
 **Date:** 2026-10-14 · **Status:** accepted (owner); built

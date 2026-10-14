@@ -185,10 +185,13 @@ pub fn answers(qs: &Questions, text: &str) -> Option<String> {
     Some(lines.join("\n"))
 }
 
-/// A job run as a report for the jobs room, or None when there's nothing to say (silent, or
-/// still running).
+/// A job run as a report for the jobs room, or None when there's nothing to say (silent, still
+/// running, or posted into a session: its room gets it from the session, D-060).
 pub fn job_report(run: &Value) -> Option<String> {
     let job = run["job"].as_str().unwrap_or("job");
+    if run["status"] == "ok" && (run["posted_to"].is_string() || run["pending_to"].is_string()) {
+        return None;
+    }
     match run["status"].as_str()? {
         "ok" => Some(format!("**{job}**\n\n{}", run["output"].as_str().unwrap_or("(no report)"))),
         "error" => Some(format!("⚠️ **{job}** failed: {}", one_line(run["error"].as_str().unwrap_or("unknown error"), 1000))),
@@ -385,6 +388,10 @@ mod tests {
     fn job_runs_become_reports() {
         assert_eq!(job_report(&json!({ "job": "brief", "status": "ok", "output": "3 new emails" })).as_deref(), Some("**brief**\n\n3 new emails"));
         assert_eq!(job_report(&json!({ "job": "x", "status": "silent" })), None);
+        let posted = json!({ "job": "x", "status": "ok", "output": "hi", "posted_to": "0b0c0d0e-0000-4000-8000-000000000000" });
+        assert_eq!(job_report(&posted), None, "a report posted into a session reaches its room from the session");
+        assert_eq!(job_report(&json!({ "status": "ok", "pending_to": "target", "output": "hi" })), None, "queued reports stay out of the jobs room");
+        assert!(job_report(&json!({ "job": "x", "status": "ok", "output": "hi", "posted_to": null })).is_some());
         assert_eq!(job_report(&json!({ "job": "x", "status": "running" })), None);
         assert_eq!(job_report(&json!({ "job": "x", "status": "error", "error": "boom\nline 2" })).as_deref(), Some("⚠️ **x** failed: boom line 2"));
         assert!(job_report(&json!({ "job": "x", "status": "missed" })).is_some());
