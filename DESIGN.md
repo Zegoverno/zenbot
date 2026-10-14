@@ -136,7 +136,9 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
   can't, no outward action. The prompt carries the previous report; a run whose session read
   untrusted content has its report marked (`job_runs.tainted`), so the next run gets it as
   untrusted content and is tainted from its start, and `schedule runs` shows it wrapped (D-053). A job session can't `ask`,
-  `delegate` or `schedule` (`agent::refusal`). A silent run's session is archived.
+  `delegate` or `schedule` (`agent::refusal`). When a run ends, however it ends (ok, silent, error,
+  interrupted by a restart), its session is archived (D-057): the board shows a job's session only
+  while it runs, and the report reaches the owner through the jobs room and `zen jobs runs`.
 - **Report files** (D-055): a job with `report_file` (a path inside its workspace, stored
   absolute) reports what its run wrote there, not the final answer, when the run ends `ok`. The
   file must be a regular file opened without following a symlink, really inside the workspace

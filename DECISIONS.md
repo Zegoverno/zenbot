@@ -6,6 +6,25 @@
 
 ---
 
+## D-057 — A job run's session is archived when the run ends
+
+**Date:** 2026-10-14 · **Status:** accepted (owner) · **Amends:** D-048 (the board's Jobs section)
+
+**Decision:** When an agent job's run ends, however it ends (`ok`, `silent`, `error`, or
+`interrupted` by a restart), the kernel archives its session (`jobs::finish`, and the interrupted
+sweep in `run_loop`). The board's Jobs section so shows only running job sessions; finished ones sit
+under Archived, one key away, and can be restored. Migration 0025 archives the job sessions from
+before.
+
+**Why:** The owner asked for it: every run left a session on the board, and the report already
+reaches the owner through the Matrix jobs room and `zen jobs runs` (errors included), so the session
+is only needed to dig into a run. Before, only silent runs were archived.
+
+**Considered:** keeping errored runs visible (no: the failure is posted to the jobs room and the
+job pauses after 5 in a row); deleting job sessions (no: archived, never deleted).
+
+---
+
 ## D-056 — Judge the action, not the reading; first step: search doesn't spread the mark
 
 **Date:** 2026-10-13 · **Status:** accepted (owner); built in part · **Amends:** D-053 (every read

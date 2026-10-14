@@ -6,6 +6,15 @@
 
 ---
 
+## 2026-10-14 — Job sessions archive themselves when the run ends (D-057)
+
+Every finished job run left its session on the board's Jobs section. Now the kernel archives a run's
+session however the run ends (ok, silent, error, interrupted); the report still reaches the owner
+through the jobs room and `zen jobs runs`. Migration 0025 archives the job sessions from before.
+The e2e `scheduled_jobs` scenario checks an ok and a failed run's sessions are archived.
+
+---
+
 ## 2026-10-14 — Sleep stub concurrency measurement
 
 - Finish the System One stub's inflight accounting before sending the response body. The client
