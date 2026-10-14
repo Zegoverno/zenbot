@@ -43,7 +43,7 @@ zenbot checks GitHub for a newer `main` about once an hour. `zen` mentions it wh
 zen upgrade            # or /upgrade inside zen; `zen upgrade --check` only checks
 ```
 
-It pulls `main` (refusing local changes or another branch) and runs `scripts/upgrade.sh`, which tests the new version, restarts zenbot once no session is working and rolls back if it isn't healthy; the result is in `~/.zenbot/upgrade.log`. Every step: [DEVELOPMENT.md, "Applying a change"](DEVELOPMENT.md#applying-a-change-scriptsupgradesh).
+It pulls `main` (refusing local changes or another branch) and runs `scripts/upgrade.sh`, which tests the new version, restarts zenbot once no session is working and rolls back if it isn't healthy; the result is in `~/.zenbot/upgrade.log`. After a healthy install it also trims oversized cargo build directories and old Docker leftovers, and `zen status` warns when the root filesystem is over 80% full. Every step: [DEVELOPMENT.md, "Applying a change"](DEVELOPMENT.md#applying-a-change-scriptsupgradesh).
 
 ### Engines
 

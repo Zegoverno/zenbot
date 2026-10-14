@@ -220,11 +220,11 @@ What it does, in order:
 
 1. Waits until the service's `/health` says `"busy":0` (no session working). After 30 minutes it goes ahead anyway and logs that it did; when `/health` doesn't answer at all (five tries in a row: the kernel is down or crash-looping) it goes ahead at once.
 2. Takes a lock (`~/.zenbot/upgrades/.lock`), so two installs never interleave. The newest request wins: if a newer stage is still waiting, or a newer one was already installed (`~/.zenbot/upgrades/.installed`), it logs `upgrade to <commit> skipped` and exits.
-3. If migrations are pending, backs up the live database to `~/.zenbot/backups/<UTC time>-<previous version>.dump` (last 10 kept). If the backup fails, or the database can't be asked what's pending, it aborts and changes nothing.
+3. If migrations are pending, backs up the live database to `~/.zenbot/backups/<UTC time>-<previous version>.dump` (last 3 kept; the nightly `prune` job keeps the same 3). If the backup fails, or the database can't be asked what's pending, it aborts and changes nothing.
 4. Waits for idle again (as in 1, within the same 30 minutes), so a session that started meanwhile isn't ended. Then keeps the old binaries as `~/.zenbot/bin/<name>.prev` and installs `zend`, `zen` and `zen-engine` from the stage; if any copy fails, it puts back the ones replaced so far and aborts without restarting.
 5. Brings `~/.zenbot/env` up to date, keeping the old file as `~/.zenbot/env.prev`: on an install still using the bootstrap database password it runs `db_secure` (`scripts/db.sh`: a random password in `~/.zenbot/db-password`, `ALTER USER` over the container's socket, `DATABASE_URL` rewritten; never logged), and it removes the retired worker `pi` (D-043) from `ZEN_WORKERS`. Both are logged. Old binaries read the same `env`, so a rollback keeps working.
 6. Writes the stage's commit to `~/.zenbot/version` and runs `sudo systemctl restart zenbot`. The kernel applies migrations at start.
-7. Waits up to 45 seconds for `/health` to say `"ok":true`. The stage is removed either way. If it is healthy, it removes the systemd timers older versions installed (`remove_old_timers`; the kernel schedules that work itself now, D-046) and runs `docker compose -f deploy/compose.yaml up -d`, so a new compose service (such as SearXNG) arrives with the upgrade; a failure there is logged, not rolled back. If it isn't healthy, it logs the last 30 service log lines, puts the `.prev` binaries and the old version back, and restarts again. **A rollback does not restore the database.** When there was a backup, the log prints the exact command to restore it.
+7. Waits up to 45 seconds for `/health` to say `"ok":true`. The stage is removed either way. If it is healthy, it removes the systemd timers older versions installed (`remove_old_timers`; the kernel schedules that work itself now, D-046) and runs `docker compose -f deploy/compose.yaml up -d`, so a new compose service (such as SearXNG) arrives with the upgrade; a failure there is logged, not rolled back. Then it keeps the disk in check: a cargo target directory of the `ZEN_REPO` checkout (the top-level `target/` and the one under `crates/zen-matrix`) over 2 GiB loses its incremental caches and `debug/` build, and the whole directory if it's still over (`trim_target` in `scripts/lib.sh`; nothing while a cargo process runs, logged when it acts), and `docker_prune` removes dangling images and build cache unused for a week (never volumes or images in use; failures ignored). If it isn't healthy, it logs the last 30 service log lines, puts the `.prev` binaries and the old version back, and restarts again. **A rollback does not restore the database.** When there was a backup, the log prints the exact command to restore it.
 
 The restart ends the current turn's connection. In a zen session, the owner reconnects by sending the next message.
 
@@ -252,7 +252,7 @@ Helpers (`scripts/db.sh`; the live database is `DATABASE_URL` from the environme
 
 ```bash
 scripts/db.sh pending          # migrations in this checkout the live database hasn't applied
-scripts/db.sh backup [label]   # dump the live database to ~/.zenbot/backups (keeps the last 10)
+scripts/db.sh backup [label]   # dump the live database to ~/.zenbot/backups (keeps the last 3)
 scripts/db.sh secure           # give the database user a private password (install.sh and upgrades do it)
 ```
 
