@@ -1,6 +1,8 @@
-# Checks every pull request and every push to main: build, unit tests, clippy with warnings as
-# errors, and the kernel's end-to-end scenarios (scripts/e2e.sh: the scripted faux model, a
-# throwaway database). For a push to main that passes, `release` then publishes Linux binaries, so
+# Checks every pull request and every push to main with scripts/check.sh, exactly as it runs
+# locally: the docs check (a PROGRESS.md entry on a pull request), build, unit tests, clippy with
+# warnings as errors, the binaries' size budgets, and the kernel's end-to-end scenarios
+# (scripts/e2e.sh: the scripted faux model, throwaway databases); each step's time goes to the
+# job's summary. For a push to main that passes, `release` then publishes Linux binaries, so
 # installs and upgrades download them instead of compiling (scripts/fetch-release.sh). Assets go to
 # the rolling `edge` release, one tarball per commit; the newest 20 are kept. The binaries it
 # publishes (the `dist` build) pass the same end-to-end scenarios first.
@@ -29,6 +31,8 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0 # the docs check compares with the base branch
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch, 2026-10-09
         with:
           components: clippy
@@ -37,30 +41,8 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends bubblewrap jq
       - name: Postgres
         run: docker compose -f deploy/compose.yaml up -d --wait postgres
-      - name: Build
-        run: cargo build --release --locked
-      - name: Unit tests
-        run: cargo test --release --locked
-      - name: Clippy
-        run: cargo clippy --release --locked --all-targets -- -D warnings
-      - name: End-to-end scenarios
-        run: ZEN_E2E_NO_BUILD=1 scripts/e2e.sh
-
-  # The docs still match the code (scripts/check-docs.py); on a pull request, the change also adds
-  # a PROGRESS.md entry if it touches the code.
-  docs:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          fetch-depth: 0
-      - name: Check the docs
-        run: |
-          if [ "${{ github.event_name }}" = pull_request ]; then
-            scripts/check-docs.py --base "origin/${{ github.base_ref }}"
-          else
-            scripts/check-docs.py
-          fi
+      - name: Docs, build, tests, clippy, sizes, end-to-end (scripts/check.sh)
+        run: CARGO_BUILD_JOBS=4 scripts/check.sh
 
   # The Matrix channel is its own Cargo workspace (crates/zen-matrix): built, tested and linted apart,
   # and not part of the release tarball (scripts/matrix.sh builds it where it's used).
@@ -85,7 +67,7 @@ jobs:
         run: cargo clippy --release --locked --all-targets -- -D warnings
 
   release:
-    needs: [check, docs]
+    needs: [check]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     # Oldest supported Ubuntu runner: binaries built against its glibc run on newer distros too.
     runs-on: ubuntu-22.04
@@ -105,6 +87,8 @@ jobs:
           PONG=$(echo '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}' | timeout 15 target/dist/zen-engine | head -1 || true)
           echo "$PONG" | grep -q pong || { echo "zen-engine did not answer ping: $PONG"; exit 1; }
           target/dist/zen --version
+      - name: Size budgets of the binaries to publish
+        run: scripts/size-budget.sh target/dist
       - name: Tools for the end-to-end scenarios
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends bubblewrap jq
       - name: Postgres

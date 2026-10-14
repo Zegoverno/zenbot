@@ -14,7 +14,8 @@ license = "Apache-2.0"
 strip = true
 
 # The binaries CI publishes (.github/workflows/ci.yml, job `release`): the release build with
-# whole-program optimization, 25–30% smaller (zen 6.2 → 4.3 MB, zend 6.7 → 5.0 MB). Local
+# whole-program optimization, 25–30% smaller (2026-10-14: zen 6.6 → 4.8 MB, zend 16.5 → 12.6 MB;
+# budgets in scripts/size-budget.sh). Local
 # builds, tests and clippy stay on `release`, which compiles much faster; scripts install either
 # kind from target/release (scripts/fetch-release.sh puts downloaded ones there).
 [profile.dist]

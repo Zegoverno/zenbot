@@ -74,17 +74,18 @@ tail -20 ~/.zenbot/upgrade.log
 
 ## Build, test, lint (as CI runs them)
 
-CI (`.github/workflows/ci.yml`, job `check`, on `ubuntu-22.04` with stable Rust) runs these on every pull request and every push to `main`:
+CI (`.github/workflows/ci.yml`, job `check`, on `ubuntu-22.04` with stable Rust) runs `scripts/check.sh` on every pull request and every push to `main`, with Postgres up (`docker compose -f deploy/compose.yaml up -d --wait postgres`). Its steps, in order, stopping at the first failure:
 
-```bash
-docker compose -f deploy/compose.yaml up -d --wait postgres
-cargo build --release --locked
-cargo test --release --locked
-cargo clippy --release --locked --all-targets -- -D warnings
-ZEN_E2E_NO_BUILD=1 scripts/e2e.sh
-```
+| Step | Command |
+|---|---|
+| `docs` | `scripts/check-docs.py --base origin/<base branch>` (a second; first, so a missing PROGRESS.md entry fails fast) |
+| `build` | `cargo build --release --locked` |
+| `tests` | `cargo test --release --locked` |
+| `clippy` | `cargo clippy --release --locked --all-targets -- -D warnings` |
+| `sizes` | `scripts/size-budget.sh`: `zend`, `zen` and `zen-engine` within their size budgets (measured size + ~15%; raise one on purpose, saying why) |
+| `e2e` | `ZEN_E2E_NO_BUILD=1 scripts/e2e.sh [filter]` |
 
-Run the same locally before a pull request: `scripts/check.sh` does it in one command (build once, then the tests, clippy, the e2e scenarios on that build, and `scripts/check-docs.py --base origin/main`), prints how long each step took and stops at the first failure with a short summary. `scripts/check.sh <filter>` passes the filter to `scripts/e2e.sh`. `--locked` fails if `Cargo.lock` would change; don't add dependencies without a good reason.
+It prints how long each step took (in CI also on the job's summary page). Locally, `scripts/check.sh <filter>` is the fast path: every step, but only the e2e scenarios matching the filter; run it without a filter, or let CI run the full suite, before merging. `--locked` fails if `Cargo.lock` would change; don't add dependencies without a good reason.
 
 **Limit build parallelism on this VM.** It has 2 CPUs and 7.7 GB of RAM, and parallel release builds have been OOM-killed. Set `CARGO_BUILD_JOBS=2` (e.g. `export CARGO_BUILD_JOBS=2` in your shell) and don't run two release builds at once (for example `cargo build` while `scripts/e2e.sh` or `scripts/upgrade.sh` is building).
 
@@ -368,12 +369,11 @@ Code that depends on a CLI's flags or output should fail loudly, so the post-upd
 
 ## CI and releases
 
-`.github/workflows/ci.yml` has four jobs (there is no separate release workflow). Third-party actions are pinned by commit SHA, the tag in a comment beside it; bump them deliberately.
+`.github/workflows/ci.yml` has three jobs (there is no separate release workflow). Third-party actions are pinned by commit SHA, the tag in a comment beside it; bump them deliberately.
 
-- **`check`**: on every pull request and every push to `main`. Build, unit tests, clippy, e2e (commands above). A newer push to a pull request cancels its running check.
+- **`check`**: on every pull request and every push to `main`: `scripts/check.sh` (above). A newer push to a pull request cancels its running check.
 - **`matrix`**: on the same events as `check`, beside it. Build, unit tests and clippy of `crates/zen-matrix` (its own workspace); not in the release tarball, and `release` doesn't wait for it.
-- **`docs`**: on the same events. `scripts/check-docs.py` (with `--base` on a pull request): MAP.md names every route, tool, setting, table, e2e scenario and crate; the paths, settings and decisions the docs name exist; the docs stay within their line budgets; and a change to the code adds a PROGRESS.md entry. AGENTS.md, "Keeping the docs true".
-- **`release`**: only on a push to `main` that passed `check` and `docs`. Builds the `dist` profile (fat LTO), checks `zen-engine` answers `ping` and `zen --version` runs, runs the e2e scenarios on those `dist` binaries (`ZEN_E2E_BIN=target/dist`), and uploads `zenbot-x86_64-linux-<sha12>.tar.gz` plus `.sha256` to the rolling `edge` prerelease (newest 20 builds kept).
+- **`release`**: only on a push to `main` that passed `check`. Builds the `dist` profile (fat LTO), checks `zen-engine` answers `ping`, `zen --version` runs and the binaries fit their `dist` size budgets (`scripts/size-budget.sh target/dist`), runs the e2e scenarios on those `dist` binaries (`ZEN_E2E_BIN=target/dist`), and uploads `zenbot-x86_64-linux-<sha12>.tar.gz` plus `.sha256` to the rolling `edge` prerelease (newest 20 builds kept).
 
 So binaries exist only for commits on `main` that passed. `install.sh`, `upgrade.sh` and `eval.sh` use them via `scripts/fetch-release.sh`; when there are none (yet), they compile locally. Right after a merge, CI needs a few minutes.
 
