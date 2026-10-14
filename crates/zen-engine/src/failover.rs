@@ -13,32 +13,7 @@ pub fn enabled() -> bool {
     )
 }
 
-/// Only explicit exhausted-usage messages qualify. Throttles, overloads, and generic 429s do not.
-pub fn is_hard_usage_limit(error: &str) -> bool {
-    let error = error.to_ascii_lowercase();
-    if error.contains("temporarily") || error.contains("rate limit") {
-        return false;
-    }
-    [
-        "you've hit your session limit",
-        "you have hit your session limit",
-        "you've hit your weekly limit",
-        "you have hit your weekly limit",
-        "you've hit your opus limit",
-        "you've hit your sonnet limit",
-        "you've reached your usage limit",
-        "you have reached your usage limit",
-        "you've hit your usage limit",
-        "you have hit your usage limit",
-        "you've hit your monthly spend limit",
-        "you've hit your org's monthly spend limit",
-        "you've hit your individual spend limit",
-        "you've hit your team's shared budget",
-        "you've hit your individual usage limit",
-    ]
-    .iter()
-    .any(|phrase| error.contains(phrase))
-}
+pub use zen_proto::worker::is_hard_usage_limit;
 
 /// The engine a turn continues on after a hard usage limit on `primary`, and that model's entry:
 /// `primary`'s `failover_target`, if it names another subscription engine that lists the model.
