@@ -18,6 +18,9 @@ use crate::{enc, Client};
 /// One owner command.
 #[derive(Debug, PartialEq)]
 pub enum OwnerCmd {
+    Sources,
+    SourceAdd { source: String, risk: i16, note: String },
+    SourceRm(String),
     /// `jobs`: every job, its schedule and state.
     Jobs,
     /// `jobs run <name>`: run it now, in the background (works on a paused job too).
@@ -58,6 +61,7 @@ impl Chat {
 
 /// How to use the commands, one line each, without the prefix (`/` or `!`) the client adds.
 pub const USAGE: &[(&str, &str)] = &[
+    ("sources [list|add <host/path> [2|3] [note…]|rm <host/path>]", "manage the owner source allowlist"),
     ("jobs", "every job, its schedule and state"),
     ("jobs run <name>", "run a job now (even a paused one)"),
     ("jobs resume <name>", "turn a job on (approves one zenbot created paused)"),
@@ -93,6 +97,14 @@ pub fn parse(text: &str) -> Option<Result<OwnerCmd, String>> {
             (Some("runs"), [n]) => Ok(OwnerCmd::Runs(Some(n.to_string()))),
             _ => usage("jobs [run|resume|pause <name> | runs [name]]"),
         },
+        "sources" => match &words[1..] {
+            [] | ["list"] => Ok(OwnerCmd::Sources),
+            ["rm", source] => Ok(OwnerCmd::SourceRm(source.to_string())),
+            ["add", source] => Ok(OwnerCmd::SourceAdd { source: source.to_string(), risk: 2, note: String::new() }),
+            ["add", source, level, note @ ..] if matches!(*level, "2" | "3") =>
+                Ok(OwnerCmd::SourceAdd { source: source.to_string(), risk: level.parse().unwrap_or(2), note: note.join(" ") }),
+            _ => usage("sources [list|add <host/path> [2|3] [note…]|rm <host/path>]"),
+        },
         "skills" => match &words[1..] {
             [] => Ok(OwnerCmd::Skills),
             [d, name, sha] if decision(d).is_some() => Ok(OwnerCmd::Skill { name: name.to_string(), decision: decision(d).unwrap_or("reject"), sha: sha.to_string() }),
@@ -124,6 +136,20 @@ pub fn parse(text: &str) -> Option<Result<OwnerCmd, String>> {
 /// Markdown for the chat.
 pub async fn run(c: &Client, cmd: &OwnerCmd, session: Option<&str>, chat: &mut Chat) -> Result<String> {
     Ok(match cmd {
+        OwnerCmd::Sources => {
+            let v = c.get("/api/sources").await?;
+            let lines: Vec<String> = v.as_array().into_iter().flatten()
+                .map(|r| format!("- `{}` — risk {}: {}", r["source"].as_str().unwrap_or(""), r["risk"], r["note"].as_str().unwrap_or(""))).collect();
+            if lines.is_empty() { "No allowlisted sources.".into() } else { lines.join("\n") }
+        }
+        OwnerCmd::SourceAdd { source, risk, note } => {
+            c.post("/api/sources", json!({"source":source,"risk":risk,"note":note})).await?;
+            format!("Allowlisted `{source}` at risk {risk}.")
+        }
+        OwnerCmd::SourceRm(source) => {
+            c.post("/api/sources", json!({"source":source,"remove":true})).await?;
+            format!("Removed `{source}`.")
+        }
         OwnerCmd::Jobs => {
             let r = c.get("/api/jobs").await?;
             let mut out: Vec<String> = r["jobs"].as_array().into_iter().flatten().map(job_line).collect();
@@ -326,6 +352,10 @@ mod tests {
         assert_eq!(parse("jobs pause x"), Some(Ok(OwnerCmd::Pause("x".into()))));
         assert_eq!(parse("jobs runs"), Some(Ok(OwnerCmd::Runs(None))));
         assert_eq!(parse("jobs runs x"), Some(Ok(OwnerCmd::Runs(Some("x".into())))));
+        assert_eq!(parse("sources"), Some(Ok(OwnerCmd::Sources)));
+        assert_eq!(parse("sources add x.com/paulg 3 public comments"), Some(Ok(OwnerCmd::SourceAdd { source: "x.com/paulg".into(), risk: 3, note: "public comments".into() })));
+        assert!(parse("sources add x.com 0").unwrap().is_err());
+        assert_eq!(parse("sources rm x.com"), Some(Ok(OwnerCmd::SourceRm("x.com".into()))));
         assert_eq!(parse("skills"), Some(Ok(OwnerCmd::Skills)));
         assert_eq!(parse("tools"), Some(Ok(OwnerCmd::Skills)));
         assert_eq!(

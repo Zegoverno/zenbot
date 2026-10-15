@@ -35,6 +35,16 @@ Update with `zen upgrade` (or `/upgrade` inside zen, which then restarts zen its
 
 Every session starts from the prompt files in `~/.zenbot/`: `agents/zenbot/SOUL.md` (who zenbot is, at bottom: yours to edit), `agents/zenbot/IDENTITY.md` (its character and how it works), `AGENTS.md` (its environment), `USER.md` (you: fill it in), and its short-term memory; then `AGENTS.md` (or `CLAUDE.md`) in each directory from `/` down to the workspace. zenbot writes default versions of its files when they're missing and never overwrites yours. What the model reads each turn: [docs/context.md](docs/context.md).
 
+## Source allowlist
+
+Only you change trusted sources: `zen sources add docs.rs --note "Rust docs"`,
+`zen sources add x.com/paulg --risk 3`, `zen sources list`, `zen sources rm docs.rs`.
+Entries cover an exact HTTPS host or whole path segments, not subdomains; levels are 2 (default)
+or 3. Chat: `/sources add docs.rs 2 Rust docs`; Matrix uses `!sources`.
+Fetching an allowlisted target is permitted in a risky session, including model-built URLs:
+only add destinations you accept receiving those requests. Redirect destinations are checked too.
+Ratings are recorded now; legacy action restrictions remain until D-062 step 3.
+
 ## Using zen
 
 Run `zen` in your terminal. It opens on the sessions board: every session in Main, Jobs and Archived sections, running, idle or waiting on you (`?`: it asked questions you haven't answered; listed first and counted in the title), with the subagents working under each. ↑↓ choose, Enter opens one, `n` starts a new session, `/` filters, `a` shows archived ones, `r` refreshes, `q` quits; `/board` (or Esc on an empty input) comes back, and a running session keeps working meanwhile. Subagent sessions open read-only. In a session it's full screen: the conversation scrolls with PgUp/PgDn or the mouse wheel, and a side panel sits next to the chat: Ctrl+B opens it on a folder tree of `~/.zenbot` (`/files <dir>` shows another folder; ↑↓ move, →/Enter open a folder or file, ← fold, `.` dotfiles, Shift+Tab moves the keys between chat and panel, or click), and `/open <file>` shows a file there (reloaded as it changes; `/close` hides it). Runs of tool calls show as one line; Ctrl+O unfolds them.

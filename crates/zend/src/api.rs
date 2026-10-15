@@ -180,7 +180,7 @@ pub(crate) async fn board(State(app): State<AppState>, Query(q): Query<BoardQuer
 }
 
 /// The columns `session_json` reads, without the cost (each query computes it its own way).
-const SESSION_COLUMNS: &str = "id, title, model, effort, archived, created_at, updated_at, kind, parent, tainted_at, risky_at";
+const SESSION_COLUMNS: &str = "id, title, model, effort, archived, created_at, updated_at, kind, parent, tainted_at, risky_at, risk";
 
 pub(crate) fn session_json(r: &sqlx::postgres::PgRow) -> Value {
     json!({
@@ -196,6 +196,7 @@ pub(crate) fn session_json(r: &sqlx::postgres::PgRow) -> Value {
         "updated_at": r.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
         // When it first read untrusted content since the owner last trusted it; null when clean.
         "tainted_at": r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("tainted_at").ok().flatten(),
+        "risk": r.try_get::<i16,_>("risk").unwrap_or(4),
         "risky_at": r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("risky_at").ok().flatten(),
         "cost": r.try_get::<f64, _>("cost").unwrap_or(0.0),
     })
@@ -411,6 +412,27 @@ pub(crate) async fn trust_session(State(app): State<AppState>, Path(id): Path<Uu
         taint::Trusted::Changed => return Err(ApiError(StatusCode::CONFLICT, "it read untrusted content after what you looked at: look again".into())),
         taint::Trusted::NotFound => return Err(not_found()),
     }))
+}
+
+/// Source allowlist mutations are owner client actions, not model tools.
+pub(crate) async fn list_sources(State(app): State<AppState>) -> ApiResult<Json<Value>> {
+    Ok(Json(crate::sources::list(&app.db).await?))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct SourceChange {
+    source: String,
+    #[serde(default)]
+    remove: bool,
+    risk: Option<i16>,
+    #[serde(default)]
+    note: String,
+}
+
+pub(crate) async fn change_source(State(app): State<AppState>, Json(body): Json<SourceChange>) -> ApiResult<Json<Value>> {
+    let risk = if body.remove { None } else { Some(body.risk.unwrap_or(2)) };
+    Ok(Json(crate::sources::change(&app.db, &body.source, risk, &body.note).await
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?))
 }
 
 /// Owner-only exact action approvals; shell/network tools cannot read the owner token.

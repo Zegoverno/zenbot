@@ -807,7 +807,7 @@ pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value, force_
         },
         _ => return None,
     };
-    Some(tools::ToolOutput { content, is_error })
+    Some(tools::ToolOutput { rating: None, content, is_error })
 }
 
 /// Servers and their tool counts (`GET /api/mcp`). Connects (starts) every configured server.

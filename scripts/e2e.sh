@@ -476,7 +476,10 @@ delegation() {
   local ws; ws=$(new_workspace delegate)
   start_kernel "$ws" "$(script delegate.json)"
   zen policy set default faux/smoke >/dev/null
-  local r sid; r=$(zen ask --json -m faux/smoke "split the work"); sid=$(echo "$r" | jq -r .session_id)
+  local r sid; sid=$(zen sessions new --model faux/smoke --title "inherit risk" --json | jq -r .id)
+  q "UPDATE sessions SET risk=3 WHERE id='$sid'" >/dev/null
+  r=$(zen ask --json -s "$sid" "split the work")
+  check "children inherit risk independently of legacy marks" eq "$(q "SELECT min(risk) || '/' || max(risk) FROM sessions WHERE parent='$sid'")" 3/3
   check "two delegations" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" delegate:false,delegate:false
   local res; res=$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='delegate'")
   check "named model, then the policy's" bash -c 'grep -q "on faux/smoke (asked, asked)" <<<"$1" && grep -q "(unknown, policy)" <<<"$1"' _ "$res"
@@ -1128,6 +1131,11 @@ names_suggestions() {
 # D-056: reading makes a session risky, safe reads do not taint; code runs offline;
 # outward/destructive actions are held before effect, and only an owner grants an exact retry.
 action_gate() {
+  # The provenance tests need SQL, but not a kernel or a subscription; use a separate database.
+  local native_db="${DB}_sources"
+  db_psql -d postgres -c "CREATE DATABASE $native_db" >/dev/null
+  check "native source, redirect eligibility and forged-provenance checks" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend source_database -- --ignored
+  db_drop "$native_db"
   local ws; ws=$(new_workspace action-gate)
   local port=$((PORT + 12))
   python3 "$REPO/scripts/e2e/searxng_stub.py" "$port" & local srv=$!
@@ -1136,6 +1144,25 @@ action_gate() {
   res_of() { q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$1' AND payload->>'role'='toolResult' AND seq > ${2:-0}"; }
   local sid r before gate
   r=$(zen ask --json -m faux/smoke "GATE-READ"); sid=$(echo "$r" | jq -r .session_id)
+  check "open search receives risk 4 on tape and session" eq "$(q "SELECT s.risk || '/' || e.risk FROM sessions s JOIN tape_events e ON e.session_id=s.id WHERE s.id='$sid' AND e.payload->>'toolName'='web_search'")" 4/4
+  check "only real owner messages are rated zero" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND origin='owner' AND risk=0")" 1
+  check "sources mutation needs the owner token" eq "$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{\"source\":\"evil.example\"}' "$URL/api/sources")" 401
+  check "invalid source level rejected" eq "$(api -o /dev/null -w '%{http_code}' -d '{\"source\":\"example.com\",\"risk\":1}' "$URL/api/sources")" 400
+  zen sources add example.com --note "test docs" >/dev/null
+  zen sources add example.org --risk 3 >/dev/null
+  check "owner CLI lists exact normalized sources" eq "$(zen --json sources list | jq -r 'map(.source) | join(",")')" example.com,example.org
+  local rated; rated=$(zen ask --json -m faux/smoke "GATE-READ" | jq -r .session_id)
+  check "search takes max result source rating, legacy protections stay" eq "$(q "SELECT risk || '/' || (risky_at IS NOT NULL) FROM sessions WHERE id='$rated'")" 3/true
+  check "web result provenance is kernel-recorded" eq "$(q "SELECT risk || '/' || origin FROM tape_events WHERE session_id='$rated' AND payload->>'toolName'='web_search'")" 3/web_search
+  zen sources rm example.org >/dev/null
+  zen ask --json -s "$rated" "GATE-READ" >/dev/null
+  check "removing a source raises the reader to open-web risk" eq "$(q "SELECT risk FROM sessions WHERE id='$rated'")" 4
+  zen sources add example.org >/dev/null
+  zen ask --json -s "$rated" "GATE-READ" >/dev/null
+  check "a later low-rated result never lowers session risk" eq "$(q "SELECT risk FROM sessions WHERE id='$rated'")" 4
+  zen sources rm example.com >/dev/null
+  zen sources rm example.org >/dev/null
+  check "source mutations are audited" eq "$(q "SELECT count(*) FROM source_audit")" 6
   check "outside read is risky, not tainted" eq "$(q "SELECT (risky_at IS NOT NULL) || '/' || (tainted_at IS NULL) FROM sessions WHERE id='$sid'")" true/true
   check "safe file effect runs without approval" grep -q "safe workspace note" "$ws/notes.txt"
   check "programmable git ran offline without taint" grep -q "sandboxed:" <<<"$(res_of "$sid")"

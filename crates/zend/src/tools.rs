@@ -88,17 +88,20 @@ safe. Returns how many occurrences were replaced, or why none matched. Example: 
     ])
 }
 
+/// Text plus optional kernel provenance. Dispatch persists it before responding to a worker.
 pub struct ToolOutput {
+    /// Kernel-owned provenance, never taken from a worker message or page text.
+    pub rating: Option<crate::sources::Rating>,
     pub content: String,
     pub is_error: bool,
 }
 
 fn ok(content: impl Into<String>) -> ToolOutput {
-    ToolOutput { content: content.into(), is_error: false }
+    ToolOutput { rating: None, content: content.into(), is_error: false }
 }
 
 fn err(content: impl Into<String>) -> ToolOutput {
-    ToolOutput { content: content.into(), is_error: true }
+    ToolOutput { rating: None, content: content.into(), is_error: true }
 }
 
 /// Resolve a tool path: `~` is the home directory, a leading `@` (as in `@file` mentions) is dropped,

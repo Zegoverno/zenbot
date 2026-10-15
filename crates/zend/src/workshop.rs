@@ -680,8 +680,8 @@ pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value) -> Opt
         _ => return None,
     };
     Some(match res {
-        Ok(content) => tools::ToolOutput { content, is_error: false },
-        Err(e) => tools::ToolOutput { content: format!("{e:#}"), is_error: true },
+        Ok(content) => tools::ToolOutput { rating: None, content, is_error: false },
+        Err(e) => tools::ToolOutput { rating: None, content: format!("{e:#}"), is_error: true },
     })
 }
 

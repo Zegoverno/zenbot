@@ -34,7 +34,10 @@ Keep dogfooding zenbot on real work and let sessions, verdicts and what the owne
 sleep's promotions into `IDENTITY.md` and `USER.md`, skill drafts, tools, routes) drive what
 changes. Candidate follow-ups, each only when use calls for it:
 
-- **Action gate (D-056), in order:** a session that reads outside content becomes *risky*, not
+- **D-062 taint redesign:** steps 1–2 are built (grammar, source ratings and owner allowlist).
+  Next: stored-item ratings replace legacy marks, `/deny` and reversible taint after attack evals;
+  then task checks/budgets and the accept queue. Legacy action limits still apply at every risk.
+- **Earlier action-gate plan (D-056), superseded in part by D-062:** a session that reads outside content becomes *risky*, not
   limited; its actions are checked before they run by fixed rules over parsed facts (run, run in
   the offline sandbox, or ask the owner, with a one-tap `/allow`); then System One reads only the
   owner's own request to grant the turn's outward actions (push, PR, deploy). Step 0's replay

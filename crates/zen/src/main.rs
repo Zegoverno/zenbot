@@ -67,6 +67,14 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Login { .. } => unreachable!(),
+        Cmd::Sources { cmd } => {
+            let value = match cmd {
+                SourcesCmd::List => c.get("/api/sources").await?,
+                SourcesCmd::Add { source, risk, note } => c.post("/api/sources", json!({"source":source,"risk":risk,"note":note})).await?,
+                SourcesCmd::Rm { source } => c.post("/api/sources", json!({"source":source,"remove":true})).await?,
+            };
+            emit(json, &value, || serde_json::to_string_pretty(&value).unwrap_or_default());
+        }
         Cmd::Models => {
             let m = c.get("/api/models").await?;
             if json {

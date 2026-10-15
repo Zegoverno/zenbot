@@ -325,8 +325,8 @@ pub(crate) async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result
 pub(crate) async fn run_child(app: &AppState, parent: Uuid, kind: &str, prompt: &str, dir: &std::path::Path, model: Option<&str>) -> Result<Uuid> {
     let child = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO sessions (id, title, model, effort, state, parent, kind, workspace, tainted_at, risky_at)
-         SELECT $1, $2 || ': ' || title, COALESCE($6, model), CASE WHEN $6 IS NULL THEN effort END, NULL, id, $3, $5, tainted_at, risky_at
+        "INSERT INTO sessions (id, title, model, effort, state, parent, kind, workspace, tainted_at, risky_at, risk)
+         SELECT $1, $2 || ': ' || title, COALESCE($6, model), CASE WHEN $6 IS NULL THEN effort END, NULL, id, $3, $5, tainted_at, risky_at, risk
          FROM sessions WHERE id = $4",
     )
     .bind(child)
@@ -550,7 +550,8 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
         if origin == Origin::Kernel {
             user["kernel"] = json!(true);
         }
-        tape::append(&app.db, id, "message", &user).await?;
+        if origin == Origin::Owner { tape::append_owner(&app.db, id, &user).await?; }
+        else { tape::append(&app.db, id, "message", &user).await?; }
         if title.is_empty() && origin == Origin::Owner {
             let t: String = text.chars().take(60).collect();
             sqlx::query("UPDATE sessions SET title = $2 WHERE id = $1").bind(id).bind(t.trim()).execute(&app.db).await?;

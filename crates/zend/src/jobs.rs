@@ -1441,8 +1441,8 @@ pub async fn run_tool(app: &AppState, session: Uuid, name: &str, args: &Value, o
         return None;
     }
     Some(match tool(app, session, args, owner_allowed).await {
-        Ok(content) => tools::ToolOutput { content, is_error: false },
-        Err(e) => tools::ToolOutput { content: format!("schedule failed: {e:#}"), is_error: true },
+        Ok(content) => tools::ToolOutput { rating: None, content, is_error: false },
+        Err(e) => tools::ToolOutput { rating: None, content: format!("schedule failed: {e:#}"), is_error: true },
     })
 }
 
