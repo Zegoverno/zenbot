@@ -1,4 +1,5 @@
 [
+  {"when":"GATE-VERIFY-GRANT","tool":"verify","args":{"goal":"exercise exact verification approval","criteria":[{"id":"writes","text":"append once","run":"git -c 'alias.zenprobe=!echo approved >> verify-grant.txt' zenprobe"}]}},
   {
     "when": "GATE-READ",
     "tool": "web_search",

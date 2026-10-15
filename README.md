@@ -100,7 +100,7 @@ How each of these works is in [DESIGN.md](DESIGN.md) ("As built"); here is what 
 
 ## The web and connected services
 
-- **Web**: `web_search` and `web_fetch` work out of the box through a SearXNG container next to Postgres; set `BRAVE_API_KEY` or `TAVILY_API_KEY` in `~/.zenbot/env` to use those instead. Everything read from the web is untrusted, and so is what a session that read it saves (`zen memory` and `zen skills` show `untrusted`). Once a session has read untrusted content its shell runs offline and writes only in the workspace (builds, tests and commits work; installs and pushes don't); zen marks it `untrusted` on the board and in the footer. `/trust` (Matrix: `!trust`) shows what it read; if you trust that, `/trust yes` lifts the limits from then on (the next untrusted read sets them again, and what it saved meanwhile stays marked). Or continue in a fresh session.
+- **Web**: `web_search` and `web_fetch` work out of the box through a SearXNG container next to Postgres; set `BRAVE_API_KEY` or `TAVILY_API_KEY` in `~/.zenbot/env` to use those instead. Everything read from the web is untrusted, and so is what a session that read it saves (`zen memory` and `zen skills` show `untrusted`). Once a session has read untrusted content project code runs offline with a read-only workspace (only private `/tmp` is writable); builds or commits that need more access require exact `/allow` approval; zen marks it `untrusted` on the board and in the footer. `/trust` (Matrix: `!trust`) shows what it read; if you trust that, `/trust yes` lifts the limits from then on (the next untrusted read sets them again, and what it saved meanwhile stays marked). Or continue in a fresh session.
 - **MCP servers** (email, calendar, documents, your own services): list them in `~/.zenbot/mcp.json`, the same shape Claude Code uses. Secrets go in `~/.zenbot/env` and are referenced as `${VAR}`; a variable named like a secret (`…TOKEN`, `…KEY`, `…SECRET`, `…PASSWORD`) is passed only to a server that lists it in `allow_env`:
   ```json
   { "mcpServers": {
@@ -112,10 +112,10 @@ How each of these works is in [DESIGN.md](DESIGN.md) ("As built"); here is what 
 ### Actions after outside reads
 
 Outside content makes a session **risky**, not blanket-limited. Read utilities run automatically
-with credential protection; Git and builds run offline; outward, unknown or steering actions
+with credential protection; Git and builds run offline/read-only and offer exact `/allow` approval; outward, unknown or steering actions
 are held before effect. A held action makes the session **untrusted**.
 
-`/allow` shows the latest held action; `/allow yes` grants that exact workspace, tool and arguments
+`/allow` shows the latest held action or sandboxed project-code attempt; `/allow yes` grants that exact workspace, tool and arguments
 once for ten minutes. In Matrix use `!allow` and `!allow yes`. This does not trust the whole
 session. Review scripts/configuration the action will execute too: approval binds arguments,
 not every referenced file's contents. `/trust` remains the broader session override.
