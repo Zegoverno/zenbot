@@ -1142,6 +1142,10 @@ action_gate() {
   before=$(q "SELECT max(seq) FROM tape_events WHERE session_id='$sid'")
   zen ask --json -s "$sid" "GATE-SECRET" >/dev/null
   check "recursive read cannot print credential characters" bash -c '! grep -q "/token:" <<<"$1"' _ "$(res_of "$sid" "$before")"
+  before=$(q "SELECT max(seq) FROM tape_events WHERE session_id='$sid'")
+  zen ask --json -s "$sid" "GATE-GREP" >/dev/null
+  check "a plain read with a pipe, cd and \\| runs in the read-only view" grep -q "1:safe workspace note" <<<"$(res_of "$sid" "$before")"
+  check "unparseable syntax is held but keeps the shell" bash -c 'grep -q "keeps its shell" <<<"$1" && [ "$2" = f ]' _ "$(res_of "$sid" "$before")" "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")"
   zen ask --json -s "$sid" "GATE-HOLD" >/dev/null
   check "outward action taints before running" eq "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")" t
   gate=$(api "$URL/api/sessions/$sid/allow" | jq -r '.actions[0].id')

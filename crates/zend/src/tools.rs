@@ -360,7 +360,10 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox:
             // This is a read-only view, not the writable build sandbox.
             let mut c = Command::new("bwrap");
             c.args(OFFLINE_SANDBOX);
-            if home.starts_with("/tmp") || home.starts_with("/run") {
+            // The host's /tmp, read-only: research reads repositories cloned there. Only the
+            // gate's listed read programs run here, and none of them opens a socket.
+            c.args(["--ro-bind", "/tmp", "/tmp"]);
+            if home.starts_with("/run") {
                 c.arg("--ro-bind").arg(&home).arg(&home);
             }
             c.arg("--ro-bind").arg(dir).arg(dir);
@@ -811,6 +814,26 @@ mod tests {
         let result = tokio::time::timeout(Duration::from_secs(2),
             execute(&root, "read", &json!({"path":"pipe"}), &[], Sandbox::None)).await.unwrap();
         assert!(result.is_error && result.content.contains("regular files"));
+    }
+
+    /// What the gate re-emits runs as meant in the read-only view, which sees the host's /tmp
+    /// (where research clones live) and can't write it.
+    #[tokio::test]
+    async fn gate_reads_run_in_the_read_only_view() {
+        let root = scratch("safe-read");
+        std::fs::write(root.join("a.md"), "alpha\nbeta\ngamma\n").unwrap();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/b.md"), "beta\n").unwrap();
+        let ws = std::env::current_dir().unwrap();
+        let cmd = format!("cd {} && grep -n \"alpha\\|gamma\" a.md | wc -l; ls *.md sub/*.md; sed -n 2p a.md 2>/dev/null; touch c.md 2>/dev/null || echo read-only", root.display());
+        // `touch` is held by the gate; run the read part, then try a write by hand.
+        assert!(matches!(crate::gate::shell(&ws, &cmd), crate::gate::Policy::Hold(_)));
+        let cmd = cmd.split("; touch").next().unwrap();
+        let crate::gate::Policy::SafeRead(emitted) = crate::gate::shell(&ws, cmd) else { panic!("{cmd}") };
+        let out = bash(&ws, &json!({"command": format!("{emitted}; /usr/bin/touch c.md 2>/dev/null || echo read-only")}), &[], Sandbox::SafeRead, None).await.unwrap_or_else(|e| e);
+        let lines: Vec<&str> = out.content.lines().collect();
+        assert_eq!(&lines[..5], &["2", "a.md", "sub/b.md", "beta", "read-only"], "{}", out.content);
+        assert!(!root.join("c.md").exists());
     }
 
     #[tokio::test]

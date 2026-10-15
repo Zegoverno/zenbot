@@ -2,7 +2,13 @@
 //! Only the owner grants an exact (workspace, tool, arguments) action, once. Unknown shell
 //! syntax is held, never interpreted by a classifier. Safe reads use fixed system binaries
 //! and a cleared environment; Git and build tools are programmable and always sandboxed.
-//! No classifier receives outside content. The narrow grammar is intentionally conservative.
+//! No classifier receives outside content. The shell grammar (`grammar.rs`) allows read-only
+//! commands by program and flag, and re-emits them from the parsed words.
+//! A hold the gate makes only because it can't classify the action (unknown syntax, program or
+//! flag) doesn't revoke the session's shell; one that could do harm does.
+
+mod grammar;
+pub use grammar::shell;
 
 use std::path::Path;
 use anyhow::Result;
@@ -10,6 +16,13 @@ use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
 use crate::{App, tools};
+
+/// Whether a hold revokes the session's shell: only when the action could do harm, not when the
+/// gate merely couldn't classify it.
+pub fn escalates(reason: &str) -> bool {
+    ![grammar::UNSUPPORTED, grammar::UNKNOWN, grammar::OPTION, grammar::DIRECTORY]
+        .iter().any(|r| reason.ends_with(r))
+}
 
 #[derive(Debug, PartialEq)]
 pub enum Policy {
@@ -45,7 +58,9 @@ pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args:
     } else { policy(workspace, name, args) };
     if let Policy::Hold(reason) = &p {
         // Revoke capabilities before returning the refusal; no action has run.
-        crate::taint::escalate(app, session, name, reason).await?;
+        if escalates(reason) {
+            crate::taint::escalate(app, session, name, reason).await?;
+        }
         sqlx::query("INSERT INTO action_gates (session_id, action, reason)
           SELECT $1, $2, $3 WHERE NOT EXISTS (
             SELECT 1 FROM action_gates WHERE session_id = $1 AND action = $2
@@ -67,7 +82,10 @@ pub fn policy(workspace: &Path, name: &str, args: &Value) -> Policy {
         }
         "write" | "edit" => {
             let p = real(&tools::resolve(workspace, args["path"].as_str().unwrap_or("")));
-            if !p.starts_with(real(workspace)) || p.starts_with(real(&crate::zen_home())) || secret(&p) || steering(&p) {
+            if p.starts_with(real(&crate::zen_home().join("global/wiki"))) {
+                // A direct edit would skip the `web` label `capture` gives what a risky session adds.
+                hold("writes the wiki directly from a session that read outside content; add the note with `capture`, which labels where it came from")
+            } else if !p.starts_with(real(workspace)) || p.starts_with(real(&crate::zen_home())) || secret(&p) || steering(&p) {
                 hold("writes outside the work or changes persistent steering/executable configuration")
             } else { Policy::Run }
         }
@@ -119,127 +137,12 @@ fn steering(path: &Path) -> bool {
         || matches!(path.extension().and_then(|s| s.to_str()), Some("sh" | "bash" | "zsh" | "service" | "py" | "js" | "mjs" | "cjs"))
 }
 
-/// A bounded grammar: simple words, literal quotes, comments, pipes and &&/; lists.
-/// Shell expansions, redirections, wrappers, heredocs, assignments and other syntax are held.
-/// Nothing parsed here is executed outside isolation except an explicitly checked read command.
-fn words(command: &str) -> Option<Vec<Vec<String>>> {
-    if command.len() > 32_768 { return None; }
-    let mut cmds = Vec::new();
-    let mut parts = Vec::new();
-    let mut word = String::new();
-    let mut started = false;
-    let mut quote = None;
-    let mut comment = false;
-    let finish = |parts: &mut Vec<String>, word: &mut String, started: &mut bool| {
-        if *started { parts.push(std::mem::take(word)); *started = false; }
-    };
-    let mut chars = command.chars().peekable();
-    while let Some(c) = chars.next() {
-        if comment {
-            if c != '\n' { continue; }
-            comment = false;
-        }
-        if let Some(q) = quote {
-            if c == q { quote = None; }
-            else {
-                if q == '"' && matches!(c, '$' | '`' | '\\') { return None; }
-                word.push(c);
-            }
-            continue;
-        }
-        match c {
-            '\'' | '"' => { quote = Some(c); started = true; }
-            '#' if !started => comment = true,
-            '$' | '`' | '\\' | '<' | '>' | '(' | ')' | '{' | '}' | '*' | '?' | '[' | ']' => return None,
-            '=' => return None,
-            '&' => {
-                if chars.next() != Some('&') { return None; }
-                finish(&mut parts, &mut word, &mut started);
-                if parts.is_empty() { return None; }
-                cmds.push(std::mem::take(&mut parts));
-            }
-            ';' | '|' | '\n' => {
-                if c == '|' && chars.peek() == Some(&'|') { return None; }
-                finish(&mut parts, &mut word, &mut started);
-                if !parts.is_empty() { cmds.push(std::mem::take(&mut parts)); }
-                else if c != '\n' { return None; }
-            }
-            c if c.is_whitespace() => finish(&mut parts, &mut word, &mut started),
-            c if c.is_control() => return None,
-            c => { word.push(c); started = true; }
-        }
-    }
-    if quote.is_some() { return None; }
-    finish(&mut parts, &mut word, &mut started);
-    if !parts.is_empty() { cmds.push(parts); }
-    if cmds.is_empty() { return None; }
-    Some(cmds)
-}
-
-pub fn shell(workspace: &Path, command: &str) -> Policy {
-    let Some(cmds) = words(command) else { return Policy::Hold("unsupported or dynamic shell syntax".into()) };
-    let mut safe = Vec::new();
-    let mut programmable = false;
-    let mut cwd = workspace.to_path_buf();
-    for w in cmds {
-        let prog = w[0].as_str();
-        let args = &w[1..];
-        let base = prog.rsplit('/').next().unwrap_or(prog);
-        if base == "cd" {
-            if args.len() != 1 || prog != "cd" { return Policy::Hold("unsupported directory change".into()); }
-            cwd = real(&tools::resolve(&cwd, &args[0]));
-            programmable = true;
-            continue;
-        }
-        if matches!(base, "git" | "cargo" | "python" | "python3" | "node" | "npm" | "make") {
-            // Every programmable utility stays in isolation: git status can run core.fsmonitor.
-            let outward = match base {
-                "git" => args.iter().any(|a| matches!(a.as_str(), "push" | "fetch" | "pull" | "clone" | "ls-remote" | "config" | "reset" | "clean")),
-                "cargo" => args.iter().any(|a| matches!(a.as_str(), "publish" | "install" | "fetch" | "update" | "add" | "login")),
-                "npm" => args.iter().any(|a| matches!(a.as_str(), "install" | "i" | "ci" | "add" | "publish" | "exec")),
-                // Opaque interpreter code can delete files or install steering even offline.
-                "python" | "python3" | "node" => true,
-                _ => false,
-            };
-            if outward { return Policy::Hold("network, destructive or persistent action".into()); }
-            programmable = true;
-            continue;
-        }
-        // Fixed system utilities; no PATH search, aliases, shell functions or environment hooks.
-        let binary = format!("/usr/bin/{base}");
-        if !matches!(base, "pwd" | "ls" | "cat" | "head" | "tail" | "wc" | "grep")
-            || !(prog == base || prog == binary) {
-            return Policy::Hold("unknown program or effect".into());
-        }
-        if args.iter().any(|a| a.starts_with("--") && a != "--"
-            || (base == "tail" && (a.contains('f') || a.contains('F')))
-            || a.contains('\n') || a.contains('\r')) {
-            return Policy::Hold("unsupported read option".into());
-        }
-        // Conservative flags for utilities with modes; pattern operands can only be read too.
-        if base == "ls" && args.iter().filter(|a| a.starts_with('-')).any(|a| !a.chars().skip(1).all(|c| "alhRdFtSr1".contains(c))) {
-            return Policy::Hold("unsupported listing option".into());
-        }
-        if args.iter().filter(|a| !a.starts_with('-')).any(|a| secret(&real(&tools::resolve(&cwd, a)))) {
-            return Policy::Hold("reads a secret or process/device path".into());
-        }
-        // Quotes protect even literal ;/$ characters in single-quoted operands.
-        let mut cmd = binary;
-        for a in args { cmd.push_str(" '"); cmd.push_str(&a.replace('\'', "'\\''")); cmd.push('\''); }
-        safe.push(cmd);
-    }
-    if programmable || safe.len() != 1 {
-        let home = tools::resolve(workspace, "~");
-        if real(&home).starts_with(real(workspace)) {
-            Policy::Hold("programmable work in a home-wide workspace can change persistent steering; use a project directory or approve this exact action".into())
-        } else {
-            Policy::Sandbox
-        }
-    } else { Policy::SafeRead(safe.remove(0)) }
-}
-
 pub fn held_note(reason: &str) -> String {
-    format!("not run: {reason}. This action was held before taking effect and the session is now tainted. Only the owner can allow this exact action once: end the turn and ask them to use /allow (zen) or !allow (Matrix), then retry unchanged.")
+    if escalates(reason) {
+        format!("not run: {reason}. This action was held before taking effect and the session is now tainted. Only the owner can allow this exact action once: end the turn and ask them to use /allow (zen) or !allow (Matrix), then retry unchanged.")
+    } else {
+        format!("not run: {reason}. Held before taking effect; the session keeps its shell. Reads run when written plainly: listed read-only programs (ls, cat, head, tail, wc, grep, find, sed -n 'M,Np', sort, uniq, cut, diff, du, stat, echo…), their usual flags, pipes, `;`, `&&`, `||`, `cd`, quotes, globs and redirects to /dev/null; no `$`, backticks, loops or other redirects. Otherwise the owner can allow this exact action once: end the turn and ask them to use /allow (zen) or !allow (Matrix), then retry unchanged.")
+    }
 }
 
 pub async fn waiting(app: &App, session: Uuid) -> Result<Vec<Value>> {
@@ -300,6 +203,24 @@ mod tests {
         assert_eq!(policy(p, "verify", &json!({"criteria":[{"run":"cargo test"}]})), Policy::Run);
         assert!(matches!(shell(p, "python3 -c 'import os; os.remove(\"important\")'"), Policy::Hold(_)));
         assert!(matches!(policy(p, "write", &json!({"path":"package.json","content":"{}"})), Policy::Hold(_)));
+    }
+
+    #[test]
+    fn only_harmful_holds_revoke_the_shell() {
+        let p = Path::new("/tmp");
+        let reason = |c: &str| match shell(p, c) { Policy::Hold(r) => r, other => panic!("{c}: {other:?}") };
+        for c in ["echo $(id)", "tmux ls", "ls --dired", "for f in a; do ls; done", "cd a b"] {
+            assert!(!escalates(&reason(c)), "{c}");
+        }
+        for c in ["curl x", "git push", "rm -rf x", "cat /proc/self/environ", "python3 -c 1"] {
+            assert!(escalates(&reason(c)), "{c}");
+        }
+        assert!(!escalates(&format!("verification command: {}", reason("echo $(id)"))));
+        assert!(held_note(&reason("echo $(id)")).contains("keeps its shell"));
+        assert!(held_note(&reason("curl x")).contains("now tainted"));
+        // #16 of the recorded holds: a direct wiki edit is held, and the note says to use capture.
+        let wiki = crate::zen_home().join("global/wiki/x.md");
+        assert!(matches!(policy(p, "edit", &json!({"path": wiki})), Policy::Hold(r) if r.contains("capture") && escalates(&r)));
     }
 
     #[test]

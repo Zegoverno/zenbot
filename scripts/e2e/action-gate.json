@@ -36,6 +36,20 @@
     }
   },
   {
+    "when": "GATE-GREP",
+    "tool": "bash",
+    "args": {
+      "command": "cd . && grep -n \"safe\\|zzz\" notes.txt | head -5"
+    }
+  },
+  {
+    "when": "GATE-GREP",
+    "tool": "bash",
+    "args": {
+      "command": "echo $(id)"
+    }
+  },
+  {
     "when": "GATE-HOLD",
     "tool": "bash",
     "args": {
@@ -67,7 +81,12 @@
   {
     "when": "GATE-JOB",
     "tool": "schedule",
-    "args": {"action":"create","name":"gate-job","schedule":"every 1h","prompt":"A test report."}
+    "args": {
+      "action": "create",
+      "name": "gate-job",
+      "schedule": "every 1h",
+      "prompt": "A test report."
+    }
   },
   {
     "when": "GATE",
