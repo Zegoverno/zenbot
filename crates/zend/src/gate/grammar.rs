@@ -908,7 +908,8 @@ mod tests {
 /// `GATE_REPLAY=commands.jsonl cargo test -p zend gate_replay -- --ignored --nocapture`.
 /// Each line is a JSON object with `cmd`. Prints the count per route and per hold reason;
 /// `GATE_REPLAY_SHOW=read|sandbox|hold` also prints those commands. The workspace is the home
-/// directory unless `GATE_REPLAY_WS` says otherwise.
+/// directory unless `GATE_REPLAY_WS` says otherwise. `GATE_REPLAY_TIER=local` replays the risk 2–3
+/// policy (`local_shell`) instead of the risk-4 one.
 #[cfg(test)]
 mod replay {
     use super::*;
@@ -926,7 +927,8 @@ mod replay {
         for line in std::fs::read_to_string(path).unwrap().lines().filter(|l| !l.trim().is_empty()) {
             let v: serde_json::Value = serde_json::from_str(line).unwrap();
             let cmd = v["cmd"].as_str().unwrap_or("");
-            let (route, why) = match shell(&ws, cmd) {
+            let local = std::env::var("GATE_REPLAY_TIER").is_ok_and(|t| t == "local");
+            let (route, why) = match if local { local_shell(&ws, cmd) } else { shell(&ws, cmd) } {
                 Policy::SafeRead(_) => ("read", String::new()),
                 Policy::Sandbox => ("sandbox", String::new()),
                 Policy::Hold(r) => { *reasons.entry(r.clone()).or_default() += 1; ("hold", r) }
