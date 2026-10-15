@@ -830,9 +830,10 @@ mod tests {
 
     #[test]
     fn secrets_are_held_through_paths_globs_cd_and_flags() {
-        let home = crate::zen_home();
-        let token = home.join("token").to_string_lossy().into_owned();
-        let parent = home.to_string_lossy().into_owned();
+        // /proc exists on CI too; zenbot secret files are only protected when they exist.
+        // Do not rely on the developer machine having ~/.zenbot/token installed.
+        let token = "/proc/self/environ";
+        let parent = "/proc/self";
         for c in [
             format!("cat {token}"), format!("cd {parent} && cat token"),
             format!("cd {parent}; cat token"), format!("grep -f {token} x"), format!("grep --file={token} x"),
