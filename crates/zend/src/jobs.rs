@@ -287,7 +287,7 @@ pub async fn list(db: &PgPool) -> Result<Vec<Job>> {
 /// Recent runs, newest first: of one job, or of all.
 pub async fn runs(db: &PgPool, name: Option<&str>, limit: i64) -> Result<Vec<Value>> {
     let rows = sqlx::query(
-        "SELECT r.id, j.name, r.trigger, r.status, r.session_id, r.started_at, r.ended_at, r.output, r.error, r.tainted, r.posted_to, r.pending_to
+        "SELECT r.id, j.name, r.trigger, r.status, r.session_id, r.started_at, r.ended_at, r.output, r.error, (r.risk>=2 OR zen_session_contaminated(r.session_id)) AS tainted, (CASE WHEN zen_session_contaminated(r.session_id) THEN 5::smallint ELSE r.risk END) AS risk, r.posted_to, r.pending_to
          FROM job_runs r JOIN jobs j ON j.id = r.job_id
          WHERE ($1::text IS NULL OR (j.name = $1 AND j.removed_at IS NULL)) ORDER BY r.started_at DESC, r.id DESC LIMIT $2",
     )
@@ -303,7 +303,7 @@ pub async fn runs(db: &PgPool, name: Option<&str>, limit: i64) -> Result<Vec<Val
                 "status": r.get::<String, _>("status"), "session": r.get::<Option<Uuid>, _>("session_id"),
                 "started_at": r.get::<DateTime<Utc>, _>("started_at"), "ended_at": r.get::<Option<DateTime<Utc>>, _>("ended_at"),
                 "output": r.get::<Option<String>, _>("output"), "error": r.get::<Option<String>, _>("error"),
-                "untrusted": r.get::<bool, _>("tainted"), "posted_to": r.get::<Option<Uuid>, _>("posted_to"),
+                "risk": r.get::<i16, _>("risk"), "untrusted": r.get::<bool, _>("tainted"), "posted_to": r.get::<Option<Uuid>, _>("posted_to"),
                 "pending_to": r.get::<Option<Uuid>, _>("pending_to"),
             })
         })
@@ -953,7 +953,7 @@ async fn deliver_pending(app: &AppState) -> Result<()> {
         let turns = app.turns.lock().await;
         let mut tx = app.db.begin().await?;
         let row = sqlx::query(
-            "SELECT r.output, r.tainted, j.name FROM job_runs r JOIN jobs j ON j.id = r.job_id
+            "SELECT r.output, (r.tainted OR r.risk>=2 OR zen_session_contaminated(r.session_id)) AS tainted, j.name FROM job_runs r JOIN jobs j ON j.id = r.job_id
              WHERE r.id = $1 AND r.pending_to = $2 AND r.status = 'ok' FOR UPDATE OF r",
         )
         .bind(run)
@@ -1216,14 +1216,14 @@ async fn run_agent(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
     tape::append(&app.db, id, "base", &json!({ "text": base })).await?;
     // The last report, so the run can tell what's new: untrusted content (and this run tainted)
     // when the run that wrote it had read untrusted content.
-    let last: Option<(Option<String>, bool)> = sqlx::query_as("SELECT output, tainted FROM job_runs WHERE job_id = $1 AND id <> $2 AND status = 'ok' ORDER BY started_at DESC LIMIT 1")
+    let last: Option<(Option<String>, i16)> = sqlx::query_as("SELECT output, CASE WHEN zen_session_contaminated(session_id) THEN 5::smallint ELSE risk END FROM job_runs WHERE job_id = $1 AND id <> $2 AND status = 'ok' ORDER BY started_at DESC LIMIT 1")
         .bind(job.id)
         .bind(run)
         .fetch_optional(&app.db)
         .await?;
     let mut prompt = job.prompt.clone().unwrap_or_default();
-    if let Some((Some(l), tainted)) = last {
-        let report = crate::taint::hand_over(app, id, tainted, "job report", &format!("the previous run of {}", job.name), &zen_proto::head(&l, 3000)).await?;
+    if let Some((Some(l), risk)) = last {
+        let report = crate::taint::hand_over_rating(app, id, risk, "job report", &format!("the previous run of {}", job.name), &zen_proto::head(&l, 3000)).await?;
         prompt.push_str(&format!("\n\n<last_report>\nThe report from this job's previous run, to tell what's new:\n{report}\n</last_report>"));
     }
     crate::turns::run_and_wait(app, id, JOB, &prompt).await?;
@@ -1408,7 +1408,7 @@ async fn tool(app: &AppState, session: Uuid, args: &Value, owner_allowed: bool) 
             for r in &rs {
                 let body = r["output"].as_str().or(r["error"].as_str()).map(|t| zen_proto::head(t, 600)).unwrap_or_default();
                 let job = r["job"].as_str().unwrap_or("");
-                let body = crate::taint::hand_over(app, session, r["untrusted"] == true, "job report", &format!("a run of {job}"), &body).await?;
+                let body = crate::taint::hand_over_rating(app, session, r["risk"].as_i64().unwrap_or(4) as i16, "job report", &format!("a run of {job}"), &body).await?;
                 lines.push(format!("- {job} {} ({}, {}): {body}", r["started_at"].as_str().unwrap_or(""), r["status"].as_str().unwrap_or(""), r["trigger"].as_str().unwrap_or("")));
             }
             lines.join("\n")

@@ -150,14 +150,21 @@ pub fn draft_target(workspace: &Path, name: &str, args: &Value) -> Option<String
 /// Whether a `read` returned stored content marked as tainted: a wiki page with an entry labelled
 /// `web`, or a file of a draft skill a tainted session wrote. Then the dispatcher hands it over as
 /// untrusted content (taint.rs). Returns where it came from.
-pub async fn read_of_tainted(db: &PgPool, workspace: &Path, args: &Value) -> Option<&'static str> {
+pub async fn read_of_tainted(db: &PgPool, workspace: &Path, args: &Value) -> Option<(&'static str,i16)> {
     let target = real(&tools::resolve(workspace, args["path"].as_str()?));
     if target.starts_with(real(&crate::wiki::root())) {
-        let text = tokio::fs::read_to_string(&target).await.ok()?;
-        return crate::wiki::has_web_entry(&text).then_some("wiki");
+        let risk = match tokio::fs::read_to_string(&target).await {
+            Ok(text) => crate::sources::file_rating(db,&target,&text).await.unwrap_or(4),
+            Err(_) => 4,
+        };
+        return Some(("wiki",risk));
     }
     let skill = draft_target(workspace, "read", args)?;
-    crate::workshop::tainted_drafts(db).await.contains(&skill).then_some("draft skill")
+    let risk = match tokio::fs::read_to_string(&target).await {
+        Ok(text) => crate::sources::file_rating(db,&target,&text).await.unwrap_or(4),
+        Err(_) => 4,
+    };
+    Some(("draft skill",if crate::workshop::tainted_drafts(db).await.contains(&skill) {risk.max(4)} else {risk}))
 }
 
 /// The prompt file an `edit` or `write` call targets, if it targets one (it is backed up first).
@@ -345,8 +352,13 @@ pub async fn run_tool(app: &AppState, session: Uuid, workspace: &Path, name: &st
             // Another session's messages may carry web content it read: then they're untrusted here too.
             let other = args["session"].as_str().map(str::trim).filter(|s| !s.is_empty());
             if let (Some(other), false) = (other, is_error) {
-                let tainted = crate::taint::prefix_tainted(&app.db, &other.to_lowercase()).await;
-                return match crate::taint::hand_over(app, session, tainted, "history", other, &content).await {
+                let risk = if let Some((lo,hi)) = crate::compact::id_prefix_range(&other.to_lowercase()) {
+                    sqlx::query_scalar::<_,Option<i16>>("SELECT max(CASE WHEN zen_session_contaminated(session_id) AND origin!='owner' THEN 5::smallint ELSE risk END) FROM tape_events WHERE session_id BETWEEN $1 AND $2 AND seq>= $3 AND seq<= $4")
+                        .bind(lo).bind(hi).bind(args["from"].as_i64().unwrap_or(0) as i32)
+                        .bind(args["to"].as_i64().or(args["from"].as_i64()).unwrap_or(i32::MAX as i64) as i32)
+                        .fetch_one(&app.db).await.ok().flatten().unwrap_or(4)
+                } else {4};
+                return match crate::taint::hand_over_rating(app, session, risk, "history", other, &content).await {
                     Ok(content) => out(content, false),
                     Err(e) => out(crate::taint::withheld(&e), true),
                 };
@@ -591,6 +603,10 @@ async fn verify(app: &AppState, session: Uuid, workspace: &Path, args: &Value) -
             } else { crate::gate::Policy::Run };
             let (command, boundary) = match &route {
                 crate::gate::Policy::SafeRead(normalized) => (normalized.as_str(), tools::Sandbox::SafeRead),
+                crate::gate::Policy::Sandbox => (run,tools::Sandbox::Offline),
+                crate::gate::Policy::NetworkSandbox => (run,tools::Sandbox::Network),
+                crate::gate::Policy::ReadOnlySandbox => (run,tools::Sandbox::ReadOnly),
+                crate::gate::Policy::Hold(why) => return err(crate::gate::held_note(why)),
                 _ => (run, sandbox),
             };
             checks.insert(c["id"].as_str().unwrap_or("").to_string(), run_check(&dir, command, c["expect"].as_str(), boundary).await);

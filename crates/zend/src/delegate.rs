@@ -152,7 +152,8 @@ async fn delegate(app: &AppState, session: Uuid, workspace: &std::path::Path, ar
     let cost: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(cost_usd), 0) FROM turns WHERE session_id = $1").bind(child).fetch_one(&app.db).await.unwrap_or(0.0);
     let error: Option<String> = sqlx::query_scalar("SELECT error FROM turns WHERE session_id = $1 ORDER BY started_at DESC LIMIT 1").bind(child).fetch_optional(&app.db).await?.flatten();
     crate::agent::log_decision(&app.db, Some(child), "model", &json!({ "kind": kind, "task": zen_proto::head(task, 300), "parent": session, "how": how }), &json!({ "model": model }), Some(&model), Some(propensity), true, error.as_deref()).await;
-    let tainted = crate::taint::tainted(&app.db, child).await;
+    let risk: i16 = sqlx::query_scalar("SELECT CASE WHEN zen_session_contaminated(id) THEN 5::smallint ELSE risk END FROM sessions WHERE id=$1")
+        .bind(child).fetch_one(&app.db).await?;
     let head = format!(
         "Subagent {} on {model} ({kind}, {how}) finished in {}s, ${cost:.3}{}:\n",
         &child.to_string()[..8],
@@ -160,11 +161,7 @@ async fn delegate(app: &AppState, session: Uuid, workspace: &std::path::Path, ar
         error.as_deref().map(|e| format!(", with an error: {e}")).unwrap_or_default()
     );
     let body = if answer.trim().is_empty() { "(no answer)".to_string() } else { answer };
-    if tainted {
-        // Unmarked, the subagent's answer is withheld (the error goes to the model instead).
-        crate::taint::taint(app, session, "delegate", &child.to_string()).await?;
-        return Ok((format!("{head}{}", crate::taint::untrusted("subagent", &child.to_string(), &body)), error.is_some()));
-    }
+    let body = crate::taint::hand_over_rating(app,session,risk,"subagent",&child.to_string(),&body).await?;
     Ok((format!("{head}{body}"), error.is_some()))
 }
 

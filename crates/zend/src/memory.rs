@@ -60,7 +60,8 @@ fn line(e: &Entry) -> String {
 
 async fn short_entries(db: &PgPool) -> Result<Vec<Entry>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, text, source, uses, proposed IS NOT DISTINCT FROM 'wiki' AS captured, updated_at, tainted,
+        "SELECT id, text, source, uses, proposed IS NOT DISTINCT FROM 'wiki' AS captured, updated_at,
+                (risk >= 2 OR zen_session_contaminated(session_id)) AS tainted,
                 (EXTRACT(EPOCH FROM now() - created_at) / 86400)::float8 AS age,
                 (EXTRACT(EPOCH FROM now() - GREATEST(updated_at, COALESCE(used_at, updated_at))) / 86400)::float8 AS idle
          FROM memories WHERE tier = 'short' ORDER BY created_at, id",
@@ -238,11 +239,12 @@ instructions), or leave it; it is being tidied now. Then carry on with the owner
             anyhow::ensure!(!text.is_empty(), "replace needs the new `text`");
             anyhow::ensure!(text.chars().count() <= 600, "keep a memory under 600 characters");
             // The new text is the replacing session's: it carries that session's mark.
-            let n = sqlx::query("UPDATE memories SET text = $2, source = $3, tainted = $4, updated_at = now(), used_at = now(), uses = uses + 1 WHERE id = $1 AND tier = 'short'")
+            let n = sqlx::query("UPDATE memories SET text = $2, source = $3, tainted = $4, session_id = $5, updated_at = now(), used_at = now(), uses = uses + 1 WHERE id = $1 AND tier = 'short'")
                 .bind(id)
                 .bind(&text)
                 .bind(source)
                 .bind(tainted)
+                .bind(session)
                 .execute(db)
                 .await?
                 .rows_affected();
@@ -856,7 +858,7 @@ pub async fn last_run(db: &PgPool) -> Result<Value, sqlx::Error> {
 /// Memories by tier, newest first, for `zen memory`.
 pub async fn list(db: &PgPool, tier: &str) -> Result<Value, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, text, source, tier, proposed, reason, created_at, updated_at, tainted FROM memories
+        "SELECT id, text, source, tier, proposed, reason, created_at, updated_at, (risk>=2 OR zen_session_contaminated(session_id)) AS tainted FROM memories
          WHERE $1 = 'all' OR tier = $1 OR ($1 = 'proposed' AND proposed = 'promote') ORDER BY id DESC LIMIT 500",
     )
         .bind(tier)

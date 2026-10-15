@@ -216,6 +216,8 @@ pub enum Sandbox {
     ReadOnly,
     /// No network; the workspace writable, everything else (the home, the zen home) read-only.
     Offline,
+    /// Risk 2–3 local work: same filesystem isolation, network retained.
+    Network,
 }
 
 /// Run a tool. `env` is added to the environment of commands (bash), which run in `sandbox`. In
@@ -338,9 +340,11 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox:
             c.arg("--chdir").arg(dir).args(["bash", "-c"]);
             c
         }
-        Sandbox::Offline => {
+        Sandbox::Offline | Sandbox::Network => {
             let mut c = Command::new("bwrap");
-            c.args(OFFLINE_SANDBOX);
+            for arg in OFFLINE_SANDBOX {
+                if sandbox != Sandbox::Network || arg != "--unshare-net" { c.arg(arg); }
+            }
             // A home under the emptied /tmp (a test's) comes back read-only; then the workspace,
             // writable (a project, its git repository, its build output); then the zen home
             // read-only again if the workspace holds it (prompt files, skills, the wiki), and the
@@ -399,7 +403,7 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox:
         .map_err(|e| match sandbox {
             Sandbox::ReadOnly => format!("the read-only shell (bubblewrap) couldn't start: {e}; use read instead"),
             Sandbox::Offline => format!("the sandboxed shell (bubblewrap) couldn't start: {e}; this session read untrusted content, so it gets no shell outside the sandbox"),
-            Sandbox::None | Sandbox::SafeRead | Sandbox::GatedFile => format!("failed to start bash: {e}"),
+            Sandbox::None | Sandbox::SafeRead | Sandbox::GatedFile | Sandbox::Network => format!("failed to start bash: {e}"),
         })?;
     let mut group = GroupKill(child.id().map(|p| p as i32));
 

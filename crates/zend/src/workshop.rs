@@ -174,6 +174,7 @@ async fn save_skill(app: &App, session: Uuid, args: &Value) -> Result<String> {
         mark_draft(&app.db, &format!("{domain}/{name}"), session).await.context("not saved: couldn't mark the draft as written by a session that read untrusted content")?;
     }
     write_skill(&dir, &md, &args["files"])?;
+    crate::sources::record_file(&app.db,session,&dir.join("SKILL.md"),1).await?;
     let mark = if tainted { "; it read untrusted content" } else { "" };
     crate::git::commit_all(&root, &format!("{what}: {domain}/{name} (session {}{mark})\n\n{reason}", &session.to_string()[..8])).await;
     let new_domain = current.is_none() && draft.is_none() && !active.iter().any(|x| x.domain == domain);

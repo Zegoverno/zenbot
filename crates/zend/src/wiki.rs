@@ -334,7 +334,11 @@ async fn capture(app: &App, session: Option<Uuid>, args: &Value) -> Result<Strin
     };
     let path = dir.join(format!("{slug_}.md"));
     let text = std::fs::read_to_string(&path)?;
+    let prior_risk = if created {1} else {crate::sources::file_rating(&app.db,&path,&text).await?};
     std::fs::write(&path, add_entry(&text, &entry, &today))?;
+    if let Some(session) = session {
+        crate::sources::record_file(&app.db,session,&path,prior_risk).await?;
+    }
     let mut log = std::fs::read_to_string(dir.join("log.md")).unwrap_or_default();
     log.push_str(&format!("## [{today}] capture | {slug_}{}\n", if created { " (new page)" } else { "" }));
     std::fs::write(dir.join("log.md"), log)?;

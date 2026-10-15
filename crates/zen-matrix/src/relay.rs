@@ -43,7 +43,7 @@ pub fn parse(text: &str) -> Input {
         "new" => Input::New((!rest.is_empty()).then(|| rest.to_string())),
         "stop" => Input::Stop,
         "session" => Input::Which,
-        "jobs" | "skills" | "tools" | "trust" | "allow" | "sources" => Input::Owner(cmd.trim().to_string()),
+        "jobs" | "skills" | "tools" | "trust" | "allow" | "sources" | "deny" => Input::Owner(cmd.trim().to_string()),
         _ => Input::Help,
     }
 }
@@ -56,6 +56,7 @@ pub const HELP: &str = "**zen in Matrix**\n\n\
 - `!jobs`: scheduled jobs; `!jobs run|resume|pause <name>`, `!jobs runs [name]` (its report).\n\
 - `!skills`: skills and made tools; `!skills accept|reject <domain/name> <sha>`, `!tools accept|reject <name> <sha>`.\n\
 - `!sources`: list the allowlist; `!sources add <host/path> [2|3] [note…]`, `!sources rm <host/path>`.\n\
+- `!deny`: stop this session and mark its products contaminated.\n\
 - `!allow`: review the latest held action; `!allow yes` allows that exact action once.\n\
 - `!trust`: what made this room's session untrusted (it read content from outside); `!trust yes` trusts it again.\n\
 - When zen asks questions, answer with the option numbers (`1 2`), or in your own words.";
@@ -307,6 +308,7 @@ mod tests {
         assert_eq!(parse(" !Skills "), Input::Owner("Skills".into()));
         assert_eq!(parse("!tools accept made_x abc"), Input::Owner("tools accept made_x abc".into()));
         assert_eq!(parse("!sources add x.com/paulg 3 comments"), Input::Owner("sources add x.com/paulg 3 comments".into()));
+        assert_eq!(parse("!deny"), Input::Owner("deny".into()));
         assert_eq!(parse("!trust yes"), Input::Owner("trust yes".into()));
         assert_eq!(parse("!allow yes"), Input::Owner("allow yes".into()));
         assert_eq!(parse("jobs run x"), Input::Prompt("jobs run x".into()), "without the `!` it is a prompt");

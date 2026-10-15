@@ -227,6 +227,9 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                         // Nothing more after a tool ended the turn; then the agent's own tools
                         // (agent.rs), or the kernel's built-ins.
                         let read_only = agent::read_only(kind.as_deref());
+                        if crate::taint::stopped(&app.db,id).await.unwrap_or(true) {
+                            return tools::ToolOutput { rating: None, content: "not run: session stopped by contamination; owner review required".into(), is_error: true };
+                        }
                         // Immutable owner-only and kind boundaries cannot be overridden by a grant.
                         if let Some(why) = agent::refusal(kind.as_deref(), &name) {
                             return tools::ToolOutput { rating: None, content: why, is_error: true };
@@ -260,6 +263,14 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                                     tracing::warn!("backing up {}: {e:#}", p.display());
                                 }
                             }
+                            let changed_path = matches!(name.as_str(),"write"|"edit").then(||
+                                tools::resolve(&workspace,args["path"].as_str().unwrap_or("")));
+                            let prior_risk = if let Some(path) = &changed_path {
+                                match tokio::fs::read_to_string(path).await {
+                                    Ok(text) => crate::sources::file_rating(&app.db,path,&text).await.unwrap_or(4),
+                                    Err(_) => 1,
+                                }
+                            } else {1};
                             let mut out = if let Some(out) = agent::run_tool(app, id, &workspace, &name, &args, &mut ending, &policy).await {
                                 out
                             } else {
@@ -269,6 +280,8 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                                 } else {
                                     match &policy {
                                         crate::gate::Policy::Sandbox => tools::Sandbox::Offline,
+                                        crate::gate::Policy::NetworkSandbox => tools::Sandbox::Network,
+                                        crate::gate::Policy::ReadOnlySandbox => tools::Sandbox::ReadOnly,
                                         crate::gate::Policy::SafeRead(_) => tools::Sandbox::SafeRead,
                                         crate::gate::Policy::Run if matches!(name.as_str(), "write" | "edit")
                                             && crate::taint::tainted(&app.db, id).await => tools::Sandbox::GatedFile,
@@ -282,16 +295,24 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                                 let mut out = tools::execute(&workspace, &name, &execute_args, &env, sandbox).await;
                                 // Stored content a tainted session wrote is untrusted however it's read.
                                 if name == "read" && !out.is_error {
-                                    if let Some(source) = agent::read_of_tainted(&app.db, &workspace, &args).await {
+                                    if let Some((source,risk)) = agent::read_of_tainted(&app.db, &workspace, &args).await {
                                         let about = args["path"].as_str().unwrap_or("");
-                                        out = match crate::taint::hand_over(app, id, true, source, about, &out.content).await {
-                                            Ok(content) => tools::ToolOutput { rating: None, content, is_error: false },
+                                        out = match crate::taint::hand_over_rating(app, id, risk, source, about, &out.content).await {
+                                            Ok(content) => tools::ToolOutput { rating: Some(crate::sources::Rating {risk,origin:format!("stored:{source}")}), content, is_error: false },
                                             Err(e) => tools::ToolOutput { rating: None, content: crate::taint::withheld(&e), is_error: true },
                                         };
                                     }
                                 }
                                 out
                             };
+                            if !out.is_error {
+                                if let Some(path) = &changed_path {
+                                    if let Err(e) = crate::sources::record_file(&app.db,id,path,prior_risk).await {
+                                        out.is_error = true;
+                                        out.content.push_str(&format!("\nfile changed, but provenance recording failed: {e}"));
+                                    }
+                                }
+                            }
                             if let Some(note) = prompt_file.as_deref().filter(|_| !out.is_error).and_then(agent::over_cap_note) {
                                 out.content.push_str(&note);
                             }
@@ -359,6 +380,11 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                 },
             };
             crate::sources::raise(&app.db, id, rating.risk).await?;
+            if rating.risk == 5 {
+                crate::taint::deny(app,id,"level-5 block").await?;
+                out.content = "content withheld: level-5 block stopped this session; owner review required".into();
+                out.is_error = true;
+            }
             let output_bytes = out.content.len() as i64;
             // Cut arguments keep the sha256 and size of the whole (masked) arguments under `_full`.
             let recorded = sqlx::query(

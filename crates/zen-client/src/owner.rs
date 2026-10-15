@@ -18,6 +18,7 @@ use crate::{enc, Client};
 /// One owner command.
 #[derive(Debug, PartialEq)]
 pub enum OwnerCmd {
+    Deny,
     Sources,
     SourceAdd { source: String, risk: i16, note: String },
     SourceRm(String),
@@ -70,6 +71,7 @@ pub const USAGE: &[(&str, &str)] = &[
     ("skills", "skills and made tools, with the fingerprint to review a draft"),
     ("skills accept|reject <domain/name> <sha>", "activate or archive a draft skill"),
     ("tools accept|reject <name> <sha>", "approve a made tool (network, no sandbox) or reject it"),
+    ("deny", "stop this session and mark its products as contaminated"),
     ("allow", "inspect the latest held action"),
     ("allow yes", "allow that exact action once, for ten minutes"),
     ("trust", "what made this session risky or tainted"),
@@ -117,6 +119,10 @@ pub fn parse(text: &str) -> Option<Result<OwnerCmd, String>> {
             }
             _ => usage("tools [accept|reject <name> <sha>]"),
         },
+        "deny" => match &words[1..] {
+            [] => Ok(OwnerCmd::Deny),
+            _ => usage("deny"),
+        },
         "allow" => match &words[1..] {
             [] => Ok(OwnerCmd::Allow { yes: false }),
             [v] if v.eq_ignore_ascii_case("yes") => Ok(OwnerCmd::Allow { yes: true }),
@@ -136,6 +142,13 @@ pub fn parse(text: &str) -> Option<Result<OwnerCmd, String>> {
 /// Markdown for the chat.
 pub async fn run(c: &Client, cmd: &OwnerCmd, session: Option<&str>, chat: &mut Chat) -> Result<String> {
     Ok(match cmd {
+        OwnerCmd::Deny => {
+            let Some(id) = session else { return Ok("No session here yet.".into()) };
+            c.post(&format!("/api/sessions/{}/deny", enc(id)), json!({})).await?;
+            chat.looked.remove(id);
+            chat.actions.remove(id);
+            "Stopped. This session and its products are marked contaminated. Review with trust before resuming.".into()
+        }
         OwnerCmd::Sources => {
             let v = c.get("/api/sources").await?;
             let lines: Vec<String> = v.as_array().into_iter().flatten()
@@ -206,7 +219,7 @@ pub async fn run(c: &Client, cmd: &OwnerCmd, session: Option<&str>, chat: &mut C
             let p = chat.prefix;
             if !yes {
                 let r = c.get(&format!("/api/sessions/{}/taint", enc(id))).await?;
-                if r["tainted_at"].is_null() && r["risky_at"].is_null() {
+                if r["tainted_at"].is_null() && r["risky_at"].is_null() && r["risk"].as_i64().unwrap_or(1) < 2 {
                     chat.looked.remove(id);
                     return Ok("This session hasn't read untrusted content: nothing to trust.".into());
                 }
@@ -220,7 +233,7 @@ pub async fn run(c: &Client, cmd: &OwnerCmd, session: Option<&str>, chat: &mut C
             chat.looked.remove(id);
             let r = r?;
             match r["seq"].as_i64() {
-                Some(seq) => format!("Trusted from #{seq} on: the risky and tainted marks are lifted. The next outside read makes it risky again."),
+                Some(seq) => format!("Trusted from #{seq} on. Contamination caused by this session is reversed; original stored-item ratings stay unchanged."),
                 None => r["result"].as_str().unwrap_or("done").to_string(),
             }
         }
@@ -235,8 +248,7 @@ pub fn taint_report(r: &Value, prefix: &str) -> String {
     };
     let mut out = vec![
         format!(
-            "**This session read untrusted content** (since {} UTC), so it runs limited: its shell has no network, \
-             and it can't change the prompt files, skills or tools, vouch for a memory or start a job.",
+            "**This session is marked contaminated** (since {} UTC). Work is stopped until you review and trust it.",
             minute(if r["tainted_at"].is_null() { &r["risky_at"] } else { &r["tainted_at"] })
         ),
         String::new(),
@@ -262,8 +274,8 @@ pub fn taint_report(r: &Value, prefix: &str) -> String {
     }
     out.push(String::new());
     out.push(
-        "Trusting it lifts the limits from now on. What it read stays in its context, so trust it only if you trust that; \
-         the next outside read makes it risky again, and what it saved meanwhile stays marked."
+        "Trusting it vouches for this reviewed window and reverses contamination caused by this session. \
+         Original stored-item risk ratings stay unchanged; later outside reads can raise risk again."
             .into(),
     );
     if r["busy"] == true {
@@ -363,6 +375,8 @@ mod tests {
             Some(Ok(OwnerCmd::Skill { name: "work/brief".into(), decision: "accept", sha: "abc123def456".into() }))
         );
         assert_eq!(parse("tools reject made_fetch 0123abcd"), Some(Ok(OwnerCmd::Tool { name: "fetch".into(), decision: "reject", sha: "0123abcd".into() })));
+        assert_eq!(parse("deny"), Some(Ok(OwnerCmd::Deny)));
+        assert!(parse("deny all").unwrap().is_err());
         assert_eq!(parse("allow"), Some(Ok(OwnerCmd::Allow { yes: false })));
         assert_eq!(parse("ALLOW YES"), Some(Ok(OwnerCmd::Allow { yes: true })));
         assert!(matches!(parse("allow everything"), Some(Err(_))));
@@ -402,7 +416,7 @@ mod tests {
             "taints": [{ "seq": 12, "source": "web_search", "about": "harbour" }],
             "sources": [{ "first": 12, "source": "web", "about": "harbour", "count": 3 }, { "first": 30, "source": "subagent", "about": "", "count": 1 }] });
         let t = taint_report(&r, "!");
-        assert!(t.starts_with("**This session read untrusted content** (since 2026-10-13 09:30 UTC)"), "{t}");
+        assert!(t.starts_with("**This session is marked contaminated** (since 2026-10-13 09:30 UTC)"), "{t}");
         assert!(t.contains("What marked it:\n- #12 web_search: harbour\n"), "{t}");
         assert!(t.contains("- #12 web (3×): harbour\n- #30 subagent\n"), "{t}");
         assert!(t.ends_with("`!trust yes` to trust it."), "{t}");
