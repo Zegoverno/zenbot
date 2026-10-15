@@ -6,6 +6,13 @@
 
 ---
 
+## 2026-10-15 — Offline, read-only project code by default (D-063)
+
+Risky sessions run project code without network or workspace writes; private `/tmp` remains
+writable. Attempts offer exact owner `/allow` approval without tainting on that basis. An exact
+verification grant also reaches its criteria. Constrained file tools keep their existing policy.
+No migration or unfinished D-062 step-3 implementation is included.
+
 ## 2026-10-15 — Source ratings and the owner's allowlist (D-062 step 2)
 
 Migration 0027 adds source entries/audit, ratings and provenance on tape/tool calls, session max

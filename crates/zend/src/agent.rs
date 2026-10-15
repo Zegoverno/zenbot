@@ -396,7 +396,7 @@ If a question goes unanswered, take your recommended option and say it was an as
                 Err(e) => out(crate::taint::withheld(&e), true),
             }
         }
-        "verify" => Some(verify(app, session, workspace, args).await),
+        "verify" => Some(verify(app, session, workspace, args, policy).await),
         "web_search" | "web_fetch" => crate::web::run_tool(app, session, name, args).await,
         "search" => crate::search::run_tool(app, session, name, args).await,
         "capture" => crate::wiki::run_tool(app, session, name, args).await,
@@ -564,7 +564,7 @@ pub fn render_results(results: &[Value], notes: Option<&str>, verifier: &str) ->
     text
 }
 
-async fn verify(app: &AppState, session: Uuid, workspace: &Path, args: &Value) -> tools::ToolOutput {
+async fn verify(app: &AppState, session: Uuid, workspace: &Path, args: &Value, policy: &crate::gate::Policy) -> tools::ToolOutput {
     let err = |content: String| tools::ToolOutput { rating: None, content, is_error: true };
     let goal = args["goal"].as_str().unwrap_or("").trim().to_string();
     let criteria = criteria_of(args);
@@ -583,10 +583,11 @@ async fn verify(app: &AppState, session: Uuid, workspace: &Path, args: &Value) -
     app.emit(session, json!({ "type": "status", "text": format!("verifying: running {} check(s)", criteria.iter().filter(|c| c["run"].is_string()).count()) })).await;
     let mut checks = serde_json::Map::new();
     // A criterion's command is the session's shell too: sandboxed once the session is tainted.
-    let sandbox = crate::taint::shell_sandbox(&app.db, session).await;
+    let granted = matches!(policy,crate::gate::Policy::Granted);
+    let sandbox = if granted {tools::Sandbox::None} else {crate::taint::shell_sandbox(&app.db, session).await};
     for c in &criteria {
         if let Some(run) = c["run"].as_str() {
-            let route = if crate::taint::tainted(&app.db, session).await {
+            let route = if !granted && crate::taint::tainted(&app.db, session).await {
                 crate::gate::shell(&dir, run)
             } else { crate::gate::Policy::Run };
             let (command, boundary) = match &route {

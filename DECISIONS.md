@@ -6,6 +6,25 @@
 
 ---
 
+## D-063 — Project code defaults to offline and read-only
+
+**Date:** 2026-10-15 · **Status:** accepted (owner), production trial · **Amends:** D-062's
+network-preserving local commands at risk 2–3; D-053/D-056's writable build sandbox.
+
+**Decision:** For risky/tainted sessions today, and at risk ≥2 when D-062 step 3 replaces those
+marks, programmable commands execute
+offline with a read-only workspace and host; only private `/tmp` is writable. The kernel's
+constrained file tools keep their policy. A sandboxed project-code attempt offers its exact
+workspace/tool/arguments for one-use owner `/allow`, without tainting simply for that attempt.
+Seccomp also denies connect/datagram syscalls and io_uring to close pathname Unix-socket escapes;
+foreign syscall ABIs are refused. An explicit grant supplies broader capabilities, including for
+verification criteria. Unknown
+and outward commands remain held under the current grammar; this does not ship D-062 step 3.
+
+**Why:** A local-looking build/test can execute scripts that send data out or plant persistent
+steering. Parsing the outer command cannot approve those hidden effects individually. Prefer
+explicit grants and measure the interruption cost in real use before relaxing this boundary.
+
 ## D-062 — Risk is rated per block by its source; a reversible taint stops the session
 
 **Date:** 2026-10-15 · **Status:** accepted (owner); steps 1–2 built · **Supersedes, as its steps

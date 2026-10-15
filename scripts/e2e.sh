@@ -999,13 +999,13 @@ taint_on_data() {
   zen ask --json -m faux/smoke "CLEAN-DRAFT" >/dev/null
   local r sid res; r=$(zen ask --json -m faux/smoke "TAINT-A"); sid=$(echo "$r" | jq -r .session_id)
   check "search, remember, a draft, a write into a clean draft, bash" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" \
-    web_search:false,remember:false,save_skill:false,write:true,write:false,bash:false,bash:true
+    web_search:false,remember:false,save_skill:false,write:true,write:false,bash:true,bash:true
   res=$(res_of "$sid")
   check "the memory is marked, an inference" eq "$(q "SELECT source || '/' || tainted FROM memories WHERE id = 1")" inferred/true
   check "the saved draft is marked; a held overwrite leaves the clean one alone" eq "$(q "SELECT string_agg(skill, ',' ORDER BY skill) FROM draft_taint")" work/web-notes
   check "the draft's commit says so" grep -q "web-notes (session ${sid:0:8}; it read untrusted content)" <<<"$(git -C "$sk" log --format=%s)"
   check "a network command is held and programmable git runs offline" bash -c 'grep -q "not run:" <<<"$1" && grep -q "sandboxed: this session has read untrusted content" <<<"$1"' _ "$res"
-  check "but writes and commits in its workspace" bash -c 'test -s "$2/made-here.txt" && [ "$(git -C "$2" log -1 --format=%s)" = sandboxed ]' _ "$res" "$ws"
+  check "file tools still write but project code cannot commit without approval" bash -c 'test -s "$2/made-here.txt" && [ "$(git -C "$2" log -1 --format=%s)" = init ] && grep -q "read-only workspace" <<<"$1"' _ "$res" "$ws"
   check "and not in the home" bash -c 'grep -q "not run:" <<<"$1" && test ! -e "$2/planted"' _ "$res" "$zh"
   r=$(zen ask --json -m faux/smoke "TAINT-B"); sid=$(echo "$r" | jq -r .session_id)
   local base; base=$(q "SELECT payload->>'text' FROM tape_events WHERE session_id='$sid' AND kind='base'")
@@ -1165,7 +1165,13 @@ action_gate() {
   check "source mutations are audited" eq "$(q "SELECT count(*) FROM source_audit")" 6
   check "outside read is risky, not tainted" eq "$(q "SELECT (risky_at IS NOT NULL) || '/' || (tainted_at IS NULL) FROM sessions WHERE id='$sid'")" true/true
   check "safe file effect runs without approval" grep -q "safe workspace note" "$ws/notes.txt"
-  check "programmable git ran offline without taint" grep -q "sandboxed:" <<<"$(res_of "$sid")"
+  check "programmable git ran offline/read-only without taint" grep -q "read-only workspace" <<<"$(res_of "$sid")"
+  gate=$(api "$URL/api/sessions/$sid/allow" | jq -r '.actions[0].id')
+  check "sandboxed project code offers exact approval without a hold or taint" eq "$(q "SELECT reason LIKE 'project code%' FROM action_gates WHERE id=$gate")" t
+  check "owner grants project code broader capabilities once" eq "$(api -X POST -d "{\"id\":$gate}" "$URL/api/sessions/$sid/allow" | jq -r .allowed)" true
+  before=$(q "SELECT max(seq) FROM tape_events WHERE session_id='$sid'")
+  zen ask --json -s "$sid" "GATE-READ" >/dev/null
+  check "approved git retry ran outside the sandbox" bash -c 'grep -q "exit code: 0" <<<"$1" && ! grep -q "sandboxed:" <<<"$1"' _ "$(res_of "$sid" "$before")"
   before=$(q "SELECT max(seq) FROM tape_events WHERE session_id='$sid'")
   zen ask --json -s "$sid" "GATE-SECRET" >/dev/null
   check "recursive read cannot print credential characters" bash -c '! grep -q "/token:" <<<"$1"' _ "$(res_of "$sid" "$before")"
@@ -1183,12 +1189,20 @@ action_gate() {
   before=$(q "SELECT max(seq) FROM tape_events WHERE session_id='$sid'")
   zen ask --json -s "$sid" "GATE-HOLD" >/dev/null
   check "one exact retry ran successfully" grep -q "exit code: 0" <<<"$(res_of "$sid" "$before")"
-  check "grant consumption audited and once" eq "$(q "SELECT (used_at IS NOT NULL) || '/' || (SELECT count(*) FROM tape_events WHERE session_id='$sid' AND kind='allow') FROM action_gates WHERE id=$gate")" true/1
+  check "grant consumption audited and once" eq "$(q "SELECT (used_at IS NOT NULL) || '/' || (SELECT count(*) FROM tape_events WHERE session_id='$sid' AND kind='allow' AND (payload->>'gate')::bigint=$gate) FROM action_gates WHERE id=$gate")" true/1
   before=$(q "SELECT max(seq) FROM tape_events WHERE session_id='$sid'")
   zen ask --json -s "$sid" "GATE-HOLD" >/dev/null
   check "second retry held again" grep -q "not run:" <<<"$(res_of "$sid" "$before")"
   zen ask --json -s "$sid" "GATE-VERIFY" >/dev/null
   check "nested verification cannot change home" bash -c '! grep -q planted "$1/.bashrc" 2>/dev/null' _ "$TMP/home"
+  zen ask --json -s "$sid" "GATE-VERIFY-GRANT" >/dev/null
+  check "unapproved verification cannot write the workspace" test ! -e "$ws/verify-grant.txt"
+  gate=$(api "$URL/api/sessions/$sid/allow" | jq -r '.actions[0].id')
+  check "owner can approve the exact verification" eq "$(api -X POST -d "{\"id\":$gate}" "$URL/api/sessions/$sid/allow" | jq -r .allowed)" true
+  zen ask --json -s "$sid" "GATE-VERIFY-GRANT" >/dev/null
+  check "exact granted verification can write once" eq "$(wc -l < "$ws/verify-grant.txt")" 1
+  zen ask --json -s "$sid" "GATE-VERIFY-GRANT" >/dev/null
+  check "verification grant cannot be reused" eq "$(wc -l < "$ws/verify-grant.txt")" 1
   zen ask --json -s "$sid" "GATE-PY" >/dev/null
   check "opaque destructive interpreter held" grep -q "safe workspace note" "$ws/notes.txt"
   zen ask --json -s "$sid" "GATE-JOB" >/dev/null

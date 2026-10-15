@@ -1,7 +1,8 @@
 //! D-056: run / sandbox / hold before an action takes effect in a risky session.
 //! Only the owner grants an exact (workspace, tool, arguments) action, once. Unknown shell
 //! syntax is held, never interpreted by a classifier. Safe reads use fixed system binaries
-//! and a cleared environment; Git and build tools are programmable and always sandboxed.
+//! and a cleared environment; Git and build tools default to offline, read-only execution
+//! (D-063). Their exact action is offered for owner approval without tainting the session.
 //! No classifier receives outside content. The shell grammar (`grammar.rs`) allows read-only
 //! commands by program and flag, and re-emits them from the parsed words.
 //! A hold the gate makes only because it can't classify the action (unknown syntax, program or
@@ -64,9 +65,17 @@ pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args:
     } else if name == "web_fetch" {
         if fetch_allowed(&app.db, session, args["url"].as_str().unwrap_or("")).await? { Policy::Run } else { Policy::Hold(UNSEEN_URL.into()) }
     } else { policy(workspace, name, args) };
-    if let Policy::Hold(reason) = &p {
-        // Revoke capabilities before returning the refusal; no action has run.
-        if escalates(reason) {
+    let code_approval = name == "bash" && matches!(p,Policy::Sandbox)
+        || name == "verify" && args["criteria"].as_array().into_iter().flatten()
+            .filter_map(|c|c["run"].as_str()).any(|c|matches!(shell(workspace,c),Policy::Sandbox));
+    let reason = match &p {
+        Policy::Hold(reason) => Some(reason.as_str()),
+        _ if code_approval => Some("project code runs offline with a read-only workspace; exact approval grants broader capabilities"),
+        _ => None,
+    };
+    if let Some(reason) = reason {
+        // A read-only attempt offers an approval without treating it as an attack.
+        if matches!(p,Policy::Hold(_)) && escalates(reason) {
             crate::taint::escalate(app, session, name, reason).await?;
         }
         sqlx::query("INSERT INTO action_gates (session_id, action, reason)
