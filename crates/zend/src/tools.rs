@@ -214,10 +214,9 @@ pub enum Sandbox {
     GatedFile,
     /// Everything read-only, an empty home with only the work bound back, no network.
     ReadOnly,
-    /// No network; the workspace writable, everything else (the home, the zen home) read-only.
+    /// No network; workspace and host read-only, with a private writable /tmp (D-063).
     Offline,
     /// Risk 2–3 local work: same filesystem isolation, network retained.
-    Network,
 }
 
 /// Run a tool. `env` is added to the environment of commands (bash), which run in `sandbox`. In
@@ -278,15 +277,15 @@ const READ_ONLY_SANDBOX: [&str; 13] =
 
 /// The shell of a session that has read untrusted content: the same view of the machine, with
 /// `/run` emptied too (the sockets there, Docker's and the user's agents, reach past the network
-/// namespace). `run_shell` binds the workspace back writable and hides the secret files.
+/// namespace). `run_shell` binds the workspace back read-only and hides the secret files.
 const OFFLINE_SANDBOX: [&str; 15] = [
     "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--tmpfs", "/run", "--unshare-pid", "--unshare-net", "--new-session", "--die-with-parent",
 ];
 
 /// What a sandboxed (offline) shell's output ends with, so the model knows why the network and the
-/// files outside the workspace are out of reach.
-pub const OFFLINE_NOTE: &str = "[sandboxed: this session has read untrusted content, so its shell has no network and can write only \
-in the workspace and a private /tmp; for anything else, the owner can trust this session again (`/trust`) or continue in a fresh one]";
+/// workspace and host writes are out of reach.
+pub const OFFLINE_NOTE: &str = "[sandboxed: this session has read untrusted content; project code has no network and a read-only workspace. \
+Only private /tmp is writable. For broader capabilities, end the turn and ask the owner to review /allow, then retry unchanged]";
 
 /// bubblewrap's arguments to hide the secret files: an empty folder over a folder, `/dev/null`
 /// over a file.
@@ -321,16 +320,64 @@ pub struct Shell {
     pub status: Option<std::io::Result<std::process::ExitStatus>>,
 }
 
-/// Run `command` with `bash -c` in `dir`, in a process group of its own: on a timeout, or when the
-/// future is dropped (an abort), the whole group is killed. A command that finishes leaves the
-/// background processes it started running. It runs in `sandbox` (bubblewrap) when there is one.
-/// Errors when it can't be started. The kernel's secret variables are removed from the environment and
-/// a sandbox hides the secret files. Used by the bash tool and `verify`'s criteria checks.
+/// Linux seccomp ABI (seccomp_data: nr at byte 0, arch at byte 4). Network namespaces do not
+/// isolate pathname Unix sockets, so deny connection/datagram operations and io_uring bypasses.
+/// Reject foreign syscall ABIs (including x32) rather than comparing the wrong syscall numbers.
+fn network_filter() -> Result<std::fs::File,String> {
+    use std::io::{Seek,Write};
+    use std::os::fd::FromRawFd;
+    #[cfg(target_arch="x86_64")]
+    let arch = 0xc000003e;
+    #[cfg(target_arch="aarch64")]
+    let arch = 0xc00000b7;
+    #[cfg(not(any(target_arch="x86_64",target_arch="aarch64")))]
+    return Err("sandbox seccomp supports x86_64 and aarch64 only".into());
+    let mut instructions: Vec<(u16,u8,u8,u32)> = vec![
+        (0x20,0,0,4), (0x15,1,0,arch), (0x06,0,0,0x80000000),
+        (0x20,0,0,0), (0x45,0,1,0x40000000), (0x06,0,0,0x00050001),
+    ];
+    for nr in [libc::SYS_connect,libc::SYS_sendto,libc::SYS_sendmsg,libc::SYS_sendmmsg,libc::SYS_io_uring_setup] {
+        instructions.push((0x15,0,1,nr as u32));
+        instructions.push((0x06,0,0,0x00050001)); // SECCOMP_RET_ERRNO | EPERM
+    }
+    instructions.push((0x06,0,0,0x7fff0000)); // SECCOMP_RET_ALLOW
+    // SAFETY: static NUL-terminated name; the returned fd is owned exactly once by File.
+    let fd = unsafe {libc::memfd_create(c"zen-offline-filter".as_ptr(),libc::MFD_CLOEXEC)};
+    if fd < 0 {return Err(format!("creating sandbox filter: {}",std::io::Error::last_os_error()));}
+    let mut file = unsafe {std::fs::File::from_raw_fd(fd)};
+    for (code,jt,jf,k) in instructions {
+        let mut instruction = Vec::from(code.to_ne_bytes());
+        instruction.extend([jt,jf]);
+        instruction.extend(k.to_ne_bytes());
+        file.write_all(&instruction).map_err(|e|format!("writing sandbox filter: {e}"))?;
+    }
+    file.rewind().map_err(|e|format!("rewinding sandbox filter: {e}"))?;
+    Ok(file)
+}
+
+fn sandbox_command(filter: &std::fs::File) -> Command {
+    use std::os::fd::AsRawFd;
+    let fd = filter.as_raw_fd();
+    let mut c = Command::new("bwrap");
+    c.arg("--seccomp").arg(fd.to_string());
+    // SAFETY: fcntl is async-signal-safe. Change only the child's fd flags, and keep the
+    // parent's owning File alive until spawn; bwrap consumes/closes this descriptor.
+    unsafe {c.pre_exec(move || {
+        if libc::fcntl(fd,libc::F_SETFD,0) < 0 {return Err(std::io::Error::last_os_error());}
+        Ok(())
+    });}
+    c
+}
+
+/// Run bash in its own process group, killed on timeout or cancellation. Sandbox modes use
+/// read-only mounts, private writable /tmp, isolated processes/network and a socket syscall
+/// filter; None is the explicit host-capability route. Kernel secret variables are removed.
 pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox: Sandbox, timeout: Duration) -> Result<Shell, String> {
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/home".into()));
+    let filter = if matches!(sandbox,Sandbox::ReadOnly|Sandbox::Offline|Sandbox::SafeRead) {Some(network_filter()?)} else {None};
     let mut cmd = match sandbox {
         Sandbox::ReadOnly => {
-            let mut c = Command::new("bwrap");
+            let mut c = sandbox_command(filter.as_ref().expect("sandbox filter initialized"));
             // The home folder (keys, sign-ins, the zen home) is replaced by an empty one, as for a
             // made tool (workshop.rs); the workspace is bound back after it and the private /tmp, in
             // case it lives under either. Secret files still inside it are hidden.
@@ -340,19 +387,17 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox:
             c.arg("--chdir").arg(dir).args(["bash", "-c"]);
             c
         }
-        Sandbox::Offline | Sandbox::Network => {
-            let mut c = Command::new("bwrap");
-            for arg in OFFLINE_SANDBOX {
-                if sandbox != Sandbox::Network || arg != "--unshare-net" { c.arg(arg); }
-            }
+        Sandbox::Offline => {
+            let mut c = sandbox_command(filter.as_ref().expect("sandbox filter initialized"));
+            c.args(OFFLINE_SANDBOX);
             // A home under the emptied /tmp (a test's) comes back read-only; then the workspace,
-            // writable (a project, its git repository, its build output); then the zen home
+            // read-only (project code must not plant steering); then the zen home
             // read-only again if the workspace holds it (prompt files, skills, the wiki), and the
             // secret files hidden.
             if home.starts_with("/tmp") || home.starts_with("/run") {
                 c.arg("--ro-bind").arg(&home).arg(&home);
             }
-            c.arg("--bind").arg(dir).arg(dir);
+            c.arg("--ro-bind").arg(dir).arg(dir);
             let zen = crate::zen_home();
             if zen.starts_with(dir) && zen.exists() {
                 c.arg("--ro-bind").arg(&zen).arg(&zen);
@@ -365,7 +410,7 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox:
             // Read operations retain access to ordinary host files, but mounts protect secrets
             // even if a path is swapped after policy checking or a utility recurses into a home.
             // This is a read-only view, not the writable build sandbox.
-            let mut c = Command::new("bwrap");
+            let mut c = sandbox_command(filter.as_ref().expect("sandbox filter initialized"));
             c.args(OFFLINE_SANDBOX);
             // The host's /tmp, read-only: research reads repositories cloned there. Only the
             // gate's listed read programs run here, and none of them opens a socket.
@@ -403,7 +448,7 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox:
         .map_err(|e| match sandbox {
             Sandbox::ReadOnly => format!("the read-only shell (bubblewrap) couldn't start: {e}; use read instead"),
             Sandbox::Offline => format!("the sandboxed shell (bubblewrap) couldn't start: {e}; this session read untrusted content, so it gets no shell outside the sandbox"),
-            Sandbox::None | Sandbox::SafeRead | Sandbox::GatedFile | Sandbox::Network => format!("failed to start bash: {e}"),
+            Sandbox::None | Sandbox::SafeRead | Sandbox::GatedFile => format!("failed to start bash: {e}"),
         })?;
     let mut group = GroupKill(child.id().map(|p| p as i32));
 
@@ -823,8 +868,37 @@ mod tests {
         assert!(result.is_error && result.content.contains("regular files"));
     }
 
-    /// What the gate re-emits runs as meant in the read-only view, which sees the host's /tmp
-    /// (where research clones live) and can't write it.
+    /// Check actual mount and syscall enforcement, not only the outer command classifier.
+    #[tokio::test]
+    async fn project_code_is_offline_and_cannot_plant_steering() {
+        let root = scratch("project-code");
+        std::fs::write(root.join("AGENTS.md"),"owner instructions").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let command = format!("if echo changed > AGENTS.md 2>/dev/null; then echo WRITE_OPEN; else echo WRITE_BLOCKED; fi; echo scratch > /tmp/zen-code-output; cat /tmp/zen-code-output; python3 -c 'import socket; s=socket.socket(); s.settimeout(1); print(\"NET_BLOCKED\" if s.connect_ex((\"127.0.0.1\", {port})) else \"NET_OPEN\")'");
+        let out = run_shell(&root,&command,&[],Sandbox::Offline,Duration::from_secs(10)).await.unwrap();
+        assert!(out.text.contains("WRITE_BLOCKED") && out.text.contains("NET_BLOCKED") && out.text.contains("scratch"),"{}",out.text);
+        assert!(!out.text.contains("WRITE_OPEN") && !out.text.contains("NET_OPEN"));
+        assert_eq!(std::fs::read_to_string(root.join("AGENTS.md")).unwrap(),"owner instructions");
+        // The owner-granted route is intentionally broader, and can write the workspace.
+        let out = run_shell(&root,"echo approved > AGENTS.md",&[],Sandbox::None,Duration::from_secs(10)).await.unwrap();
+        assert!(out.status.unwrap().unwrap().success());
+        assert_eq!(std::fs::read_to_string(root.join("AGENTS.md")).unwrap(),"approved\n");
+    }
+
+    #[tokio::test]
+    async fn sandbox_modes_cannot_connect_to_host_unix_sockets() {
+        let root = scratch("unix-boundary");
+        let _stream = std::os::unix::net::UnixListener::bind(root.join("stream.sock")).unwrap();
+        let _datagram = std::os::unix::net::UnixDatagram::bind(root.join("datagram.sock")).unwrap();
+        let command = format!("python3 -c 'import socket; s=socket.socket(socket.AF_UNIX); print(\"STREAM_BLOCKED\" if s.connect_ex(\"{0}/stream.sock\") == 1 else \"STREAM_OPEN\")'; python3 -c 'import socket; s=socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM)\ntry:\n s.sendto(b\"x\", \"{0}/datagram.sock\"); print(\"DGRAM_OPEN\")\nexcept PermissionError:\n print(\"DGRAM_BLOCKED\")'",root.display());
+        for mode in [Sandbox::Offline,Sandbox::ReadOnly,Sandbox::SafeRead] {
+            let out = run_shell(&root,&command,&[],mode,Duration::from_secs(10)).await.unwrap();
+            assert!(out.text.contains("STREAM_BLOCKED") && out.text.contains("DGRAM_BLOCKED"),"{mode:?}: {}",out.text);
+            assert!(!out.text.contains("_OPEN"),"{mode:?}: {}",out.text);
+        }
+    }
+
     #[tokio::test]
     async fn gate_reads_run_in_the_read_only_view() {
         let root = scratch("safe-read");

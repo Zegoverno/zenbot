@@ -293,7 +293,7 @@ pub async fn limited(db: &sqlx::PgPool, session: Uuid, limit: Limit) -> bool {
 }
 
 /// The sandbox a session's shell (`bash`, a `verify` criterion's command) runs in: none for a
-/// clean session, `Offline` once it has read untrusted content.
+/// clean session, offline and read-only once it has read untrusted content (D-063).
 pub async fn shell_sandbox(db: &sqlx::PgPool, session: Uuid) -> crate::tools::Sandbox {
     if limited(db, session, Limit::Shell).await {
         crate::tools::Sandbox::Offline
