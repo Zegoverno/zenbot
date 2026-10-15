@@ -8,7 +8,7 @@
 
 ## D-062 — Risk is rated per block by its source; a reversible taint stops the session
 
-**Date:** 2026-10-15 · **Status:** accepted (owner); step 1 built · **Supersedes, as its steps
+**Date:** 2026-10-15 · **Status:** accepted (owner); steps 1–2 built · **Supersedes, as its steps
 ship:** D-053's marks by the writing session and `taint::limited`, D-054's "stored marks stay",
 D-056's risky/tainted pair and "a hold taints"
 

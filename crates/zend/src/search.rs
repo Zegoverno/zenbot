@@ -792,8 +792,8 @@ pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value) -> Opt
         return None;
     }
     Some(match run(app, session, args).await {
-        Ok(content) => tools::ToolOutput { content, is_error: false },
-        Err(e) => tools::ToolOutput { content: format!("search failed: {e:#}"), is_error: true },
+        Ok(content) => tools::ToolOutput { rating: None, content, is_error: false },
+        Err(e) => tools::ToolOutput { rating: None, content: format!("search failed: {e:#}"), is_error: true },
     })
 }
 

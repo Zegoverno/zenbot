@@ -26,6 +26,7 @@ mod tape;
 mod taint;
 #[cfg(test)]
 mod test_util;
+mod sources;
 mod tools;
 mod turns;
 mod update;
@@ -242,6 +243,7 @@ async fn main() -> Result<()> {
     tokio::spawn(jobs::run_loop(app.clone()));
 
     let api = Router::new()
+        .route("/sources", get(list_sources).post(change_source))
         .route("/models", get(list_models))
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/board", get(board))

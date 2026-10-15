@@ -338,7 +338,7 @@ pub fn system_for(base: &str, kind: Option<&str>) -> String {
 /// Run one of the agent's tools (anything not a file or shell built-in). None for other tools.
 /// `ending` is set when the tool ends the model's turn (further calls are refused).
 pub async fn run_tool(app: &AppState, session: Uuid, workspace: &Path, name: &str, args: &Value, ending: &mut Option<&'static str>, policy: &crate::gate::Policy) -> Option<tools::ToolOutput> {
-    let out = |content: String, is_error: bool| Some(tools::ToolOutput { content, is_error });
+    let out = |content: String, is_error: bool| Some(tools::ToolOutput { rating: None, content, is_error });
     match name {
         "history" => {
             let (content, is_error) = crate::compact::history_tool(&app.db, session, args).await;
@@ -565,7 +565,7 @@ pub fn render_results(results: &[Value], notes: Option<&str>, verifier: &str) ->
 }
 
 async fn verify(app: &AppState, session: Uuid, workspace: &Path, args: &Value) -> tools::ToolOutput {
-    let err = |content: String| tools::ToolOutput { content, is_error: true };
+    let err = |content: String| tools::ToolOutput { rating: None, content, is_error: true };
     let goal = args["goal"].as_str().unwrap_or("").trim().to_string();
     let criteria = criteria_of(args);
     if goal.is_empty() || criteria.is_empty() || criteria.iter().any(|c| c["text"].as_str().is_none_or(|t| t.trim().is_empty())) {
@@ -637,7 +637,7 @@ async fn verify(app: &AppState, session: Uuid, workspace: &Path, args: &Value) -
         tracing::error!("recording a verification for {session}: {e:#}");
     }
     let failed = results.iter().any(|r| r["result"] == "fail");
-    tools::ToolOutput { content: render_results(&results, notes, verifier), is_error: failed }
+    tools::ToolOutput { rating: None, content: render_results(&results, notes, verifier), is_error: failed }
 }
 
 #[cfg(test)]

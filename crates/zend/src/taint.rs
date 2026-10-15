@@ -119,7 +119,7 @@ pub async fn trust(app: &App, session: Uuid, seen: i32) -> anyhow::Result<Truste
         .bind(session).execute(&mut *tx).await?;
     let lifted = sqlx::query(
         "WITH old AS (SELECT id, COALESCE(tainted_at, risky_at) AS tainted_at FROM sessions WHERE id = $1 AND (risky_at IS NOT NULL OR tainted_at IS NOT NULL) FOR UPDATE)
-         UPDATE sessions s SET tainted_at = NULL, risky_at = NULL FROM old
+         UPDATE sessions s SET tainted_at = NULL, risky_at = NULL, risk = 1, risk_trusted_through = $2 FROM old
          WHERE s.id = old.id AND NOT EXISTS (
            SELECT 1 FROM tape_events e WHERE e.session_id = $1 AND e.seq > $2
              AND (e.kind IN ('taint', 'risky') OR (e.kind = 'message' AND e.payload::text ~ $3)))
@@ -168,6 +168,7 @@ fn defuse(text: &str) -> String {
 /// recorded: then the caller must not hand the content to the model (an unmarked session could
 /// still change what steers every session); `withheld` says so.
 pub async fn taint(app: &App, session: Uuid, source: &str, about: &str) -> anyhow::Result<()> {
+    if !matches!(source, "web_fetch" | "web_search") { crate::sources::raise(&app.db, session, 4).await?; }
     let first = sqlx::query("UPDATE sessions SET risky_at = now() WHERE id = $1 AND risky_at IS NULL")
         .bind(session).execute(&app.db).await?.rows_affected() == 1;
     if first {

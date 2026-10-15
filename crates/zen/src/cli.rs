@@ -82,6 +82,11 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: Option<ReviewCmd>,
     },
+    /// Owner source allowlist (HTTPS host or path; risk 2 or 3)
+    Sources {
+        #[command(subcommand)]
+        cmd: SourcesCmd,
+    },
     /// The routing policy for subagents (which model per kind of work) and the evidence for it
     Policy {
         #[command(subcommand)]
@@ -113,6 +118,19 @@ pub(crate) enum Cmd {
         #[arg(long)]
         check: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum SourcesCmd {
+    List,
+    Add {
+        source: String,
+        #[arg(long, default_value_t = 2)]
+        risk: i16,
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    Rm { source: String },
 }
 
 #[derive(Subcommand)]

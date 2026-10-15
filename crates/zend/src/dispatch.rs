@@ -1,5 +1,7 @@
 //! Messages from workers: tool calls (run by the kernel), streamed text,
 //! finished messages, usage reports and turn ends (`zen_proto::worker`'s `ToolCall` and `TurnEvent`).
+//! Tool source risk, full masked query/focus, output digest and error status are recorded before
+//! responding. Tape provenance binds to that exact record, not to worker-supplied claims.
 
 use super::*;
 
@@ -218,7 +220,7 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             // Abort (or the turn ending) drops the tool future, which kills a running command.
             let run = async {
                 if *cancel.borrow() {
-                    return tools::ToolOutput { content: "not run: the turn was interrupted".into(), is_error: true };
+                    return tools::ToolOutput { rating: None, content: "not run: the turn was interrupted".into(), is_error: true };
                 }
                 tokio::select! {
                     out = async {
@@ -227,28 +229,28 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                         let read_only = agent::read_only(kind.as_deref());
                         // Immutable owner-only and kind boundaries cannot be overridden by a grant.
                         if let Some(why) = agent::refusal(kind.as_deref(), &name) {
-                            return tools::ToolOutput { content: why, is_error: true };
+                            return tools::ToolOutput { rating: None, content: why, is_error: true };
                         }
                         if let Some(why) = agent::protected_refusal(&app.db, id, kind.as_deref(), &workspace, &name, &args, true).await {
-                            return tools::ToolOutput { content: why, is_error: true };
+                            return tools::ToolOutput { rating: None, content: why, is_error: true };
                         }
                         let policy = if read_only { Ok(crate::gate::Policy::Run) }
                             else { crate::gate::check(app, id, &workspace, &name, &args).await };
                         let policy = match policy {
                             Ok(p) => p,
-                            Err(e) => return tools::ToolOutput { content: format!("not run: action gate unavailable ({e})"), is_error: true },
+                            Err(e) => return tools::ToolOutput { rating: None, content: format!("not run: action gate unavailable ({e})"), is_error: true },
                         };
                         if let crate::gate::Policy::Hold(why) = &policy {
-                            return tools::ToolOutput { content: crate::gate::held_note(why), is_error: true };
+                            return tools::ToolOutput { rating: None, content: crate::gate::held_note(why), is_error: true };
                         }
                         if let Some(why) = agent::refuse(ending) {
-                            tools::ToolOutput { content: why, is_error: true }
+                            tools::ToolOutput { rating: None, content: why, is_error: true }
                         } else if let Some(why) = agent::refusal(kind.as_deref(), &name) {
-                            tools::ToolOutput { content: why, is_error: true }
+                            tools::ToolOutput { rating: None, content: why, is_error: true }
                         } else if let Some(why) = agent::protected_refusal(&app.db, id, kind.as_deref(), &workspace, &name, &args, matches!(policy, crate::gate::Policy::Granted)).await {
-                            tools::ToolOutput { content: why, is_error: true }
+                            tools::ToolOutput { rating: None, content: why, is_error: true }
                         } else if let Some(why) = crate::workshop::mark_draft_write(app, id, &workspace, &name, &args).await {
-                            tools::ToolOutput { content: why, is_error: true }
+                            tools::ToolOutput { rating: None, content: why, is_error: true }
                         } else {
                             // A prompt file is backed up before the agent changes it, and the agent
                             // is told to compact it when the change takes it past its size.
@@ -283,8 +285,8 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                                     if let Some(source) = agent::read_of_tainted(&app.db, &workspace, &args).await {
                                         let about = args["path"].as_str().unwrap_or("");
                                         out = match crate::taint::hand_over(app, id, true, source, about, &out.content).await {
-                                            Ok(content) => tools::ToolOutput { content, is_error: false },
-                                            Err(e) => tools::ToolOutput { content: crate::taint::withheld(&e), is_error: true },
+                                            Ok(content) => tools::ToolOutput { rating: None, content, is_error: false },
+                                            Err(e) => tools::ToolOutput { rating: None, content: crate::taint::withheld(&e), is_error: true },
                                         };
                                     }
                                 }
@@ -296,7 +298,7 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                             out
                         }
                     } => out,
-                    _ = cancel.wait_for(|c| *c) => tools::ToolOutput { content: "interrupted: the turn was stopped before this tool finished".into(), is_error: true },
+                    _ = cancel.wait_for(|c| *c) => tools::ToolOutput { rating: None, content: "interrupted: the turn was stopped before this tool finished".into(), is_error: true },
                 }
             };
             // A tool that panics still gets an answer: the model must not wait for it.
@@ -304,7 +306,7 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                 Ok(out) => out,
                 Err(_) => {
                     tracing::error!("tool `{name}` panicked in session {id}");
-                    tools::ToolOutput { content: format!("the `{name}` tool failed with an internal error in the kernel"), is_error: true }
+                    tools::ToolOutput { rating: None, content: format!("the `{name}` tool failed with an internal error in the kernel"), is_error: true }
                 }
             };
             let ms = started.elapsed().as_millis() as i64;
@@ -334,6 +336,7 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                 if let Some(text) = context::read_capped(&path) {
                     let trusted = context::trusted(&path, &roots);
                     if !trusted {
+                        if let Some(r) = out.rating.as_mut() { r.risk = r.risk.max(4); r.origin.push_str("+untrusted-context"); }
                         if let Err(e) = crate::taint::taint(app, id, "project file", &path.display().to_string()).await {
                             out.content.push_str(&format!("\n\n[instructions in {}: {}]", path.display(), crate::taint::withheld(&e)));
                             continue;
@@ -347,16 +350,21 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             }
             // Every tool's output, instruction files included, is masked before the model or the tape sees it.
             out.content = crate::secrets::mask_off_thread(std::mem::take(&mut out.content)).await;
-            // Answer the worker first: a recording failure must not leave the model waiting.
+            // Record provenance before giving the worker content. Failure withholds the result.
+            let rating = match out.rating.take() {
+                Some(r) => r,
+                None => crate::sources::Rating {
+                    risk: sqlx::query_scalar("SELECT risk FROM sessions WHERE id=$1").bind(id).fetch_one(&app.db).await?,
+                    origin: format!("kernel:{name}"),
+                },
+            };
+            crate::sources::raise(&app.db, id, rating.risk).await?;
             let output_bytes = out.content.len() as i64;
-            if let Some(req_id) = msg.id {
-                mind.respond(req_id, &ToolResult { content: out.content, is_error: out.is_error }).await?;
-            }
             // Cut arguments keep the sha256 and size of the whole (masked) arguments under `_full`.
             let recorded = sqlx::query(
-                "INSERT INTO tool_calls (session_id, call_id, name, args, is_error, duration_ms, output_bytes, turn_id)
+                "INSERT INTO tool_calls (session_id, call_id, name, args, is_error, duration_ms, output_bytes, turn_id, risk, origin, result_sha256, source_args)
                  VALUES ($1, $2, $3, CASE WHEN $9::text IS NULL THEN $4 ELSE $4 || jsonb_build_object('_full', jsonb_build_object(
-                         'sha256', encode(sha256(convert_to($9, 'UTF8')), 'hex'), 'bytes', octet_length($9))) END, $5, $6, $7, $8)",
+                         'sha256', encode(sha256(convert_to($9, 'UTF8')), 'hex'), 'bytes', octet_length($9))) END, $5, $6, $7, $8, $10, $11, encode(sha256(convert_to($12,'UTF8')),'hex'), $13)",
             )
             .bind(id)
             .bind(&call_id)
@@ -367,10 +375,19 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             .bind(output_bytes)
             .bind(turn_id)
             .bind(full)
+            .bind(rating.risk)
+            .bind(&rating.origin)
+            .bind(&out.content)
+            .bind(json!({"query":args["query"].as_str().map(crate::secrets::mask), "focus":args["focus"].as_str().map(crate::secrets::mask)}))
             .execute(&app.db)
             .await;
             if let Err(e) = recorded {
                 tracing::error!("recording tool call {call_id} for {id}: {e:#}");
+                out.content = "result withheld: provenance could not be recorded".into();
+                out.is_error = true;
+            }
+            if let Some(req_id) = msg.id {
+                mind.respond(req_id, &ToolResult { content: out.content, is_error: out.is_error }).await?;
             }
             app.emit(id, json!({ "type": "tool_end", "call_id": call_id, "is_error": out.is_error, "ms": ms })).await;
         }

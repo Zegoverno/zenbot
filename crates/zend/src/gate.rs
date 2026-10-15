@@ -7,7 +7,8 @@
 //! A hold the gate makes only because it can't classify the action (unknown syntax, program or
 //! flag, or a URL the model built) doesn't revoke the session's shell; one that could do harm does.
 //! Egress (D-062, step 1): `web_fetch` runs only for a URL found in the owner's own messages or in
-//! earlier web results, never one the model built, which could carry data out.
+//! earlier verified web results, or targets covered by the owner's allowlist (step 2).
+//! An allowlist entry explicitly accepts requests to that destination, even model-built URLs.
 
 mod grammar;
 pub use grammar::shell;
@@ -61,7 +62,7 @@ pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args:
             .bind(tool).fetch_optional(&app.db).await?;
         if approved == Some(false) { Policy::Sandbox } else { Policy::Hold("runs a made tool with host capabilities".into()) }
     } else if name == "web_fetch" {
-        if url_seen(app, session, args["url"].as_str().unwrap_or("")).await? { Policy::Run } else { Policy::Hold(UNSEEN_URL.into()) }
+        if fetch_allowed(&app.db, session, args["url"].as_str().unwrap_or("")).await? { Policy::Run } else { Policy::Hold(UNSEEN_URL.into()) }
     } else { policy(workspace, name, args) };
     if let Policy::Hold(reason) = &p {
         // Revoke capabilities before returning the refusal; no action has run.
@@ -157,30 +158,34 @@ pub fn held_note(reason: &str) -> String {
 /// model chose is removed first: the call's own arguments (a query, a `focus`) and the result's
 /// header lines, which can echo them. So a URL the model built, which could carry data out, isn't
 /// "seen" because the model wrote it into a query or a page repeated it.
-async fn url_seen(app: &App, session: Uuid, url: &str) -> Result<bool> {
+pub async fn fetch_allowed(db: &sqlx::PgPool, session: Uuid, url: &str) -> Result<bool> {
+    Ok(crate::sources::base(db, url).await? < 4 || url_seen(db, session, url).await?)
+}
+
+async fn url_seen(db: &sqlx::PgPool, session: Uuid, url: &str) -> Result<bool> {
     let url = url.trim();
     if url.is_empty() { return Ok(false); }
     let needle = serde_json::to_string(url)?;
     let needle = &needle[1..needle.len() - 1];
     let rows = sqlx::query(
-        "SELECT e.payload, (SELECT a.payload FROM tape_events a WHERE a.session_id = e.session_id
-            AND a.kind = 'message' AND a.payload->>'role' = 'assistant'
-            AND a.payload->'content' @> jsonb_build_array(jsonb_build_object('id', e.payload->>'toolCallId'))
-            ORDER BY a.seq DESC LIMIT 1) AS call
+        "SELECT e.payload, (SELECT t.source_args FROM tool_calls t WHERE t.session_id = e.session_id
+            AND t.id = e.tool_call_record AND t.call_id = e.payload->>'toolCallId' AND t.name = e.payload->>'toolName'
+            AND NOT t.is_error ORDER BY t.id DESC LIMIT 1) AS call
          FROM tape_events e JOIN sessions s ON s.id = e.session_id
          WHERE e.session_id = $1 AND e.kind = 'message' AND strpos(e.payload::text, $2) > 0
-           AND ((e.payload->>'role' = 'user' AND s.kind IS NULL)
+           AND ((e.payload->>'role' = 'user' AND s.kind IS NULL AND e.origin = 'owner')
              OR (e.payload->>'role' = 'toolResult' AND e.payload->>'toolName' IN ('web_search', 'web_fetch')
+                 AND (e.origin = 'web_search' OR e.origin LIKE 'web_fetch:%')
                  AND NOT COALESCE((e.payload->>'isError')::boolean, false)))")
-        .bind(session).bind(needle).fetch_all(&app.db).await?;
+        .bind(session).bind(needle).fetch_all(db).await?;
     for row in rows {
         let payload: Value = row.get("payload");
-        if payload["role"] == "user" { return Ok(true); }
-        let call: Option<Value> = row.get("call");
-        let id = payload["toolCallId"].as_str().unwrap_or("");
-        let args = call.as_ref().and_then(|c| c["content"].as_array())
-            .and_then(|parts| parts.iter().find(|p| p["id"] == id)).map(|p| p["arguments"].clone())
-            .unwrap_or(Value::Null);
+        if payload["role"] == "user" {
+            if contains_whole_url(&zen_proto::text_of(&payload["content"]), url) { return Ok(true); }
+            continue;
+        }
+        let Some(args) = row.get::<Option<Value>,_>("call") else { continue };
+        // Only the kernel's complete query/focus may remove echoed model text.
         if contains_whole_url(&outside_text(&payload, &args), url) { return Ok(true); }
     }
     Ok(false)
@@ -188,18 +193,25 @@ async fn url_seen(app: &App, session: Uuid, url: &str) -> Result<bool> {
 
 /// Whether `url` occurs in `text` as a whole URL, not as the start or middle of a longer one:
 /// cutting a seen URL short would let the model choose bits to send.
-fn contains_whole_url(text: &str, url: &str) -> bool {
+pub(crate) fn contains_whole_url(text: &str, url: &str) -> bool {
     let url_char = |c: char| c.is_alphanumeric() || "-._~:/?#[]@!$&'()*+,;=%".contains(c);
     text.match_indices(url).any(|(i, _)| {
+        // Do not extract a second URL embedded in the path/query of a longer token.
+        if text[..i].rsplit(char::is_whitespace).next().unwrap_or("").contains("://") { return false; }
         let before = text[..i].chars().next_back();
         let mut after = text[i + url.len()..].chars();
         let next = after.next();
         let starts = before.is_none_or(|c| !url_char(c) || "('\"[<".contains(c));
-        // Sentence punctuation right after a URL ends it when followed by a space or the end.
+        // Legal URL punctuation cannot unconditionally terminate a URL: /a)tail is not /a.
+        // Only a matching surrounding wrapper may close it, with a clear boundary afterwards.
         let ends = match next {
             None => true,
-            Some(c) if ".,;:!?".contains(c) => after.next().is_none_or(|c| c.is_whitespace()),
-            Some(c) => !url_char(c) || ")'\"]>".contains(c),
+            Some(c) if !url_char(c) => true,
+            Some(c) if matches!((before,c), (Some('('),')') | (Some('['),']') | (Some('\''),'\'')) => {
+                let tail = after.as_str().trim_start_matches(['.', ',', ';', ':', '!', '?']);
+                tail.is_empty() || tail.chars().next().is_some_and(|c| !url_char(c))
+            }
+            Some(_) => false,
         };
         starts && ends
     })
@@ -212,6 +224,11 @@ fn outside_text(payload: &Value, args: &Value) -> String {
     for key in ["query", "focus"] {
         if let Some(v) = args[key].as_str().filter(|v| !v.trim().is_empty()) {
             text = text.replace(v, "\u{0}");
+            // Providers can repeat just a URL from a longer query/focus in a title or snippet.
+            for token in v.split_whitespace().filter(|t| t.contains("://")) {
+                let token = token.trim_matches(['(', ')', '[', ']', '<', '>', '"', '\'', ',', '.']);
+                if !token.is_empty() { text = text.replace(token, "\u{0}"); }
+            }
         }
     }
     text.lines()
@@ -318,9 +335,15 @@ mod tests {
         let t = outside_text(&fetch, &json!({"url":"https://example.com/a","focus": "gate rules"}));
         assert!(t.contains("https://example.org/b") && !t.contains(evil));
         // Only whole URLs count: no prefix or middle of a longer one.
-        let page = "see https://x.example/a/secret-path?q=1, or (https://y.example/b). <https://z.example/c>";
+        let page = "see https://x.example/a/secret-path?q=1 or (https://y.example/b). <https://z.example/c>";
         for u in ["https://x.example/a/secret-path?q=1", "https://y.example/b", "https://z.example/c"] {
             assert!(contains_whole_url(page, u), "{u}");
+        }
+        for text in ["https://example.org/a)tail", "https://example.org/a'tail", "https://example.org/a,tail", "(https://example.org/a)tail", "https://outer.test/path(https://example.org/a)"] {
+            assert!(!contains_whole_url(text, "https://example.org/a"), "{text}");
+        }
+        for text in ["(https://example.org/a)", "'https://example.org/a'", "[https://example.org/a]", "<https://example.org/a>"] {
+            assert!(contains_whole_url(text, "https://example.org/a"), "{text}");
         }
         for u in ["https://x.example/a/secret", "https://x.example/a", "https://y.example/", "x.example/a/secret-path?q=1"] {
             assert!(!contains_whole_url(page, u), "{u}");

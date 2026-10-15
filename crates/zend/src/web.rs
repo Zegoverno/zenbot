@@ -8,8 +8,10 @@
 //! - Limits: 10 s to connect, 30 s in all, 5 MB read; 20,000 characters returned per call, the rest
 //!   paged with `offset` from a 15-minute cache.
 //! - Web content is untrusted input: the kernel wraps every result in an `<untrusted>` envelope a
-//!   page can't fake (look-alike markers are defused first) and marks the session tainted
-//!   (`sessions.tainted_at`, a `taint` block), so what it later saves to memory counts as inference.
+//!   page can't fake (look-alike markers are defused first) and marks the session risky
+//!   (`sessions.risky_at`). D-062 source ratings are kernel metadata: final URL for fetch,
+//!   maximum result source for search. Owner-URL adjustment never sees page content.
+//! - Risky redirects must independently pass egress as well as SSRF checks on every hop.
 //!
 //! Search goes through one provider contract: Brave (BRAVE_API_KEY) or Tavily (TAVILY_API_KEY)
 //! when configured, else a self-hosted SearXNG (ZEN_SEARXNG_URL, default http://127.0.0.1:8888,
@@ -141,15 +143,8 @@ static FETCH: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .dns_resolver(Arc::new(PublicOnly))
         .no_proxy()
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 5 {
-                return attempt.error("more than 5 redirects");
-            }
-            match check_url(attempt.url()) {
-                Some(why) => attempt.error(format!("redirect refused: {why}")),
-                None => attempt.follow(),
-            }
-        }))
+        // Follow manually in download: every hop gets both SSRF and session egress checks.
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .user_agent(UA)
@@ -167,6 +162,7 @@ static PROVIDERS: LazyLock<reqwest::Client> =
 
 #[derive(Clone)]
 struct Page {
+    same_host: bool,
     final_url: String,
     status: u16,
     content_type: String,
@@ -216,12 +212,28 @@ pub fn readable(html: &str, url: &str) -> (String, String) {
     (title, body)
 }
 
-async fn download(url: &str) -> Result<Page, String> {
+async fn download(app: &App, session: Uuid, url: &str) -> Result<Page, String> {
     let parsed = reqwest::Url::parse(url).map_err(|e| format!("not a URL: {e}"))?;
     if let Some(why) = check_url(&parsed) {
         return Err(why);
     }
-    let resp = FETCH.get(parsed).send().await.map_err(|e| format!("couldn't fetch it: {}", error_chain(&e)))?;
+    let original_host = parsed.host_str().unwrap_or("").to_string();
+    let mut same_host = true;
+    let mut target = parsed;
+    let mut hops = 0;
+    let resp = loop {
+        if let Some(why) = check_url(&target) { return Err(why); }
+        if hops > 0 && crate::taint::tainted(&app.db, session).await && !crate::gate::fetch_allowed(&app.db, session, target.as_str()).await.map_err(|e| e.to_string())? {
+            return Err("redirect held: target is neither allowlisted nor a previously supplied URL".into());
+        }
+        let response = FETCH.get(target.clone()).send().await.map_err(|e| format!("couldn't fetch it: {}", error_chain(&e)))?;
+        if !response.status().is_redirection() { break response; }
+        if hops >= 5 { return Err("more than 5 redirects".into()); }
+        let location = response.headers().get(reqwest::header::LOCATION).and_then(|v| v.to_str().ok()).ok_or("redirect without Location")?;
+        target = target.join(location).map_err(|e| e.to_string())?;
+        same_host &= target.host_str() == Some(original_host.as_str());
+        hops += 1;
+    };
     let status = resp.status().as_u16();
     let final_url = resp.url().to_string();
     let content_type = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_ascii_lowercase();
@@ -261,7 +273,7 @@ async fn download(url: &str) -> Result<Page, String> {
     if text.len() > MAX_TEXT {
         text.truncate(text.floor_char_boundary(MAX_TEXT));
     }
-    Ok(Page { final_url, status, content_type: kind, title, text, note })
+    Ok(Page { same_host, final_url, status, content_type: kind, title, text, note })
 }
 
 /// Bytes 0x80..=0x9F in Windows-1252 (the rest of the high half is the same as Latin-1).
@@ -351,12 +363,12 @@ async fn focus_on(app: &App, text: &str, focus: &str) -> Option<(String, usize, 
 }
 
 async fn fetch(app: &App, session: Uuid, args: &Value) -> tools::ToolOutput {
-    let err = |content: String| tools::ToolOutput { content, is_error: true };
+    let err = |content: String| tools::ToolOutput { rating: None, content, is_error: true };
     let Some(url) = args["url"].as_str().map(str::trim).filter(|u| !u.is_empty()) else { return err("web_fetch needs a `url`".into()) };
     let url = if url.starts_with("http://") || url.starts_with("https://") { url.to_string() } else { format!("https://{url}") };
     let page = match cached(&url) {
         Some(p) => p,
-        None => match download(&url).await {
+        None => match tokio::time::timeout(Duration::from_secs(30), download(app, session, &url)).await.unwrap_or_else(|_| Err("fetch timed out after 30s".into())) {
             Ok(p) => {
                 cache_insert(&mut PAGES.lock().unwrap(), url.clone(), (Instant::now(), p.clone()), |entry| entry.0);
                 p
@@ -391,7 +403,11 @@ async fn fetch(app: &App, session: Uuid, args: &Value) -> tools::ToolOutput {
     }
     // The page controls its title and URL: they go inside the envelope with the text.
     let content = untrusted("web_fetch", &page.final_url, &format!("{header}{window}"));
-    tools::ToolOutput { content, is_error: page.status >= 400 }
+    let rating = match crate::sources::page(&app.db, session, &url, &page.final_url, page.same_host).await {
+        Ok(r) => r,
+        Err(e) => return err(format!("source rating unavailable: {e}")),
+    };
+    tools::ToolOutput { rating: Some(rating), content, is_error: page.status >= 400 }
 }
 
 // ---------- search ----------
@@ -563,7 +579,7 @@ pub fn render_hits(hits: &[(Hit, Option<f64>)]) -> String {
 }
 
 async fn search(app: &App, session: Uuid, args: &Value) -> tools::ToolOutput {
-    let err = |content: String| tools::ToolOutput { content, is_error: true };
+    let err = |content: String| tools::ToolOutput { rating: None, content, is_error: true };
     let Some(query) = args["query"].as_str().map(str::trim).filter(|q| !q.is_empty()) else { return err("web_search needs a `query`".into()) };
     let count = args["count"].as_u64().unwrap_or(8).clamp(1, 20) as usize;
     let key = format!("{query}\u{1}{count}");
@@ -600,7 +616,7 @@ async fn search(app: &App, session: Uuid, args: &Value) -> tools::ToolOutput {
         return err(crate::taint::withheld(&e));
     }
     if hits.is_empty() {
-        return tools::ToolOutput { content: format!("No results for \"{query}\" ({used})."), is_error: false };
+        return tools::ToolOutput { rating: None, content: format!("No results for \"{query}\" ({used})."), is_error: false };
     }
     let listed: Vec<(Hit, Option<f64>)> = match rerank(app, query, &hits).await {
         Some(r) => r.into_iter().map(|(h, p)| (h, Some(p))).collect(),
@@ -608,7 +624,14 @@ async fn search(app: &App, session: Uuid, args: &Value) -> tools::ToolOutput {
     };
     let reranked = if listed.iter().any(|(_, p)| p.is_some()) { ", ordered by relevance (System One)" } else { "" };
     let content = format!("{} results for \"{query}\" from {used}{reranked}:\n{}", listed.len(), untrusted("web_search", query, &render_hits(&listed)));
-    tools::ToolOutput { content, is_error: false }
+    let mut risk = 1;
+    for (hit, _) in &listed {
+        match crate::sources::base(&app.db, &hit.url).await {
+            Ok(r) => risk = risk.max(r),
+            Err(e) => return err(format!("source rating unavailable: {e}")),
+        }
+    }
+    tools::ToolOutput { rating: Some(crate::sources::Rating { risk, origin: "web_search".into() }), content, is_error: false }
 }
 
 // ---------- tools ----------

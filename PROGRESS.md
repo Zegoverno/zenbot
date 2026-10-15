@@ -6,6 +6,21 @@
 
 ---
 
+## 2026-10-15 — Source ratings and the owner's allowlist (D-062 step 2)
+
+Migration 0027 adds source entries/audit, ratings and provenance on tape/tool calls, session max
+risk and cached owner-URL judgments. Only authenticated owner turns get risk 0; historical roles
+are not authenticated retroactively. Web fetches use the final URL (exact HTTPS hosts and
+segment-prefix paths); searches take the highest result rating. The owner manages entries with
+`zen sources add/rm/list`, `/sources` or Matrix `!sources`. A risky session can fetch an allowlisted
+target; each redirect is separately checked for SSRF and egress. Owner URL judgments see only the
+owner message, requested URL and base rating: vouch lowers one (floor 2), suspect raises to 4,
+failure leaves it; any cross-host redirect cancels the adjustment. Kernel result digests bind
+worker messages to recorded provenance; a fake/replayed call ID cannot label new text as trusted.
+Children and summaries preserve session risk. Existing taint/limits still enforce actions;
+stored-item ratings, /deny and reversible taint are step 3. Tests include source matching,
+isolated DB provenance/egress checks and e2e owner CRUD plus monotonic search ratings.
+
 ## 2026-10-15 — The gate reads plain commands; web_fetch can't carry data out (D-062 step 1)
 
 All 16 holds the gate had made were false, mostly plain reads, and each one also took the

@@ -104,6 +104,15 @@ async fn main() -> Result<()> {
     room.send(RoomMessageEventContent::text_plain("!help")).await?;
     wait_for(&mut rx, "!new").await?;
     println!("ok: !help answered");
+    room.send(RoomMessageEventContent::text_plain("!sources add example.test/docs 3 test docs")).await?;
+    wait_for(&mut rx, "Allowlisted").await?;
+    room.send(RoomMessageEventContent::text_plain("!sources")).await?;
+    wait_for(&mut rx, "example.test/docs").await?;
+    room.send(RoomMessageEventContent::text_plain("!sources rm example.test/docs")).await?;
+    wait_for(&mut rx, "Removed").await?;
+    room.send(RoomMessageEventContent::text_plain("!sources")).await?;
+    wait_for(&mut rx, "No allowlisted sources").await?;
+    println!("ok: encrypted owner source CRUD bypasses the model");
 
     room.send(RoomMessageEventContent::text_plain("hello zen")).await?;
     wait_for(&mut rx, "Smoke test passed").await?;

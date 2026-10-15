@@ -92,7 +92,7 @@ fn parse_answers(body: &Value, questions: &Value) -> Result<Value> {
     Ok(Value::Object(answers))
 }
 
-async fn decide_with_model(model: &str, state: &Value, questions: &Value) -> Result<Value> {
+pub(crate) async fn decide_with_model(model: &str, state: &Value, questions: &Value) -> Result<Value> {
     let key = std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY is not set")?;
     let model_id = model.strip_prefix("openrouter/").unwrap_or(model);
     let url = &crate::config::get().s1_url;

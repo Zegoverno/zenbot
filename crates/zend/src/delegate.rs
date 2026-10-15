@@ -192,8 +192,8 @@ pub async fn run_tool(app: &AppState, session: Uuid, workspace: &std::path::Path
         return None;
     }
     Some(match delegate_all(app, session, workspace, args).await {
-        Ok((content, is_error)) => tools::ToolOutput { content, is_error },
-        Err(e) => tools::ToolOutput { content: format!("delegate failed: {e:#}"), is_error: true },
+        Ok((content, is_error)) => tools::ToolOutput { rating: None, content, is_error },
+        Err(e) => tools::ToolOutput { rating: None, content: format!("delegate failed: {e:#}"), is_error: true },
     })
 }
 
