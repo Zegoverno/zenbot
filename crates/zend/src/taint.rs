@@ -142,6 +142,9 @@ pub async fn trust(app: &App, session: Uuid, seen: i32) -> anyhow::Result<Truste
     // Clear only this cause. Independent denials on a descendant remain in force.
     sqlx::query("UPDATE contamination SET cleared_at=now() WHERE cause=$1 AND cleared_at IS NULL")
         .bind(session).execute(&mut *tx).await?;
+    // Another session's live cause (a denied writer or parent) still stops this one: keep its mark.
+    sqlx::query("UPDATE sessions SET tainted_at=$2 WHERE id=$1 AND zen_session_contaminated(id)")
+        .bind(session).bind(row.get::<chrono::DateTime<chrono::Utc>, _>("tainted_at")).execute(&mut *tx).await?;
     sqlx::query("UPDATE sessions s SET tainted_at=NULL WHERE s.id IN
         (SELECT affected FROM contamination WHERE cause=$1) AND NOT EXISTS
         (SELECT 1 FROM contamination c WHERE c.affected=s.id AND c.cleared_at IS NULL)")
