@@ -6,6 +6,22 @@
 
 ---
 
+## 2026-10-15 — The gate reads plain commands; web_fetch can't carry data out (D-062 step 1)
+
+All 16 holds the gate had made were false, mostly plain reads, and each one also took the
+session's shell away. The shell grammar (`gate/grammar.rs`) now allows listed read programs, each
+with its own flags (`ls cat head tail wc grep rg find sed -n jq sort uniq cut diff du stat echo
+printf …`; `sed` only with print scripts, `find` without actions, `rg` without `--pre`/`-z`), pipes,
+`;`, `&&`, `||`, `cd`, quotes, backslashes, globs expanded by the kernel with every match checked,
+and redirects to `/dev/null`; it re-emits the command from the parsed words. The read-only view
+also sees `/tmp`, read-only, where research clones live. A hold only because the gate can't classify
+the action no longer taints; harmful holds still do. In a risky session `web_fetch` runs only for a
+URL found in the owner's messages or earlier web results, never one the model built. Replay of
+2,396 recorded commands as if every session were risky: read-only route 0 → 869 (36%); the rest are
+writes, builds in the home workspace, outward actions and `$( )`/heredoc/loop syntax. All 36 attacks
+are still held. Tested: unit tests (the 16 holds, peers' CVE bypasses, secrets through globs and
+`cd`), a sandboxed run of re-emitted commands, e2e `action-gate`.
+
 ## 2026-10-14 — Lighter docs, checks and e2e (D-061)
 
 Phase 1 of slimming zenbot, with no change to what it does. Docs a contributor reads and keeps
