@@ -380,11 +380,12 @@ If a question goes unanswered, take your recommended option and say it was an as
             out(content, is_error)
         }
         "find_skills" | "load_skill" => {
-            // A draft a tainted session wrote is untrusted wherever it's read.
-            let marked = crate::workshop::tainted_drafts(&app.db).await;
-            let (content, is_error, tainted) = crate::skills::run_tool(name, args, &marked)?;
+            let (content, is_error, risk) = match crate::skills::run_tool(&app.db, session, name, args).await {
+                Ok(result) => result,
+                Err(e) => return out(format!("skills withheld: provenance unavailable ({e})"), true),
+            };
             let about = args["name"].as_str().or(args["query"].as_str()).unwrap_or("skills");
-            match crate::taint::hand_over(app, session, tainted, "draft skill", about, &content).await {
+            match crate::taint::hand_over_rating(app, session, risk, "skill", about, &content).await {
                 Ok(content) => out(content, is_error),
                 Err(e) => out(crate::taint::withheld(&e), true),
             }

@@ -757,9 +757,10 @@ pub(crate) async fn rated_results(db: &PgPool, reader: Uuid, listed: &[(Found, O
                         Ok(rows) => {
                             let messages:Vec<Value> = rows.iter().map(|r|r.get("payload")).collect();
                             let risk = rows.iter().map(|r|r.get::<i16,_>("risk")).max().unwrap_or(4);
-                            if turn_text(&messages)!=f.body {None}
-                            else if (risk<2 || f.exact) && crate::sources::depend(db,reader,&[session]).await.is_err() {None}
-                            else {Some(risk)}
+                            // A changed turn, or one whose dependency can't be recorded, isn't shown.
+                            let shown = turn_text(&messages)==f.body
+                                && (!(risk<2 || f.exact) || crate::sources::depend(db,reader,&[session]).await.is_ok());
+                            shown.then_some(risk)
                         },
                         Err(_) => None,
                     }

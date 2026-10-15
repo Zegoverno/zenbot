@@ -21,6 +21,8 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub dir: PathBuf,
+    /// Exact SKILL.md bytes used for validation, search and source ratings.
+    pub text: String,
 }
 
 /// Where skills live: `ZEN_SKILLS_DIR`, else `~/.zenbot/global/skills` (shared by every agent).
@@ -71,11 +73,15 @@ fn field<'a>(fields: &'a [(String, String)], key: &str) -> Option<&'a str> {
 /// the folder (lowercase letters, digits and hyphens, at most 64) and a `description` (at most 1024
 /// characters) saying what it does and when to use it. Empty when it's valid.
 pub fn validate(dir: &Path) -> Vec<String> {
-    let mut errs = Vec::new();
     let Ok(text) = std::fs::read_to_string(dir.join("SKILL.md")) else {
         return vec![format!("{} has no SKILL.md", dir.display())];
     };
-    let (fields, body) = frontmatter(&text);
+    validate_text(dir, &text)
+}
+
+fn validate_text(dir: &Path, text: &str) -> Vec<String> {
+    let mut errs = Vec::new();
+    let (fields, body) = frontmatter(text);
     let folder = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
     match field(&fields, "name") {
         None | Some("") => errs.push("frontmatter has no `name`".into()),
@@ -118,18 +124,19 @@ pub fn scan(root: &Path) -> Vec<Skill> {
             if !dir.join("SKILL.md").is_file() {
                 continue;
             }
-            let errs = validate(&dir);
+            let Ok(text) = std::fs::read_to_string(dir.join("SKILL.md")) else { continue };
+            let errs = validate_text(&dir, &text);
             if !errs.is_empty() {
                 tracing::warn!("skipping skill {}: {}", dir.display(), errs.join("; "));
                 continue;
             }
-            let text = std::fs::read_to_string(dir.join("SKILL.md")).unwrap_or_default();
             let (fields, _) = frontmatter(&text);
             out.push(Skill {
                 domain: domain.clone(),
                 name: field(&fields, "name").unwrap_or("").to_string(),
                 description: field(&fields, "description").unwrap_or("").to_string(),
                 dir,
+                text,
             });
         }
     }
@@ -180,7 +187,7 @@ pub fn find(skills: &[Skill], query: &str, limit: usize) -> Vec<(Skill, f64)> {
         .map(|s| {
             let name = words(&format!("{} {}", s.domain, s.name.replace('-', " ")));
             let desc = words(&s.description);
-            let body = words(&std::fs::read_to_string(s.dir.join("SKILL.md")).unwrap_or_default());
+            let body = words(&s.text);
             let score: f64 = q
                 .iter()
                 .map(|w| {
@@ -236,7 +243,13 @@ pub fn load(skill: &Skill, file: Option<&str>) -> Result<String, String> {
             p
         }
     };
-    let mut text = std::fs::read_to_string(&path).map_err(|e| format!("couldn't read {}: {e}", path.display()))?;
+    let text = if path == skill.dir.join("SKILL.md") {skill.text.clone()} else {
+        std::fs::read_to_string(&path).map_err(|e| format!("couldn't read {}: {e}", path.display()))?
+    };
+    Ok(render_load(skill, &path, text))
+}
+
+fn render_load(skill: &Skill, path: &Path, mut text: String) -> String {
     if text.len() > MAX_LOAD {
         let mut end = MAX_LOAD;
         while !text.is_char_boundary(end) {
@@ -250,7 +263,7 @@ pub fn load(skill: &Skill, file: Option<&str>) -> Result<String, String> {
     if !others.is_empty() {
         out.push_str(&format!("\nOther files in this skill (load_skill with `file`, or run scripts with bash from {}): {}", skill.dir.display(), others.join(", ")));
     }
-    Ok(out)
+    out
 }
 
 /// A skill's files other than SKILL.md, relative to its folder (two levels deep).
@@ -311,46 +324,63 @@ pub fn drafts() -> Vec<Skill> {
     scan(&root().join("_proposed"))
 }
 
-/// Run `find_skills` or `load_skill`. None for other tools. Drafts can be found and loaded too,
-/// marked as drafts: a session that uses one and is accepted makes it active (workshop.rs). Drafts
-/// named in `tainted` (domain/name: a session that read untrusted content wrote them) are marked
-/// untrusted, and the third value says the result shows one: the caller hands it over as
-/// untrusted content (taint.rs).
-pub fn run_tool(name: &str, args: &Value, tainted: &[String]) -> Option<(String, bool, bool)> {
-    let proposed = root().join("_proposed");
-    let marked = |s: &Skill| s.dir.starts_with(&proposed) && tainted.contains(&format!("{}/{}", s.domain, s.name));
-    let skills = || {
-        let mut all = scan(&root());
-        all.extend(drafts().into_iter().map(|mut s| {
-            let what = if marked(&s) { "draft, untrusted" } else { "draft" };
-            s.description = format!("({what}) {}", s.description);
-            s
-        }));
-        all
-    };
-    match name {
-        "find_skills" => {
-            let all = skills();
-            if all.is_empty() {
-                return Some((format!("No skills yet (none in {}).", root().display()), false, false));
-            }
-            let found = find(&all, args["query"].as_str().unwrap_or(""), 8);
-            if found.is_empty() {
-                let list: Vec<String> = all.iter().map(|s| format!("{}/{}", s.domain, s.name)).collect();
-                return Some((format!("No skill matches. All skills: {}", list.join(", ")), false, false));
-            }
-            let lines: Vec<String> = found.iter().map(|(s, _)| format!("- {}/{}: {}", s.domain, s.name, s.description)).collect();
-            Some((lines.join("\n"), false, found.iter().any(|(s, _)| marked(s))))
+/// Snapshots admitted to instruction context. Only clean origins may steer the agent;
+/// record dependencies even for an index, so a later denial invalidates its cached envelope.
+pub async fn instruction_index(db: &sqlx::PgPool, session: uuid::Uuid) -> anyhow::Result<String> {
+    let mut admitted = Vec::new();
+    for skill in scan(&root()) {
+        let risk = crate::sources::file_rating(db, &skill.dir.join("SKILL.md"), &skill.text).await?;
+        if risk <= 1 {
+            crate::sources::depend_file(db, session, &skill.text).await?;
+            admitted.push(skill);
         }
-        "load_skill" => {
-            let all = skills();
-            Some(match lookup(&all, args["name"].as_str().unwrap_or("")).and_then(|s| load(s, args["file"].as_str()).map(|t| (t, marked(s)))) {
-                Ok((text, untrusted)) => (text, false, untrusted),
-                Err(e) => (e, true, false),
-            })
-        }
-        _ => None,
     }
+    Ok(index_text(&admitted))
+}
+
+/// Catalog and loads rate the same snapshots they render, never a later reread. A denied
+/// skill is absent from discovery; loading one explicitly returns its level-5 rating.
+pub async fn run_tool(db: &sqlx::PgPool, session: uuid::Uuid, name: &str, args: &Value) -> anyhow::Result<(String, bool, i16)> {
+    let mut all = scan(&root());
+    all.extend(drafts());
+    if name == "find_skills" {
+        let mut admitted = Vec::new();
+        let mut risk = 1;
+        for mut skill in all {
+            let rating = crate::sources::file_rating(db, &skill.dir.join("SKILL.md"), &skill.text).await?;
+            if rating >= 5 { continue; }
+            // Ranking consumes body words too, including candidates not returned.
+            crate::sources::depend_file(db, session, &skill.text).await?;
+            risk = risk.max(rating);
+            if skill.dir.starts_with(root().join("_proposed")) {
+                skill.description = format!("(draft) {}", skill.description);
+            }
+            admitted.push(skill);
+        }
+        let found = find(&admitted, args["query"].as_str().unwrap_or(""), 8);
+        let content = if found.is_empty() {
+            format!("No skill matches. Available skills: {}", admitted.iter().map(|s| format!("{}/{}", s.domain, s.name)).collect::<Vec<_>>().join(", "))
+        } else {
+            found.iter().map(|(s, _)| format!("- {}/{}: {}", s.domain, s.name, s.description)).collect::<Vec<_>>().join("\n")
+        };
+        return Ok((content, false, risk));
+    }
+    let skill = match lookup(&all, args["name"].as_str().unwrap_or("")) {
+        Ok(skill) => skill,
+        Err(e) => return Ok((e, true, 1)),
+    };
+    let mut risk = crate::sources::file_rating(db, &skill.dir.join("SKILL.md"), &skill.text).await?;
+    crate::sources::depend_file(db, session, &skill.text).await?;
+    let file = args["file"].as_str().map(str::trim).filter(|f| !f.is_empty() && *f != "SKILL.md");
+    let (path, text) = if let Some(file) = file {
+        let path = skill.dir.join(file).canonicalize()?;
+        anyhow::ensure!(path.starts_with(skill.dir.canonicalize()?), "file is outside this skill");
+        let text = tokio::fs::read_to_string(&path).await?;
+        risk = risk.max(crate::sources::file_rating(db, &path, &text).await?);
+        crate::sources::depend_file(db, session, &text).await?;
+        (path, text)
+    } else {(skill.dir.join("SKILL.md"), skill.text.clone())};
+    Ok((render_load(skill, &path, text), false, risk))
 }
 
 #[cfg(test)]
@@ -413,6 +443,18 @@ mod tests {
         let found = find(&all, "verify the change", 5);
         assert_eq!(found[0].0.name, "verify");
         assert!(find(&all, "zzz qqq", 5).is_empty());
+    }
+
+    #[test]
+    fn catalog_and_primary_load_use_the_validated_snapshot() {
+        let root = tree();
+        let all = scan(&root);
+        let skill = lookup(&all, "work/brief").unwrap();
+        std::fs::write(skill.dir.join("SKILL.md"), "---\nname: brief\ndescription: changed\n---\nREPLACEMENT TOKEN\n").unwrap();
+        assert!(load(skill, None).unwrap().contains("Write the goal."));
+        assert!(!load(skill, None).unwrap().contains("REPLACEMENT"));
+        assert!(find(&all, "replacement", 8).is_empty());
+        assert!(index_text(&all).contains("Frame a big"));
     }
 
     #[test]

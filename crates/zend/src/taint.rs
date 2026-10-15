@@ -244,13 +244,6 @@ pub fn withheld(e: &anyhow::Error) -> String {
     format!("not shown: this session couldn't be marked as having read untrusted content ({e:#}); try again")
 }
 
-/// Give a session stored content that may be tainted: tainted content is wrapped as untrusted and
-/// marks the reading session first (an error when the mark can't be recorded: then the content
-/// must not be shown, see `withheld`); clean content is returned as it is.
-pub async fn hand_over(app: &App, session: Uuid, tainted: bool, source: &str, about: &str, text: &str) -> anyhow::Result<String> {
-    hand_over_rating(app,session,if tainted {4} else {1},source,about,text).await
-}
-
 /// Preserve a stored item's origin rating, including a reversible contamination overlay.
 pub async fn hand_over_rating(app: &App, session: Uuid, risk: i16, source: &str, about: &str, text: &str) -> anyhow::Result<String> {
     anyhow::ensure!((0..=5).contains(&risk), "invalid stored rating");

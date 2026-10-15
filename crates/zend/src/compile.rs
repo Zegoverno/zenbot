@@ -151,7 +151,7 @@ pub async fn base_prompt(db: &PgPool, session: Uuid, blocks: &[Block], workspace
     // The morning note: what the last sleep did, and what the nightly upkeep jobs found.
     let note: Vec<String> = [crate::memory::morning_note(db).await?, crate::jobs::upkeep_note(db).await?].into_iter().flatten().collect();
     let note = (!note.is_empty()).then(|| note.join("\n"));
-    let skills = crate::skills::index_text(&crate::skills::scan(&crate::skills::root()));
+    let skills = crate::skills::instruction_index(db, session).await?;
     let text = system_prompt(workspace, repo, &memory, note.as_deref(), &skills);
     tape::append(db, session, "base", &json!({ "text": text })).await?;
     Ok(text)

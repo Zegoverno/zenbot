@@ -140,7 +140,8 @@ pub async fn record_bytes(db: &PgPool, session: Uuid, path: &std::path::Path, te
     Ok(())
 }
 
-/// Legacy call sites, replaced with exact-byte registrations at each writer.
+/// Test helper: registers a file's current bytes (production writers register exact bytes).
+#[cfg(test)]
 pub async fn record_file(db: &PgPool, session: Uuid, path: &std::path::Path, prior_risk: i16) -> Result<()> {
     let text = tokio::fs::read_to_string(path).await?;
     let path = file_key(path).to_string_lossy().into_owned();
