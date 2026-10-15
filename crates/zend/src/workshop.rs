@@ -173,8 +173,11 @@ async fn save_skill(app: &App, session: Uuid, args: &Value) -> Result<String> {
     if tainted {
         mark_draft(&app.db, &format!("{domain}/{name}"), session).await.context("not saved: couldn't mark the draft as written by a session that read untrusted content")?;
     }
+    crate::sources::record_bytes(&app.db,session,&dir.join("SKILL.md"),&md,None).await?;
+    for (rel,content) in args["files"].as_object().into_iter().flatten() {
+        crate::sources::record_bytes(&app.db,session,&dir.join(rel),content.as_str().unwrap_or(""),None).await?;
+    }
     write_skill(&dir, &md, &args["files"])?;
-    crate::sources::record_file(&app.db,session,&dir.join("SKILL.md"),1).await?;
     let mark = if tainted { "; it read untrusted content" } else { "" };
     crate::git::commit_all(&root, &format!("{what}: {domain}/{name} (session {}{mark})\n\n{reason}", &session.to_string()[..8])).await;
     let new_domain = current.is_none() && draft.is_none() && !active.iter().any(|x| x.domain == domain);
@@ -391,10 +394,13 @@ async fn save_tool(app: &App, session: Uuid, args: &Value) -> Result<String> {
         if let Some(p) = path.parent() {
             std::fs::create_dir_all(p)?;
         }
+        crate::sources::record_bytes(&app.db,session,&path,content.as_str().unwrap_or(""),None).await?;
         std::fs::write(&path, content.as_str().unwrap_or(""))?;
     }
     let manifest = json!({ "name": name, "description": description, "parameters": params, "command": command });
-    std::fs::write(dir.join("tool.json"), serde_json::to_string_pretty(&manifest)?)?;
+    let manifest = serde_json::to_string_pretty(&manifest)?;
+    crate::sources::record_bytes(&app.db,session,&dir.join("tool.json"),&manifest,None).await?;
+    std::fs::write(dir.join("tool.json"),manifest)?;
     sqlx::query("INSERT INTO made_tools (name) VALUES ($1) ON CONFLICT (name) DO NOTHING").bind(name).execute(&app.db).await?;
     crate::git::commit_all(&tools_root(), &format!("save_tool: {name} (session {})\n\n{reason}", &session.to_string()[..8])).await;
     let approved: bool = sqlx::query_scalar("SELECT approved_at IS NOT NULL AND rejected_at IS NULL FROM made_tools WHERE name = $1").bind(name).fetch_one(&app.db).await.unwrap_or(false);

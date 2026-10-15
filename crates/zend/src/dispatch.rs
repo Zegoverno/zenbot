@@ -263,14 +263,6 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                                     tracing::warn!("backing up {}: {e:#}", p.display());
                                 }
                             }
-                            let changed_path = matches!(name.as_str(),"write"|"edit").then(||
-                                tools::resolve(&workspace,args["path"].as_str().unwrap_or("")));
-                            let prior_risk = if let Some(path) = &changed_path {
-                                match tokio::fs::read_to_string(path).await {
-                                    Ok(text) => crate::sources::file_rating(&app.db,path,&text).await.unwrap_or(4),
-                                    Err(_) => 1,
-                                }
-                            } else {1};
                             let mut out = if let Some(out) = agent::run_tool(app, id, &workspace, &name, &args, &mut ending, &policy).await {
                                 out
                             } else {
@@ -280,8 +272,6 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                                 } else {
                                     match &policy {
                                         crate::gate::Policy::Sandbox => tools::Sandbox::Offline,
-                                        crate::gate::Policy::NetworkSandbox => tools::Sandbox::Network,
-                                        crate::gate::Policy::ReadOnlySandbox => tools::Sandbox::ReadOnly,
                                         crate::gate::Policy::SafeRead(_) => tools::Sandbox::SafeRead,
                                         crate::gate::Policy::Run if matches!(name.as_str(), "write" | "edit")
                                             && crate::taint::tainted(&app.db, id).await => tools::Sandbox::GatedFile,
@@ -292,27 +282,19 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                                 if let crate::gate::Policy::SafeRead(command) = &policy {
                                     execute_args["command"] = json!(command);
                                 }
-                                let mut out = tools::execute(&workspace, &name, &execute_args, &env, sandbox).await;
+                                let mut out = tools::execute_origin(&workspace, &name, &execute_args, &env, sandbox, Some(tools::Origin {db:&app.db,session:id})).await;
                                 // Stored content a tainted session wrote is untrusted however it's read.
                                 if name == "read" && !out.is_error {
-                                    if let Some((source,risk)) = agent::read_of_tainted(&app.db, &workspace, &args).await {
-                                        let about = args["path"].as_str().unwrap_or("");
-                                        out = match crate::taint::hand_over_rating(app, id, risk, source, about, &out.content).await {
-                                            Ok(content) => tools::ToolOutput { rating: Some(crate::sources::Rating {risk,origin:format!("stored:{source}")}), content, is_error: false },
-                                            Err(e) => tools::ToolOutput { rating: None, content: crate::taint::withheld(&e), is_error: true },
+                                    if let Some(rating) = &out.rating {
+                                        let risk = rating.risk;
+                                        out.content = match crate::taint::hand_over_rating(app,id,risk,"file",args["path"].as_str().unwrap_or(""),&out.content).await {
+                                            Ok(content) => content,
+                                            Err(e) => {out.is_error=true; crate::taint::withheld(&e)}
                                         };
                                     }
                                 }
                                 out
                             };
-                            if !out.is_error {
-                                if let Some(path) = &changed_path {
-                                    if let Err(e) = crate::sources::record_file(&app.db,id,path,prior_risk).await {
-                                        out.is_error = true;
-                                        out.content.push_str(&format!("\nfile changed, but provenance recording failed: {e}"));
-                                    }
-                                }
-                            }
                             if let Some(note) = prompt_file.as_deref().filter(|_| !out.is_error).and_then(agent::over_cap_note) {
                                 out.content.push_str(&note);
                             }
@@ -369,6 +351,12 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                     out.content.push_str(&if trusted { context::attachment(&path, &text) } else { context::untrusted_attachment(&path, &text) });
                 }
             }
+            // A source can be denied while a read is in flight. Dependencies are recorded before
+            // handover, so recheck the live graph before returning any result to the worker.
+            if crate::taint::stopped(&app.db,id).await.unwrap_or(true) {
+                out.content = "result withheld: session or a source was contaminated during this tool".into();
+                out.is_error = true;
+            }
             // Every tool's output, instruction files included, is masked before the model or the tape sees it.
             out.content = crate::secrets::mask_off_thread(std::mem::take(&mut out.content)).await;
             // Record provenance before giving the worker content. Failure withholds the result.
@@ -379,7 +367,7 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                     origin: format!("kernel:{name}"),
                 },
             };
-            crate::sources::raise(&app.db, id, rating.risk).await?;
+            if rating.risk < 5 {crate::sources::raise(&app.db, id, rating.risk).await?;}
             if rating.risk == 5 {
                 crate::taint::deny(app,id,"level-5 block").await?;
                 out.content = "content withheld: level-5 block stopped this session; owner review required".into();

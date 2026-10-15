@@ -147,25 +147,6 @@ pub fn draft_target(workspace: &Path, name: &str, args: &Value) -> Option<String
     Some(format!("{domain}/{skill}"))
 }
 
-/// Whether a `read` returned stored content marked as tainted: a wiki page with an entry labelled
-/// `web`, or a file of a draft skill a tainted session wrote. Then the dispatcher hands it over as
-/// untrusted content (taint.rs). Returns where it came from.
-pub async fn read_of_tainted(db: &PgPool, workspace: &Path, args: &Value) -> Option<(&'static str,i16)> {
-    let target = real(&tools::resolve(workspace, args["path"].as_str()?));
-    if target.starts_with(real(&crate::wiki::root())) {
-        let risk = match tokio::fs::read_to_string(&target).await {
-            Ok(text) => crate::sources::file_rating(db,&target,&text).await.unwrap_or(4),
-            Err(_) => 4,
-        };
-        return Some(("wiki",risk));
-    }
-    let skill = draft_target(workspace, "read", args)?;
-    let risk = match tokio::fs::read_to_string(&target).await {
-        Ok(text) => crate::sources::file_rating(db,&target,&text).await.unwrap_or(4),
-        Err(_) => 4,
-    };
-    Some(("draft skill",if crate::workshop::tainted_drafts(db).await.contains(&skill) {risk.max(4)} else {risk}))
-}
 
 /// The prompt file an `edit` or `write` call targets, if it targets one (it is backed up first).
 pub fn prompt_file_target(workspace: &Path, name: &str, args: &Value) -> Option<PathBuf> {
@@ -605,8 +586,6 @@ async fn verify(app: &AppState, session: Uuid, workspace: &Path, args: &Value, p
             let (command, boundary) = match &route {
                 crate::gate::Policy::SafeRead(normalized) => (normalized.as_str(), tools::Sandbox::SafeRead),
                 crate::gate::Policy::Sandbox => (run,tools::Sandbox::Offline),
-                crate::gate::Policy::NetworkSandbox => (run,tools::Sandbox::Network),
-                crate::gate::Policy::ReadOnlySandbox => (run,tools::Sandbox::ReadOnly),
                 crate::gate::Policy::Hold(why) => return err(crate::gate::held_note(why)),
                 _ => (run, sandbox),
             };

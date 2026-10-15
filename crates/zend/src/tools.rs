@@ -216,12 +216,20 @@ pub enum Sandbox {
     ReadOnly,
     /// No network; workspace and host read-only, with a private writable /tmp (D-063).
     Offline,
-    /// Risk 2–3 local work: same filesystem isolation, network retained.
 }
 
 /// Run a tool. `env` is added to the environment of commands (bash), which run in `sandbox`. In
 /// a read-only sandbox (a verifier) only `read` may run besides, inside the workspace (`confined`).
+#[cfg(test)]
 pub async fn execute(workspace: &Path, name: &str, args: &Value, env: &[(&str, &str)], sandbox: Sandbox) -> ToolOutput {
+    execute_origin(workspace,name,args,env,sandbox,None).await
+}
+
+#[derive(Clone, Copy)]
+pub struct Origin<'a> { pub db: &'a sqlx::PgPool, pub session: uuid::Uuid }
+
+/// File provenance is computed from the exact bytes within the file operation, never a reread.
+pub async fn execute_origin(workspace: &Path, name: &str, args: &Value, env: &[(&str,&str)], sandbox: Sandbox, origin: Option<Origin<'_>>) -> ToolOutput {
     let read_only = sandbox == Sandbox::ReadOnly;
     if read_only && !matches!(name, "bash" | "read") {
         return err(format!("`{name}` can't run in a read-only session"));
@@ -229,12 +237,12 @@ pub async fn execute(workspace: &Path, name: &str, args: &Value, env: &[(&str, &
     let result = match name {
         "bash" => bash(workspace, args, env, sandbox, None).await,
         "read" if read_only => match confined(workspace, args) {
-            Ok(()) => read(workspace, args).await,
+            Ok(()) => read(workspace, args, origin).await,
             Err(e) => Err(err(e)),
         },
-        "read" => read(workspace, args).await,
-        "write" => write(workspace, args, sandbox == Sandbox::GatedFile).await,
-        "edit" => edit(workspace, args, sandbox == Sandbox::GatedFile).await,
+        "read" => read(workspace, args, origin).await,
+        "write" => write(workspace, args, sandbox == Sandbox::GatedFile, origin).await,
+        "edit" => edit(workspace, args, sandbox == Sandbox::GatedFile, origin).await,
         _ => Err(err(format!("unknown tool `{name}`"))),
     };
     // Secrets are masked once for every tool, where the dispatcher hands the result back.
@@ -554,7 +562,7 @@ fn is_binary(bytes: &[u8]) -> bool {
     bytes[..bytes.len().min(8192)].contains(&0) || std::str::from_utf8(bytes).is_err()
 }
 
-async fn read(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> {
+async fn read(workspace: &Path, args: &Value, origin: Option<Origin<'_>>) -> Result<ToolOutput, ToolOutput> {
     const MAX_READ_FILE: u64 = 16 * 1024 * 1024;
     let path = resolve(workspace, str_arg(args, "path")?);
     let file = tokio::fs::OpenOptions::new().read(true).custom_flags(0x800).open(&path).await
@@ -597,12 +605,16 @@ async fn read(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> 
         )));
     }
     let text = String::from_utf8_lossy(&bytes);
+    let rating = if let Some(origin) = origin {
+        crate::sources::depend_file(origin.db,origin.session,&text).await.map_err(|e|err(format!("file origin dependencies unavailable: {e}")))?;
+        Some(crate::sources::Rating {risk: crate::sources::file_rating(origin.db,&opened,&text).await.map_err(|e|err(format!("file provenance unavailable: {e}")))?,origin:format!("file:{}",opened.display())})
+    } else {None};
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(1).max(1) as usize;
     let limit = args.get("limit").and_then(Value::as_u64).map(|l| (l as usize).max(1)).unwrap_or(DEFAULT_READ_LINES);
     let total = text.lines().count();
     if total == 0 {
-        return Ok(ok("[empty file]\n"));
+        return Ok(ToolOutput {rating,content:"[empty file]\n".into(),is_error:false});
     }
     if offset > total {
         return Err(err(format!("offset {offset} is past the end of the file ({total} lines)")));
@@ -631,7 +643,7 @@ async fn read(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> 
     if last < total {
         out.push_str(&format!("[showing lines {offset}-{last} of {total}; continue with offset={}]\n", last + 1));
     }
-    Ok(ok(out))
+    Ok(ToolOutput {rating,content:out,is_error:false})
 }
 
 // ---------- write / edit ----------
@@ -687,7 +699,7 @@ fn anchored(workspace: &Path, path: &Path) -> std::io::Result<(std::fs::File, Pa
     Ok((dir, file))
 }
 
-async fn write(workspace: &Path, args: &Value, gated: bool) -> Result<ToolOutput, ToolOutput> {
+async fn write(workspace: &Path, args: &Value, gated: bool, origin: Option<Origin<'_>>) -> Result<ToolOutput, ToolOutput> {
     let path = resolve(workspace, str_arg(args, "path")?);
     let content = str_arg(args, "content")?;
     let _guard = lock_files(&[&path]).await;
@@ -698,6 +710,7 @@ async fn write(workspace: &Path, args: &Value, gated: bool) -> Result<ToolOutput
         }
     }
     let target = anchor.as_ref().map(|(_, p)| p.as_path()).unwrap_or(&path);
+    if let Some(o) = origin { crate::sources::record_bytes(o.db,o.session,&path,content,None).await.map_err(|e|err(format!("not written: provenance unavailable: {e}")))?; }
     write_atomic(target, content.as_bytes(), !gated).await.map_err(|e| err(format!("cannot write {}: {e}", path.display())))?;
     Ok(ok(format!("wrote {} bytes to {}", content.len(), path.display())))
 }
@@ -766,7 +779,7 @@ fn find_matches(hay: &str, needle: &str) -> (Vec<(usize, usize)>, bool) {
     (found, true)
 }
 
-async fn edit(workspace: &Path, args: &Value, gated: bool) -> Result<ToolOutput, ToolOutput> {
+async fn edit(workspace: &Path, args: &Value, gated: bool, origin: Option<Origin<'_>>) -> Result<ToolOutput, ToolOutput> {
     let path = resolve(workspace, str_arg(args, "path")?);
     let old = str_arg(args, "old_text")?.replace("\r\n", "\n");
     let new = str_arg(args, "new_text")?.replace("\r\n", "\n");
@@ -834,7 +847,9 @@ async fn edit(workspace: &Path, args: &Value, gated: bool) -> Result<ToolOutput,
         return Err(err("the replacement produced identical content; nothing changed"));
     }
     let updated = if crlf { updated.replace('\n', "\r\n") } else { updated };
-    write_atomic(target, format!("{bom}{updated}").as_bytes(), !gated)
+    let updated = format!("{bom}{updated}");
+    if let Some(o) = origin { crate::sources::record_bytes(o.db,o.session,&path,&updated,Some(&original)).await.map_err(|e|err(format!("not edited: provenance unavailable: {e}")))?; }
+    write_atomic(target, updated.as_bytes(), !gated)
         .await
         .map_err(|e| err(format!("cannot write {}: {e}", path.display())))?;
     let n = if all { matches.len() } else { 1 };

@@ -211,7 +211,7 @@ pub async fn deny(app: &App, session: Uuid, source: &str) -> anyhow::Result<()> 
     let affected: Vec<Uuid> = sqlx::query_scalar(
         "WITH RECURSIVE descendants AS (
             SELECT id FROM sessions WHERE id=$1
-            UNION SELECT s.id FROM sessions s JOIN descendants d ON s.parent=d.id)
+            UNION SELECT e.reader FROM (SELECT id AS reader,parent AS writer FROM sessions WHERE parent IS NOT NULL UNION SELECT reader,writer FROM session_inputs) e JOIN descendants d ON e.writer=d.id)
          SELECT id FROM descendants ORDER BY id")
         .bind(session).fetch_all(&mut *tx).await?;
     anyhow::ensure!(!affected.is_empty(), "session not found");
