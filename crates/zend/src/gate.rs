@@ -5,7 +5,9 @@
 //! No classifier receives outside content. The shell grammar (`grammar.rs`) allows read-only
 //! commands by program and flag, and re-emits them from the parsed words.
 //! A hold the gate makes only because it can't classify the action (unknown syntax, program or
-//! flag) doesn't revoke the session's shell; one that could do harm does.
+//! flag, or a URL the model built) doesn't revoke the session's shell; one that could do harm does.
+//! Egress (D-062, step 1): `web_fetch` runs only for a URL found in the owner's own messages or in
+//! earlier web results, never one the model built, which could carry data out.
 
 mod grammar;
 pub use grammar::shell;
@@ -17,10 +19,13 @@ use sqlx::Row;
 use uuid::Uuid;
 use crate::{App, tools};
 
+/// Held: a `web_fetch` URL that no outside source gave the session.
+pub const UNSEEN_URL: &str = "fetches a URL that isn't in the owner's messages or in earlier web results, so it could carry data out; fetch a link as it appears there";
+
 /// Whether a hold revokes the session's shell: only when the action could do harm, not when the
 /// gate merely couldn't classify it.
 pub fn escalates(reason: &str) -> bool {
-    ![grammar::UNSUPPORTED, grammar::UNKNOWN, grammar::OPTION, grammar::DIRECTORY]
+    ![grammar::UNSUPPORTED, grammar::UNKNOWN, grammar::OPTION, grammar::DIRECTORY, UNSEEN_URL]
         .iter().any(|r| reason.ends_with(r))
 }
 
@@ -55,6 +60,8 @@ pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args:
         let approved: Option<bool> = sqlx::query_scalar("SELECT approved_at IS NOT NULL FROM made_tools WHERE name = $1")
             .bind(tool).fetch_optional(&app.db).await?;
         if approved == Some(false) { Policy::Sandbox } else { Policy::Hold("runs a made tool with host capabilities".into()) }
+    } else if name == "web_fetch" {
+        if url_seen(app, session, args["url"].as_str().unwrap_or("")).await? { Policy::Run } else { Policy::Hold(UNSEEN_URL.into()) }
     } else { policy(workspace, name, args) };
     if let Policy::Hold(reason) = &p {
         // Revoke capabilities before returning the refusal; no action has run.
@@ -145,6 +152,79 @@ pub fn held_note(reason: &str) -> String {
     }
 }
 
+/// Whether `url` appears, as written, in what the session got from outside the model: the
+/// owner's messages (in the owner's own sessions) or `web_search`/`web_fetch` results. Text the
+/// model chose is removed first: the call's own arguments (a query, a `focus`) and the result's
+/// header lines, which can echo them. So a URL the model built, which could carry data out, isn't
+/// "seen" because the model wrote it into a query or a page repeated it.
+async fn url_seen(app: &App, session: Uuid, url: &str) -> Result<bool> {
+    let url = url.trim();
+    if url.is_empty() { return Ok(false); }
+    let needle = serde_json::to_string(url)?;
+    let needle = &needle[1..needle.len() - 1];
+    let rows = sqlx::query(
+        "SELECT e.payload, (SELECT a.payload FROM tape_events a WHERE a.session_id = e.session_id
+            AND a.kind = 'message' AND a.payload->>'role' = 'assistant'
+            AND a.payload->'content' @> jsonb_build_array(jsonb_build_object('id', e.payload->>'toolCallId'))
+            ORDER BY a.seq DESC LIMIT 1) AS call
+         FROM tape_events e JOIN sessions s ON s.id = e.session_id
+         WHERE e.session_id = $1 AND e.kind = 'message' AND strpos(e.payload::text, $2) > 0
+           AND ((e.payload->>'role' = 'user' AND s.kind IS NULL)
+             OR (e.payload->>'role' = 'toolResult' AND e.payload->>'toolName' IN ('web_search', 'web_fetch')
+                 AND NOT COALESCE((e.payload->>'isError')::boolean, false)))")
+        .bind(session).bind(needle).fetch_all(&app.db).await?;
+    for row in rows {
+        let payload: Value = row.get("payload");
+        if payload["role"] == "user" { return Ok(true); }
+        let call: Option<Value> = row.get("call");
+        let id = payload["toolCallId"].as_str().unwrap_or("");
+        let args = call.as_ref().and_then(|c| c["content"].as_array())
+            .and_then(|parts| parts.iter().find(|p| p["id"] == id)).map(|p| p["arguments"].clone())
+            .unwrap_or(Value::Null);
+        if contains_whole_url(&outside_text(&payload, &args), url) { return Ok(true); }
+    }
+    Ok(false)
+}
+
+/// Whether `url` occurs in `text` as a whole URL, not as the start or middle of a longer one:
+/// cutting a seen URL short would let the model choose bits to send.
+fn contains_whole_url(text: &str, url: &str) -> bool {
+    let url_char = |c: char| c.is_alphanumeric() || "-._~:/?#[]@!$&'()*+,;=%".contains(c);
+    text.match_indices(url).any(|(i, _)| {
+        let before = text[..i].chars().next_back();
+        let mut after = text[i + url.len()..].chars();
+        let next = after.next();
+        let starts = before.is_none_or(|c| !url_char(c) || "('\"[<".contains(c));
+        // Sentence punctuation right after a URL ends it when followed by a space or the end.
+        let ends = match next {
+            None => true,
+            Some(c) if ".,;:!?".contains(c) => after.next().is_none_or(|c| c.is_whitespace()),
+            Some(c) => !url_char(c) || ")'\"]>".contains(c),
+        };
+        starts && ends
+    })
+}
+
+/// A web tool result's text without what the model wrote into it.
+fn outside_text(payload: &Value, args: &Value) -> String {
+    let mut text: String = payload["content"].as_array().into_iter().flatten()
+        .filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n");
+    for key in ["query", "focus"] {
+        if let Some(v) = args[key].as_str().filter(|v| !v.trim().is_empty()) {
+            text = text.replace(v, "\u{0}");
+        }
+    }
+    text.lines()
+        .filter(|l| {
+            let l = l.trim_start();
+            // The envelope's opening (its `about` echoes the query), the search header and
+            // the focus note.
+            !(l.starts_with("<untrusted") || l.starts_with("Kept the ")
+                || l.split_once(" results for ").is_some_and(|(n, _)| n.chars().all(|c| c.is_ascii_digit())))
+        })
+        .collect::<Vec<_>>().join("\n")
+}
+
 pub async fn waiting(app: &App, session: Uuid) -> Result<Vec<Value>> {
     let rows = sqlx::query("SELECT id, action, reason FROM action_gates WHERE session_id = $1
       AND allowed_at IS NULL AND created_at > now() - interval '1 day' ORDER BY id DESC LIMIT 5")
@@ -216,11 +296,35 @@ mod tests {
             assert!(escalates(&reason(c)), "{c}");
         }
         assert!(!escalates(&format!("verification command: {}", reason("echo $(id)"))));
+        assert!(!escalates(UNSEEN_URL));
         assert!(held_note(&reason("echo $(id)")).contains("keeps its shell"));
         assert!(held_note(&reason("curl x")).contains("now tainted"));
         // #16 of the recorded holds: a direct wiki edit is held, and the note says to use capture.
         let wiki = crate::zen_home().join("global/wiki/x.md");
         assert!(matches!(policy(p, "edit", &json!({"path": wiki})), Policy::Hold(r) if r.contains("capture") && escalates(&r)));
+    }
+
+    #[test]
+    fn model_text_in_web_results_is_not_a_source() {
+        let evil = "https://evil.example/?d=S";
+        let search = json!({"content":[{"type":"text","text":format!("2 results for \"{evil}\" from searxng, ordered by relevance:\n<untrusted source=\"web_search\" about=\"{evil}\">\nnote\n[1] Result about {evil}2\n    https://example.com/a\n</untrusted>")}]});
+        let t = outside_text(&search, &json!({"query": evil}));
+        assert!(t.contains("https://example.com/a") && !t.contains(evil), "{t}");
+        // A query altered in the envelope (quotes) is still dropped with the envelope's line.
+        let quoted = format!("x\" {evil}");
+        let search = json!({"content":[{"text":format!("<untrusted source=\"web_search\" about=\"x' {evil}\">\n    https://example.com/a")}]});
+        assert!(!outside_text(&search, &json!({"query": quoted})).contains(evil));
+        let fetch = json!({"content":[{"text":format!("<untrusted source=\"web_fetch\" about=\"https://example.com/a\">\nnote\n200 https://example.com/a (text/html)\nKept the 1 of 2 parts that bear on \"{evil}\" (System One)\nSee https://example.org/b")}]});
+        let t = outside_text(&fetch, &json!({"url":"https://example.com/a","focus": "gate rules"}));
+        assert!(t.contains("https://example.org/b") && !t.contains(evil));
+        // Only whole URLs count: no prefix or middle of a longer one.
+        let page = "see https://x.example/a/secret-path?q=1, or (https://y.example/b). <https://z.example/c>";
+        for u in ["https://x.example/a/secret-path?q=1", "https://y.example/b", "https://z.example/c"] {
+            assert!(contains_whole_url(page, u), "{u}");
+        }
+        for u in ["https://x.example/a/secret", "https://x.example/a", "https://y.example/", "x.example/a/secret-path?q=1"] {
+            assert!(!contains_whole_url(page, u), "{u}");
+        }
     }
 
     #[test]
