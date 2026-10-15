@@ -26,3 +26,28 @@ impl AsRef<Path> for TestDir {
 impl Drop for TestDir {
     fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
 }
+
+/// A kernel state with no workers, for database tests of kernel functions that take an `App`
+/// (`taint::deny`, `trust`, `hand_over_rating`). Events go nowhere; aborts reach no worker.
+pub(crate) fn app(db: sqlx::PgPool) -> crate::AppState {
+    use std::collections::{HashMap, HashSet};
+    use tokio::sync::Mutex;
+    std::sync::Arc::new(crate::App {
+        db,
+        workers: Vec::new(),
+        ignored_workers: Vec::new(),
+        routes: Mutex::new(HashMap::new()),
+        catalog: Mutex::new(HashMap::new()),
+        turns: Mutex::new(HashMap::new()),
+        token: "test".into(),
+        workspace: std::env::temp_dir(),
+        repo: String::new(),
+        default_model: "faux/smoke".into(),
+        harness: "test".into(),
+        hubs: Mutex::new(HashMap::new()),
+        updater: std::sync::Arc::new(crate::update::Updater::new(std::env::temp_dir())),
+        compacting: Mutex::new(HashSet::new()),
+        waiters: Mutex::new(HashMap::new()),
+        background: std::sync::Arc::default(),
+    })
+}
