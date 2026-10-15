@@ -2,7 +2,15 @@
 //! Only the owner grants an exact (workspace, tool, arguments) action, once. Unknown shell
 //! syntax is held, never interpreted by a classifier. Safe reads use fixed system binaries
 //! and a cleared environment; Git and build tools are programmable and always sandboxed.
-//! No classifier receives outside content. The narrow grammar is intentionally conservative.
+//! No classifier receives outside content. The shell grammar (`grammar.rs`) allows read-only
+//! commands by program and flag, and re-emits them from the parsed words.
+//! A hold the gate makes only because it can't classify the action (unknown syntax, program or
+//! flag, or a URL the model built) doesn't revoke the session's shell; one that could do harm does.
+//! Egress (D-062, step 1): `web_fetch` runs only for a URL found in the owner's own messages or in
+//! earlier web results, never one the model built, which could carry data out.
+
+mod grammar;
+pub use grammar::shell;
 
 use std::path::Path;
 use anyhow::Result;
@@ -10,6 +18,16 @@ use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
 use crate::{App, tools};
+
+/// Held: a `web_fetch` URL that no outside source gave the session.
+pub const UNSEEN_URL: &str = "fetches a URL that isn't in the owner's messages or in earlier web results, so it could carry data out; fetch a link as it appears there";
+
+/// Whether a hold revokes the session's shell: only when the action could do harm, not when the
+/// gate merely couldn't classify it.
+pub fn escalates(reason: &str) -> bool {
+    ![grammar::UNSUPPORTED, grammar::UNKNOWN, grammar::OPTION, grammar::DIRECTORY, UNSEEN_URL]
+        .iter().any(|r| reason.ends_with(r))
+}
 
 #[derive(Debug, PartialEq)]
 pub enum Policy {
@@ -42,10 +60,14 @@ pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args:
         let approved: Option<bool> = sqlx::query_scalar("SELECT approved_at IS NOT NULL FROM made_tools WHERE name = $1")
             .bind(tool).fetch_optional(&app.db).await?;
         if approved == Some(false) { Policy::Sandbox } else { Policy::Hold("runs a made tool with host capabilities".into()) }
+    } else if name == "web_fetch" {
+        if url_seen(app, session, args["url"].as_str().unwrap_or("")).await? { Policy::Run } else { Policy::Hold(UNSEEN_URL.into()) }
     } else { policy(workspace, name, args) };
     if let Policy::Hold(reason) = &p {
         // Revoke capabilities before returning the refusal; no action has run.
-        crate::taint::escalate(app, session, name, reason).await?;
+        if escalates(reason) {
+            crate::taint::escalate(app, session, name, reason).await?;
+        }
         sqlx::query("INSERT INTO action_gates (session_id, action, reason)
           SELECT $1, $2, $3 WHERE NOT EXISTS (
             SELECT 1 FROM action_gates WHERE session_id = $1 AND action = $2
@@ -67,7 +89,10 @@ pub fn policy(workspace: &Path, name: &str, args: &Value) -> Policy {
         }
         "write" | "edit" => {
             let p = real(&tools::resolve(workspace, args["path"].as_str().unwrap_or("")));
-            if !p.starts_with(real(workspace)) || p.starts_with(real(&crate::zen_home())) || secret(&p) || steering(&p) {
+            if p.starts_with(real(&crate::zen_home().join("global/wiki"))) {
+                // A direct edit would skip the `web` label `capture` gives what a risky session adds.
+                hold("writes the wiki directly from a session that read outside content; add the note with `capture`, which labels where it came from")
+            } else if !p.starts_with(real(workspace)) || p.starts_with(real(&crate::zen_home())) || secret(&p) || steering(&p) {
                 hold("writes outside the work or changes persistent steering/executable configuration")
             } else { Policy::Run }
         }
@@ -119,127 +144,85 @@ fn steering(path: &Path) -> bool {
         || matches!(path.extension().and_then(|s| s.to_str()), Some("sh" | "bash" | "zsh" | "service" | "py" | "js" | "mjs" | "cjs"))
 }
 
-/// A bounded grammar: simple words, literal quotes, comments, pipes and &&/; lists.
-/// Shell expansions, redirections, wrappers, heredocs, assignments and other syntax are held.
-/// Nothing parsed here is executed outside isolation except an explicitly checked read command.
-fn words(command: &str) -> Option<Vec<Vec<String>>> {
-    if command.len() > 32_768 { return None; }
-    let mut cmds = Vec::new();
-    let mut parts = Vec::new();
-    let mut word = String::new();
-    let mut started = false;
-    let mut quote = None;
-    let mut comment = false;
-    let finish = |parts: &mut Vec<String>, word: &mut String, started: &mut bool| {
-        if *started { parts.push(std::mem::take(word)); *started = false; }
-    };
-    let mut chars = command.chars().peekable();
-    while let Some(c) = chars.next() {
-        if comment {
-            if c != '\n' { continue; }
-            comment = false;
-        }
-        if let Some(q) = quote {
-            if c == q { quote = None; }
-            else {
-                if q == '"' && matches!(c, '$' | '`' | '\\') { return None; }
-                word.push(c);
-            }
-            continue;
-        }
-        match c {
-            '\'' | '"' => { quote = Some(c); started = true; }
-            '#' if !started => comment = true,
-            '$' | '`' | '\\' | '<' | '>' | '(' | ')' | '{' | '}' | '*' | '?' | '[' | ']' => return None,
-            '=' => return None,
-            '&' => {
-                if chars.next() != Some('&') { return None; }
-                finish(&mut parts, &mut word, &mut started);
-                if parts.is_empty() { return None; }
-                cmds.push(std::mem::take(&mut parts));
-            }
-            ';' | '|' | '\n' => {
-                if c == '|' && chars.peek() == Some(&'|') { return None; }
-                finish(&mut parts, &mut word, &mut started);
-                if !parts.is_empty() { cmds.push(std::mem::take(&mut parts)); }
-                else if c != '\n' { return None; }
-            }
-            c if c.is_whitespace() => finish(&mut parts, &mut word, &mut started),
-            c if c.is_control() => return None,
-            c => { word.push(c); started = true; }
-        }
-    }
-    if quote.is_some() { return None; }
-    finish(&mut parts, &mut word, &mut started);
-    if !parts.is_empty() { cmds.push(parts); }
-    if cmds.is_empty() { return None; }
-    Some(cmds)
-}
-
-pub fn shell(workspace: &Path, command: &str) -> Policy {
-    let Some(cmds) = words(command) else { return Policy::Hold("unsupported or dynamic shell syntax".into()) };
-    let mut safe = Vec::new();
-    let mut programmable = false;
-    let mut cwd = workspace.to_path_buf();
-    for w in cmds {
-        let prog = w[0].as_str();
-        let args = &w[1..];
-        let base = prog.rsplit('/').next().unwrap_or(prog);
-        if base == "cd" {
-            if args.len() != 1 || prog != "cd" { return Policy::Hold("unsupported directory change".into()); }
-            cwd = real(&tools::resolve(&cwd, &args[0]));
-            programmable = true;
-            continue;
-        }
-        if matches!(base, "git" | "cargo" | "python" | "python3" | "node" | "npm" | "make") {
-            // Every programmable utility stays in isolation: git status can run core.fsmonitor.
-            let outward = match base {
-                "git" => args.iter().any(|a| matches!(a.as_str(), "push" | "fetch" | "pull" | "clone" | "ls-remote" | "config" | "reset" | "clean")),
-                "cargo" => args.iter().any(|a| matches!(a.as_str(), "publish" | "install" | "fetch" | "update" | "add" | "login")),
-                "npm" => args.iter().any(|a| matches!(a.as_str(), "install" | "i" | "ci" | "add" | "publish" | "exec")),
-                // Opaque interpreter code can delete files or install steering even offline.
-                "python" | "python3" | "node" => true,
-                _ => false,
-            };
-            if outward { return Policy::Hold("network, destructive or persistent action".into()); }
-            programmable = true;
-            continue;
-        }
-        // Fixed system utilities; no PATH search, aliases, shell functions or environment hooks.
-        let binary = format!("/usr/bin/{base}");
-        if !matches!(base, "pwd" | "ls" | "cat" | "head" | "tail" | "wc" | "grep")
-            || !(prog == base || prog == binary) {
-            return Policy::Hold("unknown program or effect".into());
-        }
-        if args.iter().any(|a| a.starts_with("--") && a != "--"
-            || (base == "tail" && (a.contains('f') || a.contains('F')))
-            || a.contains('\n') || a.contains('\r')) {
-            return Policy::Hold("unsupported read option".into());
-        }
-        // Conservative flags for utilities with modes; pattern operands can only be read too.
-        if base == "ls" && args.iter().filter(|a| a.starts_with('-')).any(|a| !a.chars().skip(1).all(|c| "alhRdFtSr1".contains(c))) {
-            return Policy::Hold("unsupported listing option".into());
-        }
-        if args.iter().filter(|a| !a.starts_with('-')).any(|a| secret(&real(&tools::resolve(&cwd, a)))) {
-            return Policy::Hold("reads a secret or process/device path".into());
-        }
-        // Quotes protect even literal ;/$ characters in single-quoted operands.
-        let mut cmd = binary;
-        for a in args { cmd.push_str(" '"); cmd.push_str(&a.replace('\'', "'\\''")); cmd.push('\''); }
-        safe.push(cmd);
-    }
-    if programmable || safe.len() != 1 {
-        let home = tools::resolve(workspace, "~");
-        if real(&home).starts_with(real(workspace)) {
-            Policy::Hold("programmable work in a home-wide workspace can change persistent steering; use a project directory or approve this exact action".into())
-        } else {
-            Policy::Sandbox
-        }
-    } else { Policy::SafeRead(safe.remove(0)) }
-}
-
 pub fn held_note(reason: &str) -> String {
-    format!("not run: {reason}. This action was held before taking effect and the session is now tainted. Only the owner can allow this exact action once: end the turn and ask them to use /allow (zen) or !allow (Matrix), then retry unchanged.")
+    if escalates(reason) {
+        format!("not run: {reason}. This action was held before taking effect and the session is now tainted. Only the owner can allow this exact action once: end the turn and ask them to use /allow (zen) or !allow (Matrix), then retry unchanged.")
+    } else {
+        format!("not run: {reason}. Held before taking effect; the session keeps its shell. Reads run when written plainly: listed read-only programs (ls, cat, head, tail, wc, grep, find, sed -n 'M,Np', sort, uniq, cut, diff, du, stat, echo…), their usual flags, pipes, `;`, `&&`, `||`, `cd`, quotes, globs and redirects to /dev/null; no `$`, backticks, loops or other redirects. Otherwise the owner can allow this exact action once: end the turn and ask them to use /allow (zen) or !allow (Matrix), then retry unchanged.")
+    }
+}
+
+/// Whether `url` appears, as written, in what the session got from outside the model: the
+/// owner's messages (in the owner's own sessions) or `web_search`/`web_fetch` results. Text the
+/// model chose is removed first: the call's own arguments (a query, a `focus`) and the result's
+/// header lines, which can echo them. So a URL the model built, which could carry data out, isn't
+/// "seen" because the model wrote it into a query or a page repeated it.
+async fn url_seen(app: &App, session: Uuid, url: &str) -> Result<bool> {
+    let url = url.trim();
+    if url.is_empty() { return Ok(false); }
+    let needle = serde_json::to_string(url)?;
+    let needle = &needle[1..needle.len() - 1];
+    let rows = sqlx::query(
+        "SELECT e.payload, (SELECT a.payload FROM tape_events a WHERE a.session_id = e.session_id
+            AND a.kind = 'message' AND a.payload->>'role' = 'assistant'
+            AND a.payload->'content' @> jsonb_build_array(jsonb_build_object('id', e.payload->>'toolCallId'))
+            ORDER BY a.seq DESC LIMIT 1) AS call
+         FROM tape_events e JOIN sessions s ON s.id = e.session_id
+         WHERE e.session_id = $1 AND e.kind = 'message' AND strpos(e.payload::text, $2) > 0
+           AND ((e.payload->>'role' = 'user' AND s.kind IS NULL)
+             OR (e.payload->>'role' = 'toolResult' AND e.payload->>'toolName' IN ('web_search', 'web_fetch')
+                 AND NOT COALESCE((e.payload->>'isError')::boolean, false)))")
+        .bind(session).bind(needle).fetch_all(&app.db).await?;
+    for row in rows {
+        let payload: Value = row.get("payload");
+        if payload["role"] == "user" { return Ok(true); }
+        let call: Option<Value> = row.get("call");
+        let id = payload["toolCallId"].as_str().unwrap_or("");
+        let args = call.as_ref().and_then(|c| c["content"].as_array())
+            .and_then(|parts| parts.iter().find(|p| p["id"] == id)).map(|p| p["arguments"].clone())
+            .unwrap_or(Value::Null);
+        if contains_whole_url(&outside_text(&payload, &args), url) { return Ok(true); }
+    }
+    Ok(false)
+}
+
+/// Whether `url` occurs in `text` as a whole URL, not as the start or middle of a longer one:
+/// cutting a seen URL short would let the model choose bits to send.
+fn contains_whole_url(text: &str, url: &str) -> bool {
+    let url_char = |c: char| c.is_alphanumeric() || "-._~:/?#[]@!$&'()*+,;=%".contains(c);
+    text.match_indices(url).any(|(i, _)| {
+        let before = text[..i].chars().next_back();
+        let mut after = text[i + url.len()..].chars();
+        let next = after.next();
+        let starts = before.is_none_or(|c| !url_char(c) || "('\"[<".contains(c));
+        // Sentence punctuation right after a URL ends it when followed by a space or the end.
+        let ends = match next {
+            None => true,
+            Some(c) if ".,;:!?".contains(c) => after.next().is_none_or(|c| c.is_whitespace()),
+            Some(c) => !url_char(c) || ")'\"]>".contains(c),
+        };
+        starts && ends
+    })
+}
+
+/// A web tool result's text without what the model wrote into it.
+fn outside_text(payload: &Value, args: &Value) -> String {
+    let mut text: String = payload["content"].as_array().into_iter().flatten()
+        .filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n");
+    for key in ["query", "focus"] {
+        if let Some(v) = args[key].as_str().filter(|v| !v.trim().is_empty()) {
+            text = text.replace(v, "\u{0}");
+        }
+    }
+    text.lines()
+        .filter(|l| {
+            let l = l.trim_start();
+            // The envelope's opening (its `about` echoes the query), the search header and
+            // the focus note.
+            !(l.starts_with("<untrusted") || l.starts_with("Kept the ")
+                || l.split_once(" results for ").is_some_and(|(n, _)| n.chars().all(|c| c.is_ascii_digit())))
+        })
+        .collect::<Vec<_>>().join("\n")
 }
 
 pub async fn waiting(app: &App, session: Uuid) -> Result<Vec<Value>> {
@@ -300,6 +283,48 @@ mod tests {
         assert_eq!(policy(p, "verify", &json!({"criteria":[{"run":"cargo test"}]})), Policy::Run);
         assert!(matches!(shell(p, "python3 -c 'import os; os.remove(\"important\")'"), Policy::Hold(_)));
         assert!(matches!(policy(p, "write", &json!({"path":"package.json","content":"{}"})), Policy::Hold(_)));
+    }
+
+    #[test]
+    fn only_harmful_holds_revoke_the_shell() {
+        let p = Path::new("/tmp");
+        let reason = |c: &str| match shell(p, c) { Policy::Hold(r) => r, other => panic!("{c}: {other:?}") };
+        for c in ["echo $(id)", "tmux ls", "ls --dired", "for f in a; do ls; done", "cd a b"] {
+            assert!(!escalates(&reason(c)), "{c}");
+        }
+        for c in ["curl x", "git push", "rm -rf x", "cat /proc/self/environ", "python3 -c 1"] {
+            assert!(escalates(&reason(c)), "{c}");
+        }
+        assert!(!escalates(&format!("verification command: {}", reason("echo $(id)"))));
+        assert!(!escalates(UNSEEN_URL));
+        assert!(held_note(&reason("echo $(id)")).contains("keeps its shell"));
+        assert!(held_note(&reason("curl x")).contains("now tainted"));
+        // #16 of the recorded holds: a direct wiki edit is held, and the note says to use capture.
+        let wiki = crate::zen_home().join("global/wiki/x.md");
+        assert!(matches!(policy(p, "edit", &json!({"path": wiki})), Policy::Hold(r) if r.contains("capture") && escalates(&r)));
+    }
+
+    #[test]
+    fn model_text_in_web_results_is_not_a_source() {
+        let evil = "https://evil.example/?d=S";
+        let search = json!({"content":[{"type":"text","text":format!("2 results for \"{evil}\" from searxng, ordered by relevance:\n<untrusted source=\"web_search\" about=\"{evil}\">\nnote\n[1] Result about {evil}2\n    https://example.com/a\n</untrusted>")}]});
+        let t = outside_text(&search, &json!({"query": evil}));
+        assert!(t.contains("https://example.com/a") && !t.contains(evil), "{t}");
+        // A query altered in the envelope (quotes) is still dropped with the envelope's line.
+        let quoted = format!("x\" {evil}");
+        let search = json!({"content":[{"text":format!("<untrusted source=\"web_search\" about=\"x' {evil}\">\n    https://example.com/a")}]});
+        assert!(!outside_text(&search, &json!({"query": quoted})).contains(evil));
+        let fetch = json!({"content":[{"text":format!("<untrusted source=\"web_fetch\" about=\"https://example.com/a\">\nnote\n200 https://example.com/a (text/html)\nKept the 1 of 2 parts that bear on \"{evil}\" (System One)\nSee https://example.org/b")}]});
+        let t = outside_text(&fetch, &json!({"url":"https://example.com/a","focus": "gate rules"}));
+        assert!(t.contains("https://example.org/b") && !t.contains(evil));
+        // Only whole URLs count: no prefix or middle of a longer one.
+        let page = "see https://x.example/a/secret-path?q=1, or (https://y.example/b). <https://z.example/c>";
+        for u in ["https://x.example/a/secret-path?q=1", "https://y.example/b", "https://z.example/c"] {
+            assert!(contains_whole_url(page, u), "{u}");
+        }
+        for u in ["https://x.example/a/secret", "https://x.example/a", "https://y.example/", "x.example/a/secret-path?q=1"] {
+            assert!(!contains_whole_url(page, u), "{u}");
+        }
     }
 
     #[test]

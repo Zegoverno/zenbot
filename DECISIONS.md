@@ -6,6 +6,46 @@
 
 ---
 
+## D-062 — Risk is rated per block by its source; a reversible taint stops the session
+
+**Date:** 2026-10-15 · **Status:** accepted (owner); step 1 built · **Supersedes, as its steps
+ship:** D-053's marks by the writing session and `taint::limited`, D-054's "stored marks stay",
+D-056's risky/tainted pair and "a hold taints"
+
+**Decision:** Read freely, rate what enters the context by where it came from, check what acts; only
+the owner raises trust.
+- **Every block and stored item carries `risk` 0–5 and `tainted`.** A script sets the risk from the
+  source: 0 the owner, 1 internal and clean, 2 an owner-allowlisted source, 3 one the owner rated 3,
+  4 open or unknown (web, search, MCP), 5 flagged. Derived content takes the max of its sources,
+  approximated by the session's risk when written; text found verbatim in an owner turn is 0. A
+  content check may only raise a risk. A URL the owner gives is rated by its source, then System
+  One, reading only the owner's message, may lower that exact page one level (never below 2) or
+  raise it to 4; a failure leaves it.
+- **The allowlist is the owner's** (`host` or `host/path` by whole segments, https, the final URL
+  after redirects), changed only by the owner's own commands.
+- **A session's risk is the max in its window:** 0–1 as a clean session; 2–3 outward commands,
+  steering writes and model-built URLs are held, local commands keep the network, unparseable
+  ones run offline; 4 the full gate; 5 stop. At ≥2 prompt files, skills and tools change only
+  through the owner, a job waits for the owner, and only memories rated 0–1 enter the instructions.
+- **Egress:** at ≥2, `web_fetch` runs for an allowlisted host or a URL found in the owner's
+  messages or earlier web results; a URL the model built is held.
+- **Holds ask; refusal taints.** The owner's refusal, a level-5 block or (later) a task check marks
+  the session `tainted`: it stops and everything it produced is marked; `/trust` clears that,
+  restores the ratings and vouches for the window, while stored items keep their risk.
+- **Steps:** (1) the gate's shell grammar and the egress stopgap; (2) ratings and the allowlist;
+  (3) items rated by origin, levels replace the session marks, after injection evals; (4) a task
+  check by System One on the owner's request and budgets; (5) a one-tap accept queue.
+
+**Why:** The mark sat on the session that wrote an item, not on where its text came from, and one
+bit mixed "may steer" with "has seen outside text": 5 of 12 memories were hidden (one the owner's
+own words), 3 of 7 wiki pages tainted their readers, 42 of 63 subagents started marked, all 16
+holds were false and each took the shell away, while `web_fetch` could still carry data out.
+CaMeL, FIDES and qm label data by origin and enforce at the action.
+
+**Considered:** a classifier rating content both ways (the attacker talks to it); rotating its
+questions (breaks calibration, no real secrecy); tainting only what came after the risky block
+(the steering may come from any step); per-value dataflow (too big now).
+
 ## D-061 — Lighter docs and checks
 
 **Date:** 2026-10-14 · **Status:** accepted (owner); built
@@ -112,7 +152,7 @@ job pauses after 5 in a row); deleting job sessions (no: archived, never deleted
 
 ## D-056 — Judge the action, not the reading; first step: search doesn't spread the mark
 
-**Date:** 2026-10-13 · **Status:** accepted (owner); built in part · **Amends:** D-053 (every read
+**Date:** 2026-10-13 · **Status:** accepted (owner); built in part; holds and risky/tainted superseded in part by D-062 · **Amends:** D-053 (every read
 path taints the reader), D-051 (only listed repositories are trusted)
 
 **Decision:** Reading outside content should cost little; acting on it is what's checked.
@@ -144,6 +184,9 @@ Offline builds can still change their project workspace; programmable commands i
 containing the owner's home are held for exact approval to protect persistent steering. Strong
 copy-on-write isolation and a separate Unix user are not supplied by this change.
 System One grants from the owner's request remain the next step.
+2026-10-15 (D-062 step 1): the grammar allows read programs by flag, pipes and lists, `cd`, globs
+expanded by the kernel and `/dev/null` redirects; a hold that's only "can't classify" no longer
+taints.
 
 **Why:** 5 of the 11 tainted main sessions were tainted by `search` recalling a marked memory, not
 by reading the web; a worktree of zenbot's own checkout tainted the session that made it. A replay
@@ -192,7 +235,7 @@ missing message would go out unnoticed).
 
 ## D-054 — The owner can trust a session again (`/trust`), forward only
 
-**Date:** 2026-10-13 · **Status:** accepted (owner) · **Amends:** D-053 ("continue in a fresh
+**Date:** 2026-10-13 · **Status:** accepted (owner); to be superseded in part by D-062 (step 3) · **Amends:** D-053 ("continue in a fresh
 session" was the only way out of a tainted session's limits)
 
 **Decision:** Only the owner lifts a session's taint, after looking at what set it.
@@ -226,7 +269,7 @@ trusted session per source (more state, and the owner trusts a session, not a si
 
 ## D-053 — Taint is a property of stored content; a tainted session's shell has no network
 
-**Date:** 2026-10-11 · **Status:** accepted (owner, taint review) · **Supersedes:** D-034's "what a
+**Date:** 2026-10-11 · **Status:** accepted (owner, taint review); to be superseded in part by D-062 (step 3) · **Supersedes:** D-034's "what a
 tainted session saves to memory counts as inference" as the whole rule for stored content, and
 D-051's trade-off that `bash` in a tainted session runs as the owner with the network
 
