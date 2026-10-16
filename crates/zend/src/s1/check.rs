@@ -182,6 +182,13 @@ pub fn check(name: &str, src: &str, models: &Models) -> (Option<Spec>, Vec<Diag>
             _ => {}
         }
     }
+    for e in &spec.inputs {
+        if !facts.contains(&e.as_str()) {
+            err("", "inputs", format!("`{e}` isn't a fact the caller supplies ({})", facts.join(", ")));
+        } else if spec.question.contains_key(e) {
+            err("", "inputs", format!("`{e}` is both an input and a question"));
+        }
+    }
     for e in &spec.evidence {
         if !facts.contains(&e.as_str()) {
             let hint = closest(e, facts).map(|n| format!("; did you mean `{n}`?")).unwrap_or_default();

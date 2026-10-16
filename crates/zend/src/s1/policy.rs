@@ -24,7 +24,8 @@ use super::spec::{Policy, Spec};
 pub enum Compiled {
     Costs { question: String, false_yes: f64, false_no: f64, yes: String, no: String, escalate: Option<f64> },
     Levels { question: String, order: Vec<String>, under: f64, over: f64, outcomes: BTreeMap<String, String>, escalate: Option<f64> },
-    Rules { rules: Vec<(Expr, String)>, otherwise: String },
+    /// Each rule with whether it needs a model's answer (false: it tests inputs only).
+    Rules { rules: Vec<(Expr, String, bool)>, otherwise: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,7 +39,8 @@ pub struct Judged {
 }
 
 pub fn compile(spec: &Spec) -> Result<Option<Compiled>, String> {
-    let is_question = |n: &str| spec.question.contains_key(n);
+    let is_name = |n: &str| spec.question.contains_key(n) || spec.inputs.iter().any(|i| i == n);
+    let is_input = |n: &str| spec.inputs.iter().any(|i| i == n) && !spec.question.contains_key(n);
     Ok(match &spec.policy {
         None => None,
         Some(Policy::Costs { question, false_yes, false_no, yes, no, escalate }) => Some(Compiled::Costs {
@@ -50,8 +52,9 @@ pub fn compile(spec: &Spec) -> Result<Option<Compiled>, String> {
         Some(Policy::Rules { rules: rs, otherwise }) => {
             let mut rules = Vec::new();
             for (i, r) in rs.iter().enumerate() {
-                let e = rules::parse(&r.when, &is_question).map_err(|e| format!("rule {}: {e}", i + 1))?;
-                rules.push((e, r.decide.clone()));
+                let e = rules::parse(&r.when, &is_name).map_err(|e| format!("rule {}: {e}", i + 1))?;
+                let needs = rules::needs_answers(&e, &is_input);
+                rules.push((e, r.decide.clone(), needs));
             }
             Some(Compiled::Rules { rules, otherwise: otherwise.clone() })
         }
@@ -91,10 +94,25 @@ pub fn apply(policy: &Compiled, answers: &Value, calibrate: &dyn Fn(&str, f64) -
             })
         }
         Compiled::Rules { rules: rs, otherwise } => {
-            let outcome = rs.iter().find(|(e, _)| rules::eval(e, answers)).map(|(_, d)| d.clone()).unwrap_or_else(|| otherwise.clone());
+            let outcome = rs.iter().find(|(e, _, _)| rules::eval(e, answers)).map(|(_, d, _)| d.clone()).unwrap_or_else(|| otherwise.clone());
             Some(Judged { outcome, unsure: false, p: None, expected_cost: None })
         }
     }
+}
+
+/// The outcome from the inputs alone, when the rules reach one before any rule that needs a
+/// model's answer: most low-risk decisions never call a model. None: ask the model.
+pub fn decide_early(policy: &Compiled, inputs: &Value) -> Option<String> {
+    let Compiled::Rules { rules: rs, otherwise } = policy else { return None };
+    for (e, decide, needs) in rs {
+        if *needs {
+            return None;
+        }
+        if rules::eval(e, inputs) {
+            return Some(decide.clone());
+        }
+    }
+    Some(otherwise.clone())
 }
 
 /// Identity: no calibration.
@@ -152,6 +170,36 @@ mod tests {
         assert_eq!(apply(&symmetric, &a(0.80, 0.15, 0.05), &raw).unwrap().outcome, "2", "symmetric costs pick the median");
         let only_choice = json!({ "risk": { "type": "choice", "choice": "3" } });
         assert_eq!(apply(&p, &only_choice, &raw).unwrap().outcome, "3");
+    }
+
+    #[test]
+    fn inputs_decide_early_and_questions_wait_for_the_model() {
+        let spec = Spec::parse(r#"
+name = "t"
+version = 1
+exposure = "outside"
+inputs = ["context", "effect"]
+[question.alignment]
+type = "choice"
+text = "?"
+options = { follows = "f", unrelated = "u" }
+[policy]
+kind = "rules"
+else = "hold"
+[[policy.rule]]
+when = "effect = local"
+decide = "run"
+[[policy.rule]]
+when = "alignment = follows"
+decide = "run"
+"#).unwrap();
+        let p = compile(&spec).unwrap().unwrap();
+        let facts = |e: &str| crate::s1::rules::facts_as_answers(&serde_json::from_value(json!({ "context": "low", "effect": e })).unwrap());
+        assert_eq!(decide_early(&p, &facts("local")), Some("run".into()), "no model call for a local action");
+        assert_eq!(decide_early(&p, &facts("outward")), None, "the next rule needs the model");
+        let mut a = facts("outward");
+        a["alignment"] = json!({ "type": "choice", "choice": "follows" });
+        assert_eq!(apply(&p, &a, &raw).unwrap().outcome, "run");
     }
 
     #[test]

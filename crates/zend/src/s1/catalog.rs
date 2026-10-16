@@ -64,9 +64,9 @@ pub const KINDS: &[Kind] = &[
         outcomes: Some(&[("raise", Cautious), ("keep", Neutral)]), unavailable: Some("raise"), owner_rung: false,
     },
     Kind {
-        name: "task_check", exposure: Exposure::Outside, mode: Mode::Single,
-        facts: &["job_data", "proposed_action_UNTRUSTED_DATA", "action_class"],
-        outcomes: Some(&[("run", Neutral), ("hold", Cautious)]), unavailable: Some("hold"), owner_rung: true,
+        name: "action_gate", exposure: Exposure::Outside, mode: Mode::Single,
+        facts: &["job_data", "proposed_action_UNTRUSTED_DATA", "effect", "context", "trusted"],
+        outcomes: Some(&[("run", Neutral), ("hold", Cautious), ("lock", Cautious)]), unavailable: Some("hold"), owner_rung: true,
     },
     Kind {
         name: "web_focus", exposure: Exposure::Outside, mode: Mode::Items,

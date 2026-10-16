@@ -130,7 +130,7 @@ pub fn parse_config(text: &str) -> (Vec<ServerConfig>, Vec<String>) {
     let Some(servers) = v["mcpServers"].as_object() else { return (Vec::new(), vec!["mcp.json has no `mcpServers` object".into()]) };
     let mut out = Vec::new();
     for (name, s) in servers {
-        if s["enabled"] == false || s["disabled"] == true {
+        if s["enabled"] == false || s["disabled"] == true || crate::trust::mcp_level(name) == Some(5) {
             continue;
         }
         if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
@@ -157,7 +157,11 @@ pub fn parse_config(text: &str) -> (Vec<ServerConfig>, Vec<String>) {
             timeout: Duration::from_secs(s["timeout_s"].as_u64().unwrap_or(60).clamp(1, 600)),
             include: s["include"].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect(),
             exclude: s["exclude"].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect(),
-            untrusted: s["untrusted"].as_bool().unwrap_or(true),
+            // The owner's trust list (D-067) decides first; `"untrusted": false` in mcp.json still counts.
+            untrusted: match crate::trust::mcp_level(name) {
+                Some(level) => level > 1,
+                None => s["untrusted"].as_bool().unwrap_or(true),
+            },
             command,
             url,
         };

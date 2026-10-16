@@ -363,7 +363,9 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             for path in new_context {
                 let Ok(text) = tokio::fs::read_to_string(&path).await else { continue };
                 let shown = path.display().to_string();
-                let (trusted, risk) = match context::attach_rating(&app.db, id, &text, context::trusted(&path, &roots)).await {
+                let in_trusted = context::trusted(&path, &roots);
+                let repo = if in_trusted { 1 } else { context::repo_rating(&app.db, &path).await };
+                let (trusted, risk) = match context::attach_rating(&app.db, id, &text, in_trusted, repo).await {
                     Ok(r) => r,
                     Err(e) => {
                         out.content.push_str(&format!("\n\n[instructions in {shown}: not shown, their origin couldn't be rated ({e:#})]"));
@@ -372,6 +374,16 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                 };
                 if !trusted {
                     if let Some(r) = out.rating.as_mut() { r.risk = r.risk.max(risk.min(4)); r.origin.push_str("+untrusted-context"); }
+                    // A local project with no remote is the owner's own: its instructions are
+                    // shown as content but don't raise the session.
+                    if risk <= 1 {
+                        if let Err(e) = tape::append(&app.db, id, "context", &json!({ "path": path, "trusted": false, "risk": risk })).await {
+                            tracing::error!("recording instruction file {} for {id}: {e:#}", path.display());
+                        }
+                        let text = context::capped(context::label(&shown, risk, &text));
+                        out.content.push_str(&context::untrusted_attachment(&path, &text));
+                        continue;
+                    }
                     if let Err(e) = crate::taint::mark_rating(app, id, risk, "project file", &shown).await {
                         out.content.push_str(&format!("\n\n[instructions in {shown}: {}]", crate::taint::withheld(&e)));
                         continue;

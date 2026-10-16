@@ -31,6 +31,7 @@ mod taint;
 mod test_util;
 mod sources;
 mod tools;
+mod trust;
 mod turns;
 mod update;
 mod web;
@@ -257,6 +258,7 @@ async fn main() -> Result<()> {
         .route("/sources", get(list_sources).post(change_source))
         .route("/sources/rerate", axum::routing::post(rerate_sources))
         .route("/models", get(list_models))
+        .route("/trust", get(trust::api_list).post(trust::api_change))
         .route("/s1", get(s1::api::stats))
         .route("/s1/check", get(s1::api::check_files))
         .route("/s1/models", get(s1::api::models))

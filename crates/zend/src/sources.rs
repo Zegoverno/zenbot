@@ -48,7 +48,7 @@ pub fn key(input: &str) -> Result<String> {
     Ok(format!("{}{}", u.host_str().unwrap(), u.path().trim_end_matches('/')))
 }
 
-fn matches(entry: &str, url: &Url) -> bool {
+pub(crate) fn matches(entry: &str, url: &Url) -> bool {
     let Some(host) = url.host_str() else { return false };
     let (h, p) = entry.split_once('/').map(|(h, p)| (h, format!("/{p}"))).unwrap_or((entry, String::new()));
     h == host && (p.is_empty() || url.path() == p || url.path().strip_prefix(&p).is_some_and(|rest| rest.starts_with('/')))
@@ -79,6 +79,10 @@ pub async fn change(db: &PgPool, source: &str, risk: Option<i16>, note: &str) ->
 }
 
 pub async fn base(db: &PgPool, url: &str) -> Result<i16> {
+    // The owner's trust list first (D-067); the older `sources` allowlist still counts.
+    if let Some(level) = crate::trust::url_level(url) {
+        return Ok(level);
+    }
     let Ok(url) = canonical(url, false) else { return Ok(4) };
     let rows = list(db).await?;
     Ok(rows.as_array().unwrap().iter().filter(|r| matches(r["source"].as_str().unwrap(), &url))

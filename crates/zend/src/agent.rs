@@ -59,7 +59,7 @@ const PROMPT_FILES: [&str; 4] = [crate::layout::SOUL, crate::layout::IDENTITY, "
 
 /// The owner's configuration and secrets under the zen home: the agent never changes them with
 /// `edit` or `write` (the owner edits them by hand). `matrix` and `bin` are folders.
-const OWNER_FILES: [&str; 9] = ["mcp.json", "env", "env.prev", "token", "db-password", "matrix.env", "matrix", "bin", "s1"];
+const OWNER_FILES: [&str; 10] = ["mcp.json", "env", "env.prev", "token", "db-password", "matrix.env", "matrix", "bin", "s1", "trust.toml"];
 
 /// A file an `edit` or `write` call may not change freely.
 #[derive(Debug, PartialEq)]

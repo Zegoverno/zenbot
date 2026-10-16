@@ -52,7 +52,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("owner_url", include_str!("../../s1/owner_url.toml")),
     ("source_risk", include_str!("../../s1/source_risk.toml")),
     ("content_risk", include_str!("../../s1/content_risk.toml")),
-    ("task_check", include_str!("../../s1/task_check.toml")),
+    ("action_gate", include_str!("../../s1/action_gate.toml")),
     ("web_focus", include_str!("../../s1/web_focus.toml")),
     ("web_rerank", include_str!("../../s1/web_rerank.toml")),
     ("search_rerank", include_str!("../../s1/search_rerank.toml")),
