@@ -61,6 +61,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("sleep_judge", include_str!("../../s1/sleep_judge.toml")),
     ("sleep_recheck", include_str!("../../s1/sleep_recheck.toml")),
     ("judge", include_str!("../../s1/judge.toml")),
+    ("egress", include_str!("../../s1/egress.toml")),
 ];
 
 /// The owner's decision files and approved models: `~/.zenbot/s1/`.
@@ -300,6 +301,15 @@ impl Decision {
     pub fn choice(&self, question: &str) -> Option<&str> {
         self.answers[question]["choice"].as_str()
     }
+}
+
+/// The outcome from the inputs alone, when the decision's rules reach one without a model's answer;
+/// None when a model must be asked (then call `decide` with the full facts).
+pub fn decide_early(name: &str, inputs: &Facts) -> Option<String> {
+    let r = registry();
+    let l = r.specs.get(name)?;
+    let values: Map<String, Value> = l.spec.inputs.iter().filter_map(|k| inputs.map.get(k).map(|v| (k.clone(), v.clone()))).collect();
+    policy::decide_early(l.policy.as_ref()?, &rules::facts_as_answers(&values))
 }
 
 /// One decision.

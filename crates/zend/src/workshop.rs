@@ -368,7 +368,7 @@ pub fn made_entries() -> Vec<crate::mcp::ToolEntry> {
         if name.is_empty() || name != e.file_name().to_string_lossy() {
             continue;
         }
-        out.push(crate::mcp::ToolEntry { server: "made".into(), name, description: v["description"].as_str().unwrap_or("").to_string(), schema: v["parameters"].clone(), untrusted: false, manifest: Some(m) });
+        out.push(crate::mcp::ToolEntry { server: "made".into(), name, description: v["description"].as_str().unwrap_or("").to_string(), schema: v["parameters"].clone(), untrusted: false, manifest: Some(m), annotations: Value::Null });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out

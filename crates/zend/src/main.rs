@@ -30,6 +30,7 @@ mod taint;
 #[cfg(test)]
 mod test_util;
 mod sources;
+mod proxy;
 mod tools;
 mod trust;
 mod turns;
@@ -160,8 +161,16 @@ impl App {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // Inside a sandbox, the same binary is the egress proxy's bridge (proxy.rs).
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("bridge") {
+        proxy::bridge(&args[2..]);
+    }
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(serve())
+}
+
+async fn serve() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "zend=info".into())).init();
     // The settings are read once, here (config.rs); a value that doesn't parse runs on its default.
     for bad in &config::get().unparsed {

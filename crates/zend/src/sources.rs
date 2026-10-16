@@ -101,10 +101,13 @@ pub async fn file_rating(db: &PgPool, path: &std::path::Path, text: &str) -> Res
     let row = sqlx::query("SELECT
         (SELECT max(CASE WHEN zen_session_contaminated(session_id) THEN 5::smallint ELSE risk END)
          FROM item_ratings WHERE sha256=encode(sha256(convert_to($2,'UTF8')),'hex')) AS risk,
-        EXISTS(SELECT 1 FROM item_ratings WHERE path=$1) AS tracked")
+        (SELECT max(risk) FROM item_ratings WHERE path=$1) AS writers")
         .bind(&path).bind(text).fetch_one(db).await?;
+    // Bytes no session wrote (the owner's edit, a sleep's copy) on a tracked path take the
+    // highest level its writers had, not "unknown" (D-067).
     Ok(row.get::<Option<i16>,_>("risk").unwrap_or_else(|| {
-        if row.get::<bool,_>("tracked") || crate::wiki::has_web_entry(text) {4} else {1}
+        let writers = row.get::<Option<i16>,_>("writers").unwrap_or(1);
+        if crate::wiki::has_web_entry(text) {writers.max(4)} else {writers}
     }))
 }
 
@@ -160,7 +163,7 @@ pub async fn record_bytes(db: &PgPool, session: Uuid, path: &std::path::Path, te
             .bind(&path).bind(text).bind(prior).execute(&mut *tx).await?;
     }
     sqlx::query("INSERT INTO item_ratings(path,sha256,session_id,risk)
-        SELECT $1,encode(sha256(convert_to($2,'UTF8')),'hex'),id,GREATEST(risk,$4) FROM sessions WHERE id=$3
+        SELECT $1,encode(sha256(convert_to($2,'UTF8')),'hex'),id,GREATEST(CASE WHEN risk>=4 THEN risk ELSE 1 END,$4) FROM sessions WHERE id=$3
         ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=GREATEST(item_ratings.risk,EXCLUDED.risk)")
         .bind(&path).bind(text).bind(session).bind(prior_risk.min(4)).execute(&mut *tx).await?;
     tx.commit().await?;
@@ -173,7 +176,7 @@ pub async fn record_file(db: &PgPool, session: Uuid, path: &std::path::Path, pri
     let text = tokio::fs::read_to_string(path).await?;
     let path = file_key(path).to_string_lossy().into_owned();
     sqlx::query("INSERT INTO item_ratings(path,sha256,session_id,risk)
-        SELECT $1,encode(sha256(convert_to($2,'UTF8')),'hex'),id,GREATEST(risk,$4) FROM sessions WHERE id=$3
+        SELECT $1,encode(sha256(convert_to($2,'UTF8')),'hex'),id,GREATEST(CASE WHEN risk>=4 THEN risk ELSE 1 END,$4) FROM sessions WHERE id=$3
         ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=GREATEST(item_ratings.risk,EXCLUDED.risk)")
         .bind(path).bind(text).bind(session).bind(prior_risk).execute(db).await?;
     Ok(())

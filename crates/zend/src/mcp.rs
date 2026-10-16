@@ -75,6 +75,9 @@ pub struct ToolEntry {
     /// A made tool's manifest, the exact text its name, description and schema were read from:
     /// what its catalog entry is rated by (D-062). None for a server's tool.
     pub manifest: Option<String>,
+    /// The server's tool annotations (MCP `readOnlyHint`, `destructiveHint`, `openWorldHint`): facts
+    /// for the action gate's effect (D-067). Null for a made tool.
+    pub annotations: Value,
 }
 
 impl ToolEntry {
@@ -445,6 +448,7 @@ impl Server {
                     schema: t["inputSchema"].clone(),
                     untrusted: self.cfg.untrusted,
                     manifest: None,
+                    annotations: t["annotations"].clone(),
                 });
             }
             cursor = page["nextCursor"].as_str().map(String::from);
@@ -735,6 +739,14 @@ async fn lookup(full: &str) -> Result<ToolEntry> {
 }
 
 /// The required arguments a call is missing, by the tool's input schema.
+/// What the action gate needs to know about a tool the model calls by its full name: whether its
+/// server is untrusted, and its read-only and destructive hints (D-067).
+pub async fn hints(full: &str) -> Option<(bool, bool, bool)> {
+    let t = lookup(full).await.ok()?;
+    let hint = |k: &str| t.annotations[k].as_bool().unwrap_or(false);
+    Some((t.untrusted, hint("readOnlyHint"), hint("destructiveHint")))
+}
+
 pub fn missing_args(schema: &Value, args: &Value) -> Vec<String> {
     schema["required"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|k| args.get(*k).is_none_or(Value::is_null)).map(String::from).collect()
 }
@@ -931,7 +943,7 @@ mod tests {
 
     #[test]
     fn tools_rank_by_name_then_description_and_args_are_checked() {
-        let t = |server: &str, name: &str, d: &str| ToolEntry { server: server.into(), name: name.into(), description: d.into(), schema: json!({}), untrusted: false, manifest: None };
+        let t = |server: &str, name: &str, d: &str| ToolEntry { server: server.into(), name: name.into(), description: d.into(), schema: json!({}), untrusted: false, manifest: None, annotations: Value::Null };
         let all = vec![t("cal", "list_events", "List calendar events"), t("mail", "send_email", "Send an email"), t("mail", "search", "Search email by sender")];
         let r = rank(&all, "send email", 5);
         assert_eq!(r[0].full(), "mail_send_email");
@@ -965,7 +977,7 @@ mod tests {
         let writer4 = session(4).await;
         crate::sources::record_bytes(&db, writer4, &tool.join("tool.json"), &manifest, None).await.unwrap();
         std::fs::write(tool.join("tool.json"), &manifest).unwrap();
-        let entry = ToolEntry { server: "made".into(), name: "probe".into(), description: format!("PROBE {tag}"), schema: json!({}), untrusted: false, manifest: Some(manifest.clone()) };
+        let entry = ToolEntry { server: "made".into(), name: "probe".into(), description: format!("PROBE {tag}"), schema: json!({}), untrusted: false, manifest: Some(manifest.clone()), annotations: Value::Null };
 
         // load_tool: a level-4 manifest is wrapped and raises the reader, dependency first.
         let reader = session(1).await;
@@ -999,7 +1011,7 @@ mod tests {
         assert!(hand_over_entry(&app, reader2, &entry, "spec text").await.is_err());
         assert!(crate::taint::stopped(&db, reader2).await.unwrap());
         // A server's tools: untrusted 4, trusted 1.
-        let server = ToolEntry { server: "s".into(), name: "t".into(), description: String::new(), schema: json!({}), untrusted: true, manifest: None };
+        let server = ToolEntry { server: "s".into(), name: "t".into(), description: String::new(), schema: json!({}), untrusted: true, manifest: None, annotations: Value::Null };
         assert_eq!(entry_rating(&db, &server).await.unwrap().0, 4);
         assert_eq!(entry_rating(&db, &ToolEntry { untrusted: false, ..server }).await.unwrap().0, 1);
         // Metadata errors fail closed.

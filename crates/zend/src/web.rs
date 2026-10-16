@@ -120,6 +120,20 @@ pub fn check_url(url: &reqwest::Url) -> Option<String> {
     }
 }
 
+/// A host's public addresses (the egress proxy connects only to these): none for a name or address
+/// on the VM's network.
+pub async fn public_addrs(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+    if blocked_name(host) {
+        return Err(format!("`{host}` is not a public host"));
+    }
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await.map_err(|e| format!("resolving {host}: {e}"))?.collect();
+    let public: Vec<SocketAddr> = addrs.into_iter().filter(|a| is_public(a.ip())).collect();
+    if public.is_empty() {
+        return Err(format!("`{host}` resolves to no public address"));
+    }
+    Ok(public)
+}
+
 /// Resolves names to public addresses only, so the connection goes to an address that was checked.
 struct PublicOnly;
 

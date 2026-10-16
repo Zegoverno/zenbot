@@ -29,6 +29,7 @@ pub struct Spec {
     /// One question, asked once per item in a single call.
     #[serde(default)]
     pub item: Option<String>,
+    #[serde(default)]
     pub question: BTreeMap<String, Question>,
     #[serde(default)]
     pub policy: Option<Policy>,

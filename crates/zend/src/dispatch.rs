@@ -254,7 +254,7 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                             Ok(p) => p,
                             Err(e) => return tools::ToolOutput { rating: None, content: format!("not run: action gate unavailable ({e})"), is_error: true },
                         };
-                        if let crate::gate::Policy::Hold(why) = &policy {
+                        if let crate::gate::Policy::Hold(why) | crate::gate::Policy::Lock(why) = &policy {
                             return tools::ToolOutput { rating: None, content: crate::gate::held_note(why), is_error: true };
                         }
                         if let Some(why) = agent::refuse(ending) {
@@ -277,27 +277,31 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                             let mut out = if let Some(out) = agent::run_tool(app, id, &workspace, &name, &args, &mut ending, &policy).await {
                                 out
                             } else {
-                                // A verifier's shell is read-only; a tainted session's has no network.
+                                // A verifier's shell is read-only; every other shell is contained
+                                // (D-067), except a `host: true` command the gate or the owner let run.
                                 let sandbox = if read_only {
                                     tools::Sandbox::ReadOnly
+                                } else if name == "bash" && args["host"] == true {
+                                    tools::Sandbox::None
+                                } else if matches!(name.as_str(), "write" | "edit") {
+                                    if crate::taint::tainted(&app.db, id).await { tools::Sandbox::GatedFile } else { tools::Sandbox::None }
                                 } else {
-                                    match &policy {
-                                        crate::gate::Policy::Sandbox => tools::Sandbox::Offline,
-                                        crate::gate::Policy::SafeRead(_) => tools::Sandbox::SafeRead,
-                                        crate::gate::Policy::Run if matches!(name.as_str(), "write" | "edit")
-                                            && crate::taint::tainted(&app.db, id).await => tools::Sandbox::GatedFile,
-                                        _ => tools::Sandbox::None,
-                                    }
+                                    crate::gate::shell_mode(&app.db, id).await
                                 };
-                                let mut execute_args = args.clone();
-                                if let crate::gate::Policy::SafeRead(command) = &policy {
-                                    execute_args["command"] = json!(command);
+                                if let tools::Sandbox::Contained { net: true, .. } = sandbox {
+                                    if let Err(e) = crate::proxy::ensure(&app.db, id).await {
+                                        tracing::warn!("egress proxy for {id}: {e:#}");
+                                    }
                                 }
+                                let execute_args = args.clone();
+                                let proxy_since = Instant::now();
                                 let start = std::time::SystemTime::now();
                                 let mut out = tools::execute_origin(&workspace, &name, &execute_args, &env, sandbox, Some(tools::Origin {db:&app.db,session:id,masks:&view.masks})).await;
                                 if name == "bash" {
-                                    // What the output shows of rated files rates it, as a `read` would.
+                                    // What the output shows of rated files rates it, as a `read` would;
+                                    // so do the hosts the command reached through the proxy (D-067).
                                     let (risk, writers) = view.exposure(&out.content);
+                                    let risk = risk.max(crate::proxy::contacted_since(id, proxy_since).unwrap_or(1));
                                     let shown = async {
                                         crate::fsview::finish(&app.db, id, &workspace, start, sandbox == tools::Sandbox::None).await?;
                                         crate::fsview::record(&app.db, id, risk, &writers).await?;

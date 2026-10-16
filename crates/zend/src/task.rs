@@ -1,45 +1,14 @@
-//! D-065: job alignment can only add holds at risk 4; at 2–3 it gates persistent,
-//! outward and arbitrary-code effects. Fixed safe reads and local data writes skip the model.
-//! Missing, malformed or unavailable judgments hold; exact owner grants bypass once.
-//! The goal comes from authenticated root-owner tape, not worker user messages or summaries.
+//! The owner's job, as the action gate's alignment question sees it (gate.rs, D-067): the goal
+//! comes from authenticated root-owner tape, not worker user messages or summaries.
 //! Only plain assistant text before the FIRST outside exposure is eligible as brief/plan.
 //! Proposed arguments are untrusted evidence of effects, never instructions or owner approval.
-use std::path::Path;
 use anyhow::Result;
 use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
-use crate::{App, gate::{self, Policy}};
-
-#[derive(Debug, PartialEq)]
-pub enum Class { Safe, Risky, Dangerous }
-
-pub fn class(workspace: &Path, name: &str, args: &Value) -> Class {
-    match name {
-        "read" | "search" | "history" | "find_skills" | "load_skill" | "find_tools" |
-        "load_tool" | "ask" | "judge" | "submit_verdict" => Class::Safe,
-        "schedule" if matches!(args["action"].as_str(), Some("list" | "runs")) => Class::Safe,
-        "bash" => match gate::shell(workspace, args["command"].as_str().unwrap_or("")) {
-            Policy::SafeRead(_) => Class::Safe,
-            Policy::Hold(_) => Class::Dangerous,
-            // Even a build or git status can run hooks/project code with arbitrary effects.
-            _ => Class::Risky,
-        },
-        "write" | "edit" => if gate::policy(workspace, name, args) == Policy::Run {
-            Class::Safe
-        } else { Class::Dangerous },
-        "verify" if matches!(gate::policy(workspace,name,args),Policy::Hold(_)) => Class::Dangerous,
-        "verify" => if args["criteria"].as_array().into_iter().flatten()
-            .any(|c| c["run"].as_str().is_some_and(|cmd|
-                !matches!(gate::shell(workspace, cmd), Policy::SafeRead(_)))) {
-                Class::Risky
-            } else { Class::Safe },
-        _ => Class::Risky,
-    }
-}
 
 /// Raw tape only: never compactions, tool results, child task prompts, or post-exposure plans.
-async fn job(db: &sqlx::PgPool, session: Uuid) -> Result<Value> {
+pub async fn job(db: &sqlx::PgPool, session: Uuid) -> Result<Value> {
     let root = sqlx::query("WITH RECURSIVE ancestors AS (
         SELECT id,parent,title,kind,0 AS depth FROM sessions WHERE id=$1
         UNION ALL SELECT s.id,s.parent,s.title,s.kind,a.depth+1 FROM sessions s
@@ -86,34 +55,6 @@ fn plain_text(content: &Value) -> String {
     if let Some(s) = content.as_str() { return s.to_string(); }
     content.as_array().into_iter().flatten().filter(|c| c["type"] == "text")
         .filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n")
-}
-
-/// A hold, with the S1 decision behind it (so the owner's answer to the hold labels it).
-pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args: &Value) -> Result<Option<(String, Option<i64>)>> {
-    let class = class(workspace, name, args);
-    if class == Class::Safe { return Ok(None); }
-    let goal = job(&app.db, session).await?;
-    // Never classify a partial authority record. Oversized goals hold all risky actions.
-    if goal["authenticated_goal_data"].as_str().unwrap_or("").is_empty() {
-        return Ok(Some(("task check: unavailable (no authenticated job goal); risky action does not demonstrably advance the authenticated goal or belong to the job".into(), None)));
-    }
-    // No truncation of actions: judging only a prefix would authorize unseen effects
-    // (s1/task_check.toml caps the state at 48,000 characters; over it, the action is held).
-    let facts = crate::s1::Facts::new(Some(session))
-        .with("job_data", goal)
-        .with("proposed_action_UNTRUSTED_DATA", json!({"tool":name,"arguments":args}))
-        .with("action_class", format!("{class:?}"));
-    let d = crate::s1::decide(&app.db, "task_check", facts).await;
-    if d.is("run") {
-        return Ok(None);
-    }
-    let reading = match (d.choice("alignment"), crate::s1::rules::choice_p(&d.answers["alignment"]), d.outcome.as_deref()) {
-        (_, _, Some("ask_owner")) => "System One wasn't sure".to_string(),
-        (Some(c), Some(p), _) => format!("{c}, p {p:.2}"),
-        (Some(c), None, _) => c.to_string(),
-        _ => format!("unavailable ({})", d.error.as_deref().unwrap_or("no answer")),
-    };
-    Ok(Some((format!("task check: {reading}; risky action does not demonstrably advance the authenticated goal or belong to the job"), d.id)))
 }
 
 #[cfg(test)]

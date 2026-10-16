@@ -37,9 +37,11 @@ pub(crate) async fn decide(State(app):State<AppState>,Path((kind,id)):Path<(Stri
         let stopped:bool=sqlx::query_scalar("SELECT risk>=5 OR zen_session_contaminated(id) FROM sessions WHERE id=$1").bind(session).fetch_one(&mut *tx).await?;
         if stopped { return Err(ApiError(StatusCode::CONFLICT,"contaminated session: review and trust before approval".into())); }
     }
-    let row=sqlx::query("UPDATE action_gates SET decision=$2,resolved_at=now(),allowed_at=CASE WHEN $2='approved' THEN now() ELSE NULL END WHERE id=$1 AND decision IS NULL AND allowed_at IS NULL AND created_at>now()-interval '1 day' RETURNING action")
+    let row=sqlx::query("UPDATE action_gates SET decision=$2,resolved_at=now(),allowed_at=CASE WHEN $2='approved' THEN now() ELSE NULL END WHERE id=$1 AND decision IS NULL AND allowed_at IS NULL AND created_at>now()-interval '1 day' RETURNING action, reason")
         .bind(id).bind(match d {"approve"=>"approved","reject"=>"rejected",_=>"denied"}).fetch_optional(&mut *tx).await?;
     let Some(row)=row else { return Err(ApiError(StatusCode::CONFLICT,"expired or already decided".into())); };
+    // Approving the item that locked the session unlocks it (D-067).
+    if d=="approve" { crate::gate::unlock_if_lock(&mut tx,session,&row.get::<String,_>("reason")).await?; }
     if d=="deny" {
         sqlx::query("WITH RECURSIVE descendants AS (
             SELECT id FROM sessions WHERE id=$1 UNION

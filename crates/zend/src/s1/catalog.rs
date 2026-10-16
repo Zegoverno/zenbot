@@ -73,6 +73,11 @@ pub const KINDS: &[Kind] = &[
         facts: &["need"],
         outcomes: Some(&[("keep", Neutral), ("drop", Cautious)]), unavailable: Some("keep"), owner_rung: false,
     },
+    Kind {
+        name: "egress", exposure: Exposure::Metadata, mode: Mode::Single,
+        facts: &["context", "rating"],
+        outcomes: Some(&[("allow", Grant), ("hold", Cautious)]), unavailable: Some("hold"), owner_rung: false,
+    },
     Kind { name: "web_rerank", exposure: Exposure::Outside, mode: Mode::Items, facts: &["query"], outcomes: None, unavailable: None, owner_rung: false },
     Kind { name: "search_rerank", exposure: Exposure::Private, mode: Mode::Items, facts: &["query"], outcomes: None, unavailable: None, owner_rung: false },
     Kind {

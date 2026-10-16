@@ -1,0 +1,55 @@
+# A shell reaching a new host through the egress proxy: allow it, or hold it for the owner (who can
+# allow that host for the session). Two inputs, no model call: the session's context risk and the
+# host's rating (the owner's trust list, else System One's source rating: 1 trusted, 2 known or
+# reputable, 3 partly open, 4 unknown, 5 blocked).
+name = "egress"
+version = 1
+description = "May this session's shell reach this host?"
+exposure = "metadata"
+inputs = ["context", "rating"]
+unavailable = "hold"
+
+[policy]
+kind = "rules"
+else = "hold"
+
+[[policy.rule]]
+when = "rating >= 5"
+decide = "hold"
+
+# A clean session goes where its work takes it; every host is recorded and rated.
+[[policy.rule]]
+when = "context = low"
+decide = "allow"
+
+[[policy.rule]]
+when = "context = medium and rating <= 3"
+decide = "allow"
+
+[[policy.rule]]
+when = "context = high and rating <= 2"
+decide = "allow"
+
+[[test]]
+answers = { context = "low", rating = 4 }
+expect = "allow"
+
+[[test]]
+answers = { context = "low", rating = 5 }
+expect = "hold"
+
+[[test]]
+answers = { context = "medium", rating = 3 }
+expect = "allow"
+
+[[test]]
+answers = { context = "medium", rating = 4 }
+expect = "hold"
+
+[[test]]
+answers = { context = "high", rating = 2 }
+expect = "allow"
+
+[[test]]
+answers = { context = "high", rating = 3 }
+expect = "hold"

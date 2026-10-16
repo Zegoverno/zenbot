@@ -49,9 +49,14 @@ pub async fn append_in(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, session: 
     let mut origin = "derived-session".to_string();
     let mut tool_call_record: Option<i64> = None;
     if kind == "message" && payload["role"] == "toolResult" {
-        // The worker cannot lower a rating by inserting risk/origin fields into its message.
-        risk = 4;
-        origin = "unverified-tool-result".into();
+        // The worker cannot lower a rating by inserting risk/origin fields into its message. An
+        // error the engine wrote itself (an argument it refused, a call cut off at the turn's
+        // end) carries no outside content: it keeps the session's level instead of raising it to
+        // 4 (D-067); any other result the kernel didn't produce counts as unknown.
+        let engine_error = payload["isError"].as_bool().unwrap_or(false);
+        let session_risk = risk;
+        risk = if engine_error { session_risk } else { 4 };
+        origin = if engine_error { "engine-error".into() } else { "unverified-tool-result".into() };
         let text = zen_proto::text_of(&payload["content"]);
         let rated = sqlx::query("SELECT id,risk,origin FROM tool_calls WHERE session_id=$1 AND call_id=$2 AND name=$3 AND is_error=$5 AND result_sha256=encode(sha256(convert_to($4,'UTF8')),'hex') ORDER BY id DESC LIMIT 1")
             .bind(session).bind(payload["toolCallId"].as_str().unwrap_or("")).bind(payload["toolName"].as_str().unwrap_or(""))

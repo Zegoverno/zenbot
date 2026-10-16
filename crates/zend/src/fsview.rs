@@ -239,7 +239,7 @@ pub async fn finish(db: &PgPool, session: Uuid, workspace: &Path, start: SystemT
         if !products.is_empty() {
             let (paths, digests): (Vec<String>, Vec<String>) = products.into_iter().unzip();
             sqlx::query("INSERT INTO item_ratings(path,sha256,session_id,risk)
-                SELECT p, d, s.id, s.risk FROM unnest($1::text[], $2::text[]) AS t(p,d), sessions s WHERE s.id=$3
+                SELECT p, d, s.id, CASE WHEN s.risk>=4 THEN s.risk ELSE 1 END FROM unnest($1::text[], $2::text[]) AS t(p,d), sessions s WHERE s.id=$3
                 ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=GREATEST(item_ratings.risk,EXCLUDED.risk)")
                 .bind(&paths).bind(&digests).bind(session).execute(db).await?;
         }
