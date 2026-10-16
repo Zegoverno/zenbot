@@ -3,6 +3,7 @@
 //! no ports/userinfo, ambiguous path encodings, implicit subdomains or content-based lowering.
 //! The final redirect target determines provenance. Owner URL adjustment sees ONLY the owner's
 //! actual message, URL and base rating. No page/snippet/title is ever sent to that classifier.
+//! Retained bytes aggregate provenance per writer, so copies cannot duplicate an upsert target.
 
 use anyhow::{bail, Result};
 use reqwest::Url;
@@ -138,8 +139,8 @@ pub async fn record_bytes(db: &PgPool, session: Uuid, path: &std::path::Path, te
     let mut tx = db.begin().await?;
     if let Some(prior) = prior {
         sqlx::query("INSERT INTO item_ratings(path,sha256,session_id,risk)
-            SELECT $1,encode(sha256(convert_to($2,'UTF8')),'hex'),session_id,risk FROM item_ratings
-            WHERE sha256=encode(sha256(convert_to($3,'UTF8')),'hex')
+            SELECT $1,encode(sha256(convert_to($2,'UTF8')),'hex'),session_id,max(risk) FROM item_ratings
+            WHERE sha256=encode(sha256(convert_to($3,'UTF8')),'hex') GROUP BY session_id
             ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=GREATEST(item_ratings.risk,EXCLUDED.risk)")
             .bind(&path).bind(text).bind(prior).execute(&mut *tx).await?;
     }
@@ -285,6 +286,46 @@ Result about {echo}
         assert_eq!(r,4);
         // Final URL determines base, not the requested source.
         assert_eq!(page(&db,sid,"https://example.test/docs","https://evil.test/a",false).await.unwrap().risk,4);
+    }
+
+    /// A copied version has several rows for one writer. Retaining it in an edit must
+    /// aggregate those rows before the upsert, preserving the highest risk for each writer.
+    #[tokio::test]
+    #[ignore]
+    async fn copied_bytes_edit_database() {
+        let db = PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
+        sqlx::migrate!().run(&db).await.unwrap();
+        let writer = Uuid::new_v4();
+        let editor = Uuid::new_v4();
+        for session in [writer, editor] {
+            sqlx::query("INSERT INTO sessions(id,title,model,risk) VALUES($1,'copy regression','faux/smoke',1)")
+                .bind(session).execute(&db).await.unwrap();
+        }
+        let dir = crate::test_util::TestDir::new("copied-bytes");
+        let original = dir.join("original.md");
+        let copy = dir.join("copy.md");
+        let before = format!("original bytes {writer}");
+        let after = format!("{before} edited");
+        record_bytes(&db,writer,&original,&before,None).await.unwrap();
+        tokio::fs::write(&original,&before).await.unwrap();
+        record_bytes(&db,writer,&copy,&before,None).await.unwrap();
+        tokio::fs::copy(&original,&copy).await.unwrap();
+        // Distinct ratings for the same bytes/writer must not lose their maximum.
+        sqlx::query("UPDATE item_ratings SET risk=3 WHERE path=$1 AND session_id=$2")
+            .bind(copy.to_string_lossy().as_ref()).bind(writer).execute(&db).await.unwrap();
+        record_bytes(&db,editor,&original,&after,Some(&before)).await.unwrap();
+        tokio::fs::write(&original,&after).await.unwrap();
+        assert_eq!(file_rating(&db,&original,&after).await.unwrap(),3);
+        let rows = sqlx::query("SELECT session_id,risk FROM item_ratings WHERE path=$1 AND sha256=encode(sha256(convert_to($2,'UTF8')),'hex')")
+            .bind(original.to_string_lossy().as_ref()).bind(&after).fetch_all(&db).await.unwrap();
+        assert_eq!(rows.len(),2);
+        assert!(rows.iter().any(|r| r.get::<Uuid,_>("session_id")==writer && r.get::<i16,_>("risk")==3));
+        assert!(rows.iter().any(|r| r.get::<Uuid,_>("session_id")==editor && r.get::<i16,_>("risk")==3));
+        assert!(sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM session_inputs WHERE reader=$1 AND writer=$2)")
+            .bind(editor).bind(writer).fetch_one(&db).await.unwrap());
+        // Repeating the exact edit remains idempotent.
+        record_bytes(&db,editor,&original,&after,Some(&before)).await.unwrap();
+        assert_eq!(file_rating(&db,&original,&after).await.unwrap(),3);
     }
 
     /// SOURCE_TEST_DB_URL must name a throwaway database.

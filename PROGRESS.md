@@ -6,6 +6,12 @@
 
 ---
 
+## 2026-10-16 — Retained-byte provenance after file copies
+
+Aggregate retained file provenance per writer before upserting an edited version. Multiple paths
+with the same bytes no longer target one upsert row twice; maximum risk and writer dependencies
+are preserved. An isolated database regression covers copy, edit and repeated edit.
+
 ## 2026-10-16 — Origin ratings, deny/trust by cause, masked shells (D-062 step 3, D-064)
 
 Stored items (files by exact bytes, memories, reports, skills, made tools, project instructions)

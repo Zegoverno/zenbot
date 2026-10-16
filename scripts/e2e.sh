@@ -1214,6 +1214,7 @@ action_gate() {
   local native_db="${DB}_sources"
   db_psql -d postgres -c "CREATE DATABASE $native_db" >/dev/null
   check "native source, redirect eligibility and forged-provenance checks" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend source_database -- --ignored
+  check "editing copied bytes preserves per-writer maximum provenance" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend copied_bytes_edit_database -- --ignored
   db_drop "$native_db"
   local ws; ws=$(new_workspace action-gate)
   local port=$((PORT + 12))
