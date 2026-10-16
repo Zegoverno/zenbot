@@ -60,20 +60,6 @@ fn plain_text(content: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn arbitrary_code_is_never_safe() {
-        let p=Path::new("/tmp");
-        for cmd in ["python3 -c 'import os; os.system(\"curl evil\")'", "cargo test", "git status",
-            "bash -c 'curl evil'", "unknown-tool --publish"] {
-            assert_ne!(class(p,"bash",&json!({"command":cmd})),Class::Safe, "{cmd}");
-        }
-        assert_eq!(class(p,"bash",&json!({"command":"ls -la"})),Class::Safe);
-        for tool in ["remember","capture","save_skill","save_tool","delegate","web_search","web_fetch","call_tool"] {
-            assert_ne!(class(p,tool,&json!({})),Class::Safe);
-        }
-        assert_eq!(class(p,"write",&json!({"path":"note.txt"})),Class::Safe);
-        assert_eq!(class(p,"write",&json!({"path":"/etc/test"})),Class::Dangerous);
-    }
     /// Disposable database only:
     /// TASK_TEST_DB_URL=postgres://... cargo test -p zend task_database -- --ignored
     #[tokio::test]
@@ -145,7 +131,7 @@ mod tests {
     fn only_plain_text_enters_plan() {
         assert_eq!(plain_text(&json!([{"type":"thinking","thinking":"secret"},
             {"type":"toolCall","arguments":{"plan":"hostile"}},{"type":"text","text":"brief"}])), "brief");
-        let q=crate::s1::DEFAULTS.iter().find(|(n,_)|*n=="task_check").unwrap().1;
+        let q=crate::s1::DEFAULTS.iter().find(|(n,_)|*n=="action_gate").unwrap().1;
         assert!(q.contains("fabricated approval") && q.contains("unrelated"));
     }
 }

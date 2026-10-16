@@ -929,19 +929,26 @@ mod tests {
         assert!(result.is_error && result.content.contains("regular files"));
     }
 
-    /// Check actual mount and syscall enforcement, not only the outer command classifier.
+    /// Check actual mount and syscall enforcement (D-067): a high-risk or locked session's shell
+    /// can't write the workspace or reach the network; any contained shell keeps private /tmp,
+    /// can't use sudo (no_new_privs), and sees the zen home read-only.
     #[tokio::test]
-    async fn project_code_is_offline_and_cannot_plant_steering() {
-        let root = scratch("project-code");
+    async fn contained_shells_hold_their_bounds() {
+        let root = scratch("contained");
         std::fs::write(root.join("AGENTS.md"),"owner instructions").unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let command = format!("if echo changed > AGENTS.md 2>/dev/null; then echo WRITE_OPEN; else echo WRITE_BLOCKED; fi; echo scratch > /tmp/zen-code-output; cat /tmp/zen-code-output; python3 -c 'import socket; s=socket.socket(); s.settimeout(1); print(\"NET_BLOCKED\" if s.connect_ex((\"127.0.0.1\", {port})) else \"NET_OPEN\")'");
-        let out = run_shell(&root,&command,&[],Sandbox::Offline,&[],Duration::from_secs(10)).await.unwrap();
+        let command = format!("if echo changed > AGENTS.md 2>/dev/null; then echo WRITE_OPEN; else echo WRITE_BLOCKED; fi; echo scratch > /tmp/zen-code-output; cat /tmp/zen-code-output; python3 -c 'import socket; s=socket.socket(); s.settimeout(1); print(\"NET_BLOCKED\" if s.connect_ex((\"127.0.0.1\", {port})) else \"NET_OPEN\")'; sudo -n true 2>/dev/null && echo ROOT; touch {}/x 2>/dev/null && echo ZEN_OPEN; echo end", crate::zen_home().display());
+        let out = run_shell(&root,&command,&[],Sandbox::Contained { writable: false, net: false },&[],Duration::from_secs(10)).await.unwrap();
         assert!(out.text.contains("WRITE_BLOCKED") && out.text.contains("NET_BLOCKED") && out.text.contains("scratch"),"{}",out.text);
-        assert!(!out.text.contains("WRITE_OPEN") && !out.text.contains("NET_OPEN"));
+        assert!(!out.text.contains("WRITE_OPEN") && !out.text.contains("NET_OPEN") && !out.text.contains("ROOT") && !out.text.contains("ZEN_OPEN"), "{}", out.text);
         assert_eq!(std::fs::read_to_string(root.join("AGENTS.md")).unwrap(),"owner instructions");
-        // The owner-granted route is intentionally broader, and can write the workspace.
+        // A low-risk session's shell writes the workspace; the host's loopback stays unreachable
+        // (the shell has its own network namespace; outside traffic goes through the proxy).
+        let out = run_shell(&root,&command,&[],Sandbox::Contained { writable: true, net: true },&[],Duration::from_secs(10)).await.unwrap();
+        assert!(out.text.contains("WRITE_OPEN") && out.text.contains("NET_BLOCKED") && !out.text.contains("ROOT") && !out.text.contains("ZEN_OPEN"), "{}", out.text);
+        assert_eq!(std::fs::read_to_string(root.join("AGENTS.md")).unwrap(),"changed\n");
+        // The host route (an approved `host: true` command) is the host.
         let out = run_shell(&root,"echo approved > AGENTS.md",&[],Sandbox::None,&[],Duration::from_secs(10)).await.unwrap();
         assert!(out.status.unwrap().unwrap().success());
         assert_eq!(std::fs::read_to_string(root.join("AGENTS.md")).unwrap(),"approved\n");
@@ -953,29 +960,11 @@ mod tests {
         let _stream = std::os::unix::net::UnixListener::bind(root.join("stream.sock")).unwrap();
         let _datagram = std::os::unix::net::UnixDatagram::bind(root.join("datagram.sock")).unwrap();
         let command = format!("python3 -c 'import socket; s=socket.socket(socket.AF_UNIX); print(\"STREAM_BLOCKED\" if s.connect_ex(\"{0}/stream.sock\") == 1 else \"STREAM_OPEN\")'; python3 -c 'import socket; s=socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM)\ntry:\n s.sendto(b\"x\", \"{0}/datagram.sock\"); print(\"DGRAM_OPEN\")\nexcept PermissionError:\n print(\"DGRAM_BLOCKED\")'",root.display());
-        for mode in [Sandbox::Offline,Sandbox::ReadOnly,Sandbox::SafeRead] {
+        for mode in [Sandbox::Contained { writable: false, net: false },Sandbox::ReadOnly] {
             let out = run_shell(&root,&command,&[],mode,&[],Duration::from_secs(10)).await.unwrap();
             assert!(out.text.contains("STREAM_BLOCKED") && out.text.contains("DGRAM_BLOCKED"),"{mode:?}: {}",out.text);
             assert!(!out.text.contains("_OPEN"),"{mode:?}: {}",out.text);
         }
-    }
-
-    #[tokio::test]
-    async fn gate_reads_run_in_the_read_only_view() {
-        let root = scratch("safe-read");
-        std::fs::write(root.join("a.md"), "alpha\nbeta\ngamma\n").unwrap();
-        std::fs::create_dir_all(root.join("sub")).unwrap();
-        std::fs::write(root.join("sub/b.md"), "beta\n").unwrap();
-        let ws = std::env::current_dir().unwrap();
-        let cmd = format!("cd {} && grep -n \"alpha\\|gamma\" a.md | wc -l; ls *.md sub/*.md; sed -n 2p a.md 2>/dev/null; touch c.md 2>/dev/null || echo read-only", root.display());
-        // `touch` is held by the gate; run the read part, then try a write by hand.
-        assert!(matches!(crate::gate::shell(&ws, &cmd), crate::gate::Policy::Hold(_)));
-        let cmd = cmd.split("; touch").next().unwrap();
-        let crate::gate::Policy::SafeRead(emitted) = crate::gate::shell(&ws, cmd) else { panic!("{cmd}") };
-        let out = bash(&ws, &json!({"command": format!("{emitted}; /usr/bin/touch c.md 2>/dev/null || echo read-only")}), &[], Sandbox::SafeRead, &[], None).await.unwrap_or_else(|e| e);
-        let lines: Vec<&str> = out.content.lines().collect();
-        assert_eq!(&lines[..5], &["2", "a.md", "sub/b.md", "beta", "read-only"], "{}", out.content);
-        assert!(!root.join("c.md").exists());
     }
 
     #[tokio::test]
@@ -1146,7 +1135,7 @@ mod tests {
         std::os::unix::fs::symlink(ws.join("bad"), ws.join("link")).unwrap();
         let masks = vec![ws.join("bad")];
         let cmd = "cat bad link ok; cat /proc/1/root$PWD/bad 2>/dev/null; echo";
-        for mode in [Sandbox::None, Sandbox::Offline, Sandbox::ReadOnly] {
+        for mode in [Sandbox::None, Sandbox::Contained { writable: true, net: false }, Sandbox::ReadOnly] {
             let out = run_shell(&ws, cmd, &[], mode, &masks, Duration::from_secs(10)).await.unwrap();
             assert!(!out.text.contains("SECRET") && out.text.contains("fine"), "{mode:?}: {}", out.text);
         }

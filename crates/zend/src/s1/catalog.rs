@@ -65,7 +65,7 @@ pub const KINDS: &[Kind] = &[
     },
     Kind {
         name: "action_gate", exposure: Exposure::Outside, mode: Mode::Single,
-        facts: &["job_data", "proposed_action_UNTRUSTED_DATA", "effect", "context", "trusted"],
+        facts: &["job_data", "proposed_action_UNTRUSTED_DATA", "effect", "context", "trusted", "judge"],
         outcomes: Some(&[("run", Neutral), ("hold", Cautious), ("lock", Cautious)]), unavailable: Some("hold"), owner_rung: true,
     },
     Kind {

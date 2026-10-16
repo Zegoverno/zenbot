@@ -164,8 +164,9 @@ fn entries() -> (Vec<Entry>, Option<String>) {
     (s.entries.clone(), s.problem.clone())
 }
 
-/// The owner's level for a URL (an `url` or `api` entry; the longest match wins), else a built-in
-/// registry's, else None.
+/// The owner's level for a URL (an `url` or `api` entry; the longest match wins), else None. The
+/// built-in registries rate hosts a shell reaches (`host_level`), never content: a page on
+/// github.com is user content until the owner or System One says otherwise.
 pub fn url_level(url: &str) -> Option<i16> {
     let u = crate::sources::canonical(url, false).ok()?;
     let (entries, _) = entries();
@@ -176,7 +177,6 @@ pub fn url_level(url: &str) -> Option<i16> {
         .filter(|(k, _)| crate::sources::matches(k, &u))
         .max_by_key(|(k, _)| k.len())
         .map(|(_, l)| l.rating())
-        .or_else(|| host_built_in(u.host_str()?))
 }
 
 /// The level for a host the shell reached (egress): the owner's host-wide `url`/`api` entry, else a

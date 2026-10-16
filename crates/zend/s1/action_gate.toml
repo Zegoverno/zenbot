@@ -9,7 +9,7 @@ version = 1
 description = "Run, hold or lock: context risk, action risk and alignment with the owner's job."
 exposure = "outside"
 evidence = ["job_data", "proposed_action_UNTRUSTED_DATA", "effect"]
-inputs = ["context", "effect", "trusted"]
+inputs = ["context", "effect", "trusted", "judge"]
 timeout = "10s"
 max_state_chars = 48000
 unavailable = "hold"
@@ -35,6 +35,16 @@ decide = "run"
 [[policy.rule]]
 when = "context = high and effect = irreversible"
 decide = "lock"
+
+# Without System One (off, or private content kept from it) alignment can't be read: a clean session
+# still runs what it does, anything riskier waits for the owner.
+[[policy.rule]]
+when = "judge = off and context = low and effect = outward"
+decide = "run"
+
+[[policy.rule]]
+when = "judge = off"
+decide = "hold"
 
 # An action above local that doesn't follow the owner's job is the clearest sign of injection.
 [[policy.rule]]
@@ -101,6 +111,16 @@ expect = "hold"
 [[test]]
 name = "outward after the open web waits even when aligned"
 answers = { context = "high", effect = "outward", alignment = "follows" }
+expect = "hold"
+
+[[test]]
+name = "without System One a clean session still runs"
+answers = { context = "low", effect = "outward", judge = "off" }
+expect = "run"
+
+[[test]]
+name = "without System One anything riskier waits"
+answers = { context = "medium", effect = "outward", trusted = "yes", judge = "off" }
 expect = "hold"
 
 [[test]]
