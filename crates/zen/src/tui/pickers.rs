@@ -4,6 +4,7 @@
 use super::*;
 
 pub(super) enum PickKind {
+    Queue,
     Session,
     Model,
     Effort,
@@ -26,6 +27,23 @@ pub(super) struct Picker {
 }
 
 impl App {
+    pub(super) async fn open_queue(&mut self) -> Result<()> {
+        let v=self.c.get("/api/queue").await?;
+        let items=v.as_array().into_iter().flatten().map(|r| (
+            clean(&format!("{} #{} · {} · risk {} · {} · {}",r["kind"].as_str().unwrap_or(""),r["id"],r["title"].as_str().unwrap_or("source"),r["risk"],r["summary"].as_str().unwrap_or(""),r["reason"].as_str().unwrap_or(""))),
+            format!("{}/{}",r["kind"].as_str().unwrap_or(""),r["id"])
+        )).collect();
+        self.picker=Some(Picker {title:"Queue · ↑↓ select · enter inspect · a approve · r reject · d deny · esc close".into(),items,selected:0,kind:PickKind::Queue});
+        Ok(())
+    }
+    pub(super) async fn queue_decide(&mut self, decision:&str) -> Result<()> {
+        let Some(p)=self.picker.as_ref() else {return Ok(())};
+        let Some((_,key))=p.items.get(p.selected) else {return Ok(())};
+        let v=self.c.post(&format!("/api/queue/{key}"),json!({"decision":decision})).await?;
+        self.note(v.to_string(),Sty::Dim);
+        self.open_queue().await
+    }
+
     pub(super) async fn open_session_picker(&mut self) -> Result<()> {
         let list = self.c.get("/api/sessions?archived=false").await?;
         let items = list
@@ -116,6 +134,10 @@ impl App {
         let Some(p) = self.picker.take() else { return Ok(()) };
         let Some((_, value)) = p.items.get(p.selected).cloned() else { return Ok(()) };
         match p.kind {
+            PickKind::Queue => {
+                if let Some((label,_))=p.items.get(p.selected) { self.commit(vec![line(label.clone(),Sty::Plain)]); }
+                self.picker=Some(p);
+            }
             PickKind::Session if self.still_working() => {}
             PickKind::Session => self.switch_session(value).await?,
             PickKind::Model => {
@@ -149,6 +171,19 @@ mod tests {
     use super::*;
     use crate::tui::test_util::*;
 
+    #[tokio::test]
+    async fn queue_picker_renders_and_navigation_never_approves() {
+        let mut a=app(100,30);
+        a.picker=Some(Picker {title:"Queue".into(),items:vec![("action #1 · push · off task · risk 4".into(),"action/1".into()),("source #2 · docs.test · risk 2".into(),"source/2".into())],selected:0,kind:PickKind::Queue});
+        a.draw();
+        assert!(a.capture.as_ref().unwrap().contains("approve"));
+        key(&mut a,KeyCode::Down).await;
+        assert_eq!(a.picker.as_ref().unwrap().selected,1);
+        key(&mut a,KeyCode::Enter).await;
+        assert!(a.picker.is_some(),"enter inspects, never grants");
+        key(&mut a,KeyCode::Esc).await;
+        assert!(a.picker.is_none());
+    }
     #[tokio::test]
     async fn effort_picker_lists_the_models_levels_and_sets_the_choice() {
         let mut a = app_with_models(80, 20);

@@ -19,6 +19,14 @@ pub struct Kernel {
 }
 
 impl Kernel {
+    pub async fn queue(&self) -> Result<Vec<Value>> {
+        Ok(self.c.get("/api/queue").await?.as_array().cloned().unwrap_or_default())
+    }
+    pub async fn queue_decide(&self,key:&str,decision:&str) -> Result<Value> {
+        anyhow::ensure!(key.split_once('/').is_some_and(|(k,id)| matches!(k,"action"|"source") && id.parse::<i64>().is_ok()),"invalid queue key");
+        self.c.post(&format!("/api/queue/{key}"),json!({"decision":decision})).await
+    }
+
     pub fn new(url: &str, token: String) -> Result<Self> {
         Ok(Kernel { c: Client::new(url, Some(token))?, chat: Arc::new(Mutex::new(Chat::new("!"))) })
     }

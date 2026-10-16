@@ -6,6 +6,13 @@
 
 ---
 
+## 2026-10-16 — Owner approval queue (D-065 D)
+
+Unified authenticated queue routes list held actions and exact source proposals. Atomic decisions
+grant once, refuse without retry, or explicitly deny/contaminate; idle continuations are kernel
+origin, not owner messages. Terminal picker/CLI and Matrix owner-only reactions share the routes.
+Matrix posts to existing private rooms and persists exact event mappings for replay safety.
+
 ## 2026-10-16 — System One source metadata and risk 2–3 admission (D-065 A–B)
 
 Metadata-only judgments are cached for 30 days by exact URL path, keeping public contributions

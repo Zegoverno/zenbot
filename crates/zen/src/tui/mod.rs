@@ -60,6 +60,7 @@ const KEYS_PUSH: &str = "\x1b[>1u";
 const KEYS_POP: &str = "\x1b[<1u";
 
 pub enum Start {
+    Queue,
     /// The sessions board (full screen; inline starts a new session instead).
     Board,
     New,
@@ -141,6 +142,7 @@ pub async fn run(c: Client, start: Start, new: NewSession, inline: bool) -> Resu
             }
         });
         match start {
+            Start::Queue => app.open_queue().await?,
             Start::Board if !inline => app.open_board(),
             Start::Board | Start::New => {}
             Start::Continue => {

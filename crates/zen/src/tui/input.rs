@@ -29,6 +29,7 @@ pub(super) const COMMANDS: &[Command] = &[
     cmd("/jobs", "scheduled jobs: /jobs [run|resume|pause <name> | runs [name]]", false),
     cmd("/skills", "skills and made tools: /skills [accept|reject <domain/name> <sha>]", false),
     cmd("/tools", "review a made tool: /tools accept|reject <name> <sha>", false),
+    cmd("/queue", "held actions and source proposals; select then a approve, r reject, d deny", false),
     cmd("/allow", "the action held last; /allow yes runs that exact action once", false),
     cmd("/deny", "stop this session and mark what it produced as contaminated", false),
     cmd("/trust", "what made this session untrusted; /trust yes trusts it again", false),
@@ -135,6 +136,10 @@ impl App {
             return self.board_key(k).await;
         }
 
+        if self.picker.as_ref().is_some_and(|p| matches!(p.kind,PickKind::Queue)) {
+            let decision=match k.code {KeyCode::Char('a')=>Some("approve"),KeyCode::Char('r')=>Some("reject"),KeyCode::Char('d')=>Some("deny"),_=>None};
+            if let Some(d)=decision { return self.queue_decide(d).await; }
+        }
         if let Some(p) = &mut self.picker {
             match k.code {
                 KeyCode::Up => p.selected = p.selected.saturating_sub(1),
@@ -442,6 +447,8 @@ impl App {
                 out.push(Vec::new());
                 self.commit(out);
             }
+            Some("/queue") if arg.is_empty() => self.open_queue().await?,
+            Some("/queue") => self.owner_command(&format!("queue {arg}")).await,
             Some("/open") => self.open_panel(arg),
             Some("/files") if arg.is_empty() => self.toggle_side(),
             Some("/files") => self.show_folder(arg),

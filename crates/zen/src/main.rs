@@ -67,6 +67,19 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Login { .. } => unreachable!(),
+        Cmd::Queue {decision,kind,id} => {
+            if let (Some(decision),Some(kind),Some(id))=(&decision,&kind,id) {
+                let v=c.post(&format!("/api/queue/{kind}/{id}"),json!({"decision":decision})).await?;
+                emit(json,&v,||v.to_string());
+            } else if decision.is_some() || kind.is_some() || id.is_some() {
+                anyhow::bail!("usage: zen queue [approve|reject|deny <action|source> <id>]");
+            } else if !json && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+                tui::run(c,tui::Start::Queue,NewSession {model:None,effort:None},cli.inline).await?;
+            } else {
+                let v=c.get("/api/queue").await?;
+                emit(json,&v,||serde_json::to_string_pretty(&v).unwrap_or_default());
+            }
+        }
         Cmd::Sources { cmd } => {
             let value = match cmd {
                 SourcesCmd::List => c.get("/api/sources").await?,

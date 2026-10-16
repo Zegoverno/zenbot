@@ -77,6 +77,14 @@ pub(crate) enum Cmd {
     },
     /// Check that the kernel, database, worker and model sign-in are healthy
     Status,
+    /// Held actions and source proposals; without arguments opens an interactive review
+    Queue {
+        #[arg(value_parser=["approve","reject","deny"])]
+        decision: Option<String>,
+        #[arg(value_parser=["action","source"])]
+        kind: Option<String>,
+        id: Option<i64>,
+    },
     /// zenbot's skills (active and drafts) with how often they're used, and the tools it made
     Skills {
         #[command(subcommand)]

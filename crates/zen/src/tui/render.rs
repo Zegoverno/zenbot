@@ -209,7 +209,15 @@ impl App {
             if p.items.is_empty() {
                 lines.push(line("  (nothing here)", Sty::Dim));
             }
-            lines.push(line("↑↓ choose · enter select · esc cancel", Sty::Dim));
+            if matches!(p.kind,PickKind::Queue) {
+                if let Some((label,_))=p.items.get(p.selected) {
+                    lines.extend(Md::default().render(label,w).into_iter().take(self.height().saturating_sub(window+5).max(1)));
+                }
+                lines.push(line("a approve · r reject · d deny · esc close",Sty::Dim));
+                if let Some((n,sty))=&self.notice {lines.push(line(n.clone(),*sty));}
+            } else {
+                lines.push(line("↑↓ choose · enter select · esc cancel", Sty::Dim));
+            }
             let row = 1 + p.selected - start;
             return (lines, row, 0, false);
         }

@@ -116,9 +116,18 @@ How each of these works is in [DESIGN.md](DESIGN.md) ("As built"); here is what 
 
 ### Actions after outside reads
 
-Outside content makes a session **risky**, not blanket-limited. Read utilities run automatically
-with credential protection; Git and builds run offline/read-only and offer exact `/allow` approval; outward, unknown or steering actions
-are held before effect. A held action makes the session **untrusted**.
+Outside content makes a session **risky**, not contaminated. At 2–3 local work runs normally;
+at 4 project code runs offline/read-only. Risky outward/persistent actions may be held before effect.
+A hold asks the owner; only explicit denial contaminates.
+
+`zen queue` opens the review picker (or prints JSON with `--json`); `/queue` opens it inside zen.
+Select with ↑↓, Enter inspects, **a** approves, **r** rejects, **d** denies. Scriptable:
+`zen queue approve|reject|deny action|source <id>`. Approval resumes an idle session with a kernel
+prompt to retry the exact action unchanged, once; rejection tells it not to retry; denial stops
+and contaminates the session. Busy sessions must finish first. Source approvals are pinned to
+the proposal's exact current cached rating; expired/superseded/replayed approvals fail.
+Matrix posts queue items in the existing main room (jobs room fallback): ✅ approve, ❌ reject,
+🛑 deny an action; `!queue` lists. No extra public room is created.
 
 `/allow` shows the latest held action or sandboxed project-code attempt; `/allow yes` grants that exact workspace, tool and arguments
 once for ten minutes. In Matrix use `!allow` and `!allow yes`. This does not trust the whole

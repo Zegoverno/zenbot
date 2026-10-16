@@ -1301,6 +1301,20 @@ action_gate() {
   before=$(q "SELECT max(seq) FROM tape_events WHERE session_id='$sid'")
   zen ask --json -s "$sid" "GATE-HOLD" >/dev/null
   check "legacy taint after rollback still gates effects" grep -q "not run:" <<<"$(res_of "$sid" "$before")"
+  zen ask --json -s "$sid" "QUEUE-HOLD" >/dev/null
+  gate=$(api "$URL/api/queue" | jq -r --arg sid "$sid" '[.[] | select(.kind=="action" and .session_id==$sid)][0].id')
+  check "queue read requires authentication" eq "$(curl -s -o /dev/null -w '%{http_code}' "$URL/api/queue")" 401
+  check "queue approval starts an idle kernel retry" eq "$(api -X POST -d '{"decision":"approve"}' "$URL/api/queue/action/$gate" | jq -r .resumed)" true
+  for _ in $(seq 1 100); do [ "$(api "$URL/api/sessions/$sid" | jq -r .busy)" = false ] && break; sleep .1; done
+  check "queue exact approval ran once" eq "$(wc -l < "$ws/queue-once.txt")" 1
+  check "queue approval origin is not owner" eq "$(q "SELECT (origin!='owner' AND payload->>'kernel'='true') FROM tape_events WHERE session_id='$sid' AND payload->>'role'='user' ORDER BY seq DESC LIMIT 1")" t
+  check "queue replay cannot approve again" eq "$(api -X POST -d '{"decision":"approve"}' "$URL/api/queue/action/$gate" | jq -r '.error != null')" true
+  zen ask --json -s "$sid" "QUEUE-HOLD" >/dev/null
+  gate=$(api "$URL/api/queue" | jq -r --arg sid "$sid" '[.[] | select(.kind=="action" and .session_id==$sid)][0].id')
+  api -X POST -d '{"decision":"reject"}' "$URL/api/queue/action/$gate" >/dev/null
+  for _ in $(seq 1 100); do [ "$(api "$URL/api/sessions/$sid" | jq -r .busy)" = false ] && break; sleep .1; done
+  check "reject did not run it" eq "$(wc -l < "$ws/queue-once.txt")" 1
+  check "legacy allow cannot resurrect rejection" eq "$(api -X POST -d "{\"id\":$gate}" "$URL/api/sessions/$sid/allow" | jq -r .allowed)" false
   kill "$srv" 2>/dev/null || true
 }
 

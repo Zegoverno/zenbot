@@ -14,6 +14,7 @@ mod dispatch;
 mod fsview;
 mod git;
 mod gate;
+mod queue;
 mod jobs;
 mod mcp;
 mod measure;
@@ -248,6 +249,8 @@ async fn main() -> Result<()> {
     tokio::spawn(jobs::run_loop(app.clone()));
 
     let api = Router::new()
+        .route("/queue", get(queue::list))
+        .route("/queue/{kind}/{id}", axum::routing::post(queue::decide))
         .route("/sources", get(list_sources).post(change_source))
         .route("/sources/rerate", axum::routing::post(rerate_sources))
         .route("/models", get(list_models))
