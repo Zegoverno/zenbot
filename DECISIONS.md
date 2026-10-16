@@ -22,12 +22,15 @@ D-053's session-written marks as the rule for stored items, D-054's "stored mark
   the causes the owner reviewed, and stored ratings stay. No agent tool can deny or trust.
 - **Shells see contaminated files masked**, like Anthropic's sandbox-runtime deny-read paths:
   bubblewrap binds a nodev `/dev/null` over the canonical path of every file whose current bytes
-  came from a contaminated or level-5 session (and over other hard links to it in the workspace;
-  a shell refuses to run when some are elsewhere). With masks, a host shell gets its own pid
-  namespace and no_new_privs, and the Docker socket is masked. With none, shells run as before.
+  match, by digest wherever registered, those of a contaminated or level-5 session (copies too;
+  other hard links in the workspace; a shell refuses to run when some are elsewhere; an
+  unreadable product is masked whatever it holds, a directory with an empty tmpfs). With masks,
+  a host shell gets its own pid namespace, no_new_privs and no Unix sockets (seccomp, as
+  sandbox-runtime does by default). With none, shells run as before.
   A `bash` result is rated by the rated files whose text it shows; `verify` rates its whole view
   up front. What a host shell writes in the workspace is registered by its exact bytes at the
-  session's risk; a deny that lands while a command runs withholds its result.
+  session's risk; a scan it can't complete, a non-UTF-8 name, or a deny that lands while a
+  command runs withholds its result.
 
 **Why:** A taint that only the writing session carried hid the owner's own words and couldn't be
 undone per cause; blocking the shell globally whenever anything was contaminated would stop
@@ -40,8 +43,8 @@ item is contaminated; rating every shell by the whole workspace (would push most
 sessions to 4).
 
 **Limits:** root-equivalent tools used outside these shells, processes outside zenbot, and products
-in build/cache folders (`target`, `node_modules`, `.cache`, `.cargo`, `.rustup`, `.git/objects`) or
-over 16 MiB are out of reach.
+outside the workspace or in build/cache folders (`target`, `node_modules`, `.cache`, `.cargo`,
+`.rustup`, `.git/objects`) are out of reach.
 
 ## D-063 — Project code defaults to offline and read-only
 

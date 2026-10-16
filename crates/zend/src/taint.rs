@@ -418,9 +418,22 @@ mod db {
         // A host shell's product is registered at the writer's risk.
         let writer = session(&db, 3, None).await;
         let start = std::time::SystemTime::now();
-        let out = crate::tools::run_shell(&ws, "echo payload > made; echo ok > other", &[], crate::tools::Sandbox::None, &[], std::time::Duration::from_secs(10)).await.unwrap();
-        assert!(out.status.is_some());
+        // Unique bytes: a digest denied in an earlier run is masked wherever it is (by design).
+        let w2 = ws.clone();
+        let sh = move |cmd: String| { let ws = w2.clone(); async move { crate::tools::run_shell(&ws, &cmd, &[], crate::tools::Sandbox::None, &[], std::time::Duration::from_secs(10)).await } };
+        assert!(sh(format!("echo payload {writer} > made; echo ok {writer} > other; mkdir d; echo hidden > d/x; chmod 000 d")).await.unwrap().status.is_some());
         crate::fsview::finish(&db, writer, &ws, start, true).await.unwrap();
+        // A clean session's copy is registered under it, yet masked with its source by its bytes.
+        let copier = session(&db, 1, None).await;
+        let start2 = std::time::SystemTime::now();
+        sh("cp made copied".into()).await.unwrap();
+        crate::fsview::finish(&db, copier, &ws, start2, true).await.unwrap();
+        // A product whose name isn't UTF-8 can't be registered: the result is withheld.
+        let odd = session(&db, 1, None).await;
+        let start3 = std::time::SystemTime::now();
+        sh("printf x > $'w\\xffs.txt'".into()).await.unwrap();
+        assert!(crate::fsview::finish(&db, odd, &ws, start3, true).await.is_err());
+        sh("rm -f w*s.txt".into()).await.unwrap();
         // Before a deny: verify's whole-view rating is 3 and depends on the writer; nothing is masked.
         let reader = session(&db, 1, None).await;
         let view = crate::fsview::prepare(&db, &ws).await.unwrap();
@@ -435,13 +448,16 @@ mod db {
         assert!(crate::fsview::finish(&db, reader, &ws, start, false).await.is_err(), "a stopped session's result is withheld");
         let other = session(&db, 1, None).await;
         let masks = crate::fsview::prepare(&db, &ws).await.unwrap().masks;
-        assert!(masks.contains(&ws.join("made")) && masks.contains(&ws.join("other")), "{masks:?}");
+        for m in ["made", "other", "copied", "d"] { assert!(masks.contains(&ws.join(m)), "{m}: {masks:?}"); }
+        let out = crate::tools::run_shell(&ws, "chmod 755 d; cat d/x copied; echo end", &[], crate::tools::Sandbox::None, &masks, std::time::Duration::from_secs(10)).await.unwrap();
+        assert!(!out.text.contains("hidden") && !out.text.contains("payload"), "{}", out.text);
         let out = crate::tools::run_shell(&ws, "cat made; echo end", &[], crate::tools::Sandbox::None, &masks, std::time::Duration::from_secs(10)).await.unwrap();
         assert!(!out.text.contains("payload") && out.text.ends_with("end\n"), "{}", out.text);
         assert!(!stopped(&db, other).await, "masked files don't stop unrelated work");
         // Rewritten by the owner, the file is no longer the denied bytes and is visible again.
         std::fs::write(ws.join("made"), "owner's own text").unwrap();
         assert!(!crate::fsview::prepare(&db, &ws).await.unwrap().masks.contains(&ws.join("made")));
+        std::fs::set_permissions(ws.join("d"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     }
 
     /// A write registered by a session that is denied concurrently is hidden from every reader,

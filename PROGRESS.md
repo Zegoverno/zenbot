@@ -11,9 +11,10 @@
 Stored items (files by exact bytes, memories, reports, skills, made tools, project instructions)
 keep their origin rating and writer edges; only 0–1 enters instructions. The owner's `/deny`
 (`!deny`) stops a session and everything that read its products; `/trust` lifts only reviewed
-causes. Shells see files from denied sessions masked (bubblewrap, like Anthropic's sandbox-runtime),
-bash results take the rating of rated files they show, host-shell products are registered and a
-concurrent deny withholds output. `/allow` and `/deny` now work in the terminal app (`/allow` was
+causes. Shells see files from denied sessions masked by content digest (bubblewrap, like Anthropic's
+sandbox-runtime; copies and hard links too; masked host shells get no Unix sockets), bash results
+take the rating of rated files they show, host-shell products are registered and a concurrent
+deny withholds output. `/allow` and `/deny` now work in the terminal app (`/allow` was
 missing). Codex native subagents are off (`agents.enabled = false`). Tests: unit, 14 database tests
 (races, descendants, stale trust, forged provenance, shell masks), the `origin` e2e scenario.
 

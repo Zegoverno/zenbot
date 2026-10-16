@@ -3,11 +3,15 @@
 //! Every shell the kernel runs for a session (`bash`, `verify` checks, a verifier's shell) sees the
 //! real machine, with each file whose current bytes came from a denied (contaminated) or level-5
 //! session masked: bubblewrap `--ro-bind /dev/null <path>`, as Anthropic's sandbox-runtime hides
-//! deny-read paths (the bind is nodev, so opening it fails with "Permission denied"). Masks go on canonical paths, so a symlink leads into the
-//! mask; other hard links to a masked inode in the workspace are masked too, and a shell refuses
-//! to run when some can't be found. With no masks a shell runs exactly as before, at no cost.
-//! With masks, a host shell gets its own pid namespace (no `/proc/<pid>/root` way around them;
-//! background processes end with it), no_new_privs (no sudo) and the Docker socket hidden.
+//! deny-read paths (the bind is nodev, so opening it fails with "Permission denied"). Masks match
+//! by content digest, so a copy is masked like its original; they go on canonical paths, so a
+//! symlink leads into the mask; other hard links to a masked inode in the workspace are masked too,
+//! and a shell refuses to run when some can't be found. A product the kernel couldn't read is
+//! rated for any content its path holds (`ANY`; a directory is masked with an empty tmpfs). With
+//! no masks a shell runs exactly as before, at no cost. With masks, a host shell gets its own pid
+//! namespace (no `/proc/<pid>/root` way around them; background processes end with it),
+//! no_new_privs (no sudo) and no Unix sockets (tools.rs `unix_filter`: no host daemon, tmux or
+//! container socket runs a command outside the masks).
 //!
 //! `prepare` runs before the gate and finds the masks and the rated files the shell will see in the
 //! workspace. A `bash` result takes the rating of those whose text it shows (`exposure`: a line of
@@ -15,19 +19,19 @@
 //! session's inputs, so it is wrapped like a `read` and a later deny of a writer reaches the
 //! session. Risky sessions can't write scripts or build files without the owner (gate.rs), so a
 //! rated file is data a command shows, not code it runs. `verify` rates the whole view up front
-//! (`rate_all`), before its gate. `finish` runs after: what a host-capable shell
-//! wrote in the workspace (files whose ctime, which a command can't set back, is after the start)
-//! is registered by its exact bytes at the session's risk, so a later deny hides it; and a result
-//! is withheld when the session was stopped while the command ran.
+//! (`rate_all`), before its gate. `finish` runs after: what a host-capable shell wrote in the
+//! workspace (entries whose ctime, which a command can't set back, is after the start) is
+//! registered at the session's risk, so a later deny masks it; a scan it can't complete, or a
+//! name that isn't UTF-8, withholds the result, as does a deny while the command ran.
 //!
-//! Limits: the product scan skips build and cache folders (`target`, `node_modules`, `.cache`,
-//! `.cargo`, `.rustup`, `.git/objects`) and files over 16 MiB; root-equivalent tools used outside
-//! these shells, and processes outside zenbot, are out of reach.
+//! Limits: products outside the workspace, in build and cache folders (`target`, `node_modules`,
+//! `.cache`, `.cargo`, `.rustup`, `.git/objects`), and anything done outside these shells
+//! (root-equivalent tools, processes outside zenbot) are out of reach.
 
 use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
@@ -36,25 +40,31 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 const MAX_FILE: u64 = 16 * 1024 * 1024;
-const MAX_WALK: usize = 200_000;
+const MAX_WALK: usize = 1_000_000;
 const SKIP: [&str; 5] = ["target", "node_modules", ".cache", ".cargo", ".rustup"];
-
-/// The Docker socket gives root; a shell that must not read a masked file must not reach it.
-const ROOT_SOCKETS: [&str; 1] = ["/run/docker.sock"];
+/// The digest of a product the kernel couldn't read: its rating applies to whatever is there.
+const ANY: &str = "*";
 
 pub fn digest(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// A file's digest, cached by inode, size and change time (a write changes ctime).
-fn file_digest(path: &Path, meta: &std::fs::Metadata) -> std::io::Result<String> {
+type Digested = Arc<(String, Vec<String>)>;
+type Version<'a> = (&'a str, Option<Uuid>, i16);
+
+/// A file's digest and its lines of 20 characters or more (at most 200), cached by inode, size
+/// and change time (any write changes ctime).
+fn file_digest(path: &Path, meta: &std::fs::Metadata) -> std::io::Result<Digested> {
     type Key = (PathBuf, u64, u64, u64, i64, i64);
-    static CACHE: Mutex<Option<HashMap<Key, String>>> = Mutex::new(None);
+    static CACHE: Mutex<Option<HashMap<Key, Digested>>> = Mutex::new(None);
     let key = (path.to_path_buf(), meta.dev(), meta.ino(), meta.len(), meta.ctime(), meta.ctime_nsec());
     if let Some(d) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).get(&key) {
         return Ok(d.clone());
     }
-    let d = digest(&std::fs::read(path)?);
+    let bytes = std::fs::read(path)?;
+    let lines = String::from_utf8_lossy(&bytes).lines().map(str::trim)
+        .filter(|l| l.chars().count() >= 20).take(200).map(String::from).collect();
+    let d = Arc::new((digest(&bytes), lines));
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let cache = cache.get_or_insert_with(HashMap::new);
     if cache.len() > 50_000 { cache.clear(); }
@@ -62,22 +72,25 @@ fn file_digest(path: &Path, meta: &std::fs::Metadata) -> std::io::Result<String>
     Ok(d)
 }
 
-/// Regular files under `root`, outside build and cache folders, with their metadata.
-fn walk(root: &Path, mut keep: impl FnMut(&Path, &std::fs::Metadata)) -> bool {
-    let mut stack = vec![root.to_path_buf()];
+/// Regular files and unreadable directories (`true`) under `root`, outside build and cache
+/// folders, with their metadata; symlinks aren't followed. False when it stopped at the limit.
+fn walk(root: &Path, mut keep: impl FnMut(&Path, &std::fs::Metadata, bool)) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(root) else { return false };
+    let mut stack = vec![(root.to_path_buf(), meta)];
     let mut seen = 0;
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for e in entries.flatten() {
+    while let Some((dir, meta)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { keep(&dir, &meta, true); continue };
+        for e in entries {
             seen += 1;
             if seen > MAX_WALK { return false; }
-            let (path, Ok(meta)) = (e.path(), e.metadata()) else { continue };
+            let Ok(e) = e else { keep(&dir, &meta, true); continue };
+            let (path, Ok(m)) = (e.path(), e.metadata()) else { continue };
             let name = e.file_name();
-            if meta.is_dir() {
+            if m.is_dir() {
                 let objects = name == "objects" && dir.file_name().is_some_and(|n| n == ".git");
-                if !objects && !SKIP.iter().any(|s| name == *s) { stack.push(path); }
-            } else if meta.is_file() {
-                keep(&path, &meta);
+                if !objects && !SKIP.iter().any(|s| name == *s) { stack.push((path, m)); }
+            } else if m.is_file() {
+                keep(&path, &m, false);
             }
         }
     }
@@ -94,8 +107,7 @@ pub struct View { pub masks: Vec<PathBuf>, seen: Vec<Seen> }
 impl View {
     /// The rating and writers of the rated files whose text `output` shows.
     pub fn exposure(&self, output: &str) -> (i16, Vec<Uuid>) {
-        let shown = self.seen.iter().filter(|f| f.lines.iter().any(|l| output.contains(l.as_str())));
-        fold(shown)
+        fold(self.seen.iter().filter(|f| f.lines.iter().any(|l| output.contains(l.as_str()))))
     }
 
     /// Raise the session to the whole view's rating and record every writer as its input.
@@ -126,58 +138,70 @@ pub async fn record(db: &PgPool, session: Uuid, risk: i16, writers: &[Uuid]) -> 
 pub async fn prepare(db: &PgPool, workspace: &Path) -> Result<View> {
     let ws = workspace.canonicalize().context("workspace")?;
     let prefix = format!("{}/", ws.to_string_lossy().trim_end_matches('/'));
-    // Sessions a deny reaches: the contaminated ones and, through parents and inputs, their readers.
+    // Sessions a deny reaches: the contaminated ones and, through parents and inputs, their
+    // readers. Then the ratings in the workspace, the contaminated ones, and every copy of those.
     let rows = sqlx::query(
         "WITH RECURSIVE edges AS (SELECT id AS reader, parent AS writer FROM sessions WHERE parent IS NOT NULL
              UNION ALL SELECT reader, writer FROM session_inputs),
            bad(id) AS (SELECT affected FROM contamination WHERE cleared_at IS NULL
-             UNION SELECT e.reader FROM edges e JOIN bad b ON e.writer = b.id)
-         SELECT r.path, r.sha256, r.session_id, CASE WHEN b.id IS NOT NULL THEN 5::smallint ELSE r.risk END AS risk
-         FROM item_ratings r LEFT JOIN bad b ON b.id = r.session_id
-         WHERE starts_with(r.path, $1) OR r.risk = 5 OR b.id IS NOT NULL")
+             UNION SELECT e.reader FROM edges e JOIN bad b ON e.writer = b.id),
+           rated AS (SELECT r.path, r.sha256, r.session_id, CASE WHEN b.id IS NOT NULL THEN 5::smallint ELSE r.risk END AS risk
+             FROM item_ratings r LEFT JOIN bad b ON b.id = r.session_id)
+         SELECT * FROM rated WHERE starts_with(path, $1) OR risk = 5
+           OR sha256 IN (SELECT sha256 FROM rated WHERE risk = 5 AND sha256 != '*')")
         .bind(&prefix).fetch_all(db).await?;
-    let mut by_path: HashMap<String, Vec<(String, Option<Uuid>, i16)>> = HashMap::new();
-    for r in rows {
-        by_path.entry(r.get("path")).or_default().push((r.get("sha256"), r.get("session_id"), r.get("risk")));
-    }
-    tokio::task::spawn_blocking(move || view(&ws, by_path)).await?
+    let rows: Vec<Row3> = rows.iter().map(|r| (r.get("path"), r.get("sha256"), r.get("session_id"), r.get("risk"))).collect();
+    tokio::task::spawn_blocking(move || view(&ws, rows)).await?
 }
 
-type Rated = HashMap<String, Vec<(String, Option<Uuid>, i16)>>;
+type Row3 = (String, String, Option<Uuid>, i16);
 
-fn view(ws: &Path, by_path: Rated) -> Result<View> {
+fn view(ws: &Path, rows: Vec<Row3>) -> Result<View> {
+    let mut by_digest: HashMap<&str, Vec<(Option<Uuid>, i16)>> = HashMap::new();
+    let mut by_path: HashMap<&str, Vec<Version>> = HashMap::new();
+    for (path, sha, writer, risk) in &rows {
+        by_digest.entry(sha).or_default().push((*writer, *risk));
+        by_path.entry(path).or_default().push((sha, *writer, *risk));
+    }
     let (mut masks, mut seen, mut linked) = (Vec::new(), Vec::new(), HashMap::new());
-    for (path, entries) in by_path {
-        let p = PathBuf::from(&path);
-        let Ok(meta) = std::fs::symlink_metadata(&p) else { continue };
-        if !meta.is_file() { continue; }
-        let bad = |d: &str| entries.iter().any(|(sha, _, r)| sha == d && *r == 5);
-        let current = if meta.len() > MAX_FILE { None } else { file_digest(&p, &meta).ok() };
-        let masked = match &current {
-            Some(d) => bad(d),
-            // Unreadable or oversized: masked if any version of it is contaminated.
-            None => entries.iter().any(|(_, _, r)| *r == 5),
+    for (path, versions) in by_path {
+        let p = PathBuf::from(path);
+        let any_bad = versions.iter().any(|(_, _, r)| *r == 5);
+        let meta = match std::fs::symlink_metadata(&p) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            // Can't look: masked if any version was contaminated (an inaccessible mask fails the shell).
+            Err(_) => { if any_bad { masks.push(p); } continue }
         };
-        if masked {
+        if versions.iter().any(|(sha, _, r)| *sha == ANY && *r == 5) {
+            masks.push(p);
+            continue;
+        }
+        if !meta.is_file() { continue; }
+        let current = if meta.len() > MAX_FILE { None } else { file_digest(&p, &meta).ok() };
+        let Some(current) = current else {
+            if any_bad { masks.push(p); }
+            continue;
+        };
+        let (d, lines) = &*current;
+        // Every rating of these bytes, wherever they were registered, and any of this path's own.
+        let any = versions.iter().filter(|(sha, _, _)| *sha == ANY).map(|(_, w, r)| (*w, *r));
+        let matched: Vec<_> = by_digest.get(d.as_str()).into_iter().flatten().copied().chain(any).collect();
+        if matched.iter().any(|(_, r)| *r == 5) {
             if meta.nlink() > 1 { linked.insert((meta.dev(), meta.ino()), meta.nlink()); }
             masks.push(p);
-        } else if let Some(d) = current.filter(|_| p.starts_with(ws)) {
-            let matched: Vec<_> = entries.iter().filter(|(sha, _, _)| *sha == d).collect();
-            if matched.is_empty() { continue; }
-            let text = std::fs::read(&p).unwrap_or_default();
-            let lines = String::from_utf8_lossy(&text).lines().map(str::trim)
-                .filter(|l| l.chars().count() >= 20).take(200).map(String::from).collect();
+        } else if !matched.is_empty() && p.starts_with(ws) {
             seen.push(Seen {
-                risk: matched.iter().map(|m| m.2).max().unwrap_or(1),
-                writers: matched.iter().filter_map(|m| m.1).collect(),
-                lines,
+                risk: matched.iter().map(|m| m.1).max().unwrap_or(1),
+                writers: matched.iter().filter_map(|m| m.0).collect(),
+                lines: lines.clone(),
             });
         }
     }
     if !linked.is_empty() {
         let mut found: HashMap<(u64, u64), u64> = HashMap::new();
         let mut extra = Vec::new();
-        let complete = walk(ws, |p, m| if linked.contains_key(&(m.dev(), m.ino())) {
+        let complete = walk(ws, |p, m, _| if linked.contains_key(&(m.dev(), m.ino())) {
             *found.entry((m.dev(), m.ino())).or_default() += 1;
             if !masks.iter().any(|x| x == p) { extra.push(p.to_path_buf()); }
         });
@@ -185,26 +209,29 @@ fn view(ws: &Path, by_path: Rated) -> Result<View> {
             "a contaminated file has hard links outside the workspace; the owner must remove them first");
         masks.extend(extra);
     }
-    if !masks.is_empty() {
-        masks.extend(ROOT_SOCKETS.iter().map(PathBuf::from).filter(|p| p.exists()));
-    }
     Ok(View { masks, seen })
 }
 
 /// After a shell: register what a host-capable one (`host`) wrote in `workspace` since `start`,
-/// then refuse the result if the session was stopped meanwhile.
+/// then refuse the result if that can't be done or the session was stopped meanwhile.
 pub async fn finish(db: &PgPool, session: Uuid, workspace: &Path, start: SystemTime, host: bool) -> Result<()> {
     if host {
-        let ws = workspace.to_path_buf();
+        let ws = workspace.canonicalize().context("workspace")?;
         let since = start.duration_since(SystemTime::UNIX_EPOCH)?.as_secs() as i64 - 1;
-        let products = tokio::task::spawn_blocking(move || {
-            let mut out: Vec<(String, String)> = Vec::new();
-            let complete = walk(&ws, |p, m| if m.ctime() >= since && m.len() <= MAX_FILE {
-                if let (Ok(d), Ok(real)) = (file_digest(p, m), p.canonicalize()) { out.push((real.to_string_lossy().into_owned(), d)); }
+        let products = tokio::task::spawn_blocking(move || -> Result<Vec<(String, String)>> {
+            let (mut out, mut odd) = (Vec::new(), None);
+            let complete = walk(&ws, |p, m, unreadable| if m.ctime() >= since {
+                let d = if unreadable || m.len() > MAX_FILE { ANY.to_string() }
+                    else { file_digest(p, m).map(|d| d.0.clone()).unwrap_or_else(|_| ANY.to_string()) };
+                match p.to_str() {
+                    Some(name) => out.push((name.to_string(), d)),
+                    None => odd = Some(p.to_path_buf()),
+                }
             });
-            if !complete { tracing::warn!("product scan of {} stopped at {MAX_WALK} entries", ws.display()); }
-            out
-        }).await?;
+            anyhow::ensure!(complete, "withheld: the command's products couldn't all be checked (more than {MAX_WALK} entries in {})", ws.display());
+            if let Some(p) = odd { anyhow::bail!("withheld: the command wrote {}, whose name isn't UTF-8; rename it", p.display()); }
+            Ok(out)
+        }).await??;
         if !products.is_empty() {
             let (paths, digests): (Vec<String>, Vec<String>) = products.into_iter().unzip();
             sqlx::query("INSERT INTO item_ratings(path,sha256,session_id,risk)
@@ -217,10 +244,15 @@ pub async fn finish(db: &PgPool, session: Uuid, workspace: &Path, start: SystemT
     Ok(())
 }
 
-/// bubblewrap arguments that mask `masks`; they go after every other mount.
+/// bubblewrap arguments that mask `masks` (a directory with an empty tmpfs); they go after
+/// every other mount.
 pub fn mask(c: &mut tokio::process::Command, masks: &[PathBuf]) {
     for m in masks {
-        c.arg("--ro-bind").arg("/dev/null").arg(m);
+        if std::fs::symlink_metadata(m).is_ok_and(|m| m.is_dir()) {
+            c.arg("--tmpfs").arg(m);
+        } else {
+            c.arg("--ro-bind").arg("/dev/null").arg(m);
+        }
     }
 }
 
@@ -242,7 +274,7 @@ mod tests {
         std::fs::write(d.join("src/.git/objects/b"), "b").unwrap();
         std::fs::write(d.join("src/c"), "c").unwrap();
         let mut seen = Vec::new();
-        assert!(walk(&d, |p, _| seen.push(p.to_path_buf())));
+        assert!(walk(&d, |p, _, _| seen.push(p.to_path_buf())));
         assert_eq!(seen, vec![d.join("src/c")]);
     }
 
@@ -255,13 +287,14 @@ mod tests {
         std::fs::write(ws.join("ok"), "short\n  a line long enough to be recognised  \n").unwrap();
         std::fs::write(ws.join("edited"), "new bytes").unwrap();
         let w = Uuid::new_v4();
-        let mut rated: Rated = HashMap::new();
+        std::fs::write(ws.join("copy"), "evil").unwrap();
         let key = |n: &str| ws.join(n).to_string_lossy().into_owned();
-        rated.insert(key("bad"), vec![(digest(b"evil"), Some(w), 5)]);
-        rated.insert(key("ok"), vec![(digest(b"short\n  a line long enough to be recognised  \n"), Some(w), 3)]);
-        rated.insert(key("edited"), vec![(digest(b"old bytes"), Some(w), 5)]);
+        let mut rated: Vec<Row3> = vec![(key("bad"), digest(b"evil"), Some(w), 5), (key("copy"), digest(b"evil"), None, 1)];
+        rated.push((key("ok"), digest(b"short\n  a line long enough to be recognised  \n"), Some(w), 3));
+        rated.push((key("edited"), digest(b"old bytes"), Some(w), 5));
         let v = view(&ws, rated).unwrap();
         assert!(v.masks.contains(&ws.join("bad")) && v.masks.contains(&ws.join("alias")));
+        assert!(v.masks.contains(&ws.join("copy")), "a copy is masked by its bytes");
         assert!(!v.masks.contains(&ws.join("edited")), "only the contaminated bytes are masked");
         assert_eq!(v.exposure("short, nothing more"), (1, vec![]));
         assert_eq!(v.exposure("$ cat ok\na line long enough to be recognised\n"), (3, vec![w]));

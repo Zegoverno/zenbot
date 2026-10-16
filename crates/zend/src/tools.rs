@@ -332,6 +332,27 @@ pub struct Shell {
 /// isolate pathname Unix sockets, so deny connection/datagram operations and io_uring bypasses.
 /// Reject foreign syscall ABIs (including x32) rather than comparing the wrong syscall numbers.
 fn network_filter() -> Result<std::fs::File,String> {
+    let mut rules = Vec::new();
+    for nr in [libc::SYS_connect,libc::SYS_sendto,libc::SYS_sendmsg,libc::SYS_sendmmsg,libc::SYS_io_uring_setup] {
+        rules.push((0x15,0,1,nr as u32));
+        rules.push((0x06,0,0,0x00050001)); // SECCOMP_RET_ERRNO | EPERM
+    }
+    seccomp(rules)
+}
+
+/// A host shell with masks (fsview.rs) keeps the network but makes no Unix socket: a host
+/// daemon, tmux server or container socket would run commands outside the masks. As Anthropic's
+/// sandbox-runtime does by default: `socket(AF_UNIX, ...)` and io_uring fail with EPERM.
+fn unix_filter() -> Result<std::fs::File,String> {
+    seccomp(vec![
+        (0x15,0,3,libc::SYS_socket as u32), (0x20,0,0,16), (0x15,0,1,libc::AF_UNIX as u32), (0x06,0,0,0x00050001),
+        (0x20,0,0,0), (0x15,0,1,libc::SYS_io_uring_setup as u32), (0x06,0,0,0x00050001),
+    ])
+}
+
+/// A seccomp program: foreign ABIs killed, x32 refused, then `rules` on the syscall number
+/// (loaded in A), then allow.
+fn seccomp(rules: Vec<(u16,u8,u8,u32)>) -> Result<std::fs::File,String> {
     use std::io::{Seek,Write};
     use std::os::fd::FromRawFd;
     #[cfg(target_arch="x86_64")]
@@ -344,10 +365,7 @@ fn network_filter() -> Result<std::fs::File,String> {
         (0x20,0,0,4), (0x15,1,0,arch), (0x06,0,0,0x80000000),
         (0x20,0,0,0), (0x45,0,1,0x40000000), (0x06,0,0,0x00050001),
     ];
-    for nr in [libc::SYS_connect,libc::SYS_sendto,libc::SYS_sendmsg,libc::SYS_sendmmsg,libc::SYS_io_uring_setup] {
-        instructions.push((0x15,0,1,nr as u32));
-        instructions.push((0x06,0,0,0x00050001)); // SECCOMP_RET_ERRNO | EPERM
-    }
+    instructions.extend(rules);
     instructions.push((0x06,0,0,0x7fff0000)); // SECCOMP_RET_ALLOW
     // SAFETY: static NUL-terminated name; the returned fd is owned exactly once by File.
     let fd = unsafe {libc::memfd_create(c"zen-offline-filter".as_ptr(),libc::MFD_CLOEXEC)};
@@ -384,7 +402,8 @@ fn sandbox_command(filter: &std::fs::File) -> Command {
 /// every mode; a host shell with masks runs in its own pid namespace with no_new_privs.
 pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox: Sandbox, masks: &[PathBuf], timeout: Duration) -> Result<Shell, String> {
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/home".into()));
-    let filter = if matches!(sandbox,Sandbox::ReadOnly|Sandbox::Offline|Sandbox::SafeRead) {Some(network_filter()?)} else {None};
+    let filter = if matches!(sandbox,Sandbox::ReadOnly|Sandbox::Offline|Sandbox::SafeRead) {Some(network_filter()?)}
+        else if !masks.is_empty() {Some(unix_filter()?)} else {None};
     let mut cmd = match sandbox {
         Sandbox::ReadOnly => {
             let mut c = sandbox_command(filter.as_ref().expect("sandbox filter initialized"));
@@ -446,7 +465,7 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox:
         Sandbox::None => {
             // The host as it is, but with its own /proc (no other process's root to reach
             // masked files through), background processes ending with the shell, and no sudo.
-            let mut c = Command::new("bwrap");
+            let mut c = sandbox_command(filter.as_ref().expect("sandbox filter initialized"));
             c.args(["--dev-bind", "/", "/", "--unshare-pid", "--proc", "/proc", "--die-with-parent"]);
             crate::fsview::mask(&mut c, masks);
             c.arg("--chdir").arg(dir).args(["bash", "-c"]);
@@ -1118,9 +1137,9 @@ mod tests {
             let out = run_shell(&ws, cmd, &[], mode, &masks, Duration::from_secs(10)).await.unwrap();
             assert!(!out.text.contains("SECRET") && out.text.contains("fine"), "{mode:?}: {}", out.text);
         }
-        let out = run_shell(&ws, "echo new > made; sudo -n true 2>/dev/null && echo ROOT; (sleep 30 &) ; echo done",
+        let out = run_shell(&ws, "echo new > made; sudo -n true 2>/dev/null && echo ROOT; python3 -c 'import socket; socket.socket(socket.AF_UNIX)' 2>/dev/null && echo UNIX; python3 -c 'import socket; socket.socket()' && echo inet; (sleep 30 &) ; echo done",
             &[], Sandbox::None, &masks, Duration::from_secs(10)).await.unwrap();
-        assert!(out.text.contains("done") && !out.text.contains("ROOT"), "{}", out.text);
+        assert!(out.text.contains("done") && out.text.contains("inet") && !out.text.contains("ROOT") && !out.text.contains("UNIX"), "{}", out.text);
         assert_eq!(std::fs::read_to_string(ws.join("made")).unwrap(), "new\n");
         assert_eq!(std::fs::read_to_string(ws.join("bad")).unwrap(), "SECRET-PAYLOAD", "the host file is untouched");
     }
