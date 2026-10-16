@@ -14,40 +14,6 @@ pub(crate) async fn list(State(app): State<AppState>) -> ApiResult<Json<Value>> 
     items.sort_by_key(|v|std::cmp::Reverse(timestamp(v)));
     Ok(Json(json!(items)))
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    /// SOURCE_TEST_DB_URL points at a throwaway migrated Postgres database.
-    #[tokio::test]
-    #[ignore]
-    async fn queue_decisions_database() {
-        let db=sqlx::PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
-        sqlx::migrate!().run(&db).await.unwrap();
-        let app=crate::test_util::app(db.clone());
-        let s=Uuid::new_v4();
-        sqlx::query("INSERT INTO sessions(id,title,model,risk) VALUES($1,'queue test','faux/smoke',4)").bind(s).execute(&db).await.unwrap();
-        let gate:i64=sqlx::query_scalar("INSERT INTO action_gates(session_id,action,reason) VALUES($1,$2,'off task') RETURNING id")
-            .bind(s).bind(json!({"workspace":"/tmp","tool":"bash","args":{"command":"git push"}}).to_string()).fetch_one(&db).await.unwrap();
-        let decide_one=|d:&str|decide(State(app.clone()),Path(("action".into(),gate)),Json(Decision {decision:d.into()}));
-        let (a,b)=tokio::join!(decide_one("approve"),decide_one("approve"));
-        assert_ne!(a.is_ok(),b.is_ok(),"one winner only");
-        let n:i64=sqlx::query_scalar("SELECT count(*) FROM action_gates WHERE id=$1 AND allowed_at IS NOT NULL AND decision='approved'")
-            .bind(gate).fetch_one(&db).await.unwrap();
-        assert_eq!(n,1);
-        assert!(decide_one("reject").await.is_err());
-        let rejected:i64=sqlx::query_scalar("INSERT INTO action_gates(session_id,action,reason) VALUES($1,'rejected exact action','off task') RETURNING id").bind(s).fetch_one(&db).await.unwrap();
-        assert!(decide(State(app.clone()),Path(("action".into(),rejected)),Json(Decision{decision:"reject".into()})).await.is_ok());
-        let v=super::list(State(app.clone())).await.ok().unwrap().0;
-        assert!(!v.as_array().unwrap().iter().any(|v|v["kind"]=="action" && v["id"]==rejected));
-        let response=crate::api::allow_action(State(app.clone()),Path(s),Json(crate::api::Allow{id:rejected})).await.ok().unwrap().0;
-        assert_eq!(response["allowed"],false,"legacy route cannot revive rejection");
-        let denied:i64=sqlx::query_scalar("INSERT INTO action_gates(session_id,action,reason) VALUES($1,'denied exact action','off task') RETURNING id").bind(s).fetch_one(&db).await.unwrap();
-        assert!(decide(State(app.clone()),Path(("action".into(),denied)),Json(Decision{decision:"deny".into()})).await.is_ok());
-        assert!(crate::taint::stopped(&db,s).await.unwrap(),"explicit queue deny contaminates");
-        let stopped:i64=sqlx::query_scalar("INSERT INTO action_gates(session_id,action,reason) VALUES($1,'stopped exact action','off task') RETURNING id").bind(s).fetch_one(&db).await.unwrap();
-        assert!(decide(State(app.clone()),Path(("action".into(),stopped)),Json(Decision{decision:"approve".into()})).await.is_err());
-    }
-}
 #[derive(Deserialize)]
 pub(crate) struct Decision { decision:String }
 
@@ -103,4 +69,39 @@ pub(crate) async fn decide(State(app):State<AppState>,Path((kind,id)):Path<(Stri
         }
     }
     Ok(Json(json!({"id":id,"decision":d,"resumed":resumed,"resume_error":error})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// SOURCE_TEST_DB_URL points at a throwaway migrated Postgres database.
+    #[tokio::test]
+    #[ignore]
+    async fn queue_decisions_database() {
+        let db=sqlx::PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
+        sqlx::migrate!().run(&db).await.unwrap();
+        let app=crate::test_util::app(db.clone());
+        let s=Uuid::new_v4();
+        sqlx::query("INSERT INTO sessions(id,title,model,risk) VALUES($1,'queue test','faux/smoke',4)").bind(s).execute(&db).await.unwrap();
+        let gate:i64=sqlx::query_scalar("INSERT INTO action_gates(session_id,action,reason) VALUES($1,$2,'off task') RETURNING id")
+            .bind(s).bind(json!({"workspace":"/tmp","tool":"bash","args":{"command":"git push"}}).to_string()).fetch_one(&db).await.unwrap();
+        let decide_one=|d:&str|decide(State(app.clone()),Path(("action".into(),gate)),Json(Decision {decision:d.into()}));
+        let (a,b)=tokio::join!(decide_one("approve"),decide_one("approve"));
+        assert_ne!(a.is_ok(),b.is_ok(),"one winner only");
+        let n:i64=sqlx::query_scalar("SELECT count(*) FROM action_gates WHERE id=$1 AND allowed_at IS NOT NULL AND decision='approved'")
+            .bind(gate).fetch_one(&db).await.unwrap();
+        assert_eq!(n,1);
+        assert!(decide_one("reject").await.is_err());
+        let rejected:i64=sqlx::query_scalar("INSERT INTO action_gates(session_id,action,reason) VALUES($1,'rejected exact action','off task') RETURNING id").bind(s).fetch_one(&db).await.unwrap();
+        assert!(decide(State(app.clone()),Path(("action".into(),rejected)),Json(Decision{decision:"reject".into()})).await.is_ok());
+        let v=super::list(State(app.clone())).await.ok().unwrap().0;
+        assert!(!v.as_array().unwrap().iter().any(|v|v["kind"]=="action" && v["id"]==rejected));
+        let response=crate::api::allow_action(State(app.clone()),Path(s),Json(crate::api::Allow{id:rejected})).await.ok().unwrap().0;
+        assert_eq!(response["allowed"],false,"legacy route cannot revive rejection");
+        let denied:i64=sqlx::query_scalar("INSERT INTO action_gates(session_id,action,reason) VALUES($1,'denied exact action','off task') RETURNING id").bind(s).fetch_one(&db).await.unwrap();
+        assert!(decide(State(app.clone()),Path(("action".into(),denied)),Json(Decision{decision:"deny".into()})).await.is_ok());
+        assert!(crate::taint::stopped(&db,s).await.unwrap(),"explicit queue deny contaminates");
+        let stopped:i64=sqlx::query_scalar("INSERT INTO action_gates(session_id,action,reason) VALUES($1,'stopped exact action','off task') RETURNING id").bind(s).fetch_one(&db).await.unwrap();
+        assert!(decide(State(app.clone()),Path(("action".into(),stopped)),Json(Decision{decision:"approve".into()})).await.is_err());
+    }
 }
