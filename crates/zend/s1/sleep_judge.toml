@@ -1,0 +1,43 @@
+# The nightly sleep, for each short-term memory: how likely it's needed, whether it lasts, what
+# already says it, and what kind of thing it is. The sleep reads the answers itself (ranking,
+# covers, promotion bars: memory.rs).
+name = "sleep_judge"
+version = 1
+description = "The sleep's questions about one memory."
+exposure = "private"
+evidence = ["memory", "source", "age_days", "days_since_used", "other_memories", "user_profile", "agent_identity"]
+timeout = "30s"
+
+[question.needed]
+type = "score"
+text = "How likely is the agent to need this memory in its work over the coming days?"
+levels = ["Unlikely: a one-off detail", "Possibly", "Likely", "Almost certainly: it comes up all the time"]
+
+[question.durable]
+type = "yes/no"
+text = "Will this memory still be true and useful months from now?"
+yes = "A lasting fact, preference, decision or lesson"
+no = "About a passing task, state or moment"
+
+[question.covered_by]
+type = "choice"
+text = "Does another memory (other_memories, by id), the owner's profile (user_profile) or the agent's identity (agent_identity) already say what this memory says? Pick the one that does, or none."
+options_from = "covers"
+
+[question.about_owner]
+type = "yes/no"
+text = "Is this memory about the owner as a person: who they are, their preferences, their context?"
+yes = "About the owner"
+no = "About work, projects, tools or the world"
+
+[question.guidance]
+type = "yes/no"
+text = "Is this memory a trait, standing guidance or preference about how the agent should act, rather than a fact about work or where things stand?"
+yes = "Guidance on how to act (e.g. how to answer, what to check, what to avoid)"
+no = "A fact, a state, a decision or where something is"
+
+[question.knowledge]
+type = "yes/no"
+text = "Is this memory lasting knowledge worth keeping for good in notes: a decision and why it was made, how something works, a lesson, a project's history? Not an open question, a to-do or a passing state."
+yes = "Lasting knowledge"
+no = "A passing state, an open question or a to-do"

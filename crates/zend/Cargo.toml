@@ -25,3 +25,5 @@ croner = "4"
 chrono-tz = "0.10"
 libc = "0.2"
 sha2 = "0.10"
+# Decision files (s1/): parse and report errors with their line and column.
+toml = { version = "1", default-features = false, features = ["std", "serde", "parse"] }

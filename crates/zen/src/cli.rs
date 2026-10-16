@@ -100,6 +100,11 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: Option<PolicyCmd>,
     },
+    /// System One: each decision's numbers; check the decision files; replay, compare, proposals
+    S1 {
+        #[command(subcommand)]
+        cmd: Option<S1Cmd>,
+    },
     /// Approve or reject a tool zenbot made (`zen skills` lists them)
     Tools {
         #[command(subcommand)]
@@ -126,6 +131,40 @@ pub(crate) enum Cmd {
         #[arg(long)]
         check: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum S1Cmd {
+    /// Check the decision files (~/.zenbot/s1/ and the built-in ones): errors with line and column
+    Check,
+    /// The approved System One models (~/.zenbot/s1/models.toml)
+    Models,
+    /// Apply a decision's policy (or an edited file's) to its recorded answers: what would change
+    Replay {
+        decision: String,
+        /// An edited decision file to try instead of the one in force
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+        /// How many recent decisions (default 500)
+        #[arg(long)]
+        last: Option<i64>,
+    },
+    /// Ask recorded decisions again on approved models: agreement, accuracy, latency, cost
+    Compare {
+        decision: String,
+        /// Approved model names, comma-separated
+        #[arg(long, value_delimiter = ',', required = true)]
+        models: Vec<String>,
+        /// How many recent decisions (default 20)
+        #[arg(long)]
+        last: Option<i64>,
+    },
+    /// Changes the learner proposes to decision files
+    Proposals,
+    /// Apply a proposal to your decision file
+    Approve { id: i64 },
+    /// Decline a proposal
+    Reject { id: i64 },
 }
 
 #[derive(Subcommand)]

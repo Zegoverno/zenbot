@@ -32,7 +32,7 @@ pub async fn rerate(db: &PgPool) -> Result<Value> {
             if risk==4 && !cached && base(db,url).await?==4 {complete=false}
             continue
         }
-        let (risk,available)=model::content_rating(&text,risk).await;
+        let (risk,available)=model::content_rating(db,&text,risk).await;
         complete &= available;
         if risk>=row.get::<i16,_>("risk") {continue}
         let sid:Uuid=row.get("session_id");
@@ -69,7 +69,7 @@ pub async fn rerate(db: &PgPool) -> Result<Value> {
 /// Idempotent startup pass. An unavailable classifier cannot lower anything.
 pub async fn rerate_once(db: &PgPool) -> Result<()> {
     let done: bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM source_rerates WHERE version=65)").fetch_one(db).await?;
-    if done || crate::score::scorer().is_none() || std::env::var("OPENROUTER_API_KEY").is_err() {return Ok(())}
+    if done || !crate::s1::on() || !crate::s1::openrouter_key() {return Ok(())}
     let result=rerate(db).await?;
     if result["complete"]!=true {return Ok(())}
     sqlx::query("INSERT INTO source_rerates(version,note) VALUES(65,'authenticated web bytes only; ambiguous historical provenance retained') ON CONFLICT DO NOTHING").execute(db).await?;

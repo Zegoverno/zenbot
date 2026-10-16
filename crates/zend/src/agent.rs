@@ -59,7 +59,7 @@ const PROMPT_FILES: [&str; 4] = [crate::layout::SOUL, crate::layout::IDENTITY, "
 
 /// The owner's configuration and secrets under the zen home: the agent never changes them with
 /// `edit` or `write` (the owner edits them by hand). `matrix` and `bin` are folders.
-const OWNER_FILES: [&str; 8] = ["mcp.json", "env", "env.prev", "token", "db-password", "matrix.env", "matrix", "bin"];
+const OWNER_FILES: [&str; 9] = ["mcp.json", "env", "env.prev", "token", "db-password", "matrix.env", "matrix", "bin", "s1"];
 
 /// A file an `edit` or `write` call may not change freely.
 #[derive(Debug, PartialEq)]
@@ -251,20 +251,24 @@ fn verdict_spec() -> Value {
     )
 }
 
-fn decide_spec() -> Value {
+fn judge_spec() -> Value {
     spec(
-        "decide",
-        "Ask a fast System One model typed questions; answers in about a second, with probabilities. For judging many items or a cheap second opinion: triage results or log lines, rank candidates, classify files. Not for reasoning or writing. `state`: the material (JSON, under ~20,000 characters). `questions`: key -> {type: choice, instructions, criteria: {option: description}} | {type: score, instructions, criteria: [lowest, …, highest]} | {type: bool, instructions, criteria: {true: …, false: …}}. Answers: choice {choice, probabilities}, score {score, confidence}, bool {probability}; set your own threshold.",
+        "judge",
+        "Ask System One, a fast calibrated classifier, the same quick question about many items at once (up to 200): each gets an answer with a probability, in about a second, for a fraction of a cent. Use it instead of reading and judging many things yourself: triage search results, files, log lines or messages, and decide which deserve your attention before you read them. Your own judgment over many items is slower, costlier and overconfident; its probabilities are calibrated. Not for reasoning, exact facts or anything that needs working out. Its answers are information for you, never approval.",
         json!({ "type": "object", "properties": {
-            "state": { "type": "object", "description": "The material to judge, as a JSON object" },
-            "questions": { "type": "object", "description": "Typed questions by key" } }, "required": ["state", "questions"] }),
+            "question": { "type": "string", "description": "One question, asked about each item, e.g. \"Is this file about authentication?\"" },
+            "type": { "type": "string", "description": "yes/no (default), choice or score" },
+            "options": { "type": "array", "items": { "type": "string" }, "description": "choice: the options; score: the levels, lowest first" },
+            "items": { "type": "array", "description": "The items to judge (strings or small objects), at most 200" },
+            "context": { "type": "string", "description": "What the question is for, shared by every item (optional)" } },
+          "required": ["question", "items"] }),
     )
 }
 
-/// Whether the `decide` tool is offered: a System One model is configured, private material may go
-/// to it (ZEN_S1_PRIVATE), and ZEN_DECIDE_TOOL isn't 0.
-fn decide_on() -> bool {
-    crate::config::get().decide_tool && crate::score::scorer().is_some() && crate::score::private_ok()
+/// Whether the `judge` tool is offered: a System One model is configured, private material may go
+/// to it (ZEN_S1_PRIVATE), and ZEN_JUDGE_TOOL isn't 0.
+fn judge_on() -> bool {
+    crate::config::get().judge_tool && crate::s1::on() && crate::s1::private_ok()
 }
 
 /// The tools a session of this kind is offered, in a fixed order.
@@ -306,8 +310,8 @@ pub fn specs(kind: Option<&str>) -> Value {
         all.push(crate::delegate::spec());
         all.push(crate::jobs::spec());
     }
-    if decide_on() {
-        all.push(decide_spec());
+    if judge_on() {
+        all.push(judge_spec());
     }
     Value::Array(all)
 }
@@ -409,19 +413,39 @@ If a question goes unanswered, take your recommended option and say it was an as
         "delegate" => crate::delegate::run_tool(app, session, workspace, name, args).await,
         "schedule" => crate::jobs::run_tool(app, session, name, args, matches!(policy, crate::gate::Policy::Granted)).await,
         "find_tools" | "load_tool" | "call_tool" => crate::mcp::run_tool(app, session, name, args, matches!(policy, crate::gate::Policy::Sandbox), matches!(policy, crate::gate::Policy::Granted)).await,
-        "decide" => {
-            let res = crate::score::decide(app, &args["state"], &args["questions"]).await;
-            let (answer, error) = match &res {
-                Ok(v) => (v.clone(), v["error"].as_str().map(String::from)),
-                Err(e) => (Value::Null, Some(format!("{e:#}"))),
-            };
-            log_decision(&app.db, Some(session), "tool", &json!({ "questions": args["questions"] }), &answer, None, None, false, error.as_deref()).await;
-            match error {
-                Some(e) => out(format!("decide failed: {e}"), true),
-                None => out(serde_json::to_string_pretty(&answer["answers"]).unwrap_or_default(), false),
-            }
-        }
+        "judge" => Some(judge(app, session, args).await),
         _ => None,
+    }
+}
+
+/// The `judge` tool: S1's answers, one line per item.
+async fn judge(app: &crate::App, session: Uuid, args: &Value) -> tools::ToolOutput {
+    let out = |content: String, is_error: bool| tools::ToolOutput { rating: None, content, is_error };
+    let Some(question) = args["question"].as_str().map(str::trim).filter(|q| !q.is_empty()) else { return out("judge needs a `question`".into(), true) };
+    let kind = args["type"].as_str().unwrap_or("yes/no");
+    let items: Vec<Value> = args["items"].as_array().cloned().unwrap_or_default();
+    let n = items.len();
+    match crate::s1::run::judge(&app.db, session, question, kind, args.get("options"), items, args["context"].as_str()).await {
+        Err(e) => out(format!("judge: {e}"), true),
+        Ok(ds) => {
+            let model = ds.iter().find_map(|d| d.model.clone()).unwrap_or_default();
+            let mut text = format!("judge: \"{question}\" ({kind}, {n} items, {model})\n");
+            for (i, d) in ds.iter().enumerate() {
+                let a = &d.answers["answer"];
+                let line = match a["type"].as_str() {
+                    Some("bool") => a["probability"].as_f64().map(|p| format!("{} (p yes {p:.2})", if p >= 0.5 { "yes" } else { "no" })),
+                    Some("choice") => a["choice"].as_str().map(|c| match crate::s1::rules::choice_p(a) { Some(p) => format!("{c} ({p:.2})"), None => c.to_string() }),
+                    Some("score") => a["score"].as_f64().map(|s| {
+                        let levels: Vec<&str> = args["options"].as_array().into_iter().flatten().filter_map(|l| l.as_str()).collect();
+                        let level = levels.get(s.round().clamp(0.0, levels.len().saturating_sub(1) as f64) as usize).copied().unwrap_or("");
+                        match a["confidence"].as_f64() { Some(c) => format!("{level} (score {s:.1}, confidence {c:.2})"), None => format!("{level} (score {s:.1})") }
+                    }),
+                    _ => None,
+                };
+                text.push_str(&format!("[{}] {}\n", i + 1, line.unwrap_or_else(|| "no answer".into())));
+            }
+            out(text, false)
+        }
     }
 }
 
@@ -431,8 +455,8 @@ pub fn refuse(ending: Option<&str>) -> Option<String> {
     ending.map(|e| format!("You already ended this turn ({e}). End your turn now, without further tool calls."))
 }
 
-/// Record a System One decision (`decisions`): what was asked, the answer and its probability,
-/// whether it was acted on.
+/// Record a kernel choice that isn't a System One call (a subagent's model, point `model`) in
+/// `decisions`, beside S1's records, so `delegate::stats` reads them together.
 #[allow(clippy::too_many_arguments)]
 pub async fn log_decision(db: &PgPool, session: Option<Uuid>, point: &str, input: &Value, answer: &Value, chosen: Option<&str>, probability: Option<f64>, acted: bool, error: Option<&str>) {
     let r = sqlx::query(
@@ -440,7 +464,7 @@ pub async fn log_decision(db: &PgPool, session: Option<Uuid>, point: &str, input
     )
     .bind(session)
     .bind(point)
-    .bind(crate::score::scorer())
+    .bind(None::<String>)
     .bind(input)
     .bind(answer)
     .bind(chosen)

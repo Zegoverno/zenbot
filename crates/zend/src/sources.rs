@@ -179,11 +179,6 @@ pub fn adjustment(base: i16, choice: &str) -> i16 {
     match choice { "vouches" => (base - 1).max(2), "suspects" => 4, _ => base }
 }
 
-pub fn questions() -> Value {
-    json!({"intent":{"type":"choice", "instructions":"Judge only what the owner says about this exact URL. Merely asking to read, research, compare or inspect it is not vouching. A quoted third-party recommendation is not the owner's endorsement. Suspects means the owner considers it dubious, malicious or untrustworthy.",
-        "criteria":{"vouches":"The owner explicitly vouches for this page as trustworthy", "look":"The owner only asks to look at it, or gives no clear trust judgment", "suspects":"The owner suspects this page is unreliable or malicious"}}})
-}
-
 pub async fn page(db: &PgPool, session: Uuid, requested: &str, final_url: &str, redirects_same_host: bool) -> Result<Rating> {
     let owner_rows = sqlx::query("SELECT e.payload FROM tape_events e JOIN sessions s ON s.id=e.session_id
         WHERE e.session_id=$1 AND s.kind IS NULL AND e.origin='owner' AND e.kind='message' AND e.payload->>'role'='user'")
@@ -207,26 +202,16 @@ pub async fn page(db: &PgPool, session: Uuid, requested: &str, final_url: &str, 
         let old: Option<i16> = sqlx::query_scalar("SELECT risk FROM source_vouches WHERE session_id=$1 AND owner_seq=$2 AND url=$3 AND base=$4")
             .bind(session).bind(seq).bind(requested).bind(base).fetch_optional(db).await?;
         if let Some(r) = old { rating.risk = r; break; }
-        let state = json!({"owner_message":text,"url":requested,"base_rating":base});
-        let answer = classify_owner(&state).await;
-        let (choice, result) = match answer {
-            Ok(Ok(v)) => (v["answers"]["intent"]["choice"].as_str().unwrap_or("look").to_string(), v),
-            _ => ("unavailable".into(), Value::Null),
-        };
-        rating.risk = adjustment(base, &choice);
+        // s1/owner_url.toml: vouches lowers one level (never below 2), suspects raises to 4.
+        let facts = crate::s1::Facts::new(Some(session)).with("owner_message", text.clone()).with("url", requested).with("base_rating", base);
+        let d = crate::s1::decide(db, "owner_url", facts).await;
+        let choice = if d.answered { d.choice("intent").unwrap_or("look").to_string() } else { "unavailable".into() };
+        rating.risk = adjustment(base, match d.outcome.as_deref() { Some("lower_one") => "vouches", Some("raise") => "suspects", _ => "look" });
         sqlx::query("INSERT INTO source_vouches (session_id,owner_seq,url,base,risk,choice) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING")
             .bind(session).bind(seq).bind(requested).bind(base).bind(rating.risk).bind(&choice).execute(db).await?;
-        crate::agent::log_decision(db, Some(session), "source_url", &state, &result, Some(&choice), None, true, None).await;
         break;
     }
     Ok(rating)
-}
-
-async fn classify_owner(state: &Value) -> std::result::Result<anyhow::Result<Value>, tokio::time::error::Elapsed> {
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        let model = crate::score::scorer().ok_or_else(|| anyhow::anyhow!("System One unavailable"))?;
-        crate::score::decide_with_model(&model, state, &questions()).await
-    }).await
 }
 
 #[cfg(test)]
@@ -429,30 +414,6 @@ Result about {echo}
         current.body = "exact owner words".into();
         assert_eq!(crate::search::rated_results(&db,search_reader,&[(current,None)]).await,[Some(0)]);
 
-    }
-
-    /// SOURCE_URL_REPLAY=input.jsonl (owner_message,url,base_rating) on the configured System One.
-    /// Prints only aggregate counts. Full results stay in a private output file for review.
-    #[tokio::test]
-    #[ignore]
-    async fn owner_url_replay() {
-        let input = std::env::var("SOURCE_URL_REPLAY").expect("set SOURCE_URL_REPLAY");
-        let output = std::env::var("SOURCE_URL_REPORT").expect("set SOURCE_URL_REPORT");
-        let mut report = Vec::new();
-        let mut counts = std::collections::BTreeMap::<String,usize>::new();
-        for line in std::fs::read_to_string(input).unwrap().lines() {
-            let state: Value = serde_json::from_str(line).unwrap();
-            assert!(state.as_object().unwrap().keys().all(|k| ["owner_message","url","base_rating"].contains(&k.as_str())));
-            let answer = classify_owner(&state).await;
-            let (choice,result) = match answer {
-                Ok(Ok(v)) => (v["answers"]["intent"]["choice"].as_str().unwrap_or("unavailable").to_string(),v),
-                _ => ("unavailable".into(),Value::Null),
-            };
-            *counts.entry(choice.clone()).or_default() += 1;
-            report.push(json!({"input":state,"choice":choice,"result":result}));
-        }
-        std::fs::write(output, serde_json::to_string_pretty(&report).unwrap()).unwrap();
-        println!("{}",serde_json::to_string(&counts).unwrap());
     }
 
     #[test]

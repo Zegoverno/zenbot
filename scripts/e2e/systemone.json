@@ -1,42 +1,50 @@
 [
  {
-  "tool": "decide",
+  "tool": "judge",
   "args": {
-   "state": {
-    "text": "The build passed"
-   },
-   "questions": {
-    "ok": {
-     "type": "bool",
-     "instructions": "Did it pass?",
-     "criteria": {
-      "true": "yes",
-      "false": "no"
-     }
-    },
-    "kind": {
-     "type": "choice",
-     "instructions": "What kind of event?",
-     "criteria": {
-      "build": "a build",
-      "other": "another event"
-     }
-    },
-    "rating": {
-     "type": "score",
-     "instructions": "How successful?",
-     "criteria": [
-      "failed",
-      "passed"
-     ]
-    }
-   }
+   "question": "Did this pass?",
+   "type": "yes/no",
+   "items": [
+    "The build passed",
+    "The deploy passed",
+    "Tests failed"
+   ],
+   "context": "CI results"
+  },
+  "when": "decide directly"
+ },
+ {
+  "tool": "judge",
+  "args": {
+   "question": "What kind of event is it?",
+   "type": "choice",
+   "options": [
+    "build",
+    "other"
+   ],
+   "items": [
+    "The build passed"
+   ]
   },
   "when": "decide directly"
  },
  {
   "text": "Done.",
   "when": "decide directly"
+ },
+ {
+  "tool": "judge",
+  "args": {
+   "question": "Did this pass?",
+   "items": [
+    "The build passed"
+   ]
+  },
+  "when": "judge without System One"
+ },
+ {
+  "text": "Done.",
+  "when": "judge without System One"
  },
  {
   "when": "grow the profile",

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # What CI checks, in one command (CI's `check` job runs exactly this): the docs check against the
-# base branch (a PROGRESS.md entry included; first, because it takes a second), build once, unit
+# base branch (a PROGRESS.md entry included; first, because it takes a second), that no System One
+# call bypasses the S1 engine, build once, unit
 # tests, clippy with warnings as errors, the binaries' size budgets, and the end-to-end scenarios on
 # that build. Prints the time of each step and stops at the first failure.
 #
@@ -36,6 +37,9 @@ step() { # name command…
 summary() { [ -z "${GITHUB_STEP_SUMMARY:-}" ] || printf '```\n%s\n```\n' "$(printf '%s\n' "${SUMMARY[@]}")" >>"$GITHUB_STEP_SUMMARY"; }
 
 step docs scripts/check-docs.py --base "$BASE"
+# Every System One call goes through the S1 engine (crates/zend/src/s1/, D-066).
+s1_guard() { ! grep -rnE 's1::wire|decide_with_model|/systemone' crates/zend/src --include='*.rs' | grep -v -e '^crates/zend/src/s1/' -e '^crates/zend/src/config.rs:'; }
+step s1-guard s1_guard
 step build cargo build --release --locked
 step tests cargo test --release --locked
 step clippy cargo clippy --release --locked --all-targets -- -D warnings

@@ -102,9 +102,11 @@ pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args:
     }
     // At risk 4 hard rules go first; the task check can only add holds. Exact owner grants
     // returned above bypass this once, but never bypass the contamination check.
+    let mut s1_decision = None;
     if !matches!(p, Policy::Hold(_)) {
-        if let Some(reason) = crate::task::check(app,session,workspace,name,args).await? {
+        if let Some((reason, decision)) = crate::task::check(app,session,workspace,name,args).await? {
             p=Policy::Hold(reason);
+            s1_decision = decision;
         }
     }
     let code_approval = risk >= 2 && (name == "bash" && matches!(p,Policy::Sandbox)
@@ -117,11 +119,11 @@ pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args:
     };
     if let Some(reason) = reason {
         // A hold asks the owner; only /deny or flagged content contaminates (D-062).
-        sqlx::query("INSERT INTO action_gates (session_id, action, reason)
-          SELECT $1, $2, $3 WHERE NOT EXISTS (
+        sqlx::query("INSERT INTO action_gates (session_id, action, reason, s1_decision)
+          SELECT $1, $2, $3, $4 WHERE NOT EXISTS (
             SELECT 1 FROM action_gates WHERE session_id = $1 AND action = $2
               AND allowed_at IS NULL AND created_at > now() - interval '1 day')")
-            .bind(session).bind(action).bind(reason).execute(&app.db).await?;
+            .bind(session).bind(action).bind(reason).bind(s1_decision).execute(&app.db).await?;
     }
     // SafeRead is always a fixed read-only execution route, even after escalation. Never
     // downgrade it to the writable build sandbox or lose its normalized command.
@@ -162,7 +164,7 @@ pub fn policy(workspace: &Path, name: &str, args: &Value) -> Policy {
             }
             Policy::Run
         }
-        "remember" | "capture" | "save_skill" | "save_tool" | "ask" | "decide" | "delegate" |
+        "remember" | "capture" | "save_skill" | "save_tool" | "ask" | "judge" | "delegate" |
         "search" | "history" | "find_skills" | "load_skill" | "find_tools" | "load_tool" |
         "web_search" | "web_fetch" | "submit_verdict" => Policy::Run,
         "schedule" if matches!(args["action"].as_str(), Some("list" | "runs")) => Policy::Run,
@@ -309,6 +311,7 @@ pub async fn allow(app: &App, session: Uuid, id: i64) -> Result<bool> {
     if row.is_none() { return Ok(false); }
     crate::tape::append_in(&mut tx, session, "allow", &json!({"by":"the owner","gate":id})).await?;
     tx.commit().await?;
+    crate::s1::learn::label_gate(&app.db, id, true).await;
     Ok(true)
 }
 

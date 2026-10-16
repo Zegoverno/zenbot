@@ -80,24 +80,18 @@ async fn duplicate_of(app: &App, domain: &str, name: &str, description: &str, bo
     if same.is_empty() {
         return None;
     }
-    if crate::score::scorer().is_some() && crate::score::private_ok() {
-        let mut criteria = serde_json::Map::new();
-        for s in &same {
-            criteria.insert(s.name.clone(), json!(s.description));
-        }
-        criteria.insert("none".into(), json!("None of them: the new skill does a different job"));
-        let questions = json!({ "same": { "type": "choice",
-            "instructions": "Does the new skill do the same job as one of the existing skills (so it should extend that one instead)?", "criteria": criteria } });
-        let state = json!({ "new_skill": { "name": name, "description": description, "instructions": zen_proto::head(body, 3000) } });
-        if let Ok(res) = crate::score::decide(app, &state, &questions).await {
-            if res["error"].is_null() {
-                let a = &res["answers"]["same"];
-                let choice = a["choice"].as_str().unwrap_or("none").to_string();
-                let p = a["probabilities"][&choice].as_f64().unwrap_or(0.0);
-                crate::agent::log_decision(&app.db, None, "skill_duplicate", &json!({ "skill": format!("{domain}/{name}") }), a, Some(&choice), Some(p), true, None).await;
-                return (choice != "none" && p >= 0.8).then_some(choice);
-            }
-        }
+    let mut options = serde_json::Map::new();
+    for s in &same {
+        options.insert(s.name.clone(), json!(s.description));
+    }
+    options.insert("none".into(), json!("None of them: the new skill does a different job"));
+    // s1/skill_duplicate.toml; without an answer, word overlap decides.
+    let facts = crate::s1::Facts::new(None)
+        .with("new_skill", json!({ "name": name, "description": description, "instructions": zen_proto::head(body, 3000) }))
+        .with("skills", Value::Object(options));
+    let d = crate::s1::decide(&app.db, "skill_duplicate", facts).await;
+    if d.answered {
+        return d.is("duplicate").then(|| d.choice("same").unwrap_or_default().to_string()).filter(|c| !c.is_empty());
     }
     same.iter().find(|s| overlap(&format!("{} {}", s.name, s.description), &format!("{name} {description}")) >= 0.6).map(|s| s.name.clone())
 }

@@ -215,33 +215,26 @@ pub async fn ensure(dir: &Path) -> Result<()> {
 /// Which page a note goes to, as System One judges it: a candidate's slug or "new", whether the
 /// page already records it, and whether it is sensitive. None when System One isn't available.
 async fn route(app: &App, note: &str, candidates: &[Page]) -> Option<(String, f64, f64, f64)> {
-    if crate::score::scorer().is_none() || !crate::score::private_ok() || candidates.is_empty() {
+    if candidates.is_empty() {
         return None;
     }
-    let mut criteria = serde_json::Map::new();
+    let mut options = serde_json::Map::new();
     let mut pages = serde_json::Map::new();
     for p in candidates {
-        criteria.insert(p.slug.clone(), json!(format!("{}: {}", p.title, zen_proto::head(&p.summary, 200))));
+        options.insert(p.slug.clone(), json!(format!("{}: {}", p.title, zen_proto::head(&p.summary, 200))));
         pages.insert(p.slug.clone(), json!({ "title": p.title, "aliases": p.aliases, "summary": zen_proto::head(&p.summary, 600), "timeline": p.entries.iter().take(15).collect::<Vec<_>>() }));
     }
-    criteria.insert("new".into(), json!("None of these pages is about it: it needs a page of its own"));
-    let questions = json!({
-        "page": { "type": "choice", "instructions": "Which wiki page is this note about? One page per concept, entity, decision or project.", "criteria": criteria },
-        "known": { "type": "bool", "instructions": "Does the page you chose already record what this note says (in its summary or timeline)?",
-                   "criteria": { "true": "Already recorded", "false": "Something new" } },
-        "sensitive": { "type": "bool", "instructions": "Does the note hold secrets (passwords, keys, tokens) or private personal data that shouldn't be kept in notes?",
-                       "criteria": { "true": "Sensitive", "false": "Fine to keep" } }
-    });
-    let state = json!({ "note": note, "pages": pages });
-    let res = crate::score::decide(app, &state, &questions).await.ok()?;
-    if !res["error"].is_null() {
+    options.insert("new".into(), json!("None of these pages is about it: it needs a page of its own"));
+    // s1/wiki_capture.toml; the page choice, `known` and `sensitive` are read here (capture applies
+    // `known` only to an existing page).
+    let facts = crate::s1::Facts::new(None).with("note", note).with("pages", Value::Object(pages)).with("candidates", Value::Object(options));
+    let d = crate::s1::decide(&app.db, "wiki_capture", facts).await;
+    if !d.answered {
         return None;
     }
-    let a = &res["answers"];
-    let page = a["page"]["choice"].as_str()?.to_string();
-    let p = a["page"]["probabilities"][&page].as_f64().or(a["page"]["confidence"].as_f64()).unwrap_or(0.0);
-    crate::agent::log_decision(&app.db, None, "capture", &json!({ "note": zen_proto::head(note, 300), "candidates": candidates.iter().map(|c| &c.slug).collect::<Vec<_>>() }), a, Some(&page), Some(p), true, None).await;
-    Some((page, p, a["known"]["probability"].as_f64().unwrap_or(0.0), a["sensitive"]["probability"].as_f64().unwrap_or(0.0)))
+    let page = d.choice("page")?.to_string();
+    let p = crate::s1::rules::choice_p(&d.answers["page"]).unwrap_or(0.0);
+    Some((page, p, d.prob("known").unwrap_or(0.0), d.prob("sensitive").unwrap_or(0.0)))
 }
 
 /// Whether a page's text has an entry labelled `web` (from a session that read untrusted content).

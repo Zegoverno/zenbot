@@ -32,7 +32,7 @@ fn embed_model() -> String {
 /// they go to the embedding provider only where System One may see private content (D-032,
 /// ZEN_S1_PRIVATE), and not with ZEN_EMBED=0.
 fn embed_key() -> Option<String> {
-    if !crate::config::get().embed || !crate::score::private_ok() {
+    if !crate::config::get().embed || !crate::s1::private_ok() {
         return None;
     }
     std::env::var("OPENROUTER_API_KEY").ok().filter(|k| !k.trim().is_empty())
@@ -603,16 +603,12 @@ async fn rerank(app: &App, q: &str, found: &[Found]) -> Option<Vec<(Found, f64)>
     if found.len() < 3 {
         return None;
     }
-    let judge = crate::score::Relevance {
-        point: "search_rerank",
-        need: ("query", q),
-        item: "result",
-        question: "Does {item} help answer `query`?",
-        yes: "Relevant",
-        no: "Not relevant",
-    };
     let items = found.iter().map(|f| json!({ "kind": f.kind, "title": f.title, "text": zen_proto::head(&f.snippet, 500) })).collect();
-    let probs = judge.judge(app, items).await?;
+    let ds = crate::s1::decide_items(&app.db, "search_rerank", crate::s1::Facts::new(None).with("query", q), items).await;
+    if !ds.iter().any(|d| d.answered) {
+        return None;
+    }
+    let probs: Vec<Option<f64>> = ds.iter().map(|d| d.prob("helps")).collect();
     let mut ranked: Vec<(Found, f64)> = found
         .iter()
         .zip(probs)

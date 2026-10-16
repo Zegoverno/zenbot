@@ -127,7 +127,9 @@ async fn run(cli: Cli) -> Result<()> {
             let disk = root_disk();
             let memory = c.get("/api/memory").await.unwrap_or(Value::Null);
             let jobs = c.get("/api/jobs").await.unwrap_or(Value::Null);
+            let s1 = c.get("/api/s1/check").await.unwrap_or(Value::Null);
             let status = json!({
+                "s1": s1,
                 "memory": memory_summary(&memory),
                 "jobs": jobs,
                 "engines": engines,
@@ -162,7 +164,7 @@ async fn run(cli: Cli) -> Result<()> {
                 for name in health["ignored_workers"].as_array().into_iter().flatten().filter_map(Value::as_str) {
                     println!("{:<9} ignored: not a known worker (remove it from ZEN_WORKERS in ~/.zenbot/env)", format!("worker:{}", for_stdout(name)));
                 }
-                // OpenRouter is only used for live scoring; it's shown with the scorer below.
+                // OpenRouter serves System One; it's shown on the s1 line below.
                 for (name, ok) in models["authenticated"].as_object().into_iter().flatten().filter(|(n, _)| *n != "openrouter") {
                     println!("{:<9} {}", for_stdout(name), if *ok == true { "signed in" } else { "NOT signed in" });
                 }
@@ -177,12 +179,14 @@ async fn run(cli: Cli) -> Result<()> {
                 if !jobs.is_null() {
                     println!("jobs      {}", for_stdout(&jobs_summary(&jobs)));
                 }
+                let s1_errors = s1["errors"].as_u64().unwrap_or(0);
+                let s1_files = if s1_errors > 0 { format!("  ({s1_errors} problem(s) in the decision files: zen s1 check)") } else { String::new() };
                 match models["scorer"].as_str() {
-                    None => println!("scorer    off (set ZEN_S1_MODEL to score sessions)"),
-                    Some(s) if s.starts_with("openrouter/") && models["authenticated"]["openrouter"] != true => {
-                        println!("scorer    {}  (NO key: set OPENROUTER_API_KEY)", for_stdout(s))
+                    None => println!("s1        off (set ZEN_S1_MODEL or write ~/.zenbot/s1/models.toml){s1_files}"),
+                    Some(_) if models["authenticated"]["openrouter"] != true => {
+                        println!("s1        {}  (NO key: set OPENROUTER_API_KEY){s1_files}", for_stdout(models["scorer"].as_str().unwrap_or("")))
                     }
-                    Some(s) => println!("scorer    {}", for_stdout(s)),
+                    Some(s) => println!("s1        {}{s1_files}", for_stdout(s)),
                 }
                 match &git_identity {
                     Some(id) => println!("git       {}", for_stdout(id)),
@@ -281,6 +285,7 @@ async fn run(cli: Cli) -> Result<()> {
             let r = c.post("/api/policy", json!({ "policy": p, "reason": format!("owner: {kind} -> {model}") })).await?;
             emit(json, &r, || format!("policy v{}", r["version"]));
         }
+        Cmd::S1 { cmd } => s1(&c, cmd, json).await?,
         Cmd::Tools { cmd } => {
             let (name, decision, sha) = cmd.parts();
             let res = c.post(&format!("/api/tools/{}/review", enc(name.trim_start_matches("made_"))), json!({ "decision": decision, "sha": sha })).await?;
@@ -406,4 +411,117 @@ async fn session_op(c: &Client, id: &str, method: reqwest::Method, body: Option<
     let id = c.resolve(id).await?;
     let v = c.call(method, &format!("/api/sessions/{id}"), body).await?;
     Ok((id, v))
+}
+
+/// `zen s1 …`: System One's decisions, files, models, replay, compare and proposals.
+async fn s1(c: &Client, cmd: Option<S1Cmd>, json: bool) -> anyhow::Result<()> {
+    match cmd {
+        None => {
+            let v = c.get("/api/s1").await?;
+            if json {
+                emit(true, &v, String::new);
+                return Ok(());
+            }
+            let files = &v["files"];
+            match files["models"]["default"].as_str() {
+                Some(d) => println!("System One: default model `{}` ({})", for_stdout(d), for_stdout(files["models"]["source"].as_str().unwrap_or(""))),
+                None => println!("System One is off: set ZEN_S1_MODEL or write ~/.zenbot/s1/models.toml"),
+            }
+            for d in v["decisions"].as_array().into_iter().flatten() {
+                let outcomes: Vec<String> = d["outcomes"].as_array().into_iter().flatten()
+                    .map(|o| format!("{} {}", o["outcome"].as_str().unwrap_or("-"), o["count"])).collect();
+                let latency = match (d["latency_ms"]["p50"].as_f64(), d["latency_ms"]["p95"].as_f64()) {
+                    (Some(a), Some(b)) => format!("{a:.0}/{b:.0} ms"),
+                    _ => "-".into(),
+                };
+                let labelled = d["labelled"].as_i64().unwrap_or(0);
+                let right = if labelled > 0 { format!(", right {} of {labelled}", d["correct"]) } else { String::new() };
+                println!("  {:<16} {:>5} calls  {}", for_stdout(d["decision"].as_str().unwrap_or("?")), d["calls"],
+                    dim(&format!("{} unavailable, {} blocked, {latency}, ${:.4}{right}  {}", d["unavailable"], d["blocked"], d["cost_usd"].as_f64().unwrap_or(0.0), outcomes.join(", "))));
+            }
+            let errors = files["errors"].as_u64().unwrap_or(0);
+            if errors > 0 {
+                println!("{errors} problem(s) in the decision files: zen s1 check");
+            }
+            if v["proposals"].as_u64().unwrap_or(0) > 0 {
+                println!("{} proposal(s) from the learner: zen s1 proposals", v["proposals"]);
+            }
+        }
+        Some(S1Cmd::Check) => {
+            let v = c.get("/api/s1/check").await?;
+            let errors = v["errors"].as_u64().unwrap_or(0);
+            if json {
+                emit(true, &v, String::new);
+            } else {
+                for p in v["problems"].as_array().into_iter().flatten() {
+                    for d in p["diags"].as_array().into_iter().flatten() {
+                        println!("{}:{}:{}  error  {}", for_stdout(p["path"].as_str().unwrap_or("")), d["line"], d["col"], for_stdout(d["message"].as_str().unwrap_or("")));
+                    }
+                }
+                let files = v["files"].as_array().map(|a| a.len()).unwrap_or(0);
+                let own = v["files"].as_array().into_iter().flatten().filter(|f| f["source"] != "built-in").count();
+                println!("{files} decisions in force ({own} from your files), {errors} error(s)");
+            }
+            if errors > 0 {
+                std::process::exit(1);
+            }
+        }
+        Some(S1Cmd::Models) => {
+            let v = c.get("/api/s1/models").await?;
+            emit(json, &v, || {
+                let mut s = format!("approved models ({}):", v["source"].as_str().unwrap_or(""));
+                for (name, m) in v["list"].as_object().into_iter().flatten() {
+                    let default = if v["default"].as_str() == Some(name) { "  (default)" } else { "" };
+                    s.push_str(&format!("\n  {name:<12} {}{default}  {}", m["id"].as_str().unwrap_or(""), m["note"].as_str().unwrap_or("")));
+                }
+                s
+            });
+        }
+        Some(S1Cmd::Replay { decision, file, last }) => {
+            let file = match file {
+                Some(p) => Some(std::fs::read_to_string(&p).map_err(|e| anyhow::anyhow!("reading {}: {e}", p.display()))?),
+                None => None,
+            };
+            let v = c.post("/api/s1/replay", json!({ "decision": decision, "file": file, "last": last })).await?;
+            emit(json, &v, || {
+                let mut s = format!("{}: {} recorded decisions, {} would change ({} to the right outcome, {} away from it)",
+                    v["decision"].as_str().unwrap_or(""), v["replayed"], v["changed"], v["now_right"], v["now_wrong"]);
+                for e in v["examples"].as_array().into_iter().flatten() {
+                    s.push_str(&format!("\n  #{}: {} -> {}", e["id"], e["was"].as_str().unwrap_or("-"), e["now"].as_str().unwrap_or("-")));
+                }
+                s
+            });
+        }
+        Some(S1Cmd::Compare { decision, models, last }) => {
+            let v = c.post("/api/s1/compare", json!({ "decision": decision, "models": models, "last": last })).await?;
+            emit(json, &v, || {
+                let mut s = format!("{}: {} recorded states", v["decision"].as_str().unwrap_or(""), v["states"]);
+                for m in v["models"].as_array().into_iter().flatten() {
+                    s.push_str(&format!("\n  {:<12} agrees {} of {}, right {} of {} labelled, {} ms, ${:.4}{}", m["model"].as_str().unwrap_or(""),
+                        m["agree_with_decided"], m["asked"], m["right"], m["labelled"], m["mean_ms"], m["cost_usd"].as_f64().unwrap_or(0.0),
+                        if m["failed"].as_u64().unwrap_or(0) > 0 { format!(", {} failed", m["failed"]) } else { String::new() }));
+                }
+                s
+            });
+        }
+        Some(S1Cmd::Proposals) => {
+            let v = c.get("/api/s1/proposals").await?;
+            emit(json, &v, || {
+                let items = v.as_array().cloned().unwrap_or_default();
+                if items.is_empty() {
+                    return "no proposals".into();
+                }
+                items.iter().map(|p| format!("#{} {}  (zen s1 approve {} | zen s1 reject {})", p["id"], p["summary"].as_str().unwrap_or(""), p["id"], p["id"])).collect::<Vec<_>>().join("\n")
+            });
+        }
+        Some(S1Cmd::Approve { id }) => {
+            let v = c.post(&format!("/api/s1/proposals/{id}"), json!({ "decision": "approve" })).await?;
+            emit(json, &v, || format!("proposal {id} applied to ~/.zenbot/s1/{}.toml", v["decision"].as_str().unwrap_or("")));
+        }
+        Some(S1Cmd::Reject { id }) => {
+            let v = c.post(&format!("/api/s1/proposals/{id}"), json!({ "decision": "reject" })).await?;
+            emit(json, &v, || format!("proposal {id} declined"));
+        }
+    }
+    Ok(())
 }

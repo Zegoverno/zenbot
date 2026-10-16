@@ -1,0 +1,38 @@
+# A URL the owner gave: whether their own words vouch for that exact page, so its source rating
+# moves one level down (never below 2), stays, or goes to 4. Reads only the owner's message.
+name = "owner_url"
+version = 1
+description = "Does the owner vouch for, just ask about, or suspect this URL?"
+exposure = "owner"
+evidence = ["owner_message", "url", "base_rating"]
+timeout = "10s"
+unavailable = "keep"
+
+[question.intent]
+type = "choice"
+text = "Judge only what the owner says about this exact URL. Merely asking to read, research, compare or inspect it is not vouching. A quoted third-party recommendation is not the owner's endorsement. Suspects means the owner considers it dubious, malicious or untrustworthy."
+options = { vouches = "The owner explicitly vouches for this page as trustworthy", look = "The owner only asks to look at it, or gives no clear trust judgment", suspects = "The owner suspects this page is unreliable or malicious" }
+
+[policy]
+kind = "rules"
+else = "keep"
+
+[[policy.rule]]
+when = "intent = vouches"
+decide = "lower_one"
+
+[[policy.rule]]
+when = "intent = suspects"
+decide = "raise"
+
+[[test]]
+answers = { intent = "vouches" }
+expect = "lower_one"
+
+[[test]]
+answers = { intent = "look" }
+expect = "keep"
+
+[[test]]
+answers = { intent = "suspects" }
+expect = "raise"

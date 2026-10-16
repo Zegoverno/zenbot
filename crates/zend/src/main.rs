@@ -20,7 +20,7 @@ mod mcp;
 mod measure;
 mod memory;
 mod mind;
-mod score;
+mod s1;
 mod search;
 mod secrets;
 mod skills;
@@ -193,6 +193,9 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         if let Err(e) = sources::rerate_once(&rerate_db).await { tracing::warn!("source rerating: {e:#}"); }
     });
+    // System One: decision files checked now (problems are logged), calibration curves loaded.
+    let _ = s1::status();
+    s1::learn::load(&db).await;
     if tape::repair(&db).await? > 0 {
         tracing::warn!("numbered tape blocks an older build wrote");
     }
@@ -245,7 +248,6 @@ async fn main() -> Result<()> {
     }
     tokio::spawn(dispatch(app.clone(), incoming));
     tokio::spawn(watchdog(app.clone()));
-    tokio::spawn(score::idle_loop(app.clone()));
     tokio::spawn(search::index_loop(app.clone()));
     tokio::spawn(jobs::run_loop(app.clone()));
 
@@ -255,6 +257,13 @@ async fn main() -> Result<()> {
         .route("/sources", get(list_sources).post(change_source))
         .route("/sources/rerate", axum::routing::post(rerate_sources))
         .route("/models", get(list_models))
+        .route("/s1", get(s1::api::stats))
+        .route("/s1/check", get(s1::api::check_files))
+        .route("/s1/models", get(s1::api::models))
+        .route("/s1/replay", axum::routing::post(s1::api::replay))
+        .route("/s1/compare", axum::routing::post(s1::api::compare))
+        .route("/s1/proposals", get(s1::api::proposals))
+        .route("/s1/proposals/{id}", axum::routing::post(s1::api::decide_proposal))
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/board", get(board))
         .route("/sessions/{id}", get(get_session).patch(update_session))

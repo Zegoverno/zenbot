@@ -1,5 +1,5 @@
 //! Workers: starting and supervising model workers, and routing models to them
-//! (docs/worker-protocol.md). System One runs in the kernel (score.rs).
+//! (docs/worker-protocol.md). System One runs in the kernel (s1/).
 
 use super::*;
 
@@ -184,7 +184,7 @@ pub(crate) async fn collect_models(app: &App) -> Value {
         }
     }
     // OpenRouter is called by the kernel only (workers run without its key), so the kernel reports it.
-    authenticated.insert("openrouter".into(), json!(score::openrouter_key()));
+    authenticated.insert("openrouter".into(), json!(crate::s1::openrouter_key()));
     *app.routes.lock().await = routes;
     *app.catalog.lock().await = catalog;
     let curated = visible_models(&all, std::env::var("ZEN_MODELS").ok().as_deref());
@@ -194,7 +194,7 @@ pub(crate) async fn collect_models(app: &App) -> Value {
         curated.first().and_then(|m| m["id"].as_str()).unwrap_or(&app.default_model).to_string()
     };
     json!({ "models": curated, "authenticated": authenticated, "default": default,
-            "scorer": score::scorer() })
+            "scorer": crate::s1::default_model() })
 }
 
 /// The models `failed` workers served before, from the current routes and catalog, by id.

@@ -1,0 +1,15 @@
+# `search` over sessions, memories and the wiki: how relevant each result is; the caller orders by
+# it (exact name and path hits stay on top).
+name = "search_rerank"
+version = 1
+description = "Does this result help answer the query?"
+exposure = "private"
+evidence = ["query"]
+item = "result"
+timeout = "30s"
+
+[question.helps]
+type = "yes/no"
+text = "Does {item} help answer `query`?"
+yes = "Relevant"
+no = "Not relevant"
