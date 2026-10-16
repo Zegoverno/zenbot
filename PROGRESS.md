@@ -6,6 +6,15 @@
 
 ---
 
+## 2026-10-15 — Stored provenance paths (D-062 step 3, stream B)
+
+MCP/made catalogs, job reports and report files, prompt memories and project instructions retain
+exact-snapshot numeric ratings and writer dependencies. Prompt instruction admission requires
+risk 0–1; contaminated content and metadata failures are withheld. Delivery records its writer
+edge atomically and serializes with source/target denial; made-code risk applies before execution.
+DB tests cover provenance, stale ratings, original-risk preservation and concurrent report denial.
+This is the provenance slice; controlled shell views and full attack/eval integration are separate.
+
 ## 2026-10-15 — Offline, read-only project code by default (D-063)
 
 Risky sessions run project code without network or workspace writes; private `/tmp` remains

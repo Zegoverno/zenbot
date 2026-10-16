@@ -161,6 +161,10 @@ async fn delegate(app: &AppState, session: Uuid, workspace: &std::path::Path, ar
         error.as_deref().map(|e| format!(", with an error: {e}")).unwrap_or_default()
     );
     let body = if answer.trim().is_empty() { "(no answer)".to_string() } else { answer };
+    // The parent now holds the child's words: a later denial of the child reaches it (D-062).
+    if risk < 5 {
+        crate::sources::depend(&app.db, session, &[child]).await?;
+    }
     let body = crate::taint::hand_over_rating(app,session,risk,"subagent",&child.to_string(),&body).await?;
     Ok((format!("{head}{body}"), error.is_some()))
 }

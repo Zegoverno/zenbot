@@ -329,9 +329,8 @@ pub fn drafts() -> Vec<Skill> {
 pub async fn instruction_index(db: &sqlx::PgPool, session: uuid::Uuid) -> anyhow::Result<String> {
     let mut admitted = Vec::new();
     for skill in scan(&root()) {
-        let risk = crate::sources::file_rating(db, &skill.dir.join("SKILL.md"), &skill.text).await?;
-        if risk <= 1 {
-            crate::sources::depend_file(db, session, &skill.text).await?;
+        // Same exact-byte, maximum-origin admission as prompt files (context::admit).
+        if crate::context::admit(db, session, &skill.text, 1).await?.is_some() {
             admitted.push(skill);
         }
     }

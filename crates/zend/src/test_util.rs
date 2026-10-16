@@ -26,3 +26,27 @@ impl AsRef<Path> for TestDir {
 impl Drop for TestDir {
     fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
 }
+
+/// A kernel with no workers on `db`, for database tests of kernel paths (`SOURCE_TEST_DB_URL`).
+pub(crate) fn app(db: sqlx::PgPool) -> crate::AppState {
+    use std::collections::{HashMap, HashSet};
+    use tokio::sync::Mutex;
+    std::sync::Arc::new(crate::App {
+        db,
+        workers: Vec::new(),
+        ignored_workers: Vec::new(),
+        routes: Mutex::new(HashMap::new()),
+        catalog: Mutex::new(HashMap::new()),
+        turns: Mutex::new(HashMap::new()),
+        token: String::new(),
+        workspace: std::env::temp_dir(),
+        repo: String::new(),
+        default_model: "faux/smoke".into(),
+        harness: "test".into(),
+        hubs: Mutex::new(HashMap::new()),
+        updater: std::sync::Arc::new(crate::update::Updater::new(std::env::temp_dir())),
+        compacting: Mutex::new(HashSet::new()),
+        waiters: Mutex::new(HashMap::new()),
+        background: Default::default(),
+    })
+}
