@@ -407,6 +407,43 @@ mod db {
         println!("deny/trust race: trust first {done}, deny first {changed}");
     }
 
+    /// Shell view: products registered, rated for readers, masked after a deny (fsview.rs).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn shell_products_are_masked_after_deny() {
+        let db = pool().await;
+        let app = crate::test_util::app(db.clone());
+        let dir = crate::test_util::TestDir::new("shell-view");
+        let ws = dir.canonicalize().unwrap();
+        // A host shell's product is registered at the writer's risk.
+        let writer = session(&db, 3, None).await;
+        let start = std::time::SystemTime::now();
+        let out = crate::tools::run_shell(&ws, "echo payload > made; echo ok > other", &[], crate::tools::Sandbox::None, &[], std::time::Duration::from_secs(10)).await.unwrap();
+        assert!(out.status.is_some());
+        crate::fsview::finish(&db, writer, &ws, start, true).await.unwrap();
+        // Before a deny: verify's whole-view rating is 3 and depends on the writer; nothing is masked.
+        let reader = session(&db, 1, None).await;
+        let view = crate::fsview::prepare(&db, &ws).await.unwrap();
+        assert!(view.masks.is_empty());
+        assert_eq!(view.exposure("nothing"), (1, vec![]), "short lines aren't matched");
+        view.rate_all(&db, reader).await.unwrap();
+        let risk: i16 = sqlx::query_scalar("SELECT risk FROM sessions WHERE id=$1").bind(reader).fetch_one(&db).await.unwrap();
+        assert_eq!(risk, 3);
+        // The deny reaches the reader that depended on it, and the products are masked for others.
+        deny(&app, writer, "owner /deny").await.unwrap();
+        assert!(stopped(&db, reader).await);
+        assert!(crate::fsview::finish(&db, reader, &ws, start, false).await.is_err(), "a stopped session's result is withheld");
+        let other = session(&db, 1, None).await;
+        let masks = crate::fsview::prepare(&db, &ws).await.unwrap().masks;
+        assert!(masks.contains(&ws.join("made")) && masks.contains(&ws.join("other")), "{masks:?}");
+        let out = crate::tools::run_shell(&ws, "cat made; echo end", &[], crate::tools::Sandbox::None, &masks, std::time::Duration::from_secs(10)).await.unwrap();
+        assert!(!out.text.contains("payload") && out.text.ends_with("end\n"), "{}", out.text);
+        assert!(!stopped(&db, other).await, "masked files don't stop unrelated work");
+        // Rewritten by the owner, the file is no longer the denied bytes and is visible again.
+        std::fs::write(ws.join("made"), "owner's own text").unwrap();
+        assert!(!crate::fsview::prepare(&db, &ws).await.unwrap().masks.contains(&ws.join("made")));
+    }
+
     /// A write registered by a session that is denied concurrently is hidden from every reader,
     /// whichever commits first; an edit that retains the denied bytes can't relabel them.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

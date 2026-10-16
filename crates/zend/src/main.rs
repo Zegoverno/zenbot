@@ -11,6 +11,7 @@ mod defaults;
 mod layout;
 mod delegate;
 mod dispatch;
+mod fsview;
 mod git;
 mod gate;
 mod jobs;

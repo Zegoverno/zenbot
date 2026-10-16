@@ -1058,7 +1058,7 @@ async fn run_system(app: &AppState, job: &Job) -> Result<Outcome> {
             let repo = PathBuf::from(&app.repo);
             let script = repo.join("scripts/update-engines.sh");
             anyhow::ensure!(script.exists(), "{} not found", script.display());
-            let shell = tools::run_shell(&repo, &format!("bash {}", shell_quote(&script.display().to_string())), &[], tools::Sandbox::None, Duration::from_secs(3600))
+            let shell = tools::run_shell(&repo, &format!("bash {}", shell_quote(&script.display().to_string())), &[], tools::Sandbox::None, &[], Duration::from_secs(3600))
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?;
             let text = crate::secrets::mask_off_thread(shell.text).await;

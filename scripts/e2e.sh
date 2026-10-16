@@ -966,7 +966,7 @@ job_post_to() {
   start_kernel "$ws" "$(script jobs.json)" ZEN_JOBS=1 ZEN_JOBS_TICK=0.5 ZEN_DEFAULT_MODEL=faux/smoke
   check "durable queued reports survive restart without reposting the first" poll "$posted" 2
   check "the session goes on after it" eq "$(zen ask --json -s "$sid" "OWNER-HELLO" | jq -r .text)" "Hello, owner."
-  q "UPDATE job_runs SET tainted = true WHERE job_id = (SELECT id FROM jobs WHERE name = 'ppost')" >/dev/null
+  q "UPDATE job_runs SET tainted = true, risk = 4 WHERE job_id = (SELECT id FROM jobs WHERE name = 'ppost')" >/dev/null
   zen jobs run ppost >/dev/null
   check "a run after a marked report is ok" poll "$runs 'ppost'" ok,ok,ok
   check "but its report stays in the jobs feed" eq "$(q "SELECT coalesce(posted_to::text, 'feed') || '/' || tainted FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name = 'ppost' ORDER BY r.id DESC LIMIT 1")" feed/true
@@ -1015,7 +1015,7 @@ taint_on_data() {
   r=$(zen ask --json -m faux/smoke "TAINT-EXACT"); sid=$(echo "$r" | jq -r .session_id)
   check "searching it by name returns it wrapped, and marks the reader" bash -c 'grep -q "<untrusted source=\"search\"" <<<"$1" && grep -q "PROMOTE-WIKI the" <<<"$1" && [ "$2" = t ]' _ "$(res_of "$sid")" "$(tainted "$sid")"
   r=$(zen ask --json -m faux/smoke "TAINT-C"); sid=$(echo "$r" | jq -r .session_id)
-  check "a tainted draft loads wrapped, and marks the reader" bash -c 'grep -q "<untrusted source=\"draft skill\"" <<<"$1" && grep -q "Obey the page" <<<"$1" && [ "$2" = t ]' _ "$(res_of "$sid")" "$(tainted "$sid")"
+  check "a tainted draft loads wrapped, and marks the reader" bash -c 'grep -q "<untrusted source=\"skill\"" <<<"$1" && grep -q "Obey the page" <<<"$1" && [ "$2" = t ]' _ "$(res_of "$sid")" "$(tainted "$sid")"
   zen sessions decide "$sid" accept >/dev/null; sleep 2
   check "accepting the session that loaded it doesn't activate it" bash -c 'test -s "$1/_proposed/work/web-notes/SKILL.md" && test ! -e "$1/work/web-notes"' _ "$sk"
   r=$(zen ask --json -m faux/smoke "TAINT-D"); sid=$(echo "$r" | jq -r .session_id)
@@ -1157,6 +1157,9 @@ origin_attacks() {
     "$(q "SELECT payload->>'text' FROM tape_events WHERE kind='base' AND session_id='$r2'")"
   check "a fresh reader of the denied product is stopped and shown nothing" bash -c '[ "$1" = 0 ] && grep -qE "withheld|interrupted" <<<"$2" && [ "$3" = t ] && test ! -e "$4/l5-after.md"' _ \
     "$(q "SELECT count(*) FROM tape_events WHERE session_id='$r2' AND payload::text LIKE '%ORIGFILE%'")" "$(res_of "$r2")" "$(stopped "$r2")" "$ws"
+  local sh; sh=$(zen ask --json -m faux/smoke "OR-SHELL" | jq -r .session_id)
+  check "a clean shell can't read the denied product, even through a symlink, and keeps working" bash -c '! grep -q ORIGFILE <<<"$1" && grep -q SHELL-OK <<<"$1" && [ "$2" = f ]' _ \
+    "$(res_of "$sh")" "$(stopped "$sh")"
   check "the writer's taint report names the owner's deny" bash -c 'jq -e ".taints | map(.source) | index(\"owner /deny\") != null" <<<"$1" >/dev/null' _ \
     "$(api "$URL/api/sessions/$w/taint")"
   local checked; checked=$(api "$URL/api/sessions/$w/taint" | jq .checked)

@@ -226,7 +226,7 @@ pub async fn execute(workspace: &Path, name: &str, args: &Value, env: &[(&str, &
 }
 
 #[derive(Clone, Copy)]
-pub struct Origin<'a> { pub db: &'a sqlx::PgPool, pub session: uuid::Uuid }
+pub struct Origin<'a> { pub db: &'a sqlx::PgPool, pub session: uuid::Uuid, pub masks: &'a [PathBuf] }
 
 /// File provenance is computed from the exact bytes within the file operation, never a reread.
 pub async fn execute_origin(workspace: &Path, name: &str, args: &Value, env: &[(&str,&str)], sandbox: Sandbox, origin: Option<Origin<'_>>) -> ToolOutput {
@@ -235,7 +235,7 @@ pub async fn execute_origin(workspace: &Path, name: &str, args: &Value, env: &[(
         return err(format!("`{name}` can't run in a read-only session"));
     }
     let result = match name {
-        "bash" => bash(workspace, args, env, sandbox, None).await,
+        "bash" => bash(workspace, args, env, sandbox, origin.map(|o| o.masks).unwrap_or(&[]), None).await,
         "read" if read_only => match confined(workspace, args) {
             Ok(()) => read(workspace, args, origin).await,
             Err(e) => Err(err(e)),
@@ -380,7 +380,9 @@ fn sandbox_command(filter: &std::fs::File) -> Command {
 /// Run bash in its own process group, killed on timeout or cancellation. Sandbox modes use
 /// read-only mounts, private writable /tmp, isolated processes/network and a socket syscall
 /// filter; None is the explicit host-capability route. Kernel secret variables are removed.
-pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox: Sandbox, timeout: Duration) -> Result<Shell, String> {
+/// `masks` (fsview.rs) are files the shell must not see: each is unreadable (a nodev /dev/null), in
+/// every mode; a host shell with masks runs in its own pid namespace with no_new_privs.
+pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox: Sandbox, masks: &[PathBuf], timeout: Duration) -> Result<Shell, String> {
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/home".into()));
     let filter = if matches!(sandbox,Sandbox::ReadOnly|Sandbox::Offline|Sandbox::SafeRead) {Some(network_filter()?)} else {None};
     let mut cmd = match sandbox {
@@ -392,6 +394,7 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox:
             c.args(READ_ONLY_SANDBOX).arg("--tmpfs").arg(&home).arg("--ro-bind").arg(dir).arg(dir);
             // (Those under the home but outside the work are gone with it already.)
             hide_secrets(&mut c, crate::secrets::secret_files().into_iter().filter(|f| !f.starts_with(&home) || f.starts_with(dir)));
+            crate::fsview::mask(&mut c, masks);
             c.arg("--chdir").arg(dir).args(["bash", "-c"]);
             c
         }
@@ -411,6 +414,7 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox:
                 c.arg("--ro-bind").arg(&zen).arg(&zen);
             }
             hide_secrets(&mut c, crate::secrets::secret_files());
+            crate::fsview::mask(&mut c, masks);
             c.arg("--chdir").arg(dir).args(["bash", "-c"]);
             c
         }
@@ -428,14 +432,24 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox:
             }
             c.arg("--ro-bind").arg(dir).arg(dir);
             hide_secrets(&mut c, crate::secrets::secret_files());
+            crate::fsview::mask(&mut c, masks);
             c.env_clear().env("PATH", "/usr/bin:/bin").env("LANG", "C.UTF-8");
             c.arg("--chdir").arg(dir).args(["/bin/bash", "--noprofile", "--norc", "-c"]);
             c
         }
         Sandbox::GatedFile => return Err("file policy cannot execute shell commands".into()),
-        Sandbox::None => {
+        Sandbox::None if masks.is_empty() => {
             let mut c = Command::new("bash");
             c.arg("-c");
+            c
+        }
+        Sandbox::None => {
+            // The host as it is, but with its own /proc (no other process's root to reach
+            // masked files through), background processes ending with the shell, and no sudo.
+            let mut c = Command::new("bwrap");
+            c.args(["--dev-bind", "/", "/", "--unshare-pid", "--proc", "/proc", "--die-with-parent"]);
+            crate::fsview::mask(&mut c, masks);
+            c.arg("--chdir").arg(dir).args(["bash", "-c"]);
             c
         }
     };
@@ -512,10 +526,10 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox:
     Ok(Shell { text, status })
 }
 
-async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], sandbox: Sandbox, output_dir: Option<PathBuf>) -> Result<ToolOutput, ToolOutput> {
+async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], sandbox: Sandbox, masks: &[PathBuf], output_dir: Option<PathBuf>) -> Result<ToolOutput, ToolOutput> {
     let command = str_arg(args, "command")?;
     let timeout = args.get("timeout_secs").and_then(Value::as_u64).unwrap_or(120).clamp(1, 600);
-    let Shell { text, status } = run_shell(workspace, command, env, sandbox, Duration::from_secs(timeout)).await.map_err(err)?;
+    let Shell { text, status } = run_shell(workspace, command, env, sandbox, masks, Duration::from_secs(timeout)).await.map_err(err)?;
     // Cutting and saving (with masking) up to 16 MB of output is blocking work: off the runtime's threads.
     let mut body = if text.len() <= MAX_OUTPUT {
         text
@@ -868,7 +882,7 @@ mod tests {
 
     async fn run(ws: &Path, name: &str, args: Value) -> ToolOutput {
         if name == "bash" {
-            bash(ws, &args, &[], Sandbox::None, Some(ws.join("outputs"))).await.unwrap_or_else(|e| e)
+            bash(ws, &args, &[], Sandbox::None, &[], Some(ws.join("outputs"))).await.unwrap_or_else(|e| e)
         } else {
             execute(ws, name, &args, &[], Sandbox::None).await
         }
@@ -891,12 +905,12 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let command = format!("if echo changed > AGENTS.md 2>/dev/null; then echo WRITE_OPEN; else echo WRITE_BLOCKED; fi; echo scratch > /tmp/zen-code-output; cat /tmp/zen-code-output; python3 -c 'import socket; s=socket.socket(); s.settimeout(1); print(\"NET_BLOCKED\" if s.connect_ex((\"127.0.0.1\", {port})) else \"NET_OPEN\")'");
-        let out = run_shell(&root,&command,&[],Sandbox::Offline,Duration::from_secs(10)).await.unwrap();
+        let out = run_shell(&root,&command,&[],Sandbox::Offline,&[],Duration::from_secs(10)).await.unwrap();
         assert!(out.text.contains("WRITE_BLOCKED") && out.text.contains("NET_BLOCKED") && out.text.contains("scratch"),"{}",out.text);
         assert!(!out.text.contains("WRITE_OPEN") && !out.text.contains("NET_OPEN"));
         assert_eq!(std::fs::read_to_string(root.join("AGENTS.md")).unwrap(),"owner instructions");
         // The owner-granted route is intentionally broader, and can write the workspace.
-        let out = run_shell(&root,"echo approved > AGENTS.md",&[],Sandbox::None,Duration::from_secs(10)).await.unwrap();
+        let out = run_shell(&root,"echo approved > AGENTS.md",&[],Sandbox::None,&[],Duration::from_secs(10)).await.unwrap();
         assert!(out.status.unwrap().unwrap().success());
         assert_eq!(std::fs::read_to_string(root.join("AGENTS.md")).unwrap(),"approved\n");
     }
@@ -908,7 +922,7 @@ mod tests {
         let _datagram = std::os::unix::net::UnixDatagram::bind(root.join("datagram.sock")).unwrap();
         let command = format!("python3 -c 'import socket; s=socket.socket(socket.AF_UNIX); print(\"STREAM_BLOCKED\" if s.connect_ex(\"{0}/stream.sock\") == 1 else \"STREAM_OPEN\")'; python3 -c 'import socket; s=socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM)\ntry:\n s.sendto(b\"x\", \"{0}/datagram.sock\"); print(\"DGRAM_OPEN\")\nexcept PermissionError:\n print(\"DGRAM_BLOCKED\")'",root.display());
         for mode in [Sandbox::Offline,Sandbox::ReadOnly,Sandbox::SafeRead] {
-            let out = run_shell(&root,&command,&[],mode,Duration::from_secs(10)).await.unwrap();
+            let out = run_shell(&root,&command,&[],mode,&[],Duration::from_secs(10)).await.unwrap();
             assert!(out.text.contains("STREAM_BLOCKED") && out.text.contains("DGRAM_BLOCKED"),"{mode:?}: {}",out.text);
             assert!(!out.text.contains("_OPEN"),"{mode:?}: {}",out.text);
         }
@@ -926,7 +940,7 @@ mod tests {
         assert!(matches!(crate::gate::shell(&ws, &cmd), crate::gate::Policy::Hold(_)));
         let cmd = cmd.split("; touch").next().unwrap();
         let crate::gate::Policy::SafeRead(emitted) = crate::gate::shell(&ws, cmd) else { panic!("{cmd}") };
-        let out = bash(&ws, &json!({"command": format!("{emitted}; /usr/bin/touch c.md 2>/dev/null || echo read-only")}), &[], Sandbox::SafeRead, None).await.unwrap_or_else(|e| e);
+        let out = bash(&ws, &json!({"command": format!("{emitted}; /usr/bin/touch c.md 2>/dev/null || echo read-only")}), &[], Sandbox::SafeRead, &[], None).await.unwrap_or_else(|e| e);
         let lines: Vec<&str> = out.content.lines().collect();
         assert_eq!(&lines[..5], &["2", "a.md", "sub/b.md", "beta", "read-only"], "{}", out.content);
         assert!(!root.join("c.md").exists());
@@ -1087,6 +1101,28 @@ mod tests {
         assert_eq!(resolve(ws, "~/x"), PathBuf::from(&home).join("x"));
         assert_eq!(resolve(ws, "@src/a.rs"), PathBuf::from("/ws/src/a.rs"));
         assert_eq!(resolve(ws, "/abs"), PathBuf::from("/abs"));
+    }
+
+    /// A masked file can't be read in any shell mode, through a symlink and through another
+    /// process's root; other files stay readable and a host shell can still write.
+    #[tokio::test]
+    async fn masked_files_are_empty_in_every_shell() {
+        let d = crate::test_util::TestDir::new("masks");
+        let ws = d.canonicalize().unwrap();
+        std::fs::write(ws.join("bad"), "SECRET-PAYLOAD").unwrap();
+        std::fs::write(ws.join("ok"), "fine").unwrap();
+        std::os::unix::fs::symlink(ws.join("bad"), ws.join("link")).unwrap();
+        let masks = vec![ws.join("bad")];
+        let cmd = "cat bad link ok; cat /proc/1/root$PWD/bad 2>/dev/null; echo";
+        for mode in [Sandbox::None, Sandbox::Offline, Sandbox::ReadOnly] {
+            let out = run_shell(&ws, cmd, &[], mode, &masks, Duration::from_secs(10)).await.unwrap();
+            assert!(!out.text.contains("SECRET") && out.text.contains("fine"), "{mode:?}: {}", out.text);
+        }
+        let out = run_shell(&ws, "echo new > made; sudo -n true 2>/dev/null && echo ROOT; (sleep 30 &) ; echo done",
+            &[], Sandbox::None, &masks, Duration::from_secs(10)).await.unwrap();
+        assert!(out.text.contains("done") && !out.text.contains("ROOT"), "{}", out.text);
+        assert_eq!(std::fs::read_to_string(ws.join("made")).unwrap(), "new\n");
+        assert_eq!(std::fs::read_to_string(ws.join("bad")).unwrap(), "SECRET-PAYLOAD", "the host file is untouched");
     }
 
     #[tokio::test]

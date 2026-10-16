@@ -40,7 +40,7 @@ the discount, so anything that changes must come after everything that doesn't.
   instructions never change mid-session; a memory saved with `remember` shows from the next session.
   Stored content a tainted session wrote (a memory, a draft skill, a wiki page with `web` entries, a
   job's report) arrives as untrusted content and taints the session that reads it
-  (`taint::hand_over`); a job run's `<last_report>` from such a run taints the run from its start.
+  (`taint::hand_over_rating`); a job run's `<last_report>` from such a run taints the run from its start.
 - **Instructions are fixed for the session.** They are written once on the first turn (a `base`
   block on the tape), stored with the tools (`envelopes`), and reused unchanged, so editing an AGENTS.md takes effect in the next session. An instruction file found
   mid-session (a project below the workspace) arrives once, attached to the tool result that touched

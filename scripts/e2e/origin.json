@@ -17,6 +17,7 @@
   {"when": "OR-SLOW", "tool": "write", "args": {"path": "s-note.md", "content": "ORIGSLOW product\n"}},
   {"when": "OR-SLOW", "tool": "bash", "args": {"command": "sleep 25; echo slow-too-late"}},
   {"when": "OR-SLOW", "tool": "write", "args": {"path": "s-late.md", "content": "must not be written\n"}},
+  {"when": "OR-SHELL", "tool": "bash", "args": {"command": "cat w-note.md; ln -s w-note.md alias.md; cat alias.md; echo SHELL-OK"}},
   {"when": "OR-AFTER", "tool": "read", "args": {"path": "HOMEZEN/global/wiki/origwiki-harbour.md"}},
   {"when": "OR-AFTER", "tool": "read", "args": {"path": "w-note.md"}},
   {"text": "Done."}

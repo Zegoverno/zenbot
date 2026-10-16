@@ -237,6 +237,17 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                         if let Some(why) = agent::protected_refusal(&app.db, id, kind.as_deref(), &workspace, &name, &args, true).await {
                             return tools::ToolOutput { rating: None, content: why, is_error: true };
                         }
+                        // A shell's view is rated (and its masks found) before the gate decides on it.
+                        let view = if matches!(name.as_str(), "bash" | "verify") {
+                            let view = match crate::fsview::prepare(&app.db, &workspace).await {
+                                Ok(v) if name == "verify" => v.rate_all(&app.db, id).await.map(|_| v),
+                                v => v,
+                            };
+                            match view {
+                                Ok(v) => v,
+                                Err(e) => return tools::ToolOutput { rating: None, content: format!("not run: the shell's view couldn't be checked ({e:#})"), is_error: true },
+                            }
+                        } else { crate::fsview::View::default() };
                         let policy = if read_only { Ok(crate::gate::Policy::Run) }
                             else { crate::gate::check(app, id, &workspace, &name, &args).await };
                         let policy = match policy {
@@ -282,7 +293,21 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                                 if let crate::gate::Policy::SafeRead(command) = &policy {
                                     execute_args["command"] = json!(command);
                                 }
-                                let mut out = tools::execute_origin(&workspace, &name, &execute_args, &env, sandbox, Some(tools::Origin {db:&app.db,session:id})).await;
+                                let start = std::time::SystemTime::now();
+                                let mut out = tools::execute_origin(&workspace, &name, &execute_args, &env, sandbox, Some(tools::Origin {db:&app.db,session:id,masks:&view.masks})).await;
+                                if name == "bash" {
+                                    // What the output shows of rated files rates it, as a `read` would.
+                                    let (risk, writers) = view.exposure(&out.content);
+                                    let shown = async {
+                                        crate::fsview::finish(&app.db, id, &workspace, start, sandbox == tools::Sandbox::None).await?;
+                                        crate::fsview::record(&app.db, id, risk, &writers).await?;
+                                        crate::taint::hand_over_rating(app, id, risk, "shell", args["command"].as_str().unwrap_or(""), &out.content).await
+                                    };
+                                    match shown.await {
+                                        Ok(content) => out.content = content,
+                                        Err(e) => out = tools::ToolOutput { rating: None, content: format!("{e:#}"), is_error: true },
+                                    }
+                                }
                                 // Stored content a tainted session wrote is untrusted however it's read.
                                 if name == "read" && !out.is_error {
                                     if let Some(rating) = &out.rating {

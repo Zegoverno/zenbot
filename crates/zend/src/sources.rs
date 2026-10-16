@@ -334,7 +334,7 @@ Result about {echo}
         sqlx::query("INSERT INTO sessions(id,title,model,risk) VALUES($1,'clean reader','faux/smoke',1)")
             .bind(reader).execute(&db).await.unwrap();
         let out = crate::tools::execute_origin(&dir,"read",&json!({"path":"page.md"}),&[],crate::tools::Sandbox::None,
-            Some(crate::tools::Origin {db:&db,session:reader})).await;
+            Some(crate::tools::Origin {db:&db,session:reader,masks:&[]})).await;
         assert!(!out.is_error,"{}",out.content);
         assert_eq!(out.rating.unwrap().risk,3);
         assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM session_inputs WHERE reader=$1 AND writer=$2")

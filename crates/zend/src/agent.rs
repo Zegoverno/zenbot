@@ -458,8 +458,8 @@ pub async fn log_decision(db: &PgPool, session: Option<Uuid>, point: &str, input
 
 /// A criterion's check, run by the kernel like the bash tool (its own process group, killed on a
 /// timeout or an abort, output capped and masked, in the session's shell sandbox).
-async fn run_check(dir: &Path, run: &str, expect: Option<&str>, sandbox: tools::Sandbox) -> Value {
-    match tools::run_shell(dir, run, &[], sandbox, Duration::from_secs(600)).await {
+async fn run_check(dir: &Path, run: &str, expect: Option<&str>, sandbox: tools::Sandbox, masks: &[PathBuf]) -> Value {
+    match tools::run_shell(dir, run, &[], sandbox, masks, Duration::from_secs(600)).await {
         Ok(tools::Shell { text, status: Some(Ok(status)) }) => {
             let text = crate::secrets::mask_off_thread(text).await;
             let tail = zen_proto::tail(&text, 3000);
@@ -478,7 +478,7 @@ async fn diff_from(repo: &Path, base: &str) -> String {
     // Git reads programmable local configuration; even gathering a diff stays read-only/offline.
     let quoted = format!("'{}'", base.replace('\'', "'\\''"));
     let output = |command: String| async move {
-        tools::run_shell(repo, &command, &[], tools::Sandbox::ReadOnly, Duration::from_secs(30))
+        tools::run_shell(repo, &command, &[], tools::Sandbox::ReadOnly, &[], Duration::from_secs(30))
             .await.map(|s| s.text).unwrap_or_default()
     };
     let mut d = output(format!("git diff --end-of-options {quoted}")).await;
@@ -587,6 +587,11 @@ async fn verify(app: &AppState, session: Uuid, workspace: &Path, args: &Value, p
     let base = args["base"].as_str().filter(|b| !b.trim().is_empty()).unwrap_or("HEAD").to_string();
     app.emit(session, json!({ "type": "status", "text": format!("verifying: running {} check(s)", criteria.iter().filter(|c| c["run"].is_string()).count()) })).await;
     let mut checks = serde_json::Map::new();
+    let masks = match crate::fsview::prepare(&app.db, &dir).await {
+        Ok(v) => v.masks,
+        Err(e) => return err(format!("not run: the shell's view couldn't be checked ({e:#})")),
+    };
+    let start = std::time::SystemTime::now();
     // A criterion's command is the session's shell too: sandboxed once the session is tainted.
     let granted = matches!(policy,crate::gate::Policy::Granted);
     let sandbox = if granted {tools::Sandbox::None} else {crate::taint::shell_sandbox(&app.db, session).await};
@@ -601,8 +606,11 @@ async fn verify(app: &AppState, session: Uuid, workspace: &Path, args: &Value, p
                 crate::gate::Policy::Hold(why) => return err(crate::gate::held_note(why)),
                 _ => (run, sandbox),
             };
-            checks.insert(c["id"].as_str().unwrap_or("").to_string(), run_check(&dir, command, c["expect"].as_str(), boundary).await);
+            checks.insert(c["id"].as_str().unwrap_or("").to_string(), run_check(&dir, command, c["expect"].as_str(), boundary, &masks).await);
         }
+    }
+    if let Err(e) = crate::fsview::finish(&app.db, session, &dir, start, sandbox == tools::Sandbox::None).await {
+        return err(format!("{e:#}"));
     }
     let any_failed = checks.values().any(|c| c["ok"] != true);
     let judgment = criteria.iter().any(|c| !c["run"].is_string());

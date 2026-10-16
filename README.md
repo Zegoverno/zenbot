@@ -58,7 +58,7 @@ zen -e xhigh     # thinking level (default: the model's; `zen models` lists them
 zen --inline     # no full screen: the conversation goes to terminal scrollback, like Claude Code (or ZEN_INLINE=1)
 ```
 
-Inside: `/new`, `/resume`, `/board`, `/model`, `/effort`, `/done`, `/rename <title>`, `/files`, `/open [file]`, `/close`, `/mouse` (wheel scrolling off, so the terminal can select text), `/archive`, `/jobs`, `/skills`, `/tools` (see below), `/trust` (see Web), `/upgrade`, `/restart`, `/help`, `/exit`. After each turn zenbot names the session (until you `/rename` it) and may suggest your next prompt in grey in the input: Tab takes it, then Enter sends it or you edit it first; typing your own replaces it (`zen suggestions` shows what became of them). Enter sends; Shift+Enter (or Alt+Enter, Ctrl+J) starts a new line; Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
+Inside: `/new`, `/resume`, `/board`, `/model`, `/effort`, `/done`, `/rename <title>`, `/files`, `/open [file]`, `/close`, `/mouse` (wheel scrolling off, so the terminal can select text), `/archive`, `/jobs`, `/skills`, `/tools` (see below), `/trust` (see Web), `/allow` and `/deny` (see Actions after outside reads), `/upgrade`, `/restart`, `/help`, `/exit`. After each turn zenbot names the session (until you `/rename` it) and may suggest your next prompt in grey in the input: Tab takes it, then Enter sends it or you edit it first; typing your own replaces it (`zen suggestions` shows what became of them). Enter sends; Shift+Enter (or Alt+Enter, Ctrl+J) starts a new line; Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
 
 `/done` records your verdict on the work so far: *accept* (done and good), *more* (same goal, keep working), *reshape* (the framing was wrong) or *drop*. Verdicts are the ground truth zenbot is measured and tuned by.
 
@@ -119,6 +119,10 @@ are held before effect. A held action makes the session **untrusted**.
 once for ten minutes. In Matrix use `!allow` and `!allow yes`. This does not trust the whole
 session. Review scripts/configuration the action will execute too: approval binds arguments,
 not every referenced file's contents. `/trust` remains the broader session override.
+
+`/deny` (Matrix: `!deny`) stops a session you don't trust and marks what it produced: every session
+that read it stops too, and shells no longer see the files it wrote (they read as "Permission
+denied"; unrelated work goes on). `/trust` on it lifts exactly that.
 
 ## Settings you might set
 
