@@ -3,8 +3,8 @@
 //! Matrix room is one zen session, and job reports go to a "zen jobs" room. It answers only the
 //! owner's Matrix ID (`MATRIX_OWNER`), only end-to-end encrypted messages from the owner's
 //! cross-signed devices, and only in encrypted rooms it shares with the owner alone (the rules
-//! are in trust.rs). Queue reactions are the narrow plaintext exception Matrix requires: owner
-//! account, pinned identity, checked private room and exact durable bot-event mapping (docs/matrix.md).
+//! are in trust.rs). Queue reactions require the same verified encrypted device authentication.
+//! Ordinary plaintext reactions cannot authorize; use encrypted !queue commands (docs/matrix.md).
 //!
 //!   zen-matrix login         sign in once: a device, cross-signing and key backup (prints where
 //!                            the recovery key was saved), then the rooms
@@ -438,12 +438,10 @@ impl Bridge {
     async fn on_queue_reaction(&self,ev:OriginalSyncReactionEvent,room:Room,enc:Option<EncryptionInfo>) -> Result<()> {
         if room.state()!=RoomState::Joined || ev.sender!=self.owner {return Ok(())}
         let check=self.room_check(&room).await?;
-        // Matrix reactions are plaintext even in encrypted rooms (matrix-sdk room/futures.rs).
-        // This narrow exception accepts only the server-authenticated owner account, in a checked
-        // private room with the pinned identity, targeting a durable bot queue event. If a client
-        // does encrypt a reaction, require the ordinary cross-signed-device checks as well.
+        // Plain reactions carry no authenticated device identity. Never authorize from them.
         if check!=RoomCheck::Ok || !self.owner_identity_holds(&room).await? {return Ok(())}
-        if enc.is_some() && !matches!(sealed(&ev.sender,enc.as_ref()),Sealed::CrossSigned) {return Ok(())}
+        if trust::message(self.owner.as_str(),self.bot.as_str(),ev.sender.as_str(),
+            &sealed(&ev.sender,enc.as_ref()),&check)!=trust::Verdict::Act {return Ok(())}
         let decision=match ev.content.relates_to.key.as_str() {"✅"=>"approve","❌"=>"reject","🛑"=>"deny",_=>return Ok(())};
         let mapkey=serde_json::to_string(&(room.room_id().as_str(),ev.content.relates_to.event_id.as_str()))?;
         let key=self.state.lock().await.queue_messages.get(&mapkey).cloned();
@@ -473,11 +471,12 @@ impl Bridge {
         for item in self.kernel.queue().await? {
             let key=format!("{}/{}",item["kind"].as_str().unwrap_or(""),item["id"]);
             if self.state.lock().await.queue_posted.contains(&key) {continue}
-            let md=format!("**Approval queue {key}** · {} · risk {}\n\n{}\n\nReason: {}\n\n✅ approve once · ❌ reject (no retry) · 🛑 deny session (actions only).\n\n!queue lists pending items.",
+            let command_key=key.replace('/'," ");
+            let md=format!("**Approval queue {key}** · {} · risk {}\n\n{}\n\nReason: {}\n\nSend encrypted !queue approve {command_key}, !queue reject {command_key}, or !queue deny {command_key} (actions only). Plain reactions cannot authorize.\n\n!queue lists pending items.",
                 item["title"].as_str().unwrap_or("source proposal"),item["risk"],item["summary"].as_str().unwrap_or(""),item["reason"].as_str().unwrap_or(""));
             let sent=room.send(content(&md,true)).await?;
             let mut s=self.state.lock().await;
-            s.queue_messages.insert(serde_json::to_string(&(room.room_id().as_str(),sent.event_id.as_str()))?,key.clone());
+            s.queue_messages.insert(serde_json::to_string(&(room.room_id().as_str(),sent.response.event_id.as_str()))?,key.clone());
             s.queue_posted.insert(key);
             s.save(&self.cfg.dir)?;
         }

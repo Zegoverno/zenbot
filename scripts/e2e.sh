@@ -276,9 +276,10 @@ JSON
 # searxng_stub.py on the e2e port + 2 (ZEN_SEARXNG_URL).
 web_tools() {
   local ws; ws=$(new_workspace web)
-  local port=$((PORT + 2))
+  local port=$((PORT + 2)) s1port=$((PORT+19))
+  python3 "$REPO/scripts/e2e/systemone_stub.py" "$s1port" & local s1srv=$!
   python3 "$REPO/scripts/e2e/searxng_stub.py" "$port" & local srv=$!
-  start_kernel "$ws" "$(script reach.json)" ZEN_SEARXNG_URL="http://127.0.0.1:$port"
+  start_kernel "$ws" "$(script reach.json)" ZEN_SEARXNG_URL="http://127.0.0.1:$port" ZEN_S1_URL="http://127.0.0.1:$s1port/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key
   local r sid; r=$(zen ask --json -m faux/smoke "web please"); sid=$(echo "$r" | jq -r .session_id)
   check "localhost and metadata refused, search ran, remember ran, prompt file, skill and mcp.json writes refused" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" \
     web_fetch:true,web_fetch:true,web_search:false,remember:false,edit:true,write:true,write:true
@@ -293,7 +294,8 @@ web_tools() {
   check "no session writes mcp.json" bash -c 'grep -q "mcp.json is the owner.s own configuration" <<<"$1" && ! grep -qs planted "$2"' _ "$res" "$TMP/home/.zenbot/mcp.json"
   check "its memory counts as inference" eq "$(q "SELECT source FROM memories WHERE text LIKE 'Something read on the web.%'")" inferred
   q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART" >/dev/null  # the memory scenarios start from none
-  kill "$srv" 2>/dev/null || true
+  kill "$srv" "$s1srv" 2>/dev/null || true
+  wait "$s1srv" 2>/dev/null || true
 }
 
 # Search: a fact from one session is found from another (by words, and by its exact path first), a
@@ -395,9 +397,10 @@ search_index() {
 # session hears it in the morning note.
 wiki_capture() {
   local ws; ws=$(new_workspace wiki)
-  local port=$((PORT + 2))
+  local port=$((PORT + 2)) s1port=$((PORT+19))
+  python3 "$REPO/scripts/e2e/systemone_stub.py" "$s1port" & local s1srv=$!
   python3 "$REPO/scripts/e2e/searxng_stub.py" "$port" & local srv=$!
-  start_kernel "$ws" "$(script wiki.json)" ZEN_SEARXNG_URL="http://127.0.0.1:$port"
+  start_kernel "$ws" "$(script wiki.json)" ZEN_SEARXNG_URL="http://127.0.0.1:$port" ZEN_S1_URL="http://127.0.0.1:$s1port/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key
   local w="$TMP/home/.zenbot/global/wiki"
   local r; r=$(zen ask --json -m faux/smoke "first")
   check "a new page" bash -c 'grep -q "Captured to \[\[dom-smoothie\]\] (new page" <<<"$1"' _ "$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE payload->>'toolName'='capture' ORDER BY id DESC LIMIT 1")"
@@ -418,7 +421,8 @@ wiki_capture() {
   check "and commits the agent's edits" eq "$(git -C "$w" log -1 --format=%s):$(git -C "$w" status --porcelain | wc -l)" "wiki job: edits since the last capture:0"
   sid=$(zen ask --json -m faux/smoke "after the upkeep" | jq -r .session_id)
   check "the next session hears it in the morning note" grep -q "wiki: dom-smoothie: no summary yet" <<<"$(q "SELECT payload->>'text' FROM tape_events WHERE session_id='$sid' AND kind='base'")"
-  kill "$srv" 2>/dev/null || true
+  kill "$srv" "$s1srv" 2>/dev/null || true
+  wait "$s1srv" 2>/dev/null || true
 }
 
 # Workshop: a new skill is a draft, a near-duplicate is refused, a reason is required, a new domain
@@ -475,7 +479,9 @@ workshop() {
 # and the board says the session waits on the owner until they answer.
 delegation() {
   local ws; ws=$(new_workspace delegate)
-  start_kernel "$ws" "$(script delegate.json)"
+  local s1port=$((PORT+19))
+  python3 "$REPO/scripts/e2e/systemone_stub.py" "$s1port" & local s1srv=$!
+  start_kernel "$ws" "$(script delegate.json)" ZEN_S1_URL="http://127.0.0.1:$s1port/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key
   zen policy set default faux/smoke >/dev/null
   local r sid; sid=$(zen sessions new --model faux/smoke --title "inherit risk" --json | jq -r .id)
   q "UPDATE sessions SET risk=3 WHERE id='$sid'" >/dev/null
@@ -525,6 +531,7 @@ delegation() {
   curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"archived":true}' "$URL/api/sessions/$asked" >/dev/null
   check "an archived session is counted, not sent" eq "$(board | jq -c --arg s "$asked" '[.archived >= 1, ([.sessions[] | select(.id == $s)] | length)]')" '[true,0]'
   check "until asked for" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/board?archived=true" | jq --arg s "$asked" '[.sessions[] | select(.id == $s)] | length')" 1
+  kill "$s1srv"; wait "$s1srv" 2>/dev/null || true
 }
 
 # remember: a memory saved in one session is in the next session's instructions, not the current one's.
@@ -993,7 +1000,7 @@ taint_on_data() {
   python3 "$REPO/scripts/e2e/systemone_stub.py" "$s1port" & local s1srv=$!
   local zh="$TMP/home/.zenbot" sk="$TMP/home/.zenbot/global/skills"
   local script; script=$(script taint.json "s|KERNELURL|$URL|")
-  start_kernel "$ws" "$script" ZEN_SEARXNG_URL="http://127.0.0.1:$port"
+  start_kernel "$ws" "$script" ZEN_SEARXNG_URL="http://127.0.0.1:$port" ZEN_S1_URL="http://127.0.0.1:$s1port/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key
   q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART; DELETE FROM search_docs WHERE kind = 'memory'; DELETE FROM sleep_runs" >/dev/null
   res_of() { q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$1' AND payload->>'role'='toolResult'"; }
   tainted() { q "SELECT risky_at IS NOT NULL FROM sessions WHERE id='$1'"; }
@@ -1060,10 +1067,11 @@ taint_on_data() {
 # marks on what it stored; its bash has the network again; the next untrusted read marks it again.
 trust_session() {
   local ws; ws=$(new_workspace trust)
-  local port=$((PORT + 10))
+  local port=$((PORT + 10)) s1port=$((PORT+19))
+  python3 "$REPO/scripts/e2e/systemone_stub.py" "$s1port" & local s1srv=$!
   python3 "$REPO/scripts/e2e/searxng_stub.py" "$port" & local srv=$!
   local script; script=$(script trust.json "s|KERNELURL|$URL|g" "s|E2ETOKEN|$TOKEN|")
-  start_kernel "$ws" "$script" ZEN_SEARXNG_URL="http://127.0.0.1:$port"
+  start_kernel "$ws" "$script" ZEN_SEARXNG_URL="http://127.0.0.1:$port" ZEN_S1_URL="http://127.0.0.1:$s1port/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key
   api() { curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
   res_of() { q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$1' AND payload->>'role'='toolResult' AND seq > ${2:-0}"; }
   local r sid; r=$(zen ask --json -m faux/smoke "TRUST-A"); sid=$(echo "$r" | jq -r .session_id)
@@ -1096,7 +1104,8 @@ trust_session() {
   check "the next web search taints it again, and GET taint shows only what came after the trust" bash -c '[ "$2" = f ] && jq -e ".risky_at != null and .tainted_at == null" <<<"$1" >/dev/null && jq -e ".taints | length == 1 and .[0].about == \"lighthouse\"" <<<"$1" >/dev/null && jq -e "[.sources[].about] == [\"lighthouse\"]" <<<"$1" >/dev/null' _ \
     "$t" "$(q "SELECT tainted_at IS NOT NULL FROM sessions WHERE id='$sid'")"
   q "DELETE FROM memories WHERE text LIKE 'TRUST-MEM%'" >/dev/null
-  kill "$srv" 2>/dev/null || true
+  kill "$srv" "$s1srv" 2>/dev/null || true
+  wait "$s1srv" 2>/dev/null || true
 }
 
 # Origin ratings and reversible taint under attack (D-062 step 3): a writer that read the web stores
@@ -1109,10 +1118,11 @@ trust_session() {
 # its original rating.
 origin_attacks() {
   local ws; ws=$(new_workspace origin)
-  local port=$((PORT + 11)) zh="$TMP/home/.zenbot"
+  local port=$((PORT + 11)) zh="$TMP/home/.zenbot" s1port=$((PORT+19))
+  python3 "$REPO/scripts/e2e/systemone_stub.py" "$s1port" & local s1srv=$!
   python3 "$REPO/scripts/e2e/searxng_stub.py" "$port" & local srv=$!
   local script; script=$(script origin.json "s|HOMEZEN|$zh|")
-  start_kernel "$ws" "$script" ZEN_SEARXNG_URL="http://127.0.0.1:$port"
+  start_kernel "$ws" "$script" ZEN_SEARXNG_URL="http://127.0.0.1:$port" ZEN_S1_URL="http://127.0.0.1:$s1port/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key
   q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART; DELETE FROM search_docs WHERE kind = 'memory'" >/dev/null
   api() { curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
   res_of() { q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$1' AND payload->>'role'='toolResult'"; }
@@ -1170,7 +1180,8 @@ origin_attacks() {
   check "a new reader gets the product wrapped at its original rating, not withheld" bash -c 'grep -q "<untrusted source=\"file\"" <<<"$1" && grep -q ORIGFILE <<<"$1" && [ "$2" = f ]' _ \
     "$(res_of "$r3")" "$(stopped "$r3")"
   check "and the captured wiki page wrapped too" grep -qF '<untrusted source="file" about="'"$zh"'/global/wiki/origwiki-harbour.md"' <<<"$(res_of "$r3")"
-  kill "$srv" 2>/dev/null || true
+  kill "$srv" "$s1srv" 2>/dev/null || true
+  wait "$s1srv" 2>/dev/null || true
 }
 
 # Session names and next-prompt suggestions (assist.rs): after each owner turn the assist model names
@@ -1220,12 +1231,13 @@ action_gate() {
   python3 "$REPO/scripts/e2e/systemone_stub.py" "$source_port" & local source_srv=$!
   sleep 0.3
   check "metadata scoring, public surfaces, poisoned text, unavailable and labelled 2–3 admission" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" ZEN_S1_URL="http://127.0.0.1:$source_port/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key cargo test --release -q -p zend source_system_one_database -- --ignored
-  kill "$source_srv"; wait "$source_srv" 2>/dev/null || true
+  check "authenticated root, pre-exposure plans and stored job definitions" env TASK_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend task_database -- --ignored
+  check "queue decisions are atomic, terminal and contamination-safe" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend queue_decisions_database -- --ignored
   db_drop "$native_db"
   local ws; ws=$(new_workspace action-gate)
   local port=$((PORT + 12))
   python3 "$REPO/scripts/e2e/searxng_stub.py" "$port" & local srv=$!
-  start_kernel "$ws" "$(script action-gate.json "s|ZENHOME|$TMP/home/.zenbot|g" "s|OWNERHOME|$TMP/home|g" "s|KERNELURL|$URL|g")" ZEN_SEARXNG_URL="http://127.0.0.1:$port"
+  start_kernel "$ws" "$(script action-gate.json "s|ZENHOME|$TMP/home/.zenbot|g" "s|OWNERHOME|$TMP/home|g" "s|KERNELURL|$URL|g")" ZEN_SEARXNG_URL="http://127.0.0.1:$port" ZEN_S1_URL="http://127.0.0.1:$source_port/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key
   api() { curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
   res_of() { q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$1' AND payload->>'role'='toolResult' AND seq > ${2:-0}"; }
   local sid r before gate
@@ -1238,7 +1250,7 @@ action_gate() {
   zen sources add example.org --risk 3 >/dev/null
   check "owner CLI lists exact normalized sources" eq "$(zen --json sources list | jq -r 'map(.source) | join(",")')" example.com,example.org
   local rated; rated=$(zen ask --json -m faux/smoke "GATE-READ" | jq -r .session_id)
-  check "search takes max result source rating, legacy protections stay" eq "$(q "SELECT risk || '/' || (risky_at IS NOT NULL) FROM sessions WHERE id='$rated'")" 3/true
+  check "search takes max source rating; level 3 does not set the full-gate marker" eq "$(q "SELECT risk || '/' || (risky_at IS NOT NULL) FROM sessions WHERE id='$rated'")" 3/false
   check "web result provenance is kernel-recorded" eq "$(q "SELECT risk || '/' || origin FROM tape_events WHERE session_id='$rated' AND payload->>'toolName'='web_search'")" 3/web_search
   zen sources rm example.org >/dev/null
   zen ask --json -s "$rated" "GATE-READ" >/dev/null
@@ -1315,7 +1327,55 @@ action_gate() {
   for _ in $(seq 1 100); do [ "$(api "$URL/api/sessions/$sid" | jq -r .busy)" = false ] && break; sleep .1; done
   check "reject did not run it" eq "$(wc -l < "$ws/queue-once.txt")" 1
   check "legacy allow cannot resurrect rejection" eq "$(api -X POST -d "{\"id\":$gate}" "$URL/api/sessions/$sid/allow" | jq -r .allowed)" false
-  kill "$srv" 2>/dev/null || true
+  kill "$srv" "$source_srv" 2>/dev/null || true
+  wait "$source_srv" 2>/dev/null || true
+}
+
+# D-065 A–D through real turns: reputation is not egress authority; task holds do not taint.
+source_task_queue() {
+  local ws; ws=$(new_workspace source-task-queue)
+  local sp=$((PORT+12)) mp=$((PORT+13))
+  python3 "$REPO/scripts/e2e/searxng_stub.py" "$sp" & local search_srv=$!
+  python3 "$REPO/scripts/e2e/systemone_stub.py" "$mp" & local model_srv=$!
+  sleep .3
+  start_kernel "$ws" "$(script task-queue.json)" ZEN_SEARXNG_URL="http://127.0.0.1:$sp" ZEN_S1_URL="http://127.0.0.1:$mp/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key
+  api() { curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
+  local sid gate mode
+  sid=$(zen ask --json -m faux/smoke "S1-READ: test integration and remember its result; do not push or schedule." | jq -r .session_id)
+  check "metadata-rated result leaves session at 2, uncontaminated" eq "$(q "SELECT risk || '/' || (tainted_at IS NULL) FROM sessions WHERE id='$sid'")" 2/true
+  check "reputable scope proposal reaches combined queue" eq "$(api "$URL/api/queue" | jq '[.[]|select(.kind=="source")]|length')" 1
+  zen ask --json -s "$sid" S1-LOCAL >/dev/null
+  check "safe local write and shell still run at 2" eq "$(q "SELECT count(*) FROM action_gates WHERE session_id='$sid'")/$(cat "$ws/local.txt")" "0/safe local work"
+  zen ask --json -s "$sid" S1-BUILD >/dev/null
+  check "on-job project code retains offline sandbox at 2" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='bash' AND payload::text LIKE '%sandboxed:%'")" 1
+  zen ask --json -s "$sid" S1-REMEMBER >/dev/null
+  check "on-job remember follows without hold and retains origin" eq "$(q "SELECT count(*) FROM memories WHERE session_id='$sid' AND risk=2")/$(q "SELECT count(*) FROM action_gates WHERE session_id='$sid'")" 1/1
+  zen ask --json -s "$sid" S1-SCHEDULE >/dev/null
+  zen ask --json -s "$sid" S1-PUSH >/dev/null
+  check "off-job schedule and push are held without contamination" eq "$(q "SELECT count(*) FROM action_gates WHERE session_id='$sid' AND (reason LIKE 'task check: unrelated%' OR action LIKE '%git push%')")/$(q "SELECT count(*) FROM jobs WHERE name='off-job'")/$(q "SELECT tainted_at IS NULL FROM sessions WHERE id='$sid'")" 2/0/t
+  zen ask --json -s "$sid" S1-FETCH >/dev/null
+  check "cached reputation never authorizes an unseen fetch" eq "$(q "SELECT count(*) FROM action_gates WHERE session_id='$sid' AND reason LIKE 'fetches a URL%'")" 1
+  # Missing/malformed judgments hold arbitrary-code effects, but never hold fixed safe local work.
+  for mode in CONTRADICTS MALFORMED UNAVAILABLE; do
+    local other; other=$(zen ask --json -m faux/smoke "ALIGN-$mode S1-READ" | jq -r .session_id)
+    zen ask --json -s "$other" S1-BUILD >/dev/null
+    check "$mode alignment fails closed" eq "$(q "SELECT count(*) FROM action_gates WHERE session_id='$other' AND reason LIKE 'task check:%' AND action LIKE '%git status%'")" 1
+  done
+  local other; other=$(zen ask --json -m faux/smoke "ALIGN-UNAVAILABLE S1-READ" | jq -r .session_id)
+  zen ask --json -s "$other" S1-ONCE >/dev/null
+  gate=$(q "SELECT id FROM action_gates WHERE session_id='$other' ORDER BY id DESC LIMIT 1")
+  check "queue approval grants exact held action" eq "$(api -X POST -d '{"decision":"approve"}' "$URL/api/queue/action/$gate" | jq -r .resumed)" true
+  for _ in $(seq 1 100); do [ "$(api "$URL/api/sessions/$other" | jq -r .busy)" = false ] && break; sleep .1; done
+  check "exact queue retry executed once despite unavailable classifier" eq "$(wc -l < "$ws/task-once.txt")" 1
+  zen ask --json -s "$other" S1-ONCE >/dev/null
+  gate=$(q "SELECT id FROM action_gates WHERE session_id='$other' AND decision IS NULL ORDER BY id DESC LIMIT 1")
+  api -X POST -d '{"decision":"reject"}' "$URL/api/queue/action/$gate" >/dev/null
+  for _ in $(seq 1 100); do [ "$(api "$URL/api/sessions/$other" | jq -r .busy)" = false ] && break; sleep .1; done
+  check "legacy allow cannot revive rejected action" eq "$(api -X POST -d "{\"id\":$gate}" "$URL/api/sessions/$other/allow" | jq -r .allowed)" false
+  local count; count=$(q "SELECT count(*) FROM action_gates WHERE session_id='$other'")
+  zen ask --json -s "$other" S1-ONCE >/dev/null
+  check "rejected action cannot requeue or execute again" eq "$(q "SELECT count(*) FROM action_gates WHERE session_id='$other'")/$(wc -l < "$ws/task-once.txt")" "$count/1"
+  kill "$search_srv" "$model_srv"; wait "$search_srv" "$model_srv" 2>/dev/null || true
 }
 
 # A usage-limit failover moves the session to the model it failed over to, which it keeps until the
@@ -1341,7 +1401,7 @@ run search-index search_index
 run taint-on-data taint_on_data
 run summaries summaries slow_summary
 run system-one system_one_direct memory_sleep_judged
-run action-gate action_gate
+run action-gate action_gate source_task_queue
 run file-trust kernel_tools project_files secrets_masked
 run reach mcp_tools web_tools
 run basics prompt_files open_loop restart_recovery layout_move

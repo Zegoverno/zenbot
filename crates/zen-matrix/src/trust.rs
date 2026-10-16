@@ -154,6 +154,13 @@ mod tests {
     }
 
     #[test]
+    fn queue_approval_requires_encrypted_verified_owner_authentication() {
+        // Queue reactions and encrypted !queue commands use message(), not a plaintext exception.
+        assert_ne!(message(OWNER,BOT,OWNER,&Sealed::Plain,&RoomCheck::Ok),Verdict::Act);
+        assert_ne!(message(OWNER,BOT,OWNER,&Sealed::Untrusted("new device".into()),&RoomCheck::Ok),Verdict::Act);
+        assert_eq!(message(OWNER,BOT,OWNER,&Sealed::CrossSigned,&RoomCheck::Ok),Verdict::Act);
+    }
+    #[test]
     fn the_owners_identity_is_pinned_on_first_use() {
         assert_eq!(identity(None, Some("K1")), Identity::Pin("K1".into()));
         assert_eq!(identity(Some("K1"), Some("K1")), Identity::Same);

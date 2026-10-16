@@ -35,8 +35,9 @@ sleep's promotions into `IDENTITY.md` and `USER.md`, skill drafts, tools, routes
 changes. Candidate follow-ups, each only when use calls for it:
 
 - **D-062 taint redesign:** source ratings, origin-rated stored items, reversible denial and
-  masked shells are built. D-065 A–B adds metadata scoring, owner proposals and labelled admission
-  through 3; its C–D integration supplies task checks and the combined queue before release.
+  masked shells are built. D-065 integrates metadata scoring, labelled admission through 3,
+  authenticated task checks and a combined owner queue on the branch; release validation and
+  owner review/merge/install remain before these changes are live.
   Full offline/read-only limits begin at 4; budgets remain out of scope.
 - **Earlier action-gate plan (D-056), superseded in part by D-062:** a session that reads outside content becomes *risky*, not
   limited; its actions are checked before they run by fixed rules over parsed facts (run, run in

@@ -6,6 +6,29 @@
 
 ---
 
+## 2026-10-16 — D-065 security corrections (branch, not installed)
+
+Plain Matrix reactions no longer authorize; encrypted cross-signed owner commands remain available.
+Project-controlled execution retains sandbox/hold capabilities at risks 2–3, independent of relevance.
+Owner authority is never prefix-truncated: oversized goals fail closed. Private content scoring
+honors opt-out. Reusable assessed publisher scopes exclude GitHub public contributions and page-only
+ratings cannot propose broader prefixes. Validation below predates these corrections; focused results
+are in the commit. Fresh focused action-gate/source-task-queue e2e passes (0 failed checks);
+disposable source/cache/task/queue DB regressions and private-opt-out checks pass, as do the five
+Matrix authentication-policy tests. Matrix transport e2e was updated but not rerun after these fixes.
+The earlier mixed-revision full check failed five checks (two addressed by this focused rerun,
+three delegation/wiki checks outstanding and not rerun). No completed full rerun or installation claimed.
+
+## 2026-10-16 — Integrated D-065 source/task/queue validation (branch, not installed)
+
+Authenticated task checks now integrate with terminal queue decisions and source ratings. Safe
+reads/local data writes skip alignment; persistent/outward/arbitrary-code effects fail closed.
+Rejections cannot be revived through legacy allow or requeued. The e2e runner includes disposable
+queue/task DB regressions and source-to-task-to-queue turns with controlled classifier failures.
+Restore the level-4 web review marker alongside numeric provenance; Matrix validates actual queue
+notices and owner approve/reject/deny reactions, including exact-once effects and contamination.
+Validation results are recorded with the integration commit; no live install is claimed.
+
 ## 2026-10-16 — Owner approval queue (D-065 D)
 
 Unified authenticated queue routes list held actions and exact source proposals. Atomic decisions

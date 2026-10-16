@@ -1,19 +1,17 @@
 //! Taint tracking and the untrusted-content envelope (D-034, D-051, D-053). Applies to web pages,
 //! MCP servers, subagents and history alike, not just web fetches.
 //!
-//! Outside reads mark the session risky (`sessions.risky_at`); gate.rs marks it tainted
-//! (`sessions.tainted_at`) only when an action is held. Provenance is also a property of
-//! what it stored: memories (`memories.tainted`), job reports (`job_runs.tainted`), draft skills
-//! (`draft_taint`) and wiki entries (labelled `web`). Two rules keep it from laundering:
-//! - **One read path.** Stored content goes to a session through `hand_over`: tainted content is
-//!   wrapped as untrusted and marks the reader, so it never reaches a clean session as trusted.
-//! - **One effect gate.** gate.rs checks actions before dispatch (run / sandbox / hold).
-//!   `limited` keeps risky data from vouching for itself or activating persistent drafts.
-//!   `Limit::Shell` is the capability revoked only by a held action, not by reading.
+//! D-065: outside reads raise numeric origin risk; level 4 additionally records risky_at.
+//! Levels 2–3 keep safe local work and labelled instructions; gate.rs constrains project code.
+//! At 4, limited()
+//! prevents steering/vouching and selects the offline shell. A hold never contaminates.
+//! Explicit owner denial or level-5 content stops a session and its dependent readers (D-064).
+//! Stored products retain exact-byte numeric provenance; contamination is a reversible overlay.
+//! - **One read path.** hand_over_rating preserves origin, records dependencies at callers, wraps
+//!   outside content and stops level-5 readers before handing over bytes.
+//! - **One effect gate.** gate.rs checks actions before dispatch; task.rs can add alignment holds.
 //!
-//! Only the owner lifts a session's mark (`trust`, D-054), after looking at what set it (`report`).
-//! It works forward only: the next untrusted read marks the session again, and what it stored while
-//! marked keeps its marks.
+//! Only owner review/trust lifts causes. Independent denials remain and product origins survive.
 
 use serde_json::{json, Value};
 use sqlx::Row;

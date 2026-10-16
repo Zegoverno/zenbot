@@ -399,7 +399,16 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                     origin: format!("kernel:{name}"),
                 },
             };
-            if rating.risk < 5 {crate::sources::raise(&app.db, id, rating.risk).await?;}
+            if rating.risk < 5 {
+                if matches!(name.as_str(), "web_search" | "web_fetch") && rating.origin.starts_with("web_") {
+                    // Numeric web provenance must also preserve the level-4 review/board marker.
+                    // Do not mark failed/held calls merely because their inherited session risk is 4.
+                    let about = args[if name == "web_search" { "query" } else { "url" }].as_str().unwrap_or("");
+                    crate::taint::mark_rating(app,id,rating.risk,&name,about).await?;
+                } else {
+                    crate::sources::raise(&app.db, id, rating.risk).await?;
+                }
+            }
             if rating.risk == 5 {
                 crate::taint::deny(app,id,"level-5 block").await?;
                 out.content = "content withheld: level-5 block stopped this session; owner review required".into();

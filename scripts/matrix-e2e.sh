@@ -65,6 +65,7 @@ db_psql -d postgres -c "CREATE DATABASE $DB" >/dev/null
 SCRIPT="$TMP/faux.json"
 cat > "$SCRIPT" <<'EOF'
 [
+  { "when": "The owner approved held action", "tool": "bash", "args": { "command": "echo matrix-once >> matrix-queue.txt" } },
   { "when": "hello", "tool": "bash", "args": { "command": "echo zen-ok" } },
   { "when": "hello", "text": "Smoke test passed: I ran a command through the kernel." },
   { "when": "ask me", "tool": "ask", "args": { "questions": [ { "question": "Which color?", "options": ["red", "blue"] }, { "question": "Size?", "options": ["small", "large"] } ] } },
@@ -123,6 +124,12 @@ SID=$(jq -r '.rooms[.main_room]' "$TMP/bridge/matrix/state.json")
 "$ZM/zen-matrix" run >>"$TMP/bridge.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 240); do grep -q "rooms checked" "$TMP/owner.log" && break; kill -0 $OWNER 2>/dev/null || break; sleep 1; done
+# Queue reactions are exercised against three disposable, separately scoped sessions.
+ACTION=$(jq -cnS --arg ws "$TMP/ws" '{workspace:$ws,tool:"bash",args:{command:"echo matrix-once >> matrix-queue.txt"}}')
+for decision in approve reject deny; do
+  QS=$(curl -fs -XPOST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' "$K/api/sessions" -d '{"model":"faux/smoke"}' | jq -r .id)
+  db_psql -d "$DB" -c "UPDATE sessions SET risk=4 WHERE id='$QS'; INSERT INTO action_gates(session_id,action,reason) VALUES('$QS', '$ACTION','MATRIX-QUEUE-$decision')" >/dev/null
+done
 # A job run now; the bridge reports it within a minute.
 curl -fs -XPOST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' "$K/api/jobs" \
   -d '{"name":"matrix-e2e","prompt":"hello from a job","schedule":"every 24h","model":"faux/smoke"}' >/dev/null
@@ -132,6 +139,14 @@ curl -fs -XPOST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/
 curl -fs -XPOST -H "Authorization: Bearer $TOKEN" "$K/api/jobs/matrix-e2e-main/run" >/dev/null
 wait $OWNER || { cat "$TMP/owner.log"; fail "the owner's conversation"; }
 cat "$TMP/owner.log" | grep '^ok'
+for _ in $(seq 30); do
+  [ "$(db_psql -d "$DB" -c "SELECT count(*) FROM action_gates WHERE reason LIKE 'MATRIX-QUEUE-%' AND decision IS NOT NULL")" = 3 ] && break
+  sleep 1
+done
+[ "$(db_psql -d "$DB" -c "SELECT string_agg(decision,',' ORDER BY decision) FROM action_gates WHERE reason LIKE 'MATRIX-QUEUE-%'")" = approved,denied,rejected ] || fail "encrypted queue commands did not resolve exactly"
+[ "$(wc -l < "$TMP/ws/matrix-queue.txt")" = 1 ] || fail "queue approval did not run exactly once"
+[ "$(db_psql -d "$DB" -c "SELECT zen_session_contaminated(session_id) FROM action_gates WHERE reason='MATRIX-QUEUE-deny'")" = t ] || fail "queue deny did not contaminate"
+echo "ok: encrypted queue commands approved once, rejected and denied with contamination"
 
 MEMBERSHIP=$(curl -s -H "Authorization: Bearer $SAT" "$HS/_matrix/client/v3/rooms/$SRID/members" | jq -r '.chunk[] | select(.state_key == "@zenbot:localhost") | .content.membership')
 [ "$MEMBERSHIP" = leave ] || fail "the bot's membership in the stranger's room is '$MEMBERSHIP', not leave"

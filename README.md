@@ -41,14 +41,14 @@ Only you change trusted sources: `zen sources add docs.rs --note "Rust docs"`,
 `zen sources add x.com/paulg --risk 3`, `zen sources list`, `zen sources rm docs.rs`.
 Entries cover an exact HTTPS host or whole path segments, not subdomains; levels are 2 (default)
 or 3. Chat: `/sources add docs.rs 2 Rust docs`; Matrix uses `!sources`.
-System One caches metadata-only source judgments for 30 days, conservatively scoped to an exact
-URL path. These judgments cannot authorize unseen URL requests; only your entries can.
-Content checks can raise but never lower a rating. Levels 2–3 allow normal local work and labelled
-instructions; level 4 keeps the full gate and offline shell. `zen sources rerate` revisits stored
+System One caches metadata-only source judgments for 30 days using assessed host/account/surface
+scopes (page-only when uncertain). Public contributions never inherit maintained-code trust.
+These judgments cannot authorize unseen URL requests; only your entries can.
+Content checks can raise but never lower a rating and honor private-scoring opt-out. Levels 2–3
+allow safe local work and labelled instructions; project code stays sandboxed or held from level 2. `zen sources rerate` revisits stored
 authenticated web bytes; missing historical provenance stays conservative.
 Fetching an allowlisted target is permitted in a risky session, including model-built URLs:
 only add destinations you accept receiving those requests. Redirect destinations are checked too.
-Ratings are recorded now; legacy action restrictions remain until D-062 step 3.
 
 ## Using zen
 
@@ -116,9 +116,11 @@ How each of these works is in [DESIGN.md](DESIGN.md) ("As built"); here is what 
 
 ### Actions after outside reads
 
-Outside content makes a session **risky**, not contaminated. At 2–3 local work runs normally;
-at 4 project code runs offline/read-only. Risky outward/persistent actions may be held before effect.
-A hold asks the owner; only explicit denial contaminates.
+Outside content makes a session **risky**, not contaminated. Safe local work remains available;
+from level 2 project code stays offline/read-only or held unless you grant the exact action. Persistent, outward and arbitrary-code effects need a
+System One judgment against your authenticated job and the pre-exposure brief/plan; safe reads
+and local data writes skip it. Off-job, contradictory or unavailable judgments hold before effect.
+Reputation never authorizes unseen fetch destinations. A hold asks you; explicit denial contaminates.
 
 `zen queue` opens the review picker (or prints JSON with `--json`); `/queue` opens it inside zen.
 Select with ↑↓, Enter inspects, **a** approves, **r** rejects, **d** denies. Scriptable:
@@ -126,8 +128,9 @@ Select with ↑↓, Enter inspects, **a** approves, **r** rejects, **d** denies.
 prompt to retry the exact action unchanged, once; rejection tells it not to retry; denial stops
 and contaminates the session. Busy sessions must finish first. Source approvals are pinned to
 the proposal's exact current cached rating; expired/superseded/replayed approvals fail.
-Matrix posts queue items in the existing main room (jobs room fallback): ✅ approve, ❌ reject,
-🛑 deny an action; `!queue` lists. No extra public room is created.
+Matrix posts in the existing main room (jobs fallback). Use encrypted `!queue approve|reject|deny
+action|source <id>` from a cross-signed device; `!queue` lists. Plain reactions cannot authorize,
+so ordinary-client one-tap approval is unavailable. No extra room is created.
 
 `/allow` shows the latest held action or sandboxed project-code attempt; `/allow yes` grants that exact workspace, tool and arguments
 once for ten minutes. In Matrix use `!allow` and `!allow yes`. This does not trust the whole

@@ -597,7 +597,9 @@ async fn verify(app: &AppState, session: Uuid, workspace: &Path, args: &Value, p
     let sandbox = if granted {tools::Sandbox::None} else {crate::taint::shell_sandbox(&app.db, session).await};
     for c in &criteria {
         if let Some(run) = c["run"].as_str() {
-            let route = if !granted && crate::taint::tainted(&app.db, session).await {
+            let restricted:bool=sqlx::query_scalar::<_,i16>("SELECT risk FROM sessions WHERE id=$1")
+                .bind(session).fetch_one(&app.db).await.unwrap_or(4)>=2;
+            let route = if !granted && restricted {
                 crate::gate::shell(&dir, run)
             } else { crate::gate::Policy::Run };
             let (command, boundary) = match &route {

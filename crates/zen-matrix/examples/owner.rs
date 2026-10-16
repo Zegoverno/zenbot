@@ -77,10 +77,12 @@ async fn main() -> Result<()> {
     // Everything the bot posts, decrypted.
     let (tx, mut rx) = mpsc::unbounded_channel::<(bool, String)>();
     let (post_tx, mut post_rx) = mpsc::unbounded_channel::<String>();
+    let (queue_tx, mut queue_rx) = mpsc::unbounded_channel();
     let me = c.user_id().unwrap().to_owned();
     c.add_event_handler(move |ev: OriginalSyncRoomMessageEvent, r: Room| {
         let tx = tx.clone();
         let post_tx = post_tx.clone();
+        let queue_tx = queue_tx.clone();
         let me = me.clone();
         async move {
             if ev.sender == me || r.state() != RoomState::Joined {
@@ -93,6 +95,9 @@ async fn main() -> Result<()> {
             };
             if body.contains("⏰ *matrix-e2e-main*") {
                 post_tx.send(r.room_id().to_string()).ok();
+            }
+            if body.contains("Approval queue action/") && body.contains("MATRIX-QUEUE-") {
+                queue_tx.send((r, ev.event_id, body.clone())).ok();
             }
             tx.send((notice, body)).ok();
         }
@@ -189,6 +194,26 @@ async fn main() -> Result<()> {
     wait_membership(&side, &bot, "leave").await.context("the bot stayed in a room a stranger was invited to")?;
     println!("ok: the bot left a room a stranger was invited to");
     println!("rooms checked");
+
+    // Seeded queue actions: plaintext reactions must leave them pending; encrypted commands decide.
+    for _ in 0..3 {
+        let (r, event, body) = tokio::time::timeout(Duration::from_secs(90), queue_rx.recv())
+            .await.context("no queue notice")?.context("queue stream ended")?;
+        let emoji = if body.contains("MATRIX-QUEUE-approve") { "✅" }
+            else if body.contains("MATRIX-QUEUE-reject") { "❌" } else { "🛑" };
+        // Ordinary SDK reactions are plaintext and must have no authority.
+        r.send(matrix_sdk::ruma::events::reaction::ReactionEventContent::new(
+            matrix_sdk::ruma::events::relation::Annotation::new(event, emoji.into()))).await?;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let key=body.split("Approval queue ").nth(1).context("queue key")?
+            .split_whitespace().next().context("queue id")?.trim_end_matches('*');
+        let decision=match emoji {"✅"=>"approve","❌"=>"reject",_=>"deny"};
+        r.send(RoomMessageEventContent::text_plain("!queue")).await?;
+        let pending=key.replace('/'," #");
+        wait_for(&mut rx,&pending).await.context("plaintext reaction must leave action pending")?;
+        r.send(RoomMessageEventContent::text_plain(format!("!queue {decision} {}",key.replace('/'," ")))).await?;
+    }
+    println!("ok: plaintext queue reactions ignored; encrypted verified owner commands sent");
 
     if let Some(job) = job {
         // The caller runs the job now: its report comes to the jobs room within a minute.

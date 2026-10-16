@@ -40,15 +40,14 @@ client protocol (docs/client-protocol.md), like `zen`: the kernel doesn't know M
 - **Approval queue.** Every five seconds the bridge reads `GET /api/queue` and posts new held
   actions/source proposals to the existing main room (jobs room fallback), checked encrypted and
   owner-only. `!queue` lists; `!queue approve|reject|deny action|source <id>` decides.
-  ✅ approves, ❌ rejects without retry, 🛑 denies/contaminates an action's session.
+  Approve grants once; reject forbids retries; deny contaminates an action's session.
   The durable room/event → exact kind/id mapping survives restarts; kernel compare-and-set
   decisions reject replays and stale source snapshots. No approvals room is provisioned.
-  **Reaction exception:** Matrix sends reactions unencrypted even in E2EE rooms (matrix-sdk
-  `room/futures.rs`). Only the server-authenticated owner's account, in the checked private room
-  with the pinned owner identity, targeting a mapped bot queue event, can decide. Plaintext
-  reactions cannot attest the sending device; this trusts the homeserver for that narrow action.
-  All ordinary messages still require cross-signed encrypted devices. Encrypted reactions, when
-  present, require the same cross-signed-device checks.
+  **One-tap limitation:** ordinary Matrix SDK/client reactions are plaintext even in E2EE rooms.
+  They cannot attest the sending device and are ignored, never an approval exception.
+  Use an encrypted `!queue approve action <id>` (or source/reject/deny) command from a
+  cross-signed device. Encrypted reactions, if a client supplies them, require that same device
+  authentication and a mapped queue notice; ordinary client one-tap approval is not supported.
 - **Job reports.** Every minute it reads `GET /api/jobs/runs` and posts each finished run (`ok` with
   its report, `error`, `missed`, `interrupted`; not `silent`) once to **zen jobs**. A run posted
   into a session (`posted_to`, a job's `post_to`, D-060) is left out: its report arrives in that

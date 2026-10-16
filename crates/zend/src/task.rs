@@ -1,4 +1,6 @@
-//! D-065: job alignment can only add holds at risk 4; at 2–3 it gates nonlocal effects.
+//! D-065: job alignment can only add holds at risk 4; at 2–3 it gates persistent,
+//! outward and arbitrary-code effects. Fixed safe reads and local data writes skip the model.
+//! Missing, malformed or unavailable judgments hold; exact owner grants bypass once.
 //! The goal comes from authenticated root-owner tape, not worker user messages or summaries.
 //! Only plain assistant text before the FIRST outside exposure is eligible as brief/plan.
 //! Proposed arguments are untrusted evidence of effects, never instructions or owner approval.
@@ -64,13 +66,12 @@ async fn job(db: &sqlx::PgPool, session: Uuid) -> Result<Value> {
                   AND NOT COALESCE((payload->>'kernel')::boolean,false))
               OR (origin='derived-session' AND risk<=1 AND NOT tainted AND payload->>'role'='assistant'
                   AND seq < COALESCE((SELECT min(seq) FROM tape_events WHERE session_id=$1 AND (risk>=2 OR tainted)),2147483647)))
-            ORDER BY seq DESC LIMIT 40").bind(id).fetch_all(db).await?;
+            ORDER BY seq DESC").bind(id).fetch_all(db).await?;
         for row in rows.into_iter().rev() {
             let p: Value = row.get("payload");
             let text = plain_text(&p["content"]);
-            let text = zen_proto::head(&text, 2000);
             if row.get::<String,_>("origin") == "owner" { owner.push(text); }
-            else { plans.push(text); }
+            else { plans.push(zen_proto::head(&text,2000)); }
         }
     }
     if kind.as_deref() == Some("job") {
@@ -79,10 +80,13 @@ async fn job(db: &sqlx::PgPool, session: Uuid) -> Result<Value> {
             WHERE r.session_id=$1 AND j.enabled AND j.paused_reason IS NULL
               AND j.updated_at <= r.started_at
             ORDER BY r.id DESC LIMIT 1").bind(id).fetch_optional(db).await?.flatten();
-        if let Some(p) = prompt { owner.push(zen_proto::head(&p, 8000)); }
+        if let Some(p) = prompt { owner.push(p); }
     }
+    let goal=owner.join("\n\n");
+    // Never classify a partial authority record. Oversized goals hold all risky actions.
+    let complete=goal.len()<=12000;
     Ok(json!({"session_title_label":zen_proto::head(&title,200),
-        "authenticated_goal_data":zen_proto::head(&owner.join("\n\n"),12000),
+        "authenticated_goal_data":if complete {goal} else {String::new()},
         "pre_exposure_brief_plan_data":zen_proto::head(&plans.join("\n\n"),8000)}))
 }
 
@@ -167,6 +171,18 @@ mod tests {
             "FORGED_CHILD_OWNER","TOOL_ARGUMENTS","HIDDEN_THINKING"] {
             assert!(!state.contains(bad),"{bad}: {state}");
         }
+        let long_goal=format!("{} do not publish","x".repeat(2100));
+        crate::tape::append_owner(&db,root,&json!({"role":"user","content":long_goal})).await.unwrap();
+        for _ in 0..45 {
+            crate::tape::append_owner(&db,root,&json!({"role":"user","content":"continue local work"})).await.unwrap();
+        }
+        let state=job(&db,child).await.unwrap();
+        assert!(state["authenticated_goal_data"].as_str().unwrap().contains("do not publish"));
+        crate::tape::append_owner(&db,root,&json!({"role":"user","content":"latest restriction: do not send"})).await.unwrap();
+        let state=job(&db,child).await.unwrap();
+        assert!(state["authenticated_goal_data"].as_str().unwrap().contains("latest restriction: do not send"));
+        crate::tape::append_owner(&db,root,&json!({"role":"user","content":"x".repeat(12001)})).await.unwrap();
+        assert_eq!(job(&db,child).await.unwrap()["authenticated_goal_data"],"","oversized authority fails closed");
         let run_session=Uuid::new_v4();
         sqlx::query("INSERT INTO sessions(id,title,model,kind) VALUES($1,'job label','faux/smoke','job')")
             .bind(run_session).execute(&db).await.unwrap();

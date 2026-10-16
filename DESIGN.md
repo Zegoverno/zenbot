@@ -277,12 +277,22 @@ harness versions with the same model on isolated kernels and databases (`evals/R
   (`TAVILY_API_KEY`), else SearXNG
   (`ZEN_SEARXNG_URL`, the compose service on 127.0.0.1:8888), which also rescues one failed keyed
   call; results deduplicated, http(s) only, reranked by System One.
-- **Source judgments** (D-065; `sources.rs`): metadata-only lowering, 30-day exact-path cache
-  (public contributions cannot borrow maintained-code trust), batched search misses; separate
+- **Source judgments** (D-065; `sources.rs`): metadata-only lowering, 30-day assessed publisher-scope cache
+  (public contributions cannot borrow maintained-code trust; uncertain scopes stay page-only), batched search misses; separate
   raise-only content checks fail closed. Owner allowlist alone authorizes unseen egress.
-  Risk 2–3 permits normal local work and labelled instructions; the full gate and offline shell
-  apply at 4. Snapshot-bound source proposals are owner-only and stale approvals reject.
+  Risk 2–3 permits safe local work and labelled instructions; project code remains sandboxed/held
+  from risk 2, independently of relevance. The full additional restrictions apply at 4. Snapshot-bound source proposals are owner-only and stale approvals reject.
   Startup/manual rerating requires authenticated result bytes; historical unknown reasons stay.
+- **Job alignment and queue** (D-065; `task.rs`, `queue.rs`): at 2–3 persistent, outward and
+  arbitrary-code effects require a follows judgment; safe reads and local data writes skip it.
+  At 4 fixed rules decide first and alignment can only add holds. Goals come from authenticated
+  root-owner tape or an unchanged stored scheduled-job prompt; only plain assistant plans before
+  the first exposure are admitted. Tool results, compactions and late plans never define the goal.
+  Missing/malformed/unavailable judgments hold without contamination. Fixed secret, destructive
+  and unseen-fetch guards cannot be waived by alignment. The owner queue merges held actions and
+  snapshot-bound source proposals. Approve grants exact effects once with an idle kernel-origin
+  retry; reject is terminal across legacy allow and requeue; deny contaminates. Terminal picker
+  and encrypted verified-owner commands in private Matrix rooms share authenticated queue routes.
 - **Untrusted content** (D-034, D-053; `taint.rs`): at level 4, web pages, untrusted MCP servers' output
   and tool descriptions (D-052), instruction files from repositories the owner hasn't listed
   (`ZEN_TRUSTED_REPOS`, D-051) and a tainted subagent's answer are wrapped in `<untrusted …>`

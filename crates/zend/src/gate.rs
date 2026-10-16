@@ -1,9 +1,10 @@
-//! D-056: run / sandbox / hold before an action takes effect in a risky session.
-//! Only the owner grants an exact (workspace, tool, arguments) action, once. Unknown shell
-//! syntax is held, never interpreted by a classifier. Safe reads use fixed system binaries
-//! and a cleared environment; Git and build tools default to offline, read-only execution
-//! (D-063). Their exact action is offered for owner approval without tainting the session.
-//! No classifier receives outside content. The shell grammar (`grammar.rs`) allows read-only
+//! D-065: run / sandbox / hold before an effect at risk >=2. Safe fixed reads/local data
+//! writes skip alignment; other effects at 2–3 require follows against the authenticated job.
+//! Static secret, destructive and unseen-fetch guards remain independent. At 4, unknown shell
+//! syntax is held; Git/builds default to offline/read-only from risk 2; alignment only adds holds.
+//! Only the owner grants exact (workspace, tool, arguments) effects once. Rejection is terminal
+//! across queue and legacy allow. Holds do not contaminate; owner deny stops before any grant.
+//! No outside tool result defines the authenticated goal. The shell grammar (`grammar.rs`) allows read-only
 //! commands by program and flag, and re-emits them from the parsed words.
 //! A hold the gate makes only because it can't classify the action (unknown syntax, program or
 //! flag, or a URL the model built) doesn't revoke the session's shell; one that could do harm does.
@@ -79,7 +80,7 @@ pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args:
                 "rm" | "rmdir" | "shred" | "truncate" | "dd" | "kill" | "pkill" | "killall"));
         let hard = match name {
             "web_fetch" | "read" => matches!(p, Policy::Hold(_)),
-            "write" | "edit" => secret(&real(&tools::resolve(workspace,args["path"].as_str().unwrap_or("")))),
+            "write" | "edit" => matches!(p,Policy::Hold(_)),
             "remember" => args["action"] == "remove",
             "bash" => !matches!(p,Policy::SafeRead(_)) && (matches!(&p,Policy::Hold(r) if r.contains(grammar::SECRET))
                 || destructive(args["command"].as_str().unwrap_or(""))),
@@ -90,7 +91,10 @@ pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args:
         };
         if hard {
             if !matches!(p,Policy::Hold(_)) { p=Policy::Hold("static secret or destructive action guard".into()); }
-        } else if !matches!(p,Policy::SafeRead(_)) && !(name == "call_tool" && p == Policy::Sandbox) {
+        } else if name == "bash" || name == "verify" || name == "call_tool" {
+            // Project-controlled code is a capability boundary, not a relevance judgment.
+            // Preserve the sandbox/hold even when the job explicitly asks for a build.
+        } else if !matches!(p,Policy::SafeRead(_)) {
             // Safe local work is not held. Programmable commands are NOT safe: task::class
             // routes every arbitrary-code execution through the alignment check below.
             p=Policy::Run;
@@ -103,7 +107,7 @@ pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args:
             p=Policy::Hold(reason);
         }
     }
-    let code_approval = risk >= 4 && (name == "bash" && matches!(p,Policy::Sandbox)
+    let code_approval = risk >= 2 && (name == "bash" && matches!(p,Policy::Sandbox)
         || name == "verify" && args["criteria"].as_array().into_iter().flatten()
             .filter_map(|c|c["run"].as_str()).any(|c|matches!(shell(workspace,c),Policy::Sandbox)));
     let reason = match &p {
