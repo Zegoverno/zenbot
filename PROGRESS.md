@@ -6,6 +6,18 @@
 
 ---
 
+## 2026-10-16 — Origin ratings, deny/trust by cause, masked shells (D-062 step 3, D-064)
+
+Stored items (files by exact bytes, memories, reports, skills, made tools, project instructions)
+keep their origin rating and writer edges; only 0–1 enters instructions. The owner's `/deny`
+(`!deny`) stops a session and everything that read its products; `/trust` lifts only reviewed
+causes. Shells see files from denied sessions masked by content digest (bubblewrap, like Anthropic's
+sandbox-runtime; copies and hard links too; masked host shells get no Unix sockets), bash results
+take the rating of rated files they show, host-shell products are registered and a concurrent
+deny withholds output. `/allow` and `/deny` now work in the terminal app (`/allow` was
+missing). Codex native subagents are off (`agents.enabled = false`). Tests: unit, 14 database tests
+(races, descendants, stale trust, forged provenance, shell masks), the `origin` e2e scenario.
+
 ## 2026-10-15 — Offline, read-only project code by default (D-063)
 
 Risky sessions run project code without network or workspace writes; private `/tmp` remains
@@ -253,167 +265,3 @@ events by hand and each had its own copy of the kernel client.
   as the echo in `zen` too.
 - AGENTS.md said `zen-proto` holds the worker protocol's messages; it never did. The row now says
   what it holds; typing the worker protocol stays debt (ROADMAP.md).
-
-## 2026-10-11 — Kernel modules: upkeep jobs of their own, one settings module, shared helpers
-
-Toward CONTEXT.md principle 5 (every building block a module with a documented contract).
-
-- The nightly sleep had grown into the orchestrator for unrelated work. It now tidies memory only;
-  the rest are system jobs seeded like `sleep` and `engines` (existing installs get them at the
-  next start), each with its own run record and report: `wiki` (03:10 UTC, commit the agent's wiki
-  edits, report missing summaries and broken links), `skills` (03:20, flag and archive unused
-  skills), `routes` (03:30, switch a delegation route on clear evidence) and `prune` (03:40, old
-  saved outputs and prompt-file backups). A run that found nothing is `silent`. The next sessions'
-  morning note still says what they found, read from their last day's runs. A sleep by hand or at
-  the ceiling no longer does the upkeep; `zen jobs run wiki` (etc.) does.
-- `config.rs` reads the kernel's ~40 tunable settings once at start, typed, with every default in
-  one place: `ZEN_TZ` (America/Sao_Paulo), the summary, assist and embedding models among them. A
-  value that doesn't parse runs on its default and is logged; a blank value is unset; `off`,
-  `false` and `no` now turn off flags that took only `0`. The prompt-cache lifetime that was keyed
-  on the `claude/` prefix is a per-engine setting, `ZEN_CACHE_TTL` (`claude=3600`, others 300).
-  Boot settings, paths and the workers' are still read where used (ROADMAP debt).
-- One git runner (`git::run`, `git::commit_all`) replaces the wiki's and the workshop's; one
-  `workers::json_object` replaces the JSON extraction in `compact` and `assist` (which could panic
-  on a reply with `}` before `{`); one name rule (`valid_name`) replaces three, so a new job name
-  can no longer end in a hyphen or hold `--`.
-- Tested: unit tests (config parsing and fallbacks, cache TTLs, git commits, JSON extraction), e2e
-  `wiki` (the job commits edits, reports a missing summary, the next session hears it) and
-  `scheduled-jobs` (all six system jobs seeded, each upkeep job run by hand), `scripts/check.sh`.
-
-## 2026-10-11 — zen: a lighter board, paged sessions, safer terminal text
-
-- The sessions board fetched `/api/board` inside the render loop every 2 seconds, so a slow kernel
-  froze keys and drawing, and the kernel sent every session ever made with all its children. The
-  fetch now runs in a task of its own and the rows are rebuilt only when the answer changed; the
-  kernel sends the latest 200 sessions with the latest 20 children of each (running ones always),
-  archived sessions only when the board shows them (otherwise a count), and each session's
-  `children` count.
-- Opening a session loaded its whole tape to show the last 40 messages. It now asks for the last
-  40; the kernel adds `message_count` and the session's `tokens` for the footer.
-- Streamed text draws at most ~30 frames a second; text is cut between grapheme clusters (emoji no
-  longer shift the side panel's divider); inline markdown renders in linear time; the Files tab
-  never lists or opens secret files; a panic in any task restores the terminal and ends zen;
-  `jobs runs` can't panic on a short id.
-- `zen ask`: a second Ctrl-C leaves without waiting for the turn to stop. The kernel pings a quiet
-  session WebSocket every 30 seconds so proxies don't close it during a long tool call.
-- `crates/zen/src/main.rs` (1,237 lines) is split into `cli`, `turn`, `setup` and `print`.
-- Tested: render and key tests (board fetches, paging, Files tab, emoji, frame rate), e2e checks of
-  the board's archived count, `children` and `message_count`, `scripts/check.sh`.
-
-## 2026-10-11 — Operations hardening: a private database password, safer upgrades, honest security docs
-
-- Postgres used the public password `zen`, so any process on the VM could rewrite zenbot's state.
-  `db_secure` (`scripts/db.sh`) now gives it a random password in `~/.zenbot/db-password`, set over
-  the container's socket and written to `DATABASE_URL` in `env`; `install.sh` runs it, and the
-  next upgrade runs it on existing installs right before the restart (old binaries read the same
-  `env`, so a rollback still works). The kernel treats `db-password` and `env.prev` as secret.
-- `apply-upgrade.sh` waits for idle again right before swapping binaries, goes ahead at once when
-  the kernel doesn't answer at all, aborts (binaries put back, no restart) on a failed copy or an
-  unreadable migration list, and removes the retired `pi` from `ZEN_WORKERS`. The database
-  helpers fall back to `sudo -n docker` (a standard install isn't in the `docker` group).
-- `dev.sh` no longer uses the owner's paid keys or folders (`ZEN_DEV_REAL=1` keeps them). CI pins
-  actions by commit, runs `apt-get update`, and the release job runs the e2e scenarios on the
-  binaries it publishes. `install.sh` checks Node's SHA-256.
-- Docs now say plainly what isn't enforced: an ordinary session's shell isn't sandboxed and, with
-  the install's passwordless `sudo` and Docker, is effectively root; jobs' "no outward action" is
-  prompt-only. The narrowed-sudo plan is in ROADMAP.md debt, awaiting the owner. `check-docs.py`
-  now checks every script and deployment file is in MAP.md.
-- Tested: `db_secure` on a throwaway Postgres (bootstrap password then refused), the Node check
-  with a wrong hash, `dev.sh` environment, e2e on chosen binaries, `scripts/check.sh`, and the
-  real upgrade of this VM (below in the pull request).
-
-## 2026-10-11 — Taint travels with stored content; tainted shells run offline (D-053)
-
-- A review found web text laundered into durable stores and back as trusted: a tainted session's
-  memory went unlabelled into every later session's instructions, a draft skill it wrote was served
-  as a trusted skill and activated when the owner accepted any session that loaded it, a job's
-  report reached the next run as kernel text, and a tainted session's `bash` had the network.
-- Memories, job runs and draft skills now carry the mark (migration 0022: `memories.tainted`,
-  `job_runs.tainted`, `draft_taint`), and every read path hands stored content over through
-  `taint::hand_over` (wrapped, the reader tainted): search, `history`, `find_skills`/`load_skill`,
-  `read` of a marked draft or a wiki page with `web` entries, a job's `<last_report>`, `schedule
-  runs`. A marked memory stays out of the instructions (by id only), is never promoted to a prompt
-  file, and its wiki copy is labelled `web`; the sleep's note never shows its text. A marked draft
-  is activated only by the owner's own accept; `zen skills` and `zen memory` show `untrusted`.
-- The rules for a tainted session are in one place (`taint::limited`). Its `bash` and `verify`'s
-  commands run in bubblewrap with no network, the workspace writable and the rest read-only.
-- Tested: unit tests; e2e `taint-on-data` (each laundering path, the offline shell building and
-  committing in its workspace but reaching neither the kernel nor the home); offline `cargo build`
-  with dependencies in the sandbox by hand.
-
-## 2026-10-11 — Claude runs aren't refused for a rate-limit notice before init
-
-- The engine-boundary check (2026-10-10) refused any Claude Code event before `system/init`. Claude
-  Code can send `rate_limit_event` first, so a normal run failed in 4 s without reaching the model
-  (seen in an eval). Notices (`rate_limit_event`, other `system` events) may now come before init;
-  anything that can carry model output or tool use (`assistant`, `user`, `result`, `stream_event`)
-  is still refused. Tested: unit tests.
-
-## 2026-10-11 — Kernel robustness: children stop with their parent, masked arguments, jobs, MCP
-
-- Aborting a parent left its subagent or verifier running (and spending) for up to 30 minutes. A
-  child's turn now stops as soon as the turn waiting for it does (`StopOnDrop` in `run_and_wait`),
-  and so on down.
-- Tool arguments reached clients (`tool_start`) and `tool_calls.args` unmasked, and every `write`
-  stored its whole file: strings are now masked and cut at 4 KB, with the whole arguments' sha256
-  and size under `_full`.
-- Jobs: a huge duration panicked the turn (`every 9999999999999d`), the 5-minute minimum looked at a
-  cron's first two runs only (`0,30-35 * * * *` passed), `every Nh` drifted by the tick's lateness,
-  a run started between the tick's check and insert rolled back the whole tick, and the approval
-  gate showed System One the agent's own task as if it were evidence. Each is fixed (checked
-  arithmetic, shortest gap of 50 runs, `due + k·d`, `ON CONFLICT DO NOTHING`, the task wrapped as
-  untrusted data).
-- The summarizer cut the owner's words at 2,000 characters and didn't hold its 400 KB budget: the
-  owner's words go whole; tool lines, then the agent's, are cut and then left out to fit.
-- MCP: one slow call froze every MCP tool for every session (a server's lock held across the call,
-  and every lookup locked every server). Calls now run concurrently (a stdio reader hands answers
-  out by id; tools come from the last listing). Messages over 8 MB fail the call; stdio servers run
-  in their own process group, killed whole. Every server is untrusted unless the owner sets
-  `"untrusted": false` (D-052).
-- Idle scoring takes the longest-waiting sessions first and backs off one that keeps failing; a
-  self-update's output is kept to its last 64 KB; the flaky "at most four at a time" check in
-  `memory-sleep-judged` counts only the sleep's questions.
-- Tested: unit tests for jobs, compaction, argument masking, the capped line reader and the update
-  log; e2e: `abort-tool` (a parent aborted mid-delegation), `secrets` (recorded arguments), `mcp`
-  (a call returns while another is slow, 9 MB answers, a server's child killed, local untrusted),
-  `scheduled-jobs` (the gate's state).
-
-## 2026-10-11 — Search index: indexes used, no skipped memories, embeddings off the lock
-
-- Every search read the whole `search_docs` table: the query's filtered `docs` CTE was referenced
-  four times, so Postgres materialized it and the HNSW, full-text and trigram indexes went unused.
-  Each arm now filters the table itself; on a 30,000-document test database a search went from
-  837 ms to 17 ms with each arm on its index, and ranks the same (120 queries compared, the vector
-  arm exact; HNSW's approximation aside). Planned per call (`force_custom_plan`): a generic plan
-  can't use HNSW for a parameter vector and took 8 s.
-- Memories were indexed by an `updated_at` watermark; a long transaction (the sleep) committing
-  after a later one fell behind it, so an archived memory stayed searchable. Triggers now queue each
-  changed memory in the change's own transaction (`search_queue`, migration 0021).
-- Embedding ran under the indexing lock (searches and captures waited up to a minute), and one
-  document the provider refused failed its batch forever. Embeddings now run after the lock, a
-  refused batch is halved until the document is alone, which is tried 3 times
-  (`embed_attempts`, `embed_error`), and a turn is embedded once it has ended instead of after every
-  message. The indexer no longer reads tool results, nor rewrites unchanged documents.
-- A kernel prompt inside a turn no longer splits its search document; `tool_calls(name)` is
-  indexed; `history`'s session-prefix lookup is a primary-key range.
-- Tested: unit tests, a new e2e scenario `search-index` with an embeddings stub (7 of its checks
-  fail on the previous `search.rs`), and EXPLAIN on the test database (in the pull request).
-
-## 2026-10-11 — Memory sleep: no lost duplicates, no lost updates
-
-- Two entries saying the same thing were each judged "covered" by the other, and both were
-  archived (and left search). System One now names *what* covers an entry; one covered by another
-  entry goes only while that entry stays, so one copy always survives (the newer), and it ranks at
-  least as high as the copy it replaces.
-- A `remember` replace or remove during a sleep was overwritten when the sleep wrote its fates
-  (the old text could even be promoted into `USER.md`). Fates now apply with the entries locked,
-  and an entry changed since the sleep read it is left as it is; the note names them.
-- A promotion written to a prompt file before a failed transaction was appended again by the next
-  sleep; it's now skipped when the line is already there. Prompt-file and memory sizes are counted
-  in characters everywhere (non-ASCII files were cut early). System One judges up to 4 entries at
-  once instead of one after another.
-- Tested: unit tests, a new e2e scenario `memory-sleep-judged` with the System One stub (holds
-  questions mid-sleep to change entries under it). The eval barely exercises the sleep (it runs
-  nightly), so the e2e is the main evidence.
-
-Older entries: [docs/archive/PROGRESS-2026-09-30-to-2026-10-10.md](docs/archive/PROGRESS-2026-09-30-to-2026-10-10.md).

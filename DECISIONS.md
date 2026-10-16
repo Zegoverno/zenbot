@@ -6,6 +6,47 @@
 
 ---
 
+## D-064 — Items rated by origin; deny and trust by cause; shells see contaminated files masked
+
+**Date:** 2026-10-16 · **Status:** accepted (owner) · **Builds:** D-062 step 3 · **Supersedes:**
+D-053's session-written marks as the rule for stored items, D-054's "stored marks stay".
+
+**Decision:**
+- **Stored items keep their exact-byte origin.** Files (`item_ratings`, by path and SHA-256 of the
+  bytes written), memories, job reports, skills, made tools and wiki pages carry the writing
+  session's numeric risk; a reader records the writer as an input (`session_inputs`). Only items
+  rated 0–1 enter instructions; everything else reaches a session through `hand_over_rating`
+  (wrapped and raising the reader); metadata failures withhold.
+- **The owner's `/deny` (Matrix `!deny`) contaminates by cause.** It stops the session, its children
+  and every session that read what it produced; level-5 content does the same. `/trust` lifts only
+  the causes the owner reviewed, and stored ratings stay. No agent tool can deny or trust.
+- **Shells see contaminated files masked**, like Anthropic's sandbox-runtime deny-read paths:
+  bubblewrap binds a nodev `/dev/null` over the canonical path of every file whose current bytes
+  match, by digest wherever registered, those of a contaminated or level-5 session (copies too;
+  other hard links in the workspace; a shell refuses to run when some are elsewhere; an
+  unreadable product is masked whatever it holds, a directory with an empty tmpfs). With masks,
+  a host shell gets its own pid namespace, no_new_privs, no Unix sockets (seccomp, as
+  sandbox-runtime does by default) and no kernel API token. With none, shells run as before.
+  A `bash` result is rated by the rated files whose text it shows; `verify` rates its whole view
+  up front. What a host shell writes in the workspace is registered by its exact bytes at the
+  session's risk; a scan it can't complete, a non-UTF-8 name, or a deny that lands while a
+  command runs withholds its result.
+
+**Why:** A taint that only the writing session carried hid the owner's own words and couldn't be
+undone per cause; blocking the shell globally whenever anything was contaminated would stop
+unrelated work. Masking denied bytes keeps the rest of the machine usable at no cost when nothing
+is contaminated.
+
+**Considered:** a shell view built only from admitted file snapshots (the whole OS copied and
+rated: weeks of work, builds break; no reference harness does it); blocking every shell while any
+item is contaminated; rating every shell by the whole workspace (would push most home-workspace
+sessions to 4).
+
+**Limits:** root-equivalent tools used outside these shells, processes outside zenbot, and products
+outside the workspace or in build/cache folders (`target`, `node_modules`, `.cache`, `.cargo`,
+`.rustup`, `.git/objects`), and other local TCP services a host shell can reach, are out of reach.
+A workspace of over a million entries withholds every host shell's result (fail closed).
+
 ## D-063 — Project code defaults to offline and read-only
 
 **Date:** 2026-10-15 · **Status:** accepted (owner), production trial · **Amends:** D-062's
@@ -27,7 +68,7 @@ explicit grants and measure the interruption cost in real use before relaxing th
 
 ## D-062 — Risk is rated per block by its source; a reversible taint stops the session
 
-**Date:** 2026-10-15 · **Status:** accepted (owner); steps 1–2 built · **Supersedes, as its steps
+**Date:** 2026-10-15 · **Status:** accepted (owner); steps 1–3 built (step 3: D-064) · **Supersedes, as its steps
 ship:** D-053's marks by the writing session and `taint::limited`, D-054's "stored marks stay",
 D-056's risky/tainted pair and "a hold taints"
 

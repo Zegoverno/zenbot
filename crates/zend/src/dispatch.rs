@@ -227,6 +227,9 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                         // Nothing more after a tool ended the turn; then the agent's own tools
                         // (agent.rs), or the kernel's built-ins.
                         let read_only = agent::read_only(kind.as_deref());
+                        if crate::taint::stopped(&app.db,id).await.unwrap_or(true) {
+                            return tools::ToolOutput { rating: None, content: "not run: session stopped by contamination; owner review required".into(), is_error: true };
+                        }
                         // Immutable owner-only and kind boundaries cannot be overridden by a grant.
                         if let Some(why) = agent::refusal(kind.as_deref(), &name) {
                             return tools::ToolOutput { rating: None, content: why, is_error: true };
@@ -234,6 +237,17 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                         if let Some(why) = agent::protected_refusal(&app.db, id, kind.as_deref(), &workspace, &name, &args, true).await {
                             return tools::ToolOutput { rating: None, content: why, is_error: true };
                         }
+                        // A shell's view is rated (and its masks found) before the gate decides on it.
+                        let view = if matches!(name.as_str(), "bash" | "verify") {
+                            let view = match crate::fsview::prepare(&app.db, &workspace).await {
+                                Ok(v) if name == "verify" => v.rate_all(&app.db, id).await.map(|_| v),
+                                v => v,
+                            };
+                            match view {
+                                Ok(v) => v,
+                                Err(e) => return tools::ToolOutput { rating: None, content: format!("not run: the shell's view couldn't be checked ({e:#})"), is_error: true },
+                            }
+                        } else { crate::fsview::View::default() };
                         let policy = if read_only { Ok(crate::gate::Policy::Run) }
                             else { crate::gate::check(app, id, &workspace, &name, &args).await };
                         let policy = match policy {
@@ -279,14 +293,28 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                                 if let crate::gate::Policy::SafeRead(command) = &policy {
                                     execute_args["command"] = json!(command);
                                 }
-                                let mut out = tools::execute(&workspace, &name, &execute_args, &env, sandbox).await;
+                                let start = std::time::SystemTime::now();
+                                let mut out = tools::execute_origin(&workspace, &name, &execute_args, &env, sandbox, Some(tools::Origin {db:&app.db,session:id,masks:&view.masks})).await;
+                                if name == "bash" {
+                                    // What the output shows of rated files rates it, as a `read` would.
+                                    let (risk, writers) = view.exposure(&out.content);
+                                    let shown = async {
+                                        crate::fsview::finish(&app.db, id, &workspace, start, sandbox == tools::Sandbox::None).await?;
+                                        crate::fsview::record(&app.db, id, risk, &writers).await?;
+                                        crate::taint::hand_over_rating(app, id, risk, "shell", args["command"].as_str().unwrap_or(""), &out.content).await
+                                    };
+                                    match shown.await {
+                                        Ok(content) => out.content = content,
+                                        Err(e) => out = tools::ToolOutput { rating: None, content: format!("{e:#}"), is_error: true },
+                                    }
+                                }
                                 // Stored content a tainted session wrote is untrusted however it's read.
                                 if name == "read" && !out.is_error {
-                                    if let Some(source) = agent::read_of_tainted(&app.db, &workspace, &args).await {
-                                        let about = args["path"].as_str().unwrap_or("");
-                                        out = match crate::taint::hand_over(app, id, true, source, about, &out.content).await {
-                                            Ok(content) => tools::ToolOutput { rating: None, content, is_error: false },
-                                            Err(e) => tools::ToolOutput { rating: None, content: crate::taint::withheld(&e), is_error: true },
+                                    if let Some(rating) = &out.rating {
+                                        let risk = rating.risk;
+                                        out.content = match crate::taint::hand_over_rating(app,id,risk,"file",args["path"].as_str().unwrap_or(""),&out.content).await {
+                                            Ok(content) => content,
+                                            Err(e) => {out.is_error=true; crate::taint::withheld(&e)}
                                         };
                                     }
                                 }
@@ -329,24 +357,37 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                     None => Vec::new(),
                 }
             };
-            // Only a trusted repository's file is attached as instructions; any other is
-            // untrusted content and taints the session (context.rs).
+            // Only a trusted repository's file whose exact bytes are rated 0-1 is attached as
+            // instructions; any other is handed over at its rating (context.rs, D-062).
             let roots = if new_context.is_empty() { Vec::new() } else { context::trusted_roots(std::path::Path::new(&app.repo)) };
             for path in new_context {
-                if let Some(text) = context::read_capped(&path) {
-                    let trusted = context::trusted(&path, &roots);
-                    if !trusted {
-                        if let Some(r) = out.rating.as_mut() { r.risk = r.risk.max(4); r.origin.push_str("+untrusted-context"); }
-                        if let Err(e) = crate::taint::taint(app, id, "project file", &path.display().to_string()).await {
-                            out.content.push_str(&format!("\n\n[instructions in {}: {}]", path.display(), crate::taint::withheld(&e)));
-                            continue;
-                        }
+                let Ok(text) = tokio::fs::read_to_string(&path).await else { continue };
+                let shown = path.display().to_string();
+                let (trusted, risk) = match context::attach_rating(&app.db, id, &text, context::trusted(&path, &roots)).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        out.content.push_str(&format!("\n\n[instructions in {shown}: not shown, their origin couldn't be rated ({e:#})]"));
+                        continue;
                     }
-                    if let Err(e) = tape::append(&app.db, id, "context", &json!({ "path": path, "trusted": trusted })).await {
-                        tracing::error!("recording instruction file {} for {id}: {e:#}", path.display());
+                };
+                if !trusted {
+                    if let Some(r) = out.rating.as_mut() { r.risk = r.risk.max(risk.min(4)); r.origin.push_str("+untrusted-context"); }
+                    if let Err(e) = crate::taint::mark_rating(app, id, risk, "project file", &shown).await {
+                        out.content.push_str(&format!("\n\n[instructions in {shown}: {}]", crate::taint::withheld(&e)));
+                        continue;
                     }
-                    out.content.push_str(&if trusted { context::attachment(&path, &text) } else { context::untrusted_attachment(&path, &text) });
                 }
+                if let Err(e) = tape::append(&app.db, id, "context", &json!({ "path": path, "trusted": trusted, "risk": risk })).await {
+                    tracing::error!("recording instruction file {} for {id}: {e:#}", path.display());
+                }
+                let text = context::capped(text);
+                out.content.push_str(&if trusted { context::attachment(&path, &text) } else { context::untrusted_attachment(&path, &text) });
+            }
+            // A source can be denied while a read is in flight. Dependencies are recorded before
+            // handover, so recheck the live graph before returning any result to the worker.
+            if crate::taint::stopped(&app.db,id).await.unwrap_or(true) {
+                out.content = "result withheld: session or a source was contaminated during this tool".into();
+                out.is_error = true;
             }
             // Every tool's output, instruction files included, is masked before the model or the tape sees it.
             out.content = crate::secrets::mask_off_thread(std::mem::take(&mut out.content)).await;
@@ -358,7 +399,12 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                     origin: format!("kernel:{name}"),
                 },
             };
-            crate::sources::raise(&app.db, id, rating.risk).await?;
+            if rating.risk < 5 {crate::sources::raise(&app.db, id, rating.risk).await?;}
+            if rating.risk == 5 {
+                crate::taint::deny(app,id,"level-5 block").await?;
+                out.content = "content withheld: level-5 block stopped this session; owner review required".into();
+                out.is_error = true;
+            }
             let output_bytes = out.content.len() as i64;
             // Cut arguments keep the sha256 and size of the whole (masked) arguments under `_full`.
             let recorded = sqlx::query(

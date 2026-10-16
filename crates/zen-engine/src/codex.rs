@@ -49,7 +49,7 @@ const REVIEWED: &[&str] = &[
 /// through the kernel's dynamic tools.
 fn config() -> Value {
     let features: serde_json::Map<String, Value> = DISABLED.iter().map(|f| (f.to_string(), json!(false))).collect();
-    json!({ "web_search": "disabled", "mcp_servers": {}, "project_doc_max_bytes": 0, "features": features })
+    json!({ "web_search": "disabled", "mcp_servers": {}, "project_doc_max_bytes": 0, "agents": { "enabled": false }, "features": features })
 }
 
 /// The thread items a zen turn may contain: messages, reasoning, plans, compactions and zenbot's
@@ -682,6 +682,8 @@ mod tests {
         assert_eq!(unknown_features(list), Some(vec!["new_magic_tool".to_string()]));
         assert_eq!(unknown_features("apps stable false\n"), Some(vec![]));
         assert_eq!(unknown_features("Usage: codex features …"), None);
+        assert_eq!(config()["agents"]["enabled"], false, "native agents must stay disabled");
+        assert!(foreign_item(&json!({"method":"item/started","params":{"item":{"type":"subAgentActivity"}}})).is_some());
         let disabled = config()["features"].as_object().unwrap().len();
         assert_eq!(disabled, DISABLED.len());
         assert!(DISABLED.iter().all(|f| !REVIEWED.contains(f)));

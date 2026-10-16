@@ -33,7 +33,7 @@ pub async fn append(db: &PgPool, session: Uuid, kind: &str, payload: &Value) -> 
 pub async fn append_owner(db: &PgPool, session: Uuid, payload: &Value) -> Result<(i32, String), sqlx::Error> {
     let mut tx = db.begin().await?;
     let (seq, hash) = append_in(&mut tx, session, "message", payload).await?;
-    sqlx::query("UPDATE tape_events SET risk=0, origin='owner' WHERE session_id=$1 AND seq=$2")
+    sqlx::query("UPDATE tape_events SET risk=0, origin='owner', tainted=false WHERE session_id=$1 AND seq=$2")
         .bind(session).bind(seq).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok((seq,hash))
@@ -76,6 +76,8 @@ pub async fn append_in(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, session: 
     .bind(tool_call_record)
     .fetch_one(&mut **tx)
     .await?;
+    sqlx::query("UPDATE tape_events SET tainted=zen_session_contaminated(session_id) WHERE session_id=$1 AND seq=$2")
+        .bind(session).bind(row.get::<i32,_>("seq")).execute(&mut **tx).await?;
     sqlx::query("UPDATE sessions SET updated_at = now(), risk=GREATEST(risk,$2) WHERE id = $1").bind(session).bind(risk).execute(&mut **tx).await?;
     Ok((row.get("seq"), row.get("hash")))
 }

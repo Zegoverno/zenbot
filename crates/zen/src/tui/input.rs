@@ -29,6 +29,8 @@ pub(super) const COMMANDS: &[Command] = &[
     cmd("/jobs", "scheduled jobs: /jobs [run|resume|pause <name> | runs [name]]", false),
     cmd("/skills", "skills and made tools: /skills [accept|reject <domain/name> <sha>]", false),
     cmd("/tools", "review a made tool: /tools accept|reject <name> <sha>", false),
+    cmd("/allow", "the action held last; /allow yes runs that exact action once", false),
+    cmd("/deny", "stop this session and mark what it produced as contaminated", false),
     cmd("/trust", "what made this session untrusted; /trust yes trusts it again", false),
     cmd("/upgrade", "update zenbot to the latest version and restart it", false),
     cmd("/restart", "restart zen on the installed version, back in this session", false),
@@ -458,7 +460,7 @@ impl App {
             }
             Some("/mouse") => self.note("inline mode leaves the mouse to the terminal", Sty::Dim),
             // Read here and sent to the kernel with the owner's token, never to the agent.
-            Some(c @ ("/jobs" | "/skills" | "/tools" | "/trust")) => self.owner_command(&format!("{} {arg}", &c[1..])).await,
+            Some(c @ ("/jobs" | "/skills" | "/tools" | "/trust" | "/allow" | "/deny")) => self.owner_command(&format!("{} {arg}", &c[1..])).await,
             Some("/upgrade") => self.start_upgrade(),
             Some("/restart") => {
                 self.restart = true;
@@ -470,7 +472,7 @@ impl App {
         Ok(())
     }
 
-    /// `/jobs`, `/skills`, `/tools`, `/trust` (`zen_client::owner`): the kernel's answer, or why
+    /// `/jobs`, `/skills`, `/tools`, `/trust`, `/allow`, `/deny` (`zen_client::owner`): the kernel's answer, or why
     /// not, in the transcript. A failed call is shown like any other, as an error note.
     async fn owner_command(&mut self, text: &str) {
         let out = match zen_client::owner::parse(text) {
@@ -616,6 +618,12 @@ mod tests {
         a.command("/skills accept work/brief").await.unwrap();
         assert!(a.notice.as_ref().is_some_and(|(t, _)| t.starts_with("usage: skills")), "a review names the fingerprint");
         assert!(a.entries.is_empty() && !a.busy && a.pending_prompt.is_none(), "nothing was sent as a prompt");
+        for c in ["/allow", "/deny"] {
+            a.notice = None;
+            a.command(c).await.unwrap();
+            assert!(a.notice.is_none(), "{c} is an owner command, not unknown: {:?}", a.notice);
+        }
+        assert!(!a.busy && a.pending_prompt.is_none(), "they aren't prompts either");
     }
 
     #[tokio::test]

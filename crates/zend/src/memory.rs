@@ -19,6 +19,9 @@
 //! page must not reach every later session as trusted, and putting it in as untrusted content
 //! would mark every session from then on. `search` returns it as untrusted content and marks the
 //! reader. The sleep never moves it into a prompt file, and its wiki copy is labelled `web`.
+//! Prompt rendering (D-062) admits only original ratings 0–1 with no current contamination;
+//! it records writer dependencies and checks the live stop flag before handing entries over.
+//! An error reading ratings or recording dependencies fails the render, never trusts the text.
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -50,8 +53,11 @@ pub struct Entry {
     pub captured: bool,
     /// When it last changed: the sleep writes an entry's fate only if it hasn't changed since.
     pub updated_at: chrono::DateTime<chrono::Utc>,
-    /// Saved by a session that had read untrusted content.
+    /// Saved by a session that had read untrusted content: rated 2 or more by origin, or its
+    /// writer (or a source of it) is contaminated now (D-062).
     pub tainted: bool,
+    /// The session that wrote it, if known: a reader of the entry depends on it.
+    pub writer: Option<Uuid>,
 }
 
 fn line(e: &Entry) -> String {
@@ -60,7 +66,8 @@ fn line(e: &Entry) -> String {
 
 async fn short_entries(db: &PgPool) -> Result<Vec<Entry>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, text, source, uses, proposed IS NOT DISTINCT FROM 'wiki' AS captured, updated_at, tainted,
+        "SELECT id, text, source, uses, proposed IS NOT DISTINCT FROM 'wiki' AS captured, updated_at, session_id,
+                (risk >= 2 OR zen_session_contaminated(session_id)) AS tainted,
                 (EXTRACT(EPOCH FROM now() - created_at) / 86400)::float8 AS age,
                 (EXTRACT(EPOCH FROM now() - GREATEST(updated_at, COALESCE(used_at, updated_at))) / 86400)::float8 AS idle
          FROM memories WHERE tier = 'short' ORDER BY created_at, id",
@@ -79,16 +86,23 @@ async fn short_entries(db: &PgPool) -> Result<Vec<Entry>, sqlx::Error> {
             captured: r.get("captured"),
             updated_at: r.get("updated_at"),
             tainted: r.get("tainted"),
+            writer: r.get("session_id"),
         })
         .collect())
 }
 
-/// Short-term memory as it goes into a session's instructions: every entry (writes may take it
-/// past its size until the sleep tidies it, never past the hard limit, where only the newest that
-/// fit are shown with a count of the rest), except those a tainted session saved: only their ids.
-pub async fn render(db: &PgPool) -> Result<String, sqlx::Error> {
+/// Short-term memory as it goes into `reader`'s instructions: every entry rated 0–1 (writes may
+/// take it past its size until the sleep tidies it, never past the hard limit, where only the
+/// newest that fit are shown with a count of the rest); entries rated 2 or more, or whose writer
+/// is contaminated, only by id (D-062). The reader depends on the writers of what it is shown,
+/// recorded before it is shown, so a later denial of one stops the reader. A database error fails
+/// the render: nothing unrated gets in.
+pub async fn render(db: &PgPool, reader: Uuid) -> Result<String> {
     let entries = short_entries(db).await?;
     let (marked, clean): (Vec<Entry>, Vec<Entry>) = entries.into_iter().partition(|e| e.tainted);
+    let writers: Vec<Uuid> = clean.iter().filter_map(|e| e.writer).collect();
+    crate::sources::depend(db, reader, &writers).await?;
+    anyhow::ensure!(!crate::taint::stopped(db, reader).await?, "memories withheld: a writer was stopped");
     let mut out = render_entries(&clean, ceiling());
     out.push_str(&left_out(&marked));
     Ok(out)
@@ -238,11 +252,12 @@ instructions), or leave it; it is being tidied now. Then carry on with the owner
             anyhow::ensure!(!text.is_empty(), "replace needs the new `text`");
             anyhow::ensure!(text.chars().count() <= 600, "keep a memory under 600 characters");
             // The new text is the replacing session's: it carries that session's mark.
-            let n = sqlx::query("UPDATE memories SET text = $2, source = $3, tainted = $4, updated_at = now(), used_at = now(), uses = uses + 1 WHERE id = $1 AND tier = 'short'")
+            let n = sqlx::query("UPDATE memories SET text = $2, source = $3, tainted = $4, session_id = $5, updated_at = now(), used_at = now(), uses = uses + 1 WHERE id = $1 AND tier = 'short'")
                 .bind(id)
                 .bind(&text)
                 .bind(source)
                 .bind(tainted)
+                .bind(session)
                 .execute(db)
                 .await?
                 .rows_affected();
@@ -856,7 +871,7 @@ pub async fn last_run(db: &PgPool) -> Result<Value, sqlx::Error> {
 /// Memories by tier, newest first, for `zen memory`.
 pub async fn list(db: &PgPool, tier: &str) -> Result<Value, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, text, source, tier, proposed, reason, created_at, updated_at, tainted FROM memories
+        "SELECT id, text, source, tier, proposed, reason, created_at, updated_at, (risk>=2 OR zen_session_contaminated(session_id)) AS tainted FROM memories
          WHERE $1 = 'all' OR tier = $1 OR ($1 = 'proposed' AND proposed = 'promote') ORDER BY id DESC LIMIT 500",
     )
         .bind(tier)
@@ -878,7 +893,7 @@ mod tests {
     use super::*;
 
     fn e(id: i64, text: &str, source: &str, idle: f64) -> Entry {
-        Entry { id, text: text.into(), source: source.into(), age_days: idle, idle_days: idle, uses: 0, captured: false, updated_at: chrono::DateTime::UNIX_EPOCH, tainted: false }
+        Entry { id, text: text.into(), source: source.into(), age_days: idle, idle_days: idle, uses: 0, captured: false, updated_at: chrono::DateTime::UNIX_EPOCH, tainted: false, writer: None }
     }
 
     #[test]

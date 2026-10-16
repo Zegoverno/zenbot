@@ -403,8 +403,12 @@ pub(crate) struct Trust {
 /// it read untrusted content after `seen`. Owner token only, like every route: a tainted session's
 /// shell has no network and can't read the token, so it can't call this.
 pub(crate) async fn trust_session(State(app): State<AppState>, Path(id): Path<Uuid>, Json(body): Json<Trust>) -> ApiResult<Json<Value>> {
-    if app.is_busy(id).await {
-        return Err(ApiError(StatusCode::CONFLICT, "a turn is running in this session: wait for it to end (or stop it), then look again".into()));
+    let family: Vec<Uuid> = sqlx::query_scalar("WITH RECURSIVE family AS
+        (SELECT id FROM sessions WHERE id=$1 UNION SELECT s.id FROM sessions s JOIN family f ON s.parent=f.id)
+        SELECT id FROM family").bind(id).fetch_all(&app.db).await?;
+    let turns = app.turns.lock().await;
+    if family.iter().any(|s| turns.contains_key(s)) {
+        return Err(ApiError(StatusCode::CONFLICT, "a turn is running in this session or a child: wait for it to end (or stop it), then look again".into()));
     }
     Ok(Json(match taint::trust(&app, id, body.seen).await? {
         taint::Trusted::Done(seq) => json!({ "trusted": true, "seq": seq }),
@@ -412,6 +416,12 @@ pub(crate) async fn trust_session(State(app): State<AppState>, Path(id): Path<Uu
         taint::Trusted::Changed => return Err(ApiError(StatusCode::CONFLICT, "it read untrusted content after what you looked at: look again".into())),
         taint::Trusted::NotFound => return Err(not_found()),
     }))
+}
+
+/// An authenticated owner refusal, never exposed as a model tool.
+pub(crate) async fn deny_session(State(app): State<AppState>, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
+    taint::deny(&app,id,"owner /deny").await?;
+    Ok(Json(json!({"stopped":true})))
 }
 
 /// Source allowlist mutations are owner client actions, not model tools.

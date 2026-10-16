@@ -334,11 +334,20 @@ async fn capture(app: &App, session: Option<Uuid>, args: &Value) -> Result<Strin
     };
     let path = dir.join(format!("{slug_}.md"));
     let text = std::fs::read_to_string(&path)?;
-    std::fs::write(&path, add_entry(&text, &entry, &today))?;
+    let updated = add_entry(&text,&entry,&today);
+    if let Some(session) = session {
+        crate::sources::record_bytes(&app.db,session,&path,&updated,Some(&text)).await?;
+    }
+    std::fs::write(&path,&updated)?;
     let mut log = std::fs::read_to_string(dir.join("log.md")).unwrap_or_default();
     log.push_str(&format!("## [{today}] capture | {slug_}{}\n", if created { " (new page)" } else { "" }));
-    std::fs::write(dir.join("log.md"), log)?;
-    std::fs::write(dir.join("index.md"), index_text(&pages(&dir)))?;
+    let index = index_text(&pages(&dir));
+    if let Some(session) = session {
+        crate::sources::record_bytes(&app.db,session,&dir.join("log.md"),&log,None).await?;
+        crate::sources::record_bytes(&app.db,session,&dir.join("index.md"),&index,None).await?;
+    }
+    std::fs::write(dir.join("log.md"),log)?;
+    std::fs::write(dir.join("index.md"),index)?;
     crate::git::commit_all(&dir, &format!("capture: {slug_}")).await;
     let page = parse(&slug_, &std::fs::read_to_string(&path)?);
     let needs = if page.summary.contains("[No summary yet") || created {

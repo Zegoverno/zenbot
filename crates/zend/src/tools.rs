@@ -220,20 +220,29 @@ pub enum Sandbox {
 
 /// Run a tool. `env` is added to the environment of commands (bash), which run in `sandbox`. In
 /// a read-only sandbox (a verifier) only `read` may run besides, inside the workspace (`confined`).
+#[cfg(test)]
 pub async fn execute(workspace: &Path, name: &str, args: &Value, env: &[(&str, &str)], sandbox: Sandbox) -> ToolOutput {
+    execute_origin(workspace,name,args,env,sandbox,None).await
+}
+
+#[derive(Clone, Copy)]
+pub struct Origin<'a> { pub db: &'a sqlx::PgPool, pub session: uuid::Uuid, pub masks: &'a [PathBuf] }
+
+/// File provenance is computed from the exact bytes within the file operation, never a reread.
+pub async fn execute_origin(workspace: &Path, name: &str, args: &Value, env: &[(&str,&str)], sandbox: Sandbox, origin: Option<Origin<'_>>) -> ToolOutput {
     let read_only = sandbox == Sandbox::ReadOnly;
     if read_only && !matches!(name, "bash" | "read") {
         return err(format!("`{name}` can't run in a read-only session"));
     }
     let result = match name {
-        "bash" => bash(workspace, args, env, sandbox, None).await,
+        "bash" => bash(workspace, args, env, sandbox, origin.map(|o| o.masks).unwrap_or(&[]), None).await,
         "read" if read_only => match confined(workspace, args) {
-            Ok(()) => read(workspace, args).await,
+            Ok(()) => read(workspace, args, origin).await,
             Err(e) => Err(err(e)),
         },
-        "read" => read(workspace, args).await,
-        "write" => write(workspace, args, sandbox == Sandbox::GatedFile).await,
-        "edit" => edit(workspace, args, sandbox == Sandbox::GatedFile).await,
+        "read" => read(workspace, args, origin).await,
+        "write" => write(workspace, args, sandbox == Sandbox::GatedFile, origin).await,
+        "edit" => edit(workspace, args, sandbox == Sandbox::GatedFile, origin).await,
         _ => Err(err(format!("unknown tool `{name}`"))),
     };
     // Secrets are masked once for every tool, where the dispatcher hands the result back.
@@ -323,6 +332,27 @@ pub struct Shell {
 /// isolate pathname Unix sockets, so deny connection/datagram operations and io_uring bypasses.
 /// Reject foreign syscall ABIs (including x32) rather than comparing the wrong syscall numbers.
 fn network_filter() -> Result<std::fs::File,String> {
+    let mut rules = Vec::new();
+    for nr in [libc::SYS_connect,libc::SYS_sendto,libc::SYS_sendmsg,libc::SYS_sendmmsg,libc::SYS_io_uring_setup] {
+        rules.push((0x15,0,1,nr as u32));
+        rules.push((0x06,0,0,0x00050001)); // SECCOMP_RET_ERRNO | EPERM
+    }
+    seccomp(rules)
+}
+
+/// A host shell with masks (fsview.rs) keeps the network but makes no Unix socket: a host
+/// daemon, tmux server or container socket would run commands outside the masks. As Anthropic's
+/// sandbox-runtime does by default: `socket(AF_UNIX, ...)` and io_uring fail with EPERM.
+fn unix_filter() -> Result<std::fs::File,String> {
+    seccomp(vec![
+        (0x15,0,3,libc::SYS_socket as u32), (0x20,0,0,16), (0x15,0,1,libc::AF_UNIX as u32), (0x06,0,0,0x00050001),
+        (0x20,0,0,0), (0x15,0,1,libc::SYS_io_uring_setup as u32), (0x06,0,0,0x00050001),
+    ])
+}
+
+/// A seccomp program: foreign ABIs killed, x32 refused, then `rules` on the syscall number
+/// (loaded in A), then allow.
+fn seccomp(rules: Vec<(u16,u8,u8,u32)>) -> Result<std::fs::File,String> {
     use std::io::{Seek,Write};
     use std::os::fd::FromRawFd;
     #[cfg(target_arch="x86_64")]
@@ -335,10 +365,7 @@ fn network_filter() -> Result<std::fs::File,String> {
         (0x20,0,0,4), (0x15,1,0,arch), (0x06,0,0,0x80000000),
         (0x20,0,0,0), (0x45,0,1,0x40000000), (0x06,0,0,0x00050001),
     ];
-    for nr in [libc::SYS_connect,libc::SYS_sendto,libc::SYS_sendmsg,libc::SYS_sendmmsg,libc::SYS_io_uring_setup] {
-        instructions.push((0x15,0,1,nr as u32));
-        instructions.push((0x06,0,0,0x00050001)); // SECCOMP_RET_ERRNO | EPERM
-    }
+    instructions.extend(rules);
     instructions.push((0x06,0,0,0x7fff0000)); // SECCOMP_RET_ALLOW
     // SAFETY: static NUL-terminated name; the returned fd is owned exactly once by File.
     let fd = unsafe {libc::memfd_create(c"zen-offline-filter".as_ptr(),libc::MFD_CLOEXEC)};
@@ -371,9 +398,12 @@ fn sandbox_command(filter: &std::fs::File) -> Command {
 /// Run bash in its own process group, killed on timeout or cancellation. Sandbox modes use
 /// read-only mounts, private writable /tmp, isolated processes/network and a socket syscall
 /// filter; None is the explicit host-capability route. Kernel secret variables are removed.
-pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox: Sandbox, timeout: Duration) -> Result<Shell, String> {
+/// `masks` (fsview.rs) are files the shell must not see: each is unreadable (a nodev /dev/null), in
+/// every mode; a host shell with masks runs in its own pid namespace with no_new_privs.
+pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox: Sandbox, masks: &[PathBuf], timeout: Duration) -> Result<Shell, String> {
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/home".into()));
-    let filter = if matches!(sandbox,Sandbox::ReadOnly|Sandbox::Offline|Sandbox::SafeRead) {Some(network_filter()?)} else {None};
+    let filter = if matches!(sandbox,Sandbox::ReadOnly|Sandbox::Offline|Sandbox::SafeRead) {Some(network_filter()?)}
+        else if !masks.is_empty() {Some(unix_filter()?)} else {None};
     let mut cmd = match sandbox {
         Sandbox::ReadOnly => {
             let mut c = sandbox_command(filter.as_ref().expect("sandbox filter initialized"));
@@ -383,6 +413,7 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox:
             c.args(READ_ONLY_SANDBOX).arg("--tmpfs").arg(&home).arg("--ro-bind").arg(dir).arg(dir);
             // (Those under the home but outside the work are gone with it already.)
             hide_secrets(&mut c, crate::secrets::secret_files().into_iter().filter(|f| !f.starts_with(&home) || f.starts_with(dir)));
+            crate::fsview::mask(&mut c, masks);
             c.arg("--chdir").arg(dir).args(["bash", "-c"]);
             c
         }
@@ -402,6 +433,7 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox:
                 c.arg("--ro-bind").arg(&zen).arg(&zen);
             }
             hide_secrets(&mut c, crate::secrets::secret_files());
+            crate::fsview::mask(&mut c, masks);
             c.arg("--chdir").arg(dir).args(["bash", "-c"]);
             c
         }
@@ -419,14 +451,26 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox:
             }
             c.arg("--ro-bind").arg(dir).arg(dir);
             hide_secrets(&mut c, crate::secrets::secret_files());
+            crate::fsview::mask(&mut c, masks);
             c.env_clear().env("PATH", "/usr/bin:/bin").env("LANG", "C.UTF-8");
             c.arg("--chdir").arg(dir).args(["/bin/bash", "--noprofile", "--norc", "-c"]);
             c
         }
         Sandbox::GatedFile => return Err("file policy cannot execute shell commands".into()),
-        Sandbox::None => {
+        Sandbox::None if masks.is_empty() => {
             let mut c = Command::new("bash");
             c.arg("-c");
+            c
+        }
+        Sandbox::None => {
+            // The host as it is, but with its own /proc (no other process's root to reach
+            // masked files through), background processes ending with the shell, and no sudo.
+            let mut c = sandbox_command(filter.as_ref().expect("sandbox filter initialized"));
+            c.args(["--dev-bind", "/", "/", "--unshare-pid", "--proc", "/proc", "--die-with-parent"]);
+            // Nor through the kernel's own API: its token is hidden too.
+            hide_secrets(&mut c, [crate::zen_home().join("token")].into_iter().filter(|t| t.exists()));
+            crate::fsview::mask(&mut c, masks);
+            c.arg("--chdir").arg(dir).args(["bash", "-c"]);
             c
         }
     };
@@ -503,10 +547,10 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox:
     Ok(Shell { text, status })
 }
 
-async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], sandbox: Sandbox, output_dir: Option<PathBuf>) -> Result<ToolOutput, ToolOutput> {
+async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], sandbox: Sandbox, masks: &[PathBuf], output_dir: Option<PathBuf>) -> Result<ToolOutput, ToolOutput> {
     let command = str_arg(args, "command")?;
     let timeout = args.get("timeout_secs").and_then(Value::as_u64).unwrap_or(120).clamp(1, 600);
-    let Shell { text, status } = run_shell(workspace, command, env, sandbox, Duration::from_secs(timeout)).await.map_err(err)?;
+    let Shell { text, status } = run_shell(workspace, command, env, sandbox, masks, Duration::from_secs(timeout)).await.map_err(err)?;
     // Cutting and saving (with masking) up to 16 MB of output is blocking work: off the runtime's threads.
     let mut body = if text.len() <= MAX_OUTPUT {
         text
@@ -553,7 +597,7 @@ fn is_binary(bytes: &[u8]) -> bool {
     bytes[..bytes.len().min(8192)].contains(&0) || std::str::from_utf8(bytes).is_err()
 }
 
-async fn read(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> {
+async fn read(workspace: &Path, args: &Value, origin: Option<Origin<'_>>) -> Result<ToolOutput, ToolOutput> {
     const MAX_READ_FILE: u64 = 16 * 1024 * 1024;
     let path = resolve(workspace, str_arg(args, "path")?);
     let file = tokio::fs::OpenOptions::new().read(true).custom_flags(0x800).open(&path).await
@@ -596,12 +640,16 @@ async fn read(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> 
         )));
     }
     let text = String::from_utf8_lossy(&bytes);
+    let rating = if let Some(origin) = origin {
+        crate::sources::depend_file(origin.db,origin.session,&text).await.map_err(|e|err(format!("file origin dependencies unavailable: {e}")))?;
+        Some(crate::sources::Rating {risk: crate::sources::file_rating(origin.db,&opened,&text).await.map_err(|e|err(format!("file provenance unavailable: {e}")))?,origin:format!("file:{}",opened.display())})
+    } else {None};
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(1).max(1) as usize;
     let limit = args.get("limit").and_then(Value::as_u64).map(|l| (l as usize).max(1)).unwrap_or(DEFAULT_READ_LINES);
     let total = text.lines().count();
     if total == 0 {
-        return Ok(ok("[empty file]\n"));
+        return Ok(ToolOutput {rating,content:"[empty file]\n".into(),is_error:false});
     }
     if offset > total {
         return Err(err(format!("offset {offset} is past the end of the file ({total} lines)")));
@@ -630,7 +678,7 @@ async fn read(workspace: &Path, args: &Value) -> Result<ToolOutput, ToolOutput> 
     if last < total {
         out.push_str(&format!("[showing lines {offset}-{last} of {total}; continue with offset={}]\n", last + 1));
     }
-    Ok(ok(out))
+    Ok(ToolOutput {rating,content:out,is_error:false})
 }
 
 // ---------- write / edit ----------
@@ -686,7 +734,7 @@ fn anchored(workspace: &Path, path: &Path) -> std::io::Result<(std::fs::File, Pa
     Ok((dir, file))
 }
 
-async fn write(workspace: &Path, args: &Value, gated: bool) -> Result<ToolOutput, ToolOutput> {
+async fn write(workspace: &Path, args: &Value, gated: bool, origin: Option<Origin<'_>>) -> Result<ToolOutput, ToolOutput> {
     let path = resolve(workspace, str_arg(args, "path")?);
     let content = str_arg(args, "content")?;
     let _guard = lock_files(&[&path]).await;
@@ -697,6 +745,7 @@ async fn write(workspace: &Path, args: &Value, gated: bool) -> Result<ToolOutput
         }
     }
     let target = anchor.as_ref().map(|(_, p)| p.as_path()).unwrap_or(&path);
+    if let Some(o) = origin { crate::sources::record_bytes(o.db,o.session,&path,content,None).await.map_err(|e|err(format!("not written: provenance unavailable: {e}")))?; }
     write_atomic(target, content.as_bytes(), !gated).await.map_err(|e| err(format!("cannot write {}: {e}", path.display())))?;
     Ok(ok(format!("wrote {} bytes to {}", content.len(), path.display())))
 }
@@ -765,7 +814,7 @@ fn find_matches(hay: &str, needle: &str) -> (Vec<(usize, usize)>, bool) {
     (found, true)
 }
 
-async fn edit(workspace: &Path, args: &Value, gated: bool) -> Result<ToolOutput, ToolOutput> {
+async fn edit(workspace: &Path, args: &Value, gated: bool, origin: Option<Origin<'_>>) -> Result<ToolOutput, ToolOutput> {
     let path = resolve(workspace, str_arg(args, "path")?);
     let old = str_arg(args, "old_text")?.replace("\r\n", "\n");
     let new = str_arg(args, "new_text")?.replace("\r\n", "\n");
@@ -833,7 +882,9 @@ async fn edit(workspace: &Path, args: &Value, gated: bool) -> Result<ToolOutput,
         return Err(err("the replacement produced identical content; nothing changed"));
     }
     let updated = if crlf { updated.replace('\n', "\r\n") } else { updated };
-    write_atomic(target, format!("{bom}{updated}").as_bytes(), !gated)
+    let updated = format!("{bom}{updated}");
+    if let Some(o) = origin { crate::sources::record_bytes(o.db,o.session,&path,&updated,Some(&original)).await.map_err(|e|err(format!("not edited: provenance unavailable: {e}")))?; }
+    write_atomic(target, updated.as_bytes(), !gated)
         .await
         .map_err(|e| err(format!("cannot write {}: {e}", path.display())))?;
     let n = if all { matches.len() } else { 1 };
@@ -852,7 +903,7 @@ mod tests {
 
     async fn run(ws: &Path, name: &str, args: Value) -> ToolOutput {
         if name == "bash" {
-            bash(ws, &args, &[], Sandbox::None, Some(ws.join("outputs"))).await.unwrap_or_else(|e| e)
+            bash(ws, &args, &[], Sandbox::None, &[], Some(ws.join("outputs"))).await.unwrap_or_else(|e| e)
         } else {
             execute(ws, name, &args, &[], Sandbox::None).await
         }
@@ -875,12 +926,12 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let command = format!("if echo changed > AGENTS.md 2>/dev/null; then echo WRITE_OPEN; else echo WRITE_BLOCKED; fi; echo scratch > /tmp/zen-code-output; cat /tmp/zen-code-output; python3 -c 'import socket; s=socket.socket(); s.settimeout(1); print(\"NET_BLOCKED\" if s.connect_ex((\"127.0.0.1\", {port})) else \"NET_OPEN\")'");
-        let out = run_shell(&root,&command,&[],Sandbox::Offline,Duration::from_secs(10)).await.unwrap();
+        let out = run_shell(&root,&command,&[],Sandbox::Offline,&[],Duration::from_secs(10)).await.unwrap();
         assert!(out.text.contains("WRITE_BLOCKED") && out.text.contains("NET_BLOCKED") && out.text.contains("scratch"),"{}",out.text);
         assert!(!out.text.contains("WRITE_OPEN") && !out.text.contains("NET_OPEN"));
         assert_eq!(std::fs::read_to_string(root.join("AGENTS.md")).unwrap(),"owner instructions");
         // The owner-granted route is intentionally broader, and can write the workspace.
-        let out = run_shell(&root,"echo approved > AGENTS.md",&[],Sandbox::None,Duration::from_secs(10)).await.unwrap();
+        let out = run_shell(&root,"echo approved > AGENTS.md",&[],Sandbox::None,&[],Duration::from_secs(10)).await.unwrap();
         assert!(out.status.unwrap().unwrap().success());
         assert_eq!(std::fs::read_to_string(root.join("AGENTS.md")).unwrap(),"approved\n");
     }
@@ -892,7 +943,7 @@ mod tests {
         let _datagram = std::os::unix::net::UnixDatagram::bind(root.join("datagram.sock")).unwrap();
         let command = format!("python3 -c 'import socket; s=socket.socket(socket.AF_UNIX); print(\"STREAM_BLOCKED\" if s.connect_ex(\"{0}/stream.sock\") == 1 else \"STREAM_OPEN\")'; python3 -c 'import socket; s=socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM)\ntry:\n s.sendto(b\"x\", \"{0}/datagram.sock\"); print(\"DGRAM_OPEN\")\nexcept PermissionError:\n print(\"DGRAM_BLOCKED\")'",root.display());
         for mode in [Sandbox::Offline,Sandbox::ReadOnly,Sandbox::SafeRead] {
-            let out = run_shell(&root,&command,&[],mode,Duration::from_secs(10)).await.unwrap();
+            let out = run_shell(&root,&command,&[],mode,&[],Duration::from_secs(10)).await.unwrap();
             assert!(out.text.contains("STREAM_BLOCKED") && out.text.contains("DGRAM_BLOCKED"),"{mode:?}: {}",out.text);
             assert!(!out.text.contains("_OPEN"),"{mode:?}: {}",out.text);
         }
@@ -910,7 +961,7 @@ mod tests {
         assert!(matches!(crate::gate::shell(&ws, &cmd), crate::gate::Policy::Hold(_)));
         let cmd = cmd.split("; touch").next().unwrap();
         let crate::gate::Policy::SafeRead(emitted) = crate::gate::shell(&ws, cmd) else { panic!("{cmd}") };
-        let out = bash(&ws, &json!({"command": format!("{emitted}; /usr/bin/touch c.md 2>/dev/null || echo read-only")}), &[], Sandbox::SafeRead, None).await.unwrap_or_else(|e| e);
+        let out = bash(&ws, &json!({"command": format!("{emitted}; /usr/bin/touch c.md 2>/dev/null || echo read-only")}), &[], Sandbox::SafeRead, &[], None).await.unwrap_or_else(|e| e);
         let lines: Vec<&str> = out.content.lines().collect();
         assert_eq!(&lines[..5], &["2", "a.md", "sub/b.md", "beta", "read-only"], "{}", out.content);
         assert!(!root.join("c.md").exists());
@@ -1071,6 +1122,28 @@ mod tests {
         assert_eq!(resolve(ws, "~/x"), PathBuf::from(&home).join("x"));
         assert_eq!(resolve(ws, "@src/a.rs"), PathBuf::from("/ws/src/a.rs"));
         assert_eq!(resolve(ws, "/abs"), PathBuf::from("/abs"));
+    }
+
+    /// A masked file can't be read in any shell mode, through a symlink and through another
+    /// process's root; other files stay readable and a host shell can still write.
+    #[tokio::test]
+    async fn masked_files_are_empty_in_every_shell() {
+        let d = crate::test_util::TestDir::new("masks");
+        let ws = d.canonicalize().unwrap();
+        std::fs::write(ws.join("bad"), "SECRET-PAYLOAD").unwrap();
+        std::fs::write(ws.join("ok"), "fine").unwrap();
+        std::os::unix::fs::symlink(ws.join("bad"), ws.join("link")).unwrap();
+        let masks = vec![ws.join("bad")];
+        let cmd = "cat bad link ok; cat /proc/1/root$PWD/bad 2>/dev/null; echo";
+        for mode in [Sandbox::None, Sandbox::Offline, Sandbox::ReadOnly] {
+            let out = run_shell(&ws, cmd, &[], mode, &masks, Duration::from_secs(10)).await.unwrap();
+            assert!(!out.text.contains("SECRET") && out.text.contains("fine"), "{mode:?}: {}", out.text);
+        }
+        let out = run_shell(&ws, "echo new > made; sudo -n true 2>/dev/null && echo ROOT; python3 -c 'import socket; socket.socket(socket.AF_UNIX)' 2>/dev/null && echo UNIX; python3 -c 'import socket; socket.socket()' && echo inet; (sleep 30 &) ; echo done",
+            &[], Sandbox::None, &masks, Duration::from_secs(10)).await.unwrap();
+        assert!(out.text.contains("done") && out.text.contains("inet") && !out.text.contains("ROOT") && !out.text.contains("UNIX"), "{}", out.text);
+        assert_eq!(std::fs::read_to_string(ws.join("made")).unwrap(), "new\n");
+        assert_eq!(std::fs::read_to_string(ws.join("bad")).unwrap(), "SECRET-PAYLOAD", "the host file is untouched");
     }
 
     #[tokio::test]

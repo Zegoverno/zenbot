@@ -16,7 +16,7 @@
 //!   answer is the report, `[SILENT]` when there's nothing worth the owner's attention; however the
 //!   run ends, its session is archived (D-057). A job with
 //!   a `report_file` (D-055) reports that file instead, as the run left it, when the run ends `ok`:
-//!   inside its workspace, not a symlink or secret file, written during the run, UTF-8, at most
+//!   inside its workspace, not a symlink, hardlink or secret file, written during the run, UTF-8, at most
 //!   60 KB (`read_report`); anything else makes the run an error, never the answer posted instead.
 //!
 //! How it runs (patterns from Hermes and OpenClaw, read in code): the loop sleeps until the
@@ -35,6 +35,10 @@
 //! the next run gets it as untrusted `<last_report>` (and is tainted from its start), and
 //! `schedule runs` shows it as untrusted content (D-053). ZEN_JOBS=0 turns the scheduler off (test,
 //! smoke and eval kernels).
+//! D-062: reports retain numeric origin risk and writer dependencies, including report_file's
+//! exact bytes before trimming. Only clean reports reach idle, unstopped owner sessions;
+//! delivery serializes with denial of the run, its known sources and the target. Listings
+//! withhold contaminated reports; prompt parts admit only 0–1. Metadata failures fail closed.
 
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -287,7 +291,7 @@ pub async fn list(db: &PgPool) -> Result<Vec<Job>> {
 /// Recent runs, newest first: of one job, or of all.
 pub async fn runs(db: &PgPool, name: Option<&str>, limit: i64) -> Result<Vec<Value>> {
     let rows = sqlx::query(
-        "SELECT r.id, j.name, r.trigger, r.status, r.session_id, r.started_at, r.ended_at, r.output, r.error, r.tainted, r.posted_to, r.pending_to
+        "SELECT r.id, j.name, r.trigger, r.status, r.session_id, r.started_at, r.ended_at, r.output, r.error, (r.risk>=2 OR zen_session_contaminated(r.session_id)) AS tainted, (CASE WHEN zen_session_contaminated(r.session_id) THEN 5::smallint ELSE r.risk END) AS risk, r.posted_to, r.pending_to
          FROM job_runs r JOIN jobs j ON j.id = r.job_id
          WHERE ($1::text IS NULL OR (j.name = $1 AND j.removed_at IS NULL)) ORDER BY r.started_at DESC, r.id DESC LIMIT $2",
     )
@@ -303,7 +307,7 @@ pub async fn runs(db: &PgPool, name: Option<&str>, limit: i64) -> Result<Vec<Val
                 "status": r.get::<String, _>("status"), "session": r.get::<Option<Uuid>, _>("session_id"),
                 "started_at": r.get::<DateTime<Utc>, _>("started_at"), "ended_at": r.get::<Option<DateTime<Utc>>, _>("ended_at"),
                 "output": r.get::<Option<String>, _>("output"), "error": r.get::<Option<String>, _>("error"),
-                "untrusted": r.get::<bool, _>("tainted"), "posted_to": r.get::<Option<Uuid>, _>("posted_to"),
+                "risk": r.get::<i16, _>("risk"), "untrusted": r.get::<bool, _>("tainted"), "posted_to": r.get::<Option<Uuid>, _>("posted_to"),
                 "pending_to": r.get::<Option<Uuid>, _>("pending_to"),
             })
         })
@@ -887,8 +891,9 @@ fn spawn_run(app: &AppState, job: Job, run: i64) {
 /// stays in the jobs feed: posted into a session it would mark that session (D-053).
 async fn finish(db: &PgPool, job: &Job, run: i64, o: &Outcome) -> Result<Option<Uuid>> {
     archive_session(db, run).await?;
+    // By origin rating (D-062): rated 2 or more, or stopped (a source of it denied).
     let tainted: bool = sqlx::query_scalar(
-        "SELECT COALESCE((SELECT s.risky_at IS NOT NULL OR s.tainted_at IS NOT NULL FROM job_runs r JOIN sessions s ON s.id = r.session_id WHERE r.id = $1), false)",
+        "SELECT COALESCE((SELECT s.risk >= 2 OR s.tainted_at IS NOT NULL OR zen_session_contaminated(s.id) FROM job_runs r JOIN sessions s ON s.id = r.session_id WHERE r.id = $1), false)",
     )
     .bind(run)
     .fetch_one(db)
@@ -952,8 +957,32 @@ async fn deliver_pending(app: &AppState) -> Result<()> {
     for (run, target) in rows {
         let turns = app.turns.lock().await;
         let mut tx = app.db.begin().await?;
+        crate::sources::lock_provenance(&mut tx).await?;
+        // Serialize with a denial of the run's session or any source of it (taint::deny takes
+        // its cause's chain lock first): a deny either commits before the check below, so the
+        // report is withheld, or waits until the delivery and its dependency edge commit, and
+        // then stops the target session too. Locks in id order; the turns lock serializes
+        // deliveries.
+        let mut sources: Vec<Uuid> = sqlx::query_scalar(
+            "WITH RECURSIVE edges AS (
+                SELECT id AS reader, parent AS writer FROM sessions WHERE parent IS NOT NULL
+                UNION SELECT reader, writer FROM session_inputs
+             ), ancestry(id) AS (
+                SELECT session_id FROM job_runs WHERE id = $1 AND session_id IS NOT NULL
+                UNION SELECT e.writer FROM edges e JOIN ancestry a ON a.id = e.reader
+             ) SELECT id FROM ancestry ORDER BY id",
+        )
+        .bind(run)
+        .fetch_all(&mut *tx)
+        .await?;
+        sources.push(target);
+        sources.sort();
+        sources.dedup();
+        for s in &sources {
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 7))").bind(s).execute(&mut *tx).await?;
+        }
         let row = sqlx::query(
-            "SELECT r.output, r.tainted, j.name FROM job_runs r JOIN jobs j ON j.id = r.job_id
+            "SELECT r.output, r.session_id, (r.tainted OR r.risk>=2 OR zen_session_contaminated(r.session_id)) AS tainted, j.name FROM job_runs r JOIN jobs j ON j.id = r.job_id
              WHERE r.id = $1 AND r.pending_to = $2 AND r.status = 'ok' FOR UPDATE OF r",
         )
         .bind(run)
@@ -961,7 +990,7 @@ async fn deliver_pending(app: &AppState) -> Result<()> {
         .fetch_optional(&mut *tx)
         .await?;
         let Some(row) = row else { continue };
-        let eligible: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sessions WHERE id = $1 AND kind IS NULL)")
+        let eligible: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sessions WHERE id = $1 AND kind IS NULL AND risk < 5 AND NOT zen_session_contaminated(id))")
             .bind(target)
             .fetch_one(&mut *tx)
             .await?;
@@ -988,6 +1017,14 @@ async fn deliver_pending(app: &AppState) -> Result<()> {
             "content": [{ "type": "text", "text": format!("⏰ *{job}*\n\n{}", report.trim()) }],
             "job": job, "job_run": run, "timestamp": Utc::now().timestamp_millis(),
         });
+        // The target now holds the run's words: it depends on the run's session (D-062).
+        if let Some(writer) = row.get::<Option<Uuid>, _>("session_id") {
+            sqlx::query("INSERT INTO session_inputs (reader, writer) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+                .bind(target)
+                .bind(writer)
+                .execute(&mut *tx)
+                .await?;
+        }
         tape::append_in(&mut tx, target, "message", &message).await?;
         sqlx::query("UPDATE job_runs SET posted_to = $2, pending_to = NULL WHERE id = $1")
             .bind(run)
@@ -1021,7 +1058,7 @@ async fn run_system(app: &AppState, job: &Job) -> Result<Outcome> {
             let repo = PathBuf::from(&app.repo);
             let script = repo.join("scripts/update-engines.sh");
             anyhow::ensure!(script.exists(), "{} not found", script.display());
-            let shell = tools::run_shell(&repo, &format!("bash {}", shell_quote(&script.display().to_string())), &[], tools::Sandbox::None, Duration::from_secs(3600))
+            let shell = tools::run_shell(&repo, &format!("bash {}", shell_quote(&script.display().to_string())), &[], tools::Sandbox::None, &[], Duration::from_secs(3600))
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?;
             let text = crate::secrets::mask_off_thread(shell.text).await;
@@ -1178,21 +1215,47 @@ spending, deleting): prepare it and say in the report what the owner should do.\
     )
 }
 
-/// The instructions of a job's session: the parts it picked, its skills loaded, and the job note.
-async fn job_instructions(app: &AppState, job: &Job, workspace: &std::path::Path) -> Result<String> {
+/// The instructions of a job's session (`session`): the parts it picked, its skills loaded, and
+/// the job note. Like any session's, only memories, prompt and project files and skills rated
+/// 0–1 by origin get in, and the session depends on their writers (D-062); a skill the job names
+/// that isn't admitted fails the run rather than running without it.
+async fn job_instructions(app: &AppState, job: &Job, workspace: &std::path::Path, session: Uuid) -> Result<String> {
     let parts: Vec<&str> = job.context.iter().map(String::as_str).collect();
-    let memory = crate::memory::render(&app.db).await?;
+    let memory = crate::memory::render(&app.db, session).await?;
     let skills_all = crate::skills::scan(&crate::skills::root());
-    let index = crate::skills::index_text(&skills_all);
-    let mut s = crate::compile::compose(&parts, workspace, &app.repo, &memory, None, &index);
+    let index = crate::skills::instruction_index(&app.db, session).await?;
+    let admitted = crate::compile::admitted(&app.db, session, workspace).await?;
+    let mut s = crate::compile::compose(&parts, workspace, &app.repo, &memory, None, &index, &admitted);
     for name in &job.skills {
         let skill = crate::skills::lookup(&skills_all, name).map_err(|e| anyhow::anyhow!(e))?;
+        anyhow::ensure!(
+            crate::context::admit(&app.db, session, &skill.text, 1).await?.is_some(),
+            "the skill {}/{} isn't loaded into a job's instructions: its current version was written by a session that read outside content, or one the owner stopped",
+            skill.domain, skill.name
+        );
         let text = crate::skills::load(skill, None).map_err(|e| anyhow::anyhow!(e))?;
         s.push_str(&format!("\n\n<skill name=\"{}/{}\">\n{}\n</skill>", skill.domain, skill.name, text.trim_end()));
     }
     s.push_str("\n\n");
     s.push_str(&job_note(job));
     Ok(s)
+}
+
+/// The last report of `job` before `run`, for the run's session `id` to tell what's new, at its
+/// origin rating (D-062): wrapped when rated 2 or more, and a report whose run was stopped stops
+/// this one (an error). The run depends on the session that wrote it, recorded before the report
+/// is handed over.
+async fn last_report(app: &AppState, job: &Job, run: i64, id: Uuid) -> Result<Option<String>> {
+    let last: Option<(Option<String>, i16, Option<Uuid>)> = sqlx::query_as("SELECT output, CASE WHEN zen_session_contaminated(session_id) THEN 5::smallint ELSE risk END, session_id FROM job_runs WHERE job_id = $1 AND id <> $2 AND status = 'ok' ORDER BY started_at DESC LIMIT 1")
+        .bind(job.id)
+        .bind(run)
+        .fetch_optional(&app.db)
+        .await?;
+    let Some((Some(l), risk, writer)) = last else { return Ok(None) };
+    if risk < 5 {
+        crate::sources::depend(&app.db, id, &writer.into_iter().collect::<Vec<_>>()).await?;
+    }
+    Ok(Some(crate::taint::hand_over_rating(app, id, risk, "job report", &format!("the previous run of {}", job.name), &zen_proto::head(&l, 3000)).await?))
 }
 
 /// An agent job: a fresh session with the job's instructions and its prompt; the final answer is
@@ -1212,18 +1275,11 @@ async fn run_agent(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
         .execute(&app.db)
         .await?;
     sqlx::query("UPDATE job_runs SET session_id = $2 WHERE id = $1").bind(run).bind(id).execute(&app.db).await?;
-    let base = job_instructions(app, job, &workspace).await?;
+    let base = job_instructions(app, job, &workspace, id).await?;
+    anyhow::ensure!(!crate::taint::stopped(&app.db, id).await?, "instructions withheld: a source of them was stopped by the owner");
     tape::append(&app.db, id, "base", &json!({ "text": base })).await?;
-    // The last report, so the run can tell what's new: untrusted content (and this run tainted)
-    // when the run that wrote it had read untrusted content.
-    let last: Option<(Option<String>, bool)> = sqlx::query_as("SELECT output, tainted FROM job_runs WHERE job_id = $1 AND id <> $2 AND status = 'ok' ORDER BY started_at DESC LIMIT 1")
-        .bind(job.id)
-        .bind(run)
-        .fetch_optional(&app.db)
-        .await?;
     let mut prompt = job.prompt.clone().unwrap_or_default();
-    if let Some((Some(l), tainted)) = last {
-        let report = crate::taint::hand_over(app, id, tainted, "job report", &format!("the previous run of {}", job.name), &zen_proto::head(&l, 3000)).await?;
+    if let Some(report) = last_report(app, job, run, id).await? {
         prompt.push_str(&format!("\n\n<last_report>\nThe report from this job's previous run, to tell what's new:\n{report}\n</last_report>"));
     }
     crate::turns::run_and_wait(app, id, JOB, &prompt).await?;
@@ -1250,11 +1306,32 @@ async fn run_agent(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
     let secrets = crate::secrets::secret_files();
     let (path, started) = (tools::resolve(&workspace, file), started);
     let report = tokio::task::spawn_blocking(move || read_report(&workspace, &path, started, &secrets)).await?;
+    // The file's exact bytes keep their origin (D-062): the run depends on whoever wrote them and
+    // takes their rating, so the stored report (rated by its run's session) carries it too.
+    // Bytes no session registered were written during this run, so they are the run's own.
+    let report = match report {
+        Ok(Some(raw)) => match report_rating(app, id, &raw).await {
+            Ok(()) => Ok(Some(raw.trim_end().to_string())),
+            Err(e) => Err(e),
+        },
+        other => other,
+    };
     Ok(match report {
         Ok(Some(text)) => Outcome { status: "ok", output: Some(crate::secrets::mask_off_thread(text).await), error: None },
         Ok(None) => Outcome { status: "silent", output: None, error: None },
         Err(e) => Outcome { status: "error", output: None, error: Some(format!("{e:#}")) },
     })
+}
+
+/// Rate a report file's exact bytes for the run's session `id`: depend on their writers and raise
+/// the session to their rating. Written by a stopped session: an error, never the report.
+async fn report_rating(app: &AppState, id: Uuid, raw: &str) -> Result<()> {
+    let (risk, writers) = crate::context::rate(&app.db, raw, 1).await?;
+    anyhow::ensure!(risk < 5, "the report file was written by a session the owner stopped; it isn't posted");
+    crate::sources::depend(&app.db, id, &writers).await?;
+    crate::sources::raise(&app.db, id, risk).await?;
+    anyhow::ensure!(!crate::taint::stopped(&app.db, id).await?, "report withheld: a writer was stopped during the read");
+    Ok(())
 }
 
 /// The directory a job works in: its own (relative to the kernel's workspace), else the workspace.
@@ -1304,7 +1381,7 @@ fn checked_report_file(workspace: &std::path::Path, file: &str) -> Result<String
 /// run started, over 60 KB, or not UTF-8.
 fn read_report(workspace: &std::path::Path, path: &std::path::Path, started: std::time::SystemTime, secrets: &[PathBuf]) -> Result<Option<String>> {
     use std::io::Read;
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let shown = path.display();
     // No symlink as the last part (O_NOFOLLOW), and a FIFO put there can't hold the kernel (O_NONBLOCK).
     let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path).map_err(|e| match e.kind() {
@@ -1314,15 +1391,23 @@ fn read_report(workspace: &std::path::Path, path: &std::path::Path, started: std
     })?;
     let meta = file.metadata()?;
     anyhow::ensure!(meta.is_file(), "the report file {shown} isn't a regular file");
+    anyhow::ensure!(meta.nlink() == 1, "the report file {shown} is hardlinked; it must have a single link");
     let real = std::fs::read_link(format!("/proc/self/fd/{}", std::os::fd::AsRawFd::as_raw_fd(&file))).context("can't tell where the report file really is")?;
     report_place(workspace, &real, secrets)?;
     anyhow::ensure!(meta.modified()? >= started, "the report file {shown} wasn't written by this run (it's older than the run)");
     anyhow::ensure!(meta.len() <= REPORT_MAX, "the report file {shown} has {} bytes; a report is at most 60 KB", meta.len());
     let mut bytes = Vec::new();
-    file.take(REPORT_MAX + 1).read_to_end(&mut bytes)?;
+    (&file).take(REPORT_MAX + 1).read_to_end(&mut bytes)?;
+    let after = file.metadata()?;
+    anyhow::ensure!(
+        (meta.len(), meta.mtime(), meta.mtime_nsec(), meta.ctime(), meta.ctime_nsec(), meta.nlink())
+            == (after.len(), after.mtime(), after.mtime_nsec(), after.ctime(), after.ctime_nsec(), after.nlink()),
+        "the report file {shown} changed while it was read"
+    );
     anyhow::ensure!(bytes.len() as u64 <= REPORT_MAX, "the report file {shown} grew past 60 KB while it was read");
     let text = String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("the report file {shown} isn't UTF-8 text"))?;
-    Ok((!text.trim().is_empty()).then(|| text.trim_end().to_string()))
+    // Exact bytes, as read: their rating is looked up by digest before trimming.
+    Ok((!text.trim().is_empty()).then_some(text))
 }
 
 // ---------- the agent's tool ----------
@@ -1403,12 +1488,21 @@ async fn tool(app: &AppState, session: Uuid, args: &Value, owner_allowed: bool) 
             if rs.is_empty() {
                 return Ok("No runs yet.".into());
             }
-            // Reports from runs that read untrusted content come as untrusted content (and taint).
+            // Each report at its origin rating (D-062): wrapped when rated 2 or more, after the
+            // reader's dependency on the run's session is recorded. A stopped run's report is
+            // left out of a listing (it would stop the reader for a list of runs).
             let mut lines = Vec::new();
             for r in &rs {
                 let body = r["output"].as_str().or(r["error"].as_str()).map(|t| zen_proto::head(t, 600)).unwrap_or_default();
                 let job = r["job"].as_str().unwrap_or("");
-                let body = crate::taint::hand_over(app, session, r["untrusted"] == true, "job report", &format!("a run of {job}"), &body).await?;
+                let risk = r["risk"].as_i64().map(|x| x as i16).unwrap_or(5);
+                let body = if risk >= 5 {
+                    "[report withheld: the owner stopped the session that wrote it, or a source of it]".to_string()
+                } else {
+                    let writer: Vec<Uuid> = r["session"].as_str().and_then(|s| s.parse().ok()).into_iter().collect();
+                    crate::sources::depend(&app.db, session, &writer).await?;
+                    crate::taint::hand_over_rating(app, session, risk, "job report", &format!("a run of {job}"), &body).await?
+                };
                 lines.push(format!("- {job} {} ({}, {}): {body}", r["started_at"].as_str().unwrap_or(""), r["status"].as_str().unwrap_or(""), r["trigger"].as_str().unwrap_or("")));
             }
             lines.join("\n")
@@ -1604,7 +1698,10 @@ mod tests {
         let started = std::time::SystemTime::now() - std::time::Duration::from_secs(1);
         let read = |p: &str| read_report(&ws, &ws.join(p), started, &secrets);
         std::fs::write(ws.join("out/message.md"), "Leitura I\n\nPalavra do Senhor.\n\n").unwrap();
-        assert_eq!(read("out/message.md").unwrap().as_deref(), Some("Leitura I\n\nPalavra do Senhor."), "the text, trailing blank lines dropped");
+        assert_eq!(read("out/message.md").unwrap().as_deref(), Some("Leitura I\n\nPalavra do Senhor.\n\n"), "the exact bytes (trimmed after rating)");
+        std::fs::hard_link(ws.join("out/message.md"), ws.join("out/hardlink.md")).unwrap();
+        assert!(read("out/hardlink.md").unwrap_err().to_string().contains("hardlinked"));
+        std::fs::remove_file(ws.join("out/hardlink.md")).unwrap();
         std::fs::write(ws.join("out/empty.md"), " \n").unwrap();
         assert_eq!(read("out/empty.md").unwrap(), None, "empty means silent");
         let err = |p: &str| format!("{:#}", read(p).unwrap_err());
@@ -1644,4 +1741,199 @@ mod tests {
         assert!(context_of(Some(vec!["secrets".into()])).is_err());
         assert!(valid_name("morning-brief").is_ok() && valid_name("Morning Brief").is_err() && valid_name("-x").is_err() && valid_name("x-").is_err());
     }
+
+    /// Job reports keep their origin (D-062): `<last_report>`, `schedule runs`, report files and
+    /// delivery into the owner's session. SOURCE_TEST_DB_URL must name a throwaway database.
+    #[tokio::test]
+    #[ignore]
+    async fn job_report_provenance_database() {
+        let db = PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
+        sqlx::migrate!().run(&db).await.unwrap();
+        let app = crate::test_util::app(db.clone());
+        let session = |risk: i16, kind: Option<&'static str>| {
+            let db = db.clone();
+            async move {
+                let id = Uuid::new_v4();
+                sqlx::query("INSERT INTO sessions(id,title,model,risk,kind) VALUES($1,'job provenance','faux/smoke',$2,$3)")
+                    .bind(id).bind(risk).bind(kind).execute(&db).await.unwrap();
+                id
+            }
+        };
+        let deny = |cause: Uuid| {
+            let db = db.clone();
+            async move {
+                sqlx::query("INSERT INTO contamination(cause,affected) VALUES($1,$1) ON CONFLICT(cause,affected) DO UPDATE SET cleared_at=NULL")
+                    .bind(cause).execute(&db).await.unwrap();
+            }
+        };
+        let name = format!("prov-{}", &Uuid::new_v4().to_string()[..8]);
+        sqlx::query("INSERT INTO jobs(name,kind,prompt,schedule,tz,created_by) VALUES($1,'agent','p','every 1h','UTC','owner')")
+            .bind(&name).execute(&db).await.unwrap();
+        let job = get(&db, &name).await.unwrap();
+        let run_row = |writer: Uuid, output: &'static str| {
+            let db = db.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>("INSERT INTO job_runs(job_id,trigger,status,session_id,output,ended_at) VALUES($1,'owner','ok',$2,$3,now()) RETURNING id")
+                    .bind(job.id).bind(writer).bind(output).fetch_one(&db).await.unwrap()
+            }
+        };
+        let inputs = |reader: Uuid, writer: Uuid| {
+            let db = db.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>("SELECT count(*) FROM session_inputs WHERE reader=$1 AND writer=$2")
+                    .bind(reader).bind(writer).fetch_one(&db).await.unwrap()
+            }
+        };
+        let risk_of = |id: Uuid| {
+            let db = db.clone();
+            async move { sqlx::query_scalar::<_, i16>("SELECT risk FROM sessions WHERE id=$1").bind(id).fetch_one(&db).await.unwrap() }
+        };
+
+        // A level-4 report reaches the next run wrapped, raises it, and records the dependency.
+        let writer4 = session(4, Some(JOB)).await;
+        run_row(writer4, "PREVIOUS REPORT four").await;
+        let next = session(1, Some(JOB)).await;
+        let current = run_row(next, "running").await;
+        let shown = last_report(&app, &job, current, next).await.unwrap().unwrap();
+        assert!(shown.starts_with("<untrusted source=\"job report\"") && shown.contains("PREVIOUS REPORT four"));
+        assert_eq!(risk_of(next).await, 4);
+        assert_eq!(inputs(next, writer4).await, 1);
+
+        // `schedule runs` wraps it too and raises the reader; a stopped run's report is withheld
+        // from the listing without stopping the reader.
+        let reader = session(1, None).await;
+        let listed = tool(&app, reader, &json!({"action":"runs","name":name}), false).await.unwrap();
+        assert!(listed.contains("<untrusted source=\"job report\"") && listed.contains("PREVIOUS REPORT four"));
+        assert_eq!(risk_of(reader).await, 4);
+        assert_eq!(inputs(reader, writer4).await, 1);
+        let denied = session(1, Some(JOB)).await;
+        run_row(denied, "STOPPED REPORT").await;
+        deny(denied).await;
+        let reader2 = session(1, None).await;
+        let listed = tool(&app, reader2, &json!({"action":"runs","name":name}), false).await.unwrap();
+        assert!(!listed.contains("STOPPED REPORT") && listed.contains("report withheld"));
+        assert!(!crate::taint::stopped(&db, reader2).await.unwrap());
+
+        // The newest report is the stopped one: handing it to the next run stops that run.
+        let after = session(1, Some(JOB)).await;
+        let current = run_row(after, "running").await;
+        assert!(last_report(&app, &job, current, after).await.is_err());
+        assert!(crate::taint::stopped(&db, after).await.unwrap());
+
+        // A report file keeps its writer's rating; one a stopped session wrote is an error.
+        let file_writer = session(4, None).await;
+        let dir = crate::test_util::TestDir::new("report-origin");
+        let raw = format!("report bytes {}\n", Uuid::new_v4());
+        crate::sources::record_bytes(&db, file_writer, &dir.join("r.md"), &raw, None).await.unwrap();
+        let run_session = session(1, Some(JOB)).await;
+        report_rating(&app, run_session, &raw).await.unwrap();
+        assert_eq!(risk_of(run_session).await, 4, "the run takes the file's rating");
+        assert_eq!(inputs(run_session, file_writer).await, 1);
+        deny(file_writer).await;
+        let run2 = session(1, Some(JOB)).await;
+        assert!(report_rating(&app, run2, &raw).await.is_err(), "a stopped writer's file is never the report");
+        let unknown = format!("written during the run {}", Uuid::new_v4());
+        let run3 = session(1, Some(JOB)).await;
+        report_rating(&app, run3, &unknown).await.unwrap();
+        assert_eq!(risk_of(run3).await, 1, "unregistered bytes are the run's own");
+
+        // Delivery: a run denied while queued is withheld; a delivered report ties the target
+        // to the run, so a later denial stops the target too.
+        let target = session(1, None).await;
+        let queued_writer = session(1, Some(JOB)).await;
+        let queued = run_row(queued_writer, "QUEUED REPORT").await;
+        sqlx::query("UPDATE job_runs SET pending_to=$2 WHERE id=$1").bind(queued).bind(target).execute(&db).await.unwrap();
+        deny(queued_writer).await;
+        deliver_pending(&app).await.unwrap();
+        let (pending, posted): (Option<Uuid>, Option<Uuid>) = sqlx::query_as("SELECT pending_to, posted_to FROM job_runs WHERE id=$1").bind(queued).fetch_one(&db).await.unwrap();
+        assert_eq!((pending, posted), (None, None), "withheld, not posted");
+        let messages = |id: Uuid| {
+            let db = db.clone();
+            async move { sqlx::query_scalar::<_, i64>("SELECT count(*) FROM tape_events WHERE session_id=$1 AND kind='message'").bind(id).fetch_one(&db).await.unwrap() }
+        };
+        assert_eq!(messages(target).await, 0);
+        let clean_writer = session(1, Some(JOB)).await;
+        let clean = run_row(clean_writer, "CLEAN REPORT").await;
+        sqlx::query("UPDATE job_runs SET pending_to=$2 WHERE id=$1").bind(clean).bind(target).execute(&db).await.unwrap();
+        deliver_pending(&app).await.unwrap();
+        let posted: Option<Uuid> = sqlx::query_scalar("SELECT posted_to FROM job_runs WHERE id=$1").bind(clean).fetch_one(&db).await.unwrap();
+        assert_eq!(posted, Some(target));
+        assert_eq!(messages(target).await, 1);
+        assert_eq!(inputs(target, clean_writer).await, 1);
+        assert!(!crate::taint::stopped(&db, target).await.unwrap());
+        deny(clean_writer).await;
+        assert!(crate::taint::stopped(&db, target).await.unwrap(), "a later denial of the run reaches the session it posted into");
+
+        // A stopped target must not receive a clean report either.
+        let stopped_target = session(1, None).await;
+        crate::taint::deny(&app, stopped_target, "test").await.unwrap();
+        let clean_writer = session(1, Some(JOB)).await;
+        let withheld = run_row(clean_writer, "CLEAN TO STOPPED TARGET").await;
+        sqlx::query("UPDATE job_runs SET pending_to=$2 WHERE id=$1").bind(withheld).bind(stopped_target).execute(&db).await.unwrap();
+        deliver_pending(&app).await.unwrap();
+        assert_eq!(messages(stopped_target).await, 0);
+
+        // Force the deny-before-delivery boundary while delivery is in flight. The global
+        // provenance lock keeps both ancestry and the handover stable until denial commits.
+        let blocked_writer = session(1, Some(JOB)).await;
+        let blocked_target = session(1, None).await;
+        let blocked_run = run_row(blocked_writer, "BLOCKED REPORT").await;
+        sqlx::query("UPDATE job_runs SET pending_to=$2 WHERE id=$1").bind(blocked_run).bind(blocked_target).execute(&db).await.unwrap();
+        let mut barrier = db.begin().await.unwrap();
+        crate::sources::lock_provenance(&mut barrier).await.unwrap();
+        let delivery = deliver_pending(&app);
+        tokio::pin!(delivery);
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(50), &mut delivery).await.is_err());
+        sqlx::query("INSERT INTO contamination(cause,affected) VALUES($1,$1)").bind(blocked_writer).execute(&mut *barrier).await.unwrap();
+        barrier.commit().await.unwrap();
+        delivery.await.unwrap();
+        assert_eq!(messages(blocked_target).await, 0);
+
+        // Real concurrent delivery/deny: either withheld, or delivered before denial and the
+        // recorded edge stops the target. Repeat for both a run and an upstream writer.
+        for upstream in [false, true] {
+            for _ in 0..4 {
+                let target = session(1, None).await;
+                let writer = session(1, Some(JOB)).await;
+                let cause = if upstream {
+                    let source = session(1, None).await;
+                    crate::sources::depend(&db, writer, &[source]).await.unwrap();
+                    source
+                } else { writer };
+                let queued = run_row(writer, "RACING REPORT").await;
+                sqlx::query("UPDATE job_runs SET pending_to=$2 WHERE id=$1").bind(queued).bind(target).execute(&db).await.unwrap();
+                let (delivered, denied) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    tokio::join!(deliver_pending(&app), crate::taint::deny(&app, cause, "race test"))
+                }).await.expect("delivery and denial must not deadlock");
+                delivered.unwrap();
+                denied.unwrap();
+                let posted: Option<Uuid> = sqlx::query_scalar("SELECT posted_to FROM job_runs WHERE id=$1").bind(queued).fetch_one(&db).await.unwrap();
+                if posted.is_some() {
+                    assert!(crate::taint::stopped(&db, target).await.unwrap());
+                    assert_eq!(inputs(target, writer).await, 1);
+                } else {
+                    assert_eq!(messages(target).await, 0);
+                }
+            }
+        }
+
+        // Every numeric tier survives the report-file path; no reduction to a risky boolean.
+        for tier in 0..=4i16 {
+            let writer = session(tier, None).await;
+            let raw = format!("tier {tier} {}", Uuid::new_v4());
+            crate::sources::record_bytes(&db, writer, &dir.join("tier.md"), &raw, None).await.unwrap();
+            let reader = session(0, Some(JOB)).await;
+            report_rating(&app, reader, &raw).await.unwrap();
+            assert_eq!(risk_of(reader).await, tier.max(1));
+            assert_eq!(inputs(reader, writer).await, 1);
+        }
+
+        // Metadata errors fail closed.
+        let closed = PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
+        closed.close().await;
+        let broken = crate::test_util::app(closed);
+        assert!(report_rating(&broken, run3, &unknown).await.is_err());
+        assert!(last_report(&broken, &job, current, after).await.is_err());
+    }
+
 }

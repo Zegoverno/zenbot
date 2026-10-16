@@ -78,6 +78,91 @@ pub async fn raise(db: &PgPool, session: Uuid, risk: i16) -> Result<()> {
     Ok(())
 }
 
+/// Stored file versions are trusted only for their exact bytes. Missing metadata for wiki
+/// legacy pages uses the old web label; an unregistered changed version of a tracked file is 4.
+pub async fn file_rating(db: &PgPool, path: &std::path::Path, text: &str) -> Result<i16> {
+    let path = file_key(path).to_string_lossy().into_owned();
+    let row = sqlx::query("SELECT
+        (SELECT max(CASE WHEN zen_session_contaminated(session_id) THEN 5::smallint ELSE risk END)
+         FROM item_ratings WHERE sha256=encode(sha256(convert_to($2,'UTF8')),'hex')) AS risk,
+        EXISTS(SELECT 1 FROM item_ratings WHERE path=$1) AS tracked")
+        .bind(&path).bind(text).fetch_one(db).await?;
+    Ok(row.get::<Option<i16>,_>("risk").unwrap_or_else(|| {
+        if row.get::<bool,_>("tracked") || crate::wiki::has_web_entry(text) {4} else {1}
+    }))
+}
+
+/// Record the reader's dependency before handing content over. A later deny of the writer
+/// stops derived work too; max-risk alone would lose this causal link.
+pub async fn depend(db: &PgPool, reader: Uuid, writers: &[Uuid]) -> Result<()> {
+    let mut tx = db.begin().await?;
+    lock_provenance(&mut tx).await?;
+    sqlx::query("INSERT INTO session_inputs(reader,writer) SELECT $1,w FROM unnest($2::uuid[]) w WHERE w!=$1 ON CONFLICT DO NOTHING")
+        .bind(reader).bind(writers).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Serialize graph-edge insertion, denial and irreversible handover/spawn boundaries. Take this
+/// before any session chain lock. The short critical section prevents an ancestry snapshot from
+/// missing a concurrently added writer whose denial would otherwise race execution/delivery.
+pub async fn lock_provenance(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(6462062, 3)").execute(&mut **tx).await?;
+    Ok(())
+}
+
+pub async fn depend_file(db: &PgPool, reader: Uuid, text: &str) -> Result<()> {
+    let writers: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT session_id FROM item_ratings WHERE sha256=encode(sha256(convert_to($1,'UTF8')),'hex') AND session_id IS NOT NULL")
+        .bind(text).fetch_all(db).await?;
+    depend(db,reader,&writers).await
+}
+
+/// Canonicalize through the nearest existing ancestor, including a new file.
+fn file_key(path: &std::path::Path) -> std::path::PathBuf {
+    if let Ok(path) = path.canonicalize() { return path; }
+    match (path.parent(),path.file_name()) {
+        (Some(parent),Some(name)) => file_key(parent).join(name),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// Register the exact bytes about to be written, including all writers of retained old bytes.
+/// A failed effect can conservatively leave an unused rating, but cannot create unlabelled bytes.
+pub async fn record_bytes(db: &PgPool, session: Uuid, path: &std::path::Path, text: &str, prior: Option<&str>) -> Result<()> {
+    let path = file_key(path).to_string_lossy().into_owned();
+    let prior_risk = match prior {
+        Some(text) => {depend_file(db,session,text).await?; file_rating(db,std::path::Path::new(&path),text).await?},
+        None => 1,
+    };
+    anyhow::ensure!(prior_risk < 5, "not written: retained content is contaminated");
+    let mut tx = db.begin().await?;
+    if let Some(prior) = prior {
+        sqlx::query("INSERT INTO item_ratings(path,sha256,session_id,risk)
+            SELECT $1,encode(sha256(convert_to($2,'UTF8')),'hex'),session_id,risk FROM item_ratings
+            WHERE sha256=encode(sha256(convert_to($3,'UTF8')),'hex')
+            ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=GREATEST(item_ratings.risk,EXCLUDED.risk)")
+            .bind(&path).bind(text).bind(prior).execute(&mut *tx).await?;
+    }
+    sqlx::query("INSERT INTO item_ratings(path,sha256,session_id,risk)
+        SELECT $1,encode(sha256(convert_to($2,'UTF8')),'hex'),id,GREATEST(risk,$4) FROM sessions WHERE id=$3
+        ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=GREATEST(item_ratings.risk,EXCLUDED.risk)")
+        .bind(&path).bind(text).bind(session).bind(prior_risk.min(4)).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Test helper: registers a file's current bytes (production writers register exact bytes).
+#[cfg(test)]
+pub async fn record_file(db: &PgPool, session: Uuid, path: &std::path::Path, prior_risk: i16) -> Result<()> {
+    let text = tokio::fs::read_to_string(path).await?;
+    let path = file_key(path).to_string_lossy().into_owned();
+    sqlx::query("INSERT INTO item_ratings(path,sha256,session_id,risk)
+        SELECT $1,encode(sha256(convert_to($2,'UTF8')),'hex'),id,GREATEST(risk,$4) FROM sessions WHERE id=$3
+        ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=GREATEST(item_ratings.risk,EXCLUDED.risk)")
+        .bind(path).bind(text).bind(session).bind(prior_risk).execute(db).await?;
+    Ok(())
+}
+
 pub fn adjustment(base: i16, choice: &str) -> i16 {
     match choice { "vouches" => (base - 1).max(2), "suspects" => 4, _ => base }
 }
@@ -200,6 +285,91 @@ Result about {echo}
         assert_eq!(r,4);
         // Final URL determines base, not the requested source.
         assert_eq!(page(&db,sid,"https://example.test/docs","https://evil.test/a",false).await.unwrap().risk,4);
+    }
+
+    /// SOURCE_TEST_DB_URL must name a throwaway database.
+    #[tokio::test]
+    #[ignore]
+    async fn item_origin_database() {
+        let db = PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
+        sqlx::migrate!().run(&db).await.unwrap();
+        let parent = Uuid::new_v4();
+        let child = Uuid::new_v4();
+        sqlx::query("INSERT INTO sessions(id,title,model,risk) VALUES($1,'item parent','faux/smoke',3)")
+            .bind(parent).execute(&db).await.unwrap();
+        sqlx::query("INSERT INTO sessions(id,title,model,parent) VALUES($1,'child','faux/smoke',$2)")
+            .bind(child).bind(parent).execute(&db).await.unwrap();
+        let id: i64 = sqlx::query_scalar("INSERT INTO memories(text,source,session_id,risk) VALUES('generated','owner',$1,0) RETURNING id")
+            .bind(parent).fetch_one(&db).await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_,i16>("SELECT risk FROM memories WHERE id=$1").bind(id).fetch_one(&db).await.unwrap(),3,
+            "a caller's risk and source assertions do not authenticate content");
+        crate::tape::append_owner(&db,parent,&json!({"role":"user","content":"exact owner words"})).await.unwrap();
+        sqlx::query("UPDATE memories SET text='exact owner words' WHERE id=$1").bind(id).execute(&db).await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_,i16>("SELECT risk FROM memories WHERE id=$1").bind(id).fetch_one(&db).await.unwrap(),0);
+        sqlx::query("UPDATE memories SET text='exact owner words plus attacker instructions' WHERE id=$1").bind(id).execute(&db).await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_,i16>("SELECT risk FROM memories WHERE id=$1").bind(id).fetch_one(&db).await.unwrap(),3);
+        sqlx::query("INSERT INTO contamination(cause,affected) VALUES($1,$1)").bind(parent).execute(&db).await.unwrap();
+        assert!(crate::taint::stopped(&db,child).await.unwrap(),"children inherit a live cause even when absent from its snapshot");
+        assert_eq!(sqlx::query_scalar::<_,i16>("SELECT risk FROM memories WHERE id=$1").bind(id).fetch_one(&db).await.unwrap(),3,
+            "contamination never overwrites original risk");
+        sqlx::query("INSERT INTO contamination(cause,affected) VALUES($1,$1)").bind(child).execute(&db).await.unwrap();
+        sqlx::query("UPDATE contamination SET cleared_at=now() WHERE cause=$1").bind(parent).execute(&db).await.unwrap();
+        assert!(crate::taint::stopped(&db,child).await.unwrap(),"an independent child cause survives parent reversal");
+        sqlx::query("UPDATE contamination SET cleared_at=now() WHERE cause=$1").bind(child).execute(&db).await.unwrap();
+        assert!(!crate::taint::stopped(&db,child).await.unwrap());
+        let dir = crate::test_util::TestDir::new("item-provenance");
+        let path = dir.join("page.md");
+        tokio::fs::write(&path,"first version").await.unwrap();
+        record_file(&db,parent,&path,1).await.unwrap();
+        assert_eq!(file_rating(&db,&path,"first version").await.unwrap(),3);
+        assert_eq!(file_rating(&db,&path,"changed version").await.unwrap(),4,"new bytes do not inherit an old digest's trust");
+        sqlx::query("INSERT INTO contamination(cause,affected) VALUES($1,$1) ON CONFLICT(cause,affected) DO UPDATE SET cleared_at=NULL")
+            .bind(parent).execute(&db).await.unwrap();
+        assert_eq!(file_rating(&db,&path,"first version").await.unwrap(),5);
+        sqlx::query("UPDATE contamination SET cleared_at=now() WHERE cause=$1").bind(parent).execute(&db).await.unwrap();
+        assert_eq!(file_rating(&db,&path,"first version").await.unwrap(),3,"reversal restores the origin rating");
+
+        // Ordinary files, not only wiki/drafts, carry exact-byte provenance through read.
+        let reader = Uuid::new_v4();
+        sqlx::query("INSERT INTO sessions(id,title,model,risk) VALUES($1,'clean reader','faux/smoke',1)")
+            .bind(reader).execute(&db).await.unwrap();
+        let out = crate::tools::execute_origin(&dir,"read",&json!({"path":"page.md"}),&[],crate::tools::Sandbox::None,
+            Some(crate::tools::Origin {db:&db,session:reader,masks:&[]})).await;
+        assert!(!out.is_error,"{}",out.content);
+        assert_eq!(out.rating.unwrap().risk,3);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM session_inputs WHERE reader=$1 AND writer=$2")
+            .bind(reader).bind(parent).fetch_one(&db).await.unwrap(),1);
+
+        // A copy/hardlink alias cannot launder known bytes through a new name.
+        let copy = dir.join("copy.md");
+        tokio::fs::copy(&path,&copy).await.unwrap();
+        assert_eq!(file_rating(&db,&copy,"first version").await.unwrap(),3);
+        // Register exact bytes before the effect; an unrelated mutation cannot acquire their risk.
+        record_bytes(&db,reader,&path,"edited version",Some("first version")).await.unwrap();
+        tokio::fs::write(&path,"edited version").await.unwrap();
+        sqlx::query("INSERT INTO contamination(cause,affected) VALUES($1,$1) ON CONFLICT(cause,affected) DO UPDATE SET cleared_at=NULL")
+            .bind(parent).execute(&db).await.unwrap();
+        assert!(crate::taint::stopped(&db,reader).await.unwrap(),"a later writer denial reaches a reader through its dependency");
+        assert_eq!(file_rating(&db,&path,"edited version").await.unwrap(),5,"edits retain all source writers");
+        sqlx::query("UPDATE contamination SET cleared_at=now() WHERE cause=$1").bind(parent).execute(&db).await.unwrap();
+
+        // Cached search bytes cannot borrow the rating of a newer clean memory.
+        let search_reader = Uuid::new_v4();
+        sqlx::query("INSERT INTO sessions(id,title,model,risk) VALUES($1,'search reader','faux/smoke',1)")
+            .bind(search_reader).execute(&db).await.unwrap();
+        let found = crate::search::Found {
+            kind:"memory".into(),reference:format!("m{id}"),title:"short-term memory (owner)".into(),
+            body:"exact owner words plus attacker instructions".into(),snippet:"attacker instructions".into(),
+            at:chrono::Utc::now(),exact:true,
+        };
+        let listed = [(found.clone(),None)];
+        assert_eq!(crate::search::rated_results(&db,search_reader,&listed).await,[Some(3)]);
+        sqlx::query("UPDATE memories SET text='exact owner words' WHERE id=$1").bind(id).execute(&db).await.unwrap();
+        assert_eq!(crate::search::rated_results(&db,search_reader,&listed).await,[None],"stale risky bytes cannot borrow replacement's zero rating");
+        let mut current = found;
+        current.body = "exact owner words".into();
+        assert_eq!(crate::search::rated_results(&db,search_reader,&[(current,None)]).await,[Some(0)]);
+
     }
 
     /// SOURCE_URL_REPLAY=input.jsonl (owner_message,url,base_rating) on the configured System One.

@@ -147,18 +147,6 @@ pub fn draft_target(workspace: &Path, name: &str, args: &Value) -> Option<String
     Some(format!("{domain}/{skill}"))
 }
 
-/// Whether a `read` returned stored content marked as tainted: a wiki page with an entry labelled
-/// `web`, or a file of a draft skill a tainted session wrote. Then the dispatcher hands it over as
-/// untrusted content (taint.rs). Returns where it came from.
-pub async fn read_of_tainted(db: &PgPool, workspace: &Path, args: &Value) -> Option<&'static str> {
-    let target = real(&tools::resolve(workspace, args["path"].as_str()?));
-    if target.starts_with(real(&crate::wiki::root())) {
-        let text = tokio::fs::read_to_string(&target).await.ok()?;
-        return crate::wiki::has_web_entry(&text).then_some("wiki");
-    }
-    let skill = draft_target(workspace, "read", args)?;
-    crate::workshop::tainted_drafts(db).await.contains(&skill).then_some("draft skill")
-}
 
 /// The prompt file an `edit` or `write` call targets, if it targets one (it is backed up first).
 pub fn prompt_file_target(workspace: &Path, name: &str, args: &Value) -> Option<PathBuf> {
@@ -345,8 +333,24 @@ pub async fn run_tool(app: &AppState, session: Uuid, workspace: &Path, name: &st
             // Another session's messages may carry web content it read: then they're untrusted here too.
             let other = args["session"].as_str().map(str::trim).filter(|s| !s.is_empty());
             if let (Some(other), false) = (other, is_error) {
-                let tainted = crate::taint::prefix_tainted(&app.db, &other.to_lowercase()).await;
-                return match crate::taint::hand_over(app, session, tainted, "history", other, &content).await {
+                let risk = if let Some((lo,hi)) = crate::compact::id_prefix_range(&other.to_lowercase()) {
+                    // The reader depends on the session(s) it reads (D-062): a later denial of
+                    // one reaches it. A rating or dependency that can't be recorded withholds.
+                    let rated: anyhow::Result<Option<i16>> = async {
+                        let writers: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM sessions WHERE id BETWEEN $1 AND $2")
+                            .bind(lo).bind(hi).fetch_all(&app.db).await?;
+                        crate::sources::depend(&app.db, session, &writers).await?;
+                        sqlx::query_scalar::<_,Option<i16>>("SELECT max(CASE WHEN zen_session_contaminated(session_id) AND origin!='owner' THEN 5::smallint ELSE risk END) FROM tape_events WHERE session_id BETWEEN $1 AND $2 AND seq>= $3 AND seq<= $4")
+                            .bind(lo).bind(hi).bind(args["from"].as_i64().unwrap_or(0) as i32)
+                            .bind(args["to"].as_i64().or(args["from"].as_i64()).unwrap_or(i32::MAX as i64) as i32)
+                            .fetch_one(&app.db).await.map_err(Into::into)
+                    }.await;
+                    match rated {
+                        Ok(risk) => risk.unwrap_or(4),
+                        Err(e) => return out(format!("history withheld: its origin couldn't be rated ({e})"), true),
+                    }
+                } else {4};
+                return match crate::taint::hand_over_rating(app, session, risk, "history", other, &content).await {
                     Ok(content) => out(content, false),
                     Err(e) => out(crate::taint::withheld(&e), true),
                 };
@@ -387,11 +391,12 @@ If a question goes unanswered, take your recommended option and say it was an as
             out(content, is_error)
         }
         "find_skills" | "load_skill" => {
-            // A draft a tainted session wrote is untrusted wherever it's read.
-            let marked = crate::workshop::tainted_drafts(&app.db).await;
-            let (content, is_error, tainted) = crate::skills::run_tool(name, args, &marked)?;
+            let (content, is_error, risk) = match crate::skills::run_tool(&app.db, session, name, args).await {
+                Ok(result) => result,
+                Err(e) => return out(format!("skills withheld: provenance unavailable ({e})"), true),
+            };
             let about = args["name"].as_str().or(args["query"].as_str()).unwrap_or("skills");
-            match crate::taint::hand_over(app, session, tainted, "draft skill", about, &content).await {
+            match crate::taint::hand_over_rating(app, session, risk, "skill", about, &content).await {
                 Ok(content) => out(content, is_error),
                 Err(e) => out(crate::taint::withheld(&e), true),
             }
@@ -403,7 +408,7 @@ If a question goes unanswered, take your recommended option and say it was an as
         "save_skill" | "save_tool" => crate::workshop::run_tool(app, session, name, args).await,
         "delegate" => crate::delegate::run_tool(app, session, workspace, name, args).await,
         "schedule" => crate::jobs::run_tool(app, session, name, args, matches!(policy, crate::gate::Policy::Granted)).await,
-        "find_tools" | "load_tool" | "call_tool" => crate::mcp::run_tool(app, session, name, args, matches!(policy, crate::gate::Policy::Sandbox)).await,
+        "find_tools" | "load_tool" | "call_tool" => crate::mcp::run_tool(app, session, name, args, matches!(policy, crate::gate::Policy::Sandbox), matches!(policy, crate::gate::Policy::Granted)).await,
         "decide" => {
             let res = crate::score::decide(app, &args["state"], &args["questions"]).await;
             let (answer, error) = match &res {
@@ -453,8 +458,8 @@ pub async fn log_decision(db: &PgPool, session: Option<Uuid>, point: &str, input
 
 /// A criterion's check, run by the kernel like the bash tool (its own process group, killed on a
 /// timeout or an abort, output capped and masked, in the session's shell sandbox).
-async fn run_check(dir: &Path, run: &str, expect: Option<&str>, sandbox: tools::Sandbox) -> Value {
-    match tools::run_shell(dir, run, &[], sandbox, Duration::from_secs(600)).await {
+async fn run_check(dir: &Path, run: &str, expect: Option<&str>, sandbox: tools::Sandbox, masks: &[PathBuf]) -> Value {
+    match tools::run_shell(dir, run, &[], sandbox, masks, Duration::from_secs(600)).await {
         Ok(tools::Shell { text, status: Some(Ok(status)) }) => {
             let text = crate::secrets::mask_off_thread(text).await;
             let tail = zen_proto::tail(&text, 3000);
@@ -473,7 +478,7 @@ async fn diff_from(repo: &Path, base: &str) -> String {
     // Git reads programmable local configuration; even gathering a diff stays read-only/offline.
     let quoted = format!("'{}'", base.replace('\'', "'\\''"));
     let output = |command: String| async move {
-        tools::run_shell(repo, &command, &[], tools::Sandbox::ReadOnly, Duration::from_secs(30))
+        tools::run_shell(repo, &command, &[], tools::Sandbox::ReadOnly, &[], Duration::from_secs(30))
             .await.map(|s| s.text).unwrap_or_default()
     };
     let mut d = output(format!("git diff --end-of-options {quoted}")).await;
@@ -582,6 +587,11 @@ async fn verify(app: &AppState, session: Uuid, workspace: &Path, args: &Value, p
     let base = args["base"].as_str().filter(|b| !b.trim().is_empty()).unwrap_or("HEAD").to_string();
     app.emit(session, json!({ "type": "status", "text": format!("verifying: running {} check(s)", criteria.iter().filter(|c| c["run"].is_string()).count()) })).await;
     let mut checks = serde_json::Map::new();
+    let masks = match crate::fsview::prepare(&app.db, &dir).await {
+        Ok(v) => v.masks,
+        Err(e) => return err(format!("not run: the shell's view couldn't be checked ({e:#})")),
+    };
+    let start = std::time::SystemTime::now();
     // A criterion's command is the session's shell too: sandboxed once the session is tainted.
     let granted = matches!(policy,crate::gate::Policy::Granted);
     let sandbox = if granted {tools::Sandbox::None} else {crate::taint::shell_sandbox(&app.db, session).await};
@@ -592,10 +602,15 @@ async fn verify(app: &AppState, session: Uuid, workspace: &Path, args: &Value, p
             } else { crate::gate::Policy::Run };
             let (command, boundary) = match &route {
                 crate::gate::Policy::SafeRead(normalized) => (normalized.as_str(), tools::Sandbox::SafeRead),
+                crate::gate::Policy::Sandbox => (run,tools::Sandbox::Offline),
+                crate::gate::Policy::Hold(why) => return err(crate::gate::held_note(why)),
                 _ => (run, sandbox),
             };
-            checks.insert(c["id"].as_str().unwrap_or("").to_string(), run_check(&dir, command, c["expect"].as_str(), boundary).await);
+            checks.insert(c["id"].as_str().unwrap_or("").to_string(), run_check(&dir, command, c["expect"].as_str(), boundary, &masks).await);
         }
+    }
+    if let Err(e) = crate::fsview::finish(&app.db, session, &dir, start, sandbox == tools::Sandbox::None).await {
+        return err(format!("{e:#}"));
     }
     let any_failed = checks.values().any(|c| c["ok"] != true);
     let judgment = criteria.iter().any(|c| !c["run"].is_string());

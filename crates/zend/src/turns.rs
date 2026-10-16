@@ -401,6 +401,7 @@ impl Drop for StopOnDrop {
 }
 
 pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: Origin) -> Result<()> {
+    anyhow::ensure!(!crate::taint::stopped(&app.db,id).await?, "session stopped by contamination; review it with /trust");
     let row = sqlx::query("SELECT model, effort, title, workspace, kind FROM sessions WHERE id = $1")
         .bind(id)
         .fetch_optional(&app.db)

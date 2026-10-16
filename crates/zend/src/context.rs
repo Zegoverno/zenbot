@@ -6,10 +6,11 @@
 //! - On demand: a project below the workspace (e.g. ~/zenbot) has its own AGENTS.md. The first
 //!   time a tool touches a path there, the kernel attaches that file to the tool's result and
 //!   records it in the session (tape kind `context`), so it isn't attached again (later turns see
-//!   it in the history). Only a trusted repository's file is attached as instructions: zenbot's
-//!   own checkout (ZEN_REPO) and those the owner lists in ZEN_TRUSTED_REPOS. Any other (a
-//!   repository just cloned, a downloaded archive) is attached as untrusted content and taints the
-//!   session, like a web page: anyone can write an AGENTS.md.
+//!   it in the history). Only a trusted repository's file rated 0–1 by exact bytes is attached
+//!   as instructions: zenbot's checkout (ZEN_REPO) and ZEN_TRUSTED_REPOS. Other text is content,
+//!   rated at least 4 outside those repositories. Prompt assembly also admits only ratings 0–1.
+//!   Ratings precede truncation; writer dependencies precede handover. Contaminated bytes and
+//!   metadata errors are withheld (D-062).
 
 use std::path::{Path, PathBuf};
 
@@ -18,9 +19,9 @@ use serde_json::Value;
 const MAX_FILE: usize = 32 * 1024;
 const NAMES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
 
-/// A file's text, cut at MAX_FILE.
-pub fn read_capped(path: &Path) -> Option<String> {
-    let mut text = std::fs::read_to_string(path).ok()?;
+/// Text cut at MAX_FILE: what is shown of an instruction file. Ratings are taken on the whole
+/// text, before the cut.
+pub fn capped(mut text: String) -> String {
     if text.len() > MAX_FILE {
         let mut end = MAX_FILE;
         while !text.is_char_boundary(end) {
@@ -29,7 +30,7 @@ pub fn read_capped(path: &Path) -> Option<String> {
         text.truncate(end);
         text.push_str("\n[... truncated; read the file for the rest ...]");
     }
-    Some(text)
+    text
 }
 
 /// The instruction file in `dir`, if any (AGENTS.md wins over CLAUDE.md).
@@ -37,7 +38,8 @@ fn in_dir(dir: &Path) -> Option<PathBuf> {
     NAMES.iter().map(|n| dir.join(n)).find(|p| p.is_file())
 }
 
-/// Files that always go into the system prompt: from `/` down to the workspace.
+/// Files that always go into the system prompt: from `/` down to the workspace, with their whole
+/// text (the exact bytes `rate` judges; cut with `capped` when shown).
 pub fn always(workspace: &Path) -> Vec<(PathBuf, String)> {
     let mut dirs: Vec<&Path> = workspace.ancestors().collect();
     dirs.reverse();
@@ -45,7 +47,7 @@ pub fn always(workspace: &Path) -> Vec<(PathBuf, String)> {
     let mut out: Vec<(PathBuf, String)> = Vec::new();
     for p in paths {
         if !out.iter().any(|(q, _)| q == &p) {
-            if let Some(text) = read_capped(&p) {
+            if let Ok(text) = std::fs::read_to_string(&p) {
                 out.push((p, text));
             }
         }
@@ -143,6 +145,59 @@ fn worktree_root(path: &Path) -> Option<PathBuf> {
     let worktrees = entry.parent()?;
     let git_dir = worktrees.parent()?;
     (worktrees.file_name()? == "worktrees" && git_dir.file_name()? == ".git").then(|| git_dir.parent().map(Path::to_path_buf))?
+}
+
+/// The origin rating of instruction text (a prompt file, a project's AGENTS.md, a skill) by its
+/// exact bytes, and the writers whose rows decide it (the reader depends on those). Bytes no
+/// session registered get `unknown`: the owner's own edits and git checkouts land there, and a
+/// session rated 2 or more can't write them unregistered (file tools register before the effect,
+/// its shell runs read-only, D-063). Registered bytes take the maximum original rating, with
+/// contamination from any writer overlaid as 5. A second registration cannot launder an origin.
+/// Database errors are returned: the caller leaves the text out (fail closed).
+pub async fn rate(db: &sqlx::PgPool, text: &str, unknown: i16) -> anyhow::Result<(i16, Vec<uuid::Uuid>)> {
+    use sqlx::Row;
+    let rows = sqlx::query(
+        "SELECT session_id, risk, (session_id IS NOT NULL AND zen_session_contaminated(session_id)) AS bad
+         FROM item_ratings WHERE sha256 = encode(sha256(convert_to($1, 'UTF8')), 'hex')",
+    )
+    .bind(text)
+    .fetch_all(db)
+    .await?;
+    if rows.is_empty() {
+        return Ok((unknown, Vec::new()));
+    }
+    let risk = rows.iter().map(|r| if r.get::<bool, _>("bad") { 5 } else { r.get("risk") }).max().unwrap_or(unknown);
+    let writers = rows.iter().filter_map(|r| r.get::<Option<uuid::Uuid>, _>("session_id")).collect();
+    Ok((risk, writers))
+}
+
+/// Admit instruction text to a prompt only when rated 0–1 (D-062): records the reader's
+/// dependency on its writers first, so a later denial of a writer reaches this session.
+/// None when it is left out (rated 2 or more, or contaminated).
+pub async fn admit(db: &sqlx::PgPool, reader: uuid::Uuid, text: &str, unknown: i16) -> anyhow::Result<Option<i16>> {
+    let (risk, writers) = rate(db, text, unknown).await?;
+    if risk > 1 {
+        return Ok(None);
+    }
+    crate::sources::depend(db, reader, &writers).await?;
+    anyhow::ensure!(!crate::taint::stopped(db, reader).await?, "instructions withheld: a writer was stopped");
+    Ok(Some(risk))
+}
+
+/// How an instruction file met below the workspace is attached: as instructions only when its
+/// repository is one the owner listed (`in_trusted_repo`) and its exact bytes are rated 0–1;
+/// otherwise as content at its rating, at least 4 outside a listed repository (anyone can write
+/// an AGENTS.md there). Returns (attached as instructions, rating), after recording the reader's
+/// dependency on the writers. Level 5 (a contaminated writer) is returned for the caller to stop
+/// the reader.
+pub async fn attach_rating(db: &sqlx::PgPool, reader: uuid::Uuid, text: &str, in_trusted_repo: bool) -> anyhow::Result<(bool, i16)> {
+    let (risk, writers) = rate(db, text, if in_trusted_repo { 1 } else { 4 }).await?;
+    if risk == 5 {
+        return Ok((false, 5));
+    }
+    crate::sources::depend(db, reader, &writers).await?;
+    let trusted = in_trusted_repo && risk <= 1;
+    Ok((trusted, if in_trusted_repo { risk } else { risk.max(4) }))
 }
 
 /// How an instruction file from a repository the owner hasn't listed is shown: content to weigh,
@@ -249,4 +304,133 @@ mod tests {
         std::fs::write(fake.join(".git"), format!("gitdir: {}\n", entry.display())).unwrap();
         assert!(!trusted(&fake.join("AGENTS.md"), &roots));
     }
+
+    /// Instruction text and memories in prompts, and project files attached to results, keep
+    /// their origin (D-062). SOURCE_TEST_DB_URL must name a throwaway database.
+    #[tokio::test]
+    #[ignore]
+    async fn instruction_provenance_database() {
+        let db = sqlx::PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
+        sqlx::migrate!().run(&db).await.unwrap();
+        let session = |risk: i16| {
+            let db = db.clone();
+            async move {
+                let id = uuid::Uuid::new_v4();
+                sqlx::query("INSERT INTO sessions(id,title,model,risk) VALUES($1,'instruction provenance','faux/smoke',$2)")
+                    .bind(id).bind(risk).execute(&db).await.unwrap();
+                id
+            }
+        };
+        let deny = |cause: uuid::Uuid| {
+            let db = db.clone();
+            async move {
+                sqlx::query("INSERT INTO contamination(cause,affected) VALUES($1,$1) ON CONFLICT(cause,affected) DO UPDATE SET cleared_at=NULL")
+                    .bind(cause).execute(&db).await.unwrap();
+            }
+        };
+        let inputs = |reader: uuid::Uuid, writer: uuid::Uuid| {
+            let db = db.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>("SELECT count(*) FROM session_inputs WHERE reader=$1 AND writer=$2")
+                    .bind(reader).bind(writer).fetch_one(&db).await.unwrap()
+            }
+        };
+        let dir = crate::test_util::TestDir::new("instruction-origin");
+        let tag = uuid::Uuid::new_v4();
+        let (writer1, writer4) = (session(1).await, session(4).await);
+        let risky = format!("RISKY RULES {tag}");
+        let clean = format!("CLEAN RULES {tag}");
+        crate::sources::record_bytes(&db, writer4, &dir.join("risky.md"), &risky, None).await.unwrap();
+        crate::sources::record_bytes(&db, writer1, &dir.join("clean.md"), &clean, None).await.unwrap();
+
+        // Admission to a prompt: only 0-1, with the dependency recorded.
+        let reader = session(1).await;
+        assert_eq!(admit(&db, reader, &risky, 1).await.unwrap(), None, "a level-4 writer's text never enters a prompt");
+        assert_eq!(admit(&db, reader, &clean, 1).await.unwrap(), Some(1));
+        assert_eq!(inputs(reader, writer1).await, 1);
+        assert_eq!(inputs(reader, writer4).await, 0);
+        assert_eq!(admit(&db, reader, &format!("owner edit {tag}"), 1).await.unwrap(), Some(1), "unregistered bytes: the owner's own edit");
+        // A second registration cannot lower the original maximum rating.
+        crate::sources::record_bytes(&db, writer4, &dir.join("copy.md"), &clean, None).await.unwrap();
+        let reader_b = session(1).await;
+        assert_eq!(admit(&db, reader_b, &clean, 1).await.unwrap(), None);
+        assert_eq!(inputs(reader_b, writer4).await, 0);
+        // The clean writer denied: its readers stop, and its text no longer gets in.
+        deny(writer1).await;
+        assert!(crate::taint::stopped(&db, reader).await.unwrap());
+        assert_eq!(admit(&db, session(1).await, &clean, 1).await.unwrap(), None);
+        let only_denied = format!("DENIED RULES {tag}");
+        crate::sources::record_bytes(&db, writer1, &dir.join("denied.md"), &only_denied, None).await.unwrap();
+        assert_eq!(rate(&db, &only_denied, 1).await.unwrap().0, 5);
+
+        // Attachments below the workspace.
+        let r = session(1).await;
+        assert_eq!(attach_rating(&db, r, &risky, true).await.unwrap(), (false, 4), "a trusted repo's file written by a risky session is content, not instructions");
+        assert_eq!(attach_rating(&db, r, &only_denied, true).await.unwrap(), (false, 5));
+        assert_eq!(attach_rating(&db, r, &format!("fresh {tag}"), true).await.unwrap(), (true, 1));
+        assert_eq!(attach_rating(&db, r, &format!("fresh {tag}"), false).await.unwrap(), (false, 4), "an unlisted repository stays untrusted");
+
+        // The prompt's workspace files: a risky version is left out, by name only.
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("AGENTS.md"), &risky).unwrap();
+        let p = session(1).await;
+        let admitted = crate::compile::admitted(&db, p, &ws).await.unwrap();
+        let prompt = crate::compile::system_prompt(&ws, "/repo", "", None, "", &admitted);
+        assert!(!prompt.contains(&risky) && prompt.contains("Left out of these instructions") && prompt.contains(&ws.join("AGENTS.md").display().to_string()));
+        let fresh = format!("FRESH RULES {tag}");
+        std::fs::write(ws.join("AGENTS.md"), &fresh).unwrap();
+        let admitted = crate::compile::admitted(&db, p, &ws).await.unwrap();
+        assert!(crate::compile::system_prompt(&ws, "/repo", "", None, "", &admitted).contains(&fresh));
+
+        // Memories: only 0-1 entries are rendered, and the reader depends on their writers.
+        let m4 = format!("RISKY MEMORY {tag}");
+        let m1 = format!("CLEAN MEMORY {tag}");
+        let (mw1, mw4) = (session(1).await, session(4).await);
+        for (text, w) in [(&m4, mw4), (&m1, mw1)] {
+            sqlx::query("INSERT INTO memories(text,source,session_id) VALUES($1,'inferred',$2)").bind(text).bind(w).execute(&db).await.unwrap();
+        }
+        let mr = session(1).await;
+        let rendered = crate::memory::render(&db, mr).await.unwrap();
+        assert!(rendered.contains(&m1) && !rendered.contains(&m4));
+        assert_eq!(inputs(mr, mw1).await, 1);
+        deny(mw1).await;
+        assert!(crate::taint::stopped(&db, mr).await.unwrap());
+        assert!(!crate::memory::render(&db, session(1).await).await.unwrap().contains(&m1), "a denied writer's memory leaves the prompt");
+
+        // Prompt rendering uses the admitted snapshot, never a second filesystem read.
+        std::fs::write(ws.join("AGENTS.md"), "replacement after admission").unwrap();
+        let prompt = crate::compile::system_prompt(&ws, "/repo", "", None, "", &admitted);
+        assert!(prompt.contains(&fresh) && !prompt.contains("replacement after admission"));
+
+        // A deny between rating and dependency insertion cannot make a stale clean read pass.
+        let app = crate::test_util::app(db.clone());
+        let late_writer = session(1).await;
+        let late_text = format!("late denial {tag}");
+        crate::sources::record_bytes(&db, late_writer, &dir.join("late.md"), &late_text, None).await.unwrap();
+        let (stale_risk, stale_writers) = rate(&db, &late_text, 1).await.unwrap();
+        crate::taint::deny(&app, late_writer, "race test").await.unwrap();
+        let late_reader = session(1).await;
+        crate::sources::depend(&db, late_reader, &stale_writers).await.unwrap();
+        assert!(crate::taint::hand_over_rating(&app, late_reader, stale_risk, "test", "stale instructions", &late_text).await.is_err());
+        assert!(crate::memory::render(&db, late_reader).await.is_err());
+
+        // Trust clears only the contamination overlay: immutable origin 4 stays out of prompts.
+        crate::taint::deny(&app, writer4, "review test").await.unwrap();
+        assert_eq!(rate(&db, &risky, 1).await.unwrap().0, 5);
+        let seen = crate::taint::report(&app, writer4).await.unwrap().unwrap()["checked"].as_i64().unwrap() as i32;
+        assert!(matches!(crate::taint::trust(&app, writer4, seen).await.unwrap(), crate::taint::Trusted::Done(_)));
+        assert_eq!(rate(&db, &risky, 1).await.unwrap().0, 4);
+        assert_eq!(admit(&db, session(1).await, &risky, 1).await.unwrap(), None);
+
+        // Metadata errors fail closed.
+        let closed = sqlx::PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
+        closed.close().await;
+        assert!(rate(&closed, &clean, 1).await.is_err());
+        assert!(admit(&closed, mr, &clean, 1).await.is_err());
+        assert!(attach_rating(&closed, mr, &clean, true).await.is_err());
+        assert!(crate::memory::render(&closed, mr).await.is_err());
+        assert!(crate::compile::admitted(&closed, mr, &ws).await.is_err());
+    }
+
 }

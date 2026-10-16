@@ -46,9 +46,11 @@ fn key(workspace: &Path, name: &str, args: &Value) -> String {
 
 /// Decide before any effect. A grant is consumed atomically, including concurrent identical calls.
 pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args: &Value) -> Result<Policy> {
-    if !crate::taint::tainted(&app.db, session).await {
-        return Ok(Policy::Run);
+    if crate::taint::stopped(&app.db, session).await? {
+        anyhow::bail!("session stopped by contamination; only the owner can review and /trust it");
     }
+    let risk: i16 = sqlx::query_scalar("SELECT risk FROM sessions WHERE id=$1").bind(session).fetch_one(&app.db).await?;
+    if risk < 2 { return Ok(Policy::Run); }
     let action = key(workspace, name, args);
     let grant: Option<i64> = sqlx::query_scalar(
         "UPDATE action_gates SET used_at = now()
@@ -64,6 +66,8 @@ pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args:
         if approved == Some(false) { Policy::Sandbox } else { Policy::Hold("runs a made tool with host capabilities".into()) }
     } else if name == "web_fetch" {
         if fetch_allowed(&app.db, session, args["url"].as_str().unwrap_or("")).await? { Policy::Run } else { Policy::Hold(UNSEEN_URL.into()) }
+    } else if name == "bash" && risk < 4 {
+        grammar::local_shell(workspace,args["command"].as_str().unwrap_or(""))
     } else { policy(workspace, name, args) };
     let code_approval = name == "bash" && matches!(p,Policy::Sandbox)
         || name == "verify" && args["criteria"].as_array().into_iter().flatten()
@@ -74,10 +78,7 @@ pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args:
         _ => None,
     };
     if let Some(reason) = reason {
-        // A read-only attempt offers an approval without treating it as an attack.
-        if matches!(p,Policy::Hold(_)) && escalates(reason) {
-            crate::taint::escalate(app, session, name, reason).await?;
-        }
+        // A hold asks the owner; only /deny or flagged content contaminates (D-062).
         sqlx::query("INSERT INTO action_gates (session_id, action, reason)
           SELECT $1, $2, $3 WHERE NOT EXISTS (
             SELECT 1 FROM action_gates WHERE session_id = $1 AND action = $2
@@ -156,7 +157,7 @@ fn steering(path: &Path) -> bool {
 
 pub fn held_note(reason: &str) -> String {
     if escalates(reason) {
-        format!("not run: {reason}. This action was held before taking effect and the session is now tainted. Only the owner can allow this exact action once: end the turn and ask them to use /allow (zen) or !allow (Matrix), then retry unchanged.")
+        format!("not run: {reason}. Held before taking effect; this does not taint the session. Only the owner can allow this exact action once: end the turn and ask them to use /allow (zen) or !allow (Matrix), then retry unchanged.")
     } else {
         format!("not run: {reason}. Held before taking effect; the session keeps its shell. Reads run when written plainly: listed read-only programs (ls, cat, head, tail, wc, grep, find, sed -n 'M,Np', sort, uniq, cut, diff, du, stat, echo…), their usual flags, pipes, `;`, `&&`, `||`, `cd`, quotes, globs and redirects to /dev/null; no `$`, backticks, loops or other redirects. Otherwise the owner can allow this exact action once: end the turn and ask them to use /allow (zen) or !allow (Matrix), then retry unchanged.")
     }
@@ -312,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn only_harmful_holds_revoke_the_shell() {
+    fn holds_never_claim_to_taint_the_session() {
         let p = Path::new("/tmp");
         let reason = |c: &str| match shell(p, c) { Policy::Hold(r) => r, other => panic!("{c}: {other:?}") };
         for c in ["echo $(id)", "tmux ls", "ls --dired", "for f in a; do ls; done", "cd a b"] {
@@ -324,7 +325,7 @@ mod tests {
         assert!(!escalates(&format!("verification command: {}", reason("echo $(id)"))));
         assert!(!escalates(UNSEEN_URL));
         assert!(held_note(&reason("echo $(id)")).contains("keeps its shell"));
-        assert!(held_note(&reason("curl x")).contains("now tainted"));
+        assert!(held_note(&reason("curl x")).contains("does not taint"));
         // #16 of the recorded holds: a direct wiki edit is held, and the note says to use capture.
         let wiki = crate::zen_home().join("global/wiki/x.md");
         assert!(matches!(policy(p, "edit", &json!({"path": wiki})), Policy::Hold(r) if r.contains("capture") && escalates(&r)));

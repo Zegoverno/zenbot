@@ -8,7 +8,7 @@
 //! the kernel's own token, API keys, the database URL) is filled only for a server that lists it in
 //! `allow_env`, so a server can't be handed the kernel's credentials by accident. Per server:
 //! `enabled`, `timeout_s`, `include` / `exclude` (tool names), `allow_env`, and `untrusted` (wrap
-//! its output as untrusted and taint the session; default true for every server, local or remote,
+//! its output as untrusted and raise the session's risk to 4; default true for local or remote,
 //! until the owner sets `"untrusted": false`; D-052). The agent can't change the file with `edit` or
 //! `write` (agent.rs, `Protected::OwnerOnly`): only the owner does.
 //!
@@ -16,7 +16,9 @@
 //! engine; the Phase 0 spike), so MCP tools aren't added to it. Instead the model gets three fixed
 //! tools: `find_tools` (names and one-line descriptions), `load_tool` (a tool's full definition, as
 //! a tool result) and `call_tool` (run it). Every call goes through the kernel: recorded like any
-//! tool call, with a timeout, output capped and secrets masked.
+//! tool call, with a timeout, output capped and secrets masked. Made catalog entries retain the
+//! exact manifest snapshot's numeric origin rating and writer dependencies; contaminated entries
+//! are omitted from discovery and withheld on explicit load/call. Metadata failures fail closed.
 //!
 //! Calls run at the same time, to one server and to several: a server's lock is held only to
 //! connect, and its tools are looked up from its last listing (listed again when a stdio server
@@ -70,6 +72,9 @@ pub struct ToolEntry {
     pub schema: Value,
     /// From a server marked untrusted: its description and schema are wrapped and taint the session.
     pub untrusted: bool,
+    /// A made tool's manifest, the exact text its name, description and schema were read from:
+    /// what its catalog entry is rated by (D-062). None for a server's tool.
+    pub manifest: Option<String>,
 }
 
 impl ToolEntry {
@@ -435,6 +440,7 @@ impl Server {
                     description: t["description"].as_str().unwrap_or("").to_string(),
                     schema: t["inputSchema"].clone(),
                     untrusted: self.cfg.untrusted,
+                    manifest: None,
                 });
             }
             cursor = page["nextCursor"].as_str().map(String::from);
@@ -598,6 +604,44 @@ async fn catalog() -> (Vec<ToolEntry>, Vec<String>) {
     (tools, problems)
 }
 
+/// A catalog entry's origin rating and the writers it depends on (D-062): a server marked
+/// untrusted is 4, one the owner trusts 1; a made tool takes its manifest's exact-byte rating.
+async fn entry_rating(db: &sqlx::PgPool, t: &ToolEntry) -> Result<(i16, Vec<Uuid>)> {
+    Ok(match &t.manifest {
+        Some(text) => crate::context::rate(db, text, 1).await?,
+        None if t.untrusted => (4, Vec::new()),
+        None => (1, Vec::new()),
+    })
+}
+
+/// The catalog with each entry's rating, as the model may see it: made tools whose manifest a
+/// stopped session wrote are left out, and the reader depends on the writers of every entry
+/// ranked (ranking reads their descriptions). A rating that can't be read fails the catalog.
+async fn rated_catalog(db: &sqlx::PgPool, session: Uuid) -> Result<(Vec<(ToolEntry, i16)>, Vec<String>)> {
+    let (tools, problems) = catalog().await;
+    let mut out = Vec::new();
+    for t in tools {
+        let (risk, writers) = entry_rating(db, &t).await?;
+        if risk >= 5 {
+            continue;
+        }
+        crate::sources::depend(db, session, &writers).await?;
+        out.push((t, risk));
+    }
+    Ok((out, problems))
+}
+
+/// Hand `text` from catalog entry `t` (its spec) to `session` at the entry's origin rating, the
+/// dependency on its writers recorded first; level 5 stops the session (an error).
+async fn hand_over_entry(app: &App, session: Uuid, t: &ToolEntry, text: &str) -> Result<String> {
+    let source = if t.server == "made" { "made" } else { "mcp" };
+    let (risk, writers) = entry_rating(&app.db, t).await?;
+    if risk < 5 {
+        crate::sources::depend(&app.db, session, &writers).await?;
+    }
+    crate::taint::hand_over_rating(app, session, risk, source, &t.full(), text).await
+}
+
 fn words(text: &str) -> Vec<String> {
     text.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() >= 3).map(String::from).collect()
 }
@@ -625,8 +669,15 @@ fn one_line(d: &str) -> String {
 }
 
 async fn find(app: &App, session: Uuid, query: &str) -> (String, bool) {
-    let (tools, problems) = catalog().await;
+    let (rated, problems) = match rated_catalog(&app.db, session).await {
+        Ok(c) => c,
+        Err(e) => return (format!("tools withheld: their origin couldn't be rated ({e:#})"), true),
+    };
+    let tools: Vec<ToolEntry> = rated.iter().map(|(t, _)| t.clone()).collect();
+    let risk_of = |t: &ToolEntry| rated.iter().find(|(r, _)| r.full() == t.full()).map_or(4, |(_, risk)| *risk);
     let mut out = String::new();
+    // Names also appear in the no-match server list. Rate the complete catalog snapshot.
+    let mut risk = rated.iter().map(|(_, r)| *r).max().unwrap_or(1);
     if tools.is_empty() {
         out.push_str(&format!("No MCP tools are available (servers are configured in {}).", config_path().display()));
     } else {
@@ -641,28 +692,25 @@ async fn find(app: &App, session: Uuid, query: &str) -> (String, bool) {
             out.push_str(&format!("No tool matches. Servers: {} ({} tools); try other words.", servers.join(", "), tools.len()));
         } else {
             out.push_str("Load one with load_tool to see its parameters, then run it with call_tool.\n");
-            let has_untrusted = found.iter().any(|t| t.untrusted);
             for t in found {
                 let line = format!("{}: {}", t.full(), one_line(&t.description));
-                if t.untrusted {
-                    out.push_str(&format!("- {}\n", crate::taint::untrusted("mcp", &t.full(), &line)));
+                let r = risk_of(&t);
+                risk = risk.max(r);
+                if r >= 2 {
+                    out.push_str(&format!("- {}\n", crate::taint::untrusted(if t.server == "made" { "made" } else { "mcp" }, &t.full(), &line)));
                 } else {
                     out.push_str(&format!("- {line}\n"));
-                }
-            }
-            if has_untrusted {
-                if let Err(e) = crate::taint::taint(app, session, "mcp", "find_tools").await {
-                    return (crate::taint::withheld(&e), true);
                 }
             }
         }
     }
     if !problems.is_empty() {
         // A remote server controls its error text too. Treat all catalog errors conservatively.
-        if let Err(e) = crate::taint::taint(app, session, "mcp", "catalog errors").await {
-            return (crate::taint::withheld(&e), true);
-        }
+        risk = risk.max(4);
         out.push_str(&format!("\nProblems: {}", crate::taint::untrusted("mcp", "catalog errors", &problems.join("; "))));
+    }
+    if let Err(e) = crate::taint::mark_rating(app, session, risk, "mcp", "find_tools").await {
+        return (crate::taint::withheld(&e), true);
     }
     (out, false)
 }
@@ -705,26 +753,28 @@ pub fn result_text(result: &Value) -> String {
     parts.join("\n")
 }
 
-async fn call(app: &App, session: Uuid, full: &str, args: &Value, force_sandbox: bool) -> Result<(String, bool)> {
+async fn call(app: &App, session: Uuid, full: &str, args: &Value, force_sandbox: bool, owner_allowed: bool) -> Result<(String, bool)> {
     let t = lookup(full).await?;
+    // Validation errors quote schema keys too. Admit/rate the exact manifest before even
+    // returning those errors, and apply its risk before choosing execution capabilities.
+    let (entry_risk, writers) = entry_rating(&app.db, &t).await?;
+    if entry_risk < 5 {
+        crate::sources::depend(&app.db, session, &writers).await?;
+    }
+    crate::taint::mark_rating(app, session, entry_risk, "tool catalog", &t.full()).await?;
     let args = if args.is_null() { json!({}) } else { args.clone() };
     let missing = missing_args(&t.schema, &args);
     if !missing.is_empty() {
         let error = format!("missing required arguments: {} (load_tool shows the parameters)", missing.join(", "));
-        if t.untrusted {
-            crate::taint::taint(app, session, "mcp", &t.full()).await?;
-            return Ok((crate::taint::untrusted("mcp", &t.full(), &error), true));
-        }
-        anyhow::bail!("{error}");
+        return Ok((crate::taint::hand_over_rating(app, session, entry_risk, "tool catalog", &t.full(), &error).await?, true));
     }
     if t.server == "made" {
-        let (text, is_error, networked) = crate::workshop::run_made(&app.db, &t.name, &args, force_sandbox).await?;
-        // An approved tool can reach the network: what it returns may be web content.
-        if networked {
-            crate::taint::taint(app, session, "made", &t.full()).await?;
-            return Ok((crate::taint::untrusted("made", &t.full(), &text), is_error));
-        }
-        return Ok((text, is_error));
+        let (text, is_error, networked, risk) = crate::workshop::run_made(&app.db, session, &t.name, &args, force_sandbox, owner_allowed).await?;
+        // Its output is at least its code's origin rating; an approved tool can reach the
+        // network, so what it returns may be web content. A tool a stopped session wrote never
+        // ran (5): this session stops too.
+        let risk = if networked { risk.max(4) } else { risk };
+        return Ok((crate::taint::hand_over_rating(app, session, risk, "made", &t.full(), &text).await?, is_error));
     }
     let server = { REGISTRY.lock().await.servers.get(&t.server).cloned().context("the server went away")? };
     let untrusted = server.cfg.untrusted;
@@ -785,23 +835,23 @@ match its parameters. Ask the owner before calls that send, publish, delete or s
 }
 
 /// Run `find_tools`, `load_tool` or `call_tool`. None for other tools.
-pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value, force_sandbox: bool) -> Option<tools::ToolOutput> {
+pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value, force_sandbox: bool, owner_allowed: bool) -> Option<tools::ToolOutput> {
     let (content, is_error) = match name {
         "find_tools" => find(app, session, args["query"].as_str().unwrap_or("")).await,
         "load_tool" => match lookup(args["name"].as_str().unwrap_or("")).await {
             Ok(t) => {
                 let spec = format!("<tool name=\"{}\">\n{}\n\nParameters (JSON schema):\n{}\n</tool>\nRun it with call_tool.",
                     t.full(), t.description.trim(), serde_json::to_string_pretty(&t.schema).unwrap_or_default());
-                // Name, description and schema all come from the server: wrap the entire spec.
-                match if t.untrusted { crate::taint::taint(app, session, "mcp", &t.full()).await } else { Ok(()) } {
-                    Ok(()) if t.untrusted => (crate::taint::untrusted("mcp", &t.full(), &spec), false),
-                    Ok(()) => (spec, false),
+                // Name, description and schema come from the server or the manifest: the whole
+                // spec at the entry's origin rating, dependency recorded first (level 5 stops).
+                match hand_over_entry(app, session, &t, &spec).await {
+                    Ok(spec) => (spec, false),
                     Err(e) => (crate::taint::withheld(&e), true),
                 }
             }
             Err(e) => (format!("{e:#}"), true),
         },
-        "call_tool" => match call(app, session, args["name"].as_str().unwrap_or(""), &args["arguments"], force_sandbox).await {
+        "call_tool" => match call(app, session, args["name"].as_str().unwrap_or(""), &args["arguments"], force_sandbox, owner_allowed).await {
             Ok(r) => r,
             Err(e) => (format!("call_tool failed: {e:#}"), true),
         },
@@ -877,7 +927,7 @@ mod tests {
 
     #[test]
     fn tools_rank_by_name_then_description_and_args_are_checked() {
-        let t = |server: &str, name: &str, d: &str| ToolEntry { server: server.into(), name: name.into(), description: d.into(), schema: json!({}), untrusted: false };
+        let t = |server: &str, name: &str, d: &str| ToolEntry { server: server.into(), name: name.into(), description: d.into(), schema: json!({}), untrusted: false, manifest: None };
         let all = vec![t("cal", "list_events", "List calendar events"), t("mail", "send_email", "Send an email"), t("mail", "search", "Search email by sender")];
         let r = rank(&all, "send email", 5);
         assert_eq!(r[0].full(), "mail_send_email");
@@ -885,4 +935,74 @@ mod tests {
         let schema = json!({ "required": ["to", "subject"] });
         assert_eq!(missing_args(&schema, &json!({ "to": "a" })), ["subject"]);
     }
+
+    /// Made tools keep their origin (D-062) in the catalog, load_tool and their run's rating.
+    /// SOURCE_TEST_DB_URL must name a throwaway database.
+    #[tokio::test]
+    #[ignore]
+    async fn made_tool_provenance_database() {
+        let db = sqlx::PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
+        sqlx::migrate!().run(&db).await.unwrap();
+        let app = crate::test_util::app(db.clone());
+        let session = |risk: i16| {
+            let db = db.clone();
+            async move {
+                let id = Uuid::new_v4();
+                sqlx::query("INSERT INTO sessions(id,title,model,risk) VALUES($1,'made provenance','faux/smoke',$2)")
+                    .bind(id).bind(risk).execute(&db).await.unwrap();
+                id
+            }
+        };
+        let dir = crate::test_util::TestDir::new("made-origin");
+        let tool = dir.join("probe");
+        std::fs::create_dir_all(&tool).unwrap();
+        let tag = Uuid::new_v4();
+        let manifest = format!(r#"{{"name":"probe","description":"PROBE {tag}","parameters":{{"type":"object"}},"command":"python3 run.py"}}"#);
+        let writer4 = session(4).await;
+        crate::sources::record_bytes(&db, writer4, &tool.join("tool.json"), &manifest, None).await.unwrap();
+        std::fs::write(tool.join("tool.json"), &manifest).unwrap();
+        let entry = ToolEntry { server: "made".into(), name: "probe".into(), description: format!("PROBE {tag}"), schema: json!({}), untrusted: false, manifest: Some(manifest.clone()) };
+
+        // load_tool: a level-4 manifest is wrapped and raises the reader, dependency first.
+        let reader = session(1).await;
+        let shown = hand_over_entry(&app, reader, &entry, "spec text").await.unwrap();
+        assert!(shown.starts_with("<untrusted source=\"made\""));
+        let risk: i16 = sqlx::query_scalar("SELECT risk FROM sessions WHERE id=$1").bind(reader).fetch_one(&db).await.unwrap();
+        assert_eq!(risk, 4);
+        let deps: i64 = sqlx::query_scalar("SELECT count(*) FROM session_inputs WHERE reader=$1 AND writer=$2").bind(reader).bind(writer4).fetch_one(&db).await.unwrap();
+        assert_eq!(deps, 1);
+        // Its code's rating covers every file: unknown text 1; unrated binary bytes fail closed.
+        std::fs::write(tool.join("run.py"), format!("print('{tag}')")).unwrap();
+        assert_eq!(crate::workshop::folder_rating(&db, &tool).await.unwrap().0, 4);
+        let clean_tool = dir.join("clean");
+        std::fs::create_dir_all(&clean_tool).unwrap();
+        std::fs::write(clean_tool.join("run.py"), format!("print('clean {tag}')")).unwrap();
+        assert_eq!(crate::workshop::folder_rating(&db, &clean_tool).await.unwrap().0, 1);
+        std::fs::write(clean_tool.join("blob"), [0xffu8, 0xfe]).unwrap();
+        assert!(crate::workshop::folder_rating(&db, &clean_tool).await.is_err());
+        let linked_tool = dir.join("linked");
+        std::fs::create_dir_all(&linked_tool).unwrap();
+        std::os::unix::fs::symlink(tool.join("run.py"), linked_tool.join("escape.py")).unwrap();
+        assert!(crate::workshop::folder_rating(&db, &linked_tool).await.is_err(), "a link cannot import unrated host bytes");
+
+        // A manifest a stopped session wrote: left out of discovery's ratings (5) and loading it
+        // stops the reader.
+        sqlx::query("INSERT INTO contamination(cause,affected) VALUES($1,$1) ON CONFLICT(cause,affected) DO UPDATE SET cleared_at=NULL")
+            .bind(writer4).execute(&db).await.unwrap();
+        assert_eq!(entry_rating(&db, &entry).await.unwrap().0, 5);
+        assert_eq!(crate::workshop::folder_rating(&db, &tool).await.unwrap().0, 5);
+        let reader2 = session(1).await;
+        assert!(hand_over_entry(&app, reader2, &entry, "spec text").await.is_err());
+        assert!(crate::taint::stopped(&db, reader2).await.unwrap());
+        // A server's tools: untrusted 4, trusted 1.
+        let server = ToolEntry { server: "s".into(), name: "t".into(), description: String::new(), schema: json!({}), untrusted: true, manifest: None };
+        assert_eq!(entry_rating(&db, &server).await.unwrap().0, 4);
+        assert_eq!(entry_rating(&db, &ToolEntry { untrusted: false, ..server }).await.unwrap().0, 1);
+        // Metadata errors fail closed.
+        let closed = sqlx::PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
+        closed.close().await;
+        assert!(entry_rating(&closed, &entry).await.is_err());
+        assert!(crate::workshop::folder_rating(&closed, &clean_tool).await.is_err());
+    }
+
 }

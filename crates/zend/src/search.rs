@@ -505,6 +505,8 @@ pub struct Found {
     pub reference: String,
     pub title: String,
     pub snippet: String,
+    /// Exact indexed body whose snippets are rendered; validation must bind to these bytes.
+    pub body: String,
     pub at: chrono::DateTime<chrono::Utc>,
     pub exact: bool,
 }
@@ -552,7 +554,7 @@ pub async fn query(db: &PgPool, q: &str, kinds: &[&str], session: Option<Uuid>, 
              SELECT id FROM search_docs
              WHERE $2::text IS NOT NULL AND embedding IS NOT NULL AND embed_model = $7 AND kind = ANY($4) AND ($6::uuid IS NULL OR session_id = $6)
              ORDER BY embedding <=> $2::text::vector LIMIT 50) v)
-         SELECT d.kind, d.ref, coalesce(d.title, '') AS title, d.at, (e.id IS NOT NULL) AS exact_hit,
+         SELECT d.kind, d.ref, d.body, coalesce(d.title, '') AS title, d.at, (e.id IS NOT NULL) AS exact_hit,
                 coalesce(1.0 / (60 + f.r), 0) + coalesce(1.0 / (60 + v.r), 0) AS rrf,
                 ts_headline('simple', d.body, websearch_to_tsquery('simple', $1), 'MaxFragments=2,MaxWords=35,MinWords=12,FragmentDelimiter= … ') AS snippet,
                 left(d.body, 250) AS head, right(d.body, 450) AS tail, left(d.body, 700) AS whole, length(d.body) AS len, (f.id IS NOT NULL) AS text_hit
@@ -586,6 +588,7 @@ pub async fn query(db: &PgPool, q: &str, kinds: &[&str], session: Option<Uuid>, 
                 kind: r.get("kind"),
                 reference: r.get("ref"),
                 title: r.get("title"),
+                body: r.get("body"),
                 snippet: snippet.replace('\n', " "),
                 at: r.get("at"),
                 exact: r.get("exact_hit"),
@@ -679,9 +682,7 @@ async fn run(app: &App, session: Uuid, args: &Value) -> Result<String> {
         let _one = INDEXING.lock().await;
         index_turns(&app.db).await.and(index_memories(&app.db).await).and(index_wiki(&app.db).await)
     };
-    if let Err(e) = indexed {
-        tracing::warn!("indexing before a search: {e:#}");
-    }
+    indexed.context("search withheld: indexing failed")?;
     let found = query(&app.db, q, &kinds, only, (limit * 2).max(12)).await?;
     let listed: Vec<(Found, Option<f64>)> = match rerank(app, q, &found).await {
         Some(r) => r.into_iter().map(|(f, p)| (f, Some(p))).collect(),
@@ -716,14 +717,17 @@ async fn run(app: &App, session: Uuid, args: &Value) -> Result<String> {
     // A marked result asked for by name (an exact match) is handed over in full, and taints the
     // session; any other is listed by reference only, with none of its text (D-056), so a search
     // that merely comes across one doesn't spread the mark.
-    let marked = marked_results(app, &listed).await;
-    let (full, withheld): (Vec<_>, Vec<_>) = listed.iter().cloned().zip(marked).partition(|((f, _), m)| !m || f.exact);
-    let (open, shown): (Vec<_>, Vec<_>) = full.into_iter().partition(|(_, m)| *m);
+    let ratings = rated_results(&app.db, session, &listed).await;
+    // A stale or unverifiable index entry is never shown, even for an exact query.
+    let (listed, ratings): (Vec<_>,Vec<_>) = listed.into_iter().zip(ratings).filter_map(|(f,r)|r.map(|r|(f,r))).unzip();
+    let (full, withheld): (Vec<_>, Vec<_>) = listed.iter().cloned().zip(ratings).partition(|((f, _), risk)| *risk < 2 || f.exact);
+    let (open, shown): (Vec<_>, Vec<_>) = full.into_iter().partition(|(_, risk)| *risk >= 2);
+    let max_risk = open.iter().map(|(_,risk)| *risk).max().unwrap_or(1);
     let shown: Vec<_> = shown.into_iter().map(|(r, _)| r).collect();
     let open: Vec<_> = open.into_iter().map(|(r, _)| r).collect();
     let mut out = format!("{header}{}", render(&shown));
     if !open.is_empty() {
-        out.push_str(&crate::taint::hand_over(app, session, true, "search", q, &render(&open)).await?);
+        out.push_str(&crate::taint::hand_over_rating(app, session, max_risk, "search", q, &render(&open)).await?);
     }
     if !withheld.is_empty() {
         out.push_str(&render_withheld(&withheld.into_iter().map(|((f, _), _)| f).collect::<Vec<_>>()));
@@ -733,31 +737,63 @@ async fn run(app: &App, session: Uuid, args: &Value) -> Result<String> {
 
 /// Which of `listed` carry the taint mark: a turn of a tainted session, a memory a tainted session
 /// saved, a wiki page with a `web` entry. Fails closed: a result whose mark can't be read is marked.
-async fn marked_results(app: &App, listed: &[(Found, Option<f64>)]) -> Vec<bool> {
-    let refs = |kind: &str| listed.iter().filter(|(f, _)| f.kind == kind).map(|(f, _)| f.reference.clone()).collect::<Vec<_>>();
-    let sessions: Vec<Uuid> = refs("turn").iter().filter_map(|r| r.split(':').next().and_then(|s| s.parse().ok())).collect();
-    let memories: Vec<i64> = refs("memory").iter().filter_map(|r| r.trim_start_matches('m').parse().ok()).collect();
-    let tainted_sessions: Option<Vec<Uuid>> = sqlx::query_scalar("SELECT id FROM sessions WHERE id = ANY($1) AND (risky_at IS NOT NULL OR tainted_at IS NOT NULL)")
-        .bind(&sessions).fetch_all(&app.db).await.ok();
-    let tainted_memories: Option<Vec<i64>> = sqlx::query_scalar("SELECT id FROM memories WHERE id = ANY($1) AND tainted")
-        .bind(&memories).fetch_all(&app.db).await.ok();
-    let web_pages: Option<Vec<String>> = sqlx::query_scalar("SELECT ref FROM search_docs WHERE kind = 'wiki' AND ref = ANY($1) AND body LIKE '%(web) —%'")
-        .bind(refs("wiki")).fetch_all(&app.db).await.ok();
-    listed
-        .iter()
-        .map(|(f, _)| match f.kind.as_str() {
-            "turn" => match (&tainted_sessions, f.reference.split(':').next().and_then(|s| s.parse::<Uuid>().ok())) {
-                (Some(t), Some(s)) => t.contains(&s),
-                _ => true,
-            },
-            "memory" => match (&tainted_memories, f.reference.trim_start_matches('m').parse::<i64>().ok()) {
-                (Some(t), Some(id)) => t.contains(&id),
-                _ => true,
-            },
-            "wiki" => web_pages.as_ref().is_none_or(|p| p.contains(&f.reference)),
-            _ => true,
-        })
-        .collect()
+pub(crate) async fn rated_results(db: &PgPool, reader: Uuid, listed: &[(Found, Option<f64>)]) -> Vec<Option<i16>> {
+    let mut ratings = Vec::new();
+    for (f,_) in listed {
+        let rating = match f.kind.as_str() {
+            "memory" => {
+                if let Ok(id) = f.reference.trim_start_matches('m').parse::<i64>() {
+                    // Bind origin and writer to the same row snapshot, then insert the edge
+                    // through the provenance boundary shared with deny/delivery/spawn.
+                    match sqlx::query_as::<_, (i16, Option<Uuid>)>("SELECT CASE WHEN zen_session_contaminated(session_id) THEN 5::smallint ELSE risk END, session_id FROM memories WHERE id=$1 AND text=$2 AND $3=(tier || '-term memory (' || source || ')') AND tier!='archived'")
+                        .bind(id).bind(&f.body).bind(&f.title).fetch_optional(db).await {
+                        Ok(Some((risk, writer))) => {
+                            if (risk < 2 || f.exact) && crate::sources::depend(db, reader, &writer.into_iter().collect::<Vec<_>>()).await.is_err() {
+                                None
+                            } else { Some(risk) }
+                        }
+                        _ => None,
+                    }
+                } else {None}
+            }
+            "turn" => {
+                if let Some((session,seq)) = f.reference.split_once(':').and_then(|(s,n)|Some((s.parse::<Uuid>().ok()?,n.parse::<i32>().ok()?))) {
+                    match sqlx::query("SELECT payload, CASE WHEN zen_session_contaminated(session_id) AND origin!='owner' THEN 5::smallint ELSE risk END AS risk FROM tape_events WHERE session_id=$1 AND seq >= $2 AND seq < COALESCE((SELECT min(seq) FROM tape_events WHERE session_id=$1 AND seq>$2 AND kind='message' AND payload->>'role'='user' AND NOT COALESCE((payload->>'kernel')::boolean,false)),2147483647) ORDER BY seq")
+                        .bind(session).bind(seq).fetch_all(db).await {
+                        Ok(rows) => {
+                            let messages:Vec<Value> = rows.iter().map(|r|r.get("payload")).collect();
+                            let risk = rows.iter().map(|r|r.get::<i16,_>("risk")).max().unwrap_or(4);
+                            // A changed turn, or one whose dependency can't be recorded, isn't shown.
+                            let shown = turn_text(&messages)==f.body
+                                && (!(risk<2 || f.exact) || crate::sources::depend(db,reader,&[session]).await.is_ok());
+                            shown.then_some(risk)
+                        },
+                        Err(_) => None,
+                    }
+                } else {None}
+            }
+            "wiki" => {
+                let path = crate::wiki::root().join(format!("{}.md",f.reference));
+                match tokio::fs::read_to_string(&path).await {
+                    Ok(text) => {
+                        let page = crate::wiki::parse(&f.reference,&text);
+                        if format!("{}\n{}",page.summary,page.entries.join("\n")) != f.body || page.title != f.title {None}
+                        else {
+                            match crate::sources::file_rating(db,&path,&text).await {
+                                Ok(risk) if (risk<2 || f.exact) && crate::sources::depend_file(db,reader,&text).await.is_err() => None,
+                                Ok(risk) => Some(risk),
+                                Err(_) => None,
+                            }
+                        }
+                    },
+                    Err(_) => None,
+                }
+            }
+            _ => None,
+        };
+        ratings.push(rating);
+    }
+    ratings
 }
 
 /// Marked results listed without their text: where they are and how to open them. Nothing in it
