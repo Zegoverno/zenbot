@@ -467,6 +467,8 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox:
             // masked files through), background processes ending with the shell, and no sudo.
             let mut c = sandbox_command(filter.as_ref().expect("sandbox filter initialized"));
             c.args(["--dev-bind", "/", "/", "--unshare-pid", "--proc", "/proc", "--die-with-parent"]);
+            // Nor through the kernel's own API: its token is hidden too.
+            hide_secrets(&mut c, [crate::zen_home().join("token")].into_iter().filter(|t| t.exists()));
             crate::fsview::mask(&mut c, masks);
             c.arg("--chdir").arg(dir).args(["bash", "-c"]);
             c

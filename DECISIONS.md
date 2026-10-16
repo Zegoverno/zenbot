@@ -25,8 +25,8 @@ D-053's session-written marks as the rule for stored items, D-054's "stored mark
   match, by digest wherever registered, those of a contaminated or level-5 session (copies too;
   other hard links in the workspace; a shell refuses to run when some are elsewhere; an
   unreadable product is masked whatever it holds, a directory with an empty tmpfs). With masks,
-  a host shell gets its own pid namespace, no_new_privs and no Unix sockets (seccomp, as
-  sandbox-runtime does by default). With none, shells run as before.
+  a host shell gets its own pid namespace, no_new_privs, no Unix sockets (seccomp, as
+  sandbox-runtime does by default) and no kernel API token. With none, shells run as before.
   A `bash` result is rated by the rated files whose text it shows; `verify` rates its whole view
   up front. What a host shell writes in the workspace is registered by its exact bytes at the
   session's risk; a scan it can't complete, a non-UTF-8 name, or a deny that lands while a
@@ -44,7 +44,8 @@ sessions to 4).
 
 **Limits:** root-equivalent tools used outside these shells, processes outside zenbot, and products
 outside the workspace or in build/cache folders (`target`, `node_modules`, `.cache`, `.cargo`,
-`.rustup`, `.git/objects`) are out of reach.
+`.rustup`, `.git/objects`), and other local TCP services a host shell can reach, are out of reach.
+A workspace of over a million entries withholds every host shell's result (fail closed).
 
 ## D-063 — Project code defaults to offline and read-only
 

@@ -52,8 +52,9 @@ pub fn digest(bytes: &[u8]) -> String {
 type Digested = Arc<(String, Vec<String>)>;
 type Version<'a> = (&'a str, Option<Uuid>, i16);
 
-/// A file's digest and its lines of 20 characters or more (at most 200), cached by inode, size
-/// and change time (any write changes ctime).
+/// A file's digest and its lines of 20 characters or more (at most 200, each cut to its first 200
+/// characters: a shown line contains them), cached by inode, size and change time (any write
+/// changes ctime).
 fn file_digest(path: &Path, meta: &std::fs::Metadata) -> std::io::Result<Digested> {
     type Key = (PathBuf, u64, u64, u64, i64, i64);
     static CACHE: Mutex<Option<HashMap<Key, Digested>>> = Mutex::new(None);
@@ -63,7 +64,7 @@ fn file_digest(path: &Path, meta: &std::fs::Metadata) -> std::io::Result<Digeste
     }
     let bytes = std::fs::read(path)?;
     let lines = String::from_utf8_lossy(&bytes).lines().map(str::trim)
-        .filter(|l| l.chars().count() >= 20).take(200).map(String::from).collect();
+        .filter(|l| l.chars().count() >= 20).take(200).map(|l| l.chars().take(200).collect()).collect();
     let d = Arc::new((digest(&bytes), lines));
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let cache = cache.get_or_insert_with(HashMap::new);
@@ -84,7 +85,8 @@ fn walk(root: &Path, mut keep: impl FnMut(&Path, &std::fs::Metadata, bool)) -> b
             seen += 1;
             if seen > MAX_WALK { return false; }
             let Ok(e) = e else { keep(&dir, &meta, true); continue };
-            let (path, Ok(m)) = (e.path(), e.metadata()) else { continue };
+            // An entry that lists but can't be looked at (a directory without search permission).
+            let (path, Ok(m)) = (e.path(), e.metadata()) else { keep(&dir, &meta, true); continue };
             let name = e.file_name();
             if m.is_dir() {
                 let objects = name == "objects" && dir.file_name().is_some_and(|n| n == ".git");
@@ -230,6 +232,8 @@ pub async fn finish(db: &PgPool, session: Uuid, workspace: &Path, start: SystemT
             });
             anyhow::ensure!(complete, "withheld: the command's products couldn't all be checked (more than {MAX_WALK} entries in {})", ws.display());
             if let Some(p) = odd { anyhow::bail!("withheld: the command wrote {}, whose name isn't UTF-8; rename it", p.display()); }
+            out.sort();
+            out.dedup();
             Ok(out)
         }).await??;
         if !products.is_empty() {
