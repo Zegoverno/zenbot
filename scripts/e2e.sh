@@ -1099,6 +1099,77 @@ trust_session() {
   kill "$srv" 2>/dev/null || true
 }
 
+# Origin ratings and reversible taint under attack (D-062 step 3): a writer that read the web stores
+# a memory, a file and history; its held outward actions (curl, an unseen URL, a USER.md edit) never
+# taint it; outside text quoting the owner's words isn't rated as the owner's. A clean reader gets
+# every stored product wrapped, its risk raised and a dependency recorded. The owner's deny stops a
+# running turn before its next tool and reaches the reader; a fresh reader of a denied product
+# (level 5) is stopped with nothing shown. Trusting the writer lifts only its own cause: the reader
+# that read before runs again, the one stopped by level 5 stays stopped, and the product is back to
+# its original rating.
+origin_attacks() {
+  local ws; ws=$(new_workspace origin)
+  local port=$((PORT + 11)) zh="$TMP/home/.zenbot"
+  python3 "$REPO/scripts/e2e/searxng_stub.py" "$port" & local srv=$!
+  local script; script=$(script origin.json "s|HOMEZEN|$zh|")
+  start_kernel "$ws" "$script" ZEN_SEARXNG_URL="http://127.0.0.1:$port"
+  q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART; DELETE FROM search_docs WHERE kind = 'memory'" >/dev/null
+  api() { curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
+  res_of() { q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$1' AND payload->>'role'='toolResult'"; }
+  stopped() { q "SELECT risk=5 OR zen_session_contaminated(id) FROM sessions WHERE id='$1'"; }
+  local user_before; user_before=$(sha256sum "$zh/USER.md" 2>/dev/null)
+  local r w; r=$(zen ask --json -m faux/smoke "OW-WRITE keep the gate code 7731"); w=$(echo "$r" | jq -r .session_id)
+  check "the writer read the web: risk 4, not tainted" eq "$(q "SELECT risk || '/' || (tainted_at IS NULL) FROM sessions WHERE id='$w'")" 4/true
+  check "its outward actions were held, and holds don't taint" bash -c '[ "$(grep -o "not run:" <<<"$1" | wc -l)" -ge 3 ] && [ "$2" = 0 ] && [ "$3" = f ]' _ \
+    "$(res_of "$w")" "$(q "SELECT count(*) FROM contamination WHERE cause='$w' OR affected='$w'")" "$(stopped "$w")"
+  check "egress: the unseen URL is held, not fetched" eq "$(q "SELECT count(*) FROM action_gates WHERE session_id='$w' AND action LIKE '%unseen.test%' AND reason LIKE 'fetches a URL that isn''t%'")" 1
+  check "the USER.md edit didn't happen" eq "$(sha256sum "$zh/USER.md" 2>/dev/null)" "$user_before"
+  check "stored items carry the writer's rating; quoting the owner isn't the owner" eq \
+    "$(q "SELECT string_agg(risk::text, ',' ORDER BY id) FROM memories")" 4,4,0
+  sed -i "s|WSID|$w|" "$script"
+  local r1; r1=$(zen ask --json -m faux/smoke "OR-READ" | jq -r .session_id)
+  local res; res=$(res_of "$r1")
+  check "a clean reader gets the memory, the file and the history wrapped" bash -c \
+    'grep -q "<untrusted source=\"search\"" <<<"$1" && grep -q "<untrusted source=\"file\" about=\"w-note.md\"" <<<"$1" && grep -q "<untrusted source=\"history\"" <<<"$1"' _ "$res"
+  check "the wiki page it captured is listed with its text and name withheld" bash -c '! grep -q "ORIGWIKI the" <<<"$1" && grep -q "name withheld" <<<"$1"' _ \
+    "$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$r1' AND payload->>'role'='toolResult' AND payload->>'toolName'='search' AND payload->'content'->0->>'text' LIKE '%(wiki)%'")"
+  check "and its risk is raised, a dependency recorded, nothing stopped" eq \
+    "$(q "SELECT s.risk || '/' || (SELECT count(*) FROM session_inputs WHERE reader=s.id AND writer='$w') FROM sessions s WHERE s.id='$r1'")/$(stopped "$r1")" 4/1/f
+  # The owner denies a session while its turn runs: the turn stops before its next tool.
+  local slow; slow=$(zen sessions new --json -m faux/smoke | jq -r .id)
+  zen ask --json -s "$slow" "OR-SLOW" >/dev/null 2>&1 &
+  local asker=$!
+  poll "SELECT count(*) FROM tool_calls WHERE session_id='$slow' AND name='write'" 1 >/dev/null
+  sleep 1
+  local t0=$SECONDS
+  check "the owner denies the running session" eq "$(api -X POST -d '{}' "$URL/api/sessions/$slow/deny" | jq -r .stopped)" true
+  wait "$asker" 2>/dev/null || true
+  check "its turn ended promptly" bash -c '[ "$1" -lt 15 ]' _ "$((SECONDS - t0))"
+  check "and ran nothing after the deny" bash -c 'test -s "$1/s-note.md" && test ! -e "$1/s-late.md" && [ "$2" = 0 ]' _ "$ws" \
+    "$(q "SELECT count(*) FROM tape_events WHERE session_id='$slow' AND payload->>'role'='toolResult' AND payload::text LIKE '%slow-too-late%'")"
+  check "its blocks are marked" eq "$(q "SELECT bool_and(tainted) FROM tape_events WHERE session_id='$slow' AND origin!='owner'")" t
+  check "new work there is refused" bash -c '! "$@" >/dev/null 2>&1' _ zen ask --json -s "$slow" "OR-AFTER"
+  # Denying the writer reaches the reader that read its products.
+  api -X POST -d '{}' "$URL/api/sessions/$w/deny" >/dev/null
+  check "deny reaches the reader through its recorded read" eq "$(stopped "$w")/$(stopped "$r1")" t/t
+  local r2; r2=$(zen ask --json -m faux/smoke "OR-L5" | jq -r .session_id)
+  check "the denied writer's memories stay out of a new session's instructions, even its exact owner words" bash -c '! grep -q 7731 <<<"$1" && ! grep -q 5521 <<<"$1"' _ \
+    "$(q "SELECT payload->>'text' FROM tape_events WHERE kind='base' AND session_id='$r2'")"
+  check "a fresh reader of the denied product is stopped and shown nothing" bash -c '[ "$1" = 0 ] && grep -qE "withheld|interrupted" <<<"$2" && [ "$3" = t ] && test ! -e "$4/l5-after.md"' _ \
+    "$(q "SELECT count(*) FROM tape_events WHERE session_id='$r2' AND payload::text LIKE '%ORIGFILE%'")" "$(res_of "$r2")" "$(stopped "$r2")" "$ws"
+  check "the writer's taint report names the owner's deny" bash -c 'jq -e ".taints | map(.source) | index(\"owner /deny\") != null" <<<"$1" >/dev/null' _ \
+    "$(api "$URL/api/sessions/$w/taint")"
+  local checked; checked=$(api "$URL/api/sessions/$w/taint" | jq .checked)
+  check "the owner trusts the writer" eq "$(api -X POST -d "{\"seen\": $checked}" "$URL/api/sessions/$w/trust" | jq -r .trusted)" true
+  check "only its own cause is lifted: the earlier reader runs, the level-5 reader stays stopped" eq "$(stopped "$w")/$(stopped "$r1")/$(stopped "$r2")" f/f/t
+  check "stored items keep their original ratings" eq "$(q "SELECT string_agg(risk::text, ',' ORDER BY id) FROM memories")" 4,4,0
+  local r3; r3=$(zen ask --json -m faux/smoke "OR-AFTER" | jq -r .session_id)
+  check "a new reader gets the product wrapped at its original rating, not withheld" bash -c 'grep -q "<untrusted source=\"file\"" <<<"$1" && grep -q ORIGFILE <<<"$1" && [ "$2" = f ]' _ \
+    "$(res_of "$r3")" "$(stopped "$r3")"
+  check "and the captured wiki page wrapped too" grep -qF '<untrusted source="file" about="'"$zh"'/global/wiki/origwiki-harbour.md"' <<<"$(res_of "$r3")"
+  kill "$srv" 2>/dev/null || true
+}
+
 # Session names and next-prompt suggestions (assist.rs): after each owner turn the assist model names
 # the session (while the owner hasn't) and suggests the next prompt; the next prompt settles it.
 names_suggestions() {
@@ -1253,7 +1324,7 @@ run basics prompt_files open_loop restart_recovery layout_move
 run memory memory_across_sessions memory_sleep
 run delegation delegation
 run names-suggestions names_suggestions
-run trust trust_session
+run trust trust_session origin_attacks
 run workshop workshop
 run verifier verifier
 run agent-tools skills_on_demand ask_and_gone_tools

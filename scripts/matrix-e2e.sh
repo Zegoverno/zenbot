@@ -33,7 +33,8 @@ fail() { echo "FAILED: $*"; for f in kernel bridge; do echo "--- $f log"; tail -
 echo "== build"
 (cd "$REPO" && cargo build --release -q)
 (cd "$REPO/crates/zen-matrix" && cargo build --release -q --bins --examples)
-ZM="$REPO/crates/zen-matrix/target/release"
+BIN="${CARGO_TARGET_DIR:-$REPO/target}/release"
+ZM="${CARGO_TARGET_DIR:-$REPO/crates/zen-matrix/target}/release"
 
 echo "== homeserver"
 sudo docker run -d --name "$NAME" -p "127.0.0.1:$HS_PORT:6167" \
@@ -79,7 +80,7 @@ mkdir -p "$TMP/zenhome" "$TMP/ws"
   unset OPENROUTER_API_KEY ZEN_S1_MODEL BRAVE_API_KEY TAVILY_API_KEY
   ZEN_TOKEN="$TOKEN" ZEN_PORT=$K_PORT ZEN_WORKERS=engine ZEN_FAUX=1 ZEN_FAUX_SCRIPT="$SCRIPT" \
     ZEN_DEFAULT_MODEL=faux/smoke ZEN_SUGGEST=off ZEN_JOBS=0 ZEN_HOME="$TMP/zenhome" ZEN_WORKSPACE="$TMP/ws" \
-    DATABASE_URL="$(db_url_for "$DB")" exec ./target/release/zend
+    DATABASE_URL="$(db_url_for "$DB")" exec "$BIN/zend"
 ) >"$TMP/kernel.log" 2>&1 &
 PIDS+=($!)
 wait_healthy "$K/health" 60 "${PIDS[-1]}" || fail "the kernel didn't come up"
@@ -118,7 +119,7 @@ grep -q "wasn't decrypted" "$TMP/bridge.log" || fail "the unverified session's m
 echo "== an answer from while the bridge was down"
 kill "$BRIDGE"; wait "$BRIDGE" 2>/dev/null || true
 SID=$(jq -r '.rooms[.main_room]' "$TMP/bridge/matrix/state.json")
-"$REPO/target/release/zen" ask --quiet --session "$SID" "hello from the terminal" >/dev/null || fail "zen ask in the room's session"
+"$BIN/zen" ask --quiet --session "$SID" "hello from the terminal" >/dev/null || fail "zen ask in the room's session"
 "$ZM/zen-matrix" run >>"$TMP/bridge.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 240); do grep -q "rooms checked" "$TMP/owner.log" && break; kill -0 $OWNER 2>/dev/null || break; sleep 1; done
