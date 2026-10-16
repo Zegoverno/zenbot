@@ -55,10 +55,13 @@ pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args:
     let grant: Option<i64> = sqlx::query_scalar(
         "UPDATE action_gates SET used_at = now()
          WHERE id = (SELECT id FROM action_gates WHERE session_id = $1 AND action = $2
-            AND used_at IS NULL AND allowed_at > now() - interval '10 minutes' ORDER BY id DESC LIMIT 1)
+            AND used_at IS NULL AND (decision IS NULL OR decision='approved') AND allowed_at > now() - interval '10 minutes' ORDER BY id DESC LIMIT 1)
          AND used_at IS NULL RETURNING id")
         .bind(session).bind(&action).fetch_optional(&app.db).await?;
     if grant.is_some() { return Ok(Policy::Granted); }
+    let refused: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM action_gates WHERE session_id=$1 AND action=$2 AND decision IN ('rejected','denied'))")
+        .bind(session).bind(&action).fetch_one(&app.db).await?;
+    if refused { return Ok(Policy::Hold("the owner rejected this exact action; do not retry or requeue it".into())); }
     let mut p = if name == "call_tool" && args["name"].as_str().is_some_and(|n| n.starts_with("made_")) {
         let tool = args["name"].as_str().unwrap().trim_start_matches("made_");
         let approved: Option<bool> = sqlx::query_scalar("SELECT approved_at IS NOT NULL FROM made_tools WHERE name = $1")
@@ -285,7 +288,7 @@ fn outside_text(payload: &Value, args: &Value) -> String {
 
 pub async fn waiting(app: &App, session: Uuid) -> Result<Vec<Value>> {
     let rows = sqlx::query("SELECT id, action, reason FROM action_gates WHERE session_id = $1
-      AND allowed_at IS NULL AND created_at > now() - interval '1 day' ORDER BY id DESC LIMIT 5")
+      AND decision IS NULL AND allowed_at IS NULL AND created_at > now() - interval '1 day' ORDER BY id DESC LIMIT 5")
       .bind(session).fetch_all(&app.db).await?;
     Ok(rows.iter().map(|r| json!({"id":r.get::<i64,_>("id"),
       "action":crate::secrets::mask(&r.get::<String,_>("action")), "reason":r.get::<String,_>("reason")})).collect())
@@ -296,8 +299,8 @@ pub async fn allow(app: &App, session: Uuid, id: i64) -> Result<bool> {
     // Match tape's lock ordering: session advisory lock before updating the session/audit.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 7))")
         .bind(session).execute(&mut *tx).await?;
-    let row = sqlx::query("UPDATE action_gates SET allowed_at = now() WHERE id = $1 AND session_id = $2
-      AND allowed_at IS NULL AND created_at > now() - interval '1 day' RETURNING reason")
+    let row = sqlx::query("UPDATE action_gates SET allowed_at = now(), decision='approved', resolved_at=now() WHERE id = $1 AND session_id = $2
+      AND decision IS NULL AND allowed_at IS NULL AND created_at > now() - interval '1 day' RETURNING reason")
       .bind(id).bind(session).fetch_optional(&mut *tx).await?;
     if row.is_none() { return Ok(false); }
     crate::tape::append_in(&mut tx, session, "allow", &json!({"by":"the owner","gate":id})).await?;
