@@ -611,7 +611,8 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 - **Made-tool approval covers the content** (a SHA-256 of the manifest and files, computed in
   Postgres, over the private copy that runs): a tool changed after approval runs sandboxed again;
   the owner approves by the fingerprint they reviewed. Unapproved tools are offline and
-  read-only, with an empty home, but can read the rest of the filesystem (`--ro-bind / /`); approved
+  read-only, with an empty home and an empty `/run`, make no socket connection (the offline shell's
+  seccomp filter; Docker's socket would otherwise be reachable), but can read the rest of the filesystem (`--ro-bind / /`); approved
   ones run with `bash -c` (not a login shell) and full write access.
 
 ## Deeper docs

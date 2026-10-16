@@ -331,7 +331,7 @@ pub struct Shell {
 /// Linux seccomp ABI (seccomp_data: nr at byte 0, arch at byte 4). Network namespaces do not
 /// isolate pathname Unix sockets, so deny connection/datagram operations and io_uring bypasses.
 /// Reject foreign syscall ABIs (including x32) rather than comparing the wrong syscall numbers.
-fn network_filter() -> Result<std::fs::File,String> {
+pub(crate) fn network_filter() -> Result<std::fs::File,String> {
     let mut rules = Vec::new();
     for nr in [libc::SYS_connect,libc::SYS_sendto,libc::SYS_sendmsg,libc::SYS_sendmmsg,libc::SYS_io_uring_setup] {
         rules.push((0x15,0,1,nr as u32));

@@ -6,6 +6,13 @@
 
 ---
 
+## 2026-10-16 — Unapproved made tools can't reach host sockets
+
+An unapproved made tool's sandbox had no seccomp filter and kept `/run`, so it could connect to
+the Docker socket (root on this host) despite having no network: a risky session could save a tool
+and run it. It now gets an empty `/run` and the offline shell's filter (no connect or send on any
+socket). Test: a socket in the tool's own folder is refused, `/run` is empty.
+
 ## 2026-10-16 — D-065 security corrections (branch, not installed)
 
 Plain Matrix reactions no longer authorize; encrypted cross-signed owner commands remain available.
