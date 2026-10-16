@@ -6,6 +6,12 @@
 
 ---
 
+## 2026-10-16 — Unapproved made tools can't reach host sockets
+
+An unapproved made tool's sandbox had no seccomp filter and kept `/run`, so it could connect to
+the Docker socket (root on this host) despite having no network: a risky session could save a tool
+and run it. It now gets an empty `/run` and the offline shell's filter (no connect or send on any
+socket). Test: a socket in the tool's own folder is refused, `/run` is empty.
 ## 2026-10-16 — S1: System One as one engine of decision files (D-066)
 
 Every System One call now goes through `crates/zend/src/s1/`: thirteen decision files
