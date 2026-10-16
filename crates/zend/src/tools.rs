@@ -217,7 +217,8 @@ pub enum Sandbox {
     /// Everything read-only, an empty home with only the work bound back, no network (a verifier).
     ReadOnly,
     /// The session's shell: the machine read-only, the workspace writable when `writable`, the zen
-    /// home read-only and its secrets hidden, private /tmp and /run, its own processes, no sudo
+    /// home read-only and its secrets hidden, the session's own /tmp (kept between its commands) and an
+    /// empty /run, its own processes, no sudo
     /// (bubblewrap sets no_new_privs), and network only through the session's egress proxy when
     /// `net` (proxy.rs; else none at all).
     Contained { writable: bool, net: bool },
@@ -344,6 +345,19 @@ pub(crate) fn network_filter() -> Result<std::fs::File,String> {
     seccomp(rules)
 }
 
+/// A session's private /tmp for its contained shells (`<system tmp>/zen-sandbox/<session>`, mode 700;
+/// the nightly `prune` job removes those a week old).
+pub fn session_tmp(session: &str) -> Option<PathBuf> {
+    let id: uuid::Uuid = session.parse().ok()?;
+    let root = std::env::temp_dir().join("zen-sandbox");
+    let dir = root.join(id.to_string());
+    std::fs::create_dir_all(&dir).ok()?;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700));
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).ok()?;
+    Some(dir)
+}
+
 /// A contained shell with the proxy: only io_uring (which bypasses seccomp's socket rules) is refused.
 fn uring_filter() -> Result<std::fs::File,String> {
     seccomp(vec![(0x15,0,1,libc::SYS_io_uring_setup as u32), (0x06,0,0,0x00050001)])
@@ -440,6 +454,11 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox:
             // the kernel's tools), its secrets hidden.
             if home.starts_with("/tmp") || home.starts_with("/run") {
                 c.arg("--ro-bind").arg(&home).arg(&home);
+            }
+            // The session's own /tmp, kept between its commands (build caches, scratch files) and
+            // never shared with the host's or another session's.
+            if let Some(tmp) = env.iter().find(|(k, _)| *k == "ZEN_SESSION_ID").and_then(|(_, s)| session_tmp(s)) {
+                c.arg("--bind").arg(&tmp).arg("/tmp");
             }
             c.arg(if writable { "--bind" } else { "--ro-bind" }).arg(dir).arg(dir);
             let zen = crate::zen_home();
@@ -943,6 +962,13 @@ mod tests {
         assert!(out.text.contains("WRITE_BLOCKED") && out.text.contains("NET_BLOCKED") && out.text.contains("scratch"),"{}",out.text);
         assert!(!out.text.contains("WRITE_OPEN") && !out.text.contains("NET_OPEN") && !out.text.contains("ROOT") && !out.text.contains("HOMEDIR_OPEN"), "{}", out.text);
         assert_eq!(std::fs::read_to_string(root.join("AGENTS.md")).unwrap(),"owner instructions");
+        // A session's /tmp is its own and lasts between its commands.
+        let sid = uuid::Uuid::new_v4().to_string();
+        let env = [("ZEN_SESSION_ID", sid.as_str())];
+        run_shell(&root,"echo kept > /tmp/zen-scratch",&env,Sandbox::Contained { writable: true, net: false },&[],Duration::from_secs(10)).await.unwrap();
+        let out = run_shell(&root,"cat /tmp/zen-scratch",&env,Sandbox::Contained { writable: false, net: false },&[],Duration::from_secs(10)).await.unwrap();
+        assert!(out.text.contains("kept"), "{}", out.text);
+        assert!(!std::path::Path::new("/tmp/zen-scratch").exists(), "not the host's /tmp");
         // A low-risk session's shell writes the workspace; the host's loopback stays unreachable
         // (the shell has its own network namespace; outside traffic goes through the proxy).
         let out = run_shell(&root,&command,&[],Sandbox::Contained { writable: true, net: true },&[],Duration::from_secs(10)).await.unwrap();
