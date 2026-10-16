@@ -118,6 +118,18 @@ async fn main() -> Result<()> {
     wait_for(&mut rx, "Smoke test passed").await?;
     println!("ok: a prompt went to zen and the answer came back encrypted");
 
+    room.send(RoomMessageEventContent::text_plain("!deny")).await?;
+    wait_for(&mut rx, "Stopped. This session and its products").await?;
+    room.send(RoomMessageEventContent::text_plain("!trust yes")).await?;
+    wait_for(&mut rx, "Look first:").await?;
+    room.send(RoomMessageEventContent::text_plain("!trust")).await?;
+    wait_for(&mut rx, "owner /deny").await?;
+    room.send(RoomMessageEventContent::text_plain("!trust yes")).await?;
+    wait_for(&mut rx, "Contamination caused by this session is reversed").await?;
+    room.send(RoomMessageEventContent::text_plain("hello after trust")).await?;
+    wait_for(&mut rx, "Smoke test passed").await?;
+    println!("ok: encrypted !deny stops; !trust requires review and resumes the session");
+
     room.send(RoomMessageEventContent::text_plain("please ask me")).await?;
     wait_for(&mut rx, "Reply with option numbers").await?;
     room.send(RoomMessageEventContent::text_plain("2 1")).await?;

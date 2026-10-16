@@ -339,7 +339,7 @@ mod tests {
     }
 }
 
-/// Races and owner-only reversibility against a real database (D-062 step 3). Run on a throwaway
+/// Attack races and owner-only reversibility against a real database (D-062 step 3). Run on a throwaway
 /// database only: `. scripts/db.sh; SOURCE_TEST_DB_URL=$(db_url_for zen_step3_x) cargo test -p zend
 /// taint::db -- --ignored --test-threads=1`.
 #[cfg(test)]
