@@ -38,7 +38,7 @@ These hold today and in the target design. Changing one needs the owner's OK and
           │ HTTP + WebSocket, one port (ZEN_PORT, default 8100, loopback), owner token
 ┌──────────────────────── zend (Rust kernel, systemd service `zenbot`) ────────────────────────┐
 │ API/WS · sessions and tape · context compiler · tools and executor · memory and sleep · skills │
-│ System One decisions and scoring · summaries · tracing · worker routing and supervision        │
+│ System One decisions (S1) · summaries · tracing · worker routing and supervision               │
 └────────────┬───────────────────────────────┬─────────────────────────────────────┘
              │ JSON-RPC 2.0 over stdio        │ sqlx / HTTPS for System One
     zen-engine (Rust)                    Postgres + pgvector / OpenRouter
@@ -155,7 +155,7 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
   reports to the jobs feed only.
 - **Creating jobs**: the owner (`zen jobs add`, `POST /api/jobs`) or the agent (`schedule`). An
   agent's job goes live only when System One, reading the owner's own messages in the session,
-  gives ≥ `ZEN_JOB_BAR` (0.9) that the owner asked for it (decision point `job_approval`; the
+  judges the owner asked for it (decision file `job_approval`, live from 0.9 by its costs; the
   task the agent wrote is shown as untrusted data, never as evidence);
   otherwise, or in a tainted session, it's saved paused with the reason, and the owner's
   `zen jobs resume` approves it. The agent can't set a job's model.
@@ -249,20 +249,26 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
 
 ### System One
 
-A fast typed-decision model (Jev via OpenRouter's `/api/v1/systemone`, called by the kernel):
-choice, score or bool questions, answered with probabilities. Public bool maps to `noul` on the
-wire; OpenRouter reports usage and cost directly. Used today for live scoring of sessions (from the owner's
-messages and final answers only, never tool output; `session_scores`), the model's `decide` tool,
-the memory sleep, reranking `search` and `web_search` results, `web_fetch`'s `focus`, `capture`'s
-page choice, `save_skill`'s near-duplicate check, a subtask's kind of work (`delegate`) and agent
-job approval (`schedule`). Private content is allowed unless `ZEN_S1_PRIVATE=0` (D-032).
-Configured by `ZEN_S1_MODEL` and `OPENROUTER_API_KEY`; no additional worker is needed. Without it,
-each use falls back to a simpler rule, and a job the agent schedules is saved paused.
+S1 (`crates/zend/src/s1/`, D-066) makes every fast decision: typed questions (yes/no, choice,
+score) to an approved classifier on OpenRouter's `/api/v1/systemone` (Jev by default), answered
+with probabilities; `bool` maps to `noul` on the wire. Each decision is a TOML file: its questions,
+the evidence facts, a policy (what each mistake costs, ordered levels, or explicit rules), an
+`unavailable` outcome, a ladder of approved models and test cases; the owner's
+`~/.zenbot/s1/<name>.toml` replaces a built-in one once it passes the checker. The catalog in code
+fixes each caller's facts, exposure and outcomes, so a decision on outside content can only lead
+toward caution. Decisions today: `job_approval`, `owner_url`, `source_risk`, `content_risk`,
+`task_check`, `web_focus`, `web_rerank`, `search_rerank`, `wiki_capture`, `skill_duplicate`,
+`sleep_judge`, `sleep_recheck`, and `judge` (the brain's tool). Every call is recorded with its
+model, latency and cost; the owner's answers to held actions and paused jobs label decisions, and
+the nightly sleep fits calibration curves (applied where a file opts in) and proposes changes.
+Private content is allowed unless `ZEN_S1_PRIVATE=0` (D-032). Configured by
+`~/.zenbot/s1/models.toml` or `ZEN_S1_MODEL`, and `OPENROUTER_API_KEY`; without it each decision
+takes its `unavailable` outcome, and a job the agent schedules is saved paused.
 
 ### Measurement
 
 `turns` (one row per turn), `model_calls`, `tool_calls` (skill loads included), `envelopes`,
-`session_decisions` (the owner's `/done` verdicts, with their source), `session_scores`,
+`session_decisions` (the owner's `/done` verdicts, with their source),
 `decisions`, `memories`, `sleep_runs`. Evals: `scripts/eval.sh` runs two
 harness versions with the same model on isolated kernels and databases (`evals/README.md`).
 
@@ -451,7 +457,7 @@ Loaded at session start.
 | `load_tool` | Load a tool's full definition so it can be called | built |
 | `call_tool` | Run a loaded tool (the list stays fixed, D-033) | built |
 | `save_tool` | Make a tool: a script plus a manifest, sandboxed until the owner approves | built (D-037) |
-| `decide` | Ask System One typed questions, in batches, with probabilities | built |
+| `judge` | Ask System One one question over many items, with a probability each | built (D-066) |
 | `verify` | A fresh verifier checks work against criteria, without the maker's reasoning | built |
 | `capture` | Put a concept into the wiki | built (D-036) |
 | `delegate` | Hand subtasks to subagents with fresh context and a chosen model, in parallel | built (D-038) |
@@ -465,15 +471,15 @@ rules (D-037); wiki pages through `capture` (timeline) and `edit` (the summary).
 
 ### System One, used heavily
 
-- **Called by the model** through `decide`: whenever the answer is one of known options, whenever
-  there are many items, whenever a cheap second opinion helps. Batches of items with a probability
-  each, so the model sets its own threshold.
-- **Built into tools**, so every engine benefits: `search`, `web_search` and `find_*` rank and filter
-  by relevance; `web_fetch` can keep only the relevant parts; `remember`'s sleep scores entries;
-  `capture` routes and de-duplicates. Built, except ranking in `find_skills` and `find_tools`
-  (word match today).
-- **Shadow first.** Each new use is logged in `decisions` with its probabilities and, later, what
-  actually happened; it acts on its own once it matches outcomes often enough.
+- **Called by the brain** through `judge`: one question over up to 200 items, an answer and a
+  probability each, instead of reading and judging many things itself (D-066).
+- **Built into tools** as decision files, so every engine benefits: `search` and `web_search` rank
+  by relevance, `web_fetch` keeps the parts that help, the sleep judges memories, `capture` routes,
+  sources and content are rated, risky actions are checked against the job. `find_skills` and
+  `find_tools` still match words.
+- **Recorded and learned from:** every decision with its probabilities and, when known, what really
+  happened; calibration applies where a file opts in, and changes reach a file only through the
+  owner's approval.
 - System One decides (where, whether, which); generative work (writing text) goes to a model.
 - **Private content:** System One may see it unless the owner sets `ZEN_S1_PRIVATE=0` (D-032).
 
@@ -550,8 +556,8 @@ showed (built).
 
 ### Model choice
 
-Learned from real usage, not fixed tasks (D-030, Phase 6): System One classifies the situation; a
-versioned policy maps it to a model; a small share of subtasks explore another model with the choice
+Learned from real usage, not fixed tasks (D-030, Phase 6): a versioned policy maps the kind of work
+to a model (subtasks take the `unknown` route since System One stopped classifying them, D-066); a small share of subtasks explore another model with the choice
 probability logged; outcomes (verdicts, corrections, verification, cost) update the policy. Built
 for subagents (D-038, "Delegation" above: the owner's verdicts and cost are the outcomes so far); a
 main session runs on the model the owner picks.

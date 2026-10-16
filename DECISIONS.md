@@ -6,6 +6,51 @@
 
 ---
 
+## D-066 — S1: every System One decision is a file, decided by its costs, recorded and learned from
+
+**Date:** 2026-10-16 · **Status:** accepted (owner) · **Supersedes:** D-038's System One kind
+classifier (subtasks take the `unknown` route), session scoring (`session_scores` is no longer
+written), the `decide` tool (replaced by `judge`), `ZEN_JOB_BAR` (deprecated for one release)
+
+**Decision:** One engine (`crates/zend/src/s1/`) makes every System One decision; nothing else
+calls OpenRouter's `/systemone` (a check in `scripts/check.sh` enforces it).
+- **Three layers, like a person's:** reflexes (fixed kernel rules) below; System One (S1: cheap,
+  calibrated classifiers the owner approves, on OpenRouter) for fast judgments at every step; the
+  brain (the session's reasoning model, any provider) deliberates. S1 feeds rules or the brain as
+  evidence; it never defers to the brain for a better opinion (reasoning models are overconfident).
+- **A decision is a TOML file:** typed questions (yes/no, choice, score), the evidence facts, a
+  policy, an `unavailable` outcome, a ladder of approved models, test cases. Defaults ship in the
+  binary (`crates/zend/s1/`); the owner's `~/.zenbot/s1/<name>.toml` replaces one. A checker
+  reports every problem with line, column and a suggestion; a failing file never takes effect.
+- **The owner states what mistakes cost, not thresholds:** a yes/no decision takes the outcome
+  with the lower expected cost (9 : 1 is "yes from 0.9"); ordered levels take the cheapest level
+  given under- and over-rating costs; explicit rules remain for the rest. Escalation is one more
+  option with a cost: the next approved model, then (where the caller supports it) the owner.
+- **The catalog in code fixes what each caller sends and accepts:** a file can tune a decision but
+  can't change its exposure, add outcomes, or let a decision on outside content allow anything;
+  security decisions must fail toward caution.
+- **Recorded and learned from:** every call is a `decisions` row (file fingerprint, model, rung,
+  answers, outcome, latency, cost); masked states are kept 30 days for `zen s1 compare`. The owner's
+  answers to held actions and paused jobs label decisions; nightly, a calibration curve is fitted
+  per decision and model once 30 outcomes exist, applied only where a file says `calibrate = true`;
+  the learner proposes changes the owner approves (`zen s1 proposals`).
+- **The brain asks S1 directly** through `judge`: one question over up to 200 items, an answer and
+  probability each; information, never approval.
+
+**Why:** System One calls had grown in 11 modules with their own thresholds, timeouts, fallbacks,
+privacy checks and logging (three wrote nothing at all); nothing could be tuned without code,
+compared across models or measured. Two uses never changed anything (session scores no one read;
+a kind classifier for a routing policy that never left version 0). The owner wants S1 used
+heavily as switchable building blocks. State of the art separates judgment from policy (policy
+engines), declares model functions in files with fallbacks and tests (BAML), escalates through
+cascades (FrugalGPT) and sets thresholds from known outcomes rather than self-reported confidence
+(conformal abstention).
+
+**Considered:** decisions as Rust code per job (logic stays in code, needs a release to tune);
+prose rules sent to the model as the main control (its effect on outcomes is fuzzy); escalating
+to the brain when S1 is unsure (the worse judge); a generic cache (only source ratings cache,
+and they keep their own table).
+
 ## D-065 — Metadata source judgments, authenticated job checks and owner queue
 
 **Date:** 2026-10-16 · **Status:** accepted (owner brief) · **Builds:** D-062 steps 4–5.
