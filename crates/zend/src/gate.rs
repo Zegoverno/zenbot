@@ -59,17 +59,47 @@ pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args:
          AND used_at IS NULL RETURNING id")
         .bind(session).bind(&action).fetch_optional(&app.db).await?;
     if grant.is_some() { return Ok(Policy::Granted); }
-    let p = if risk >= 4 && name == "call_tool" && args["name"].as_str().is_some_and(|n| n.starts_with("made_")) {
+    let mut p = if name == "call_tool" && args["name"].as_str().is_some_and(|n| n.starts_with("made_")) {
         let tool = args["name"].as_str().unwrap().trim_start_matches("made_");
         let approved: Option<bool> = sqlx::query_scalar("SELECT approved_at IS NOT NULL FROM made_tools WHERE name = $1")
             .bind(tool).fetch_optional(&app.db).await?;
         if approved == Some(false) { Policy::Sandbox } else { Policy::Hold("runs a made tool with host capabilities".into()) }
     } else if name == "web_fetch" {
         if fetch_allowed(&app.db, session, args["url"].as_str().unwrap_or("")).await? { Policy::Run } else { Policy::Hold(UNSEEN_URL.into()) }
-    } else if risk < 4 {
-        // Local work is normal at 2–3; task checks add the outward/persistent boundary.
-        Policy::Run
     } else { policy(workspace, name, args) };
+    if risk < 4 {
+        // Hard guards are independent of alignment. In particular System One cannot approve
+        // a model-made fetch URL, secret access, or a plainly destructive shell command.
+        let destructive = |command: &str| command.split(|c: char|
+            c.is_whitespace() || ";|&()`$={}<>\"'\\".contains(c))
+            .any(|w| matches!(w.rsplit('/').next().unwrap_or(w),
+                "rm" | "rmdir" | "shred" | "truncate" | "dd" | "kill" | "pkill" | "killall"));
+        let hard = match name {
+            "web_fetch" | "read" => matches!(p, Policy::Hold(_)),
+            "write" | "edit" => secret(&real(&tools::resolve(workspace,args["path"].as_str().unwrap_or("")))),
+            "remember" => args["action"] == "remove",
+            "bash" => !matches!(p,Policy::SafeRead(_)) && (matches!(&p,Policy::Hold(r) if r.contains(grammar::SECRET))
+                || destructive(args["command"].as_str().unwrap_or(""))),
+            "verify" => args["criteria"].as_array().into_iter().flatten().any(|c|
+                c["run"].as_str().is_some_and(|cmd| !matches!(shell(workspace,cmd),Policy::SafeRead(_))
+                    && (destructive(cmd) || matches!(shell(workspace,cmd),Policy::Hold(r) if r.contains(grammar::SECRET))))),
+            _ => false,
+        };
+        if hard {
+            if !matches!(p,Policy::Hold(_)) { p=Policy::Hold("static secret or destructive action guard".into()); }
+        } else if !matches!(p,Policy::SafeRead(_)) && !(name == "call_tool" && p == Policy::Sandbox) {
+            // Safe local work is not held. Programmable commands are NOT safe: task::class
+            // routes every arbitrary-code execution through the alignment check below.
+            p=Policy::Run;
+        }
+    }
+    // At risk 4 hard rules go first; the task check can only add holds. Exact owner grants
+    // returned above bypass this once, but never bypass the contamination check.
+    if !matches!(p, Policy::Hold(_)) {
+        if let Some(reason) = crate::task::check(app,session,workspace,name,args).await? {
+            p=Policy::Hold(reason);
+        }
+    }
     let code_approval = risk >= 4 && (name == "bash" && matches!(p,Policy::Sandbox)
         || name == "verify" && args["criteria"].as_array().into_iter().flatten()
             .filter_map(|c|c["run"].as_str()).any(|c|matches!(shell(workspace,c),Policy::Sandbox)));
@@ -158,9 +188,9 @@ fn steering(path: &Path) -> bool {
 
 pub fn held_note(reason: &str) -> String {
     if escalates(reason) {
-        format!("not run: {reason}. Held before taking effect; this does not taint the session. Only the owner can allow this exact action once: end the turn and ask them to use /allow (zen) or !allow (Matrix), then retry unchanged.")
+        format!("not run: {reason}. Held before taking effect; this does not taint the session. Only the owner can allow this exact action once: end the turn and ask them to review /queue (zen) or !queue (Matrix), or use /allow / !allow, then retry unchanged.")
     } else {
-        format!("not run: {reason}. Held before taking effect; the session keeps its shell. Reads run when written plainly: listed read-only programs (ls, cat, head, tail, wc, grep, find, sed -n 'M,Np', sort, uniq, cut, diff, du, stat, echo…), their usual flags, pipes, `;`, `&&`, `||`, `cd`, quotes, globs and redirects to /dev/null; no `$`, backticks, loops or other redirects. Otherwise the owner can allow this exact action once: end the turn and ask them to use /allow (zen) or !allow (Matrix), then retry unchanged.")
+        format!("not run: {reason}. Held before taking effect; the session keeps its shell. Reads run when written plainly: listed read-only programs (ls, cat, head, tail, wc, grep, find, sed -n 'M,Np', sort, uniq, cut, diff, du, stat, echo…), their usual flags, pipes, `;`, `&&`, `||`, `cd`, quotes, globs and redirects to /dev/null; no `$`, backticks, loops or other redirects. Otherwise the owner can allow this exact action once: end the turn and ask them to review /queue (zen) or !queue (Matrix), or use /allow / !allow, then retry unchanged.")
     }
 }
 

@@ -25,6 +25,7 @@ mod search;
 mod secrets;
 mod skills;
 mod tape;
+mod task;
 mod taint;
 #[cfg(test)]
 mod test_util;
