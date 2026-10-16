@@ -743,11 +743,17 @@ pub(crate) async fn rated_results(db: &PgPool, reader: Uuid, listed: &[(Found, O
         let rating = match f.kind.as_str() {
             "memory" => {
                 if let Ok(id) = f.reference.trim_start_matches('m').parse::<i64>() {
-                    let dependency = sqlx::query("INSERT INTO session_inputs(reader,writer) SELECT $1,session_id FROM memories WHERE id=$2 AND session_id IS NOT NULL AND session_id!=$1 AND ($3 OR (risk<2 AND NOT zen_session_contaminated(session_id))) ON CONFLICT DO NOTHING")
-                        .bind(reader).bind(id).bind(f.exact).execute(db).await;
-                    if dependency.is_err() {ratings.push(None); continue;}
-                    sqlx::query_scalar::<_,i16>("SELECT CASE WHEN zen_session_contaminated(session_id) THEN 5::smallint ELSE risk END FROM memories WHERE id=$1 AND text=$2 AND $3=(tier || '-term memory (' || source || ')') AND tier!='archived'")
-                        .bind(id).bind(&f.body).bind(&f.title).fetch_optional(db).await.ok().flatten()
+                    // Bind origin and writer to the same row snapshot, then insert the edge
+                    // through the provenance boundary shared with deny/delivery/spawn.
+                    match sqlx::query_as::<_, (i16, Option<Uuid>)>("SELECT CASE WHEN zen_session_contaminated(session_id) THEN 5::smallint ELSE risk END, session_id FROM memories WHERE id=$1 AND text=$2 AND $3=(tier || '-term memory (' || source || ')') AND tier!='archived'")
+                        .bind(id).bind(&f.body).bind(&f.title).fetch_optional(db).await {
+                        Ok(Some((risk, writer))) => {
+                            if (risk < 2 || f.exact) && crate::sources::depend(db, reader, &writer.into_iter().collect::<Vec<_>>()).await.is_err() {
+                                None
+                            } else { Some(risk) }
+                        }
+                        _ => None,
+                    }
                 } else {None}
             }
             "turn" => {

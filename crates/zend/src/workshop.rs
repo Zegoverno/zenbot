@@ -265,6 +265,15 @@ pub async fn on_accept(app: &App, session: Uuid) {
             tracing::info!("not activating {}/{}: a session that read untrusted content wrote it (the owner accepts it with zen skills)", d.domain, d.name);
             continue;
         }
+        // By origin too (D-062): a draft whose files are rated 2 or more, or written by a session
+        // since stopped, is activated only by the owner's own accept. Unknown means no.
+        match folder_rating(&app.db, &d.dir).await {
+            Ok((risk, _)) if risk <= 1 => {}
+            other => {
+                tracing::info!("not activating {}/{}: its files are rated {:?} by origin (the owner accepts it with zen skills)", d.domain, d.name, other.map(|r| r.0).map_err(|e| e.to_string()));
+                continue;
+            }
+        }
         if domains.contains(&d.domain) {
             match decide_draft(&app.db, &format!("{}/{}", d.domain, d.name), true, "a session that used it was accepted", None).await {
                 Ok(m) => tracing::info!("{m}"),
@@ -365,7 +374,7 @@ pub fn made_entries() -> Vec<crate::mcp::ToolEntry> {
         if name.is_empty() || name != e.file_name().to_string_lossy() {
             continue;
         }
-        out.push(crate::mcp::ToolEntry { server: "made".into(), name, description: v["description"].as_str().unwrap_or("").to_string(), schema: v["parameters"].clone(), untrusted: false });
+        out.push(crate::mcp::ToolEntry { server: "made".into(), name, description: v["description"].as_str().unwrap_or("").to_string(), schema: v["parameters"].clone(), untrusted: false, manifest: Some(m) });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
@@ -524,16 +533,55 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The origin rating of a made tool's (or a draft skill's) folder (D-062): the highest of its files' ratings by exact
+/// bytes (`context::rate`), and their writers. Non-text files and links cannot be rated by
+/// this text provenance path and are rejected, not executed with an assumed rating.
+/// Errors fail closed: the tool doesn't run.
+pub async fn folder_rating(db: &sqlx::PgPool, dir: &Path) -> Result<(i16, Vec<Uuid>)> {
+    fn walk(dir: &Path, out: &mut Vec<(PathBuf, bool)>) -> std::io::Result<()> {
+        for e in std::fs::read_dir(dir)? {
+            let e = e?;
+            if e.file_name() == ".git" {
+                continue;
+            }
+            let kind = e.file_type()?;
+            if kind.is_dir() {
+                walk(&e.path(), out)?;
+            } else {
+                out.push((e.path(), kind.is_file()));
+            }
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    walk(dir, &mut files)?;
+    let (mut risk, mut writers) = (1, Vec::new());
+    for (path, regular) in files {
+        anyhow::ensure!(regular, "tool file {} is not a regular file; its provenance cannot be rated", path.display());
+        let text = std::fs::read_to_string(&path).with_context(|| format!("rating exact bytes of {}", path.display()))?;
+        let (r, w) = crate::context::rate(db, &text, 1).await?;
+        risk = risk.max(r);
+        writers.extend(w);
+    }
+    writers.sort();
+    writers.dedup();
+    Ok((risk, writers))
+}
+
 /// A private copy of a tool's folder, removed when dropped.
 struct RunCopy(PathBuf);
 
 impl RunCopy {
     fn of(name: &str) -> Result<Self> {
+        Self::from_dir(name, &tools_root().join(name))
+    }
+
+    fn from_dir(name: &str, source: &Path) -> Result<Self> {
         use std::os::unix::fs::DirBuilderExt;
         let root = std::env::temp_dir().join(format!("zen-tool-{}", Uuid::new_v4()));
         std::fs::DirBuilder::new().mode(0o700).create(&root)?;
         let copy = RunCopy(root);
-        copy_tree(&tools_root().join(name), &copy.dir(name)).context("copying the tool")?;
+        copy_tree(source, &copy.dir(name)).context("copying the tool")?;
         Ok(copy)
     }
 
@@ -553,11 +601,32 @@ impl Drop for RunCopy {
 /// kernel's environment; its process group is killed after 120 s. It runs from a private copy of
 /// its folder, which is what is checked against the approval (nothing can change it in between)
 /// and what it writes to (dropped after the run).
-/// Returns the output, whether it failed, and whether it ran with the network (approved).
-pub async fn run_made(db: &sqlx::PgPool, name: &str, args: &Value, force_sandbox: bool) -> Result<(String, bool, bool)> {
+/// The copy is rated by its exact bytes before it runs (`folder_rating`), and `session` depends on
+/// its writers: a tool a stopped session wrote doesn't run (rating 5, nothing else returned).
+/// Returns the output, whether it failed, whether it ran with the network (approved), and the
+/// tool's origin rating.
+pub async fn run_made(db: &sqlx::PgPool, session: Uuid, name: &str, args: &Value, force_sandbox: bool, owner_allowed: bool) -> Result<(String, bool, bool, i16)> {
     anyhow::ensure!(valid_name(name) && tools_root().join(name).join("tool.json").is_file(), "no such tool");
     let copy = RunCopy::of(name)?;
+    run_snapshot(db, session, name, args, force_sandbox, owner_allowed, &copy).await
+}
+
+/// Execute only the private snapshot whose bytes are rated below; never reread the source.
+async fn run_snapshot(db: &sqlx::PgPool, session: Uuid, name: &str, args: &Value, force_sandbox: bool, owner_allowed: bool, copy: &RunCopy) -> Result<(String, bool, bool, i16)> {
     let dir = copy.dir(name);
+    let (risk, writers) = folder_rating(db, &dir).await?;
+    if risk >= 5 {
+        return Ok((String::new(), true, false, 5));
+    }
+    crate::sources::depend(db, session, &writers).await?;
+    crate::sources::raise(db, session, risk).await?;
+    // Denial and new dependency edges cannot commit between this check and process creation.
+    let mut spawn_tx = db.begin().await?;
+    crate::sources::lock_provenance(&mut spawn_tx).await?;
+    anyhow::ensure!(!crate::taint::stopped(db, session).await?, "tool withheld: a writer was stopped");
+    // The code's rating affects capabilities before execution, not just its returned output.
+    let session_risk: i16 = sqlx::query_scalar("SELECT risk FROM sessions WHERE id=$1").bind(session).fetch_one(db).await?;
+    let force_sandbox = force_sandbox || (session_risk >= 2 && !owner_allowed);
     let m: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("tool.json")).context("no such tool")?)?;
     let command = m["command"].as_str().context("the manifest has no command")?.to_string();
     let row = sqlx::query("SELECT approved_at IS NOT NULL AND rejected_at IS NULL AS ok, rejected_at IS NOT NULL AS rejected, approved_sha FROM made_tools WHERE name = $1")
@@ -605,6 +674,7 @@ pub async fn run_made(db: &sqlx::PgPool, name: &str, args: &Value, force_sandbox
         .context("starting the tool")?;
     // Kill the whole group on a timeout or an abort, not just bash.
     let _group = crate::tools::GroupKill(child.id().map(|p| p as i32));
+    spawn_tx.commit().await?;
     let input = args.to_string();
     let mut stdin = child.stdin.take();
     let run = async move {
@@ -638,7 +708,8 @@ pub async fn run_made(db: &sqlx::PgPool, name: &str, args: &Value, force_sandbox
     } else {
         "\n[ran sandboxed: no network, files read-only, until the owner approves it]"
     };
-    Ok((format!("{}{note}", text.trim_end()), !status.success(), approved))
+    anyhow::ensure!(!crate::taint::stopped(db, session).await?, "tool result withheld: a writer was stopped during execution");
+    Ok((format!("{}{note}", text.trim_end()), !status.success(), approved, risk))
 }
 
 // ---------- the tools ----------
@@ -739,6 +810,64 @@ mod tests {
         assert!(same_content(now, "0123456789AB").is_ok() && same_content(now, now).is_ok());
         assert!(same_content(now, "01234").is_err(), "too short to mean anything");
         assert!(same_content(now, "fedcba98").unwrap_err().to_string().contains("changed since you reviewed it"));
+    }
+
+    /// Execute a private rated snapshot, with no global path/environment overrides.
+    #[tokio::test]
+    #[ignore]
+    async fn made_execution_provenance_database() {
+        let db = sqlx::PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
+        sqlx::migrate!().run(&db).await.unwrap();
+        let app = crate::test_util::app(db.clone());
+        let session = |risk: i16| {
+            let db = db.clone();
+            async move {
+                let id = Uuid::new_v4();
+                sqlx::query("INSERT INTO sessions(id,title,model,risk) VALUES($1,'made execution','faux/smoke',$2)")
+                    .bind(id).bind(risk).execute(&db).await.unwrap();
+                id
+            }
+        };
+        let dir = crate::test_util::TestDir::new("made-execution");
+        let name = format!("probe-{}", Uuid::new_v4());
+        let tool = dir.join(&name);
+        std::fs::create_dir_all(&tool).unwrap();
+        let manifest = format!(r#"{{"name":"{name}","command":"sleep 0.2; printf SAFE"}}"#);
+        std::fs::write(tool.join("tool.json"), &manifest).unwrap();
+        let writer = session(4).await;
+        crate::sources::record_bytes(&db, writer, &tool.join("tool.json"), &manifest, None).await.unwrap();
+        let copy = RunCopy::from_dir(&name, &tool).unwrap();
+        // An owner-approved fingerprint must not override the code's numeric origin.
+        let sha = fingerprint(&db, &copy.dir(&name)).await.unwrap();
+        sqlx::query("INSERT INTO made_tools(name,approved_at,approved_sha) VALUES($1,now(),$2)")
+            .bind(&name).bind(sha).execute(&db).await.unwrap();
+        // Change the live source after copying: only the rated private snapshot executes.
+        std::fs::write(tool.join("tool.json"), r#"{"command":"printf UNRATED"}"#).unwrap();
+        let reader = session(1).await;
+        let (text, error, networked, risk) = run_snapshot(&db, reader, &name, &json!({}), false, false, &copy).await.unwrap();
+        assert!(!error && !networked && risk == 4 && text.starts_with("SAFE"), "{text}");
+        let stored: i16 = sqlx::query_scalar("SELECT risk FROM sessions WHERE id=$1").bind(reader).fetch_one(&db).await.unwrap();
+        assert_eq!(stored, 4);
+        let granted = session(4).await;
+        let (_, error, networked, risk) = run_snapshot(&db, granted, &name, &json!({}), false, true, &copy).await.unwrap();
+        assert!(!error && networked && risk == 4, "an exact owner grant changes capabilities, not origin");
+        // Denial in flight withholds even a successful result. A denial before start may reject
+        // it earlier; neither timing is allowed to return the tool's words.
+        let reader2 = session(1).await;
+        let args = json!({});
+        let (result, denied) = tokio::join!(
+            run_snapshot(&db, reader2, &name, &args, false, false, &copy),
+            async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                crate::taint::deny(&app, writer, "made execution race").await
+            }
+        );
+        denied.unwrap();
+        assert!(result.is_err(), "an in-flight denied tool's output must be withheld");
+        assert!(crate::taint::stopped(&db, reader2).await.unwrap());
+        let reader3 = session(1).await;
+        let (text, error, networked, risk) = run_snapshot(&db, reader3, &name, &args, false, true, &copy).await.unwrap();
+        assert!(text.is_empty() && error && !networked && risk == 5, "an exact grant cannot execute a contaminated snapshot");
     }
 
     #[test]

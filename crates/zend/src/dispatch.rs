@@ -332,24 +332,31 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                     None => Vec::new(),
                 }
             };
-            // Only a trusted repository's file is attached as instructions; any other is
-            // untrusted content and taints the session (context.rs).
+            // Only a trusted repository's file whose exact bytes are rated 0-1 is attached as
+            // instructions; any other is handed over at its rating (context.rs, D-062).
             let roots = if new_context.is_empty() { Vec::new() } else { context::trusted_roots(std::path::Path::new(&app.repo)) };
             for path in new_context {
-                if let Some(text) = context::read_capped(&path) {
-                    let trusted = context::trusted(&path, &roots);
-                    if !trusted {
-                        if let Some(r) = out.rating.as_mut() { r.risk = r.risk.max(4); r.origin.push_str("+untrusted-context"); }
-                        if let Err(e) = crate::taint::taint(app, id, "project file", &path.display().to_string()).await {
-                            out.content.push_str(&format!("\n\n[instructions in {}: {}]", path.display(), crate::taint::withheld(&e)));
-                            continue;
-                        }
+                let Ok(text) = tokio::fs::read_to_string(&path).await else { continue };
+                let shown = path.display().to_string();
+                let (trusted, risk) = match context::attach_rating(&app.db, id, &text, context::trusted(&path, &roots)).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        out.content.push_str(&format!("\n\n[instructions in {shown}: not shown, their origin couldn't be rated ({e:#})]"));
+                        continue;
                     }
-                    if let Err(e) = tape::append(&app.db, id, "context", &json!({ "path": path, "trusted": trusted })).await {
-                        tracing::error!("recording instruction file {} for {id}: {e:#}", path.display());
+                };
+                if !trusted {
+                    if let Some(r) = out.rating.as_mut() { r.risk = r.risk.max(risk.min(4)); r.origin.push_str("+untrusted-context"); }
+                    if let Err(e) = crate::taint::mark_rating(app, id, risk, "project file", &shown).await {
+                        out.content.push_str(&format!("\n\n[instructions in {shown}: {}]", crate::taint::withheld(&e)));
+                        continue;
                     }
-                    out.content.push_str(&if trusted { context::attachment(&path, &text) } else { context::untrusted_attachment(&path, &text) });
                 }
+                if let Err(e) = tape::append(&app.db, id, "context", &json!({ "path": path, "trusted": trusted, "risk": risk })).await {
+                    tracing::error!("recording instruction file {} for {id}: {e:#}", path.display());
+                }
+                let text = context::capped(text);
+                out.content.push_str(&if trusted { context::attachment(&path, &text) } else { context::untrusted_attachment(&path, &text) });
             }
             // A source can be denied while a read is in flight. Dependencies are recorded before
             // handover, so recheck the live graph before returning any result to the worker.

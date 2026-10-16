@@ -52,10 +52,61 @@ pub fn cut_middle(text: &str, cap: usize, path: &str) -> String {
     )
 }
 
-/// A prompt file's text (`rel` under the zen home) with its placeholders filled in, cut to its size.
-fn prompt_file(rel: &str, vars: &[(&str, String)]) -> Option<String> {
+/// The prompt files under the zen home, in the order they appear.
+const PROMPT_FILES: [&str; 4] = [crate::layout::SOUL, crate::layout::IDENTITY, "AGENTS.md", "USER.md"];
+
+/// The instruction texts a prompt may include, each the exact snapshot that was rated (D-062):
+/// only text rated 0–1 is admitted, and the session depends on its writers. What was left out is
+/// named, never shown.
+#[derive(Clone, Debug, Default)]
+pub struct Admitted {
+    /// Prompt files by their path under the zen home.
+    files: std::collections::HashMap<&'static str, String>,
+    /// The workspace's instruction files, from `/` down (whole text; cut when shown).
+    project: Vec<(std::path::PathBuf, String)>,
+    /// Files left out: rated 2 or more, or written by a session since denied.
+    withheld: Vec<String>,
+}
+
+impl Admitted {
+    /// Every file as it is on disk, unrated: for tests of the prompt's shape only.
+    #[cfg(test)]
+    pub fn unrated(workspace: &Path) -> Self {
+        let files = PROMPT_FILES.iter().filter_map(|rel| std::fs::read_to_string(crate::zen_home().join(rel)).ok().map(|t| (*rel, t))).collect();
+        Admitted { files, project: context::always(workspace), withheld: Vec::new() }
+    }
+}
+
+/// Rate the prompt files and the workspace's instruction files by their exact bytes and admit
+/// those rated 0–1 (bytes no session registered count as 1: the owner's own edits). Recorded
+/// dependencies come first, so a later denial of a writer stops this session. A database error
+/// fails the whole prompt: nothing unrated gets in.
+pub async fn admitted(db: &PgPool, session: Uuid, workspace: &Path) -> Result<Admitted> {
+    let mut out = Admitted::default();
+    for rel in PROMPT_FILES {
+        let path = crate::zen_home().join(rel);
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        match context::admit(db, session, &text, 1).await? {
+            Some(_) => {
+                out.files.insert(rel, text);
+            }
+            None => out.withheld.push(format!("~/.zenbot/{rel}")),
+        }
+    }
+    for (path, text) in context::always(workspace) {
+        match context::admit(db, session, &text, 1).await? {
+            Some(_) => out.project.push((path, text)),
+            None => out.withheld.push(path.display().to_string()),
+        }
+    }
+    Ok(out)
+}
+
+/// A prompt file's text (`rel` under the zen home), from its admitted snapshot, with its
+/// placeholders filled in, cut to its size.
+fn prompt_file(rel: &str, vars: &[(&str, String)], admitted: &Admitted) -> Option<String> {
     let path = crate::zen_home().join(rel);
-    let mut text = std::fs::read_to_string(&path).ok()?;
+    let mut text = admitted.files.get(rel)?.clone();
     for (k, v) in vars {
         text = text.replace(&format!("{{{{{k}}}}}"), v);
     }
@@ -66,8 +117,8 @@ fn prompt_file(rel: &str, vars: &[(&str, String)]) -> Option<String> {
 /// (AGENTS.md), the owner (USER.md), its short-term memory (MEMORY.md, rendered by the kernel), the
 /// skills index, and the instruction files of the workspace's projects (from `/` down). How to use
 /// each tool is in the tool's own description; how to do a kind of work, in skills.
-pub fn system_prompt(workspace: &Path, repo: &str, memory: &str, sleep_note: Option<&str>, skills_index: &str) -> String {
-    compose(&PARTS, workspace, repo, memory, sleep_note, skills_index)
+pub fn system_prompt(workspace: &Path, repo: &str, memory: &str, sleep_note: Option<&str>, skills_index: &str, admitted: &Admitted) -> String {
+    compose(&PARTS, workspace, repo, memory, sleep_note, skills_index, admitted)
 }
 
 /// The parts of the instructions a session can have, in order. A scheduled job picks some (its
@@ -75,7 +126,7 @@ pub fn system_prompt(workspace: &Path, repo: &str, memory: &str, sleep_note: Opt
 pub const PARTS: [&str; 7] = ["soul", "identity", "agents", "user", "memory", "skills", "project"];
 
 /// The instructions made of the given `parts` only (names from `PARTS`), in the usual order.
-pub fn compose(parts: &[&str], workspace: &Path, repo: &str, memory: &str, sleep_note: Option<&str>, skills_index: &str) -> String {
+pub fn compose(parts: &[&str], workspace: &Path, repo: &str, memory: &str, sleep_note: Option<&str>, skills_index: &str, admitted: &Admitted) -> String {
     let has = |p: &str| parts.contains(&p);
     let home = std::env::var("HOME").unwrap_or_default();
     let vars = [
@@ -87,16 +138,16 @@ pub fn compose(parts: &[&str], workspace: &Path, repo: &str, memory: &str, sleep
     let mut s = String::new();
     // The agent's own soul; the environment and the owner are system-wide (layout.rs).
     let soul_rel = crate::layout::SOUL;
-    let soul = prompt_file(soul_rel, &vars).unwrap_or_else(|| "You are zenbot, the owner's agent on their Linux VM.".into());
+    let soul = prompt_file(soul_rel, &vars, admitted).unwrap_or_else(|| "You are zenbot, the owner's agent on their Linux VM.".into());
     s.push_str(&format!("<soul file=\"~/.zenbot/{soul_rel}\">\n{soul}\n</soul>\n"));
     let identity_rel = crate::layout::IDENTITY;
-    if let Some(identity) = prompt_file(identity_rel, &vars).filter(|_| has("identity")) {
+    if let Some(identity) = prompt_file(identity_rel, &vars, admitted).filter(|_| has("identity")) {
         s.push_str(&format!("\n<identity file=\"~/.zenbot/{identity_rel}\">\n{identity}\n</identity>\n"));
     }
-    if let Some(env) = prompt_file("AGENTS.md", &vars).filter(|_| has("agents")) {
+    if let Some(env) = prompt_file("AGENTS.md", &vars, admitted).filter(|_| has("agents")) {
         s.push_str(&format!("\n<environment file=\"~/.zenbot/AGENTS.md\">\n{env}\n</environment>\n"));
     }
-    if let Some(user) = prompt_file("USER.md", &vars).filter(|_| has("user")) {
+    if let Some(user) = prompt_file("USER.md", &vars, admitted).filter(|_| has("user")) {
         s.push_str(&format!("\n<owner file=\"~/.zenbot/USER.md\">\n{user}\n</owner>\n"));
     }
     if has("memory") {
@@ -113,13 +164,19 @@ pub fn compose(parts: &[&str], workspace: &Path, repo: &str, memory: &str, sleep
             "\n<skills>\nHow to do kinds of work well. When a job matches one, load it with load_skill and follow it; find_skills searches them.\n{skills_index}</skills>\n"
         ));
     }
-    let files = if has("project") { context::always(workspace) } else { Vec::new() };
+    let files: &[(std::path::PathBuf, String)] = if has("project") { &admitted.project } else { &[] };
     if !files.is_empty() {
         s.push_str("\n<project_context>\nInstructions the owner keeps for agents in these projects. Follow them.\n");
         for (path, text) in files {
-            s.push_str(&format!("<file path=\"{}\">\n{}\n</file>\n", path.display(), text.trim_end()));
+            s.push_str(&format!("<file path=\"{}\">\n{}\n</file>\n", path.display(), context::capped(text.clone()).trim_end()));
         }
         s.push_str("</project_context>\n");
+    }
+    if !admitted.withheld.is_empty() {
+        s.push_str(&format!(
+            "\nLeft out of these instructions: {} (the current version was written by a session that read outside content, or one the owner stopped; the owner reviews it).\n",
+            admitted.withheld.join(", ")
+        ));
     }
     s.push_str(&format!(
         "\nWorking directory for tools: {} (paths are relative to it unless absolute; ~ is the home directory). \
@@ -147,12 +204,16 @@ pub async fn base_prompt(db: &PgPool, session: Uuid, blocks: &[Block], workspace
             return Ok(env.system);
         }
     }
-    let memory = crate::memory::render(db).await?;
+    let memory = crate::memory::render(db, session).await?;
     // The morning note: what the last sleep did, and what the nightly upkeep jobs found.
     let note: Vec<String> = [crate::memory::morning_note(db).await?, crate::jobs::upkeep_note(db).await?].into_iter().flatten().collect();
     let note = (!note.is_empty()).then(|| note.join("\n"));
     let skills = crate::skills::instruction_index(db, session).await?;
-    let text = system_prompt(workspace, repo, &memory, note.as_deref(), &skills);
+    let admitted = admitted(db, session, workspace).await?;
+    // A writer denied while this was assembled reaches the session through the dependencies
+    // just recorded: never fix instructions for a session that is already stopped.
+    anyhow::ensure!(!crate::taint::stopped(db, session).await?, "instructions withheld: a source of them was stopped by the owner");
+    let text = system_prompt(workspace, repo, &memory, note.as_deref(), &skills, &admitted);
     tape::append(db, session, "base", &json!({ "text": text })).await?;
     Ok(text)
 }
@@ -268,7 +329,7 @@ mod tests {
         std::fs::write(root.join("CLAUDE.md"), "outer rule").unwrap();
         std::fs::write(ws.join("AGENTS.md"), "inner rule").unwrap();
         std::fs::write(ws.join("CLAUDE.md"), "shadowed by AGENTS.md").unwrap();
-        let prompt = system_prompt(&ws, "/repo", "- [m1] a memory\n", Some("Last sleep: 1 kept."), "- work/verify: Check work.\n");
+        let prompt = system_prompt(&ws, "/repo", "- [m1] a memory\n", Some("Last sleep: 1 kept."), "- work/verify: Check work.\n", &Admitted::unrated(&ws));
         let outer = prompt.find("outer rule").expect("parent CLAUDE.md loaded");
         let inner = prompt.find("inner rule").expect("workspace AGENTS.md loaded");
         assert!(outer < inner, "files are ordered from the root down");

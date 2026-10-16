@@ -334,10 +334,21 @@ pub async fn run_tool(app: &AppState, session: Uuid, workspace: &Path, name: &st
             let other = args["session"].as_str().map(str::trim).filter(|s| !s.is_empty());
             if let (Some(other), false) = (other, is_error) {
                 let risk = if let Some((lo,hi)) = crate::compact::id_prefix_range(&other.to_lowercase()) {
-                    sqlx::query_scalar::<_,Option<i16>>("SELECT max(CASE WHEN zen_session_contaminated(session_id) AND origin!='owner' THEN 5::smallint ELSE risk END) FROM tape_events WHERE session_id BETWEEN $1 AND $2 AND seq>= $3 AND seq<= $4")
-                        .bind(lo).bind(hi).bind(args["from"].as_i64().unwrap_or(0) as i32)
-                        .bind(args["to"].as_i64().or(args["from"].as_i64()).unwrap_or(i32::MAX as i64) as i32)
-                        .fetch_one(&app.db).await.ok().flatten().unwrap_or(4)
+                    // The reader depends on the session(s) it reads (D-062): a later denial of
+                    // one reaches it. A rating or dependency that can't be recorded withholds.
+                    let rated: anyhow::Result<Option<i16>> = async {
+                        let writers: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM sessions WHERE id BETWEEN $1 AND $2")
+                            .bind(lo).bind(hi).fetch_all(&app.db).await?;
+                        crate::sources::depend(&app.db, session, &writers).await?;
+                        sqlx::query_scalar::<_,Option<i16>>("SELECT max(CASE WHEN zen_session_contaminated(session_id) AND origin!='owner' THEN 5::smallint ELSE risk END) FROM tape_events WHERE session_id BETWEEN $1 AND $2 AND seq>= $3 AND seq<= $4")
+                            .bind(lo).bind(hi).bind(args["from"].as_i64().unwrap_or(0) as i32)
+                            .bind(args["to"].as_i64().or(args["from"].as_i64()).unwrap_or(i32::MAX as i64) as i32)
+                            .fetch_one(&app.db).await.map_err(Into::into)
+                    }.await;
+                    match rated {
+                        Ok(risk) => risk.unwrap_or(4),
+                        Err(e) => return out(format!("history withheld: its origin couldn't be rated ({e})"), true),
+                    }
                 } else {4};
                 return match crate::taint::hand_over_rating(app, session, risk, "history", other, &content).await {
                     Ok(content) => out(content, false),
@@ -397,7 +408,7 @@ If a question goes unanswered, take your recommended option and say it was an as
         "save_skill" | "save_tool" => crate::workshop::run_tool(app, session, name, args).await,
         "delegate" => crate::delegate::run_tool(app, session, workspace, name, args).await,
         "schedule" => crate::jobs::run_tool(app, session, name, args, matches!(policy, crate::gate::Policy::Granted)).await,
-        "find_tools" | "load_tool" | "call_tool" => crate::mcp::run_tool(app, session, name, args, matches!(policy, crate::gate::Policy::Sandbox)).await,
+        "find_tools" | "load_tool" | "call_tool" => crate::mcp::run_tool(app, session, name, args, matches!(policy, crate::gate::Policy::Sandbox), matches!(policy, crate::gate::Policy::Granted)).await,
         "decide" => {
             let res = crate::score::decide(app, &args["state"], &args["questions"]).await;
             let (answer, error) = match &res {

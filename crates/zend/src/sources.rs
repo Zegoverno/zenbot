@@ -95,8 +95,19 @@ pub async fn file_rating(db: &PgPool, path: &std::path::Path, text: &str) -> Res
 /// Record the reader's dependency before handing content over. A later deny of the writer
 /// stops derived work too; max-risk alone would lose this causal link.
 pub async fn depend(db: &PgPool, reader: Uuid, writers: &[Uuid]) -> Result<()> {
+    let mut tx = db.begin().await?;
+    lock_provenance(&mut tx).await?;
     sqlx::query("INSERT INTO session_inputs(reader,writer) SELECT $1,w FROM unnest($2::uuid[]) w WHERE w!=$1 ON CONFLICT DO NOTHING")
-        .bind(reader).bind(writers).execute(db).await?;
+        .bind(reader).bind(writers).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Serialize graph-edge insertion, denial and irreversible handover/spawn boundaries. Take this
+/// before any session chain lock. The short critical section prevents an ancestry snapshot from
+/// missing a concurrently added writer whose denial would otherwise race execution/delivery.
+pub async fn lock_provenance(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(6462062, 3)").execute(&mut **tx).await?;
     Ok(())
 }
 

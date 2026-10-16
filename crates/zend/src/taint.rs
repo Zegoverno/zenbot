@@ -206,6 +206,7 @@ pub async fn stopped(db: &sqlx::PgPool, session: Uuid) -> anyhow::Result<bool> {
 /// reads consult live causes, so a concurrent write cannot escape a deny by finishing late.
 pub async fn deny(app: &App, session: Uuid, source: &str) -> anyhow::Result<()> {
     let mut tx = app.db.begin().await?;
+    crate::sources::lock_provenance(&mut tx).await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 7))")
         .bind(session).execute(&mut *tx).await?;
     let affected: Vec<Uuid> = sqlx::query_scalar(
@@ -246,19 +247,29 @@ pub fn withheld(e: &anyhow::Error) -> String {
 
 /// Preserve a stored item's origin rating, including a reversible contamination overlay.
 pub async fn hand_over_rating(app: &App, session: Uuid, risk: i16, source: &str, about: &str, text: &str) -> anyhow::Result<String> {
+    mark_rating(app, session, risk, source, about).await?;
+    if risk < 2 { return Ok(text.to_string()); }
+    Ok(untrusted(source, about, text))
+}
+
+/// The session-side half of `hand_over_rating`, for a caller that wraps several items itself
+/// (a catalog): raise the reader to `risk`, record where a risky read came from, and stop the
+/// reader at level 5. Errors mean the content must not be handed over.
+pub async fn mark_rating(app: &App, session: Uuid, risk: i16, source: &str, about: &str) -> anyhow::Result<()> {
     anyhow::ensure!((0..=5).contains(&risk), "invalid stored rating");
     if risk == 5 {
         deny(app,session,source).await?;
         anyhow::bail!("content withheld: contaminated item stopped the session; owner review required");
     }
     crate::sources::raise(&app.db,session,risk).await?;
-    if risk < 2 { return Ok(text.to_string()); }
+    anyhow::ensure!(!stopped(&app.db, session).await?, "content withheld: a source was stopped during the read");
+    if risk < 2 { return Ok(()); }
     let first = sqlx::query("UPDATE sessions SET risky_at=now() WHERE id=$1 AND risky_at IS NULL")
         .bind(session).execute(&app.db).await?.rows_affected() == 1;
     if first {
         crate::tape::append(&app.db,session,"risky",&json!({"source":source,"about":about})).await?;
     }
-    Ok(untrusted(source, about, text))
+    Ok(())
 }
 
 /// What a session that has read untrusted content may not do as it would otherwise.
