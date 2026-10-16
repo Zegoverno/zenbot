@@ -118,7 +118,7 @@ pub async fn trust(app: &App, session: Uuid, seen: i32) -> anyhow::Result<Truste
         .bind(session).execute(&mut *tx).await?;
     let lifted = sqlx::query(
         "WITH old AS (SELECT id, COALESCE(tainted_at, risky_at, now()) AS tainted_at FROM sessions WHERE id = $1 AND (risk >= 2 OR risky_at IS NOT NULL OR tainted_at IS NOT NULL) FOR UPDATE)
-         UPDATE sessions s SET tainted_at = NULL, risky_at = NULL, risk = 1, risk_trusted_through = $2 FROM old
+         UPDATE sessions s SET tainted_at = NULL, risky_at = NULL, risk = 1, risk_trusted_through = $2, lock_reason = NULL, locked_at = NULL FROM old
          WHERE s.id = old.id AND NOT EXISTS (
            SELECT 1 FROM tape_events e WHERE e.session_id = $1 AND e.seq > $2
              AND (e.risk >= 2 OR e.kind IN ('taint', 'risky') OR (e.kind = 'message' AND e.payload::text ~ $3)))
@@ -286,7 +286,7 @@ pub enum Limit {
     Vouch,
     /// Start a scheduled job without the owner (it waits for their approval).
     StartJob,
-    /// Run a shell with the network and the home writable (it runs sandboxed: `tools::Sandbox::Offline`).
+    /// Run a shell with the workspace writable (gate::shell_mode makes it read-only).
     Shell,
 }
 
@@ -298,16 +298,6 @@ pub async fn limited(db: &sqlx::PgPool, session: Uuid, limit: Limit) -> bool {
         Limit::Vouch | Limit::Steer | Limit::StartJob => tainted(db, session).await,
         Limit::Shell => sqlx::query_scalar::<_, bool>("SELECT risk>=4 OR zen_session_contaminated(id) FROM sessions WHERE id = $1")
             .bind(session).fetch_optional(db).await.map(|t| t.unwrap_or(true)).unwrap_or(true),
-    }
-}
-
-/// The sandbox a session's shell (`bash`, a `verify` criterion's command) runs in: none for a
-/// clean session, offline and read-only once it has read untrusted content (D-063).
-pub async fn shell_sandbox(db: &sqlx::PgPool, session: Uuid) -> crate::tools::Sandbox {
-    if limited(db, session, Limit::Shell).await {
-        crate::tools::Sandbox::Offline
-    } else {
-        crate::tools::Sandbox::None
     }
 }
 

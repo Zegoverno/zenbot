@@ -59,7 +59,7 @@ const PROMPT_FILES: [&str; 4] = [crate::layout::SOUL, crate::layout::IDENTITY, "
 
 /// The owner's configuration and secrets under the zen home: the agent never changes them with
 /// `edit` or `write` (the owner edits them by hand). `matrix` and `bin` are folders.
-const OWNER_FILES: [&str; 9] = ["mcp.json", "env", "env.prev", "token", "db-password", "matrix.env", "matrix", "bin", "s1"];
+const OWNER_FILES: [&str; 10] = ["mcp.json", "env", "env.prev", "token", "db-password", "matrix.env", "matrix", "bin", "s1", "trust.toml"];
 
 /// A file an `edit` or `write` call may not change freely.
 #[derive(Debug, PartialEq)]
@@ -412,7 +412,7 @@ If a question goes unanswered, take your recommended option and say it was an as
         "save_skill" | "save_tool" => crate::workshop::run_tool(app, session, name, args).await,
         "delegate" => crate::delegate::run_tool(app, session, workspace, name, args).await,
         "schedule" => crate::jobs::run_tool(app, session, name, args, matches!(policy, crate::gate::Policy::Granted)).await,
-        "find_tools" | "load_tool" | "call_tool" => crate::mcp::run_tool(app, session, name, args, matches!(policy, crate::gate::Policy::Sandbox), matches!(policy, crate::gate::Policy::Granted)).await,
+        "find_tools" | "load_tool" | "call_tool" => crate::mcp::run_tool(app, session, name, args, false, matches!(policy, crate::gate::Policy::Granted)).await,
         "judge" => Some(judge(app, session, args).await),
         _ => None,
     }
@@ -482,8 +482,9 @@ pub async fn log_decision(db: &PgPool, session: Option<Uuid>, point: &str, input
 
 /// A criterion's check, run by the kernel like the bash tool (its own process group, killed on a
 /// timeout or an abort, output capped and masked, in the session's shell sandbox).
-async fn run_check(dir: &Path, run: &str, expect: Option<&str>, sandbox: tools::Sandbox, masks: &[PathBuf]) -> Value {
-    match tools::run_shell(dir, run, &[], sandbox, masks, Duration::from_secs(600)).await {
+async fn run_check(dir: &Path, run: &str, expect: Option<&str>, sandbox: tools::Sandbox, masks: &[PathBuf], session: Uuid) -> Value {
+    let id = session.to_string();
+    match tools::run_shell(dir, run, &[("ZEN_SESSION_ID", id.as_str())], sandbox, masks, Duration::from_secs(600)).await {
         Ok(tools::Shell { text, status: Some(Ok(status)) }) => {
             let text = crate::secrets::mask_off_thread(text).await;
             let tail = zen_proto::tail(&text, 3000);
@@ -618,21 +619,16 @@ async fn verify(app: &AppState, session: Uuid, workspace: &Path, args: &Value, p
     let start = std::time::SystemTime::now();
     // A criterion's command is the session's shell too: sandboxed once the session is tainted.
     let granted = matches!(policy,crate::gate::Policy::Granted);
-    let sandbox = if granted {tools::Sandbox::None} else {crate::taint::shell_sandbox(&app.db, session).await};
+    // A criterion's command runs as the session's own shell would: contained (D-067).
+    let sandbox = if granted {tools::Sandbox::None} else {crate::gate::shell_mode(&app.db, session).await};
+    if let tools::Sandbox::Contained { net: true, .. } = sandbox {
+        if let Err(e) = crate::proxy::ensure(&app.db, session).await {
+            tracing::warn!("egress proxy for {session}: {e:#}");
+        }
+    }
     for c in &criteria {
         if let Some(run) = c["run"].as_str() {
-            let restricted:bool=sqlx::query_scalar::<_,i16>("SELECT risk FROM sessions WHERE id=$1")
-                .bind(session).fetch_one(&app.db).await.unwrap_or(4)>=2;
-            let route = if !granted && restricted {
-                crate::gate::shell(&dir, run)
-            } else { crate::gate::Policy::Run };
-            let (command, boundary) = match &route {
-                crate::gate::Policy::SafeRead(normalized) => (normalized.as_str(), tools::Sandbox::SafeRead),
-                crate::gate::Policy::Sandbox => (run,tools::Sandbox::Offline),
-                crate::gate::Policy::Hold(why) => return err(crate::gate::held_note(why)),
-                _ => (run, sandbox),
-            };
-            checks.insert(c["id"].as_str().unwrap_or("").to_string(), run_check(&dir, command, c["expect"].as_str(), boundary, &masks).await);
+            checks.insert(c["id"].as_str().unwrap_or("").to_string(), run_check(&dir, run, c["expect"].as_str(), sandbox, &masks, session).await);
         }
     }
     if let Err(e) = crate::fsview::finish(&app.db, session, &dir, start, sandbox == tools::Sandbox::None).await {

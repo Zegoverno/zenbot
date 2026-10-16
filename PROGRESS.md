@@ -6,6 +6,26 @@
 
 ---
 
+## 2026-10-16 — Security: context risk, action alignment, contained sessions (D-067)
+
+Every shell now runs contained (no secrets, no sudo, no host sockets) with its network through a
+per-session egress proxy in the kernel; acting as the owner is a `host: true` command the gate
+checks. One S1 decision (`action_gate`) runs, holds or locks each effect from the session's context
+risk, the action's effect and, only when needed, alignment with the owner's job; most actions need
+no model call. The owner's trust list (`zen trust`, `~/.zenbot/trust.toml`) covers URLs, APIs, MCP
+servers and repos by remote. Rating fixes: legacy marks reset (migration 0033), clones rated by
+their remote, engine errors and medium products no longer raise risk. Removed: the shell grammar,
+the SafeRead/offline modes as policy, the task class table. Tests: unit (classify, rules on inputs,
+contained-shell enforcement, proxy parsing, trust parsing), e2e `security` (proxy end to end, holds,
+owner allow, no sudo/Docker/token), the gate scenarios rewritten; replay: 7,263 of 7,284 low-risk
+actions run without a model call, none held by rule.
+
+## 2026-10-16 — Unapproved made tools can't reach host sockets
+
+An unapproved made tool's sandbox had no seccomp filter and kept `/run`, so it could connect to
+the Docker socket (root on this host) despite having no network: a risky session could save a tool
+and run it. It now gets an empty `/run` and the offline shell's filter (no connect or send on any
+socket). Test: a socket in the tool's own folder is refused, `/run` is empty.
 ## 2026-10-16 — S1: System One as one engine of decision files (D-066)
 
 Every System One call now goes through `crates/zend/src/s1/`: thirteen decision files
@@ -182,77 +202,5 @@ The e2e `scheduled_jobs` scenario checks an ok and a failed run's sessions are a
   judging falsely exceeded the four-call limit in post-merge CI. Kernel limits are unchanged.
 
 ---
-
-## 2026-10-13 — Three-way action gate (D-056)
-
-Outside reads mark provenance as risky, without blanket shell taint. The kernel checks effects
-before dispatch: fixed read utilities run in a hardened read-only view, programmable builds/Git
-run in the offline workspace sandbox, and unsupported, outward or steering actions are held.
-A held action taints the session before anything runs. `/allow` and `/allow yes` (`!` in Matrix)
-review and grant the latest exact workspace/tool/arguments once for ten minutes, without trusting
-the session. Approval and its audit commit together; the grant is consumed atomically.
-Approved scheduling uses owner authorization without a second job activation prompt. Kernel Git
-ignores global configuration and hooks/fsmonitor, closing the indirect Git-config escape.
-Reads validate the opened object, and unapproved file writes use directory descriptors instead
-of following mutable symlinks. Verification checks its commands and directory before running,
-and collecting its Git diff is read-only/offline too. Secret mounts now also hide SSH, GitHub,
-AWS and package-registry credentials. Request-based System One grants remain a follow-up.
-
----
-
-## 2026-10-13 — Search no longer spreads the taint mark; worktrees are trusted (D-056)
-
-Most tainted sessions weren't reading the web: `search` came across a memory an earlier tainted
-session saved and tainted the reader. Now a marked result `search` only comes across is listed by
-reference without its text; asked for by name it comes wrapped and taints, as before. A git
-worktree of a trusted repository is trusted like the repository (zenbot's own worktrees tainted the
-sessions that made them). First step of the action gate (ROADMAP). Tested: e2e `taint_on_data`
-(a search lists the memory without its text and the reader stays clean; by name it's wrapped and
-taints) and `project_files` (a worktree's AGENTS.md is followed); unit tests for the worktree link,
-including a forged one-way link.
-
----
-
----
-
-## 2026-10-13 — A job's report can come from a file (D-055)
-
-The `daily-readings` job sends the Mass readings, which a script builds and checks word for word
-against the source, but the report was the run's final answer, so the model retyped the text. Now
-a job can name a `report_file` (`zen jobs add/set --report-file`, `{report_file}` in `POST/PATCH
-/api/jobs`, the `schedule` tool's `report_file`; new column `jobs.report_file`, migration 0023).
-When the run ends `ok`, the kernel posts that file, and the final answer stays in the session. It
-fails closed: a file missing, older than the run, a symlink, outside the job's workspace, a secret
-file, over 60 KB or not UTF-8 makes the run an error naming why; an empty file makes it silent.
-Taint is unchanged. Tested: e2e `job-report-file` (the report is the file, not the answer; refused
-outside the workspace when set; missing, stale, a symlink to the token, outside at run time each an
-error; empty is silent; `""` clears it), unit tests for the path and file rules.
-
-## 2026-10-13 — `/trust`: the owner trusts a session again (D-054)
-
-A session that read anything from outside (a web search, a subagent's answer: about half of
-them) ran limited for good: no network in its shell, no skill or prompt-file changes. The only
-way out was a fresh session, losing the work's context. Now `/trust` in zen (`!trust` in Matrix)
-shows what marked the session: its `taint` blocks and the untrusted content it was handed, from
-the new `GET /api/sessions/{id}/taint`. `/trust yes` lifts the mark through `POST
-/api/sessions/{id}/trust`, which records a `trust` block. It works forward only: the next
-untrusted read marks the session again, and what it stored meanwhile keeps its marks. It's refused
-while a turn runs and when the session read more after the owner looked. Sessions now carry
-`tainted_at`: the board and zen's footer mark `untrusted`, and the stream sends `taint`. Tested:
-e2e `trust` (a tainted shell can't reach the route even with the token; refused on a stale look;
-lifted; the stored memory keeps its mark; the shell gets the network back; the next web search
-marks it again), unit tests for parsing, the report and the TUI marks.
-
-## 2026-10-13 — Owner commands in the chat: `/jobs`, `/skills`, `/tools` (and `!` in Matrix)
-
-Approving a job zenbot created paused, running one to test it, or accepting a draft skill or a
-made tool needed the terminal (`zen jobs …`), out of reach from the chat or the phone. Now zen's
-input takes `/jobs [run|resume|pause <name> | runs [name]]`, `/skills [accept|reject <domain/name>
-<sha>]` and `/tools accept|reject <name> <sha>`, and Matrix takes the same with `!` (in every room,
-zen jobs included). One module, `zen_client::owner`, parses and runs them for both clients. The
-client reads them before anything is sent and calls the kernel with the owner's token, so they
-never reach the agent: text it read can't approve anything. Removing and creating jobs stay in
-the terminal. Tested: parsing and formatting unit tests, a TUI test that a command is never sent as
-a prompt, zen-matrix's parse tests.
 
 Older entries: `docs/archive/PROGRESS-*.md`.

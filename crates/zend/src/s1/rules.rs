@@ -12,6 +12,11 @@
 //! option, else its confidence), `.confidence` the model's confidence. A condition on a question
 //! that wasn't answered is false. Comparisons: `= != < <= > >=`, `in [..]`, `not in [..]`;
 //! combined with `and`, `or`, `not` and parentheses. Bare words are text.
+//!
+//! A decision's `inputs` (facts the caller passes, such as `context` or `effect`) can be used the
+//! same way: `context = low and effect = local`. A rule that uses only inputs is decided without
+//! asking a model (`needs_answers`), so a policy whose first matching rule is about inputs costs
+//! no call.
 
 use serde_json::Value;
 
@@ -226,6 +231,12 @@ fn value(o: &Operand, answers: &Value) -> Option<Val> {
         Operand::Answer(q, field) => {
             let a = &answers[q];
             match (a["type"].as_str()?, field.as_deref()) {
+                ("fact", None) => match &a["value"] {
+                    Value::Number(n) => n.as_f64().map(Val::Num),
+                    Value::Bool(b) => Some(Val::Text(if *b { "yes".into() } else { "no".into() })),
+                    v => v.as_str().map(|s| Val::Text(s.into())),
+                },
+                ("fact", Some(_)) => None,
                 ("bool", None | Some("p")) => a["probability"].as_f64().map(Val::Num),
                 ("bool", Some(_)) => None,
                 ("choice", None) => a["choice"].as_str().map(|c| Val::Text(c.into())),
@@ -280,6 +291,21 @@ pub fn eval(e: &Expr, answers: &Value) -> bool {
     }
 }
 
+/// Whether a condition refers to a question (needs a model's answer), not only to inputs.
+pub fn needs_answers(e: &Expr, is_input: &dyn Fn(&str) -> bool) -> bool {
+    match e {
+        Expr::And(a, b) | Expr::Or(a, b) => needs_answers(a, is_input) || needs_answers(b, is_input),
+        Expr::Not(a) => needs_answers(a, is_input),
+        Expr::Cmp(Operand::Answer(q, _), ..) | Expr::In(Operand::Answer(q, _), ..) => !is_input(q),
+        _ => false,
+    }
+}
+
+/// Inputs in the form conditions read: `{name: {type: fact, value}}`.
+pub fn facts_as_answers(inputs: &serde_json::Map<String, Value>) -> Value {
+    Value::Object(inputs.iter().map(|(k, v)| (k.clone(), serde_json::json!({ "type": "fact", "value": v }))).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +333,18 @@ mod tests {
         assert!(t("outcome >= 2 and outcome.confidence > 0.5"));
         assert!(t("reputation = 'reputable'"));
         assert!(!t("writers = author or injection > 0.9"));
+    }
+
+    #[test]
+    fn inputs_decide_without_answers() {
+        let names = |n: &str| ["context", "effect", "alignment"].contains(&n);
+        let input = |n: &str| ["context", "effect"].contains(&n);
+        let facts = facts_as_answers(&serde_json::from_value(json!({ "context": "low", "effect": "local" })).unwrap());
+        let e = parse("context = low and effect = local", &names).unwrap();
+        assert!(!needs_answers(&e, &input));
+        assert!(eval(&e, &facts));
+        let e = parse("effect = outward and alignment = follows", &names).unwrap();
+        assert!(needs_answers(&e, &input));
     }
 
     #[test]

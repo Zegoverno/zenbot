@@ -159,8 +159,10 @@ pub fn check(name: &str, src: &str, models: &Models) -> (Option<Spec>, Vec<Diag>
     }
 
     // Questions.
-    if spec.question.is_empty() {
-        err("", "", "a decision asks at least one question ([question.<name>])".into());
+    // A decision decided by rules on its inputs alone needs no question (and never calls a model).
+    let inputs_only = matches!(&spec.policy, Some(Policy::Rules { rules, .. }) if rules.iter().all(|r| !r.when.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| spec.question.contains_key(w))));
+    if spec.question.is_empty() && !(inputs_only && !spec.inputs.is_empty()) {
+        err("", "", "a decision asks at least one question ([question.<name>]), unless its rules use only its `inputs`".into());
     }
     let facts = kind.facts;
     for (q, question) in &spec.question {
@@ -180,6 +182,13 @@ pub fn check(name: &str, src: &str, models: &Models) -> (Option<Spec>, Vec<Diag>
             },
             QuestionKind::Score if question.levels.as_ref().is_none_or(|l| l.len() < 2) => err(&table, "levels", format!("score `{q}` needs at least two `levels`, lowest first")),
             _ => {}
+        }
+    }
+    for e in &spec.inputs {
+        if !facts.contains(&e.as_str()) {
+            err("", "inputs", format!("`{e}` isn't a fact the caller supplies ({})", facts.join(", ")));
+        } else if spec.question.contains_key(e) {
+            err("", "inputs", format!("`{e}` is both an input and a question"));
         }
     }
     for e in &spec.evidence {

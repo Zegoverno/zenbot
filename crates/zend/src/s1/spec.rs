@@ -21,10 +21,15 @@ pub struct Spec {
     /// The facts the caller supplies, by name; they become the state's keys.
     #[serde(default)]
     pub evidence: Vec<String>,
+    /// Facts the rules may test directly (`context = low`), besides the questions' answers; a rule
+    /// on inputs alone is decided without a model call.
+    #[serde(default)]
+    pub inputs: Vec<String>,
     /// Per-item decisions: the prefix of each item's state key (`result` gives `result_0`, …).
     /// One question, asked once per item in a single call.
     #[serde(default)]
     pub item: Option<String>,
+    #[serde(default)]
     pub question: BTreeMap<String, Question>,
     #[serde(default)]
     pub policy: Option<Policy>,
@@ -214,6 +219,15 @@ pub fn parse_duration(s: &str) -> Option<Duration> {
 pub fn test_answers(spec: &Spec, case: &TestCase) -> Result<Value, String> {
     let mut out = serde_json::Map::new();
     for (q, v) in &case.answers {
+        if spec.inputs.contains(q) {
+            let value = match v {
+                toml::Value::String(s) => serde_json::json!(s),
+                toml::Value::Boolean(b) => serde_json::json!(b),
+                other => serde_json::json!(num(other)),
+            };
+            out.insert(q.clone(), serde_json::json!({ "type": "fact", "value": value }));
+            continue;
+        }
         let question = spec.question.get(q).ok_or_else(|| format!("test answers unknown question `{q}`"))?;
         let parsed = match (question.kind, v) {
             (QuestionKind::YesNo, v) => {

@@ -327,29 +327,29 @@ mod tests {
             for limit in [crate::taint::Limit::Shell,crate::taint::Limit::Steer,crate::taint::Limit::Vouch,crate::taint::Limit::StartJob] {
                 assert!(!crate::taint::limited(&db,sid,limit).await);
             }
-            assert!(matches!(crate::gate::check(&app,sid,&dir,"bash",&json!({"command":"cargo test"})).await.unwrap(),crate::gate::Policy::Sandbox));
+            // Medium context (D-067): local work runs, contained and online; nothing is queued.
+            assert!(matches!(crate::gate::check(&app,sid,&dir,"bash",&json!({"command":"cargo test"})).await.unwrap(),crate::gate::Policy::Run));
             assert!(matches!(crate::gate::check(&app,sid,&dir,"write",&json!({"path":"local.txt","content":"x"})).await.unwrap(),crate::gate::Policy::Run));
             assert!(!crate::gate::fetch_allowed(&db,sid,&url).await.unwrap(),"cached reputation cannot grant egress");
-            assert!(matches!(crate::taint::shell_sandbox(&db,sid).await,crate::tools::Sandbox::None));
+            assert_eq!(crate::gate::shell_mode(&db,sid).await,crate::tools::Sandbox::Contained{writable:true,net:true});
             assert!(matches!(crate::gate::check(&app,sid,&dir,"verify",&json!({"criteria":[{"run":"cargo test"}]})).await.unwrap(),crate::gate::Policy::Run));
-            assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM action_gates WHERE session_id=$1").bind(sid).fetch_one(&db).await.unwrap(),2);
-            for command in ["npm test","python3 hidden.py","cargo run"] {
-                assert!(!matches!(crate::gate::check(&app,sid,&dir,"bash",&json!({"command":command})).await.unwrap(),
-                    crate::gate::Policy::Run|crate::gate::Policy::Granted),"project code must not get host capabilities: {command}");
-            }
+            assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM action_gates WHERE session_id=$1").bind(sid).fetch_one(&db).await.unwrap(),0);
+            // An approved made tool runs on the host: outward, checked against the job (the stub
+            // reads it as following), from a trusted source: it runs.
             let made=format!("host-{}",Uuid::new_v4().simple());
             sqlx::query("INSERT INTO made_tools(name,approved_at) VALUES($1,now())").bind(&made).execute(&db).await.unwrap();
             let args=json!({"name":format!("made_{made}"),"arguments":{}});
-            assert!(matches!(crate::gate::check(&app,sid,&dir,"call_tool",&args).await.unwrap(),crate::gate::Policy::Hold(_)),
-                "global made-tool approval is not an exact host grant");
-            let action=json!({"workspace":&*dir,"tool":"call_tool","args":args}).to_string();
-            sqlx::query("UPDATE action_gates SET allowed_at=now(),decision='approved' WHERE session_id=$1 AND action=$2")
-                .bind(sid).bind(action).execute(&db).await.unwrap();
-            assert!(matches!(crate::gate::check(&app,sid,&dir,"call_tool",&args).await.unwrap(),crate::gate::Policy::Granted));
-            assert!(matches!(crate::gate::check(&app,sid,&dir,"call_tool",&args).await.unwrap(),crate::gate::Policy::Hold(_)));
+            assert!(matches!(crate::gate::check(&app,sid,&dir,"call_tool",&args).await.unwrap(),crate::gate::Policy::Run));
+            // A host command the stub reads as off the job locks the session after outside content.
+            assert!(matches!(crate::gate::check(&app,sid,&dir,"bash",&json!({"command":"git push","host":true})).await.unwrap(),crate::gate::Policy::Lock(_)));
+            assert_eq!(crate::gate::shell_mode(&db,sid).await,crate::tools::Sandbox::Contained{writable:false,net:false});
+            assert!(matches!(crate::gate::check(&app,sid,&dir,"write",&json!({"path":"local.txt","content":"x"})).await.unwrap(),crate::gate::Policy::Run),"locked sessions keep local work");
+            assert!(matches!(crate::gate::check(&app,sid,&dir,"call_tool",&args).await.unwrap(),crate::gate::Policy::Hold(_)),"but nothing outward");
+            sqlx::query("UPDATE sessions SET lock_reason=NULL, locked_at=NULL WHERE id=$1").bind(sid).execute(&db).await.unwrap();
             let instruction=format!("rated instruction {sid}");
             record_bytes(&db,sid,&dir.join(format!("instruction-{sid}.md")),&instruction,None).await.unwrap();
-            assert_eq!(crate::context::admit(&db,sid,&instruction,1).await.unwrap(),Some(risk));
+            // What a medium session writes carries no rating of its own (only a high session's products do).
+            assert_eq!(crate::context::admit(&db,sid,&instruction,1).await.unwrap(),Some(1));
             assert!(crate::context::label("project file",risk,&instruction).contains(&format!("risk: {risk}")));
             let text=format!("rated memory {sid}");
             sqlx::query("INSERT INTO memories(text,source,session_id) VALUES($1,'inferred',$2)").bind(&text).bind(sid).execute(&db).await.unwrap();

@@ -117,7 +117,7 @@ class H(BaseHTTPRequestHandler):
                             choice = "unknown"
                         answers[name] = {"type": "choice", "choice": choice, "probabilities": {choice: 1.0}}
                 elif name == "alignment":
-                    assert set(state) == {"job_data", "proposed_action_UNTRUSTED_DATA", "action_class"}
+                    assert set(state) == {"job_data", "proposed_action_UNTRUSTED_DATA", "effect"}
                     goal = state["job_data"]["authenticated_goal_data"]
                     assert "LATE_POISON_PLAN" not in state["job_data"]["pre_exposure_brief_plan_data"]
                     if "ALIGN-UNAVAILABLE" in goal:

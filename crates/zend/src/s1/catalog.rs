@@ -64,14 +64,19 @@ pub const KINDS: &[Kind] = &[
         outcomes: Some(&[("raise", Cautious), ("keep", Neutral)]), unavailable: Some("raise"), owner_rung: false,
     },
     Kind {
-        name: "task_check", exposure: Exposure::Outside, mode: Mode::Single,
-        facts: &["job_data", "proposed_action_UNTRUSTED_DATA", "action_class"],
-        outcomes: Some(&[("run", Neutral), ("hold", Cautious)]), unavailable: Some("hold"), owner_rung: true,
+        name: "action_gate", exposure: Exposure::Outside, mode: Mode::Single,
+        facts: &["job_data", "proposed_action_UNTRUSTED_DATA", "effect", "context", "trusted", "judge"],
+        outcomes: Some(&[("run", Neutral), ("hold", Cautious), ("lock", Cautious)]), unavailable: Some("hold"), owner_rung: true,
     },
     Kind {
         name: "web_focus", exposure: Exposure::Outside, mode: Mode::Items,
         facts: &["need"],
         outcomes: Some(&[("keep", Neutral), ("drop", Cautious)]), unavailable: Some("keep"), owner_rung: false,
+    },
+    Kind {
+        name: "egress", exposure: Exposure::Metadata, mode: Mode::Single,
+        facts: &["context", "rating"],
+        outcomes: Some(&[("allow", Grant), ("hold", Cautious)]), unavailable: Some("hold"), owner_rung: false,
     },
     Kind { name: "web_rerank", exposure: Exposure::Outside, mode: Mode::Items, facts: &["query"], outcomes: None, unavailable: None, owner_rung: false },
     Kind { name: "search_rerank", exposure: Exposure::Private, mode: Mode::Items, facts: &["query"], outcomes: None, unavailable: None, owner_rung: false },

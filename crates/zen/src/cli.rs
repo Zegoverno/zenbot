@@ -100,6 +100,11 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: Option<PolicyCmd>,
     },
+    /// The owner's trust list: URLs, APIs, MCP servers and repos whose content keeps a session low
+    Trust {
+        #[command(subcommand)]
+        cmd: Option<TrustCmd>,
+    },
     /// System One: each decision's numbers; check the decision files; replay, compare, proposals
     S1 {
         #[command(subcommand)]
@@ -130,6 +135,31 @@ pub(crate) enum Cmd {
         /// Only check whether an update is available
         #[arg(long)]
         check: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum TrustCmd {
+    /// The list, with the built-in package registries
+    List,
+    /// Add or change an entry: kind url|api|mcp|repo, then a host (or host/path), an MCP server's name, or host/owner/name (* for any)
+    Add {
+        #[arg(value_parser = ["url", "api", "mcp", "repo"])]
+        kind: String,
+        #[arg(name = "match")]
+        pattern: String,
+        /// trusted (default), known, partly-open or blocked
+        #[arg(long, default_value = "trusted", value_parser = ["trusted", "known", "partly-open", "blocked"])]
+        level: String,
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    /// Remove an entry
+    Rm {
+        #[arg(value_parser = ["url", "api", "mcp", "repo"])]
+        kind: String,
+        #[arg(name = "match")]
+        pattern: String,
     },
 }
 

@@ -260,6 +260,13 @@ fn calibrator(l: &Loaded) -> impl Fn(&str, &str, f64) -> f64 + '_ {
 
 pub async fn single(db: &sqlx::PgPool, name: &str, facts: Facts) -> Decision {
     let Some(l) = spec_of(name) else { return Decision { error: Some(format!("no decision `{name}`")), ..Default::default() } };
+    // Rules on the caller's inputs alone decide without a model (and without a record): most
+    // low-risk decisions end here, even with System One off.
+    let inputs: Map<String, Value> = l.spec.inputs.iter().filter_map(|k| facts.map.get(k).map(|v| (k.clone(), v.clone()))).collect();
+    let inputs = super::rules::facts_as_answers(&inputs);
+    if let Some(outcome) = l.policy.as_ref().and_then(|p| policy::decide_early(p, &inputs)) {
+        return Decision { outcome: Some(outcome), ..Default::default() };
+    }
     let started = Instant::now();
     let mut rec = Record::new(&l, facts.session);
     if let Some(why) = blocked(&l.spec) {
@@ -277,7 +284,16 @@ pub async fn single(db: &sqlx::PgPool, name: &str, facts: Facts) -> Decision {
     let size = state.to_string().len();
     let deadline = started + l.spec.timeout().unwrap_or(Duration::from_secs(30));
     let cal = calibrator(&l);
-    let judge = |a: &Value, model: &str| l.policy.as_ref().and_then(|p| policy::apply(p, a, &|q, p| cal(model, q, p)));
+    let judge = |a: &Value, model: &str| {
+        // The rules read the inputs beside the answers.
+        let mut with_inputs = a.clone();
+        if let (Some(w), Some(i)) = (with_inputs.as_object_mut(), inputs.as_object()) {
+            for (k, v) in i {
+                w.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        l.policy.as_ref().and_then(|p| policy::apply(p, &with_inputs, &|q, p| cal(model, q, p)))
+    };
     let result = if size > l.spec.max_state_chars {
         Err(format!("state too large ({size} > {} characters)", l.spec.max_state_chars))
     } else {

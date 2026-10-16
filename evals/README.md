@@ -49,7 +49,7 @@ is cached in `~/.zenbot/evals/cache/` and reused for `ZEN_EVAL_CACHE_DAYS` (7) d
 base commit, model, effort, the task's files (`task.json`, `files/`, `hidden/`), the `claude` and
 `codex` versions and the repeat number are the same; the report lists which base results came from
 the cache and when. `--fresh` runs the base again. The `coding-zen-*` tasks share one Cargo target
-directory (`~/.zenbot/evals/cargo-target-zen`), so their builds wait for each other's lock; their
+directory (`~/.cache/zen-evals/cargo-target-zen`: outside the zen home, which a contained shell sees read-only), so their builds wait for each other's lock; their
 times are noisier when they run at once.
 
 The report compares, per task and in total: checks passed, cost, tokens, cache hit rate, time, tool

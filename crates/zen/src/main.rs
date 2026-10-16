@@ -286,6 +286,30 @@ async fn run(cli: Cli) -> Result<()> {
             emit(json, &r, || format!("policy v{}", r["version"]));
         }
         Cmd::S1 { cmd } => s1(&c, cmd, json).await?,
+        Cmd::Trust { cmd } => {
+            let v = match cmd.unwrap_or(TrustCmd::List) {
+                TrustCmd::List => c.get("/api/trust").await?,
+                TrustCmd::Add { kind, pattern, level, note } => c.post("/api/trust", json!({ "kind": kind, "match": pattern, "level": level, "note": note })).await?,
+                TrustCmd::Rm { kind, pattern } => c.post("/api/trust", json!({ "kind": kind, "match": pattern, "remove": true })).await?,
+            };
+            emit(json, &v, || {
+                if v["entries"].is_array() {
+                    let mut s = String::new();
+                    if let Some(p) = v["problem"].as_str() {
+                        s.push_str(&format!("{}: {p} (the last good list is in force)\n", v["path"].as_str().unwrap_or("")));
+                    }
+                    for e in v["entries"].as_array().into_iter().flatten() {
+                        s.push_str(&format!("{:<5} {:<40} {}{}\n", e["kind"].as_str().unwrap_or(""), e["match"].as_str().unwrap_or(""), e["level"].as_str().unwrap_or(""),
+                            e["note"].as_str().filter(|n| !n.is_empty()).map(|n| format!("  ({n})")).unwrap_or_default()));
+                    }
+                    let built: Vec<&str> = v["built_in"].as_array().into_iter().flatten().filter_map(|e| e["match"].as_str()).collect();
+                    s.push_str(&format!("built in: {}", built.join(", ")));
+                    s
+                } else {
+                    format!("{} {} {}", v["kind"].as_str().unwrap_or(""), v["match"].as_str().unwrap_or(""), v["level"].as_str().unwrap_or("removed"))
+                }
+            });
+        }
         Cmd::Tools { cmd } => {
             let (name, decision, sha) = cmd.parts();
             let res = c.post(&format!("/api/tools/{}/review", enc(name.trim_start_matches("made_"))), json!({ "decision": decision, "sha": sha })).await?;

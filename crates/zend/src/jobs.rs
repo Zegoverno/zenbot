@@ -1139,6 +1139,10 @@ fn prune_files(home: &std::path::Path) -> Vec<String> {
     if evals > 0 {
         notes.push(format!("evals: removed {evals} eval run(s) older than {EVAL_DAYS} days"));
     }
+    let tmps = prune_session_tmps(&std::env::temp_dir().join("zen-sandbox"), 7);
+    if tmps > 0 {
+        notes.push(format!("sandbox: removed {tmps} session /tmp folder(s) unused for 7 days"));
+    }
     notes
 }
 
@@ -1185,6 +1189,18 @@ fn prune_eval_runs(dir: &std::path::Path, days: i64, now: DateTime<Utc>) -> usiz
             let name = e.file_name().to_string_lossy().into_owned();
             name.len() == 16 && stamp(&name).is_some_and(|at| at < limit)
         })
+        .filter(|e| std::fs::remove_dir_all(e.path()).is_ok())
+        .count()
+}
+
+/// Session /tmp folders of contained shells (`tools::session_tmp`, named by session id) not touched
+/// for `days` days.
+fn prune_session_tmps(dir: &std::path::Path, days: u64) -> usize {
+    let Ok(read) = std::fs::read_dir(dir) else { return 0 };
+    let limit = std::time::Duration::from_secs(days * 86_400);
+    read.flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && e.file_name().to_string_lossy().parse::<Uuid>().is_ok())
+        .filter(|e| e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > limit))
         .filter(|e| std::fs::remove_dir_all(e.path()).is_ok())
         .count()
 }

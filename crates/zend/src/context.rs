@@ -128,6 +128,22 @@ pub fn trusted_roots(repo: &Path) -> Vec<PathBuf> {
 pub fn trusted(path: &Path, roots: &[PathBuf]) -> bool {
     let Ok(real) = path.canonicalize() else { return false };
     roots.iter().any(|r| real.starts_with(r)) || worktree_root(&real).is_some_and(|main| roots.contains(&main))
+        // Or its remote is one the owner trusts: every clone and worktree of it (D-067).
+        || crate::trust::repo_level(&real).is_some_and(|l| l <= 1)
+}
+
+/// How risky the instruction files of a repository the owner hasn't trusted are (D-067): the
+/// owner's level for its remote, else System One's rating of the remote (who can write there),
+/// else 1 for a repository with no remote (a local project of the owner's).
+pub async fn repo_rating(db: &sqlx::PgPool, path: &Path) -> i16 {
+    let real = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if let Some(level) = crate::trust::repo_level(&real) {
+        return level;
+    }
+    match crate::trust::remote_of(&real) {
+        Some(remote) => crate::sources::rated(db, &format!("https://{remote}"), "repo_remote").await.unwrap_or(4),
+        None => 1,
+    }
 }
 
 /// The main checkout of the git worktree that holds `path`, if git links them both ways: the
@@ -194,15 +210,15 @@ pub async fn admit(db: &sqlx::PgPool, reader: uuid::Uuid, text: &str, unknown: i
 /// an AGENTS.md there). Returns (attached as instructions, rating), after recording the reader's
 /// dependency on the writers. Level 5 (a contaminated writer) is returned for the caller to stop
 /// the reader.
-pub async fn attach_rating(db: &sqlx::PgPool, reader: uuid::Uuid, text: &str, in_trusted_repo: bool) -> anyhow::Result<(bool, i16)> {
-    let (risk, writers) = rate(db, text, if in_trusted_repo { 1 } else { 4 }).await?;
+pub async fn attach_rating(db: &sqlx::PgPool, reader: uuid::Uuid, text: &str, in_trusted_repo: bool, repo: i16) -> anyhow::Result<(bool, i16)> {
+    let (risk, writers) = rate(db, text, if in_trusted_repo { 1 } else { repo }).await?;
     if risk == 5 {
         return Ok((false, 5));
     }
     crate::sources::depend(db, reader, &writers).await?;
     crate::sources::raise(db, reader, risk).await?;
     let trusted = in_trusted_repo && risk <= 3;
-    Ok((trusted, if in_trusted_repo { risk } else { risk.max(4) }))
+    Ok((trusted, if in_trusted_repo { risk } else { risk.max(repo) }))
 }
 
 /// How an instruction file from a repository the owner hasn't listed is shown: content to weigh,
@@ -370,10 +386,10 @@ mod tests {
 
         // Attachments below the workspace.
         let r = session(1).await;
-        assert_eq!(attach_rating(&db, r, &risky, true).await.unwrap(), (false, 4), "a trusted repo's file written by a risky session is content, not instructions");
-        assert_eq!(attach_rating(&db, r, &only_denied, true).await.unwrap(), (false, 5));
-        assert_eq!(attach_rating(&db, r, &format!("fresh {tag}"), true).await.unwrap(), (true, 1));
-        assert_eq!(attach_rating(&db, r, &format!("fresh {tag}"), false).await.unwrap(), (false, 4), "an unlisted repository stays untrusted");
+        assert_eq!(attach_rating(&db, r, &risky, true, 4).await.unwrap(), (false, 4), "a trusted repo's file written by a risky session is content, not instructions");
+        assert_eq!(attach_rating(&db, r, &only_denied, true, 4).await.unwrap(), (false, 5));
+        assert_eq!(attach_rating(&db, r, &format!("fresh {tag}"), true, 4).await.unwrap(), (true, 1));
+        assert_eq!(attach_rating(&db, r, &format!("fresh {tag}"), false, 4).await.unwrap(), (false, 4), "an unlisted repository stays untrusted");
 
         // The prompt's workspace files: a risky version is left out, by name only.
         let ws = dir.join("ws");
@@ -433,7 +449,7 @@ mod tests {
         closed.close().await;
         assert!(rate(&closed, &clean, 1).await.is_err());
         assert!(admit(&closed, mr, &clean, 1).await.is_err());
-        assert!(attach_rating(&closed, mr, &clean, true).await.is_err());
+        assert!(attach_rating(&closed, mr, &clean, true, 4).await.is_err());
         assert!(crate::memory::render(&closed, mr).await.is_err());
         assert!(crate::compile::admitted(&closed, mr, &ws).await.is_err());
     }

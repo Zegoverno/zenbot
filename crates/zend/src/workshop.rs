@@ -368,7 +368,7 @@ pub fn made_entries() -> Vec<crate::mcp::ToolEntry> {
         if name.is_empty() || name != e.file_name().to_string_lossy() {
             continue;
         }
-        out.push(crate::mcp::ToolEntry { server: "made".into(), name, description: v["description"].as_str().unwrap_or("").to_string(), schema: v["parameters"].clone(), untrusted: false, manifest: Some(m) });
+        out.push(crate::mcp::ToolEntry { server: "made".into(), name, description: v["description"].as_str().unwrap_or("").to_string(), schema: v["parameters"].clone(), untrusted: false, manifest: Some(m), annotations: Value::Null });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
@@ -605,6 +605,39 @@ pub async fn run_made(db: &sqlx::PgPool, session: Uuid, name: &str, args: &Value
     run_snapshot(db, session, name, args, force_sandbox, owner_allowed, &copy).await
 }
 
+/// The unapproved tool's sandbox: read-only, no network, the home folder replaced by an empty one
+/// (so the tool can't read the owner's keys or tokens), only its own folder bound back. A network
+/// namespace doesn't isolate pathname Unix sockets (the Docker socket is root on this host), so
+/// `/run` is emptied and the offline shell's seccomp filter refuses connect and send on any
+/// socket. The returned file must outlive the spawn.
+fn sandboxed(home: &str, dir: &Path, command: &str) -> Result<(tokio::process::Command, std::fs::File)> {
+    let filter = crate::tools::network_filter().map_err(|e| anyhow::anyhow!(e))?;
+    let fd = std::os::fd::AsRawFd::as_raw_fd(&filter);
+    let mut c = tokio::process::Command::new("bwrap");
+    // SAFETY: fcntl is async-signal-safe; it only clears close-on-exec on the child's copy of the
+    // filter fd, which bwrap consumes.
+    unsafe {
+        c.pre_exec(move || {
+            if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    c.arg("--seccomp").arg(fd.to_string());
+    c.args(["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--tmpfs", "/run", "--unshare-net", "--unshare-pid", "--new-session", "--die-with-parent"])
+        .arg("--tmpfs")
+        .arg(home)
+        .arg("--ro-bind")
+        .arg(dir)
+        .arg(dir)
+        .arg("--chdir")
+        .arg(dir)
+        .args(["bash", "-c"])
+        .arg(command);
+    Ok((c, filter))
+}
+
 /// Execute only the private snapshot whose bytes are rated below; never reread the source.
 async fn run_snapshot(db: &sqlx::PgPool, session: Uuid, name: &str, args: &Value, force_sandbox: bool, owner_allowed: bool, copy: &RunCopy) -> Result<(String, bool, bool, i16)> {
     let dir = copy.dir(name);
@@ -633,6 +666,7 @@ async fn run_snapshot(db: &sqlx::PgPool, session: Uuid, name: &str, args: &Value
     let changed = approved && sha.as_deref() != Some(fingerprint(db, &dir).await?.as_str());
     let approved = approved && !changed && !force_sandbox;
     let keep = ["PATH", "HOME", "USER", "LANG", "LC_ALL", "TZ"];
+    let mut _filter: Option<std::fs::File> = None;
     let mut cmd = if approved {
         // `bash -c`, not a login shell: a profile could export secrets.
         let mut c = tokio::process::Command::new("bash");
@@ -640,19 +674,13 @@ async fn run_snapshot(db: &sqlx::PgPool, session: Uuid, name: &str, args: &Value
         c
     } else {
         // Read-only, no network, and the home folder replaced by an empty one, so the tool can't
-        // read the owner's keys or tokens; only its own folder is bound back.
+        // read the owner's keys or tokens; only its own folder is bound back. A network namespace
+        // doesn't isolate pathname Unix sockets (the Docker socket is root on this host), so
+        // `/run` is emptied and the same seccomp filter as the offline shell refuses connect and
+        // send on any socket.
         let home = std::env::var("HOME").unwrap_or_else(|_| "/home".into());
-        let mut c = tokio::process::Command::new("bwrap");
-        c.args(["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--unshare-net", "--unshare-pid", "--new-session", "--die-with-parent"])
-            .arg("--tmpfs")
-            .arg(&home)
-            .arg("--ro-bind")
-            .arg(&dir)
-            .arg(&dir)
-            .arg("--chdir")
-            .arg(&dir)
-            .args(["bash", "-c"])
-            .arg(&command);
+        let (c, filter) = sandboxed(&home, &dir, &command)?;
+        _filter = Some(filter);
         c
     };
     let mut child = cmd
@@ -760,6 +788,31 @@ pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An unapproved tool can't reach a host Unix socket (the Docker socket is root): `/run` is
+    /// emptied and connect is refused on any socket, here one inside the tool's own folder, the
+    /// one place the sandbox still shows.
+    #[tokio::test]
+    async fn unapproved_tools_cannot_reach_unix_sockets() {
+        if std::process::Command::new("bwrap").arg("--version").output().is_err() {
+            eprintln!("skipped: no bwrap");
+            return;
+        }
+        let dir = crate::test_util::TestDir::new("made-tool-socket");
+        let sock = dir.join("daemon.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let home = crate::test_util::TestDir::new("made-tool-home");
+        let probe = format!(
+            "python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); print(\"CONNECTED\")' {} 2>&1; ls /run",
+            sock.display()
+        );
+        let (mut c, _filter) = sandboxed(&home.display().to_string(), &dir, &probe).unwrap();
+        let out = c.output().await.unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(!text.contains("CONNECTED"), "{text}");
+        assert!(text.contains("Operation not permitted"), "{text}");
+        assert!(!text.contains("docker.sock"), "/run is emptied: {text}");
+    }
 
     #[test]
     fn names_and_overlap() {
