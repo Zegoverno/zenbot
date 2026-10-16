@@ -6,6 +6,16 @@
 
 ---
 
+## 2026-10-16 — System One source metadata and risk 2–3 admission (D-065 A–B)
+
+Metadata-only judgments are cached for 30 days by exact URL path, keeping public contributions
+separate from maintained code. Search misses are batched; a separate content check can only raise
+risk and unavailable checks fail closed. Owner allowlist grants remain separate from inferred
+reputation. Atomic, snapshot-bound proposal interfaces await the owner queue. Ratings through 3
+enter instructions with labels and writer dependencies; local work stays normal at 2–3.
+Re-rating authenticates exact stored web bytes and lowers stored rows only with explicit
+writer-only evidence; ambiguous historical provenance stays unchanged. Expand-only migration 0030.
+
 ## 2026-10-16 — Retained-byte provenance after file copies
 
 Aggregate retained file provenance per writer before upserting an edited version. Multiple paths

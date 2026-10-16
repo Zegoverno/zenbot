@@ -123,6 +123,7 @@ pub(crate) enum Cmd {
 #[derive(Subcommand)]
 pub(crate) enum SourcesCmd {
     List,
+    Rerate,
     Add {
         source: String,
         #[arg(long, default_value_t = 2)]

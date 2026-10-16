@@ -183,7 +183,11 @@ fn defuse(text: &str) -> String {
 /// recorded: then the caller must not hand the content to the model (an unmarked session could
 /// still change what steers every session); `withheld` says so.
 pub async fn taint(app: &App, session: Uuid, source: &str, about: &str) -> anyhow::Result<()> {
-    if !matches!(source, "web_fetch" | "web_search") { crate::sources::raise(&app.db, session, 4).await?; }
+    if matches!(source, "web_fetch" | "web_search") {
+        anyhow::ensure!(!stopped(&app.db, session).await?, "session stopped");
+        return Ok(()); // dispatch records the fetched bytes' numeric rating, not a blanket web mark.
+    }
+    crate::sources::raise(&app.db, session, 4).await?;
     let first = sqlx::query("UPDATE sessions SET risky_at = now() WHERE id = $1 AND risky_at IS NULL")
         .bind(session).execute(&app.db).await?.rows_affected() == 1;
     if first {
@@ -266,7 +270,7 @@ pub async fn mark_rating(app: &App, session: Uuid, risk: i16, source: &str, abou
     }
     crate::sources::raise(&app.db,session,risk).await?;
     anyhow::ensure!(!stopped(&app.db, session).await?, "content withheld: a source was stopped during the read");
-    if risk < 2 { return Ok(()); }
+    if risk < 4 { return Ok(()); }
     let first = sqlx::query("UPDATE sessions SET risky_at=now() WHERE id=$1 AND risky_at IS NULL")
         .bind(session).execute(&app.db).await?.rows_affected() == 1;
     if first {
@@ -312,7 +316,7 @@ pub async fn shell_sandbox(db: &sqlx::PgPool, session: Uuid) -> crate::tools::Sa
 /// Whether a session has read untrusted content. When it can't be told (a database error), it
 /// counts as tainted: the checks that use this fail closed.
 pub async fn tainted(db: &sqlx::PgPool, session: Uuid) -> bool {
-    sqlx::query_scalar::<_, bool>("SELECT risk>=2 OR zen_session_contaminated(id) FROM sessions WHERE id = $1")
+    sqlx::query_scalar::<_, bool>("SELECT risk>=4 OR zen_session_contaminated(id) FROM sessions WHERE id = $1")
         .bind(session).fetch_optional(db).await.map(|t| t.unwrap_or(true)).unwrap_or(true)
 }
 

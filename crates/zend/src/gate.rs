@@ -59,19 +59,20 @@ pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args:
          AND used_at IS NULL RETURNING id")
         .bind(session).bind(&action).fetch_optional(&app.db).await?;
     if grant.is_some() { return Ok(Policy::Granted); }
-    let p = if name == "call_tool" && args["name"].as_str().is_some_and(|n| n.starts_with("made_")) {
+    let p = if risk >= 4 && name == "call_tool" && args["name"].as_str().is_some_and(|n| n.starts_with("made_")) {
         let tool = args["name"].as_str().unwrap().trim_start_matches("made_");
         let approved: Option<bool> = sqlx::query_scalar("SELECT approved_at IS NOT NULL FROM made_tools WHERE name = $1")
             .bind(tool).fetch_optional(&app.db).await?;
         if approved == Some(false) { Policy::Sandbox } else { Policy::Hold("runs a made tool with host capabilities".into()) }
     } else if name == "web_fetch" {
         if fetch_allowed(&app.db, session, args["url"].as_str().unwrap_or("")).await? { Policy::Run } else { Policy::Hold(UNSEEN_URL.into()) }
-    } else if name == "bash" && risk < 4 {
-        grammar::local_shell(workspace,args["command"].as_str().unwrap_or(""))
+    } else if risk < 4 {
+        // Local work is normal at 2–3; task checks add the outward/persistent boundary.
+        Policy::Run
     } else { policy(workspace, name, args) };
-    let code_approval = name == "bash" && matches!(p,Policy::Sandbox)
+    let code_approval = risk >= 4 && (name == "bash" && matches!(p,Policy::Sandbox)
         || name == "verify" && args["criteria"].as_array().into_iter().flatten()
-            .filter_map(|c|c["run"].as_str()).any(|c|matches!(shell(workspace,c),Policy::Sandbox));
+            .filter_map(|c|c["run"].as_str()).any(|c|matches!(shell(workspace,c),Policy::Sandbox)));
     let reason = match &p {
         Policy::Hold(reason) => Some(reason.as_str()),
         _ if code_approval => Some("project code runs offline with a read-only workspace; exact approval grants broader capabilities"),

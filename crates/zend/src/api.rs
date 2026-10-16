@@ -425,6 +425,10 @@ pub(crate) async fn deny_session(State(app): State<AppState>, Path(id): Path<Uui
 }
 
 /// Source allowlist mutations are owner client actions, not model tools.
+pub(crate) async fn rerate_sources(State(app): State<AppState>) -> ApiResult<Json<Value>> {
+    Ok(Json(crate::sources::rerate(&app.db).await?))
+}
+
 pub(crate) async fn list_sources(State(app): State<AppState>) -> ApiResult<Json<Value>> {
     Ok(Json(crate::sources::list(&app.db).await?))
 }

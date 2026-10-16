@@ -1215,6 +1215,12 @@ action_gate() {
   db_psql -d postgres -c "CREATE DATABASE $native_db" >/dev/null
   check "native source, redirect eligibility and forged-provenance checks" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend source_database -- --ignored
   check "editing copied bytes preserves per-writer maximum provenance" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend copied_bytes_edit_database -- --ignored
+  check "source proposals bind cached snapshots and reject stale approvals" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend source_cache_proposals_database -- --ignored
+  local source_port=$((PORT + 13))
+  python3 "$REPO/scripts/e2e/systemone_stub.py" "$source_port" & local source_srv=$!
+  sleep 0.3
+  check "metadata scoring, public surfaces, poisoned text, unavailable and labelled 2–3 admission" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" ZEN_S1_URL="http://127.0.0.1:$source_port/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key cargo test --release -q -p zend source_system_one_database -- --ignored
+  kill "$source_srv"; wait "$source_srv" 2>/dev/null || true
   db_drop "$native_db"
   local ws; ws=$(new_workspace action-gate)
   local port=$((PORT + 12))

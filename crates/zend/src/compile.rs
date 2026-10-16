@@ -56,7 +56,7 @@ pub fn cut_middle(text: &str, cap: usize, path: &str) -> String {
 const PROMPT_FILES: [&str; 4] = [crate::layout::SOUL, crate::layout::IDENTITY, "AGENTS.md", "USER.md"];
 
 /// The instruction texts a prompt may include, each the exact snapshot that was rated (D-062):
-/// only text rated 0–1 is admitted, and the session depends on its writers. What was left out is
+/// only text rated 0–3 is admitted, and the session depends on its writers. What was left out is
 /// named, never shown.
 #[derive(Clone, Debug, Default)]
 pub struct Admitted {
@@ -64,7 +64,7 @@ pub struct Admitted {
     files: std::collections::HashMap<&'static str, String>,
     /// The workspace's instruction files, from `/` down (whole text; cut when shown).
     project: Vec<(std::path::PathBuf, String)>,
-    /// Files left out: rated 2 or more, or written by a session since denied.
+    /// Files left out: rated 4 or more, or written by a session since denied.
     withheld: Vec<String>,
 }
 
@@ -78,7 +78,7 @@ impl Admitted {
 }
 
 /// Rate the prompt files and the workspace's instruction files by their exact bytes and admit
-/// those rated 0–1 (bytes no session registered count as 1: the owner's own edits). Recorded
+/// those rated 0–3 (bytes no session registered count as 1: the owner's own edits). Recorded
 /// dependencies come first, so a later denial of a writer stops this session. A database error
 /// fails the whole prompt: nothing unrated gets in.
 pub async fn admitted(db: &PgPool, session: Uuid, workspace: &Path) -> Result<Admitted> {
@@ -87,15 +87,18 @@ pub async fn admitted(db: &PgPool, session: Uuid, workspace: &Path) -> Result<Ad
         let path = crate::zen_home().join(rel);
         let Ok(text) = std::fs::read_to_string(&path) else { continue };
         match context::admit(db, session, &text, 1).await? {
-            Some(_) => {
-                out.files.insert(rel, text);
+            Some(risk) => {
+                out.files.insert(rel, context::label(&format!("~/.zenbot/{rel}"), risk, &text));
             }
             None => out.withheld.push(format!("~/.zenbot/{rel}")),
         }
     }
     for (path, text) in context::always(workspace) {
         match context::admit(db, session, &text, 1).await? {
-            Some(_) => out.project.push((path, text)),
+            Some(risk) => {
+                let text = context::label(&path.display().to_string(), risk, &text);
+                out.project.push((path, text));
+            },
             None => out.withheld.push(path.display().to_string()),
         }
     }

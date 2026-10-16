@@ -187,6 +187,10 @@ async fn main() -> Result<()> {
     let mut migrator = sqlx::migrate!("./migrations");
     migrator.set_ignore_missing(true);
     migrator.run(&db).await?;
+    let rerate_db = db.clone();
+    tokio::spawn(async move {
+        if let Err(e) = sources::rerate_once(&rerate_db).await { tracing::warn!("source rerating: {e:#}"); }
+    });
     if tape::repair(&db).await? > 0 {
         tracing::warn!("numbered tape blocks an older build wrote");
     }
@@ -245,6 +249,7 @@ async fn main() -> Result<()> {
 
     let api = Router::new()
         .route("/sources", get(list_sources).post(change_source))
+        .route("/sources/rerate", axum::routing::post(rerate_sources))
         .route("/models", get(list_models))
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/board", get(board))

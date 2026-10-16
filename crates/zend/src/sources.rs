@@ -1,9 +1,17 @@
-//! D-062 source ratings, alongside (not replacing yet) legacy taint enforcement.
+//! D-065 metadata-only source scoring, conservative path cache and atomic owner proposals.
+//! Inferred reputation never grants egress; content checks only raise. Instruction limits start at 4.
 //! Only owner client routes mutate the allowlist. HTTPS exact hosts and segment-prefix paths;
 //! no ports/userinfo, ambiguous path encodings, implicit subdomains or content-based lowering.
 //! The final redirect target determines provenance. Owner URL adjustment sees ONLY the owner's
 //! actual message, URL and base rating. No page/snippet/title is ever sent to that classifier.
 //! Retained bytes aggregate provenance per writer, so copies cannot duplicate an upsert target.
+
+mod model;
+mod rerate;
+pub use model::{rated, rated_many, content_risk};
+#[allow(unused_imports)] // public owner queue interfaces
+pub use model::{proposals, decide_proposal};
+pub use rerate::{rerate, rerate_once};
 
 use anyhow::{bail, Result};
 use reqwest::Url;
@@ -55,6 +63,9 @@ pub async fn change(db: &PgPool, source: &str, risk: Option<i16>, note: &str) ->
     let source = key(source)?;
     if risk.is_some_and(|r| r != 2 && r != 3) || note.len() > 1000 { bail!("risk must be 2 or 3; note at most 1000 bytes"); }
     let mut tx = db.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,65))").bind(&source).execute(&mut *tx).await?;
+    sqlx::query("UPDATE source_ratings SET snapshot=$2,proposal=CASE WHEN proposal='rejected' THEN proposal END WHERE scope=$1")
+        .bind(&source).bind(Uuid::new_v4()).execute(&mut *tx).await?;
     if let Some(risk) = risk {
         sqlx::query("INSERT INTO sources (source,risk,note) VALUES ($1,$2,$3) ON CONFLICT (source) DO UPDATE SET risk=$2,note=$3,updated_at=now()")
             .bind(&source).bind(risk).bind(note).execute(&mut *tx).await?;
@@ -174,7 +185,14 @@ pub fn questions() -> Value {
 }
 
 pub async fn page(db: &PgPool, session: Uuid, requested: &str, final_url: &str, redirects_same_host: bool) -> Result<Rating> {
-    let base = base(db, final_url).await?;
+    let owner_rows = sqlx::query("SELECT e.payload FROM tape_events e JOIN sessions s ON s.id=e.session_id
+        WHERE e.session_id=$1 AND s.kind IS NULL AND e.origin='owner' AND e.kind='message' AND e.payload->>'role'='user'")
+        .bind(session).fetch_all(db).await?;
+    let owner_given = owner_rows.iter().any(|r| {
+        let p: Value = r.get("payload");
+        crate::gate::contains_whole_url(&zen_proto::text_of(&p["content"]), requested)
+    });
+    let base = rated(db, final_url, if owner_given {"owner_url"} else {"page_link"}).await?;
     let mut rating = Rating { risk: base, origin: format!("web_fetch:{final_url}") };
     let same_host = Url::parse(requested).ok().zip(Url::parse(final_url).ok())
         .is_some_and(|(a,b)| a.host_str() == b.host_str());

@@ -6,9 +6,9 @@
 //! - On demand: a project below the workspace (e.g. ~/zenbot) has its own AGENTS.md. The first
 //!   time a tool touches a path there, the kernel attaches that file to the tool's result and
 //!   records it in the session (tape kind `context`), so it isn't attached again (later turns see
-//!   it in the history). Only a trusted repository's file rated 0–1 by exact bytes is attached
+//!   it in the history). Only a trusted repository's file rated 0–3 by exact bytes is attached
 //!   as instructions: zenbot's checkout (ZEN_REPO) and ZEN_TRUSTED_REPOS. Other text is content,
-//!   rated at least 4 outside those repositories. Prompt assembly also admits only ratings 0–1.
+//!   rated at least 4 outside those repositories. Prompt assembly also admits only ratings 0–3 (with labels at 2–3).
 //!   Ratings precede truncation; writer dependencies precede handover. Contaminated bytes and
 //!   metadata errors are withheld (D-062).
 
@@ -150,7 +150,7 @@ fn worktree_root(path: &Path) -> Option<PathBuf> {
 /// The origin rating of instruction text (a prompt file, a project's AGENTS.md, a skill) by its
 /// exact bytes, and the writers whose rows decide it (the reader depends on those). Bytes no
 /// session registered get `unknown`: the owner's own edits and git checkouts land there, and a
-/// session rated 2 or more can't write them unregistered (file tools register before the effect,
+/// session rated 4 or more can't write them unregistered (file tools register before the effect,
 /// its shell runs read-only, D-063). Registered bytes take the maximum original rating, with
 /// contamination from any writer overlaid as 5. A second registration cannot launder an origin.
 /// Database errors are returned: the caller leaves the text out (fail closed).
@@ -171,21 +171,25 @@ pub async fn rate(db: &sqlx::PgPool, text: &str, unknown: i16) -> anyhow::Result
     Ok((risk, writers))
 }
 
-/// Admit instruction text to a prompt only when rated 0–1 (D-062): records the reader's
-/// dependency on its writers first, so a later denial of a writer reaches this session.
-/// None when it is left out (rated 2 or more, or contaminated).
+/// Visible attribution for admitted outside-derived instructions (D-065).
+pub fn label(source: &str, risk: i16, text: &str) -> String {
+    if risk < 2 { text.to_string() } else { format!("[source: {source}; risk: {risk}]\n{text}") }
+}
+
+/// Admit ratings through 3; record dependency and rating before handing over. Errors withhold.
 pub async fn admit(db: &sqlx::PgPool, reader: uuid::Uuid, text: &str, unknown: i16) -> anyhow::Result<Option<i16>> {
     let (risk, writers) = rate(db, text, unknown).await?;
-    if risk > 1 {
+    if risk > 3 {
         return Ok(None);
     }
     crate::sources::depend(db, reader, &writers).await?;
+    crate::sources::raise(db, reader, risk).await?;
     anyhow::ensure!(!crate::taint::stopped(db, reader).await?, "instructions withheld: a writer was stopped");
     Ok(Some(risk))
 }
 
 /// How an instruction file met below the workspace is attached: as instructions only when its
-/// repository is one the owner listed (`in_trusted_repo`) and its exact bytes are rated 0–1;
+/// repository is one the owner listed (`in_trusted_repo`) and its exact bytes are rated 0–3;
 /// otherwise as content at its rating, at least 4 outside a listed repository (anyone can write
 /// an AGENTS.md there). Returns (attached as instructions, rating), after recording the reader's
 /// dependency on the writers. Level 5 (a contaminated writer) is returned for the caller to stop
@@ -196,7 +200,8 @@ pub async fn attach_rating(db: &sqlx::PgPool, reader: uuid::Uuid, text: &str, in
         return Ok((false, 5));
     }
     crate::sources::depend(db, reader, &writers).await?;
-    let trusted = in_trusted_repo && risk <= 1;
+    crate::sources::raise(db, reader, risk).await?;
+    let trusted = in_trusted_repo && risk <= 3;
     Ok((trusted, if in_trusted_repo { risk } else { risk.max(4) }))
 }
 

@@ -6,6 +6,19 @@
 
 ---
 
+## D-065 — Metadata-only source judgments and labelled instruction admission
+
+**Date:** 2026-10-16 · **Status:** accepted (owner brief) · **Builds:** D-062 steps 4–5.
+A–B: System One sees host, path (no query), scope, depth and reach method, never page/title/snippet,
+when lowering. Code maps publisher/reputation answers to 2–4; unavailable stays 4 without caching.
+A separate content check only raises. Exact-path cache scopes conservatively separate code from
+public issues/comments, including within one organisation. Only owner allowlist entries authorize
+unseen egress. Source proposals retain immutable cached scope/risk snapshots; approval and audit
+are atomic and stale snapshots reject. Rejection suppresses later proposals.
+Instruction text through 3 is labelled by source/risk and records writer dependencies; limits begin
+at 4, while web egress still checks at 2. Historical provenance is never invented by re-rating.
+Task checks and the combined queue are the separately integrated C–D portion of the same brief.
+
 ## D-064 — Items rated by origin; deny and trust by cause; shells see contaminated files masked
 
 **Date:** 2026-10-16 · **Status:** accepted (owner) · **Builds:** D-062 step 3 · **Supersedes:**

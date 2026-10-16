@@ -80,6 +80,14 @@ class H(BaseHTTPRequestHandler):
                 assert "task" not in state["job"]
                 assert state["job"]["task_written_by_agent"].startswith('<untrusted source="agent"')
             answers = {}
+            source_batch = any(n == "writers" or n.endswith("_writers") for n in request["questions"])
+            if source_batch:
+                entries = [state] if "host" in state else list(state.values())
+                for entry in entries:
+                    assert set(entry) == {"host", "scope", "path", "path_depth", "reached"}
+                    assert "?" not in entry["path"]
+                if any(e["host"] == "unavailable.source.test" for e in entries):
+                    return self.reply(503, {"error": "unavailable fixture"})
             # The sleep's marker entries: lasting and about the owner, or lasting knowledge.
             memory = str(state.get("memory", ""))
             if "HOLD" in memory and RELEASE:
@@ -94,7 +102,21 @@ class H(BaseHTTPRequestHandler):
             marked = next((v for k, v in high.items() if k in memory), None)
             for name, question in request["questions"].items():
                 kind = question["type"]
-                if kind == "noul" and marked is not None:
+                if source_batch:
+                    entry = state if "host" in state else state[name.split("_", 1)[0]]
+                    field = name.rsplit("_", 1)[-1]
+                    if field == "platform":
+                        answers[name] = {"type": "noul", "noul": 1.0}
+                    else:
+                        known = entry["host"] == "reputable.source.test"
+                        choice = ("anyone" if "/issues" in entry["path"] else "organisation") if field == "writers" else "reputable"
+                        if not known:
+                            choice = "unknown"
+                        answers[name] = {"type": "choice", "choice": choice, "probabilities": {choice: 1.0}}
+                elif name == "injection":
+                    assert set(state) == {"untrusted_text"}
+                    answers[name] = {"type": "noul", "noul": 1.0 if "POISON" in state["untrusted_text"] else 0.0}
+                elif kind == "noul" and marked is not None:
                     answers[name] = {"type": "noul", "noul": 0.97 if name in marked else 0.05}
                 elif kind == "noul":
                     answers[name] = {"type": "noul", "noul": 0.82}

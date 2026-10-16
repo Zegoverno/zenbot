@@ -330,7 +330,9 @@ pub async fn instruction_index(db: &sqlx::PgPool, session: uuid::Uuid) -> anyhow
     let mut admitted = Vec::new();
     for skill in scan(&root()) {
         // Same exact-byte, maximum-origin admission as prompt files (context::admit).
-        if crate::context::admit(db, session, &skill.text, 1).await?.is_some() {
+        if let Some(risk) = crate::context::admit(db, session, &skill.text, 1).await? {
+            let mut skill = skill;
+            skill.description = crate::context::label(&format!("{}/{}",skill.domain,skill.name),risk,&skill.description);
             admitted.push(skill);
         }
     }

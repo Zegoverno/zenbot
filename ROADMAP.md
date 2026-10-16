@@ -34,10 +34,10 @@ Keep dogfooding zenbot on real work and let sessions, verdicts and what the owne
 sleep's promotions into `IDENTITY.md` and `USER.md`, skill drafts, tools, routes) drive what
 changes. Candidate follow-ups, each only when use calls for it:
 
-- **D-062 taint redesign:** steps 1–2 are built (grammar, source ratings and owner allowlist).
-  Next: stored-item ratings replace legacy marks, `/deny` and reversible taint after attack evals;
-  then task checks/budgets and the accept queue. Legacy action limits still apply at every risk;
-  D-063 tightens programmable commands to offline/read-only until exact owner approval.
+- **D-062 taint redesign:** source ratings, origin-rated stored items, reversible denial and
+  masked shells are built. D-065 A–B adds metadata scoring, owner proposals and labelled admission
+  through 3; its C–D integration supplies task checks and the combined queue before release.
+  Full offline/read-only limits begin at 4; budgets remain out of scope.
 - **Earlier action-gate plan (D-056), superseded in part by D-062:** a session that reads outside content becomes *risky*, not
   limited; its actions are checked before they run by fixed rules over parsed facts (run, run in
   the offline sandbox, or ask the owner, with a one-tap `/allow`); then System One reads only the

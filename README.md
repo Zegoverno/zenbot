@@ -41,6 +41,11 @@ Only you change trusted sources: `zen sources add docs.rs --note "Rust docs"`,
 `zen sources add x.com/paulg --risk 3`, `zen sources list`, `zen sources rm docs.rs`.
 Entries cover an exact HTTPS host or whole path segments, not subdomains; levels are 2 (default)
 or 3. Chat: `/sources add docs.rs 2 Rust docs`; Matrix uses `!sources`.
+System One caches metadata-only source judgments for 30 days, conservatively scoped to an exact
+URL path. These judgments cannot authorize unseen URL requests; only your entries can.
+Content checks can raise but never lower a rating. Levels 2–3 allow normal local work and labelled
+instructions; level 4 keeps the full gate and offline shell. `zen sources rerate` revisits stored
+authenticated web bytes; missing historical provenance stays conservative.
 Fetching an allowlisted target is permitted in a risky session, including model-built URLs:
 only add destinations you accept receiving those requests. Redirect destinations are checked too.
 Ratings are recorded now; legacy action restrictions remain until D-062 step 3.

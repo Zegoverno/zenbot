@@ -380,7 +380,7 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                 if let Err(e) = tape::append(&app.db, id, "context", &json!({ "path": path, "trusted": trusted, "risk": risk })).await {
                     tracing::error!("recording instruction file {} for {id}: {e:#}", path.display());
                 }
-                let text = context::capped(text);
+                let text = context::capped(context::label(&shown, risk, &text));
                 out.content.push_str(&if trusted { context::attachment(&path, &text) } else { context::untrusted_attachment(&path, &text) });
             }
             // A source can be denied while a read is in flight. Dependencies are recorded before

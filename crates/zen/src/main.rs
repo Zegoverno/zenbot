@@ -70,6 +70,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Sources { cmd } => {
             let value = match cmd {
                 SourcesCmd::List => c.get("/api/sources").await?,
+                SourcesCmd::Rerate => c.post("/api/sources/rerate", json!({})).await?,
                 SourcesCmd::Add { source, risk, note } => c.post("/api/sources", json!({"source":source,"risk":risk,"note":note})).await?,
                 SourcesCmd::Rm { source } => c.post("/api/sources", json!({"source":source,"remove":true})).await?,
             };
