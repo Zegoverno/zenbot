@@ -36,8 +36,10 @@ pub fn socket_path(session: Uuid) -> PathBuf {
 }
 
 static LISTENING: LazyLock<Mutex<HashSet<Uuid>>> = LazyLock::new(Default::default);
-/// Hosts each session reached, with their rating and when.
-static CONTACTED: LazyLock<Mutex<HashMap<Uuid, Vec<(String, i16, Instant)>>>> = LazyLock::new(Default::default);
+/// A host a session reached: its name, rating and when.
+type Contact = (String, i16, Instant);
+/// Hosts each session reached.
+static CONTACTED: LazyLock<Mutex<HashMap<Uuid, Vec<Contact>>>> = LazyLock::new(Default::default);
 
 /// Start the session's proxy socket if it isn't listening yet; returns its path.
 pub async fn ensure(db: &PgPool, session: Uuid) -> Result<PathBuf> {
