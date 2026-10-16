@@ -1,8 +1,17 @@
-//! D-062 source ratings, alongside (not replacing yet) legacy taint enforcement.
+//! D-065 metadata-only source scoring, conservative path cache and atomic owner proposals.
+//! Inferred reputation never grants egress; content checks only raise. Instruction limits start at 4.
 //! Only owner client routes mutate the allowlist. HTTPS exact hosts and segment-prefix paths;
 //! no ports/userinfo, ambiguous path encodings, implicit subdomains or content-based lowering.
 //! The final redirect target determines provenance. Owner URL adjustment sees ONLY the owner's
 //! actual message, URL and base rating. No page/snippet/title is ever sent to that classifier.
+//! Retained bytes aggregate provenance per writer, so copies cannot duplicate an upsert target.
+
+mod model;
+mod rerate;
+pub use model::{rated, rated_many, content_risk};
+#[allow(unused_imports)] // public owner queue interfaces
+pub use model::{proposals, decide_proposal};
+pub use rerate::{rerate, rerate_once};
 
 use anyhow::{bail, Result};
 use reqwest::Url;
@@ -54,6 +63,9 @@ pub async fn change(db: &PgPool, source: &str, risk: Option<i16>, note: &str) ->
     let source = key(source)?;
     if risk.is_some_and(|r| r != 2 && r != 3) || note.len() > 1000 { bail!("risk must be 2 or 3; note at most 1000 bytes"); }
     let mut tx = db.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,65))").bind(&source).execute(&mut *tx).await?;
+    sqlx::query("UPDATE source_ratings SET snapshot=$2,proposal=CASE WHEN proposal='rejected' THEN proposal END WHERE scope=$1")
+        .bind(&source).bind(Uuid::new_v4()).execute(&mut *tx).await?;
     if let Some(risk) = risk {
         sqlx::query("INSERT INTO sources (source,risk,note) VALUES ($1,$2,$3) ON CONFLICT (source) DO UPDATE SET risk=$2,note=$3,updated_at=now()")
             .bind(&source).bind(risk).bind(note).execute(&mut *tx).await?;
@@ -138,8 +150,8 @@ pub async fn record_bytes(db: &PgPool, session: Uuid, path: &std::path::Path, te
     let mut tx = db.begin().await?;
     if let Some(prior) = prior {
         sqlx::query("INSERT INTO item_ratings(path,sha256,session_id,risk)
-            SELECT $1,encode(sha256(convert_to($2,'UTF8')),'hex'),session_id,risk FROM item_ratings
-            WHERE sha256=encode(sha256(convert_to($3,'UTF8')),'hex')
+            SELECT $1,encode(sha256(convert_to($2,'UTF8')),'hex'),session_id,max(risk) FROM item_ratings
+            WHERE sha256=encode(sha256(convert_to($3,'UTF8')),'hex') GROUP BY session_id
             ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=GREATEST(item_ratings.risk,EXCLUDED.risk)")
             .bind(&path).bind(text).bind(prior).execute(&mut *tx).await?;
     }
@@ -173,7 +185,14 @@ pub fn questions() -> Value {
 }
 
 pub async fn page(db: &PgPool, session: Uuid, requested: &str, final_url: &str, redirects_same_host: bool) -> Result<Rating> {
-    let base = base(db, final_url).await?;
+    let owner_rows = sqlx::query("SELECT e.payload FROM tape_events e JOIN sessions s ON s.id=e.session_id
+        WHERE e.session_id=$1 AND s.kind IS NULL AND e.origin='owner' AND e.kind='message' AND e.payload->>'role'='user'")
+        .bind(session).fetch_all(db).await?;
+    let owner_given = owner_rows.iter().any(|r| {
+        let p: Value = r.get("payload");
+        crate::gate::contains_whole_url(&zen_proto::text_of(&p["content"]), requested)
+    });
+    let base = rated(db, final_url, if owner_given {"owner_url"} else {"page_link"}).await?;
     let mut rating = Rating { risk: base, origin: format!("web_fetch:{final_url}") };
     let same_host = Url::parse(requested).ok().zip(Url::parse(final_url).ok())
         .is_some_and(|(a,b)| a.host_str() == b.host_str());
@@ -285,6 +304,46 @@ Result about {echo}
         assert_eq!(r,4);
         // Final URL determines base, not the requested source.
         assert_eq!(page(&db,sid,"https://example.test/docs","https://evil.test/a",false).await.unwrap().risk,4);
+    }
+
+    /// A copied version has several rows for one writer. Retaining it in an edit must
+    /// aggregate those rows before the upsert, preserving the highest risk for each writer.
+    #[tokio::test]
+    #[ignore]
+    async fn copied_bytes_edit_database() {
+        let db = PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
+        sqlx::migrate!().run(&db).await.unwrap();
+        let writer = Uuid::new_v4();
+        let editor = Uuid::new_v4();
+        for session in [writer, editor] {
+            sqlx::query("INSERT INTO sessions(id,title,model,risk) VALUES($1,'copy regression','faux/smoke',1)")
+                .bind(session).execute(&db).await.unwrap();
+        }
+        let dir = crate::test_util::TestDir::new("copied-bytes");
+        let original = dir.join("original.md");
+        let copy = dir.join("copy.md");
+        let before = format!("original bytes {writer}");
+        let after = format!("{before} edited");
+        record_bytes(&db,writer,&original,&before,None).await.unwrap();
+        tokio::fs::write(&original,&before).await.unwrap();
+        record_bytes(&db,writer,&copy,&before,None).await.unwrap();
+        tokio::fs::copy(&original,&copy).await.unwrap();
+        // Distinct ratings for the same bytes/writer must not lose their maximum.
+        sqlx::query("UPDATE item_ratings SET risk=3 WHERE path=$1 AND session_id=$2")
+            .bind(copy.to_string_lossy().as_ref()).bind(writer).execute(&db).await.unwrap();
+        record_bytes(&db,editor,&original,&after,Some(&before)).await.unwrap();
+        tokio::fs::write(&original,&after).await.unwrap();
+        assert_eq!(file_rating(&db,&original,&after).await.unwrap(),3);
+        let rows = sqlx::query("SELECT session_id,risk FROM item_ratings WHERE path=$1 AND sha256=encode(sha256(convert_to($2,'UTF8')),'hex')")
+            .bind(original.to_string_lossy().as_ref()).bind(&after).fetch_all(&db).await.unwrap();
+        assert_eq!(rows.len(),2);
+        assert!(rows.iter().any(|r| r.get::<Uuid,_>("session_id")==writer && r.get::<i16,_>("risk")==3));
+        assert!(rows.iter().any(|r| r.get::<Uuid,_>("session_id")==editor && r.get::<i16,_>("risk")==3));
+        assert!(sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM session_inputs WHERE reader=$1 AND writer=$2)")
+            .bind(editor).bind(writer).fetch_one(&db).await.unwrap());
+        // Repeating the exact edit remains idempotent.
+        record_bytes(&db,editor,&original,&after,Some(&before)).await.unwrap();
+        assert_eq!(file_rating(&db,&original,&after).await.unwrap(),3);
     }
 
     /// SOURCE_TEST_DB_URL must name a throwaway database.

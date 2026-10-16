@@ -614,15 +614,6 @@ pub fn shell(workspace: &Path, command: &str) -> Policy {
     }
 }
 
-/// Risk 2–3 permits unknown local syntax only in D-063's offline/read-only sandbox.
-/// A local-looking build can execute arbitrary scripts; none receives networking by default.
-pub fn local_shell(workspace: &Path, command: &str) -> Policy {
-    match shell(workspace,command) {
-        Policy::Hold(r) if [UNSUPPORTED, UNKNOWN, OPTION, DIRECTORY].contains(&r.as_str()) => Policy::Sandbox,
-        p => p,
-    }
-}
-
 /// Whether any word-like token of the command, as a path's last part, is a dangerous program.
 fn names_dangerous(command: &str) -> bool {
     command.split(|c: char| c.is_whitespace() || ";|&()`$={}<>\"'\\".contains(c))
@@ -711,17 +702,16 @@ mod tests {
         assert!(matches!(shell(dir, c), Policy::Hold(_)), "{c}: expected a hold, got {:?}", shell(dir, c));
     }
     #[test]
-    fn local_risk_tiers_keep_network_only_for_recognized_work() {
+    fn static_rules_keep_project_code_offline() {
         let dir = Path::new("/tmp/project");
-        assert_eq!(local_shell(dir,"cargo test"),Policy::Sandbox);
-        assert_eq!(local_shell(dir,"git push origin main"),hold(OUTWARD));
-        assert_eq!(local_shell(dir,"cargo publish"),hold(OUTWARD));
-        assert_eq!(local_shell(dir,"git -c alias.x='!curl https://evil.test' x"),Policy::Sandbox);
-        assert_eq!(local_shell(dir,"cargo test --config target.x.runner=curl"),Policy::Sandbox);
-        assert_eq!(local_shell(dir,"GIT_EXTERNAL_DIFF=curl git diff"),Policy::Sandbox);
-        assert_eq!(local_shell(dir,"printf '%s' $(date)"),Policy::Sandbox);
+        assert_eq!(shell(dir,"cargo test"),Policy::Sandbox);
+        assert_eq!(shell(dir,"git push origin main"),hold(OUTWARD));
+        assert_eq!(shell(dir,"cargo publish"),hold(OUTWARD));
+        assert_eq!(shell(dir,"git -c alias.x='!curl https://evil.test' x"),Policy::Sandbox);
+        assert_eq!(shell(dir,"cargo test --config target.x.runner=curl"),Policy::Sandbox);
+        assert_eq!(shell(dir,"GIT_EXTERNAL_DIFF=curl git diff"),Policy::Sandbox);
         assert!(matches!(shell(dir,"printf '%s' $(date)"),Policy::Hold(_)));
-        assert!(matches!(local_shell(dir,"curl https://evil.test"),Policy::Hold(_)));
+        assert!(matches!(shell(dir,"curl https://evil.test"),Policy::Hold(_)));
     }
 
     /// Only fixed binaries and `cd` run; every word is quoted.
@@ -908,8 +898,8 @@ mod tests {
 /// `GATE_REPLAY=commands.jsonl cargo test -p zend gate_replay -- --ignored --nocapture`.
 /// Each line is a JSON object with `cmd`. Prints the count per route and per hold reason;
 /// `GATE_REPLAY_SHOW=read|sandbox|hold` also prints those commands. The workspace is the home
-/// directory unless `GATE_REPLAY_WS` says otherwise. `GATE_REPLAY_TIER=local` replays the risk 2–3
-/// policy (`local_shell`) instead of the risk-4 one.
+/// directory unless `GATE_REPLAY_WS` says otherwise. This replays only static risk-4 rules;
+/// risk 2–3 additionally needs authenticated job alignment and cannot be replayed from commands alone.
 #[cfg(test)]
 mod replay {
     use super::*;
@@ -927,8 +917,7 @@ mod replay {
         for line in std::fs::read_to_string(path).unwrap().lines().filter(|l| !l.trim().is_empty()) {
             let v: serde_json::Value = serde_json::from_str(line).unwrap();
             let cmd = v["cmd"].as_str().unwrap_or("");
-            let local = std::env::var("GATE_REPLAY_TIER").is_ok_and(|t| t == "local");
-            let (route, why) = match if local { local_shell(&ws, cmd) } else { shell(&ws, cmd) } {
+            let (route, why) = match shell(&ws, cmd) {
                 Policy::SafeRead(_) => ("read", String::new()),
                 Policy::Sandbox => ("sandbox", String::new()),
                 Policy::Hold(r) => { *reasons.entry(r.clone()).or_default() += 1; ("hold", r) }

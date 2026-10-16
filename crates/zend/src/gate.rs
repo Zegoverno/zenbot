@@ -1,9 +1,10 @@
-//! D-056: run / sandbox / hold before an action takes effect in a risky session.
-//! Only the owner grants an exact (workspace, tool, arguments) action, once. Unknown shell
-//! syntax is held, never interpreted by a classifier. Safe reads use fixed system binaries
-//! and a cleared environment; Git and build tools default to offline, read-only execution
-//! (D-063). Their exact action is offered for owner approval without tainting the session.
-//! No classifier receives outside content. The shell grammar (`grammar.rs`) allows read-only
+//! D-065: run / sandbox / hold before an effect at risk >=2. Safe fixed reads/local data
+//! writes skip alignment; other effects at 2–3 require follows against the authenticated job.
+//! Static secret, destructive and unseen-fetch guards remain independent. At 4, unknown shell
+//! syntax is held; Git/builds default to offline/read-only from risk 2; alignment only adds holds.
+//! Only the owner grants exact (workspace, tool, arguments) effects once. Rejection is terminal
+//! across queue and legacy allow. Holds do not contaminate; owner deny stops before any grant.
+//! No outside tool result defines the authenticated goal. The shell grammar (`grammar.rs`) allows read-only
 //! commands by program and flag, and re-emits them from the parsed words.
 //! A hold the gate makes only because it can't classify the action (unknown syntax, program or
 //! flag, or a URL the model built) doesn't revoke the session's shell; one that could do harm does.
@@ -55,23 +56,60 @@ pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args:
     let grant: Option<i64> = sqlx::query_scalar(
         "UPDATE action_gates SET used_at = now()
          WHERE id = (SELECT id FROM action_gates WHERE session_id = $1 AND action = $2
-            AND used_at IS NULL AND allowed_at > now() - interval '10 minutes' ORDER BY id DESC LIMIT 1)
+            AND used_at IS NULL AND (decision IS NULL OR decision='approved') AND allowed_at > now() - interval '10 minutes' ORDER BY id DESC LIMIT 1)
          AND used_at IS NULL RETURNING id")
         .bind(session).bind(&action).fetch_optional(&app.db).await?;
     if grant.is_some() { return Ok(Policy::Granted); }
-    let p = if name == "call_tool" && args["name"].as_str().is_some_and(|n| n.starts_with("made_")) {
+    let refused: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM action_gates WHERE session_id=$1 AND action=$2 AND decision IN ('rejected','denied'))")
+        .bind(session).bind(&action).fetch_one(&app.db).await?;
+    if refused { return Ok(Policy::Hold("the owner rejected this exact action; do not retry or requeue it".into())); }
+    let mut p = if name == "call_tool" && args["name"].as_str().is_some_and(|n| n.starts_with("made_")) {
         let tool = args["name"].as_str().unwrap().trim_start_matches("made_");
         let approved: Option<bool> = sqlx::query_scalar("SELECT approved_at IS NOT NULL FROM made_tools WHERE name = $1")
             .bind(tool).fetch_optional(&app.db).await?;
         if approved == Some(false) { Policy::Sandbox } else { Policy::Hold("runs a made tool with host capabilities".into()) }
     } else if name == "web_fetch" {
         if fetch_allowed(&app.db, session, args["url"].as_str().unwrap_or("")).await? { Policy::Run } else { Policy::Hold(UNSEEN_URL.into()) }
-    } else if name == "bash" && risk < 4 {
-        grammar::local_shell(workspace,args["command"].as_str().unwrap_or(""))
     } else { policy(workspace, name, args) };
-    let code_approval = name == "bash" && matches!(p,Policy::Sandbox)
+    if risk < 4 {
+        // Hard guards are independent of alignment. In particular System One cannot approve
+        // a model-made fetch URL, secret access, or a plainly destructive shell command.
+        let destructive = |command: &str| command.split(|c: char|
+            c.is_whitespace() || ";|&()`$={}<>\"'\\".contains(c))
+            .any(|w| matches!(w.rsplit('/').next().unwrap_or(w),
+                "rm" | "rmdir" | "shred" | "truncate" | "dd" | "kill" | "pkill" | "killall"));
+        let hard = match name {
+            "web_fetch" | "read" => matches!(p, Policy::Hold(_)),
+            "write" | "edit" => matches!(p,Policy::Hold(_)),
+            "remember" => args["action"] == "remove",
+            "bash" => !matches!(p,Policy::SafeRead(_)) && (matches!(&p,Policy::Hold(r) if r.contains(grammar::SECRET))
+                || destructive(args["command"].as_str().unwrap_or(""))),
+            "verify" => args["criteria"].as_array().into_iter().flatten().any(|c|
+                c["run"].as_str().is_some_and(|cmd| !matches!(shell(workspace,cmd),Policy::SafeRead(_))
+                    && (destructive(cmd) || matches!(shell(workspace,cmd),Policy::Hold(r) if r.contains(grammar::SECRET))))),
+            _ => false,
+        };
+        if hard {
+            if !matches!(p,Policy::Hold(_)) { p=Policy::Hold("static secret or destructive action guard".into()); }
+        } else if name == "bash" || name == "verify" || name == "call_tool" {
+            // Project-controlled code is a capability boundary, not a relevance judgment.
+            // Preserve the sandbox/hold even when the job explicitly asks for a build.
+        } else if !matches!(p,Policy::SafeRead(_)) {
+            // Safe local work is not held. Programmable commands are NOT safe: task::class
+            // routes every arbitrary-code execution through the alignment check below.
+            p=Policy::Run;
+        }
+    }
+    // At risk 4 hard rules go first; the task check can only add holds. Exact owner grants
+    // returned above bypass this once, but never bypass the contamination check.
+    if !matches!(p, Policy::Hold(_)) {
+        if let Some(reason) = crate::task::check(app,session,workspace,name,args).await? {
+            p=Policy::Hold(reason);
+        }
+    }
+    let code_approval = risk >= 2 && (name == "bash" && matches!(p,Policy::Sandbox)
         || name == "verify" && args["criteria"].as_array().into_iter().flatten()
-            .filter_map(|c|c["run"].as_str()).any(|c|matches!(shell(workspace,c),Policy::Sandbox));
+            .filter_map(|c|c["run"].as_str()).any(|c|matches!(shell(workspace,c),Policy::Sandbox)));
     let reason = match &p {
         Policy::Hold(reason) => Some(reason.as_str()),
         _ if code_approval => Some("project code runs offline with a read-only workspace; exact approval grants broader capabilities"),
@@ -157,9 +195,9 @@ fn steering(path: &Path) -> bool {
 
 pub fn held_note(reason: &str) -> String {
     if escalates(reason) {
-        format!("not run: {reason}. Held before taking effect; this does not taint the session. Only the owner can allow this exact action once: end the turn and ask them to use /allow (zen) or !allow (Matrix), then retry unchanged.")
+        format!("not run: {reason}. Held before taking effect; this does not taint the session. Only the owner can allow this exact action once: end the turn and ask them to review /queue (zen) or !queue (Matrix), or use /allow / !allow, then retry unchanged.")
     } else {
-        format!("not run: {reason}. Held before taking effect; the session keeps its shell. Reads run when written plainly: listed read-only programs (ls, cat, head, tail, wc, grep, find, sed -n 'M,Np', sort, uniq, cut, diff, du, stat, echo…), their usual flags, pipes, `;`, `&&`, `||`, `cd`, quotes, globs and redirects to /dev/null; no `$`, backticks, loops or other redirects. Otherwise the owner can allow this exact action once: end the turn and ask them to use /allow (zen) or !allow (Matrix), then retry unchanged.")
+        format!("not run: {reason}. Held before taking effect; the session keeps its shell. Reads run when written plainly: listed read-only programs (ls, cat, head, tail, wc, grep, find, sed -n 'M,Np', sort, uniq, cut, diff, du, stat, echo…), their usual flags, pipes, `;`, `&&`, `||`, `cd`, quotes, globs and redirects to /dev/null; no `$`, backticks, loops or other redirects. Otherwise the owner can allow this exact action once: end the turn and ask them to review /queue (zen) or !queue (Matrix), or use /allow / !allow, then retry unchanged.")
     }
 }
 
@@ -254,7 +292,7 @@ fn outside_text(payload: &Value, args: &Value) -> String {
 
 pub async fn waiting(app: &App, session: Uuid) -> Result<Vec<Value>> {
     let rows = sqlx::query("SELECT id, action, reason FROM action_gates WHERE session_id = $1
-      AND allowed_at IS NULL AND created_at > now() - interval '1 day' ORDER BY id DESC LIMIT 5")
+      AND decision IS NULL AND allowed_at IS NULL AND created_at > now() - interval '1 day' ORDER BY id DESC LIMIT 5")
       .bind(session).fetch_all(&app.db).await?;
     Ok(rows.iter().map(|r| json!({"id":r.get::<i64,_>("id"),
       "action":crate::secrets::mask(&r.get::<String,_>("action")), "reason":r.get::<String,_>("reason")})).collect())
@@ -265,8 +303,8 @@ pub async fn allow(app: &App, session: Uuid, id: i64) -> Result<bool> {
     // Match tape's lock ordering: session advisory lock before updating the session/audit.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 7))")
         .bind(session).execute(&mut *tx).await?;
-    let row = sqlx::query("UPDATE action_gates SET allowed_at = now() WHERE id = $1 AND session_id = $2
-      AND allowed_at IS NULL AND created_at > now() - interval '1 day' RETURNING reason")
+    let row = sqlx::query("UPDATE action_gates SET allowed_at = now(), decision='approved', resolved_at=now() WHERE id = $1 AND session_id = $2
+      AND decision IS NULL AND allowed_at IS NULL AND created_at > now() - interval '1 day' RETURNING reason")
       .bind(id).bind(session).fetch_optional(&mut *tx).await?;
     if row.is_none() { return Ok(false); }
     crate::tape::append_in(&mut tx, session, "allow", &json!({"by":"the owner","gate":id})).await?;

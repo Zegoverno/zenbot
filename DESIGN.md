@@ -179,10 +179,10 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
   entry with its source (`owner`, `verified`, `inferred`). Rendered into the instructions at a
   session's start (frozen for the session) and exported to `~/.zenbot/global/MEMORY.md`. Size
   `ZEN_MEMORY_CHARS` (4000); writes past twice that are refused and start a sleep at once. An entry
-  a tainted session saved (or replaced) is `inferred` and marked (`memories.tainted`, D-053): the
-  instructions and the export list only its id, and `search` returns it as untrusted content that
-  taints the reader. (Rendering it as untrusted content instead would taint every session from
-  then on, sandboxing their shells and locking the prompt files.)
+  at risk 4 or above, or from a contaminated writer, is withheld from instructions by text
+  (only its id is listed). Ratings 2–3 enter with a source/risk label and writer dependency, raising
+  the reader's numeric risk without marking it tainted (D-065). Numeric origin, not legacy boolean
+  marks, controls admission.
 - **Sleep** (`memory::sleep`, the kernel's `sleep` job nightly at 03:00 UTC, `zen memory
   sleep`): ranks entries (System One's "needed soon" when allowed, else recency; the owner's words
   and verified results a little higher), keeps what fits and archives the rest (out of the search
@@ -277,10 +277,26 @@ harness versions with the same model on isolated kernels and databases (`evals/R
   (`TAVILY_API_KEY`), else SearXNG
   (`ZEN_SEARXNG_URL`, the compose service on 127.0.0.1:8888), which also rescues one failed keyed
   call; results deduplicated, http(s) only, reranked by System One.
-- **Untrusted content** (D-034, D-053; `taint.rs`): web pages, untrusted MCP servers' output
+- **Source judgments** (D-065; `sources.rs`): metadata-only lowering, 30-day assessed publisher-scope cache
+  (public contributions cannot borrow maintained-code trust; uncertain scopes stay page-only), batched search misses; separate
+  raise-only content checks fail closed. Owner allowlist alone authorizes unseen egress.
+  Risk 2–3 permits safe local work and labelled instructions; project code remains sandboxed/held
+  from risk 2, independently of relevance. The full additional restrictions apply at 4. Snapshot-bound source proposals are owner-only and stale approvals reject.
+  Startup/manual rerating requires authenticated result bytes; historical unknown reasons stay.
+- **Job alignment and queue** (D-065; `task.rs`, `queue.rs`): at 2–3 persistent, outward and
+  arbitrary-code effects require a follows judgment; safe reads and local data writes skip it.
+  At 4 fixed rules decide first and alignment can only add holds. Goals come from authenticated
+  root-owner tape or an unchanged stored scheduled-job prompt; only plain assistant plans before
+  the first exposure are admitted. Tool results, compactions and late plans never define the goal.
+  Missing/malformed/unavailable judgments hold without contamination. Fixed secret, destructive
+  and unseen-fetch guards cannot be waived by alignment. The owner queue merges held actions and
+  snapshot-bound source proposals. Approve grants exact effects once with an idle kernel-origin
+  retry; reject is terminal across legacy allow and requeue; deny contaminates. Terminal picker
+  and encrypted verified-owner commands in private Matrix rooms share authenticated queue routes.
+- **Untrusted content** (D-034, D-053; `taint.rs`): at level 4, web pages, untrusted MCP servers' output
   and tool descriptions (D-052), instruction files from repositories the owner hasn't listed
   (`ZEN_TRUSTED_REPOS`, D-051) and a tainted subagent's answer are wrapped in `<untrusted …>`
-  (markers inside are defused) and the session is risky (`sessions.risky_at`, a `risky` block). `gate.rs` checks effects before they run: fixed read utilities use a credential-protected read-only view, Git/builds run offline with a read-only workspace (D-063), and outward, unknown or steering effects are held. A held effect sets `sessions.tainted_at` and a `taint` block before any effect. `/allow` inspects the latest held action; `/allow yes` grants the exact workspace/tool/arguments once within ten minutes. The grant and audit commit together and consumption is atomic. `/trust` clears both marks (D-056).
+  (markers inside are defused) and the session is risky (`sessions.risky_at`, a `risky` block). `gate.rs` checks effects before they run: fixed read utilities use a credential-protected read-only view, Git/builds run offline with a read-only workspace (D-063), and outward, unknown or steering effects are held. A held effect requests owner review without contaminating the session; only denial or level-5 content contaminates. `/allow` inspects the latest held action; `/allow yes` grants the exact workspace/tool/arguments once within ten minutes. The grant and audit commit together and consumption is atomic. `/trust` clears both marks (D-056).
   Taint is also a property of what a tainted session stores: memories (`memories.tainted`), job
   reports (`job_runs.tainted`), draft skills (`draft_taint`) and wiki entries (labelled `web`).
   Every path that gives stored content to a session goes through `taint::hand_over_rating`, which wraps

@@ -6,6 +6,33 @@
 
 ---
 
+## D-065 — Metadata source judgments, authenticated job checks and owner queue
+
+**Date:** 2026-10-16 · **Status:** accepted (owner brief) · **Builds:** D-062 steps 4–5.
+A–B: System One sees host, path (no query), scope, depth and reach method, never page/title/snippet,
+when lowering. Code maps publisher/reputation answers to 2–4; unavailable stays 4 without caching.
+A separate content check only raises and honors private-classification opt-out. Kernel-derived
+host/account/surface/page scopes are model-assessed; GitHub maintained-code prefixes cannot include
+public issues/comments. Page-only assessments never propose a broader owner prefix. Only owner allowlist entries authorize
+unseen egress. Source proposals retain immutable cached scope/risk snapshots; approval and audit
+are atomic and stale snapshots reject. Rejection suppresses later proposals.
+Instruction text through 3 is labelled by source/risk and records writer dependencies; limits begin
+at 4, while web egress still checks at 2. Historical provenance is never invented by re-rating.
+C–D: at 2–3 risky/persistent, outward and arbitrary-code actions require a follows judgment;
+at 4 this check only adds holds after fixed rules. Safe reads/local data writes skip the model.
+Authenticated root-owner tape and pre-first-exposure plain assistant plans define the job; scheduled
+jobs use their unchanged stored definition, never runtime prompts with old reports. Proposed actions
+are untrusted data. Unavailable/malformed answers hold; no hold itself contaminates. Static secret,
+destructive and unseen-egress guards remain independent of alignment. Owner grants bypass once.
+The combined owner-only queue merges held effects and immutable source proposals. Atomic terminal
+decisions approve once and resume an idle kernel-origin turn, reject without retry/requeue, or deny
+and contaminate. Legacy allow cannot resurrect rejection. Terminal and encrypted verified-owner
+Matrix commands use the same API; plaintext reactions never authorize. At risks 2–3 project code
+retains sandbox/hold boundaries regardless of relevance; exact grants alone broaden capabilities.
+Owner authority is uncut up to a cap, beyond which risky actions fail closed.
+Budgets remain outside this change; arbitrary-code checks are deliberately stricter
+than treating local-looking commands as safe, because project hooks may have outward effects.
+
 ## D-064 — Items rated by origin; deny and trust by cause; shells see contaminated files masked
 
 **Date:** 2026-10-16 · **Status:** accepted (owner) · **Builds:** D-062 step 3 · **Supersedes:**

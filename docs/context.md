@@ -26,8 +26,8 @@ the discount, so anything that changes must come after everything that doesn't.
 - **What the instructions hold** (`compile::system_prompt`, D-027), in this order: `~/.zenbot/agents/zenbot/SOUL.md`
   (who the agent is), `~/.zenbot/agents/zenbot/IDENTITY.md` (how it works, D-045), `~/.zenbot/AGENTS.md` (its environment; `{{workspace}}`, `{{home}}`,
   `{{zen_home}}` and `{{repo}}` filled in), `~/.zenbot/USER.md` (the owner), short-term memory as it
-  was at the session's start (entries `[m12] …`; an entry a session that read untrusted content
-  saved only by its id, D-053, so it neither steers the session as trusted nor taints it; plus a
+  was at the session's start (entries `[m12] …`; entries rated through 3 are admitted, 2–3
+  labelled by source/risk; 4–5 only by id, D-065; writer dependencies precede admission; plus a
   note on last night's sleep and what the nightly upkeep jobs found, when there was any, which never shows such an entry's text), the skills index (each skill's name and description, or only the domains when that's over
   `ZEN_SKILL_INDEX_CHARS`), the projects' instruction files, and last the tools' working directory.
   A scheduled job's session gets only the parts its `context` names (`compile::PARTS`; the soul is
@@ -39,8 +39,9 @@ the discount, so anything that changes must come after everything that doesn't.
 - **Loaded on demand, appended.** A skill (`load_skill`) arrives as a tool result, so the
   instructions never change mid-session; a memory saved with `remember` shows from the next session.
   Stored content a tainted session wrote (a memory, a draft skill, a wiki page with `web` entries, a
-  job's report) arrives as untrusted content and taints the session that reads it
-  (`taint::hand_over_rating`); a job run's `<last_report>` from such a run taints the run from its start.
+  job's report) keeps its numeric origin through `taint::hand_over_rating`; ratings 2–3
+  do not mark the reader tainted, 4 applies the full gate, 5 stops. A job run's `<last_report>`
+  preserves this rating from its start.
 - **Instructions are fixed for the session.** They are written once on the first turn (a `base`
   block on the tape), stored with the tools (`envelopes`), and reused unchanged, so editing an AGENTS.md takes effect in the next session. An instruction file found
   mid-session (a project below the workspace) arrives once, attached to the tool result that touched

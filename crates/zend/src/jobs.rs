@@ -291,7 +291,7 @@ pub async fn list(db: &PgPool) -> Result<Vec<Job>> {
 /// Recent runs, newest first: of one job, or of all.
 pub async fn runs(db: &PgPool, name: Option<&str>, limit: i64) -> Result<Vec<Value>> {
     let rows = sqlx::query(
-        "SELECT r.id, j.name, r.trigger, r.status, r.session_id, r.started_at, r.ended_at, r.output, r.error, (r.risk>=2 OR zen_session_contaminated(r.session_id)) AS tainted, (CASE WHEN zen_session_contaminated(r.session_id) THEN 5::smallint ELSE r.risk END) AS risk, r.posted_to, r.pending_to
+        "SELECT r.id, j.name, r.trigger, r.status, r.session_id, r.started_at, r.ended_at, r.output, r.error, (r.risk>=4 OR zen_session_contaminated(r.session_id)) AS tainted, (CASE WHEN zen_session_contaminated(r.session_id) THEN 5::smallint ELSE r.risk END) AS risk, r.posted_to, r.pending_to
          FROM job_runs r JOIN jobs j ON j.id = r.job_id
          WHERE ($1::text IS NULL OR (j.name = $1 AND j.removed_at IS NULL)) ORDER BY r.started_at DESC, r.id DESC LIMIT $2",
     )
@@ -891,9 +891,9 @@ fn spawn_run(app: &AppState, job: Job, run: i64) {
 /// stays in the jobs feed: posted into a session it would mark that session (D-053).
 async fn finish(db: &PgPool, job: &Job, run: i64, o: &Outcome) -> Result<Option<Uuid>> {
     archive_session(db, run).await?;
-    // By origin rating (D-062): rated 2 or more, or stopped (a source of it denied).
+    // By origin rating (D-065): rated 4 or more, or stopped (a source of it denied).
     let tainted: bool = sqlx::query_scalar(
-        "SELECT COALESCE((SELECT s.risk >= 2 OR s.tainted_at IS NOT NULL OR zen_session_contaminated(s.id) FROM job_runs r JOIN sessions s ON s.id = r.session_id WHERE r.id = $1), false)",
+        "SELECT COALESCE((SELECT s.risk >= 4 OR s.tainted_at IS NOT NULL OR zen_session_contaminated(s.id) FROM job_runs r JOIN sessions s ON s.id = r.session_id WHERE r.id = $1), false)",
     )
     .bind(run)
     .fetch_one(db)
@@ -982,7 +982,7 @@ async fn deliver_pending(app: &AppState) -> Result<()> {
             sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 7))").bind(s).execute(&mut *tx).await?;
         }
         let row = sqlx::query(
-            "SELECT r.output, r.session_id, (r.tainted OR r.risk>=2 OR zen_session_contaminated(r.session_id)) AS tainted, j.name FROM job_runs r JOIN jobs j ON j.id = r.job_id
+            "SELECT r.output, r.session_id, r.risk, (r.risk>=4 OR zen_session_contaminated(r.session_id)) AS tainted, j.name FROM job_runs r JOIN jobs j ON j.id = r.job_id
              WHERE r.id = $1 AND r.pending_to = $2 AND r.status = 'ok' FOR UPDATE OF r",
         )
         .bind(run)
@@ -1011,7 +1011,9 @@ async fn deliver_pending(app: &AppState) -> Result<()> {
             continue;
         }
         let job: String = row.get("name");
-        let report: String = row.get::<Option<String>, _>("output").unwrap_or_default();
+        let risk: i16 = row.get("risk");
+        let report = crate::context::label(&format!("job {job} run {run}"), risk, &row.get::<Option<String>, _>("output").unwrap_or_default());
+        sqlx::query("UPDATE sessions SET risk=GREATEST(risk,$2) WHERE id=$1").bind(target).bind(risk).execute(&mut *tx).await?;
         let message = json!({
             "role": "assistant",
             "content": [{ "type": "text", "text": format!("⏰ *{job}*\n\n{}", report.trim()) }],

@@ -720,7 +720,7 @@ async fn run(app: &App, session: Uuid, args: &Value) -> Result<String> {
     let ratings = rated_results(&app.db, session, &listed).await;
     // A stale or unverifiable index entry is never shown, even for an exact query.
     let (listed, ratings): (Vec<_>,Vec<_>) = listed.into_iter().zip(ratings).filter_map(|(f,r)|r.map(|r|(f,r))).unzip();
-    let (full, withheld): (Vec<_>, Vec<_>) = listed.iter().cloned().zip(ratings).partition(|((f, _), risk)| *risk < 2 || f.exact);
+    let (full, withheld): (Vec<_>, Vec<_>) = listed.iter().cloned().zip(ratings).partition(|((f, _), risk)| *risk < 4 || f.exact);
     let (open, shown): (Vec<_>, Vec<_>) = full.into_iter().partition(|(_, risk)| *risk >= 2);
     let max_risk = open.iter().map(|(_,risk)| *risk).max().unwrap_or(1);
     let shown: Vec<_> = shown.into_iter().map(|(r, _)| r).collect();
@@ -748,7 +748,7 @@ pub(crate) async fn rated_results(db: &PgPool, reader: Uuid, listed: &[(Found, O
                     match sqlx::query_as::<_, (i16, Option<Uuid>)>("SELECT CASE WHEN zen_session_contaminated(session_id) THEN 5::smallint ELSE risk END, session_id FROM memories WHERE id=$1 AND text=$2 AND $3=(tier || '-term memory (' || source || ')') AND tier!='archived'")
                         .bind(id).bind(&f.body).bind(&f.title).fetch_optional(db).await {
                         Ok(Some((risk, writer))) => {
-                            if (risk < 2 || f.exact) && crate::sources::depend(db, reader, &writer.into_iter().collect::<Vec<_>>()).await.is_err() {
+                            if (risk < 4 || f.exact) && crate::sources::depend(db, reader, &writer.into_iter().collect::<Vec<_>>()).await.is_err() {
                                 None
                             } else { Some(risk) }
                         }
@@ -765,7 +765,7 @@ pub(crate) async fn rated_results(db: &PgPool, reader: Uuid, listed: &[(Found, O
                             let risk = rows.iter().map(|r|r.get::<i16,_>("risk")).max().unwrap_or(4);
                             // A changed turn, or one whose dependency can't be recorded, isn't shown.
                             let shown = turn_text(&messages)==f.body
-                                && (!(risk<2 || f.exact) || crate::sources::depend(db,reader,&[session]).await.is_ok());
+                                && (!(risk<4 || f.exact) || crate::sources::depend(db,reader,&[session]).await.is_ok());
                             shown.then_some(risk)
                         },
                         Err(_) => None,
@@ -780,7 +780,7 @@ pub(crate) async fn rated_results(db: &PgPool, reader: Uuid, listed: &[(Found, O
                         if format!("{}\n{}",page.summary,page.entries.join("\n")) != f.body || page.title != f.title {None}
                         else {
                             match crate::sources::file_rating(db,&path,&text).await {
-                                Ok(risk) if (risk<2 || f.exact) && crate::sources::depend_file(db,reader,&text).await.is_err() => None,
+                                Ok(risk) if (risk<4 || f.exact) && crate::sources::depend_file(db,reader,&text).await.is_err() => None,
                                 Ok(risk) => Some(risk),
                                 Err(_) => None,
                             }

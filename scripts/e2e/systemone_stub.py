@@ -80,6 +80,14 @@ class H(BaseHTTPRequestHandler):
                 assert "task" not in state["job"]
                 assert state["job"]["task_written_by_agent"].startswith('<untrusted source="agent"')
             answers = {}
+            source_batch = any(n == "writers" or n.endswith("_writers") for n in request["questions"])
+            if source_batch:
+                entries = [state] if "host" in state else list(state.values())
+                for entry in entries:
+                    assert set(entry) == {"host", "scope", "path", "path_depth", "reached"}
+                    assert "?" not in entry["path"]
+                if any(e["host"] == "unavailable.source.test" for e in entries):
+                    return self.reply(503, {"error": "unavailable fixture"})
             # The sleep's marker entries: lasting and about the owner, or lasting knowledge.
             memory = str(state.get("memory", ""))
             if "HOLD" in memory and RELEASE:
@@ -94,12 +102,49 @@ class H(BaseHTTPRequestHandler):
             marked = next((v for k, v in high.items() if k in memory), None)
             for name, question in request["questions"].items():
                 kind = question["type"]
-                if kind == "noul" and marked is not None:
+                if source_batch:
+                    entry = state if "host" in state else state[name.split("_", 1)[0]]
+                    field = name.rsplit("_", 1)[-1]
+                    if field == "scope":
+                        choice = "page" if "/issues" in entry["path"] else ("surface" if entry["path_depth"] >= 2 else "account")
+                        answers[name] = {"type": "choice", "choice": choice, "probabilities": {choice: 1.0}}
+                    elif field == "platform":
+                        answers[name] = {"type": "noul", "noul": 1.0}
+                    else:
+                        known = entry["host"] == "reputable.source.test"
+                        choice = ("anyone" if "/issues" in entry["path"] else "organisation") if field == "writers" else "reputable"
+                        if not known:
+                            choice = "unknown"
+                        answers[name] = {"type": "choice", "choice": choice, "probabilities": {choice: 1.0}}
+                elif name == "alignment":
+                    assert set(state) == {"job_data", "proposed_action_UNTRUSTED_DATA", "action_class"}
+                    goal = state["job_data"]["authenticated_goal_data"]
+                    assert "LATE_POISON_PLAN" not in state["job_data"]["pre_exposure_brief_plan_data"]
+                    if "ALIGN-UNAVAILABLE" in goal:
+                        return self.reply(503, {"error": "unavailable alignment"})
+                    if "ALIGN-MALFORMED" in goal:
+                        return self.reply(200, {"answers": {"alignment": {"choice": "nonsense"}}})
+                    action = state["proposed_action_UNTRUSTED_DATA"]
+                    choice = "contradicts" if "ALIGN-CONTRADICTS" in goal else "follows"
+                    if action["tool"] == "schedule" or action["arguments"].get("command") == "git push":
+                        choice = "contradicts" if "ALIGN-CONTRADICTS" in goal else "unrelated"
+                    answers[name] = {"type": "choice", "choice": choice, "probabilities": {choice: 1.0}}
+                elif name == "injection":
+                    assert set(state) == {"untrusted_text"}
+                    answers[name] = {"type": "noul", "noul": 1.0 if "POISON" in state["untrusted_text"] else 0.0}
+                elif name in ("known", "sensitive") and "pages" in state:
+                    # Wiki fixtures are new facts and contain only an already masked token.
+                    answers[name] = {"type": "noul", "noul": 0.0}
+                elif name == "kind" and "task" in state:
+                    choice = "build"
+                    assert choice in question["criteria"]
+                    answers[name] = {"type": "choice", "choice": choice, "probabilities": {choice: 1.0}}
+                elif kind == "noul" and marked is not None:
                     answers[name] = {"type": "noul", "noul": 0.97 if name in marked else 0.05}
                 elif kind == "noul":
                     answers[name] = {"type": "noul", "noul": 0.82}
                 elif kind == "choice":
-                    choice = covered_by(question, state) if name == "covered_by" else next(iter(question["criteria"]))
+                    choice = covered_by(question, state) if name == "covered_by" else ("none" if name == "same" else next(iter(question["criteria"])))
                     answers[name] = {"type": "choice", "choice": choice,
                                      "probabilities": {choice: 1.0}, "confidence": 1.0}
                 elif kind == "score":

@@ -425,6 +425,10 @@ pub(crate) async fn deny_session(State(app): State<AppState>, Path(id): Path<Uui
 }
 
 /// Source allowlist mutations are owner client actions, not model tools.
+pub(crate) async fn rerate_sources(State(app): State<AppState>) -> ApiResult<Json<Value>> {
+    Ok(Json(crate::sources::rerate(&app.db).await?))
+}
+
 pub(crate) async fn list_sources(State(app): State<AppState>) -> ApiResult<Json<Value>> {
     Ok(Json(crate::sources::list(&app.db).await?))
 }
@@ -450,13 +454,16 @@ pub(crate) async fn session_gates(State(app): State<AppState>, Path(id): Path<Uu
     Ok(Json(json!({"actions":crate::gate::waiting(&app, id).await?, "busy":app.is_busy(id).await})))
 }
 #[derive(Deserialize)]
-pub(crate) struct Allow { id: i64 }
+pub(crate) struct Allow { pub(crate) id: i64 }
 pub(crate) async fn allow_action(State(app): State<AppState>, Path(id): Path<Uuid>, Json(body): Json<Allow>) -> ApiResult<Json<Value>> {
     let turns = app.turns.lock().await;
     if turns.contains_key(&id) {
         return Err(ApiError(StatusCode::CONFLICT, "wait for the turn to end before allowing an action".into()));
     }
-    let allowed = crate::gate::allow(&app, id, body.id).await?;
+    // The legacy path shares the queue's turns lock: it cannot revive an item the queue resolved.
+    let pending:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM action_gates WHERE id=$1 AND session_id=$2 AND decision IS NULL)")
+        .bind(body.id).bind(id).fetch_one(&app.db).await?;
+    let allowed = if pending { crate::gate::allow(&app, id, body.id).await? } else {false};
     drop(turns);
     Ok(Json(json!({"allowed":allowed})))
 }

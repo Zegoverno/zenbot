@@ -82,6 +82,10 @@ pub fn is_user_id(s: &str) -> bool {
 #[derive(Default, Serialize, Deserialize, Debug, PartialEq)]
 #[serde(default)]
 pub struct State {
+    /// Exact room/event → queue kind/id. Kept after decisions so reaction replays hit kernel CAS.
+    pub queue_messages: BTreeMap<String,String>,
+    /// Queue kind/id already posted (stable across restarts).
+    pub queue_posted: BTreeSet<String>,
     /// The room that's the owner's main zen chat.
     pub main_room: Option<String>,
     /// The room job reports go to.
@@ -186,6 +190,17 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn queue_mapping_is_durable_and_room_scoped() {
+        let mut s=State::default();
+        let mapkey=serde_json::to_string(&("!a:server","$queue")).unwrap();
+        s.queue_messages.insert(mapkey.clone(),"action/42".into());
+        s.queue_posted.insert("action/42".into());
+        let s:State=serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(s.queue_messages.get(&mapkey).map(String::as_str),Some("action/42"));
+        assert!(!s.queue_messages.contains_key(&serde_json::to_string(&("!b:server","$queue")).unwrap()));
+        assert!(s.queue_posted.contains("action/42"));
+    }
     #[test]
     fn user_ids() {
         assert!(is_user_id("@ze:beeper.com"));

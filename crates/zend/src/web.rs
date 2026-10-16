@@ -9,7 +9,8 @@
 //!   paged with `offset` from a 15-minute cache.
 //! - Web content is untrusted input: the kernel wraps every result in an `<untrusted>` envelope a
 //!   page can't fake (look-alike markers are defused first) and marks the session risky
-//!   (`sessions.risky_at`). D-062 source ratings are kernel metadata: final URL for fetch,
+//!   at level 4 (`sessions.risky_at`). D-065 metadata-only scoring and raise-only content checks
+//!   preserve normal work at 2–3. Source ratings are kernel metadata: final URL for fetch,
 //!   maximum result source for search. Owner-URL adjustment never sees page content.
 //! - Risky redirects must independently pass egress as well as SSRF checks on every hop.
 //!
@@ -403,10 +404,11 @@ async fn fetch(app: &App, session: Uuid, args: &Value) -> tools::ToolOutput {
     }
     // The page controls its title and URL: they go inside the envelope with the text.
     let content = untrusted("web_fetch", &page.final_url, &format!("{header}{window}"));
-    let rating = match crate::sources::page(&app.db, session, &url, &page.final_url, page.same_host).await {
+    let mut rating = match crate::sources::page(&app.db, session, &url, &page.final_url, page.same_host).await {
         Ok(r) => r,
         Err(e) => return err(format!("source rating unavailable: {e}")),
     };
+    rating.risk = crate::sources::content_risk(&format!("{header}{window}"), rating.risk).await;
     tools::ToolOutput { rating: Some(rating), content, is_error: page.status >= 400 }
 }
 
@@ -624,13 +626,12 @@ async fn search(app: &App, session: Uuid, args: &Value) -> tools::ToolOutput {
     };
     let reranked = if listed.iter().any(|(_, p)| p.is_some()) { ", ordered by relevance (System One)" } else { "" };
     let content = format!("{} results for \"{query}\" from {used}{reranked}:\n{}", listed.len(), untrusted("web_search", query, &render_hits(&listed)));
-    let mut risk = 1;
-    for (hit, _) in &listed {
-        match crate::sources::base(&app.db, &hit.url).await {
-            Ok(r) => risk = risk.max(r),
-            Err(e) => return err(format!("source rating unavailable: {e}")),
-        }
-    }
+    let urls: Vec<&str> = listed.iter().map(|(hit,_)|hit.url.as_str()).collect();
+    let mut risk = match crate::sources::rated_many(&app.db, &urls).await {
+        Ok(r) => r,
+        Err(e) => return err(format!("source rating unavailable: {e}")),
+    };
+    risk = crate::sources::content_risk(&render_hits(&listed), risk).await;
     tools::ToolOutput { rating: Some(crate::sources::Rating { risk, origin: "web_search".into() }), content, is_error: false }
 }
 

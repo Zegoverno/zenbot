@@ -18,6 +18,8 @@ use crate::{enc, Client};
 /// One owner command.
 #[derive(Debug, PartialEq)]
 pub enum OwnerCmd {
+    Queue,
+    QueueDecision { kind: String, id: i64, decision: String },
     Deny,
     Sources,
     SourceAdd { source: String, risk: i16, note: String },
@@ -62,6 +64,7 @@ impl Chat {
 
 /// How to use the commands, one line each, without the prefix (`/` or `!`) the client adds.
 pub const USAGE: &[(&str, &str)] = &[
+    ("queue [approve|reject|deny <action|source> <id>]", "held actions and source proposals"),
     ("sources [list|add <host/path> [2|3] [note…]|rm <host/path>]", "manage the owner source allowlist"),
     ("jobs", "every job, its schedule and state"),
     ("jobs run <name>", "run a job now (even a paused one)"),
@@ -90,6 +93,12 @@ pub fn parse(text: &str) -> Option<Result<OwnerCmd, String>> {
         _ => None,
     };
     let parsed = match first.as_str() {
+        "queue" => match &words[1..] {
+            [] => Ok(OwnerCmd::Queue),
+            [d, kind, id] if matches!(*d,"approve"|"reject"|"deny") && matches!(*kind,"action"|"source") && id.parse::<i64>().is_ok() =>
+                Ok(OwnerCmd::QueueDecision {kind:kind.to_string(),id:id.parse().unwrap_or(0),decision:d.to_string()}),
+            _ => usage("queue [approve|reject|deny <action|source> <id>]"),
+        },
         "jobs" => match (words.get(1).map(|w| w.to_ascii_lowercase()).as_deref(), &words[2.min(words.len())..]) {
             (None | Some("list"), []) => Ok(OwnerCmd::Jobs),
             (Some("run"), [n]) => Ok(OwnerCmd::Run(n.to_string())),
@@ -142,6 +151,14 @@ pub fn parse(text: &str) -> Option<Result<OwnerCmd, String>> {
 /// Markdown for the chat.
 pub async fn run(c: &Client, cmd: &OwnerCmd, session: Option<&str>, chat: &mut Chat) -> Result<String> {
     Ok(match cmd {
+        OwnerCmd::Queue => {
+            let v=c.get("/api/queue").await?;
+            let lines:Vec<String>=v.as_array().into_iter().flatten().map(|r| format!("{} #{} · {} · risk {}\n{}\n{}",r["kind"].as_str().unwrap_or(""),r["id"],r["title"].as_str().unwrap_or("source proposal"),r["risk"],r["summary"].as_str().unwrap_or(""),r["reason"].as_str().unwrap_or(""))).collect();
+            if lines.is_empty() {"Queue empty.".into()} else {format!("{}\n\n{}queue approve|reject|deny <action|source> <id>",lines.join("\n\n"),chat.prefix)}
+        }
+        OwnerCmd::QueueDecision {kind,id,decision} => {
+            c.post(&format!("/api/queue/{kind}/{id}"),json!({"decision":decision})).await?.to_string()
+        }
         OwnerCmd::Deny => {
             let Some(id) = session else { return Ok("No session here yet.".into()) };
             c.post(&format!("/api/sessions/{}/deny", enc(id)), json!({})).await?;
@@ -357,6 +374,10 @@ mod tests {
 
     #[test]
     fn parses_the_commands_and_leaves_anything_else_alone() {
+        assert_eq!(parse("queue"),Some(Ok(OwnerCmd::Queue)));
+        assert_eq!(parse("queue approve source 42"),Some(Ok(OwnerCmd::QueueDecision{kind:"source".into(),id:42,decision:"approve".into()})));
+        assert!(parse("queue approve action nope").unwrap().is_err());
+        assert!(parse("queue trust action 1").unwrap().is_err());
         assert_eq!(parse("jobs"), Some(Ok(OwnerCmd::Jobs)));
         assert_eq!(parse("JOBS list"), Some(Ok(OwnerCmd::Jobs)));
         assert_eq!(parse("jobs run daily-readings"), Some(Ok(OwnerCmd::Run("daily-readings".into()))));

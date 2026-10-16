@@ -265,10 +265,10 @@ pub async fn on_accept(app: &App, session: Uuid) {
             tracing::info!("not activating {}/{}: a session that read untrusted content wrote it (the owner accepts it with zen skills)", d.domain, d.name);
             continue;
         }
-        // By origin too (D-062): a draft whose files are rated 2 or more, or written by a session
+        // By origin too (D-062): a draft whose files are rated 4 or more, or written by a session
         // since stopped, is activated only by the owner's own accept. Unknown means no.
         match folder_rating(&app.db, &d.dir).await {
-            Ok((risk, _)) if risk <= 1 => {}
+            Ok((risk, _)) if risk <= 3 => {}
             other => {
                 tracing::info!("not activating {}/{}: its files are rated {:?} by origin (the owner accepts it with zen skills)", d.domain, d.name, other.map(|r| r.0).map_err(|e| e.to_string()));
                 continue;
@@ -626,7 +626,7 @@ async fn run_snapshot(db: &sqlx::PgPool, session: Uuid, name: &str, args: &Value
     anyhow::ensure!(!crate::taint::stopped(db, session).await?, "tool withheld: a writer was stopped");
     // The code's rating affects capabilities before execution, not just its returned output.
     let session_risk: i16 = sqlx::query_scalar("SELECT risk FROM sessions WHERE id=$1").bind(session).fetch_one(db).await?;
-    let force_sandbox = force_sandbox || (session_risk >= 2 && !owner_allowed);
+    let force_sandbox = force_sandbox || (session_risk >= 4 && !owner_allowed);
     let m: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("tool.json")).context("no such tool")?)?;
     let command = m["command"].as_str().context("the manifest has no command")?.to_string();
     let row = sqlx::query("SELECT approved_at IS NOT NULL AND rejected_at IS NULL AS ok, rejected_at IS NOT NULL AS rejected, approved_sha FROM made_tools WHERE name = $1")

@@ -3,7 +3,8 @@
 //! Matrix room is one zen session, and job reports go to a "zen jobs" room. It answers only the
 //! owner's Matrix ID (`MATRIX_OWNER`), only end-to-end encrypted messages from the owner's
 //! cross-signed devices, and only in encrypted rooms it shares with the owner alone (the rules
-//! are in trust.rs).
+//! are in trust.rs). Queue reactions require the same verified encrypted device authentication.
+//! Ordinary plaintext reactions cannot authorize; use encrypted !queue commands (docs/matrix.md).
 //!
 //!   zen-matrix login         sign in once: a device, cross-signing and key backup (prints where
 //!                            the recovery key was saved), then the rooms
@@ -40,6 +41,7 @@ use matrix_sdk::{
                 member::{MembershipState, OriginalSyncRoomMemberEvent, StrippedRoomMemberEvent},
                 message::{MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent},
             },
+            reaction::OriginalSyncReactionEvent,
             InitialStateEvent,
         },
         OwnedRoomId, OwnedUserId, RoomId, UserId,
@@ -380,6 +382,15 @@ async fn run() -> Result<()> {
     });
 
     let b = bridge.clone();
+    c.add_event_handler(move |ev: OriginalSyncReactionEvent, room: Room, enc: Option<EncryptionInfo>| {
+        let b=b.clone();
+        async move {
+            if let Err(e)=b.on_queue_reaction(ev,room,enc).await { log(format!("queue reaction: {e:#}")); }
+        }
+    });
+    let b=bridge.clone();
+    tokio::spawn(async move { b.report_queue().await });
+    let b = bridge.clone();
     tokio::spawn(async move { b.report_jobs().await });
 
     log(format!("zen-matrix running as {} for {}", bridge.bot, bridge.owner));
@@ -424,6 +435,54 @@ fn content(md: &str, notice: bool) -> RoomMessageEventContent {
 }
 
 impl Bridge {
+    async fn on_queue_reaction(&self,ev:OriginalSyncReactionEvent,room:Room,enc:Option<EncryptionInfo>) -> Result<()> {
+        if room.state()!=RoomState::Joined || ev.sender!=self.owner {return Ok(())}
+        let check=self.room_check(&room).await?;
+        // Plain reactions carry no authenticated device identity. Never authorize from them.
+        if check!=RoomCheck::Ok || !self.owner_identity_holds(&room).await? {return Ok(())}
+        if trust::message(self.owner.as_str(),self.bot.as_str(),ev.sender.as_str(),
+            &sealed(&ev.sender,enc.as_ref()),&check)!=trust::Verdict::Act {return Ok(())}
+        let decision=match ev.content.relates_to.key.as_str() {"✅"=>"approve","❌"=>"reject","🛑"=>"deny",_=>return Ok(())};
+        let mapkey=serde_json::to_string(&(room.room_id().as_str(),ev.content.relates_to.event_id.as_str()))?;
+        let key=self.state.lock().await.queue_messages.get(&mapkey).cloned();
+        if let Some(key)=key {
+            match self.kernel.queue_decide(&key,decision).await {
+                Ok(v)=>self.note(&room,&format!("Queue {key}: {v}")).await,
+                Err(e)=>self.note(&room,&format!("Queue {key}: {e} (already decided, stale or busy items cannot be approved again).")).await,
+            }
+        }
+        Ok(())
+    }
+    async fn report_queue(self:Arc<Self>) {
+        loop {
+            if let Err(e)=self.post_queue().await {log(format!("queue: {e:#}"))}
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
+    async fn post_queue(&self) -> Result<()> {
+        let rid={
+            let s=self.state.lock().await;
+            s.main_room.clone().or_else(||s.jobs_room.clone())
+        };
+        let Some(rid)=rid else {return Ok(())};
+        let rid=RoomId::parse(rid)?;
+        let Some(room)=self.client.get_room(&rid) else {return Ok(())};
+        if room.state()!=RoomState::Joined || self.room_check(&room).await?!=RoomCheck::Ok {return Ok(())}
+        for item in self.kernel.queue().await? {
+            let key=format!("{}/{}",item["kind"].as_str().unwrap_or(""),item["id"]);
+            if self.state.lock().await.queue_posted.contains(&key) {continue}
+            let command_key=key.replace('/'," ");
+            let md=format!("**Approval queue {key}** · {} · risk {}\n\n{}\n\nReason: {}\n\nSend encrypted !queue approve {command_key}, !queue reject {command_key}, or !queue deny {command_key} (actions only). Plain reactions cannot authorize.\n\n!queue lists pending items.",
+                item["title"].as_str().unwrap_or("source proposal"),item["risk"],item["summary"].as_str().unwrap_or(""),item["reason"].as_str().unwrap_or(""));
+            let sent=room.send(content(&md,true)).await?;
+            let mut s=self.state.lock().await;
+            s.queue_messages.insert(serde_json::to_string(&(room.room_id().as_str(),sent.response.event_id.as_str()))?,key.clone());
+            s.queue_posted.insert(key);
+            s.save(&self.cfg.dir)?;
+        }
+        Ok(())
+    }
+
     /// Whether a room is one the bot may act and post in (trust::check_room).
     async fn room_check(&self, room: &Room) -> Result<RoomCheck> {
         let encryption = match room.encryption_state() {
@@ -544,7 +603,7 @@ impl Bridge {
                 let msg = match s {
                     Some(id) => {
                         let limited = if self.kernel.tainted(&id).await.unwrap_or(false) {
-                            "\nAn action was held, so it runs limited: `!allow` reviews that action; `!trust` shows the session-wide override."
+                            "\nAn action was held, so it runs limited: `!queue` reviews held actions and proposals; `!trust` shows the session-wide override."
                         } else {
                             ""
                         };

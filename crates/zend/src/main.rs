@@ -14,6 +14,7 @@ mod dispatch;
 mod fsview;
 mod git;
 mod gate;
+mod queue;
 mod jobs;
 mod mcp;
 mod measure;
@@ -24,6 +25,7 @@ mod search;
 mod secrets;
 mod skills;
 mod tape;
+mod task;
 mod taint;
 #[cfg(test)]
 mod test_util;
@@ -187,6 +189,10 @@ async fn main() -> Result<()> {
     let mut migrator = sqlx::migrate!("./migrations");
     migrator.set_ignore_missing(true);
     migrator.run(&db).await?;
+    let rerate_db = db.clone();
+    tokio::spawn(async move {
+        if let Err(e) = sources::rerate_once(&rerate_db).await { tracing::warn!("source rerating: {e:#}"); }
+    });
     if tape::repair(&db).await? > 0 {
         tracing::warn!("numbered tape blocks an older build wrote");
     }
@@ -244,7 +250,10 @@ async fn main() -> Result<()> {
     tokio::spawn(jobs::run_loop(app.clone()));
 
     let api = Router::new()
+        .route("/queue", get(queue::list))
+        .route("/queue/{kind}/{id}", axum::routing::post(queue::decide))
         .route("/sources", get(list_sources).post(change_source))
+        .route("/sources/rerate", axum::routing::post(rerate_sources))
         .route("/models", get(list_models))
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/board", get(board))

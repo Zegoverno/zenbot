@@ -6,6 +6,52 @@
 
 ---
 
+## 2026-10-16 — D-065 security corrections (branch, not installed)
+
+Plain Matrix reactions no longer authorize; encrypted cross-signed owner commands remain available.
+Project-controlled execution retains sandbox/hold capabilities at risks 2–3, independent of relevance.
+Owner authority is never prefix-truncated: oversized goals fail closed. Private content scoring
+honors opt-out. Reusable assessed publisher scopes exclude GitHub public contributions and page-only
+ratings cannot propose broader prefixes. Validation below predates these corrections; focused results
+are in the commit. Fresh focused action-gate/source-task-queue e2e passes (0 failed checks);
+disposable source/cache/task/queue DB regressions and private-opt-out checks pass, as do the five
+Matrix authentication-policy tests. Matrix transport e2e was updated but not rerun after these fixes.
+The earlier mixed-revision full check failed five checks (two addressed by this focused rerun,
+three delegation/wiki checks outstanding and not rerun). No completed full rerun or installation claimed.
+
+## 2026-10-16 — Integrated D-065 source/task/queue validation (branch, not installed)
+
+Authenticated task checks now integrate with terminal queue decisions and source ratings. Safe
+reads/local data writes skip alignment; persistent/outward/arbitrary-code effects fail closed.
+Rejections cannot be revived through legacy allow or requeued. The e2e runner includes disposable
+queue/task DB regressions and source-to-task-to-queue turns with controlled classifier failures.
+Restore the level-4 web review marker alongside numeric provenance; Matrix validates actual queue
+notices and owner approve/reject/deny reactions, including exact-once effects and contamination.
+Validation results are recorded with the integration commit; no live install is claimed.
+
+## 2026-10-16 — Owner approval queue (D-065 D)
+
+Unified authenticated queue routes list held actions and exact source proposals. Atomic decisions
+grant once, refuse without retry, or explicitly deny/contaminate; idle continuations are kernel
+origin, not owner messages. Terminal picker/CLI and Matrix owner-only reactions share the routes.
+Matrix posts to existing private rooms and persists exact event mappings for replay safety.
+
+## 2026-10-16 — System One source metadata and risk 2–3 admission (D-065 A–B)
+
+Metadata-only judgments are cached for 30 days by exact URL path, keeping public contributions
+separate from maintained code. Search misses are batched; a separate content check can only raise
+risk and unavailable checks fail closed. Owner allowlist grants remain separate from inferred
+reputation. Atomic, snapshot-bound proposal interfaces await the owner queue. Ratings through 3
+enter instructions with labels and writer dependencies; local work stays normal at 2–3.
+Re-rating authenticates exact stored web bytes and lowers stored rows only with explicit
+writer-only evidence; ambiguous historical provenance stays unchanged. Expand-only migration 0030.
+
+## 2026-10-16 — Retained-byte provenance after file copies
+
+Aggregate retained file provenance per writer before upserting an edited version. Multiple paths
+with the same bytes no longer target one upsert row twice; maximum risk and writer dependencies
+are preserved. An isolated database regression covers copy, edit and repeated edit.
+
 ## 2026-10-16 — Origin ratings, deny/trust by cause, masked shells (D-062 step 3, D-064)
 
 Stored items (files by exact bytes, memories, reports, skills, made tools, project instructions)

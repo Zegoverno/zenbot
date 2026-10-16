@@ -1,4 +1,6 @@
 [
+  {"when":"QUEUE-HOLD","tool":"bash","args":{"command":"curl -s -o /dev/null KERNELURL/health; echo once >> queue-once.txt","timeout_secs":5}},
+  {"when":"The owner approved held action","tool":"bash","args":{"command":"curl -s -o /dev/null KERNELURL/health; echo once >> queue-once.txt","timeout_secs":5}},
   {"when":"GATE-VERIFY-GRANT","tool":"verify","args":{"goal":"exercise exact verification approval","criteria":[{"id":"writes","text":"append once","run":"git -c 'alias.zenprobe=!echo approved >> verify-grant.txt' zenprobe"}]}},
   {
     "when": "GATE-READ",
