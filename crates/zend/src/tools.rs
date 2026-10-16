@@ -938,15 +938,15 @@ mod tests {
         std::fs::write(root.join("AGENTS.md"),"owner instructions").unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let command = format!("if echo changed > AGENTS.md 2>/dev/null; then echo WRITE_OPEN; else echo WRITE_BLOCKED; fi; echo scratch > /tmp/zen-code-output; cat /tmp/zen-code-output; python3 -c 'import socket; s=socket.socket(); s.settimeout(1); print(\"NET_BLOCKED\" if s.connect_ex((\"127.0.0.1\", {port})) else \"NET_OPEN\")'; sudo -n true 2>/dev/null && echo ROOT; touch {}/x 2>/dev/null && echo ZEN_OPEN; echo end", crate::zen_home().display());
+        let command = format!("if echo changed > AGENTS.md 2>/dev/null; then echo WRITE_OPEN; else echo WRITE_BLOCKED; fi; echo scratch > /tmp/zen-code-output; cat /tmp/zen-code-output; python3 -c 'import socket; s=socket.socket(); s.settimeout(1); print(\"NET_BLOCKED\" if s.connect_ex((\"127.0.0.1\", {port})) else \"NET_OPEN\")'; sudo -n true 2>/dev/null && echo ROOT; touch {}/x 2>/dev/null && echo HOMEDIR_OPEN; echo end", crate::zen_home().display());
         let out = run_shell(&root,&command,&[],Sandbox::Contained { writable: false, net: false },&[],Duration::from_secs(10)).await.unwrap();
         assert!(out.text.contains("WRITE_BLOCKED") && out.text.contains("NET_BLOCKED") && out.text.contains("scratch"),"{}",out.text);
-        assert!(!out.text.contains("WRITE_OPEN") && !out.text.contains("NET_OPEN") && !out.text.contains("ROOT") && !out.text.contains("ZEN_OPEN"), "{}", out.text);
+        assert!(!out.text.contains("WRITE_OPEN") && !out.text.contains("NET_OPEN") && !out.text.contains("ROOT") && !out.text.contains("HOMEDIR_OPEN"), "{}", out.text);
         assert_eq!(std::fs::read_to_string(root.join("AGENTS.md")).unwrap(),"owner instructions");
         // A low-risk session's shell writes the workspace; the host's loopback stays unreachable
         // (the shell has its own network namespace; outside traffic goes through the proxy).
         let out = run_shell(&root,&command,&[],Sandbox::Contained { writable: true, net: true },&[],Duration::from_secs(10)).await.unwrap();
-        assert!(out.text.contains("WRITE_OPEN") && out.text.contains("NET_BLOCKED") && !out.text.contains("ROOT") && !out.text.contains("ZEN_OPEN"), "{}", out.text);
+        assert!(out.text.contains("WRITE_OPEN") && out.text.contains("NET_BLOCKED") && !out.text.contains("ROOT") && !out.text.contains("HOMEDIR_OPEN"), "{}", out.text);
         assert_eq!(std::fs::read_to_string(root.join("AGENTS.md")).unwrap(),"changed\n");
         // The host route (an approved `host: true` command) is the host.
         let out = run_shell(&root,"echo approved > AGENTS.md",&[],Sandbox::None,&[],Duration::from_secs(10)).await.unwrap();

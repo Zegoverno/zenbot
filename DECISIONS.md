@@ -6,6 +6,49 @@
 
 ---
 
+## D-067 — Security: context risk, action alignment, contained sessions
+
+**Date:** 2026-10-16 · **Status:** accepted (owner) · **Supersedes:** D-056's three-way shell grammar,
+D-063's offline sandbox as a policy (now the high-risk shell mode), D-062's "derived content takes the
+session max" and script-only source rating where replaced below, D-065's task class table (now
+effects in the gate) and the 2–3 classifier route
+
+**Decision:** At low risk the agent runs automatically; as risk rises actions are held; when it turns
+dangerous the session locks and asks the owner. Three inputs decide every effect through one S1
+decision file (`action_gate.toml`, the owner's to tune):
+- **Context risk** (low, medium, high): the highest rating of what the session actually read. The
+  owner's trust list (`~/.zenbot/trust.toml`: URLs, APIs, MCP servers, repos by git remote) first,
+  else System One's source rating, then a raise-only content scan. A local repository with no
+  remote is the owner's own (low); built-in package registries keep builds low. Products carry
+  their writer's level only from a high session; engine-written errors don't raise anything.
+- **Action risk** from facts: local (reads, workspace edits, every shell: contained), persistent
+  (memory, the wiki, skills, jobs, prompt files, the zen home), outward (a `host: true` command,
+  an unseen URL, an untrusted or approved tool), irreversible (secrets, destructive tools). After
+  high-risk content, file edits count as persistent (the workspace is read-only).
+- **Alignment**, only when the rules need it: System One reads the owner's authenticated goal and
+  the action, never tool output; without System One a clean session still runs outward actions.
+- Outcomes: run; hold (one queue item); lock (no outward or persistent effects, shell read-only and
+  offline, one queue item; approving it unlocks; `/trust` too). An unrelated or contradicting
+  action above local after outside content locks.
+- **Containment is the boundary:** every shell, verify command and unapproved made tool runs in one
+  bubblewrap sandbox (secrets and the zen home's config hidden or read-only, no sudo, no host
+  sockets), its network only through the kernel's egress proxy (`zend bridge` inside, S1's
+  `egress` decision per host, recorded). Acting as the owner needs credentials that exist only
+  outside the sandbox, so it is always a gated `host: true` command.
+
+**Why:** Classifiers get bypassed (60–80% reported against Claude Code's auto mode), so the OS
+contains and the classifier decides friction (sandbox-runtime, Codex). Task Shield and MELON: judge
+whether an action serves the owner's goal, with a judge the content can't talk to. The previous
+model rated nearly every session 4 (legacy marks, clones of zenbot, engine errors, inherited
+products) and still had root paths (shell-fetched content unrated, made tools reaching Docker,
+classifier-only host shells at 2–3). Replay over 14 days: 97% of low-risk actions run with no model
+call and none are held by rule.
+
+**Considered:** a separate Unix user (later hardening: the sandbox already removes sudo, Docker and
+the token); narrowing writes to the session's project at medium (the kernel can't know the project);
+sandboxing MCP stdio servers in this change (follow-up); keeping the shell grammar (unnecessary for
+safety once every shell is contained).
+
 ## D-066 — S1: every System One decision is a file, decided by its costs, recorded and learned from
 
 **Date:** 2026-10-16 · **Status:** accepted (owner) · **Supersedes:** D-038's System One kind

@@ -63,7 +63,7 @@ zen -e xhigh     # thinking level (default: the model's; `zen models` lists them
 zen --inline     # no full screen: the conversation goes to terminal scrollback, like Claude Code (or ZEN_INLINE=1)
 ```
 
-Inside: `/new`, `/resume`, `/board`, `/model`, `/effort`, `/done`, `/rename <title>`, `/files`, `/open [file]`, `/close`, `/mouse` (wheel scrolling off, so the terminal can select text), `/archive`, `/jobs`, `/skills`, `/tools` (see below), `/trust` (see Web), `/allow` and `/deny` (see Actions after outside reads), `/upgrade`, `/restart`, `/help`, `/exit`. After each turn zenbot names the session (until you `/rename` it) and may suggest your next prompt in grey in the input: Tab takes it, then Enter sends it or you edit it first; typing your own replaces it (`zen suggestions` shows what became of them). Enter sends; Shift+Enter (or Alt+Enter, Ctrl+J) starts a new line; Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
+Inside: `/new`, `/resume`, `/board`, `/model`, `/effort`, `/done`, `/rename <title>`, `/files`, `/open [file]`, `/close`, `/mouse` (wheel scrolling off, so the terminal can select text), `/archive`, `/jobs`, `/skills`, `/tools` (see below), `/trust` (see Web), `/allow` and `/deny` (see Safety), `/upgrade`, `/restart`, `/help`, `/exit`. After each turn zenbot names the session (until you `/rename` it) and may suggest your next prompt in grey in the input: Tab takes it, then Enter sends it or you edit it first; typing your own replaces it (`zen suggestions` shows what became of them). Enter sends; Shift+Enter (or Alt+Enter, Ctrl+J) starts a new line; Esc interrupts zenbot, ↑↓ recall prompts, Ctrl-D exits.
 
 `/done` records your verdict on the work so far: *accept* (done and good), *more* (same goal, keep working), *reshape* (the framing was wrong) or *drop*. Verdicts are the ground truth zenbot is measured and tuned by.
 
@@ -86,6 +86,7 @@ zen skills accept|reject <domain/name> <fingerprint>
 zen tools accept|reject <name> <fingerprint>
 zen policy                                        # which model gets delegated work, and the evidence
 zen policy set <kind> <model> [--candidates a,b] | undo
+zen trust [add <url|api|mcp|repo> <match> --level trusted|known|partly-open|blocked | rm …]   # what keeps a session low
 zen s1                                            # System One: each decision's calls, outcomes, latency, cost
 zen s1 check | models                             # check your decision files (line and column); approved models
 zen s1 replay <decision> [--file edited.toml]     # what an edited decision would have decided on recorded answers
@@ -120,32 +121,24 @@ How each of these works is in [DESIGN.md](DESIGN.md) ("As built"); here is what 
   ```
   Per server: `enabled`, `timeout_s`, `include` / `exclude` (tool names), `allow_env`, `untrusted` (default true: its output is untrusted and taints the session; set `"untrusted": false` for a server you trust). Only you edit `mcp.json`. `curl -H "Authorization: Bearer $(cat ~/.zenbot/token)" localhost:8100/api/mcp` shows what loaded.
 
-### Actions after outside reads
+### Safety: let it run at low risk, stop when it's dangerous
 
-Outside content makes a session **risky**, not contaminated. Safe local work remains available;
-from level 2 project code stays offline/read-only or held unless you grant the exact action. Persistent, outward and arbitrary-code effects need a
-System One judgment against your authenticated job and the pre-exposure brief/plan; safe reads
-and local data writes skip it. Off-job, contradictory or unavailable judgments hold before effect.
-Reputation never authorizes unseen fetch destinations. A hold asks you; explicit denial contaminates.
+Every shell runs contained: your secrets, the zen home's config, sudo, Docker and local services are
+out of reach, and the network goes through zenbot's proxy (so builds and downloads work). Each
+session has a context risk, the highest of what it read: **low** (your words, your repos, sources on
+your trust list), **medium** (reputable sources System One rated), **high** (the open web, unknown).
+Before an action with effect, zenbot weighs that, what the action does and, when needed, whether
+System One reads it as following your job:
 
-`zen queue` opens the review picker (or prints JSON with `--json`); `/queue` opens it inside zen.
-Select with ↑↓, Enter inspects, **a** approves, **r** rejects, **d** denies. Scriptable:
-`zen queue approve|reject|deny action|source <id>`. Approval resumes an idle session with a kernel
-prompt to retry the exact action unchanged, once; rejection tells it not to retry; denial stops
-and contaminates the session. Busy sessions must finish first. Source approvals are pinned to
-the proposal's exact current cached rating; expired/superseded/replayed approvals fail.
-Matrix posts in the existing main room (jobs fallback). Use encrypted `!queue approve|reject|deny
-action|source <id>` from a cross-signed device; `!queue` lists. Plain reactions cannot authorize,
-so ordinary-client one-tap approval is unavailable. No extra room is created.
+- low risk: everything runs, including pushes and PRs that follow the job (`host: true` commands);
+- medium: local work and on-job memory run; pushes and new hosts wait unless trusted and on-job;
+- high: local work runs read-only; memory, edits and outward actions wait for you;
+- an action that doesn't follow your job after outside content **locks** the session (local work
+  only, offline) until you look.
 
-`/allow` shows the latest held action or sandboxed project-code attempt; `/allow yes` grants that exact workspace, tool and arguments
-once for ten minutes. In Matrix use `!allow` and `!allow yes`. This does not trust the whole
-session. Review scripts/configuration the action will execute too: approval binds arguments,
-not every referenced file's contents. `/trust` remains the broader session override.
-
-`/deny` (Matrix: `!deny`) stops a session you don't trust and marks what it produced: every session
-that read it stops too, and shells no longer see the files it wrote (they read as "Permission
-denied"; unrelated work goes on). `/trust` on it lifts exactly that.
+What waits is one item in `/queue` (zen), `!queue` (Matrix) or `zen queue`. `zen trust add url docs.rs`
+(or `repo github.com/you/*`, `mcp calendar`) keeps those sources low; `/deny` stops a session and
+everything that read its output; `/trust` lifts its marks.
 
 ## Settings you might set
 

@@ -361,14 +361,17 @@ All tool output is masked before reaching the model or tape, and tool arguments 
 private password (`~/.zenbot/db-password`, set by `db_secure` in `scripts/db.sh` at install and on
 upgrade; the bootstrap `zen` in `deploy/compose.yaml` is only for the first start, CI and throwaway
 setups), so other processes on the VM can't use Postgres without reading the owner's files.
-**This is not a security boundary against the agent:** a clean session's commands still
-run as the owner's Unix user and can read and write the owner's files, including `~/.zenbot/token`,
-`~/.zenbot/db-password` and the files `edit`/`write` protect. On the standard install that user
-also has passwordless `sudo` (`install.sh`, `scripts/upgrade.sh` and the service's unit need it)
-and can run Docker, so **an untainted session's shell is effectively root on the VM**. Strong
-isolation needs a separate uid, narrowed `sudo` and an owner credential unavailable to it (planned,
-ROADMAP.md "Technical debt"). Outward-facing actions, scheduled jobs' included, are covered by the
-system prompt ("ask before"), not enforced.
+**Every session's shell is contained (D-067):** bubblewrap with the machine read-only, the
+workspace writable unless the session's context is high or it's locked, the zen home read-only with
+its secrets hidden, private `/tmp` and `/run` (no Docker or other host sockets), its own processes
+and `no_new_privs` (sudo and setuid fail), and its network only through the kernel's per-session
+egress proxy (`zend bridge` inside; each new host decided by S1's `egress`, recorded). Acting as
+the owner (push, gh, ssh, docker, systemctl) needs `host: true`, which the action gate checks: S1's
+`action_gate` over the context risk (the trust list, S1 source ratings, the content scan), the
+action's effect and, when needed, alignment with the owner's job, giving run, hold or lock. A host
+command that runs, and `zend` itself, still run as the owner's Unix user, who has passwordless
+`sudo` and Docker on the standard install; a separate uid is later hardening (ROADMAP.md). MCP stdio
+servers run outside the sandbox (follow-up).
 
 ### Deployment
 
