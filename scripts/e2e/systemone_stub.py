@@ -132,6 +132,13 @@ class H(BaseHTTPRequestHandler):
                 elif name == "injection":
                     assert set(state) == {"untrusted_text"}
                     answers[name] = {"type": "noul", "noul": 1.0 if "POISON" in state["untrusted_text"] else 0.0}
+                elif name in ("known", "sensitive") and "pages" in state:
+                    # Wiki fixtures are new facts and contain only an already masked token.
+                    answers[name] = {"type": "noul", "noul": 0.0}
+                elif name == "kind" and "task" in state:
+                    choice = "build"
+                    assert choice in question["criteria"]
+                    answers[name] = {"type": "choice", "choice": choice, "probabilities": {choice: 1.0}}
                 elif kind == "noul" and marked is not None:
                     answers[name] = {"type": "noul", "noul": 0.97 if name in marked else 0.05}
                 elif kind == "noul":

@@ -489,7 +489,7 @@ delegation() {
   check "children inherit risk independently of legacy marks" eq "$(q "SELECT min(risk) || '/' || max(risk) FROM sessions WHERE parent='$sid'")" 3/3
   check "two delegations" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" delegate:false,delegate:false
   local res; res=$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='delegate'")
-  check "named model, then the policy's" bash -c 'grep -q "on faux/smoke (asked, asked)" <<<"$1" && grep -q "(unknown, policy)" <<<"$1"' _ "$res"
+  check "named model, then the policy's" bash -c 'grep -q "on faux/smoke (asked, asked)" <<<"$1" && grep -q "(build, policy)" <<<"$1"' _ "$res"
   check "the subagents' answers come back" eq "$(grep -c '^Done\.$' <<<"${res//|/$'\n'}")" 2
   check "the subagents ran their task" eq "$(q "SELECT count(*) FROM sessions WHERE parent='$sid' AND kind='subagent'")" 2
   local child; child=$(q "SELECT id FROM sessions WHERE parent='$sid' AND kind='subagent' LIMIT 1")
