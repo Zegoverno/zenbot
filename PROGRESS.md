@@ -6,6 +6,21 @@
 
 ---
 
+## 2026-10-16 — S1: System One as one engine of decision files (D-066)
+
+Every System One call now goes through `crates/zend/src/s1/`: thirteen decision files
+(`crates/zend/s1/*.toml`; the owner's `~/.zenbot/s1/` overrides) with typed questions, a policy by
+costs or rules, approved models (`~/.zenbot/s1/models.toml`, else `ZEN_S1_MODEL`), timeouts, a
+circuit breaker, masked states and one ledger. Behaviour is unchanged: today's thresholds became
+costs and rules, checked by each file's test cases. New: `zen s1` (numbers per decision), `zen s1
+check` (line and column), `models`, `replay`, `compare`, `proposals`/`approve`/`reject`; the
+brain's `judge` tool replaces `decide`; the owner's queue answers and job choices label
+decisions, and the nightly sleep fits calibration curves and proposes changes. Removed: session
+scoring and the subagent kind classifier (`score.rs`), `ZEN_DECIDE_TOOL`, `ZEN_SCORE_IDLE_SECS`;
+`ZEN_JOB_BAR` is deprecated. Tests: unit (spec, checker, rules, policy math, breaker, masking,
+calibration), every default file through the checker and its tests, e2e `system-one` (judge,
+ledger, a broken owner file, System One down) and the existing scenarios unchanged.
+
 ## 2026-10-16 — D-065 security corrections (branch, not installed)
 
 Plain Matrix reactions no longer authorize; encrypted cross-signed owner commands remain available.
@@ -240,74 +255,4 @@ never reach the agent: text it read can't approve anything. Removing and creatin
 the terminal. Tested: parsing and formatting unit tests, a TUI test that a command is never sent as
 a prompt, zen-matrix's parse tests.
 
-## 2026-10-11 — Docs trimmed: each fact in one place
-
-The docs repeated the same facts across files (the upgrade flow in six, the tool list, jobs and
-taint rules in several), so every change had to touch many of them. Now each fact lives in one
-file and the others link to it; no fact was dropped.
-
-- The upgrade and engine-update flow: only DEVELOPMENT.md; AGENTS, MAP, INSTALL and DESIGN link.
-  DEVELOPMENT.md drops what AGENTS.md owns (git flow, hard rules, secret files) and what
-  DESIGN.md and evals/README.md own (jobs, sleep, wiki, workshop, evals), keeping the commands.
-- MAP.md: no per-file line counts; the Tests section lists e2e scenario names, and what each
-  checks is the comment above its function in `scripts/e2e.sh` (all 29 have one now).
-- ROADMAP.md: finished phases 0–6 are one table row each with where they're recorded; every debt
-  item was checked against the code and is still open.
-- SPEC.md: the "Moved to" stubs are gone; as-built details link to DESIGN.md.
-- README.md: install, use, settings people set, and links.
-- DESIGN.md: the tool list links to MAP.md (check-docs.py now checks tools there only); "Security
-  today" links to "Untrusted content".
-- Stale statements fixed: routes and skills are tended by their own nightly jobs, not the sleep;
-  `verify`'s commands run in the session's sandbox; bubblewrap also runs tainted shells; 29 e2e
-  scenarios, not 27; decisions run to D-053.
-- Lines (before → after): AGENTS 140 → 139, DESIGN 533 → 523, DEVELOPMENT 466 → 437, INSTALL
-  66 → 58, MAP 681 → 596, README 135 → 115, ROADMAP 204 → 131, SPEC 262 → 239, evals/README
-  101 → 102; the current docs 3,238 → 2,990 lines (MAP.md 113 → 104 KB). History (PROGRESS,
-  DECISIONS, docs/research) unchanged.
-- Tested: `scripts/check-docs.py`, `scripts/check.sh`.
-
----
-
-## 2026-10-11 — Engines behind one trait; the worker protocol typed
-
-Toward CONTEXT.md principles 5 and 6: adding an engine to `zen-engine` meant edits in several
-match arms (model listing, `complete`, turn routing, failover's target, sign-in check and run), and
-the worker protocol was untyped JSON on both sides.
-
-- `zen-engine`: an `Engine` trait (`engine.rs`: name, version, models, `run_turn`, `complete`,
-  start-up housekeeping, failover target, subscription sign-in check) implemented by `claude`,
-  `codex` and `faux`, and a registry (`engine::all`) the protocol loop and failover go through.
-  Adding an engine is one module and one line. The engines' runtime checks (Claude Code's
-  `system/init` check, Codex's item allowlist, `codex-features`) stay in their modules with their
-  tests.
-- `zen-proto` types the worker protocol (`zen_proto::worker`: every request, answer, `tool.call`
-  and turn notification in docs/worker-protocol.md, with a round-trip test per message). `zend`
-  (`mind`, `dispatch`, `turns`, `workers`) and `zen-engine` build and read messages through them.
-- No behavior change: the wire format is the same bytes (keys still sorted), checked by feeding the
-  same requests to the old and new `zen-engine` (ping, models.list with the real CLIs, complete,
-  faux turns, an unknown engine, an abort before its start, an unknown method), and by the e2e
-  suite unchanged. A misshapen `turn.end` (fields of the wrong type) still ends its turn.
-
----
-
-## 2026-10-11 — One client contract: typed session events, one kernel client
-
-Toward CONTEXT.md principles 5 and 6: `zen` and `zen-matrix` each parsed the kernel's session
-events by hand and each had its own copy of the kernel client.
-
-- `zen-proto` types the client protocol's events (`zen_proto::client::Event`, exactly the table in
-  docs/client-protocol.md; an unknown or misshapen event is `Other`, so a client still tolerates
-  new events). One end-of-turn rule (`Event::ends_turn`: `end` without `next`, `idle`, a `resync`
-  with `busy: false`) and one echo match for a sent prompt (`echoes`, `Sent`: trimmed text, never
-  the kernel's own message) replace the clients' separate rules. `zen ask`/`zen chat`, the terminal
-  app and the Matrix bridge read events through them. The wire format is unchanged (the kernel
-  still builds events with `json!`). A full shared turn reducer didn't fit: each client renders
-  deltas and messages its own way, and the bridge ignores deltas.
-- New crate `zen-client`: the kernel client both use (`zen_home`, `parse_env`, the token,
-  HTTP calls, `new_session`, `resolve`, the session WebSocket, `enc`, the plain-http token
-  warning). `zen-matrix` uses it through a path dependency, so it now also warns about a token
-  sent over plain http to another machine, encodes session ids in paths, and waits 120 s (was 60)
-  for a call. An echo that differs from the sent prompt only in surrounding whitespace now counts
-  as the echo in `zen` too.
-- AGENTS.md said `zen-proto` holds the worker protocol's messages; it never did. The row now says
-  what it holds; typing the worker protocol stays debt (ROADMAP.md).
+Older entries: `docs/archive/PROGRESS-*.md`.

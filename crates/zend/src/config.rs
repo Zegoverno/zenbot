@@ -45,6 +45,8 @@ pub struct Config {
     pub s1_url: String,
     /// `ZEN_S1_PRIVATE` (on): whether System One and embeddings may see private content (D-032).
     pub s1_private: bool,
+    /// `ZEN_S1_CONCURRENCY` (8, at least 1): System One calls in flight at once (s1/run.rs).
+    pub s1_concurrency: usize,
     /// `ZEN_CACHE_TTL` (`claude=3600`): how long each engine's prompt cache lives, in seconds, as
     /// `engine=secs` pairs (`*=secs` for the rest; 300 when unnamed). Claude Code asks for one hour;
     /// Codex and others get the providers' five minutes (measure.rs).
@@ -63,8 +65,8 @@ pub struct Config {
     /// `ZEN_TRUSTED_REPOS` (none): comma-separated repositories whose AGENTS.md / CLAUDE.md are
     /// instructions (besides `ZEN_REPO`).
     pub trusted_repos: Vec<String>,
-    /// `ZEN_DECIDE_TOOL` (on): off hides the `decide` tool.
-    pub decide_tool: bool,
+    /// `ZEN_JUDGE_TOOL` (on): off hides the `judge` tool (s1/run.rs).
+    pub judge_tool: bool,
 
     // ---- compaction ----
     /// `ZEN_CONTEXT_TOKENS` (200000): the context budget, capped by the model's window.
@@ -106,8 +108,6 @@ pub struct Config {
     pub explore: f64,
     /// `ZEN_POLICY_MIN_JUDGED` (20): judged subtasks each model needs before a route may switch.
     pub policy_min_judged: u64,
-    /// `ZEN_SCORE_IDLE_SECS` (7200): idle time before a session is scored.
-    pub score_idle_secs: i64,
     /// `ZEN_TURN_IDLE_SECS` (600): the watchdog aborts a turn quiet this long.
     pub turn_idle_secs: u64,
     /// `ZEN_TURN_ABORT_GRACE_SECS` (30): then ends it in the kernel this long after the abort.
@@ -149,6 +149,7 @@ impl Config {
             s1_model: set("ZEN_S1_MODEL"),
             s1_url: text("ZEN_S1_URL", "https://openrouter.ai/api/v1/systemone"),
             s1_private: on("ZEN_S1_PRIVATE"),
+            s1_concurrency: num("ZEN_S1_CONCURRENCY", 8.0).max(1.0) as usize,
             cache_ttl,
             soul_chars: num("ZEN_SOUL_CHARS", 4000.0) as usize,
             identity_chars: num("ZEN_IDENTITY_CHARS", 4000.0) as usize,
@@ -156,7 +157,7 @@ impl Config {
             user_chars: num("ZEN_USER_CHARS", 3000.0) as usize,
             skill_index_chars: num("ZEN_SKILL_INDEX_CHARS", 2500.0) as usize,
             trusted_repos: text("ZEN_TRUSTED_REPOS", "").split(',').map(str::trim).filter(|p| !p.is_empty()).map(String::from).collect(),
-            decide_tool: on("ZEN_DECIDE_TOOL"),
+            judge_tool: on("ZEN_JUDGE_TOOL"),
             context_tokens: num("ZEN_CONTEXT_TOKENS", 200_000.0) as i64,
             compact_soft: num("ZEN_COMPACT_SOFT", 0.7),
             compact_hard: num("ZEN_COMPACT_HARD", 0.9),
@@ -175,7 +176,6 @@ impl Config {
             jobs_tick: num("ZEN_JOBS_TICK", 60.0).clamp(0.2, 60.0),
             explore: num("ZEN_EXPLORE", 0.1),
             policy_min_judged: num("ZEN_POLICY_MIN_JUDGED", 20.0) as u64,
-            score_idle_secs: num("ZEN_SCORE_IDLE_SECS", 7200.0) as i64,
             turn_idle_secs: num("ZEN_TURN_IDLE_SECS", 600.0) as u64,
             turn_abort_grace_secs: num("ZEN_TURN_ABORT_GRACE_SECS", 30.0) as u64,
             update_check_secs: num("ZEN_UPDATE_CHECK_SECS", 3600.0) as u64,

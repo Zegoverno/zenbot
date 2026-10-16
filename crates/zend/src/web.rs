@@ -346,16 +346,14 @@ async fn focus_on(app: &App, text: &str, focus: &str) -> Option<(String, usize, 
     if parts.len() < 3 {
         return None;
     }
-    let judge = crate::score::Relevance {
-        point: "web_focus",
-        need: ("need", focus),
-        item: "part",
-        question: "Does {item} of the page contain information that helps with `need`?",
-        yes: "It bears on the need",
-        no: "Navigation, boilerplate or off-topic",
-    };
-    let probs = judge.judge(app, parts.iter().map(|p| json!(zen_proto::head(p, 1500))).collect()).await?;
-    let keep: Vec<usize> = (0..parts.len()).filter(|&i| probs[i].unwrap_or(1.0) >= 0.5).collect();
+    // s1/web_focus.toml: a part is dropped only when it's unlikely to help (outside content can
+    // only cut); no answer keeps the whole page.
+    let facts = crate::s1::Facts::new(None).with("need", focus);
+    let ds = crate::s1::decide_items(&app.db, "web_focus", facts, parts.iter().map(|p| json!(zen_proto::head(p, 1500))).collect()).await;
+    if !ds.iter().any(|d| d.answered) {
+        return None;
+    }
+    let keep: Vec<usize> = (0..parts.len()).filter(|&i| !ds[i].is("drop")).collect();
     if keep.is_empty() {
         return None;
     }
@@ -408,7 +406,7 @@ async fn fetch(app: &App, session: Uuid, args: &Value) -> tools::ToolOutput {
         Ok(r) => r,
         Err(e) => return err(format!("source rating unavailable: {e}")),
     };
-    rating.risk = crate::sources::content_risk(&format!("{header}{window}"), rating.risk).await;
+    rating.risk = crate::sources::content_risk(&app.db, &format!("{header}{window}"), rating.risk).await;
     tools::ToolOutput { rating: Some(rating), content, is_error: page.status >= 400 }
 }
 
@@ -548,17 +546,12 @@ async fn rerank(app: &App, query: &str, hits: &[Hit]) -> Option<Vec<(Hit, f64)>>
     if !crate::config::get().search_rerank || hits.len() < 3 {
         return None;
     }
-    let judge = crate::score::Relevance {
-        point: "web_rerank",
-        need: ("query", query),
-        item: "result",
-        question: "Is {item} likely to help answer `query`?",
-        yes: "Relevant and likely useful",
-        no: "Off-topic, spam or unlikely to help",
-    };
     let items = hits.iter().map(|h| json!({ "title": h.title, "url": h.url, "snippet": zen_proto::head(&h.snippet, 400) })).collect();
-    let probs = judge.judge(app, items).await?;
-    let mut ranked: Vec<(Hit, f64)> = hits.iter().cloned().zip(probs.into_iter().map(|p| p.unwrap_or(0.5))).collect();
+    let ds = crate::s1::decide_items(&app.db, "web_rerank", crate::s1::Facts::new(None).with("query", query), items).await;
+    if !ds.iter().any(|d| d.answered) {
+        return None;
+    }
+    let mut ranked: Vec<(Hit, f64)> = hits.iter().cloned().zip(ds.iter().map(|d| d.prob("helps").unwrap_or(0.5))).collect();
     ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     Some(ranked)
 }
@@ -631,7 +624,7 @@ async fn search(app: &App, session: Uuid, args: &Value) -> tools::ToolOutput {
         Ok(r) => r,
         Err(e) => return err(format!("source rating unavailable: {e}")),
     };
-    risk = crate::sources::content_risk(&render_hits(&listed), risk).await;
+    risk = crate::sources::content_risk(&app.db, &render_hits(&listed), risk).await;
     tools::ToolOutput { rating: Some(crate::sources::Rating { risk, origin: "web_search".into() }), content, is_error: false }
 }
 

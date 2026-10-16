@@ -366,15 +366,6 @@ pub(crate) async fn decide(State(app): State<AppState>, Path(id): Path<Uuid>, Js
             workshop::on_accept(&app2, id).await
         });
     }
-    // Score the work the decision covers, so each decision has a score to compare it with.
-    let scoring = app.clone();
-    let work = app.background_work();
-    tokio::spawn(async move {
-        let _work = work;
-        if let Err(e) = score::score_session(&scoring, id, "decision").await {
-            tracing::warn!("scoring session {id} after a decision: {e:#}");
-        }
-    });
     Ok(Json(json!({
         "id": row.get::<i64, _>("id"),
         "session_id": id,
@@ -705,6 +696,7 @@ pub(crate) async fn update_job(State(app): State<AppState>, Path(name): Path<Str
 }
 
 pub(crate) async fn delete_job(State(app): State<AppState>, Path(name): Path<String>) -> ApiResult<Json<Value>> {
+    jobs::label_removed(&app.db, &name).await;
     jobs::remove(&app.db, &name).await.map_err(bad_request)?;
     Ok(Json(json!({ "removed": name })))
 }

@@ -489,7 +489,7 @@ delegation() {
   check "children inherit risk independently of legacy marks" eq "$(q "SELECT min(risk) || '/' || max(risk) FROM sessions WHERE parent='$sid'")" 3/3
   check "two delegations" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" delegate:false,delegate:false
   local res; res=$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='delegate'")
-  check "named model, then the policy's" bash -c 'grep -q "on faux/smoke (asked, asked)" <<<"$1" && grep -q "(build, policy)" <<<"$1"' _ "$res"
+  check "named model, then the policy's" bash -c 'grep -q "on faux/smoke (asked, asked)" <<<"$1" && grep -q "(unknown, policy)" <<<"$1"' _ "$res"
   check "the subagents' answers come back" eq "$(grep -c '^Done\.$' <<<"${res//|/$'\n'}")" 2
   check "the subagents ran their task" eq "$(q "SELECT count(*) FROM sessions WHERE parent='$sid' AND kind='subagent'")" 2
   local child; child=$(q "SELECT id FROM sessions WHERE parent='$sid' AND kind='subagent' LIMIT 1")
@@ -634,10 +634,21 @@ system_one_direct() {
     ZEN_DEFAULT_MODEL=faux/smoke ZEN_USER_CHARS=1200
   check "the kernel reports its own OpenRouter key" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/models" | jq -r .authenticated.openrouter)" true
   local sid; sid=$(zen ask --json -m faux/smoke "decide directly" | jq -r .session_id)
-  local answer; answer=$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='decide' ORDER BY seq DESC LIMIT 1")
-  check "System One bool mapped from noul" grep -q '"probability": 0.82' <<<"$answer"
-  check "System One choice and score parsed" bash -c 'grep -q "\"choice\": \"build\"" <<<"$1" && grep -q "\"score\": 1" <<<"$1"' _ "$answer"
-  check "the decision was logged" eq "$(q "SELECT count(*) FROM decisions WHERE session_id='$sid' AND point='tool' AND error IS NULL")" 1
+  local answers; answers=$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='judge'")
+  check "judge: a yes/no answer per item, mapped from noul" bash -c 'grep -q "\[3\] yes (p yes 0.82)" <<<"$1"' _ "$answers"
+  check "judge: a choice per item" grep -q '\[1\] build' <<<"$answers"
+  check "every judge call is in the ledger, with its latency" eq "$(q "SELECT count(*) FILTER (WHERE latency_ms IS NOT NULL AND source='model') || '/' || count(*) FROM decisions WHERE session_id='$sid' AND point='judge' AND error IS NULL")" 2/2
+  # The decision files: the built-in ones pass the checker; an owner file with a typo is reported with
+  # its line and a suggestion, and never takes effect.
+  local zs="$TMP/home/.zenbot/s1"; mkdir -p "$zs"
+  check "the built-in decision files pass the checker" grep -q "13 decisions in force (0 from your files), 0 error" <<<"$(zen s1 check)"
+  sed 's/^false_no = 1$/false_noo = 1/' "$REPO/crates/zend/s1/job_approval.toml" >"$zs/job_approval.toml"
+  sleep 2.5
+  local report; report=$(zen s1 check 2>&1 || true)
+  check "a typo is reported with its line and a suggestion" grep -q "job_approval.toml:[0-9]*:1  error  unknown field \`false_noo\`; did you mean \`false_no\`?" <<<"$report"
+  check "and the built-in file stays in force" eq "$(zen s1 check --json 2>/dev/null | jq -r '.files[] | select(.name=="job_approval") | .source')" built-in
+  check "zen status points at the problem" grep -q "problem(s) in the decision files" <<<"$(zen status 2>&1)"
+  rm -f "$zs/job_approval.toml"
   # The sleep promotes on its own: the owner's lasting fact moves to USER.md (backup first), an
   # inference stays out of it, lasting knowledge is copied into the wiki.
   local zh="$TMP/home/.zenbot"; rm -rf "$zh/backups"; printf '# USER.md\n\nE2E Owner.\n' >"$zh/USER.md"
@@ -663,7 +674,14 @@ system_one_direct() {
   check "the sleep compacted USER.md" bash -c 'grep -q "Compacted by the e2e" "$1" && test "$(wc -c <"$1")" -le 1200' _ "$zh/USER.md"
   check "said so in its note, with a backup of the long version" bash -c 'grep -q "compacted USER.md from" <<<"$1" && grep -l "agent will have to compact" "$2"/USER-*.md >/dev/null' _ "$(echo "$r" | jq -r .note)" "$zh/backups/prompt-files"
   check "through a session of the kernel's own" eq "$(q "SELECT kind || '/' || coalesce(parent::text, 'none') FROM sessions WHERE title = 'sleep: compact USER.md'")" subagent/none
-  kill "$srv" 2>/dev/null || true
+  check "the sleep's judgments are in the ledger" test "$(q "SELECT count(*) FROM decisions WHERE point='sleep_judge' AND source='model' AND spec_sha IS NOT NULL")" -ge 3
+  # System One down: a decision fails fast and says so; nothing waits for it.
+  kill "$srv" 2>/dev/null || true; wait "$srv" 2>/dev/null || true
+  local t0=$SECONDS
+  sid=$(zen ask --json -m faux/smoke "judge without System One" | jq -r .session_id)
+  check "with System One down, judge fails within seconds" test $((SECONDS - t0)) -lt 20
+  check "and says why" grep -q "judge: " <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='judge'")"
+  check "the failure is in the ledger" eq "$(q "SELECT source FROM decisions WHERE session_id='$sid' AND point='judge'")" unavailable
 }
 
 # The sleep with System One (stub): of two entries that say the same thing, one stays (and stays
@@ -1227,6 +1245,7 @@ action_gate() {
   check "native source, redirect eligibility and forged-provenance checks" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend source_database -- --ignored
   check "editing copied bytes preserves per-writer maximum provenance" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend copied_bytes_edit_database -- --ignored
   check "source proposals bind cached snapshots and reject stale approvals" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend source_cache_proposals_database -- --ignored
+  check "System One learns from labelled outcomes: a calibration curve, a proposal, queue labels" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend s1_learn_database -- --ignored
   local source_port=$((PORT + 13))
   python3 "$REPO/scripts/e2e/systemone_stub.py" "$source_port" & local source_srv=$!
   sleep 0.3

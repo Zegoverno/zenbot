@@ -332,9 +332,9 @@ pub enum Cover {
     Entry(i64),
 }
 
-/// The questions the sleep asks about each entry (System One via `score.rs`); `others` are the ids
-/// of the other entries, the choices for what covers it.
-pub fn questions(others: &[i64]) -> Value {
+/// The choices for what already says an entry (s1/sleep_judge.toml's `covered_by`): nothing, the
+/// owner's profile, the agent's identity, or another entry by id.
+pub fn covers(others: &[i64]) -> Value {
     let mut covers = serde_json::Map::new();
     covers.insert("none".into(), json!("Nothing else says it: it says something new"));
     covers.insert("user_profile".into(), json!("The owner's profile (user_profile) already says the same"));
@@ -342,20 +342,7 @@ pub fn questions(others: &[i64]) -> Value {
     for id in others {
         covers.insert(format!("m{id}"), json!(format!("Memory m{id} in other_memories already says the same")));
     }
-    json!({
-        "needed": { "type": "score", "instructions": "How likely is the agent to need this memory in its work over the coming days?",
-            "criteria": ["Unlikely: a one-off detail", "Possibly", "Likely", "Almost certainly: it comes up all the time"] },
-        "durable": { "type": "bool", "instructions": "Will this memory still be true and useful months from now?",
-            "criteria": { "true": "A lasting fact, preference, decision or lesson", "false": "About a passing task, state or moment" } },
-        "covered_by": { "type": "choice", "instructions": "Does another memory (other_memories, by id), the owner's profile (user_profile) or the agent's identity (agent_identity) already say what this memory says? Pick the one that does, or none.",
-            "criteria": covers },
-        "about_owner": { "type": "bool", "instructions": "Is this memory about the owner as a person: who they are, their preferences, their context?",
-            "criteria": { "true": "About the owner", "false": "About work, projects, tools or the world" } },
-        "guidance": { "type": "bool", "instructions": "Is this memory a trait, standing guidance or preference about how the agent should act, rather than a fact about work or where things stand?",
-            "criteria": { "true": "Guidance on how to act (e.g. how to answer, what to check, what to avoid)", "false": "A fact, a state, a decision or where something is" } },
-        "knowledge": { "type": "bool", "instructions": "Is this memory lasting knowledge worth keeping for good in notes: a decision and why it was made, how something works, a lesson, a project's history? Not an open question, a to-do or a passing state.",
-            "criteria": { "true": "Lasting knowledge", "false": "A passing state, an open question or a to-do" } }
-    })
+    Value::Object(covers)
 }
 
 fn score01(a: &Value) -> Option<f64> {
@@ -605,7 +592,7 @@ pub async fn sleep(app: &AppState, trigger: &str) -> Result<Value> {
     let db = &app.db;
     let run: i64 = sqlx::query_scalar("INSERT INTO sleep_runs (trigger, scorer) VALUES ($1, $2) RETURNING id")
         .bind(trigger)
-        .bind(crate::score::scorer().filter(|_| crate::score::private_ok()))
+        .bind(crate::s1::default_model().filter(|_| crate::s1::private_ok()))
         .fetch_one(db)
         .await?;
     let res = sleep_inner(app, run).await;
@@ -623,26 +610,21 @@ const JUDGING_AT_ONCE: usize = 4;
 /// more; the lowest of the three answers counts.
 async fn judge(app: &AppState, e: &Entry, all: &[Entry], user_md: &str, identity_md: &str) -> (Option<Judged>, Value) {
     let others: Vec<i64> = all.iter().filter(|o| o.id != e.id).map(|o| o.id).collect();
-    let qs = questions(&others);
     let state = state_for(e, all, user_md, identity_md);
-    let (mut judged, raw) = match crate::score::decide(app, &state, &qs).await {
-        Ok(v) if v["error"].is_null() => (judged_from(&v["answers"]), v["answers"].clone()),
-        Ok(v) => {
-            tracing::warn!("sleep: judging m{}: {}", e.id, v["error"]);
-            (None, Value::Null)
-        }
-        Err(e2) => {
-            tracing::warn!("sleep: judging m{}: {e2:#}", e.id);
-            (None, Value::Null)
-        }
+    let facts = |extra: bool| {
+        let f = crate::s1::Facts { session: None, map: state.as_object().cloned().unwrap_or_default() };
+        if extra { f.with("covers", covers(&others)) } else { f }
+    };
+    let d = crate::s1::decide(&app.db, "sleep_judge", facts(true)).await;
+    let (mut judged, raw) = if d.answered {
+        (judged_from(&d.answers), d.answers.clone())
+    } else {
+        tracing::warn!("sleep: judging m{}: {}", e.id, d.error.as_deref().unwrap_or("no answer"));
+        (None, Value::Null)
     };
     if let Some(j) = judged.as_mut().filter(|j| matches!(belongs_in(j, promote_bar()), Some("USER.md" | "IDENTITY.md"))) {
-        let repeat = json!({ "durable": qs["durable"], "about_owner": qs["about_owner"], "guidance": qs["guidance"] });
         for _ in 0..2 {
-            let a = match crate::score::decide(app, &state, &repeat).await {
-                Ok(v) if v["error"].is_null() => v["answers"].clone(),
-                _ => Value::Null,
-            };
+            let a = crate::s1::decide(&app.db, "sleep_recheck", facts(false)).await.answers;
             j.durable = j.durable.min(score01(&a["durable"]).unwrap_or(0.0));
             j.about_owner = j.about_owner.min(score01(&a["about_owner"]).unwrap_or(0.0));
             j.guidance = j.guidance.min(score01(&a["guidance"]).unwrap_or(0.0));
@@ -670,7 +652,7 @@ async fn sleep_inner(app: &AppState, run: i64) -> Result<Value> {
     let user_md = std::fs::read_to_string(home.join("USER.md")).unwrap_or_default();
     let identity_md = std::fs::read_to_string(home.join(crate::layout::IDENTITY)).unwrap_or_default();
     // Memories are private content: System One sees them only when allowed (ZEN_S1_PRIVATE).
-    let scorer = crate::score::scorer().filter(|_| crate::score::private_ok());
+    let scorer = crate::s1::default_model().filter(|_| crate::s1::private_ok());
     let mut judged: Vec<Option<Judged>> = vec![None; entries.len()];
     let mut raw: Vec<Value> = vec![Value::Null; entries.len()];
     if scorer.is_some() && !entries.is_empty() {
@@ -941,8 +923,7 @@ mod tests {
 
     #[test]
     fn the_cover_question_offers_the_other_entries() {
-        let q = questions(&[4, 7]);
-        let c = &q["covered_by"]["criteria"];
+        let c = &covers(&[4, 7]);
         assert!(c.get("none").is_some() && c.get("user_profile").is_some() && c.get("agent_identity").is_some() && c.get("m4").is_some() && c.get("m7").is_some());
         let state = state_for(&e(4, "x", "owner", 0.0), &[e(4, "x", "owner", 0.0), e(7, "y", "owner", 0.0)], "", "");
         assert_eq!(state["other_memories"], json!({ "m7": "y" }));

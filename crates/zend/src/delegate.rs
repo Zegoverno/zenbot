@@ -7,8 +7,9 @@
 //! taint, and an answer from a subagent that read the web is untrusted (and taints the parent).
 //!
 //! Which model a subagent runs on is learned from real use, not fixed eval tasks. Unless the call
-//! names one, System One classifies the kind of work, and the routing policy (`policies`, versioned;
-//! `zen policy`) maps it to a model. A small share of subtasks (ZEN_EXPLORE, default 0.1) try another
+//! names one, the routing policy (`policies`, versioned; `zen policy`) maps the kind of work to a
+//! model; System One no longer classifies the kind (D-066: it never changed a choice), so subtasks
+//! take the `unknown` route. A small share of subtasks (ZEN_EXPLORE, default 0.1) try another
 //! of the route's candidates, and each choice is logged with its probability (`decisions`, point
 //! `model`) so the comparison stays unbiased. Outcomes are the owner's verdict on the parent
 //! session, and cost. The nightly `routes` job (jobs.rs) switches a route to another model only when the lower bound
@@ -23,10 +24,9 @@ use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{tools, App, AppState};
+use crate::{tools, AppState};
 
 pub const SUBAGENT: &str = "subagent";
-const KINDS: [&str; 8] = ["understand", "shape", "bet", "build", "verify", "maintain", "reflect", "reach"];
 const SUBAGENT_NOTE: &str = "You are a subagent: the main agent gave you one task, below. Do it, then answer with what it needs \
 to carry on: the result, how you checked it, and anything it must know or decide. You can't ask the owner or delegate further; \
 take sensible defaults and say what you assumed. Be concise.";
@@ -71,18 +71,6 @@ pub fn pick(policy: &Value, kind: &str, fallback: &str, served: &[String], r: f6
         (others[i.min(others.len() - 1)].clone(), explore / others.len() as f64, "explore")
     } else {
         (base, 1.0 - explore, "policy")
-    }
-}
-
-/// The kind of work a task is, as System One judges it ("unknown" without it).
-async fn kind_of(app: &App, task: &str) -> String {
-    if crate::score::scorer().is_none() || !crate::score::private_ok() {
-        return "unknown".into();
-    }
-    let q = json!({ "kind": crate::score::questions()["work"].clone() });
-    match crate::score::decide(app, &json!({ "task": zen_proto::head(task, 4000) }), &q).await {
-        Ok(v) if v["error"].is_null() => v["answers"]["kind"]["choice"].as_str().filter(|k| KINDS.contains(k)).unwrap_or("unknown").to_string(),
-        _ => "unknown".into(),
     }
 }
 
@@ -138,7 +126,7 @@ async fn delegate(app: &AppState, session: Uuid, workspace: &std::path::Path, ar
             (m.to_string(), "asked".to_string(), 1.0, "asked")
         }
         None => {
-            let kind = kind_of(app, task).await;
+            let kind = "unknown".to_string();
             let (_, p) = policy(&app.db).await;
             let (m, prob, how) = pick(&p, &kind, &parent_model, served, draw());
             (m, kind, prob, how)

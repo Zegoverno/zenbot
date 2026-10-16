@@ -1,0 +1,33 @@
+# `save_skill` for a new skill: does an existing skill in the domain already do this job? Without
+# an answer the caller falls back to word overlap.
+name = "skill_duplicate"
+version = 1
+description = "Does the new skill do the same job as an existing one?"
+exposure = "private"
+evidence = ["new_skill"]
+timeout = "30s"
+
+[question.same]
+type = "choice"
+text = "Does the new skill do the same job as one of the existing skills (so it should extend that one instead)?"
+options_from = "skills"
+
+[policy]
+kind = "rules"
+else = "new"
+
+[[policy.rule]]
+when = "same != none and same.p >= 0.8"
+decide = "duplicate"
+
+[[test]]
+answers = { same = { choice = "deploy", p = 0.9 } }
+expect = "duplicate"
+
+[[test]]
+answers = { same = { choice = "deploy", p = 0.6 } }
+expect = "new"
+
+[[test]]
+answers = { same = "none" }
+expect = "new"
