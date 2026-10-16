@@ -152,14 +152,16 @@ async fn handle(db: &PgPool, session: Uuid, mut client: UnixStream) -> Result<()
         Ok(t) => t,
         Err(e) => return deny(&mut client, "400 Bad Request", &e).await,
     };
-    if !matches!(target.port, 80 | 443) {
+    // Tests only: e2e reaches a stub on loopback (production never sets this).
+    let test_loopback = target.host == "127.0.0.1" && std::env::var_os("ZEN_EGRESS_LOOPBACK_FOR_TESTS").is_some();
+    if !matches!(target.port, 80 | 443) && !test_loopback {
         return deny(&mut client, "403 Forbidden", &format!("zenbot's egress proxy: only ports 80 and 443 ({}:{} refused)", target.host, target.port)).await;
     }
     let rating = match crate::gate::egress(db, session, &target.host).await {
         Ok(r) => r,
         Err(why) => return deny(&mut client, "403 Forbidden", &format!("zenbot's egress proxy: {why}")).await,
     };
-    let addrs = match crate::web::public_addrs(&target.host, target.port).await {
+    let addrs = match if test_loopback { Ok(vec![std::net::SocketAddr::from(([127, 0, 0, 1], target.port))]) } else { crate::web::public_addrs(&target.host, target.port).await } {
         Ok(a) => a,
         Err(e) => return deny(&mut client, "403 Forbidden", &format!("zenbot's egress proxy: {e}")).await,
     };

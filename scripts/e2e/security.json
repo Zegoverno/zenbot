@@ -1,0 +1,42 @@
+[
+ {
+  "when": "PROXY-LOW",
+  "tool": "bash",
+  "args": {
+   "command": "curl -s -m 5 --noproxy '' -x \"$HTTPS_PROXY\" http://127.0.0.1:STUBPORT/ping; echo; echo rc=$?"
+  }
+ },
+ {
+  "when": "PROXY-LOW",
+  "text": "Done."
+ },
+ {
+  "when": "PROXY-HIGH",
+  "tool": "web_search",
+  "args": {
+   "query": "harbour"
+  }
+ },
+ {
+  "when": "PROXY-HIGH",
+  "tool": "bash",
+  "args": {
+   "command": "curl -s -m 5 --noproxy '' -x \"$HTTPS_PROXY\" http://127.0.0.1:STUBPORT/ping; echo; echo rc=$?"
+  }
+ },
+ {
+  "when": "PROXY-HIGH",
+  "text": "Done."
+ },
+ {
+  "when": "PROXY-SUDO",
+  "tool": "bash",
+  "args": {
+   "command": "sudo -n id 2>&1 | head -1; ls /run/docker.sock 2>&1 | head -1; cat ~/.zenbot/token | wc -c; touch ~/.zenbot/AGENTS.md 2>&1 | head -1; echo end"
+  }
+ },
+ {
+  "when": "PROXY-SUDO",
+  "text": "Done."
+ }
+]

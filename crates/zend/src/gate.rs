@@ -409,6 +409,51 @@ mod tests {
         }
     }
 
+    /// The false-positive replay (D-067): the gate over recorded tool calls, read-only. Context is
+    /// recomputed as the new model rates it (only outside content raises it: web and MCP results);
+    /// alignment isn't replayed (counted as "asks S1").
+    /// GATE_REPLAY_DB_URL=… GATE_REPLAY_DAYS=14 cargo test --release -p zend gate_replay -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn gate_replay() {
+        let url = std::env::var("GATE_REPLAY_DB_URL").expect("GATE_REPLAY_DB_URL");
+        let days: i32 = std::env::var("GATE_REPLAY_DAYS").ok().and_then(|d| d.parse().ok()).unwrap_or(14);
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .after_connect(|c, _| Box::pin(async move { sqlx::query("SET default_transaction_read_only = on").execute(c).await.map(|_| ()) }))
+            .connect(&url).await.unwrap();
+        let rows = sqlx::query(
+            "SELECT t.session_id, t.name, t.args, s.workspace,
+               GREATEST(1, COALESCE((SELECT max(e.risk) FROM tape_events e WHERE e.session_id = t.session_id AND e.created_at < t.created_at
+                 AND (e.origin LIKE 'web_%' OR (e.payload->>'role' = 'toolResult'
+                   AND e.payload->>'toolName' IN ('web_search','web_fetch','call_tool','load_tool','find_tools')))), 1))::int2 AS context
+             FROM tool_calls t JOIN sessions s ON s.id = t.session_id
+             WHERE t.created_at > now() - make_interval(days => $1)")
+            .bind(days).fetch_all(&db).await.unwrap();
+        let mut counts: std::collections::BTreeMap<(String, String), usize> = Default::default();
+        let mut sessions: std::collections::HashMap<Uuid, (i16, bool)> = Default::default();
+        for r in &rows {
+            let (session, name, args): (Uuid, String, Value) = (r.get("session_id"), r.get("name"), r.get("args"));
+            let ws = std::path::PathBuf::from(r.get::<Option<String>, _>("workspace").unwrap_or_else(|| "/home/exedev".into()));
+            let context: i16 = r.get("context");
+            // MCP calls replay as outward without asking their servers.
+            let (effect, trusted) = if name == "call_tool" { (Effect::Outward, false) } else { classify(&db, session, &ws, &name, &args).await.unwrap_or((Effect::Outward, false)) };
+            let level = level(context);
+            let effect = if level == "high" && effect == Effect::Local && matches!(name.as_str(), "write" | "edit") { Effect::Persistent } else { effect };
+            let facts = crate::s1::Facts::new(None).with("context", level).with("effect", effect.as_str()).with("trusted", if trusted { "yes" } else { "no" }).with("judge", "on");
+            let outcome = crate::s1::decide_early("action_gate", &facts).unwrap_or_else(|| "asks S1".into());
+            let e = sessions.entry(session).or_insert((1, false));
+            e.0 = e.0.max(context);
+            e.1 |= outcome == "hold" || outcome == "lock";
+            *counts.entry((level.to_string(), outcome)).or_default() += 1;
+        }
+        println!("{} tool calls over {days} days, {} sessions", rows.len(), sessions.len());
+        for ((level, outcome), n) in &counts {
+            println!("  {level:<6} {outcome:<8} {n}");
+        }
+        let by = |l: &str| sessions.values().filter(|(c, _)| level(*c) == l).count();
+        println!("sessions by context: low {}, medium {}, high {}", by("low"), by("medium"), by("high"));
+    }
+
     #[test]
     fn levels() {
         assert_eq!((level(0), level(1), level(2), level(3), level(4), level(5)), ("low", "low", "medium", "medium", "high", "high"));

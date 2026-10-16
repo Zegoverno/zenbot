@@ -1411,6 +1411,41 @@ source_task_queue() {
   kill "$search_srv" "$model_srv"; wait "$search_srv" "$model_srv" 2>/dev/null || true
 }
 
+# D-067 containment end to end: every shell runs contained, its network only through the session's
+# egress proxy (the bridge inside the sandbox, the proxy in the kernel). A clean session reaches a
+# new host and what it fetched raises its level; after the open web the same host is held until the
+# owner allows it for the session. Sudo, the Docker socket, the token and the zen home are out of
+# reach. (The stub listens on loopback, which only ZEN_EGRESS_LOOPBACK_FOR_TESTS lets the proxy use.)
+egress_proxy() {
+  local ws; ws=$(new_workspace security)
+  local sp=$((PORT + 14)) stub=$((PORT + 15))
+  python3 "$REPO/scripts/e2e/searxng_stub.py" "$sp" & local search_srv=$!
+  local www="$TMP/www"; mkdir -p "$www"; echo pong >"$www/ping"
+  python3 -m http.server "$stub" --bind 127.0.0.1 --directory "$www" >/dev/null 2>&1 & local www_srv=$!
+  sleep .3
+  start_kernel "$ws" "$(script security.json "s|STUBPORT|$stub|g")" ZEN_SEARXNG_URL="http://127.0.0.1:$sp" ZEN_EGRESS_LOOPBACK_FOR_TESTS=1
+  api() { curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
+  res_of() { q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$1' AND payload->>'role'='toolResult' AND seq > ${2:-0}"; }
+  local sid before
+  sid=$(zen ask --json -m faux/smoke "PROXY-LOW" | jq -r .session_id)
+  check "a clean session's shell reaches a new host through the proxy" bash -c 'grep -q pong <<<"$1" && grep -q "rc=0" <<<"$1"' _ "$(res_of "$sid")"
+  check "the proxy recorded and allowed it" eq "$(q "SELECT outcome FROM egress WHERE session_id='$sid' AND host='127.0.0.1'")" allow
+  check "what it fetched from an unknown host raises the session" eq "$(q "SELECT risk FROM sessions WHERE id='$sid'")" 4
+  sid=$(zen ask --json -m faux/smoke "PROXY-HIGH" | jq -r .session_id)
+  check "after the open web the proxy holds the unknown host" bash -c 'grep -q "held: the shell reaching 127.0.0.1" <<<"$1" && ! grep -q pong <<<"$1"' _ "$(res_of "$sid")"
+  local gate; gate=$(q "SELECT id FROM action_gates WHERE session_id='$sid' AND action LIKE '%egress%'")
+  check "as a queue item for the owner" test -n "$gate"
+  api -X POST -d '{"decision":"approve"}' "$URL/api/queue/action/$gate" >/dev/null
+  for _ in $(seq 1 100); do [ "$(api "$URL/api/sessions/$sid" | jq -r .busy)" = false ] && break; sleep .1; done
+  before=$(q "SELECT max(seq) FROM tape_events WHERE session_id='$sid'")
+  zen ask --json -s "$sid" "PROXY-HIGH" >/dev/null
+  check "allowed by the owner, the host is reachable for the session" grep -q pong <<<"$(res_of "$sid" "$before")"
+  sid=$(zen ask --json -m faux/smoke "PROXY-SUDO" | jq -r .session_id)
+  local out; out=$(res_of "$sid")
+  check "no sudo, no Docker socket, no token, no writing the zen home" bash -c '! grep -q "uid=0" <<<"$1" && grep -q "No such file" <<<"$1" && grep -qE "^0$" <<<"$1" && grep -q "Read-only" <<<"$1" && grep -q end <<<"$1"' _ "$out"
+  kill "$search_srv" "$www_srv" 2>/dev/null || true
+}
+
 # A usage-limit failover moves the session to the model it failed over to, which it keeps until the
 # owner picks another (D-058): the tape records the switch, the session and its clients show the new
 # model, and the next turn runs on it.
@@ -1435,6 +1470,7 @@ run taint-on-data taint_on_data
 run summaries summaries slow_summary
 run system-one system_one_direct memory_sleep_judged
 run action-gate action_gate source_task_queue
+run security egress_proxy
 run file-trust kernel_tools project_files secrets_masked
 run reach mcp_tools web_tools
 run basics prompt_files open_loop restart_recovery layout_move
