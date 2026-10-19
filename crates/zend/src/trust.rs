@@ -309,8 +309,30 @@ fn render(entries: &[Entry]) -> String {
 }
 
 /// `GET /api/trust`.
-pub(crate) async fn api_list() -> axum::Json<serde_json::Value> {
-    axum::Json(list())
+#[derive(Deserialize)]
+pub(crate) struct ListQuery { #[serde(default)] suggest: bool }
+
+pub(crate) async fn api_list(axum::extract::State(app): axum::extract::State<crate::AppState>, axum::extract::Query(query): axum::extract::Query<ListQuery>) -> crate::api::ApiResult<axum::Json<serde_json::Value>> {
+    if !query.suggest { return Ok(axum::Json(list())); }
+    use sqlx::Row;
+    // Observations are evidence for review, never automatic authority. Ignore failed calls and
+    // sessions with an active denial; the owner still chooses the entry's level explicitly.
+    let rows = sqlx::query("SELECT host,sum(reads)::bigint AS reads FROM (
+        SELECT e.host,e.count AS reads FROM egress e JOIN sessions s ON s.id=e.session_id
+        WHERE e.outcome='allow' AND e.rating<5 AND NOT zen_session_contaminated(s.id)
+        UNION ALL
+        SELECT split_part(split_part(t.args->>'url','://',2),'/',1) AS host,1::bigint AS reads
+        FROM tool_calls t JOIN sessions s ON s.id=t.session_id
+        WHERE t.name='web_fetch' AND NOT t.is_error AND NOT zen_session_contaminated(s.id)
+        ) observations GROUP BY host HAVING sum(reads)>=2 ORDER BY reads DESC,host LIMIT 50")
+        .fetch_all(&app.db).await?;
+    let entries: Vec<_> = rows.iter().filter_map(|row| {
+        let host: String = row.get("host");
+        let parsed = reqwest::Url::parse(&format!("https://{host}/")).ok()?;
+        if parsed.host_str()? != host || host_level(&host).is_some() { return None; }
+        Some(serde_json::json!({"kind":"url","match":host,"level":"known","note":format!("{} clean observations; review before adding",row.get::<i64,_>("reads"))}))
+    }).collect();
+    Ok(axum::Json(serde_json::json!({"entries":entries,"built_in":[],"suggestions":true})))
 }
 
 #[derive(Deserialize)]

@@ -157,6 +157,7 @@ pub async fn trust(app: &App, session: Uuid, seen: i32) -> anyhow::Result<Truste
     let block = json!({ "by": "the owner", "seen": seen, "tainted_at": tainted_at, "source": last["source"], "about": last["about"] });
     let (seq, _) = crate::tape::append_in(&mut tx, session, "trust", &block).await?;
     tx.commit().await?;
+    crate::session_state::invalidate();
     app.emit(session, json!({ "type": "taint", "tainted": false, "risky": false })).await;
     Ok(Trusted::Done(seq))
 }
@@ -232,6 +233,7 @@ pub async fn deny(app: &App, session: Uuid, source: &str) -> anyhow::Result<()> 
         .bind(&affected).execute(&mut *tx).await?;
     crate::tape::append_in(&mut tx, session, "taint", &json!({"source":source,"about":"work stopped; products marked","affected":affected})).await?;
     tx.commit().await?;
+    crate::session_state::invalidate();
     {
         let turns = app.turns.lock().await;
         for id in &affected {
@@ -295,17 +297,14 @@ pub enum Limit {
 /// it applies the answer.
 pub async fn limited(db: &sqlx::PgPool, session: Uuid, limit: Limit) -> bool {
     match limit {
-        Limit::Vouch | Limit::Steer | Limit::StartJob => tainted(db, session).await,
-        Limit::Shell => sqlx::query_scalar::<_, bool>("SELECT risk>=4 OR zen_session_contaminated(id) FROM sessions WHERE id = $1")
-            .bind(session).fetch_optional(db).await.map(|t| t.unwrap_or(true)).unwrap_or(true),
+        Limit::Vouch | Limit::Steer | Limit::StartJob | Limit::Shell => tainted(db, session).await,
     }
 }
 
 /// Whether a session has read untrusted content. When it can't be told (a database error), it
 /// counts as tainted: the checks that use this fail closed.
 pub async fn tainted(db: &sqlx::PgPool, session: Uuid) -> bool {
-    sqlx::query_scalar::<_, bool>("SELECT risk>=4 OR zen_session_contaminated(id) FROM sessions WHERE id = $1")
-        .bind(session).fetch_optional(db).await.map(|t| t.unwrap_or(true)).unwrap_or(true)
+    crate::session_state::get(db, session).await.map(|state| state.risk>=4 || state.stopped).unwrap_or(true)
 }
 
 #[cfg(test)]

@@ -35,6 +35,7 @@ pub(super) const COMMANDS: &[Command] = &[
     cmd("/trust", "what made this session untrusted; /trust yes trusts it again", false),
     cmd("/upgrade", "update zenbot to the latest version and restart it", false),
     cmd("/restart", "restart zen on the installed version, back in this session", false),
+    cmd("/steer", "change direction at the next tool boundary: /steer <message>", true),
     cmd("/help", "keys and commands", false),
     cmd("/exit", "quit zen", false),
 ];
@@ -334,11 +335,13 @@ impl App {
     }
 
     pub(super) async fn submit(&mut self) -> Result<()> {
-        let text = self.editor.buf.trim().to_string();
+        let raw = self.editor.buf.trim();
+        let steer = raw.starts_with("/steer ");
+        let text = raw.strip_prefix("/steer ").unwrap_or(raw).trim().to_string();
         if text.is_empty() {
             return Ok(());
         }
-        if text.starts_with('/') {
+        if text.starts_with('/') && !steer {
             self.editor.take();
             return self.command(&text).await;
         }
@@ -346,12 +349,10 @@ impl App {
             self.note("this session is read-only: zenbot drives it · esc goes back to the board", Sty::Warn);
             return Ok(());
         }
-        if self.still_working() {
-            return Ok(());
-        }
         // What became of the suggested next prompt goes with the prompt (read before a reconnect
         // below forgets it).
-        let prompt = prompt_message(&text, self.suggestion.as_ref());
+        let mut prompt = prompt_message(&text, self.suggestion.as_ref());
+        if steer { prompt["mode"] = json!("steer"); }
         // The prompt stays in the input until it can be sent.
         if self.session.is_none() {
             let id = self.c.new_session(json!({ "model": self.model, "effort": self.effort })).await?;
@@ -362,9 +363,6 @@ impl App {
             // and a turn that is still running is known before sending another prompt.
             let id = self.session.clone().unwrap_or_default();
             self.switch_session(id).await?;
-            if self.still_working() {
-                return Ok(());
-            }
         }
         self.editor.take();
         self.suggestion = None;
@@ -372,11 +370,13 @@ impl App {
             self.title = text.chars().take(40).collect::<String>().trim().to_string();
         }
         self.scroll = 0; // back to the latest when you send
-        self.push(Entry::User(text.clone()));
-        self.pending_prompt = Some(text.clone());
-        self.begin_turn();
-        self.aborting = false;
-        self.reset_stream();
+        if !self.still_working() {
+            self.push(Entry::User(text.clone()));
+            self.pending_prompt = Some(text.clone());
+            self.begin_turn();
+            self.aborting = false;
+            self.reset_stream();
+        }
         if let Some(sink) = &mut self.sink {
             if let Err(e) = sink.send(Message::text(prompt.to_string())).await {
                 // The connection is gone: the next send reconnects.
@@ -590,6 +590,10 @@ mod tests {
         typed(&mut a, "/ren").await;
         key(&mut a, KeyCode::Enter).await;
         assert_eq!(a.editor.buf, "/rename ", "a command that takes an argument waits for it");
+        a.editor.clear();
+        typed(&mut a, "/ste").await;
+        key(&mut a, KeyCode::Enter).await;
+        assert_eq!(a.editor.buf, "/steer ", "steering waits for the owner's correction");
     }
 
     #[tokio::test]

@@ -29,7 +29,7 @@ Every request, the WebSocket upgrade included, carries the owner's token in
 | `GET /api/skills` | | skills (active and drafts) with their use, and the tools the agent made; each draft and tool has its `sha` (fingerprint of its content) |
 | `POST /api/skills/review` | `{ name, decision: accept\|reject, sha }` | `{ result }`: activates or archives a draft skill; `sha` is the fingerprint the owner reviewed (8 characters or more), 400 when the draft changed since |
 | `POST /api/tools/{name}/review` | `{ decision: accept\|reject, sha }` | `{ result }`: approves (network allowed) or rejects a tool the agent made; `sha` as above |
-| `GET /api/mcp` | | `{ config, servers, problems }`: MCP servers from `~/.zenbot/mcp.json` and their tools |
+| `GET /api/mcp` | | `{ config, servers, problems }`: MCP servers from `~/.zenbot/mcp.json` and cached tool counts; never starts connections |
 | `GET /api/policy`, `POST /api/policy` | `{ policy: { routes }, reason? }` | the routing policy, evidence and suggestions / set a new version `{ version }` |
 | `POST /api/policy/undo` | | `{ version }`: the policy before the latest change, as a new version |
 | `GET /api/jobs` | | `{ jobs, scheduler }`: scheduled jobs with schedule, next run and last result |
@@ -39,6 +39,8 @@ Every request, the WebSocket upgrade included, carries the owner's token in
 | `GET /api/jobs/runs?job=&limit=` | | recent runs, newest first (limit 20 by default, at most 200): `{ id, job, trigger, status, session, started_at, ended_at, output, error }` |
 | `GET /api/version?refresh=` | | the running commit and whether `main` is ahead |
 | `GET /api/upgrade`, `POST /api/upgrade` | | upgrade progress / start one |
+
+Busy prompts persist until dispatched after the current turn. `"mode":"steer"` stops at the next tool boundary, leaves that action unexecuted and dispatches the correction first. Existing `status`/`error` events report queueing/start failures. Pending prompts survive restarts and are consumed atomically with their owner tape message. Failed starts retain an error row for inspection.
 
 ## WebSocket: `/api/sessions/{id}/ws`
 
@@ -71,7 +73,7 @@ every client uses; `zen-client` (`crates/zen-client`) opens the stream and makes
 | `model` | `model, effort` | the session's model changed without the owner choosing it: a usage-limit failover moved it to the model it continued on, which it keeps until the owner picks another (D-058). `effort` is its thinking level there (`null`: the model's default) |
 | `status` | `text` | progress the kernel reports: a long tool ("verifying: running 3 check(s)"), a delegation, a summary being made, a usage-limit failover |
 | `questions` | `questions: [{ question, options }]` | the `ask` tool's questions for the owner, recommended option first; the answers are the owner's next prompt |
-| `taint` | `risky, tainted, source?, about?` | an outside read sets `risky`; a held action sets `tainted` and revokes unsandboxed shell execution; trusting clears both |
+| `taint` | `risky, tainted, source?, about?` | an outside read sets `risky`; owner denial or level-5 content sets `tainted` and stops work; trusting clears both |
 | `error` | `error` | a request failed |
 | `resync` | `skipped, busy` | the client fell behind and missed events |
 

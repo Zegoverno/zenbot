@@ -6,6 +6,18 @@
 
 ---
 
+## 2026-10-19 — Phase 2b and Phase 3: approved jobs and kernel recovery (D-068)
+
+Owner-approved jobs retain their named sources and workspace; agent edits reset that authority.
+Source judgments distinguish identifiable publishers from unknown ones, and aligned file edits
+can proceed at high risk. Held jobs wait for owner queue decisions and then finish their reports.
+MCP stdio servers use containment and their own egress policy; status no longer connects them.
+`zen trust suggest` proposes entries for review. Busy prompts queue durably in the kernel;
+`/steer` and Matrix `!steer` interrupt at the next tool boundary. Worker writes are bounded,
+tool bookkeeping errors return a result, summary flags clear on task exit, and nested permission
+checks share an invalidated snapshot. JSONL session mirrors retry from a durable export queue.
+Legacy workflow blocks no longer hide history. Validation is recorded in the PR before merge.
+
 ## 2026-10-16 — Security: context risk, action alignment, contained sessions (D-067)
 
 Every shell now runs contained (no secrets, no sudo, no host sockets) with its network through a

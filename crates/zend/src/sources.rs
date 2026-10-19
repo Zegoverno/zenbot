@@ -90,6 +90,7 @@ pub async fn base(db: &PgPool, url: &str) -> Result<i16> {
 }
 
 pub async fn raise(db: &PgPool, session: Uuid, risk: i16) -> Result<()> {
+    crate::session_state::invalidate();
     sqlx::query("UPDATE sessions SET risk=GREATEST(risk,$2) WHERE id=$1").bind(session).bind(risk).execute(db).await?;
     Ok(())
 }
@@ -194,7 +195,16 @@ pub async fn page(db: &PgPool, session: Uuid, requested: &str, final_url: &str, 
         let p: Value = r.get("payload");
         crate::gate::contains_whole_url(&zen_proto::text_of(&p["content"]), requested)
     });
-    let base = rated(db, final_url, if owner_given {"owner_url"} else {"page_link"}).await?;
+    // A page under a domain an owner-approved job names counts as the owner's source (D-068).
+    let job_named = match Url::parse(final_url).ok().and_then(|u| u.host_str().map(String::from)) {
+        Some(h) => crate::jobs::names_host(db, session, &h).await,
+        None => false,
+    };
+    let base = match crate::trust::url_level(final_url) {
+        Some(level) => level,
+        None if job_named => 2,
+        None => rated(db, final_url, if owner_given {"owner_url"} else {"page_link"}).await?,
+    };
     let mut rating = Rating { risk: base, origin: format!("web_fetch:{final_url}") };
     let same_host = Url::parse(requested).ok().zip(Url::parse(final_url).ok())
         .is_some_and(|(a,b)| a.host_str() == b.host_str());

@@ -71,7 +71,7 @@ fn complete(d: &crate::s1::Decision) -> Option<(i16, Value)> {
 /// Metadata ratings are deliberately separate from base(), which reads only owner entries.
 pub async fn rated(db: &PgPool, url: &str, reached: &str) -> Result<i16> {
     let owner = base(db,url).await?;
-    if owner < 4 { return Ok(owner); }
+    if owner != 4 { return Ok(owner); }
     let Ok(state) = metadata(url,reached) else { return Ok(4) };
     if let Some(risk)=cached(db,&state).await? {return Ok(risk)}
     let d = crate::s1::decide(db, "source_risk", facts(&state)).await;
@@ -87,8 +87,8 @@ pub async fn rated_many(db: &PgPool, urls: &[&str]) -> Result<i16> {
     let mut pending=std::collections::BTreeMap::new();
     for url in urls {
         let owner=base(db,url).await?;
-        if owner<4 {risk=risk.max(owner);continue}
-        let Ok(state)=metadata(url,"search_result") else {risk=4;continue};
+        if owner!=4 {risk=risk.max(owner);continue}
+        let Ok(state)=metadata(url,"search_result") else {risk=risk.max(4);continue};
         let scope=state["scope"].as_str().unwrap().to_string();
         if let Some(r)=cached(db,&state).await? {risk=risk.max(r)} else {pending.insert(scope,state);}
     }
@@ -96,8 +96,8 @@ pub async fn rated_many(db: &PgPool, urls: &[&str]) -> Result<i16> {
     let states: Vec<&Value> = pending.values().collect();
     let decisions = crate::s1::decide_batch(db, "source_risk", None, states.iter().map(|s| facts(s)).collect()).await;
     for (state, d) in states.into_iter().zip(decisions) {
-        let Some((r, answer)) = complete(&d) else {risk=4;continue};
-        let Some(scope)=assessed_scope(state,&answer) else {risk=4;continue};
+        let Some((r, answer)) = complete(&d) else {risk=risk.max(4);continue};
+        let Some(scope)=assessed_scope(state,&answer) else {risk=risk.max(4);continue};
         cache(db,&scope,r,&answer).await?;
         risk=risk.max(r);
     }

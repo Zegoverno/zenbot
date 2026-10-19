@@ -90,7 +90,7 @@ impl Guarded {
 
 /// The real path a tool would write: symlinks resolved as far as the path exists, the rest (folders
 /// `write` would create) added after it, `..` and all.
-fn real(p: &Path) -> PathBuf {
+pub(crate) fn real(p: &Path) -> PathBuf {
     use std::path::Component;
     let parts: Vec<Component> = p.components().collect();
     for split in (1..=parts.len()).rev() {

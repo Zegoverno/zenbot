@@ -110,9 +110,12 @@ impl Mind {
     async fn write(&self, msg: Value) -> Result<()> {
         let mut line = serde_json::to_vec(&msg)?;
         line.push(b'\n');
-        let mut stdin = self.stdin.lock().await;
-        stdin.write_all(&line).await?;
-        stdin.flush().await?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut stdin = self.stdin.lock().await;
+            stdin.write_all(&line).await?;
+            stdin.flush().await?;
+            Ok::<_, std::io::Error>(())
+        }).await.context("worker stdin write timed out")??;
         Ok(())
     }
 
@@ -133,12 +136,14 @@ impl Mind {
         // Removes the entry however this future ends: answered, timed out, failed or dropped
         // (a caller that stops waiting must not leak its entry).
         let _waiting = Waiting { mind: self, id };
-        self.write(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })).await.context("worker is not running")?;
-        match tokio::time::timeout(limit, rx).await {
-            Ok(Ok(res)) => res.map_err(|e| anyhow!(e)),
-            Ok(Err(_)) => Err(anyhow!("mind dropped request")),
-            Err(_) => Err(anyhow!("mind request `{method}` timed out")),
-        }
+        tokio::time::timeout(limit, async {
+            self.write(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })).await.context("worker is not running")?;
+            match rx.await {
+                Ok(res) => res.map_err(|e| anyhow!(e)),
+                Err(_) => Err(anyhow!("mind dropped request")),
+            }
+        }).await.map_err(|_| anyhow!("mind request `{method}` timed out"))?
+
     }
 
     /// Answer a worker's request (`tool.call`).
@@ -173,6 +178,16 @@ impl Drop for Waiting<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_worker_that_does_not_read_stdin_times_out() {
+        let (mind, _, _) = Mind::spawn("sleep 2", "/tmp").await.unwrap();
+        let started = std::time::Instant::now();
+        let result = mind.request_within("test", json!({"data":"x".repeat(2*1024*1024)}), std::time::Duration::from_millis(100)).await;
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(mind.pending.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn workers_get_no_secrets_but_engine_sign_ins() {

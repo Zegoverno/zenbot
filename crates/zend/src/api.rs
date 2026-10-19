@@ -509,6 +509,7 @@ pub(crate) async fn handle_socket(app: AppState, id: Uuid, socket: WebSocket) {
                 // (a summary at the hard limit can take minutes).
                 let text = cmd.get("text").and_then(Value::as_str).unwrap_or("").to_string();
                 // What the owner did with the suggested next prompt, if the client showed one.
+                let steer = cmd["mode"] == "steer";
                 let reported = cmd["suggestion"]["id"].as_i64().map(|s| (s, cmd["suggestion"]["taken"] == true));
                 let app = app.clone();
                 tokio::spawn(async move {
@@ -517,7 +518,7 @@ pub(crate) async fn handle_socket(app: AppState, id: Uuid, socket: WebSocket) {
                             tracing::warn!("recording the suggestion's outcome in session {id}: {e:#}");
                         }
                     }
-                    if let Err(e) = start_turn(&app, id, text).await {
+                    if let Err(e) = turns::submit_prompt(&app, id, text, steer).await {
                         app.emit(id, json!({ "type": "error", "error": e.to_string() })).await;
                     }
                 });
@@ -595,7 +596,7 @@ pub(crate) async fn run_sleep(State(app): State<AppState>, Query(q): Query<Sleep
     Ok(Json(res.map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?))
 }
 
-/// MCP servers from ~/.zenbot/mcp.json: tools per server and problems (connecting the servers).
+/// MCP servers from ~/.zenbot/mcp.json: cached tools per server and problems (no connections started).
 pub(crate) async fn mcp_status() -> Json<Value> {
     Json(mcp::status().await)
 }

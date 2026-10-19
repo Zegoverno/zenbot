@@ -289,6 +289,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Trust { cmd } => {
             let v = match cmd.unwrap_or(TrustCmd::List) {
                 TrustCmd::List => c.get("/api/trust").await?,
+                TrustCmd::Suggest => c.get("/api/trust?suggest=true").await?,
                 TrustCmd::Add { kind, pattern, level, note } => c.post("/api/trust", json!({ "kind": kind, "match": pattern, "level": level, "note": note })).await?,
                 TrustCmd::Rm { kind, pattern } => c.post("/api/trust", json!({ "kind": kind, "match": pattern, "remove": true })).await?,
             };

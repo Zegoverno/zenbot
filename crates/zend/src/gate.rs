@@ -108,7 +108,7 @@ pub async fn classify(db: &sqlx::PgPool, session: Uuid, workspace: &Path, name: 
                     .bind(tool).fetch_optional(db).await?;
                 if approved == Some(true) { (Effect::Outward, true) } else { (Effect::Local, true) }
             } else {
-                match crate::mcp::hints(full).await {
+                match crate::mcp::hints(db, full).await {
                     Some((_, _, true)) => (Effect::Irreversible, false),
                     Some((false, true, _)) => (Effect::Local, true),
                     Some((untrusted, ..)) => (Effect::Outward, !untrusted),
@@ -122,11 +122,9 @@ pub async fn classify(db: &sqlx::PgPool, session: Uuid, workspace: &Path, name: 
 
 /// Decide before any effect. A grant is consumed atomically, including concurrent identical calls.
 pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args: &Value) -> Result<Policy> {
-    if crate::taint::stopped(&app.db, session).await? {
-        anyhow::bail!("session stopped by contamination; only the owner can review and /trust it");
-    }
-    let row = sqlx::query("SELECT risk, lock_reason FROM sessions WHERE id=$1").bind(session).fetch_one(&app.db).await?;
-    let (risk, lock): (i16, Option<String>) = (row.get("risk"), row.get("lock_reason"));
+    let state = crate::session_state::get(&app.db, session).await?;
+    anyhow::ensure!(!state.stopped, "session stopped by contamination; only the owner can review and /trust it");
+    let (risk, lock) = (state.risk, state.lock);
     let action = key(workspace, name, args);
     let grant: Option<i64> = sqlx::query_scalar(
         "UPDATE action_gates SET used_at = now()
@@ -148,7 +146,8 @@ pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args:
     let effect = if context == "high" && effect == Effect::Local && matches!(name, "write" | "edit") { Effect::Persistent } else { effect };
     let judge = crate::s1::on() && crate::s1::private_ok();
     let inputs = crate::s1::Facts::new(Some(session)).with("context", context).with("effect", effect.as_str())
-        .with("trusted", if trusted { "yes" } else { "no" }).with("judge", if judge { "on" } else { "off" });
+        .with("trusted", if trusted { "yes" } else { "no" }).with("judge", if judge { "on" } else { "off" })
+        .with("edit", if matches!(name, "write" | "edit") { "yes" } else { "no" });
     // Most actions are decided by the rules on these inputs alone, with no model call.
     let (outcome, reading, decision) = match crate::s1::decide_early("action_gate", &inputs) {
         Some(o) => (o, None, None),
@@ -177,6 +176,7 @@ pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args:
     };
     let reason = match &policy { Policy::Lock(r) | Policy::Hold(r) => r.clone(), _ => unreachable!() };
     if let Policy::Lock(_) = &policy {
+        crate::session_state::invalidate();
         sqlx::query("UPDATE sessions SET lock_reason = $2, locked_at = now() WHERE id = $1 AND lock_reason IS NULL").bind(session).bind(&reason).execute(&app.db).await?;
     }
     sqlx::query("INSERT INTO action_gates (session_id, action, reason, s1_decision)
@@ -191,9 +191,10 @@ pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args:
 /// (read-only workspace, network only to hosts the egress decision allows) or it's locked
 /// (read-only, offline). A verifier's shell is read-only (dispatch).
 pub async fn shell_mode(db: &sqlx::PgPool, session: Uuid) -> tools::Sandbox {
-    let row = sqlx::query("SELECT risk, lock_reason IS NOT NULL AS locked FROM sessions WHERE id=$1").bind(session).fetch_optional(db).await.ok().flatten();
-    let (risk, locked) = row.map(|r| (r.get::<i16, _>("risk"), r.get::<bool, _>("locked"))).unwrap_or((4, true));
-    tools::Sandbox::Contained { writable: !locked && risk < 4, net: !locked }
+    match crate::session_state::get(db, session).await {
+        Ok(state) => tools::Sandbox::Contained { writable: state.lock.is_none() && state.risk < 4 && !state.stopped, net: state.lock.is_none() && !state.stopped },
+        Err(_) => tools::Sandbox::Contained { writable: false, net: false },
+    }
 }
 
 /// May a session's shell reach `host` (the egress proxy asks)? Returns the host's rating, or why not.
@@ -206,6 +207,8 @@ pub async fn egress(db: &sqlx::PgPool, session: Uuid, host: &str) -> Result<i16,
     let risk: i16 = row.get("risk");
     let rating = match crate::trust::host_level(host) {
         Some(l) => l,
+        // A source an owner-approved job names counts as the owner's (D-068).
+        None if crate::jobs::names_host(db, session, host).await => 2,
         None => crate::sources::rated(db, &format!("https://{host}/"), "shell_egress").await.unwrap_or(4),
     };
     let action = json!({"tool": "egress", "host": host}).to_string();
@@ -369,6 +372,7 @@ pub async fn allow(app: &App, session: Uuid, id: i64) -> Result<bool> {
     unlock_if_lock(&mut tx, session, &row.get::<String, _>("reason")).await?;
     crate::tape::append_in(&mut tx, session, "allow", &json!({"by":"the owner","gate":id})).await?;
     tx.commit().await?;
+    crate::session_state::invalidate();
     crate::s1::learn::label_gate(&app.db, id, true).await;
     Ok(true)
 }

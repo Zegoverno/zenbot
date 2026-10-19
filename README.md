@@ -132,13 +132,19 @@ System One reads it as following your job:
 
 - low risk: everything runs, including pushes and PRs that follow the job (`host: true` commands);
 - medium: local work and on-job memory run; pushes and new hosts wait unless trusted and on-job;
-- high: local work runs read-only; memory, edits and outward actions wait for you;
+- high: shells run read-only; local file edits that follow the job run, other effects wait for you;
 - an action that doesn't follow your job after outside content **locks** the session (local work
   only, offline) until you look.
 
 What waits is one item in `/queue` (zen), `!queue` (Matrix) or `zen queue`. `zen trust add url docs.rs`
 (or `repo github.com/you/*`, `mcp calendar`) keeps those sources low; `/deny` stops a session and
-everything that read its output; `/trust` lifts its marks.
+everything that read its output; `/trust` lifts its marks. `zen trust suggest` shows repeated clean
+hosts to review and add explicitly. Owner-approved jobs keep their named sources and own folder;
+a held job waits up to two hours for your queue decision and resumes when approved.
+
+Messages sent during a turn queue in the kernel, including from Matrix. `/steer message` (Matrix `!steer message`) stops at the next tool boundary and continues with your correction.
+
+Private history mirrors appear in `~/.zenbot/sessions/<session-id>.jsonl` within a few seconds and rebuild on restart. MCP stdio servers run contained with their own writable folder under `~/.cache/zenbot/mcp/`; network follows their trust level. `/api/mcp` reports cached state without starting servers.
 
 ## Settings you might set
 

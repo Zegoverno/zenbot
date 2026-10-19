@@ -466,8 +466,8 @@ pub async fn create(app: &AppState, spec: Spec, by: By) -> Result<(Job, Option<S
         By::Agent(s) => gate(app, *s, &name, &prompt, &schedule, report_file.as_deref(), post_to).await,
     };
     let row = sqlx::query(&format!(
-        "INSERT INTO jobs (name, kind, prompt, context, skills, schedule, tz, model, workspace, enabled, paused_reason, created_by, created_in, approval, next_run_at, report_file, post_to)
-         VALUES ($1, 'agent', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING {COLUMNS}"
+        "INSERT INTO jobs (name, kind, prompt, context, skills, schedule, tz, model, workspace, enabled, paused_reason, created_by, created_in, approval, next_run_at, report_file, post_to, owner_approved)
+         VALUES ($1, 'agent', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING {COLUMNS}"
     ))
     .bind(&name)
     .bind(&prompt)
@@ -485,6 +485,7 @@ pub async fn create(app: &AppState, spec: Spec, by: By) -> Result<(Job, Option<S
     .bind(next)
     .bind(&report_file)
     .bind(post_to)
+    .bind(matches!(by, By::Owner))
     .fetch_one(&app.db)
     .await
     .map_err(|e| match &e {
@@ -536,7 +537,7 @@ pub async fn update(app: &AppState, name: &str, spec: Spec, by: By) -> Result<(J
     let paused = if enabled { None } else { paused.or(job.paused_reason.clone()) };
     let row = sqlx::query(&format!(
         "UPDATE jobs SET prompt = $2, context = $3, skills = $4, schedule = $5, tz = $6, model = $7, workspace = COALESCE($8, workspace),
-                enabled = $9, paused_reason = $10, approval = COALESCE($11, approval), next_run_at = $12, report_file = $13, post_to = $14, failures = 0, updated_at = now()
+                enabled = $9, paused_reason = $10, approval = COALESCE($11, approval), next_run_at = $12, report_file = $13, post_to = $14, owner_approved = $15, failures = 0, updated_at = now()
          WHERE id = $1 RETURNING {COLUMNS}"
     ))
     .bind(job.id)
@@ -553,6 +554,7 @@ pub async fn update(app: &AppState, name: &str, spec: Spec, by: By) -> Result<(J
     .bind(next)
     .bind(&report_file)
     .bind(post_to)
+    .bind(matches!(by, By::Owner))
     .fetch_one(&app.db)
     .await?;
     WAKE.notify_one();
@@ -592,15 +594,116 @@ pub async fn set_enabled(app: &AppState, name: &str, on: bool, by: By) -> Result
             }
         }
     }
-    let row = sqlx::query(&format!("UPDATE jobs SET enabled = $2, paused_reason = $3, next_run_at = $4, failures = CASE WHEN $2 THEN 0 ELSE failures END, updated_at = now() WHERE id = $1 RETURNING {COLUMNS}"))
+    let row = sqlx::query(&format!("UPDATE jobs SET enabled = $2, paused_reason = $3, next_run_at = $4, owner_approved = CASE WHEN $5 THEN true ELSE owner_approved END, failures = CASE WHEN $2 THEN 0 ELSE failures END, updated_at = now() WHERE id = $1 RETURNING {COLUMNS}"))
         .bind(job.id)
         .bind(on)
         .bind(&reason)
         .bind(next)
+        .bind(on && matches!(by, By::Owner))
         .fetch_one(&app.db)
         .await?;
     WAKE.notify_one();
     Ok((job_of(&row), None))
+}
+
+/// How long a run waits for the owner to answer an action it held.
+const HOLD_WAIT: Duration = Duration::from_secs(2 * 3600);
+
+/// A run that held an action waits for the owner instead of failing (D-068): the hold is a queue
+/// item (Matrix posts it to the owner); approving it resumes the session with the exact action,
+/// and the run goes on once that turn ends. A refusal, a deny, or no answer within `HOLD_WAIT`
+/// ends the wait; the run is then judged on what it has.
+async fn wait_for_owner(app: &AppState, session: Uuid) -> Result<()> {
+    let deadline = std::time::Instant::now() + HOLD_WAIT;
+    loop {
+        let pending: Option<i64> = sqlx::query_scalar(
+            "SELECT g.id FROM action_gates g WHERE g.session_id=$1 AND g.created_at>now()-interval '1 day'
+              AND ((g.decision IS NULL AND g.allowed_at IS NULL) OR (g.decision IN ('approved','rejected') AND NOT EXISTS
+                (SELECT 1 FROM turns t WHERE t.session_id=g.session_id AND t.started_at>=g.resolved_at AND t.ended_at IS NOT NULL)))
+              ORDER BY g.id DESC LIMIT 1",
+        )
+        .bind(session)
+        .fetch_optional(&app.db)
+        .await?;
+        let Some(gate) = pending else { return Ok(()) };
+        tracing::info!("job session {session} waits for the owner on held action {gate}");
+        loop {
+            anyhow::ensure!(std::time::Instant::now() < deadline, "timed out waiting for owner review of held job action #{gate}");
+            anyhow::ensure!(!crate::taint::stopped(&app.db, session).await?, "held job stopped by owner denial");
+            let decision: (Option<String>, Option<DateTime<Utc>>) = sqlx::query_as("SELECT decision,resolved_at FROM action_gates WHERE id=$1")
+                .bind(gate).fetch_one(&app.db).await?;
+            match decision.0.as_deref() {
+                None => tokio::time::sleep(Duration::from_secs(1)).await,
+                Some("denied") => anyhow::bail!("held job action #{gate} denied by the owner"),
+                Some(_) => {
+                    // Approval/rejection commits before its continuation starts. Wait for the
+                    // actual continuation's recorded end, not a guessed sleep followed by busy.
+                    let completed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns WHERE session_id=$1 AND started_at >= $2 AND ended_at IS NOT NULL)")
+                        .bind(session).bind(decision.1).fetch_one(&app.db).await?;
+                    if completed { break; }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
+}
+
+/// Registrable domain including private suffixes: neighbouring github.io tenants stay separate.
+pub fn registrable(host: &str) -> String {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    static RULES: std::sync::LazyLock<std::collections::HashSet<&'static str>> = std::sync::LazyLock::new(|| {
+        include_str!("../public-suffix-list.dat").lines().map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with("//")).collect()
+    });
+    if host.parse::<std::net::IpAddr>().is_ok() { return host; }
+    let labels: Vec<&str> = host.split('.').collect();
+    let mut suffix = 1;
+    for i in 0..labels.len() {
+        let tail = labels[i..].join(".");
+        if RULES.contains(format!("!{tail}").as_str()) {
+            suffix = labels.len() - i - 1;
+            break;
+        }
+        if RULES.contains(tail.as_str()) || (i + 1 < labels.len() && RULES.contains(format!("*.{}", labels[i + 1..].join(".")).as_str())) {
+            suffix = suffix.max(labels.len() - i);
+        }
+    }
+    labels[labels.len().saturating_sub(suffix + 1)..].join(".")
+}
+
+/// Domains named by an explicitly owner-created/approved job's unchanged prompt (D-068).
+/// A job S1 alone let go live gets no owner source authority. Empty for other sessions.
+pub async fn owner_job_domains(db: &PgPool, session: Uuid) -> Vec<String> {
+    let row = sqlx::query(
+        "SELECT j.prompt FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE r.session_id = $1 AND j.kind = 'agent' AND j.owner_approved AND j.updated_at <= r.started_at
+         LIMIT 1",
+    )
+    .bind(session)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+    let Some(row) = row else { return Vec::new() };
+    let prompt: Option<String> = row.get("prompt");
+    let mut out: Vec<String> = prompt.unwrap_or_default()
+        .split(|c: char| c.is_whitespace() || "()<>[]\"'`,".contains(c))
+        .filter_map(|word| {
+            let word = word.trim_end_matches(['.', ';', '!']);
+            let url = if word.contains("://") { word.to_string() } else { format!("https://{word}") };
+            let parsed = reqwest::Url::parse(&url).ok()?;
+            if !matches!(parsed.scheme(), "https"|"http") || !parsed.username().is_empty() || parsed.password().is_some() {return None;}
+            let host = parsed.host_str()?;
+            (host.contains('.') && !word.starts_with('/')).then(|| registrable(host))
+        }).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Whether `host` is under a domain the session's owner-approved job names.
+pub async fn names_host(db: &PgPool, session: Uuid, host: &str) -> bool {
+    let domain = registrable(host);
+    owner_job_domains(db, session).await.contains(&domain)
 }
 
 /// The S1 judgment a job was created or changed with (`jobs.approval`), if any.
@@ -1291,7 +1394,9 @@ async fn last_report(app: &AppState, job: &Job, run: i64, id: Uuid) -> Result<Op
 /// the report.
 async fn run_agent(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
     let model = job.model.clone().unwrap_or_else(|| app.default_model.clone());
-    let workspace = workspace_of(app, job.workspace.as_deref());
+    let approved: bool = sqlx::query_scalar("SELECT owner_approved FROM jobs WHERE id=$1").bind(job.id).fetch_one(&app.db).await?;
+    let inferred = if approved && job.workspace.is_none() { inferred_workspace(app, job) } else { None };
+    let workspace = workspace_of(app, job.workspace.as_deref().or(inferred.as_deref()));
     // A report file older than this wasn't written by this run.
     let started = std::time::SystemTime::now();
     let id = Uuid::new_v4();
@@ -1312,6 +1417,8 @@ async fn run_agent(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
         prompt.push_str(&format!("\n\n<last_report>\nThe report from this job's previous run, to tell what's new:\n{report}\n</last_report>"));
     }
     crate::turns::run_and_wait(app, id, JOB, &prompt).await?;
+    wait_for_owner(app, id).await?;
+    anyhow::ensure!(!crate::taint::stopped(&app.db, id).await?, "job stopped by owner denial");
     let error: Option<String> = sqlx::query_scalar("SELECT error FROM turns WHERE session_id = $1 ORDER BY started_at DESC LIMIT 1").bind(id).fetch_optional(&app.db).await?.flatten();
     let answer = crate::delegate::final_answer(&app.db, id).await;
     let trimmed = answer.trim();
@@ -1364,6 +1471,35 @@ async fn report_rating(app: &AppState, id: Uuid, raw: &str) -> Result<()> {
 }
 
 /// The directory a job works in: its own (relative to the kernel's workspace), else the workspace.
+/// An approved job's unambiguous existing folder, else its conventional output folder's parent. Explicit workspace
+/// always wins. Never infer authority from model output or a report from an earlier run.
+fn inferred_workspace(app: &AppState, job: &Job) -> Option<String> {
+    let mut dirs: Vec<PathBuf> = job.prompt.as_deref().unwrap_or("")
+        .split(|c: char| c.is_whitespace() || "()<>[]\"'`,".contains(c))
+        .filter(|word| word.starts_with('/'))
+        .filter_map(|word| {
+            let path = PathBuf::from(word.trim_end_matches(['.', ';', ':']));
+            let dir = if path.is_file() {path.parent()?.to_path_buf()} else {path};
+            dir.is_dir().then(|| dir.canonicalize().ok()).flatten()
+        }).collect();
+    dirs.sort(); dirs.dedup();
+    if dirs.len()==1 { return Some(dirs[0].display().to_string()); }
+    if !dirs.is_empty() { return None; }
+    let path = std::path::Path::new(job.report_file.as_deref()?);
+    let parent = path.parent()?;
+    // report_file is stored absolute, even when originally relative. Preserve those relative
+    // paths: out/message.md must still mean <workspace>/out/message.md, not out/out/message.md.
+    // Never enlarge the original report boundary from a stored path changed behind the API.
+    let original = workspace_of(app, job.workspace.as_deref());
+    let parent_real = real_path(parent)?;
+    let original_real = real_path(&original)?;
+    if !parent_real.starts_with(&original_real) { return None; }
+    let folder = if matches!(parent.file_name().and_then(|n| n.to_str()), Some("out"|"output"|"outputs"|"reports")) {
+        parent.parent()?
+    } else if parent_real == original_real { parent } else { return None; };
+    Some(folder.display().to_string())
+}
+
 fn workspace_of(app: &AppState, dir: Option<&str>) -> PathBuf {
     dir.map(|w| tools::resolve(&app.workspace, w)).unwrap_or_else(|| app.workspace.clone())
 }
@@ -1572,6 +1708,44 @@ pub async fn run_tool(app: &AppState, session: Uuid, name: &str, args: &Value, o
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "SOURCE_TEST_DB_URL must name a disposable database"]
+    async fn owner_job_authority_database() {
+        let db = PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
+        sqlx::migrate!("./migrations").run(&db).await.unwrap();
+        let app = crate::test_util::app(db.clone());
+        let session = Uuid::new_v4();
+        sqlx::query("INSERT INTO sessions(id,model,kind) VALUES($1,'faux/smoke','job')").bind(session).execute(&db).await.unwrap();
+        let name = format!("job-test-{}", &session.to_string()[..8]);
+        let spec = Spec {name:Some(name.clone()), prompt:Some("fetch https://liturgiadiaria.edicoescnbb.com.br/ and https://alice.github.io/".into()), schedule:Some("every 1h".into()), ..Default::default()};
+        let (job, _) = create(&app, spec, By::Owner).await.unwrap();
+        sqlx::query("INSERT INTO job_runs(job_id,trigger,status,session_id) VALUES($1,'owner','running',$2)")
+            .bind(job.id).bind(session).execute(&db).await.unwrap();
+        assert!(names_host(&db,session,"api-liturgia.edicoescnbb.com.br").await);
+        assert!(!names_host(&db,session,"bob.github.io").await);
+        let change = Spec {prompt:Some("fetch https://attacker.test/".into()), ..Default::default()};
+        update(&app, &name, change, By::Agent(session)).await.unwrap();
+        let approved: bool = sqlx::query_scalar("SELECT owner_approved FROM jobs WHERE id=$1").bind(job.id).fetch_one(&db).await.unwrap();
+        assert!(!approved,"an agent edit cannot retain its earlier owner approval");
+        assert!(!names_host(&db,session,"attacker.test").await);
+        db.close().await;
+    }
+
+    #[test]
+    fn registrable_domains() {
+        assert_eq!(registrable("api-liturgia.edicoescnbb.com.br"), "edicoescnbb.com.br");
+        assert_eq!(registrable("liturgiadiaria.edicoescnbb.com.br"), "edicoescnbb.com.br");
+        assert_eq!(registrable("www.bbc.co.uk"), "bbc.co.uk");
+        assert_eq!(registrable("docs.rs"), "docs.rs");
+        assert_ne!(registrable("alice.github.io"), registrable("bob.github.io"));
+        assert_eq!(registrable("a.city.kawasaki.jp"), "city.kawasaki.jp");
+        assert_eq!(registrable("a.b.ck"), "a.b.ck");
+        assert_eq!(registrable("a.www.ck"), "www.ck");
+        assert_eq!(registrable("127.0.0.1"), "127.0.0.1");
+        assert_eq!(registrable("api.github.com"), "github.com");
+        assert_eq!(registrable("Evil.edicoescnbb.com.br.attacker.io"), "attacker.io");
+    }
 
     #[test]
     fn old_saved_outputs_are_pruned_and_others_kept() {

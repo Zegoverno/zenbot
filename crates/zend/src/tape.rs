@@ -5,7 +5,8 @@
 //! database (`zen_block_hash`, migrations/0007) so every writer hashes the same canonical JSON.
 //! D-062: risk/origin are kernel-owned columns beside (not inside) the historical payload hash.
 //! Session risk is a conservative maximum, reset only by owner trust; derived blocks carry it.
-//! Tool result provenance requires the kernel's output digest; only append_owner assigns risk 0.
+//! Tool result provenance requires the kernel's output digest; only the owner append path assigns
+//! risk 0. Committed changes queue private JSONL mirror exports, retried across restarts.
 
 use serde_json::Value;
 use sqlx::{PgPool, Row};
@@ -26,16 +27,28 @@ pub async fn append(db: &PgPool, session: Uuid, kind: &str, payload: &Value) -> 
     let mut tx = db.begin().await?;
     let result = append_in(&mut tx, session, kind, payload).await?;
     tx.commit().await?;
+    crate::session_state::invalidate();
     Ok(result)
 }
 
 /// Only the authenticated owner turn path calls this. A worker cannot claim owner provenance.
+#[cfg(test)]
 pub async fn append_owner(db: &PgPool, session: Uuid, payload: &Value) -> Result<(i32, String), sqlx::Error> {
+    append_owner_queued(db, session, payload, None).await
+}
+
+pub async fn append_owner_queued(db: &PgPool, session: Uuid, payload: &Value, queued: Option<i64>) -> Result<(i32, String), sqlx::Error> {
     let mut tx = db.begin().await?;
     let (seq, hash) = append_in(&mut tx, session, "message", payload).await?;
+    if let Some(queued) = queued {
+        let deleted = sqlx::query("DELETE FROM pending_prompts WHERE id=$1 AND session_id=$2 AND error IS NULL")
+            .bind(queued).bind(session).execute(&mut *tx).await?.rows_affected();
+        if deleted != 1 { return Err(sqlx::Error::RowNotFound); }
+    }
     sqlx::query("UPDATE tape_events SET risk=0, origin='owner', tainted=false WHERE session_id=$1 AND seq=$2")
         .bind(session).bind(seq).execute(&mut *tx).await?;
     tx.commit().await?;
+    crate::session_state::invalidate();
     Ok((seq,hash))
 }
 
@@ -116,4 +129,44 @@ pub async fn repair(db: &PgPool) -> Result<u64, sqlx::Error> {
         .execute(db)
         .await?;
     Ok(r.rows_affected())
+}
+
+/// Maintain private JSONL history files from the committed tape. The database remains authoritative;
+/// a failed export is retried, and every restart repairs the whole mirror. Atomic replacement means
+/// readers see a complete session, never a partial JSON line or an out-of-order concurrent append.
+pub async fn mirror_loop(db: PgPool) {
+    // Rebuild missing or manually damaged exports on restart as well as resuming dirty rows.
+    let _ = sqlx::query("INSERT INTO tape_exports(session_id) SELECT DISTINCT session_id FROM tape_events ON CONFLICT DO NOTHING").execute(&db).await;
+    loop {
+        if let Err(e) = mirror_pending(&db).await {
+            tracing::warn!("exporting session histories: {e:#}");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+}
+
+async fn mirror_pending(db: &PgPool) -> anyhow::Result<()> {
+    let pending: Vec<(Uuid, i64)> = sqlx::query_as("SELECT session_id,version FROM tape_exports ORDER BY session_id LIMIT 100").fetch_all(db).await?;
+    let dir = crate::zen_home().join("sessions");
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+    for (session, version) in pending {
+        let rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(e) FROM tape_events e WHERE session_id=$1 ORDER BY seq")
+            .bind(session).fetch_all(db).await?;
+        let path = dir.join(format!("{session}.jsonl"));
+        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let tmp = path.with_extension("jsonl.tmp");
+            let mut file = std::fs::OpenOptions::new().create(true).truncate(true).write(true).mode(0o600).open(&tmp)?;
+            for row in rows {
+                serde_json::to_writer(&mut file, &row)?;
+                file.write_all(b"\n")?;
+            }
+            file.sync_all()?;
+            std::fs::rename(tmp, path)
+        }).await??;
+        sqlx::query("DELETE FROM tape_exports WHERE session_id=$1 AND version=$2").bind(session).bind(version).execute(db).await?;
+    }
+    Ok(())
 }

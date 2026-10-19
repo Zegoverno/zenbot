@@ -23,6 +23,7 @@ mod mind;
 mod s1;
 mod search;
 mod secrets;
+mod session_state;
 mod skills;
 mod tape;
 mod task;
@@ -89,6 +90,8 @@ struct App {
     updater: Arc<update::Updater>,
     /// Sessions whose summary is being prepared in the background.
     compacting: Mutex<HashSet<Uuid>>,
+    finishing: Mutex<HashSet<Uuid>>,
+    starting_prompts: Mutex<HashSet<Uuid>>,
     /// Kernel-started turns being waited for (verifier sessions), by session.
     waiters: Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<()>>>,
     /// Kernel tasks running outside a turn (after a verdict: skill activation, scoring), counted as
@@ -157,7 +160,7 @@ impl App {
     }
 
     async fn is_busy(&self, id: Uuid) -> bool {
-        self.turns.lock().await.contains_key(&id)
+        self.finishing.lock().await.contains(&id) || self.turns.lock().await.contains_key(&id)
     }
 }
 
@@ -249,6 +252,8 @@ async fn serve() -> Result<()> {
         hubs: Mutex::new(HashMap::new()),
         updater,
         compacting: Mutex::new(HashSet::new()),
+        finishing: Mutex::new(HashSet::new()),
+        starting_prompts: Mutex::new(HashSet::new()),
         waiters: Mutex::new(HashMap::new()),
         background: Arc::default(),
     });
@@ -258,6 +263,8 @@ async fn serve() -> Result<()> {
     }
     tokio::spawn(dispatch(app.clone(), incoming));
     tokio::spawn(watchdog(app.clone()));
+    tokio::spawn(turns::prompt_loop(app.clone()));
+    tokio::spawn(tape::mirror_loop(app.db.clone()));
     tokio::spawn(search::index_loop(app.clone()));
     tokio::spawn(jobs::run_loop(app.clone()));
 

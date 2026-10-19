@@ -282,7 +282,7 @@ fn repin_owner() -> Result<()> {
 
 /// What a room's link to its session takes.
 enum Cmd {
-    Prompt(String),
+    Prompt { text: String, steer: bool },
     Abort,
 }
 
@@ -616,10 +616,10 @@ impl Bridge {
             Input::Stop => {
                 let _ = self.link(&room).await?.send(Cmd::Abort);
             }
-            Input::Prompt(p) => {
+            Input::Prompt(p) | Input::Steer(p) => {
                 if !p.is_empty() {
                     let link = self.link(&room).await?;
-                    if link.send(Cmd::Prompt(p)).is_err() {
+                    if link.send(Cmd::Prompt { text: p, steer: text.body.split_whitespace().next().is_some_and(|s| s.eq_ignore_ascii_case("!steer")) }).is_err() {
                         self.links.lock().await.remove(&rid);
                         bail!("lost the link to the session; send it again");
                     }
@@ -824,7 +824,7 @@ impl Bridge {
                     cmd = rx.recv() => {
                         let Some(cmd) = cmd else { return };
                         let msg = match cmd {
-                            Cmd::Prompt(text) => serde_json::json!({ "type": "prompt", "text": stream.prompt(&text) }),
+                            Cmd::Prompt { text, steer } => serde_json::json!({ "type": "prompt", "text": stream.prompt(&text), "mode": if steer {"steer"} else {"queue"} }),
                             Cmd::Abort => serde_json::json!({ "type": "abort" }),
                         };
                         if sink.send(Message::text(msg.to_string())).await.is_err() {
