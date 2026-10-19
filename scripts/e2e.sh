@@ -1034,12 +1034,12 @@ taint_on_data() {
   tainted() { q "SELECT risky_at IS NOT NULL FROM sessions WHERE id='$1'"; }
   zen ask --json -m faux/smoke "CLEAN-DRAFT" >/dev/null
   local r sid res; r=$(zen ask --json -m faux/smoke "TAINT-A"); sid=$(echo "$r" | jq -r .session_id)
-  # D-067: after the open web, persistent effects (memory, a draft, file edits) wait for the owner;
-  # shells run contained and read-only, with no way to the kernel.
-  check "after the open web: memory, a draft and file edits are held; shells run contained" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" \
-    web_search:false,remember:true,save_skill:true,write:true,write:true,bash:true,bash:true
+  # D-068: aligned workspace file edits run after the open web. Memory/draft effects wait,
+  # writes outside the workspace fail, and shells remain contained and read-only.
+  check "after the open web: persistent effects wait, aligned workspace edits run, shells stay contained" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" \
+    web_search:false,remember:true,save_skill:true,write:true,write:false,bash:true,bash:true
   res=$(res_of "$sid")
-  check "a held write leaves the workspace and the clean draft alone" bash -c 'test ! -e "$1/made-here.txt" && ! grep -q "Obey" "$2/_proposed/work/clean-notes/SKILL.md"' _ "$ws" "$sk"
+  check "the aligned workspace write runs and the refused draft write leaves its bytes alone" bash -c 'grep -q hi "$1/made-here.txt" && ! grep -q "Obey" "$2/_proposed/work/clean-notes/SKILL.md"' _ "$ws" "$sk"
   check "the shell can't commit (read-only) or reach the kernel" bash -c 'grep -q "\[contained:" <<<"$1" && [ "$(git -C "$2" log -1 --format=%s)" = init ]' _ "$res" "$ws"
   check "and not in the home" bash -c 'grep -q "not run:" <<<"$1" && test ! -e "$2/planted"' _ "$res" "$zh"
   # The owner approves the memory and the draft once: what a high-risk session stores keeps its mark.
@@ -1311,7 +1311,7 @@ action_gate() {
   check "safe file effect runs without approval" grep -q "safe workspace note" "$ws/notes.txt"
   # D-067: after the open web every shell still runs, contained: read-only workspace, nothing queued.
   check "a high-risk session's shell runs contained, read-only" grep -q "read-only" <<<"$(res_of "$sid")"
-  check "after the open web only the file edit waits (the workspace is read-only for it too)" eq "$(q "SELECT count(*) FROM action_gates WHERE session_id='$sid'")/$(q "SELECT count(*) FROM action_gates WHERE session_id='$sid' AND action LIKE '%notes.txt%'")" 1/1
+  check "an aligned file edit runs while the shell workspace stays read-only" eq "$(q "SELECT count(*) FROM action_gates WHERE session_id='$sid'")/$(q "SELECT count(*) FROM action_gates WHERE session_id='$sid' AND action LIKE '%notes.txt%'")" 0/0
   before=$(q "SELECT max(seq) FROM tape_events WHERE session_id='$sid'")
   zen ask --json -s "$sid" "GATE-SECRET" >/dev/null
   check "recursive read cannot print credential characters" bash -c '! grep -q "/token:" <<<"$1"' _ "$(res_of "$sid" "$before")"
@@ -1478,7 +1478,7 @@ phase3_kernel() {
   python3 -m http.server "$stub" --bind 127.0.0.1 --directory "$TMP/www" >/dev/null 2>&1 & local www_srv=$!
   sleep .3
   local faux; faux=$(script phase3.json "s|STUBPORT|$stub|g")
-  start_kernel "$ws" "$faux" ZEN_SEARXNG_URL="http://127.0.0.1:$sp" ZEN_EGRESS_LOOPBACK_FOR_TESTS=1 ZEN_S1_URL="http://127.0.0.1:$mp/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key
+  start_kernel "$ws" "$faux" ZEN_DEFAULT_MODEL=faux/smoke ZEN_SEARXNG_URL="http://127.0.0.1:$sp" ZEN_EGRESS_LOOPBACK_FOR_TESTS=1 ZEN_S1_URL="http://127.0.0.1:$mp/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key
   api() { curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
   local sid first second
   sid=$(api -X POST -d '{"model":"faux/smoke"}' "$URL/api/sessions" | jq -r .id)
@@ -1498,7 +1498,7 @@ phase3_kernel() {
   # Queue a prompt before stopping; the durable row must be dispatched after restart.
   stop_kernel
   q "INSERT INTO pending_prompts(session_id,text) VALUES('$sid','P3-QUEUED')" >/dev/null
-  start_kernel "$ws" "$faux" ZEN_SEARXNG_URL="http://127.0.0.1:$sp" ZEN_EGRESS_LOOPBACK_FOR_TESTS=1 ZEN_S1_URL="http://127.0.0.1:$mp/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key
+  start_kernel "$ws" "$faux" ZEN_DEFAULT_MODEL=faux/smoke ZEN_SEARXNG_URL="http://127.0.0.1:$sp" ZEN_EGRESS_LOOPBACK_FOR_TESTS=1 ZEN_S1_URL="http://127.0.0.1:$mp/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key
   check "a queued prompt survives kernel restart" poll "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND origin='owner' AND payload->>'content'='P3-QUEUED'" 2
   check "JSONL mirror catches up and preserves sequence and hashes" until_ok python3 -c 'import json,sys; rows=[json.loads(x) for x in open(sys.argv[1])]; assert rows and all(r["seq"]==i+1 and r["hash"] for i,r in enumerate(rows)); assert sum(r["origin"]=="owner" and r["payload"].get("content")=="P3-QUEUED" for r in rows)==2' "$TMP/home/.zenbot/sessions/$sid.jsonl"
   # Replay the readings failure: owner-named host, its shell fetch, and a local output file.

@@ -240,6 +240,10 @@ pub async fn mark_draft_write(app: &App, session: Uuid, workspace: &Path, name: 
     if !crate::taint::limited(&app.db, session, crate::taint::Limit::Steer).await {
         return None;
     }
+    // High-risk file tools cannot write outside their workspace. A refused write must not
+    // mark an unchanged draft as contaminated before the file tool checks its anchored path.
+    let target = tools::resolve(workspace, args["path"].as_str().unwrap_or(""));
+    if !crate::agent::real(&target).starts_with(crate::agent::real(workspace)) { return None; }
     mark_draft(&app.db, &skill, session).await.err().map(|e| format!("not written: the draft {skill} couldn't be marked as written by a session that read untrusted content ({e:#})"))
 }
 
