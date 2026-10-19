@@ -11,7 +11,7 @@ CREATE INDEX pending_prompts_session ON pending_prompts(session_id,id) WHERE err
 
 -- Explicit owner approval is reset whenever an agent edits a job definition.
 ALTER TABLE jobs ADD COLUMN owner_approved boolean NOT NULL DEFAULT false;
-UPDATE jobs SET owner_approved=true WHERE kind='agent' AND (created_by='owner' OR approval IS NULL);
+UPDATE jobs SET owner_approved=true WHERE kind='agent' AND created_by='owner';
 
 -- A committed dirty queue makes JSONL exports retryable without assuming id/commit ordering.
 CREATE TABLE tape_exports (

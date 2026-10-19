@@ -5,7 +5,8 @@
 //! database (`zen_block_hash`, migrations/0007) so every writer hashes the same canonical JSON.
 //! D-062: risk/origin are kernel-owned columns beside (not inside) the historical payload hash.
 //! Session risk is a conservative maximum, reset only by owner trust; derived blocks carry it.
-//! Tool result provenance requires the kernel's output digest; only append_owner assigns risk 0.
+//! Tool result provenance requires the kernel's output digest; only the owner append path assigns
+//! risk 0. Committed changes queue private JSONL mirror exports, retried across restarts.
 
 use serde_json::Value;
 use sqlx::{PgPool, Row};

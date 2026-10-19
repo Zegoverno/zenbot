@@ -1,5 +1,6 @@
 //! A turn's lifecycle: starting it (owner or kernel), compiling what it sends (compile.rs),
-//! ending it, recording it (`turns`), and the watchdog for turns that stall.
+//! ending it, recording it (`turns`), durable busy prompts/tool-boundary steering, and the watchdog
+//! for turns that stall. Start/finish/summary reservations are released even on task exit.
 
 use super::*;
 use zen_proto::worker;
@@ -326,7 +327,9 @@ pub(crate) enum Origin {
 /// The owner's prompt.
 pub(crate) async fn submit_prompt(app: &AppState, id: Uuid, text: String, steer: bool) -> Result<()> {
     if text.trim().is_empty() { return Ok(()); }
-    if !app.is_busy(id).await {
+    let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_prompts WHERE session_id=$1 AND error IS NULL)")
+        .bind(id).fetch_one(&app.db).await?;
+    if !waiting && !app.is_busy(id).await {
         match begin_turn(app, id, text.clone(), Origin::Owner).await {
             Ok(()) => return Ok(()),
             Err(e) if e.to_string().contains("already working") => {},

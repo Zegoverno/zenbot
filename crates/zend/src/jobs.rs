@@ -628,14 +628,13 @@ async fn wait_for_owner(app: &AppState, session: Uuid) -> Result<()> {
         let Some(gate) = pending else { return Ok(()) };
         tracing::info!("job session {session} waits for the owner on held action {gate}");
         loop {
-            if std::time::Instant::now() >= deadline || crate::taint::stopped(&app.db, session).await? {
-                return Ok(());
-            }
+            anyhow::ensure!(std::time::Instant::now() < deadline, "timed out waiting for owner review of held job action #{gate}");
+            anyhow::ensure!(!crate::taint::stopped(&app.db, session).await?, "held job stopped by owner denial");
             let decision: (Option<String>, Option<DateTime<Utc>>) = sqlx::query_as("SELECT decision,resolved_at FROM action_gates WHERE id=$1")
                 .bind(gate).fetch_one(&app.db).await?;
             match decision.0.as_deref() {
                 None => tokio::time::sleep(Duration::from_secs(1)).await,
-                Some("denied") => return Ok(()),
+                Some("denied") => anyhow::bail!("held job action #{gate} denied by the owner"),
                 Some(_) => {
                     // Approval/rejection commits before its continuation starts. Wait for the
                     // actual continuation's recorded end, not a guessed sleep followed by busy.
@@ -672,10 +671,8 @@ pub fn registrable(host: &str) -> String {
     labels[labels.len().saturating_sub(suffix + 1)..].join(".")
 }
 
-/// The domains an owner-approved job's prompt names (D-068): a job the owner created, or one that
-/// went live through the owner (created before the S1 gate, granted, or resumed after S1 paused
-/// it), runs with the owner's authority over the sources its prompt names. A job S1 alone let go
-/// live doesn't. Empty for any other session.
+/// Domains named by an explicitly owner-created/approved job's unchanged prompt (D-068).
+/// A job S1 alone let go live gets no owner source authority. Empty for other sessions.
 pub async fn owner_job_domains(db: &PgPool, session: Uuid) -> Vec<String> {
     let row = sqlx::query(
         "SELECT j.prompt FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE r.session_id = $1 AND j.kind = 'agent' AND j.owner_approved AND j.updated_at <= r.started_at
@@ -1421,6 +1418,7 @@ async fn run_agent(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
     }
     crate::turns::run_and_wait(app, id, JOB, &prompt).await?;
     wait_for_owner(app, id).await?;
+    anyhow::ensure!(!crate::taint::stopped(&app.db, id).await?, "job stopped by owner denial");
     let error: Option<String> = sqlx::query_scalar("SELECT error FROM turns WHERE session_id = $1 ORDER BY started_at DESC LIMIT 1").bind(id).fetch_optional(&app.db).await?.flatten();
     let answer = crate::delegate::final_answer(&app.db, id).await;
     let trimmed = answer.trim();
@@ -1710,13 +1708,13 @@ mod tests {
         let session = Uuid::new_v4();
         sqlx::query("INSERT INTO sessions(id,model,kind) VALUES($1,'faux/smoke','job')").bind(session).execute(&db).await.unwrap();
         let name = format!("job-test-{}", &session.to_string()[..8]);
-        let spec: Spec = serde_json::from_value(json!({"name":name,"prompt":"fetch https://liturgiadiaria.edicoescnbb.com.br/ and https://alice.github.io/", "schedule":"every 1h"})).unwrap();
+        let spec = Spec {name:Some(name.clone()), prompt:Some("fetch https://liturgiadiaria.edicoescnbb.com.br/ and https://alice.github.io/".into()), schedule:Some("every 1h".into()), ..Default::default()};
         let (job, _) = create(&app, spec, By::Owner).await.unwrap();
         sqlx::query("INSERT INTO job_runs(job_id,trigger,status,session_id) VALUES($1,'owner','running',$2)")
             .bind(job.id).bind(session).execute(&db).await.unwrap();
         assert!(names_host(&db,session,"api-liturgia.edicoescnbb.com.br").await);
         assert!(!names_host(&db,session,"bob.github.io").await);
-        let change: Spec = serde_json::from_value(json!({"prompt":"fetch https://attacker.test/"})).unwrap();
+        let change = Spec {prompt:Some("fetch https://attacker.test/".into()), ..Default::default()};
         update(&app, &name, change, By::Agent(session)).await.unwrap();
         let approved: bool = sqlx::query_scalar("SELECT owner_approved FROM jobs WHERE id=$1").bind(job.id).fetch_one(&db).await.unwrap();
         assert!(!approved,"an agent edit cannot retain its earlier owner approval");
@@ -1731,6 +1729,10 @@ mod tests {
         assert_eq!(registrable("www.bbc.co.uk"), "bbc.co.uk");
         assert_eq!(registrable("docs.rs"), "docs.rs");
         assert_ne!(registrable("alice.github.io"), registrable("bob.github.io"));
+        assert_eq!(registrable("a.city.kawasaki.jp"), "city.kawasaki.jp");
+        assert_eq!(registrable("a.b.ck"), "a.b.ck");
+        assert_eq!(registrable("a.www.ck"), "www.ck");
+        assert_eq!(registrable("127.0.0.1"), "127.0.0.1");
         assert_eq!(registrable("api.github.com"), "github.com");
         assert_eq!(registrable("Evil.edicoescnbb.com.br.attacker.io"), "attacker.io");
     }

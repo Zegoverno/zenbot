@@ -24,7 +24,8 @@
 //! connect, and its tools are looked up from its last listing (listed again when a stdio server
 //! says they changed). A stdio server gets each request written under a stdin lock and a reader
 //! task hands each answer to its call by id; it runs in its own process group, killed whole when
-//! it's dropped. A message from a server (a stdio line, an HTTP body) over 8 MB fails the call.
+//! it's dropped. Stdio runs contained, with a private writable cache folder and network through
+//! a proxy governed by the server's own trust level; status only reads cached counts. A message from a server (a stdio line, an HTTP body) over 8 MB fails the call.
 //!
 //! The client is written here, against the MCP spec (2025-06-18), instead of using the `rmcp` crate:
 //! three methods are needed (initialize, tools/list, tools/call), and rmcp would add a second
