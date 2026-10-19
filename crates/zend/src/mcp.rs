@@ -392,12 +392,17 @@ impl Server {
                 // server; only the basics and what the config gives it.
                 let keep = ["PATH", "HOME", "USER", "LANG", "LC_ALL", "TZ", "TMPDIR"];
                 let dir = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/home".into())).join(".cache/zenbot/mcp").join(&self.cfg.name);
-                std::fs::create_dir_all(&dir)?;
+                use std::os::unix::fs::DirBuilderExt;
+                std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
                 let socket = crate::proxy::ensure_mcp(db, &self.cfg.name, if self.cfg.untrusted {4} else {1}).await?;
                 let filter = tools::contained_filter(true).map_err(|e| anyhow!(e))?;
                 let tmp = tools::session_tmp(&format!("mcp-{}", self.cfg.name));
                 let mut command = tools::contained_command(&filter, &dir, true, tmp.as_deref(), Some(&socket), &[]);
                 command.env_clear();
+                command.env("XDG_CACHE_HOME", dir.join("cache"))
+                    .env("npm_config_cache", dir.join("cache/npm"))
+                    .env("PIP_CACHE_DIR", dir.join("cache/pip"))
+                    .env("UV_CACHE_DIR", dir.join("cache/uv"));
                 // Restore proxy variables after clearing inherited credentials.
                 let proxy = format!("http://127.0.0.1:{}", crate::proxy::BRIDGE_PORT);
                 for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY"] {
