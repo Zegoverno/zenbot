@@ -1395,7 +1395,7 @@ async fn last_report(app: &AppState, job: &Job, run: i64, id: Uuid) -> Result<Op
 async fn run_agent(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
     let model = job.model.clone().unwrap_or_else(|| app.default_model.clone());
     let approved: bool = sqlx::query_scalar("SELECT owner_approved FROM jobs WHERE id=$1").bind(job.id).fetch_one(&app.db).await?;
-    let inferred = if approved && job.workspace.is_none() { inferred_workspace(job) } else { None };
+    let inferred = if approved && job.workspace.is_none() { inferred_workspace(app, job) } else { None };
     let workspace = workspace_of(app, job.workspace.as_deref().or(inferred.as_deref()));
     // A report file older than this wasn't written by this run.
     let started = std::time::SystemTime::now();
@@ -1471,9 +1471,9 @@ async fn report_rating(app: &AppState, id: Uuid, raw: &str) -> Result<()> {
 }
 
 /// The directory a job works in: its own (relative to the kernel's workspace), else the workspace.
-/// An approved job's unambiguous existing folder, else the report file's parent. Explicit workspace
+/// An approved job's unambiguous existing folder, else its conventional output folder's parent. Explicit workspace
 /// always wins. Never infer authority from model output or a report from an earlier run.
-fn inferred_workspace(job: &Job) -> Option<String> {
+fn inferred_workspace(app: &AppState, job: &Job) -> Option<String> {
     let mut dirs: Vec<PathBuf> = job.prompt.as_deref().unwrap_or("")
         .split(|c: char| c.is_whitespace() || "()<>[]\"'`,".contains(c))
         .filter(|word| word.starts_with('/'))
@@ -1487,7 +1487,17 @@ fn inferred_workspace(job: &Job) -> Option<String> {
     if !dirs.is_empty() { return None; }
     let path = std::path::Path::new(job.report_file.as_deref()?);
     let parent = path.parent()?;
-    parent.is_absolute().then(|| parent.display().to_string())
+    // report_file is stored absolute, even when originally relative. Preserve those relative
+    // paths: out/message.md must still mean <workspace>/out/message.md, not out/out/message.md.
+    // Never enlarge the original report boundary from a stored path changed behind the API.
+    let original = workspace_of(app, job.workspace.as_deref());
+    let parent_real = real_path(parent)?;
+    let original_real = real_path(&original)?;
+    if !parent_real.starts_with(&original_real) { return None; }
+    let folder = if matches!(parent.file_name().and_then(|n| n.to_str()), Some("out"|"output"|"outputs"|"reports")) {
+        parent.parent()?
+    } else if parent_real == original_real { parent } else { return None; };
+    Some(folder.display().to_string())
 }
 
 fn workspace_of(app: &AppState, dir: Option<&str>) -> PathBuf {

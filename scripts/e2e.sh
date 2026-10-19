@@ -1495,8 +1495,8 @@ phase3_kernel() {
   check "owner steering stops the next action and runs the correction" poll "SELECT count(*) FROM tool_calls WHERE session_id='$sid' AND args->>'path'='steered.txt'" 1
   check "the action after the boundary did not run" test ! -e "$ws/should-not-run.txt"
   # Queue a prompt before stopping; the durable row must be dispatched after restart.
-  q "INSERT INTO pending_prompts(session_id,text) VALUES('$sid','P3-QUEUED')" >/dev/null
   stop_kernel
+  q "INSERT INTO pending_prompts(session_id,text) VALUES('$sid','P3-QUEUED')" >/dev/null
   start_kernel "$ws" "$faux" ZEN_SEARXNG_URL="http://127.0.0.1:$sp" ZEN_EGRESS_LOOPBACK_FOR_TESTS=1 ZEN_S1_URL="http://127.0.0.1:$mp/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key
   check "a queued prompt survives kernel restart" poll "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND origin='owner' AND payload->>'content'='P3-QUEUED'" 2
   check "JSONL mirror catches up and preserves sequence and hashes" until_ok python3 -c 'import json,sys; rows=[json.loads(x) for x in open(sys.argv[1])]; assert rows and all(r["seq"]==i+1 and r["hash"] for i,r in enumerate(rows)); assert sum(r["origin"]=="owner" and r["payload"].get("content")=="P3-QUEUED" for r in rows)==2' "$TMP/home/.zenbot/sessions/$sid.jsonl"

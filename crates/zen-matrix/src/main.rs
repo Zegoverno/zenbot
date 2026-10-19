@@ -619,7 +619,7 @@ impl Bridge {
             Input::Prompt(p) | Input::Steer(p) => {
                 if !p.is_empty() {
                     let link = self.link(&room).await?;
-                    if link.send(Cmd::Prompt { text: p, steer: text.body.trim().split_whitespace().next().is_some_and(|s| s.eq_ignore_ascii_case("!steer")) }).is_err() {
+                    if link.send(Cmd::Prompt { text: p, steer: text.body.split_whitespace().next().is_some_and(|s| s.eq_ignore_ascii_case("!steer")) }).is_err() {
                         self.links.lock().await.remove(&rid);
                         bail!("lost the link to the session; send it again");
                     }
