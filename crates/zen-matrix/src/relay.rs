@@ -32,6 +32,8 @@ pub enum Input {
     Help,
     /// Anything else: a prompt for the room's session.
     Prompt(String),
+    /// Queue an owner correction and interrupt at the next tool boundary.
+    Steer(String),
 }
 
 pub fn parse(text: &str) -> Input {
@@ -42,6 +44,7 @@ pub fn parse(text: &str) -> Input {
     match word.to_ascii_lowercase().as_str() {
         "new" => Input::New((!rest.is_empty()).then(|| rest.to_string())),
         "stop" => Input::Stop,
+        "steer" => Input::Steer(rest.to_string()),
         "session" => Input::Which,
         "queue" | "jobs" | "skills" | "tools" | "trust" | "allow" | "sources" | "deny" => Input::Owner(cmd.trim().to_string()),
         _ => Input::Help,
@@ -57,6 +60,7 @@ pub const HELP: &str = "**zen in Matrix**\n\n\
 - `!skills`: skills and made tools; `!skills accept|reject <domain/name> <sha>`, `!tools accept|reject <name> <sha>`.\n\
 - `!sources`: list the allowlist; `!sources add <host/path> [2|3] [note…]`, `!sources rm <host/path>`.\n\
 - `!deny`: stop this session and mark its products contaminated.\n\
+- `!steer message`: change direction at the next tool boundary. Ordinary messages queue until the current turn ends.\n\
 - `!queue`: pending actions and source proposals; react to queue notes ✅ approve, ❌ reject, 🛑 deny.\n\
 - `!allow`: review the latest held action; `!allow yes` allows that exact action once.\n\
 - `!trust`: what made this room's session untrusted (it read content from outside); `!trust yes` trusts it again.\n\
@@ -312,6 +316,7 @@ mod tests {
         assert_eq!(parse("!deny"), Input::Owner("deny".into()));
         assert_eq!(parse("!trust yes"), Input::Owner("trust yes".into()));
         assert_eq!(parse("!allow yes"), Input::Owner("allow yes".into()));
+        assert_eq!(parse("!steer change direction"),Input::Steer("change direction".into()));
         assert_eq!(parse("!queue"),Input::Owner("queue".into()));
         assert_eq!(parse("!queue approve action 42"),Input::Owner("queue approve action 42".into()));
         assert_eq!(parse("jobs run x"), Input::Prompt("jobs run x".into()), "without the `!` it is a prompt");

@@ -2,7 +2,7 @@
 # the page): who can publish there and whether they're reputable. 2: one reputable author or
 # organisation; 3: identifiable, or partly open; 4: anyone, unknown, or no answer.
 name = "source_risk"
-version = 1
+version = 2
 description = "Who can publish at this source, and are they reputable?"
 exposure = "metadata"
 evidence = ["host", "scope", "path", "path_depth", "reached"]
@@ -35,6 +35,12 @@ no = "Not multi-tenant"
 kind = "rules"
 else = "4"
 
+# An identifiable publisher with an uncertain writer label stays at 3. Unknown publishers
+# and confidently open contributions stay at 4; missing confidence never lowers a rating.
+[[policy.rule]]
+when = "reputation in [reputable, identifiable] and platform < 0.5 and writers.p < 0.65"
+decide = "3"
+
 [[policy.rule]]
 when = "writers in [author, organisation] and reputation = reputable and platform >= 0"
 decide = "2"
@@ -45,6 +51,12 @@ decide = "3"
 
 [[policy.rule]]
 when = "writers = partly and reputation in [reputable, identifiable] and platform >= 0"
+decide = "3"
+
+# An identifiable publisher whose writers the URL alone can't show (an organisation's API host):
+# known, not open (D-068). Open platforms stay out: they're "anyone" or a platform.
+[[policy.rule]]
+when = "writers = unknown and reputation in [reputable, identifiable] and platform < 0.5"
 decide = "3"
 
 [[test]]
@@ -58,6 +70,11 @@ answers = { writers = "author", reputation = "identifiable", platform = 0.1 }
 expect = "3"
 
 [[test]]
+name = "an identifiable organisation's API host"
+answers = { writers = "unknown", reputation = "identifiable", platform = 0.14 }
+expect = "3"
+
+[[test]]
 name = "anyone can write"
 answers = { writers = "anyone", reputation = "reputable", platform = 0.9 }
 expect = "4"
@@ -65,4 +82,14 @@ expect = "4"
 [[test]]
 name = "no platform answer"
 answers = { writers = "organisation", reputation = "reputable" }
+expect = "4"
+
+[[test]]
+name = "an identifiable publisher with an uncertain writer label"
+answers = { writers = {choice="anyone",p=0.55}, reputation="identifiable", platform=0.1 }
+expect = "3"
+
+[[test]]
+name = "an unknown publisher with an uncertain writer label"
+answers = { writers = {choice="anyone",p=0.55}, reputation="unknown", platform=0.1 }
 expect = "4"

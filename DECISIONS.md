@@ -6,6 +6,20 @@
 
 ---
 
+## D-068 — Approved job authority and recoverable kernel work
+
+**Decision:** ship the Phase 2 leftovers and kernel Phase 3 together. Explicit owner approval belongs to an unchanged job definition; agent edits revoke it. Named source domains use private public-suffix boundaries and defer to owner trust entries, including blocks. The explicit workspace wins over an inferred prompt/report folder. Held runs wait up to two hours for owner decisions and their recorded continuations.
+
+Identifiable publishers with uncertain writers rate 3. Aligned high-risk file edits run while shells remain read-only. MCP stdio servers are contained and use their own egress trust level. Trust suggestions require explicit owner action.
+
+Busy prompts persist until atomically consumed with their authenticated tape message. Steering stops at a tool boundary and starts a correction turn using the existing worker protocol. Permission snapshots are shared within one tool call, invalidated by relevant mutations, and discarded at its end; live handover checks remain. This deliberately keeps authority shorter-lived than a whole model turn. Worker requests have deadlines and task exit clears summary/start/finish reservations. A durable dirty queue drives atomic private JSONL history exports. SQLite replacement is deferred; legacy schema remains for rollback.
+
+**Basis:** D-067 containment, D-065 authenticated provenance/queue, D-050 worker cleanup and principle 11's plain-file ownership. A vendored Mozilla public suffix list supplies reproducible shared-hosting boundaries without a runtime dependency.
+
+**Date:** 2026-10-19 (owner approved the combined scope before implementation)
+
+---
+
 ## D-067 — Security: context risk, action alignment, contained sessions
 
 **Date:** 2026-10-16 · **Status:** accepted (owner) · **Supersedes:** D-056's three-way shell grammar,

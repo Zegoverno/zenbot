@@ -38,7 +38,11 @@ changes. Candidate follow-ups, each only when use calls for it:
   masked shells are built. D-065 integrates metadata scoring, labelled admission through 3,
   authenticated task checks and a combined owner queue on the branch; release validation and
   owner review/merge/install remain before these changes are live.
-  Full offline/read-only limits begin at 4; budgets remain out of scope.
+  Full read-only limits begin at 4; budgets remain out of scope.
+- **Phase 2b + Phase 3 (D-068), pending release:** approved job authority, contextual source
+  ratings, aligned high-risk edits, held-run continuation, contained MCP, trust suggestions,
+  worker hang recovery, durable prompts, permission snapshots and JSONL histories are on the
+  combined branch. Full validation, advisory eval and owner review remain before merge/install.
 - **Earlier action-gate plan (D-056), superseded in part by D-062:** a session that reads outside content becomes *risky*, not
   limited; its actions are checked before they run by fixed rules over parsed facts (run, run in
   the offline sandbox, or ask the owner, with a one-tap `/allow`); then System One reads only the

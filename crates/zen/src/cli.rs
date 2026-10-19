@@ -140,6 +140,8 @@ pub(crate) enum Cmd {
 
 #[derive(Subcommand)]
 pub(crate) enum TrustCmd {
+    /// Propose entries from repeated clean web reads and egress; review then add explicitly
+    Suggest,
     /// The list, with the built-in package registries
     List,
     /// Add or change an entry: kind url|api|mcp|repo, then a host (or host/path), an MCP server's name, or host/owner/name (* for any)

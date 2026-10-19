@@ -283,46 +283,9 @@ harness versions with the same model on isolated kernels and databases (`evals/R
   (`TAVILY_API_KEY`), else SearXNG
   (`ZEN_SEARXNG_URL`, the compose service on 127.0.0.1:8888), which also rescues one failed keyed
   call; results deduplicated, http(s) only, reranked by System One.
-- **Source judgments** (D-065; `sources.rs`): metadata-only lowering, 30-day assessed publisher-scope cache
-  (public contributions cannot borrow maintained-code trust; uncertain scopes stay page-only), batched search misses; separate
-  raise-only content checks fail closed. Owner allowlist alone authorizes unseen egress.
-  Risk 2–3 permits safe local work and labelled instructions; project code remains sandboxed/held
-  from risk 2, independently of relevance. The full additional restrictions apply at 4. Snapshot-bound source proposals are owner-only and stale approvals reject.
-  Startup/manual rerating requires authenticated result bytes; historical unknown reasons stay.
-- **Job alignment and queue** (D-065; `task.rs`, `queue.rs`): at 2–3 persistent, outward and
-  arbitrary-code effects require a follows judgment; safe reads and local data writes skip it.
-  At 4 fixed rules decide first and alignment can only add holds. Goals come from authenticated
-  root-owner tape or an unchanged stored scheduled-job prompt; only plain assistant plans before
-  the first exposure are admitted. Tool results, compactions and late plans never define the goal.
-  Missing/malformed/unavailable judgments hold without contamination. Fixed secret, destructive
-  and unseen-fetch guards cannot be waived by alignment. The owner queue merges held actions and
-  snapshot-bound source proposals. Approve grants exact effects once with an idle kernel-origin
-  retry; reject is terminal across legacy allow and requeue; deny contaminates. Terminal picker
-  and encrypted verified-owner commands in private Matrix rooms share authenticated queue routes.
-- **Untrusted content** (D-034, D-053; `taint.rs`): at level 4, web pages, untrusted MCP servers' output
-  and tool descriptions (D-052), instruction files from repositories the owner hasn't listed
-  (`ZEN_TRUSTED_REPOS`, D-051) and a tainted subagent's answer are wrapped in `<untrusted …>`
-  (markers inside are defused) and the session is risky (`sessions.risky_at`, a `risky` block). `gate.rs` checks effects before they run: fixed read utilities use a credential-protected read-only view, Git/builds run offline with a read-only workspace (D-063), and outward, unknown or steering effects are held. A held effect requests owner review without contaminating the session; only denial or level-5 content contaminates. `/allow` inspects the latest held action; `/allow yes` grants the exact workspace/tool/arguments once within ten minutes. The grant and audit commit together and consumption is atomic. `/trust` clears both marks (D-056).
-  Taint is also a property of what a tainted session stores: memories (`memories.tainted`), job
-  reports (`job_runs.tainted`), draft skills (`draft_taint`) and wiki entries (labelled `web`).
-  Every path that gives stored content to a session goes through `taint::hand_over_rating`, which wraps
-  marked content and makes the reader risky, so it never reaches a clean session as trusted. `search`
-  hands over a marked result only when asked for it by name (an exact match); any other marked
-  result is listed by reference with none of its text (a wiki page without its name), so coming across one doesn't spread the
-  mark (D-056). Items keep their numeric origin by exact bytes; the owner's `/deny` contaminates a session
-  and everything that read its products, `/trust` lifts reviewed causes, and every shell sees files
-  from contaminated sessions masked (`fsview.rs`, D-064). What a
-  risky session may not vouch for is `taint::limited`: `remember` records `inferred` and marks the entry,
-  so web text can't pass as the owner's words; its `edit` or `write` on a prompt file (`SOUL`,
-  `IDENTITY`, `AGENTS`, `USER`), an active skill or a made tool is refused, as for any subagent or
-  kernel session (D-045, D-051), unless an exact owner grant overrides a main session's steering limit. Persistent scheduling is held, and an exact grant supplies owner authorization. Programmable `bash` and verification commands run offline in bubblewrap: no network, `/run` and a private `/tmp` emptied,
-  its own processes, the workspace and the rest of the machine read-only, the secret files hidden; the result says so. Only private `/tmp` is writable. A seccomp filter blocks socket connection/datagram syscalls and io_uring; network namespaces alone do not isolate pathname Unix sockets. Project-code attempts offer an exact `/allow` action without themselves tainting the session. Builds, tests or commits needing workspace writes or networking require exact approval or the owner trusting the session again (`/trust`, D-054:
-  after looking at what marked it, forward only; what it stored keeps its marks) or continues in a fresh session. Unsupported shell syntax is held conservatively; the narrow grammar is not a promise that the prototype's unchecked fraction is preserved. Workspace code cannot write project files without exact approval; programmable commands in a workspace containing the home are held for exact approval instead of running automatically. Immutable snapshots and a separate Unix user are not supplied by this gate. A main session may write
-  `IDENTITY.md` and `USER.md` itself; each change is backed up first
-  (`~/.zenbot/backups/prompt-files/`) and one that passes the file's cap comes back with a request
-  to compact it. No session may `edit` or `write` the owner's configuration and secrets
-  (`mcp.json`, `env`, `token`, `matrix.env`, `matrix/`, `bin/`). When the taint can't be read the
-  session counts as tainted; when it can't be recorded the content is withheld.
+- **Source judgments** (D-065, D-068; `sources.rs`): metadata-only lowering with a 30-day   assessed publisher-scope cache, separate raise-only content checks and owner-approved proposals.   Identifiable publishers with uncertain writers rate 3; unknown publishers remain 4. Owner   trust entries win over job-named source authority. Explicit owner approval belongs to a job's   unchanged definition and is revoked by agent edits. Public-suffix boundaries keep separate   tenants separate. A job's explicit workspace wins over inferred prompt/report folders.
+- **Alignment and queue** (`gate.rs`, `task.rs`, `queue.rs`): effects are checked against the   authenticated root-owner goal or unchanged stored job prompt, with only pre-exposure assistant   plans admitted. Local work skips the judge. At high risk, aligned file edits run while shells   remain read-only; contradicting actions lock, unavailable or ambiguous judgments hold. A hold   never contaminates. Approve grants exact effects once with a kernel-origin retry; reject is   terminal; deny contaminates the session and dependent readers. A held scheduled run waits up   to two hours, then waits for the decision's continuation to finish before delivering its report.
+- **Outside content** (`taint.rs`, `sources.rs`): numeric origin ratings survive copying and   persistence; reads at 2+ are labelled. Denial and level-5 content stop readers. `/trust` lifts   reviewed causes forward only; stored products retain their origin. `fsview.rs` masks products   of contaminated writers. Prompt files, active skills, made tools, owner config and secrets   retain their separate write protections. Every shell runs contained except an authorized host   command (D-067); high-risk workspaces are read-only with private scratch space. Permission   snapshots are shared within each tool call, invalidated on mutations, and never retained over   another call. Handover checks contamination live; database failures fail closed.
 - **MCP** (`mcp.rs`, D-033, D-052): servers in `~/.zenbot/mcp.json` (stdio or streamable HTTP,
   `${VAR}` from the environment, a secret-named one only when the server lists it in `allow_env`,
   `include`/`exclude`, `timeout_s`, `untrusted`, default true for every server until the owner
@@ -333,7 +296,9 @@ harness versions with the same model on isolated kernels and databases (`evals/R
   tools are looked up from its last listing (listed again on `tools/list_changed`), and a stdio
   server's answers reach their calls by id. A message over 8 MB fails its call. A stdio server runs
   in its own process group, killed whole when it is replaced or the kernel stops.
-  `GET /api/mcp` shows servers and problems.
+  Stdio servers run contained with a private writable cache folder and network through a proxy
+  evaluated at the server's own trust level. `GET /api/mcp` reports cached counts and errors without
+  starting servers. `zen trust suggest` proposes repeated clean hosts for explicit owner review.
 
 ### Security today
 
@@ -371,7 +336,7 @@ the owner (push, gh, ssh, docker, systemctl) needs `host: true`, which the actio
 action's effect and, when needed, alignment with the owner's job, giving run, hold or lock. A host
 command that runs, and `zend` itself, still run as the owner's Unix user, who has passwordless
 `sudo` and Docker on the standard install; a separate uid is later hardening (ROADMAP.md). MCP stdio
-servers run outside the sandbox (follow-up).
+servers use the same containment boundary with their own writable cache folder and trust policy.
 
 ### Deployment
 

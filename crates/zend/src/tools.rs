@@ -345,6 +345,55 @@ pub(crate) fn network_filter() -> Result<std::fs::File,String> {
     seccomp(rules)
 }
 
+/// The contained sandbox up to the program to run (D-067): the machine read-only, `dir` writable
+/// when `writable`, `tmp` (else an empty one) as /tmp, an empty /run, the zen home read-only with
+/// its secrets hidden, `masks` unreadable, and the network only through the proxy `socket` (the
+/// command then runs under `zend bridge`). Shells (`run_shell`) and MCP stdio servers (mcp.rs) use
+/// it; append the program and its arguments. `filter` must stay open until the spawn.
+pub fn contained_command(filter: &std::fs::File, dir: &Path, writable: bool, tmp: Option<&Path>, socket: Option<&Path>, masks: &[PathBuf]) -> Command {
+    let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/home".into()));
+    let mut c = sandbox_command(filter);
+    c.args(OFFLINE_SANDBOX);
+    // A home under the emptied /tmp (a test's) comes back read-only; then the workspace; then the
+    // zen home read-only again (prompt files, skills, the wiki change only through the kernel's
+    // tools), its secrets hidden.
+    if let Some(tmp) = tmp {
+        c.arg("--bind").arg(tmp).arg("/tmp");
+    }
+    if home.starts_with("/tmp") || home.starts_with("/run") {
+        c.arg("--ro-bind").arg(&home).arg(&home);
+    }
+    c.arg(if writable { "--bind" } else { "--ro-bind" }).arg(dir).arg(dir);
+    let zen = crate::zen_home();
+    if zen.exists() {
+        c.arg("--ro-bind").arg(&zen).arg(&zen);
+    }
+    hide_secrets(&mut c, crate::secrets::secret_files());
+    crate::fsview::mask(&mut c, masks);
+    let bridge = std::env::var("ZEN_BRIDGE_BIN").map(PathBuf::from).or_else(|_| std::env::current_exe());
+    match (socket, bridge) {
+        (Some(sock), Ok(exe)) => {
+            let proxy = format!("http://127.0.0.1:{}", crate::proxy::BRIDGE_PORT);
+            c.arg("--bind").arg(sock).arg(sock);
+            for k in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY"] {
+                c.env(k, &proxy);
+            }
+            c.env("NO_PROXY", "localhost,127.0.0.1").env("no_proxy", "localhost,127.0.0.1");
+            c.arg("--chdir").arg(dir).arg(&exe).arg("bridge").arg(sock).arg(crate::proxy::BRIDGE_PORT.to_string());
+        }
+        _ => {
+            c.arg("--chdir").arg(dir);
+        }
+    }
+    c
+}
+
+/// The seccomp filter for a contained process: io_uring refused always; with no network, every
+/// connect and send too.
+pub fn contained_filter(net: bool) -> Result<std::fs::File, String> {
+    if net { uring_filter() } else { network_filter() }
+}
+
 /// A session's private /tmp for its contained shells (`<system tmp>/zen-sandbox/<session>`, mode 700;
 /// the nightly `prune` job removes those a week old).
 pub fn session_tmp(session: &str) -> Option<PathBuf> {
@@ -447,43 +496,13 @@ pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox:
             c
         }
         Sandbox::Contained { writable, net } => {
-            let mut c = sandbox_command(filter.as_ref().expect("sandbox filter initialized"));
-            c.args(OFFLINE_SANDBOX);
-            // A home under the emptied /tmp (a test's) comes back read-only; then the workspace;
-            // then the zen home read-only again (prompt files, skills, the wiki change only through
-            // the kernel's tools), its secrets hidden.
-            if home.starts_with("/tmp") || home.starts_with("/run") {
-                c.arg("--ro-bind").arg(&home).arg(&home);
-            }
+            let session = env.iter().find(|(k, _)| *k == "ZEN_SESSION_ID").map(|(_, v)| v.to_string());
             // The session's own /tmp, kept between its commands (build caches, scratch files) and
             // never shared with the host's or another session's.
-            if let Some(tmp) = env.iter().find(|(k, _)| *k == "ZEN_SESSION_ID").and_then(|(_, s)| session_tmp(s)) {
-                c.arg("--bind").arg(&tmp).arg("/tmp");
-            }
-            c.arg(if writable { "--bind" } else { "--ro-bind" }).arg(dir).arg(dir);
-            let zen = crate::zen_home();
-            if zen.exists() {
-                c.arg("--ro-bind").arg(&zen).arg(&zen);
-            }
-            hide_secrets(&mut c, crate::secrets::secret_files());
-            crate::fsview::mask(&mut c, masks);
-            let session = env.iter().find(|(k, _)| *k == "ZEN_SESSION_ID").map(|(_, v)| v.to_string());
+            let tmp = session.as_deref().and_then(session_tmp);
             let socket = session.and_then(|s| s.parse().ok()).map(crate::proxy::socket_path).filter(|p| net && p.exists());
-            let bridge = std::env::var("ZEN_BRIDGE_BIN").map(PathBuf::from).or_else(|_| std::env::current_exe());
-            match (socket, bridge) {
-                (Some(sock), Ok(exe)) => {
-                    let proxy = format!("http://127.0.0.1:{}", crate::proxy::BRIDGE_PORT);
-                    c.arg("--bind").arg(&sock).arg(&sock);
-                    for k in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY"] {
-                        c.env(k, &proxy);
-                    }
-                    c.env("NO_PROXY", "localhost,127.0.0.1").env("no_proxy", "localhost,127.0.0.1");
-                    c.arg("--chdir").arg(dir).arg(&exe).arg("bridge").arg(&sock).arg(crate::proxy::BRIDGE_PORT.to_string()).args(["bash", "-c"]);
-                }
-                _ => {
-                    c.arg("--chdir").arg(dir).args(["bash", "-c"]);
-                }
-            }
+            let mut c = contained_command(filter.as_ref().expect("sandbox filter initialized"), dir, writable, tmp.as_deref(), socket.as_deref(), masks);
+            c.args(["bash", "-c"]);
             c
         }
         Sandbox::GatedFile => return Err("file policy cannot execute shell commands".into()),

@@ -47,6 +47,8 @@ pub(crate) fn app(db: sqlx::PgPool) -> crate::AppState {
         hubs: Mutex::new(HashMap::new()),
         updater: std::sync::Arc::new(crate::update::Updater::new(std::env::temp_dir())),
         compacting: Mutex::new(HashSet::new()),
+        finishing: Mutex::new(HashSet::new()),
+        starting_prompts: Mutex::new(HashSet::new()),
         waiters: Mutex::new(HashMap::new()),
         background: std::sync::Arc::default(),
     })

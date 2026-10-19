@@ -5,11 +5,11 @@
 # before any outside content, and the action; never tool output. Most actions are decided by the
 # first rules alone, with no model call.
 name = "action_gate"
-version = 1
+version = 2
 description = "Run, hold or lock: context risk, action risk and alignment with the owner's job."
 exposure = "outside"
 evidence = ["job_data", "proposed_action_UNTRUSTED_DATA", "effect"]
-inputs = ["context", "effect", "trusted", "judge"]
+inputs = ["context", "effect", "trusted", "judge", "edit"]
 timeout = "10s"
 max_state_chars = 48000
 unavailable = "hold"
@@ -46,6 +46,11 @@ decide = "run"
 when = "judge = off"
 decide = "hold"
 
+# An edit S1 reads as unrelated waits for the owner; only one that contradicts the job locks (D-068).
+[[policy.rule]]
+when = "context = high and edit = yes and alignment = unrelated"
+decide = "hold"
+
 # An action above local that doesn't follow the owner's job is the clearest sign of injection.
 [[policy.rule]]
 when = "alignment in [unrelated, contradicts] and context in [medium, high]"
@@ -53,6 +58,12 @@ decide = "lock"
 
 [[policy.rule]]
 when = "context = low and effect = outward and alignment = follows"
+decide = "run"
+
+# After high-risk content a file edit counts as persistent, but one that follows the job runs (the
+# read-only shell still keeps project code from running what was planted) (D-068).
+[[policy.rule]]
+when = "context = high and edit = yes and alignment = follows"
 decide = "run"
 
 [[policy.rule]]
@@ -97,6 +108,21 @@ expect = "hold"
 name = "an unrelated action after outside content locks"
 answers = { context = "medium", effect = "persistent", alignment = "unrelated" }
 expect = "lock"
+
+[[test]]
+name = "an edit that follows the job runs after the open web"
+answers = { context = "high", effect = "persistent", edit = "yes", alignment = "follows" }
+expect = "run"
+
+[[test]]
+name = "an edit that contradicts the job locks"
+answers = { context = "high", effect = "persistent", edit = "yes", alignment = "contradicts" }
+expect = "lock"
+
+[[test]]
+name = "an edit S1 reads as unrelated waits"
+answers = { context = "high", effect = "persistent", edit = "yes", alignment = "unrelated" }
+expect = "hold"
 
 [[test]]
 name = "anything irreversible after the open web locks"

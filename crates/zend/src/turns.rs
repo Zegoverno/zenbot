@@ -78,7 +78,11 @@ pub(crate) async fn watchdog(app: AppState) {
 /// End a session's turn in the kernel: cancel its tool calls, free the session, tell clients.
 /// Returns false if no turn was running (e.g. it was already ended).
 pub(crate) async fn finish_turn(app: &AppState, id: Uuid, error: Value) -> bool {
+    let mut finishing = app.finishing.lock().await;
     let Some(turn) = app.turns.lock().await.remove(&id) else { return false };
+    finishing.insert(id);
+    drop(finishing);
+    let _finishing = SessionFlag { app: app.clone(), id, finishing: true };
     let _ = turn.cancel.send(true);
     let Recorded { turn: summary, parent, session_cost: cost } = match record_turn(app, &turn, &error).await {
         Ok(r) => r,
@@ -123,6 +127,7 @@ pub(crate) async fn prepare_summary_if_needed(app: &AppState, id: Uuid, model: &
     }
     let (app, model) = (app.clone(), model.to_string());
     tokio::spawn(async move {
+        let _guard = Compacting { app: app.clone(), id };
         let res = match compact::pending(&app.db, id).await {
             Ok(Some(_)) => Ok(None),
             Ok(None) => compact::prepare(&app, id, settings.keep_tokens(), &model).await,
@@ -133,8 +138,15 @@ pub(crate) async fn prepare_summary_if_needed(app: &AppState, id: Uuid, model: &
             Ok(None) => {}
             Err(e) => tracing::error!("preparing a summary for session {id}: {e:#}"),
         }
-        app.compacting.lock().await.remove(&id);
     });
+}
+
+struct Compacting { app: AppState, id: Uuid }
+impl Drop for Compacting {
+    fn drop(&mut self) {
+        let (app, id) = (self.app.clone(), self.id);
+        tokio::spawn(async move { app.compacting.lock().await.remove(&id); });
+    }
 }
 
 /// A session's cost: its turns, plus calls recorded before turns were (they have no turn_id).
@@ -312,11 +324,52 @@ pub(crate) enum Origin {
 }
 
 /// The owner's prompt.
-pub(crate) async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result<()> {
-    if text.trim().is_empty() {
-        return Ok(());
+pub(crate) async fn submit_prompt(app: &AppState, id: Uuid, text: String, steer: bool) -> Result<()> {
+    if text.trim().is_empty() { return Ok(()); }
+    if !app.is_busy(id).await {
+        match begin_turn(app, id, text.clone(), Origin::Owner).await {
+            Ok(()) => return Ok(()),
+            Err(e) if e.to_string().contains("already working") => {},
+            Err(e) => return Err(e),
+        }
     }
-    begin_turn(app, id, text, Origin::Owner).await
+    anyhow::ensure!(!crate::taint::stopped(&app.db, id).await?, "session stopped by contamination; review it with /trust");
+    let queued: i64 = sqlx::query_scalar("INSERT INTO pending_prompts(session_id,text,steer) VALUES($1,$2,$3) RETURNING id")
+        .bind(id).bind(crate::secrets::mask(&text)).bind(steer).fetch_one(&app.db).await?;
+    app.emit(id, json!({"type":"status", "text":format!("Prompt #{queued} queued")})).await;
+    Ok(())
+}
+
+/// One dispatcher per kernel; each session's oldest prompt starts only after its previous turn.
+/// The row survives restarts and is removed in the same transaction as its owner tape message.
+pub(crate) async fn prompt_loop(app: AppState) {
+    loop {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let rows = match sqlx::query("SELECT DISTINCT ON(session_id) id,session_id,text FROM pending_prompts WHERE error IS NULL ORDER BY session_id,steer DESC,id")
+            .fetch_all(&app.db).await {
+                Ok(rows) => rows,
+                Err(e) => { tracing::warn!("loading pending prompts: {e:#}"); continue; }
+            };
+        for row in rows {
+            let session: Uuid = row.get("session_id");
+            if app.is_busy(session).await { continue; }
+            if !app.starting_prompts.lock().await.insert(session) { continue; }
+            let app = app.clone();
+            tokio::spawn(async move {
+                let _starting = SessionFlag { app: app.clone(), id: session, finishing: false };
+                let queued: i64 = row.get("id");
+                let pending = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pending_prompts WHERE id=$1 AND error IS NULL)")
+                    .bind(queued).fetch_one(&app.db).await.unwrap_or(false);
+                if !pending { return; }
+                if let Err(e) = begin_queued(&app, session, row.get("text"), Origin::Owner, Some(queued)).await {
+                    if app.is_busy(session).await { return; }
+                    let _ = sqlx::query("UPDATE pending_prompts SET error=$2 WHERE id=$1")
+                        .bind(queued).bind(e.to_string()).execute(&app.db).await;
+                    app.emit(session,json!({"type":"error","error":format!("Queued prompt #{queued} failed: {e}")})).await;
+                }
+            });
+        }
+    }
 }
 
 /// Run a child session of `kind` (a verifier, a subagent) with one kernel prompt, on `model` (the
@@ -325,8 +378,8 @@ pub(crate) async fn start_turn(app: &AppState, id: Uuid, text: String) -> Result
 pub(crate) async fn run_child(app: &AppState, parent: Uuid, kind: &str, prompt: &str, dir: &std::path::Path, model: Option<&str>) -> Result<Uuid> {
     let child = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO sessions (id, title, model, effort, state, parent, kind, workspace, tainted_at, risky_at, risk)
-         SELECT $1, $2 || ': ' || title, COALESCE($6, model), CASE WHEN $6 IS NULL THEN effort END, NULL, id, $3, $5, tainted_at, risky_at, risk
+        "INSERT INTO sessions (id, title, model, effort, parent, kind, workspace, risk)
+         SELECT $1, $2 || ': ' || title, COALESCE($6, model), CASE WHEN $6 IS NULL THEN effort END, id, $3, $5, risk
          FROM sessions WHERE id = $4",
     )
     .bind(child)
@@ -401,6 +454,11 @@ impl Drop for StopOnDrop {
 }
 
 pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: Origin) -> Result<()> {
+    begin_queued(app, id, text, origin, None).await
+}
+
+async fn begin_queued(app: &AppState, id: Uuid, text: String, origin: Origin, queued: Option<i64>) -> Result<()> {
+    anyhow::ensure!(!app.finishing.lock().await.contains(&id), "this session is already working; wait or abort");
     anyhow::ensure!(!crate::taint::stopped(&app.db,id).await?, "session stopped by contamination; review it with /trust");
     let row = sqlx::query("SELECT model, effort, title, workspace, kind FROM sessions WHERE id = $1")
         .bind(id)
@@ -551,7 +609,7 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
         if origin == Origin::Kernel {
             user["kernel"] = json!(true);
         }
-        if origin == Origin::Owner { tape::append_owner(&app.db, id, &user).await?; }
+        if origin == Origin::Owner { tape::append_owner_queued(&app.db, id, &user, queued).await?; }
         else { tape::append(&app.db, id, "message", &user).await?; }
         if title.is_empty() && origin == Origin::Owner {
             let t: String = text.chars().take(60).collect();
@@ -673,5 +731,37 @@ mod tests {
         assert_eq!(t["cost_usd"].as_f64(), Some(0.25));
         let none = sum_reports(&[json!({ "provider": "codex" })]);
         assert!(none["input"].is_null() && none["cost_usd"].is_null(), "nothing reported: the model calls are summed instead");
+    }
+}
+
+/// Keep start/finish reservations even when their owning task panics or is cancelled.
+struct SessionFlag { app: AppState, id: Uuid, finishing: bool }
+impl Drop for SessionFlag {
+    fn drop(&mut self) {
+        let (app, id, finishing) = (self.app.clone(), self.id, self.finishing);
+        tokio::spawn(async move {
+            if finishing { app.finishing.lock().await.remove(&id); }
+            else { app.starting_prompts.lock().await.remove(&id); }
+        });
+    }
+}
+
+#[cfg(test)]
+mod reservation_tests {
+    use super::*;
+    #[tokio::test]
+    async fn summary_panic_releases_its_reservation() {
+        let db = PgPoolOptions::new().connect_lazy("postgres://unused:unused@localhost/unused").unwrap();
+        let app = crate::test_util::app(db);
+        let id = Uuid::new_v4();
+        app.compacting.lock().await.insert(id);
+        let child = app.clone();
+        assert!(tokio::spawn(async move {
+            let _guard = Compacting {app: child, id};
+            panic!("simulated summary panic");
+        }).await.is_err());
+        tokio::time::timeout(Duration::from_secs(1),async {
+            while app.compacting.lock().await.contains(&id) {tokio::task::yield_now().await;}
+        }).await.unwrap();
     }
 }

@@ -56,6 +56,7 @@ pub(crate) async fn decide(State(app):State<AppState>,Path((kind,id)):Path<(Stri
     }
     crate::tape::append_in(&mut tx,session,"queue",&json!({"gate":id,"decision":d,"by":"the owner"})).await?;
     tx.commit().await?;
+    crate::session_state::invalidate();
     drop(turns);
     // The owner's answer is what S1's task check should have said (s1/learn.rs).
     crate::s1::learn::label_gate(&app.db,id,d=="approve").await;

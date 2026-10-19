@@ -223,11 +223,12 @@ mcp_tools() {
   mkdir -p "$TMP/home/.zenbot"
   cat >"$TMP/home/.zenbot/mcp.json" <<JSON
 { "mcpServers": {
-  "local": { "command": "python3", "args": ["$REPO/scripts/e2e/mcp_server.py", "--child-pidfile", "$TMP/mcp-child.pid"] },
+  "local": { "command": "python3", "args": ["$REPO/scripts/e2e/mcp_server.py", "--child-pidfile", "$TMP/home/.cache/zenbot/mcp/local/mcp-child.pid"] },
   "remote": { "url": "http://127.0.0.1:$port/mcp", "headers": { "Authorization": "Bearer \${ZEN_E2E_MCP_TOKEN}" }, "allow_env": ["ZEN_E2E_MCP_TOKEN"] },
   "greedy": { "url": "http://127.0.0.1:$port/mcp", "headers": { "Authorization": "Bearer \${ZEN_TOKEN}" }, "exclude": ["echo", "add"] } } }
 JSON
   start_kernel "$ws" "$(script reach.json)" ZEN_E2E_MCP_TOKEN=e2e
+  check "MCP status does not start configured stdio servers" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/mcp" | jq '.servers.local')/$(test -e "$TMP/home/.cache/zenbot/mcp/local/mcp-child.pid" && echo started || echo idle)" "0/idle"
   local r sid; r=$(zen ask --json -m faux/smoke "mcp please"); sid=$(echo "$r" | jq -r .session_id)
   check "untrusted descriptions make external effects wait for approval" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" \
     find_tools:false,load_tool:false,call_tool:true,call_tool:true,call_tool:true
@@ -261,12 +262,15 @@ JSON
   check "an answer over 8 MB is an error, stdio and HTTP" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" call_tool:true,call_tool:true
   check "the first oversized result is refused, and the next outside call is held" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$(echo "$r" | jq -r .session_id)' AND payload->>'role'='toolResult' AND (payload::text LIKE '%over 8 MB%' OR payload::text LIKE '%not run:%')")" 2
   # A server's own children go with it: changing mcp.json restarts the servers.
-  local child; child=$(cat "$TMP/mcp-child.pid")
-  check "the local server's child runs" kill -0 "$child"
+  local marker="$TMP/home/.cache/zenbot/mcp/local/mcp-child.pid"
+  local heartbeat="$marker.$(cat "$marker")"
+  check "stdio MCP can write only its own folder and cannot read the owner token" jq -e '.workspace_write and (.owner_file_write|not) and (.token_read|not)' "$TMP/home/.cache/zenbot/mcp/local/containment.json"
+  local beat; beat=$(cat "$heartbeat"); sleep .3
+  check "the local server's child runs" test "$beat" != "$(cat "$heartbeat")"
   sed -i 's/"exclude": \["echo", "add"\]/"exclude": ["echo"]/' "$TMP/home/.zenbot/mcp.json"
   zen ask --json -m faux/smoke "tool find" >/dev/null
-  local i; for i in $(seq 1 20); do kill -0 "$child" 2>/dev/null || break; sleep 0.25; done
-  check "and is gone when the server is replaced" bash -c '! kill -0 "$1" 2>/dev/null' _ "$child"
+  sleep .5; beat=$(cat "$heartbeat"); sleep .3
+  check "and stops when the server is replaced" eq "$(cat "$heartbeat")" "$beat"
   kill "$srv" 2>/dev/null || true
 }
 
@@ -1272,6 +1276,8 @@ action_gate() {
   check "metadata scoring, public surfaces, poisoned text, unavailable and labelled 2–3 admission" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" ZEN_S1_URL="http://127.0.0.1:$source_port/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key cargo test --release -q -p zend source_system_one_database -- --ignored
   check "authenticated root, pre-exposure plans and stored job definitions" env TASK_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend task_database -- --ignored
   check "queue decisions are atomic, terminal and contamination-safe" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend queue_decisions_database -- --ignored
+  check "permission snapshots refresh on risk, lock and denial" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend permission_snapshot_database -- --ignored
+  check "job source authority is owner-only and revoked by agent edits" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend owner_job_authority_database -- --ignored
   db_drop "$native_db"
   local ws; ws=$(new_workspace action-gate)
   local port=$((PORT + 12))
@@ -1461,8 +1467,64 @@ failover_model() {
   check "the next turn runs on it" eq "$(zen ask --json -s "$sid" "second" | jq -r '.error // "ok"')/$(q "SELECT model FROM turns WHERE session_id='$sid' ORDER BY started_at DESC LIMIT 1")" "ok/faux/backup"
 }
 
+# Phase 2b incident replay and Phase 3 kernel behavior, with disposable jobs and faux turns.
+phase3_kernel() {
+  local ws; ws=$(new_workspace phase3)
+  local sp=$((PORT+12)) mp=$((PORT+13)) stub=$((PORT+15))
+  python3 "$REPO/scripts/e2e/searxng_stub.py" "$sp" & local search_srv=$!
+  python3 "$REPO/scripts/e2e/systemone_stub.py" "$mp" & local model_srv=$!
+  mkdir -p "$TMP/www"; echo pong > "$TMP/www/ping"
+  python3 -m http.server "$stub" --bind 127.0.0.1 --directory "$TMP/www" >/dev/null 2>&1 & local www_srv=$!
+  sleep .3
+  local faux; faux=$(script phase3.json "s|STUBPORT|$stub|g")
+  start_kernel "$ws" "$faux" ZEN_SEARXNG_URL="http://127.0.0.1:$sp" ZEN_EGRESS_LOOPBACK_FOR_TESTS=1 ZEN_S1_URL="http://127.0.0.1:$mp/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key
+  api() { curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
+  local sid first second
+  sid=$(api -X POST -d '{"model":"faux/smoke"}' "$URL/api/sessions" | jq -r .id)
+  zen ask --json -s "$sid" P3-SLOW > "$TMP/first.json" & first=$!
+  poll "SELECT count(*) FROM turns WHERE session_id='$sid' AND ended_at IS NULL" 1 >/dev/null
+  python3 scripts/e2e/ws_prompt.py "$URL" "$TOKEN" "$sid" '{"type":"prompt","text":"P3-QUEUED"}' 0 > "$TMP/queued.events" & second=$!
+  wait "$first" "$second"
+  check "a prompt sent while busy runs afterwards" poll "SELECT count(*) FROM tool_calls WHERE session_id='$sid' AND name='write'" 1
+  check "queued owner provenance stays authenticated" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND origin='owner' AND payload->>'content'='P3-QUEUED'")" 1
+  check "the queue consumed it once" eq "$(q "SELECT count(*) FROM pending_prompts WHERE session_id='$sid'")/$(cat "$ws/queued.txt")" 0/queued
+  zen ask --json -s "$sid" P3-BASE > "$TMP/base.json" & first=$!
+  poll "SELECT count(*) FROM turns WHERE session_id='$sid' AND ended_at IS NULL" 1 >/dev/null
+  python3 scripts/e2e/ws_prompt.py "$URL" "$TOKEN" "$sid" '{"type":"prompt","text":"P3-CORRECT","mode":"steer"}' 0 > "$TMP/steered.events" & second=$!
+  wait "$first" "$second"
+  check "owner steering stops the next action and runs the correction" poll "SELECT count(*) FROM tool_calls WHERE session_id='$sid' AND args->>'path'='steered.txt'" 1
+  check "the action after the boundary did not run" test ! -e "$ws/should-not-run.txt"
+  # Queue a prompt before stopping; the durable row must be dispatched after restart.
+  q "INSERT INTO pending_prompts(session_id,text) VALUES('$sid','P3-QUEUED')" >/dev/null
+  stop_kernel
+  start_kernel "$ws" "$faux" ZEN_SEARXNG_URL="http://127.0.0.1:$sp" ZEN_EGRESS_LOOPBACK_FOR_TESTS=1 ZEN_S1_URL="http://127.0.0.1:$mp/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key
+  check "a queued prompt survives kernel restart" poll "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND origin='owner' AND payload->>'content'='P3-QUEUED'" 2
+  check "JSONL mirror catches up and preserves sequence and hashes" until_ok python3 -c 'import json,sys; rows=[json.loads(x) for x in open(sys.argv[1])]; assert rows and all(r["seq"]==i+1 and r["hash"] for i,r in enumerate(rows)); assert sum(r["origin"]=="owner" and r["payload"].get("content")=="P3-QUEUED" for r in rows)==2' "$TMP/home/.zenbot/sessions/$sid.jsonl"
+  # Replay the readings failure: owner-named host, its shell fetch, and a local output file.
+  zen jobs add p3-readings --schedule 'every 1h' --prompt "P3-INCIDENT fetch http://127.0.0.1:$stub/ping" --dir "$ws" >/dev/null
+  zen jobs run p3-readings >/dev/null
+  check "an approved job naming its source finishes and delivers" poll "SELECT last_status FROM jobs WHERE name='p3-readings'" ok
+  check "the named source stays at 2, and the output write runs" eq "$(q "SELECT s.risk FROM sessions s JOIN job_runs r ON r.session_id=s.id JOIN jobs j ON j.id=r.job_id WHERE j.name='p3-readings'")/$(cat "$ws/out/notes.json")" 2/readings
+  # A high-risk file write aligned with the authenticated goal runs; its shell remains read-only.
+  q "UPDATE sessions SET risk=4 WHERE id='$sid'" >/dev/null
+  zen ask --json -s "$sid" 'P3-WRITE write the aligned local output' >/dev/null
+  check "an aligned high-risk write runs" eq "$(cat "$ws/out/aligned.json")" aligned
+  zen jobs add p3-held --schedule 'every 1h' --prompt 'ALIGN-UNAVAILABLE P3-HOLD write out/held.json' --dir "$ws" >/dev/null
+  zen jobs run p3-held >/dev/null
+  check "a held job waits, represented in the owner queue" poll "SELECT count(*) FROM action_gates g JOIN job_runs r ON r.session_id=g.session_id JOIN jobs j ON j.id=r.job_id WHERE j.name='p3-held' AND g.decision IS NULL" 1
+  local gate; gate=$(q "SELECT g.id FROM action_gates g JOIN job_runs r ON r.session_id=g.session_id JOIN jobs j ON j.id=r.job_id WHERE j.name='p3-held' ORDER BY g.id DESC LIMIT 1")
+  check "the job stays running while awaiting the owner" eq "$(q "SELECT status FROM job_runs r JOIN jobs j ON j.id=r.job_id WHERE j.name='p3-held'")" running
+  # Wait for the first turn's end before approving, just as Matrix's owner queue does.
+  poll "SELECT count(*) FROM turns t JOIN job_runs r ON r.session_id=t.session_id JOIN jobs j ON j.id=r.job_id WHERE j.name='p3-held' AND t.ended_at IS NOT NULL" 1 >/dev/null
+  check "approval resumes the exact action" eq "$(api -X POST -d '{"decision":"approve"}' "$URL/api/queue/action/$gate" | jq -r .resumed)" true
+  check "the resumed job delivers its report" poll "SELECT last_status FROM jobs WHERE name='p3-held'" ok
+  check "the approved file was written" eq "$(cat "$ws/out/held.json")" approved
+  kill "$search_srv" "$model_srv" "$www_srv"; wait "$search_srv" "$model_srv" "$www_srv" 2>/dev/null || true
+}
+
 # Scenarios that share a setup run as parts of one; `scripts/e2e.sh <filter>` matches the scenario's
 # name or a part's function name. Slowest first, so the parallel run ends sooner.
+run phase3 phase3_kernel
 run turns abort_tool stale_turn
 run jobs scheduled_jobs job_report_file job_post_to
 run search-index search_index

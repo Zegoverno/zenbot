@@ -34,8 +34,12 @@ pub(crate) async fn dispatch(app: AppState, mut incoming: tokio::sync::mpsc::Unb
         if msg.method == ToolCall::METHOD {
             let app = app.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle_incoming(&app, worker, msg).await {
+                let request = msg.id.clone();
+                if let Err(e) = crate::session_state::scope(handle_incoming(&app, worker, msg)).await {
                     tracing::error!("handling tool call: {e:#}");
+                    if let Some(request) = request {
+                        let _ = app.workers[worker].mind().respond(request, &refused("tool failed: kernel could not complete its bookkeeping")).await;
+                    }
                 }
             });
             continue;
@@ -196,6 +200,16 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                     return Ok(());
                 }
             };
+            let steer: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_prompts WHERE session_id=$1 AND steer AND error IS NULL)")
+                .bind(id).fetch_one(&app.db).await?;
+            if steer {
+                if let Some(request) = msg.id {
+                    mind.respond(request, &refused("owner steering requested; this action was not run")).await?;
+                }
+                let app = app.clone();
+                tokio::spawn(async move { abort_turn(&app, id).await; });
+                return Ok(());
+            }
             let ToolCall { name, call_id, args, .. } = call;
             let (mut cancel, model, turn_id, mut ending, workspace, kind) = {
                 let mut turns = app.turns.lock().await;
@@ -258,8 +272,6 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                             return tools::ToolOutput { rating: None, content: crate::gate::held_note(why), is_error: true };
                         }
                         if let Some(why) = agent::refuse(ending) {
-                            tools::ToolOutput { rating: None, content: why, is_error: true }
-                        } else if let Some(why) = agent::refusal(kind.as_deref(), &name) {
                             tools::ToolOutput { rating: None, content: why, is_error: true }
                         } else if let Some(why) = agent::protected_refusal(&app.db, id, kind.as_deref(), &workspace, &name, &args, matches!(policy, crate::gate::Policy::Granted)).await {
                             tools::ToolOutput { rating: None, content: why, is_error: true }
@@ -411,7 +423,7 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             let rating = match out.rating.take() {
                 Some(r) => r,
                 None => crate::sources::Rating {
-                    risk: sqlx::query_scalar("SELECT risk FROM sessions WHERE id=$1").bind(id).fetch_one(&app.db).await?,
+                    risk: crate::session_state::get(&app.db, id).await?.risk,
                     origin: format!("kernel:{name}"),
                 },
             };

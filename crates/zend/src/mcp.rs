@@ -41,7 +41,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 
@@ -350,7 +350,7 @@ async fn refresh() {
 
 impl Server {
     /// The live connection and the tools, connecting (or listing the tools again) when needed.
-    async fn ensure(&self) -> Result<(Arc<Conn>, Vec<ToolEntry>)> {
+    async fn ensure(&self, db: &sqlx::PgPool) -> Result<(Arc<Conn>, Vec<ToolEntry>)> {
         let mut st = self.state.lock().await;
         if let Some(conn) = st.conn.clone().filter(|c| c.usable()) {
             if !conn.stale() {
@@ -371,7 +371,7 @@ impl Server {
                 bail!("{e} (tried {}s ago; retrying after {}s)", at.elapsed().as_secs(), RETRY_AFTER.as_secs());
             }
         }
-        match self.connect().await {
+        match self.connect(db).await {
             Ok((conn, tools)) => {
                 *st = State { conn: Some(conn.clone()), tools: tools.clone(), error: None, failed_at: None };
                 Ok((conn, tools))
@@ -384,17 +384,29 @@ impl Server {
         }
     }
 
-    async fn connect(&self) -> Result<(Arc<Conn>, Vec<ToolEntry>)> {
+    async fn connect(&self, db: &sqlx::PgPool) -> Result<(Arc<Conn>, Vec<ToolEntry>)> {
         let conn = match (&self.cfg.command, &self.cfg.url) {
             (Some(cmd), _) => {
                 // A clean environment: the kernel's own (its token, API keys) never reaches a
                 // server; only the basics and what the config gives it.
                 let keep = ["PATH", "HOME", "USER", "LANG", "LC_ALL", "TZ", "TMPDIR"];
-                let mut child = Command::new(cmd)
+                let dir = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/home".into())).join(".cache/zenbot/mcp").join(&self.cfg.name);
+                std::fs::create_dir_all(&dir)?;
+                let socket = crate::proxy::ensure_mcp(db, &self.cfg.name, if self.cfg.untrusted {4} else {1}).await?;
+                let filter = tools::contained_filter(true).map_err(|e| anyhow!(e))?;
+                let tmp = tools::session_tmp(&format!("mcp-{}", self.cfg.name));
+                let mut command = tools::contained_command(&filter, &dir, true, tmp.as_deref(), Some(&socket), &[]);
+                command.env_clear();
+                // Restore proxy variables after clearing inherited credentials.
+                let proxy = format!("http://127.0.0.1:{}", crate::proxy::BRIDGE_PORT);
+                for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY"] {
+                    command.env(key, &proxy);
+                }
+                let mut child = command.arg(cmd)
                     .args(&self.cfg.args)
-                    .env_clear()
                     .envs(keep.iter().filter_map(|k| std::env::var(k).ok().map(|v| (*k, v))))
                     .envs(self.cfg.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+                    .env("TMPDIR", "/tmp")
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::null())
@@ -592,14 +604,14 @@ pub fn sse_messages(text: &str) -> Vec<Value> {
 
 /// Every server's tools (connecting the ones not yet connected, all at once), and what went wrong.
 /// A connected server's tools come from its last listing: no call is waited for.
-async fn catalog() -> (Vec<ToolEntry>, Vec<String>) {
+async fn catalog(db: &sqlx::PgPool) -> (Vec<ToolEntry>, Vec<String>) {
     refresh().await;
     let (mut servers, mut problems) = {
         let reg = REGISTRY.lock().await;
         (reg.servers.iter().map(|(n, s)| (n.clone(), Arc::clone(s))).collect::<Vec<_>>(), reg.problems.clone())
     };
     servers.sort_by(|a, b| a.0.cmp(&b.0));
-    let listed = futures_util::future::join_all(servers.iter().map(|(_, s)| s.ensure())).await;
+    let listed = futures_util::future::join_all(servers.iter().map(|(_, s)| s.ensure(db))).await;
     let mut tools = Vec::new();
     for ((name, _), res) in servers.iter().zip(listed) {
         match res {
@@ -617,8 +629,7 @@ async fn catalog() -> (Vec<ToolEntry>, Vec<String>) {
 async fn entry_rating(db: &sqlx::PgPool, t: &ToolEntry) -> Result<(i16, Vec<Uuid>)> {
     Ok(match &t.manifest {
         Some(text) => crate::context::rate(db, text, 1).await?,
-        None if t.untrusted => (4, Vec::new()),
-        None => (1, Vec::new()),
+        None => (crate::trust::mcp_level(&t.server).unwrap_or(if t.untrusted {4} else {1}), Vec::new()),
     })
 }
 
@@ -626,7 +637,7 @@ async fn entry_rating(db: &sqlx::PgPool, t: &ToolEntry) -> Result<(i16, Vec<Uuid
 /// stopped session wrote are left out, and the reader depends on the writers of every entry
 /// ranked (ranking reads their descriptions). A rating that can't be read fails the catalog.
 async fn rated_catalog(db: &sqlx::PgPool, session: Uuid) -> Result<(Vec<(ToolEntry, i16)>, Vec<String>)> {
-    let (tools, problems) = catalog().await;
+    let (tools, problems) = catalog(db).await;
     let mut out = Vec::new();
     for t in tools {
         let (risk, writers) = entry_rating(db, &t).await?;
@@ -723,8 +734,8 @@ async fn find(app: &App, session: Uuid, query: &str) -> (String, bool) {
     (out, false)
 }
 
-async fn lookup(full: &str) -> Result<ToolEntry> {
-    let (tools, _) = catalog().await;
+async fn lookup(db: &sqlx::PgPool, full: &str) -> Result<ToolEntry> {
+    let (tools, _) = catalog(db).await;
     if let Some(t) = tools.iter().find(|t| t.full() == full) {
         return Ok(t.clone());
     }
@@ -741,8 +752,8 @@ async fn lookup(full: &str) -> Result<ToolEntry> {
 /// The required arguments a call is missing, by the tool's input schema.
 /// What the action gate needs to know about a tool the model calls by its full name: whether its
 /// server is untrusted, and its read-only and destructive hints (D-067).
-pub async fn hints(full: &str) -> Option<(bool, bool, bool)> {
-    let t = lookup(full).await.ok()?;
+pub async fn hints(db: &sqlx::PgPool, full: &str) -> Option<(bool, bool, bool)> {
+    let t = lookup(db, full).await.ok()?;
     let hint = |k: &str| t.annotations[k].as_bool().unwrap_or(false);
     Some((t.untrusted, hint("readOnlyHint"), hint("destructiveHint")))
 }
@@ -770,7 +781,7 @@ pub fn result_text(result: &Value) -> String {
 }
 
 async fn call(app: &App, session: Uuid, full: &str, args: &Value, force_sandbox: bool, owner_allowed: bool) -> Result<(String, bool)> {
-    let t = lookup(full).await?;
+    let t = lookup(&app.db, full).await?;
     // Validation errors quote schema keys too. Admit/rate the exact manifest before even
     // returning those errors, and apply its risk before choosing execution capabilities.
     let (entry_risk, writers) = entry_rating(&app.db, &t).await?;
@@ -795,14 +806,14 @@ async fn call(app: &App, session: Uuid, full: &str, args: &Value, force_sandbox:
     let server = { REGISTRY.lock().await.servers.get(&t.server).cloned().context("the server went away")? };
     let untrusted = server.cfg.untrusted;
     let result = async {
-        let (conn, _) = server.ensure().await?;
+        let (conn, _) = server.ensure(&app.db).await?;
         server.request(&conn, "tools/call", json!({ "name": t.name, "arguments": args })).await
     }
     .await;
     let result = match result {
         Ok(result) => result,
         Err(e) if untrusted => {
-            crate::taint::taint(app, session, "mcp", &t.full()).await?;
+            crate::taint::mark_rating(app, session, entry_risk, "mcp", &t.full()).await?;
             return Ok((crate::taint::untrusted("mcp", &t.full(), &format!("call failed: {e:#}")), true));
         }
         Err(e) => return Err(e),
@@ -813,7 +824,7 @@ async fn call(app: &App, session: Uuid, full: &str, args: &Value, force_sandbox:
         text = format!("{}\n[... cut at 50 KB; {saved} ...]", &text[..text.floor_char_boundary(MAX_OUTPUT)]);
     }
     if untrusted {
-        crate::taint::taint(app, session, "mcp", &t.full()).await?;
+        crate::taint::mark_rating(app, session, entry_risk, "mcp", &t.full()).await?;
         text = crate::taint::untrusted("mcp", &t.full(), &text);
     }
     Ok((text, result["isError"] == true))
@@ -854,7 +865,7 @@ match its parameters. Ask the owner before calls that send, publish, delete or s
 pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value, force_sandbox: bool, owner_allowed: bool) -> Option<tools::ToolOutput> {
     let (content, is_error) = match name {
         "find_tools" => find(app, session, args["query"].as_str().unwrap_or("")).await,
-        "load_tool" => match lookup(args["name"].as_str().unwrap_or("")).await {
+        "load_tool" => match lookup(&app.db, args["name"].as_str().unwrap_or("")).await {
             Ok(t) => {
                 let spec = format!("<tool name=\"{}\">\n{}\n\nParameters (JSON schema):\n{}\n</tool>\nRun it with call_tool.",
                     t.full(), t.description.trim(), serde_json::to_string_pretty(&t.schema).unwrap_or_default());
@@ -876,14 +887,23 @@ pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value, force_
     Some(tools::ToolOutput { rating: None, content, is_error })
 }
 
-/// Servers and their tool counts (`GET /api/mcp`). Connects (starts) every configured server.
+/// Configured servers and cached tool counts; status never starts a process or contacts a server.
 pub async fn status() -> Value {
-    let (tools, problems) = catalog().await;
-    let mut by: HashMap<String, usize> = HashMap::new();
-    for t in &tools {
-        *by.entry(t.server.clone()).or_default() += 1;
+    refresh().await;
+    let (servers, mut problems) = {
+        let reg = REGISTRY.lock().await;
+        (reg.servers.values().cloned().collect::<Vec<_>>(), reg.problems.clone())
+    };
+    let mut counts = HashMap::new();
+    for server in servers {
+        if let Ok(state) = server.state.try_lock() {
+            counts.insert(server.cfg.name.clone(), state.tools.len());
+            if let Some(error) = &state.error { problems.push(format!("server `{}`: {error}", server.cfg.name)); }
+        } else {
+            counts.insert(server.cfg.name.clone(), 0);
+        }
     }
-    json!({ "config": config_path(), "servers": by, "problems": problems })
+    json!({ "config": config_path(), "servers": counts, "problems": problems })
 }
 
 #[cfg(test)]

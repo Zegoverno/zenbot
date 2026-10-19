@@ -35,7 +35,15 @@ pub fn socket_path(session: Uuid) -> PathBuf {
     dir().join(format!("{session}.sock"))
 }
 
-static LISTENING: LazyLock<Mutex<HashSet<Uuid>>> = LazyLock::new(Default::default);
+static LISTENING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
+
+/// Who a proxy socket serves: a session (its egress decided by the gate), or an MCP stdio server the
+/// owner configured (any public host but one the trust list blocks; logged).
+#[derive(Clone, Debug)]
+enum Client {
+    Session(Uuid),
+    Mcp(String, i16),
+}
 /// A host a session reached: its name, rating and when.
 type Contact = (String, i16, Instant);
 /// Hosts each session reached.
@@ -43,30 +51,39 @@ static CONTACTED: LazyLock<Mutex<HashMap<Uuid, Vec<Contact>>>> = LazyLock::new(D
 
 /// Start the session's proxy socket if it isn't listening yet; returns its path.
 pub async fn ensure(db: &PgPool, session: Uuid) -> Result<PathBuf> {
-    let path = socket_path(session);
-    if LISTENING.lock().unwrap_or_else(|e| e.into_inner()).contains(&session) && path.exists() {
+    listen(db, socket_path(session), Client::Session(session)).await
+}
+
+/// The proxy socket of an MCP stdio server (`<zen home>/proxy/mcp-<name>.sock`).
+pub async fn ensure_mcp(db: &PgPool, server: &str, risk: i16) -> Result<PathBuf> {
+    listen(db, dir().join(format!("mcp-{server}-{risk}.sock")), Client::Mcp(server.to_string(), risk)).await
+}
+
+async fn listen(db: &PgPool, path: PathBuf, client: Client) -> Result<PathBuf> {
+    let key = path.display().to_string();
+    if LISTENING.lock().unwrap_or_else(|e| e.into_inner()).contains(&key) && path.exists() {
         return Ok(path);
     }
     std::fs::create_dir_all(dir())?;
     std::fs::set_permissions(dir(), std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).with_context(|| format!("binding {}", path.display()))?;
-    LISTENING.lock().unwrap_or_else(|e| e.into_inner()).insert(session);
+    LISTENING.lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone());
     let db = db.clone();
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
-                    let db = db.clone();
+                    let (db, client) = (db.clone(), client.clone());
                     tokio::spawn(async move {
-                        if let Err(e) = handle(&db, session, stream).await {
-                            tracing::debug!("egress proxy ({session}): {e:#}");
+                        if let Err(e) = handle(&db, &client, stream).await {
+                            tracing::debug!("egress proxy ({client:?}): {e:#}");
                         }
                     });
                 }
                 Err(e) => {
-                    tracing::warn!("egress proxy ({session}) stopped accepting: {e}");
-                    LISTENING.lock().unwrap_or_else(|e| e.into_inner()).remove(&session);
+                    tracing::warn!("egress proxy ({client:?}) stopped accepting: {e}");
+                    LISTENING.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
                     return;
                 }
             }
@@ -133,7 +150,7 @@ async fn deny(stream: &mut UnixStream, status: &str, why: &str) -> Result<()> {
     Ok(())
 }
 
-async fn handle(db: &PgPool, session: Uuid, mut client: UnixStream) -> Result<()> {
+async fn handle(db: &PgPool, who: &Client, mut client: UnixStream) -> Result<()> {
     // The head, up to 16 KiB; anything read past it is forwarded.
     let mut buf = Vec::with_capacity(4096);
     let mut chunk = [0u8; 4096];
@@ -159,7 +176,22 @@ async fn handle(db: &PgPool, session: Uuid, mut client: UnixStream) -> Result<()
     if !matches!(target.port, 80 | 443) && !test_loopback {
         return deny(&mut client, "403 Forbidden", &format!("zenbot's egress proxy: only ports 80 and 443 ({}:{} refused)", target.host, target.port)).await;
     }
-    let rating = match crate::gate::egress(db, session, &target.host).await {
+    let decided = match who {
+        Client::Session(session) => crate::gate::egress(db, *session, &target.host).await,
+        Client::Mcp(server, risk) => {
+            let rating = match crate::trust::host_level(&target.host) {
+                Some(rating) => rating,
+                None => crate::sources::rated(db, &format!("https://{}/",target.host), "mcp_egress").await.unwrap_or(4),
+            };
+            let risk = crate::trust::mcp_level(server).unwrap_or(*risk);
+            let facts = crate::s1::Facts::new(None).with("context", crate::gate::level(risk)).with("rating",rating);
+            if risk < 5 && crate::s1::decide_early("egress",&facts).as_deref()==Some("allow") {
+                tracing::info!("MCP server `{server}` reaches {} (rated {rating})", target.host);
+                Ok(rating)
+            } else { Err(format!("MCP server `{server}` cannot reach {} at its trust level; review `zen trust`",target.host)) }
+        },
+    };
+    let rating = match decided {
         Ok(r) => r,
         Err(why) => return deny(&mut client, "403 Forbidden", &format!("zenbot's egress proxy: {why}")).await,
     };
@@ -171,7 +203,9 @@ async fn handle(db: &PgPool, session: Uuid, mut client: UnixStream) -> Result<()
         Ok(Ok(s)) => s,
         _ => return deny(&mut client, "502 Bad Gateway", &format!("couldn't reach {}:{}", target.host, target.port)).await,
     };
-    CONTACTED.lock().unwrap_or_else(|e| e.into_inner()).entry(session).or_default().push((target.host.clone(), rating, Instant::now()));
+    if let Client::Session(session) = who {
+        CONTACTED.lock().unwrap_or_else(|e| e.into_inner()).entry(*session).or_default().push((target.host.clone(), rating, Instant::now()));
+    }
     if target.tunnel {
         client.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n").await?;
     } else {
