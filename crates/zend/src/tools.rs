@@ -369,6 +369,10 @@ pub fn contained_command(filter: &std::fs::File, dir: &Path, writable: bool, tmp
         c.arg("--ro-bind").arg(&zen).arg(&zen);
     }
     hide_secrets(&mut c, crate::secrets::secret_files());
+    // A read-only directory does not isolate pathname Unix sockets. Hide every proxy capability
+    // first, then bind back only this process's socket below.
+    let proxies = crate::proxy::dir();
+    if proxies.exists() { c.arg("--tmpfs").arg(proxies); }
     crate::fsview::mask(&mut c, masks);
     let bridge = std::env::var("ZEN_BRIDGE_BIN").map(PathBuf::from).or_else(|_| std::env::current_exe());
     match (socket, bridge) {

@@ -88,7 +88,8 @@ if __name__ == "__main__":
             "import sys,time\nwhile True:\n open(sys.argv[1],'w').write(str(time.time()))\n time.sleep(.1)", heartbeat], stdin=subprocess.DEVNULL)
         with open(sys.argv[2], "w") as f:
             f.write(ident)
-        probe = {"workspace_write":False,"owner_file_write":False,"token_read":False}
+        probe = {"workspace_write":False,"owner_file_write":False,"token_read":False,
+                 "other_proxy_visible":os.path.exists(os.path.expanduser("~/.zenbot/proxy/other-owner-data"))}
         try:
             with open("workspace-probe", "w") as f: f.write("contained")
             probe["workspace_write"] = True

@@ -220,7 +220,8 @@ mcp_tools() {
   local ws; ws=$(new_workspace mcp)
   local port=$((PORT + 1))
   python3 "$REPO/scripts/e2e/mcp_server.py" --http "$port" & local srv=$!
-  mkdir -p "$TMP/home/.zenbot"
+  mkdir -p "$TMP/home/.zenbot/proxy"
+  echo private-other-proxy > "$TMP/home/.zenbot/proxy/other-owner-data"
   cat >"$TMP/home/.zenbot/mcp.json" <<JSON
 { "mcpServers": {
   "local": { "command": "python3", "args": ["$REPO/scripts/e2e/mcp_server.py", "--child-pidfile", "$TMP/home/.cache/zenbot/mcp/local/mcp-child.pid"] },
@@ -264,7 +265,7 @@ JSON
   # A server's own children go with it: changing mcp.json restarts the servers.
   local marker="$TMP/home/.cache/zenbot/mcp/local/mcp-child.pid"
   local heartbeat="$marker.$(cat "$marker")"
-  check "stdio MCP can write only its own folder and cannot read the owner token" jq -e '.workspace_write and (.owner_file_write|not) and (.token_read|not)' "$TMP/home/.cache/zenbot/mcp/local/containment.json"
+  check "stdio MCP can write only its own folder and cannot read the owner token" jq -e '.workspace_write and (.owner_file_write|not) and (.token_read|not) and (.other_proxy_visible|not)' "$TMP/home/.cache/zenbot/mcp/local/containment.json"
   local beat; beat=$(cat "$heartbeat"); sleep .3
   check "the local server's child runs" test "$beat" != "$(cat "$heartbeat")"
   sed -i 's/"exclude": \["echo", "add"\]/"exclude": ["echo"]/' "$TMP/home/.zenbot/mcp.json"
