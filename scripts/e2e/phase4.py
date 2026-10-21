@@ -70,6 +70,31 @@ put('system-one','concept','System 1 in the example account','Automatic processi
     links=[dict(relation='part_of',target='two-processes')])
 check(any(e['target']=='two-processes' for e in call('neighbors',id='system-one')['links']), 'concept graph preserves a typed parent link')
 check(call('search',query='deliberate')['records'][0]['id']=='two-processes', 'owner searches inspect full matching evidence')
+# Versioned evidence and anchored claims remain attributable through corrections.
+put('anchored-account','concept','Anchored account','## Claim {#limited}\nA claim with qualifications.')
+put('counterclaim','claim','Counterclaim','An alternative interpretation.',
+    links=[dict(relation='contradicts',target='anchored-account#limited',evidence=[dict(source='meeting-source',locator='line 3',basis='interpretation')])])
+check(call('neighbors',id='counterclaim')['links'][0]['target_anchor']=='limited', 'claim anchors survive graph projection')
+check(call('get',id='counterclaim')['metadata']['links'][0]['evidence'][0]['revision']==1, 'edge evidence freezes its source revision')
+check(refuses('put',record=dict(id='bad-anchor',store='knowledge',kind='concept',title='Bad anchor',body='Text',metadata={'links':[{'relation':'related_to','target':'anchored-account#missing'}]})), 'missing claim anchors are refused')
+# Publication receipts recover deleted projections without overwriting a manual correction.
+path.unlink()
+check(refuses('get',id='pilot-project'), 'missing file is withheld')
+call('repair',id='pilot-project')
+check('manually corrected' in call('get',id='pilot-project')['body'], 'publication receipt repairs a missing file')
+from concurrent.futures import ThreadPoolExecutor
+record=call('get',id='pilot-project')
+def race_update(label):
+    candidate=dict(record,body='Concurrent correction '+label)
+    try:
+        call('put',record=candidate,expected_revision=record['revision'])
+        return True
+    except urllib.error.HTTPError as e:
+        assert e.code==400
+        return False
+with ThreadPoolExecutor(max_workers=2) as executor:
+    winners=list(executor.map(race_update,['one','two']))
+check(sum(winners)==1, 'concurrent corrections have exactly one revision winner')
 check(call('schema')['relations'], 'owner can inspect the schema contract')
 check('proposals' in call('dream'), 'dream returns proposals without publishing facts')
 check(call('work'), 'processing history is inspectable')

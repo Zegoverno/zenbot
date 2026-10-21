@@ -78,3 +78,8 @@ CREATE TRIGGER memory_inputs AFTER INSERT OR UPDATE OF session_id ON memories FO
 CREATE FUNCTION zen_memory_contaminated(target bigint) RETURNS boolean LANGUAGE sql STABLE AS $$
  SELECT EXISTS(SELECT 1 FROM brain_memory_inputs WHERE memory_id=target AND zen_session_contaminated(writer))
 $$;
+
+CREATE TABLE brain_record_inputs (record_id text NOT NULL REFERENCES brain_records(id),writer uuid NOT NULL REFERENCES sessions(id),PRIMARY KEY(record_id,writer));
+CREATE FUNCTION zen_brain_contaminated(target text) RETURNS boolean LANGUAGE sql STABLE AS $$
+ SELECT EXISTS(SELECT 1 FROM brain_record_inputs WHERE record_id=target AND zen_session_contaminated(writer))
+$$;

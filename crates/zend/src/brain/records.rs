@@ -31,7 +31,7 @@ const RELATIONS: &[&str] = &[
     "distinguishes",
     "mentions",
 ];
-const SCHEMA:&str="# Second-brain schema v1\n\nOne canonical ID per record; aliases are case-insensitive. Search before creating.\nKnowledge lives under wiki/{concepts,claims,arguments,questions,syntheses,sources,events,subjects}/.\nEntities live under entities/{people,organizations,projects}/. Folders are primary homes; subjects\nand typed links are multiple classifications. Frontmatter is a JSON object (valid YAML), followed\nby the readable body. Preserve IDs when renaming. Evidence items cite source and locator; inferential\nlinks are tentative. Status: active, provisional, superseded, archived. Never treat mentions as proof.\nSources describe precisely what was inspected. Memory is curated experience, sessions are archives.\nGenerated memory projections are edited through brain actions, not silently overwritten.\n";
+const SCHEMA: &str = "# Second-brain schema v1\n\nOne canonical ID per record; aliases are case-insensitive. Search before creating.\nKnowledge lives under wiki/{concepts,claims,arguments,questions,syntheses,sources,events,subjects}/.\nEntities live under entities/{people,organizations,projects}/. Folders are primary homes; subjects\nand typed links are multiple classifications. Frontmatter is a JSON object (valid YAML), followed\nby the readable body. Preserve IDs when renaming. Evidence items cite source and locator; inferential\nlinks are tentative. Status: active, provisional, superseded, archived. Never treat mentions as proof.\nSources describe precisely what was inspected. Memory is curated experience, sessions are archives.\nGenerated memory projections are edited through brain actions, not silently overwritten.\n";
 fn valid_id(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 96
@@ -197,7 +197,12 @@ fn parse(text: &str) -> Result<Value> {
     Ok(r)
 }
 async fn read(db: &PgPool, id: &str, session: Option<Uuid>) -> Result<Value> {
-    let row=sqlx::query("SELECT *,zen_session_contaminated(session_id) AS contaminated FROM brain_records WHERE id=$1").bind(id).fetch_one(db).await?;
+    let row = sqlx::query(
+        "SELECT *,zen_brain_contaminated(id) AS contaminated FROM brain_records WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(db)
+    .await?;
     ensure!(
         row.get::<bool, _>("published"),
         "record publication pending"
@@ -216,10 +221,51 @@ async fn read(db: &PgPool, id: &str, session: Option<Uuid>) -> Result<Value> {
         let risk = crate::sources::file_rating(db, &p, &text)
             .await?
             .max(row.get("risk"));
+        let writers: Vec<Uuid> =
+            sqlx::query_scalar("SELECT writer FROM brain_record_inputs WHERE record_id=$1")
+                .bind(id)
+                .fetch_all(db)
+                .await?;
+        crate::sources::depend(db, s, &writers).await?;
         admit(db, s, risk, row.get("session_id")).await?;
         crate::sources::depend_file(db, s, &text).await?;
     }
     Ok(r)
+}
+async fn bind_evidence(
+    db: &PgPool,
+    evidence: &mut [Value],
+    risk: &mut i16,
+    writers: &mut Vec<Uuid>,
+) -> Result<()> {
+    for e in evidence {
+        ensure!(
+            !string(e, "source").is_empty() && !string(e, "locator").is_empty(),
+            "evidence needs source and locator"
+        );
+        let reference = string(e, "source");
+        let source = reference.strip_prefix("record:").unwrap_or(&reference);
+        if let Some(row) = sqlx::query("SELECT revision,digest,CASE WHEN zen_brain_contaminated(id) THEN 5::smallint ELSE risk END AS risk,session_id FROM brain_records WHERE id=$1 AND published").bind(source).fetch_optional(db).await? {
+            let current: i64 = row.get("revision");
+            let revision = e["revision"].as_i64().unwrap_or(current);
+            if revision == current {
+                read(db, source, None).await?;
+                e["digest"] = json!(row.get::<Option<String>,_>("digest"));
+            } else {
+                let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM brain_revisions WHERE record_id=$1 AND revision=$2)").bind(source).bind(revision).fetch_one(db).await?;
+                ensure!(exists, "unknown evidence revision");
+                e.as_object_mut().ok_or_else(||anyhow::anyhow!("evidence must be an object"))?.remove("digest");
+            }
+            e["revision"] = json!(revision);
+            *risk = (*risk).max(row.get("risk"));
+            let inputs: Vec<Uuid> = sqlx::query_scalar("SELECT writer FROM brain_record_inputs WHERE record_id=$1").bind(source).fetch_all(db).await?;
+            writers.extend(inputs);
+            if let Some(writer) = row.get::<Option<Uuid>,_>("session_id") {writers.push(writer);}
+        } else {
+            e["verification"] = json!("reference_only; original bytes not registered");
+        }
+    }
+    Ok(())
 }
 async fn put(
     app: &crate::AppState,
@@ -244,6 +290,27 @@ async fn put(
             .is_none_or(|e| e.is_empty())
     {
         r["status"] = json!("provisional");
+    }
+    let mut input_writers = vec![];
+    if let Some(s) = session {
+        input_writers.push(s);
+    }
+    let mut evidence_groups = vec![];
+    if let Some(evidence) = r["metadata"]["evidence"].as_array_mut() {
+        evidence_groups.push(evidence);
+    }
+    for evidence in evidence_groups {
+        bind_evidence(&app.db, evidence, &mut risk, &mut input_writers).await?;
+    }
+    if let Some(links) = r["metadata"]["links"].as_array_mut() {
+        for link in links {
+            if let Some(evidence) = link["evidence"].as_array_mut() {
+                bind_evidence(&app.db, evidence, &mut risk, &mut input_writers).await?;
+            }
+        }
+    }
+    if let Some(s) = session {
+        crate::sources::depend(&app.db, s, &input_writers).await?;
     }
     let p = path(&store, &kind, &id);
     let mut tx = app.db.begin().await?;
@@ -323,7 +390,7 @@ async fn put(
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM brain_records WHERE id=$1 AND published)",
         )
-        .bind(&target)
+        .bind(target)
         .fetch_one(&mut *tx)
         .await?;
         ensure!(exists, "unknown or pending link target {target}");
@@ -359,6 +426,9 @@ async fn put(
         .execute(&mut *tx)
         .await?;
     }
+    for writer in input_writers {
+        sqlx::query("INSERT INTO brain_record_inputs(record_id,writer) VALUES($1,$2) ON CONFLICT DO NOTHING").bind(&id).bind(writer).execute(&mut *tx).await?;
+    }
     let payload = json!({"id":id,"revision":rev,"text":text,"prior":if import {tokio::fs::read_to_string(&p).await.ok().map(|t|hash(&t))}else{prior.as_ref().and_then(|o|o.get::<Option<String>,_>("digest"))}});
     sqlx::query("INSERT INTO brain_work(kind,work_key,payload) VALUES('publish',$1,$2)")
         .bind(format!("publish:{id}:{rev}"))
@@ -376,7 +446,7 @@ async fn put(
         Err(e) => {
             return Ok(
                 json!({"id":id,"revision":rev,"publication":"pending","error":e.to_string()}),
-            )
+            );
         }
     }
     Ok(json!({"id":id,"revision":rev,"publication":"published"}))
@@ -410,6 +480,14 @@ async fn publish(app: &crate::AppState, p: &Value) -> Result<()> {
     if let Some(s) = row.get::<Option<Uuid>, _>("session_id") {
         let prior = tokio::fs::read_to_string(&path).await.ok();
         crate::sources::record_bytes(&app.db, s, &path, &text, prior.as_deref()).await?;
+    }
+    let writers: Vec<Uuid> =
+        sqlx::query_scalar("SELECT writer FROM brain_record_inputs WHERE record_id=$1")
+            .bind(&id)
+            .fetch_all(&mut *tx)
+            .await?;
+    for writer in writers {
+        sqlx::query("INSERT INTO item_ratings(path,sha256,session_id,risk) VALUES($1,$2,$3,$4) ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=GREATEST(item_ratings.risk,EXCLUDED.risk)").bind(path.to_string_lossy().as_ref()).bind(hash(&text)).bind(writer).bind(row.get::<i16,_>("risk")).execute(&mut *tx).await?;
     }
     private_write(&path, &text).await?;
     sqlx::query("DELETE FROM brain_aliases WHERE record_id=$1")
@@ -490,6 +568,7 @@ pub(crate) async fn private_write(path: &std::path::Path, text: &str) -> Result<
     f.sync_all().await?;
     tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).await?;
     tokio::fs::rename(&tmp, path).await?;
+    std::fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 pub async fn recover(app: &crate::AppState) -> Result<()> {
@@ -527,7 +606,7 @@ pub async fn recover(app: &crate::AppState) -> Result<()> {
     Ok(())
 }
 pub async fn search_rating(db: &PgPool, reader: Uuid, f: &crate::search::Found) -> Result<i16> {
-    let row=sqlx::query("SELECT path,risk,session_id,published,digest,zen_session_contaminated(session_id) AS contaminated FROM brain_records WHERE id=$1").bind(&f.reference).fetch_one(db).await?;
+    let row=sqlx::query("SELECT path,risk,session_id,published,digest,zen_brain_contaminated(id) AS contaminated FROM brain_records WHERE id=$1").bind(&f.reference).fetch_one(db).await?;
     ensure!(row.get::<bool, _>("published"), "publication pending");
     let path = PathBuf::from(row.get::<String, _>("path"));
     let text = tokio::fs::read_to_string(&path).await?;
@@ -544,6 +623,12 @@ pub async fn search_rating(db: &PgPool, reader: Uuid, f: &crate::search::Found) 
     };
     if risk < 4 || f.exact {
         crate::sources::depend_file(db, reader, &text).await?;
+        let writers: Vec<Uuid> =
+            sqlx::query_scalar("SELECT writer FROM brain_record_inputs WHERE record_id=$1")
+                .bind(&f.reference)
+                .fetch_all(db)
+                .await?;
+        crate::sources::depend(db, reader, &writers).await?;
         crate::sources::depend(
             db,
             reader,
@@ -714,6 +799,13 @@ pub async fn manage(app: &crate::AppState, session: Option<Uuid>, a: &Value) -> 
             .fetch_all(&app.db)
             .await?;
             Ok(json!(rows))
+        }
+        "repair" => {
+            ensure!(session.is_none(), "repair is owner-only");
+            let count=sqlx::query("UPDATE brain_work w SET state='pending',error=NULL WHERE kind='publish' AND payload->>'id'=$1 AND (payload->>'revision')::bigint=(SELECT revision FROM brain_records WHERE id=$1)").bind(&id).execute(&app.db).await?.rows_affected();
+            ensure!(count > 0, "no publication receipt for this record");
+            recover(app).await?;
+            Ok(json!({"queued":count}))
         }
         "retry" => {
             ensure!(session.is_none(), "retry is owner-only");

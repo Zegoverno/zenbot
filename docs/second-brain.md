@@ -37,7 +37,8 @@ A label for relatively automatic processing within this account. It is not an an
 Use `zen brain schema` for accepted types and relationships. Evidence identifies source, locator
 and basis: owner statement, observation, external claim, inference, proof, empirical evidence,
 hypothesis, interpretation or tradition. These describe evidence, not automatically established
-truth. Support/contradiction edges require evidence. A model cannot establish source authenticity
+truth. Support/contradiction edges require evidence. Links may target `record-id#claim-anchor` with an
+explicit `{#claim-anchor}` in the body. Citations to registered records retain source revisions. A model cannot establish source authenticity
 merely by writing a citation. Preserve qualifications and competing claims in the body.
 
 ## Memory and sleep
@@ -50,6 +51,7 @@ stable retry keys. Explicit pins go directly to long-term memory.
 The short-term soft target is `ZEN_MEMORY_CHARS` (4,000 characters); its double is the hard view
 limit. Full buffers save pending entries durably. Sleep uses bounded S1 batches, keeps uncertainty,
 promotes durable experience and archives clearly expired detail. Changed revisions are left alone.
+Stale long-term/archive projections are withdrawn after disposition changes.
 No automatic sleep writes USER/IDENTITY/SOUL/AGENTS. Model outages retain pending work; inspect
 failed receipts and retry them. Archive is retention outside normal recall, not physical erasure.
 
@@ -71,6 +73,7 @@ zen brain brief --id ana-partner
 zen brain neighbors --id pilot-meeting
 zen brain lint
 zen brain import --id pilot-project
+zen brain repair --id pilot-project
 zen brain correct --id m12 --args '{"expected_revision":2,"text":"The pilot is now paused."}'
 zen brain history --id m12
 zen brain annotate --id m12 --args '{"expected_revision":3,"details":{"state":"open","owner":"Jose"}}'

@@ -656,7 +656,7 @@ Phase 2b/3 (D-068): `jobs.owner_approved` records authority (0034); `crates/zend
   Agent tool `brain` uses the same source-aware service. CLI `zen brain ACTION --id ID --query TEXT
   --args JSON` accepts JSON from stdin with `--args -`.
 - Migration `0035_second_brain.sql`: `brain_records`, `brain_aliases`, `brain_links`, `brain_work`,
-  `brain_revisions`, `brain_contexts`, `brain_skill_uses`, `brain_memory_inputs`; memory metadata,
+  `brain_revisions`, `brain_contexts`, `brain_skill_uses`, `brain_memory_inputs`, `brain_record_inputs`; memory metadata,
   history and dependencies; English/Portuguese search indexes.
 - `ZEN_LEGACY_TOOL_AUTHORING` defaults off; enable only for legacy `save_tool` migration.
 - `ZEN_BRAIN_MODE` = `on`: automatic context/capture; `shadow`: context receipts only; `off`: neither.

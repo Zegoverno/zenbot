@@ -197,14 +197,21 @@ pub async fn decide_draft(db: &sqlx::PgPool, name: &str, accept: bool, by: &str,
         same_content(&fingerprint(db, &draft.dir).await?, r)?;
     }
     let to = if accept { skills::root().join(&draft.domain).join(&draft.name) } else { archived_root().join(&draft.domain).join(&draft.name) };
+    let mut replaced = None;
     if to.exists() {
         anyhow::ensure!(accept && reviewed.is_some(),"replacement requires owner fingerprint review");
         let previous=archived_root().join(&draft.domain).join(format!("{}-{}",draft.name,Uuid::new_v4()));
         std::fs::create_dir_all(previous.parent().context("missing parent")?)?;
         std::fs::rename(&to,&previous)?;
+        replaced = Some(previous);
     }
     std::fs::create_dir_all(to.parent().context("no parent")?)?;
-    std::fs::rename(&draft.dir, &to)?;
+    if let Err(e) = std::fs::rename(&draft.dir, &to) {
+        if let Some(previous) = replaced {
+            std::fs::rename(&previous, &to).context("restoring previous active skill after failed activation")?;
+        }
+        return Err(e.into());
+    }
     // The owner's decision covers what they reviewed: the mark goes with the draft.
     let key = format!("{}/{}", draft.domain, draft.name);
     if let Err(e) = sqlx::query("DELETE FROM draft_taint WHERE skill = $1").bind(&key).execute(db).await {

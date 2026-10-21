@@ -67,7 +67,7 @@ async fn candidates(app: &crate::AppState, s: Uuid, q: &str) -> Result<Vec<Candi
             kind: "memory".into(),
         });
     }
-    let ids:Vec<String>=sqlx::query_scalar("SELECT DISTINCT r.id FROM brain_records r LEFT JOIN brain_aliases a ON a.record_id=r.id WHERE published AND status IN ('active','provisional') AND risk<4 AND NOT zen_session_contaminated(session_id) AND (r.title ILIKE '%'||$1||'%' OR a.alias=lower($1) OR to_tsvector('english',r.title||' '||r.body) @@ websearch_to_tsquery('english',$1) OR to_tsvector('portuguese',r.title||' '||r.body) @@ websearch_to_tsquery('portuguese',$1)) LIMIT 30").bind(&lexical_query).fetch_all(db).await?;
+    let ids:Vec<String>=sqlx::query_scalar("SELECT DISTINCT r.id FROM brain_records r LEFT JOIN brain_aliases a ON a.record_id=r.id WHERE published AND status IN ('active','provisional') AND risk<4 AND NOT zen_brain_contaminated(r.id) AND (r.title ILIKE '%'||$1||'%' OR a.alias=lower($1) OR to_tsvector('english',r.title||' '||r.body) @@ websearch_to_tsquery('english',$1) OR to_tsvector('portuguese',r.title||' '||r.body) @@ websearch_to_tsquery('portuguese',$1)) LIMIT 30").bind(&lexical_query).fetch_all(db).await?;
     let mut expanded = ids.clone();
     for id in ids.iter().take(8) {
         let neighbors:Vec<String>=sqlx::query_scalar("SELECT CASE WHEN source=$1 THEN target ELSE source END FROM brain_links WHERE source=$1 OR target=$1 ORDER BY relation LIMIT 3").bind(id).fetch_all(db).await?;

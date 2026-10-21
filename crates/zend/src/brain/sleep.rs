@@ -341,6 +341,18 @@ pub(crate) async fn export(db: &PgPool) -> Result<()> {
         )
         .await?;
     }
+    // Withdraw stale projections after a disposition or undo. The database retains the evidence.
+    for v in &rows {
+        let name = format!("m{}.md", v["id"]);
+        for (tier, folder) in [("long", "memory/records"), ("archived", "memory/archive")] {
+            if v["tier"] != tier {
+                let path = root().join(folder).join(&name);
+                if tokio::fs::try_exists(&path).await? {
+                    export_file(db, &path, &format!("# m{}\n\nProjection withdrawn; current tier: {}. Read the current record through brain.\n", v["id"], string(v,"tier")), std::slice::from_ref(v)).await?;
+                }
+            }
+        }
+    }
     // Complete export includes pending and withheld records and their metadata, for owner recovery.
     export_file(
         db,
@@ -460,7 +472,9 @@ async fn consolidate_inner(app: &crate::AppState, trigger: &str) -> Result<Value
             .await?;
         used += text.chars().count() + 80;
     }
-    let note=format!("Promoted {promoted}; kept {kept}; archived {archived}; changed {held}. Uncertain entries retained; prompt files unchanged.");
+    let note = format!(
+        "Promoted {promoted}; kept {kept}; archived {archived}; changed {held}. Uncertain entries retained; prompt files unchanged."
+    );
     sqlx::query("UPDATE sleep_runs SET ended_at=now(),entries=$2,kept=$3,promoted=$4,dropped=$6,note=$5 WHERE id=$1").bind(run).bind(rows.len() as i32).bind(kept).bind(promoted).bind(&note).bind(archived).execute(&mut *tx).await?;
     enqueue_export(&mut tx).await?;
     tx.commit().await?;

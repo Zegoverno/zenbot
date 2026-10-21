@@ -747,7 +747,7 @@ pub(crate) async fn rated_results(db: &PgPool, reader: Uuid, listed: &[(Found, O
                         .bind(id).bind(&f.body).bind(&f.title).fetch_optional(db).await {
                         Ok(Some((risk, writer))) => {
                             if risk<4||f.exact {
-                                let writers:Vec<Uuid>=sqlx::query_scalar("SELECT writer FROM brain_memory_inputs WHERE memory_id=$1").bind(id).fetch_all(db).await.unwrap_or_default();
+                                let Ok(writers)=sqlx::query_scalar::<_,Uuid>("SELECT writer FROM brain_memory_inputs WHERE memory_id=$1").bind(id).fetch_all(db).await else {ratings.push(None);continue;};
                                 if crate::sources::depend(db,reader,&writers).await.is_err(){ratings.push(None);continue;}
                             }
                             if (risk < 4 || f.exact) && crate::sources::depend(db, reader, &writer.into_iter().collect::<Vec<_>>()).await.is_err() {
