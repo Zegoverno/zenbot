@@ -130,6 +130,6 @@ step of a skill worked. Existing made-tool execution remains compatible. New aut
 `ZEN_LEGACY_TOOL_AUTHORING=1` is a migration switch. Prefer skills and supporting scripts.
 
 Source-risk/contamination rules apply across memory and graph reads, merges, exports and context.
-Private model calls obey `ZEN_S1_PRIVATE`. A correction cannot remove text a running model already
+Private S1 calls obey `ZEN_S1_PRIVATE`; explicit synthesis uses the configured subscription model. A correction cannot remove text a running model already
 saw; original evidence remains in the tape. No automatic outreach, reminders or external ingestion
 is implied by a relationship record. SQLite migration and image/PDF reading belong to later phases.
