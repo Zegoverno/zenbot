@@ -59,7 +59,7 @@ CREATE TABLE brain_skill_uses (
 
 -- Migration manifest and first export are durable; no reclassification or risk lowering.
 INSERT INTO brain_work(kind,work_key,payload)
- SELECT 'memory_export','phase4-initial-export',jsonb_build_object('legacy_count',count(*),'max_id',max(id)) FROM memories;
+ SELECT 'memory_export','phase4-initial-export',jsonb_build_object('legacy_count',count(*),'max_id',max(id),'short',count(*) FILTER(WHERE tier='short'),'long',count(*) FILTER(WHERE tier='long'),'archived',count(*) FILTER(WHERE tier='archived'),'checksum',md5(coalesce(string_agg(to_jsonb(memories)::text,'' ORDER BY id),''))) FROM memories;
 
 -- Add language-aware arms without replacing the identifier-preserving simple index.
 ALTER TABLE search_docs ADD COLUMN fts_en tsvector GENERATED ALWAYS AS (to_tsvector('english',coalesce(title,'')||' '||body)) STORED;
@@ -83,3 +83,6 @@ CREATE TABLE brain_record_inputs (record_id text NOT NULL REFERENCES brain_recor
 CREATE FUNCTION zen_brain_contaminated(target text) RETURNS boolean LANGUAGE sql STABLE AS $$
  SELECT EXISTS(SELECT 1 FROM brain_record_inputs WHERE record_id=target AND zen_session_contaminated(writer))
 $$;
+
+-- Generated view hashes detect manual edits; repair retains the reviewed bytes privately.
+CREATE TABLE brain_projections (path text PRIMARY KEY,digest text NOT NULL,pending_digest text,backup_path text,updated_at timestamptz NOT NULL DEFAULT now());

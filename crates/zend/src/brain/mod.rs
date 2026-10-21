@@ -5,10 +5,10 @@ mod recall;
 mod records;
 mod sleep;
 mod synthesis;
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 pub use recall::{context, explain};
 pub use records::{manage, recover, search_rating};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 pub use sleep::{capture_turn, consolidate, remember};
 use sqlx::{PgPool, Row};
@@ -21,7 +21,7 @@ pub fn root() -> std::path::PathBuf {
     crate::layout::global_dir()
 }
 pub fn spec() -> Value {
-    json!({"name":"brain","description":"Maintain the second brain: sourced knowledge and people/projects, relationship briefs, long-term memory and skill evidence. Search before creating; never invent sources or user preferences. Session history is evidence, not automatically memory. Use get/list/search/neighbors/brief/lint; put requires record {id,store,kind,title,body,metadata}; update requires expected_revision. Metadata carries aliases,subjects,evidence,links. Ambiguous people must be resolved with the owner. pin/promote/archive/correct/undo target memory id; sleep consolidates selected experience; dream proposes connections, never facts. Skills remain find_skills/load_skill/save_skill with owner-reviewed activation.","parameters":{"type":"object","properties":{"action":{"type":"string"},"id":{"type":"string"},"query":{"type":"string"},"store":{"type":"string"},"kind":{"type":"string"},"status":{"type":"string"},"offset":{"type":"integer"},"record":{"type":"object"},"expected_revision":{"type":"integer"},"ids":{"type":"array","items":{"type":"string"}},"merge_id":{"type":"string"},"merge_revision":{"type":"integer"},"details":{"type":"object"},"event_at":{"type":"string"},"session":{"type":"string"},"text":{"type":"string"},"revision":{"type":"integer"}},"required":["action"]}})
+    json!({"name":"brain","description":"Maintain the second brain: sourced knowledge and people/projects, relationship briefs, long-term memory and skill evidence. Search before creating; never invent sources or user preferences. Session history is evidence, not automatically memory. Use get/list/search/neighbors/brief/lint; put requires record {id,store,kind,title,body,metadata}; update requires expected_revision. Metadata carries aliases,subjects,evidence,links. Ambiguous people must be resolved with the owner. pin/promote/archive/correct/undo target memory id; sleep consolidates selected experience; dream proposes connections, never facts. Skills remain find_skills/load_skill/save_skill with owner-reviewed activation.","parameters":{"type":"object","properties":{"action":{"type":"string"},"id":{"type":"string"},"query":{"type":"string"},"store":{"type":"string"},"kind":{"type":"string"},"status":{"type":"string"},"tier":{"type":"string"},"offset":{"type":"integer"},"record":{"type":"object"},"expected_revision":{"type":"integer"},"ids":{"type":"array","items":{"type":"string"}},"merge_id":{"type":"string"},"merge_revision":{"type":"integer"},"details":{"type":"object"},"event_at":{"type":"string"},"session":{"type":"string"},"text":{"type":"string"},"revision":{"type":"integer"}},"required":["action"]}})
 }
 pub async fn run_tool(app: &crate::AppState, session: Uuid, args: &Value) -> (String, bool) {
     match manage(app, Some(session), args).await {
@@ -90,6 +90,10 @@ pub(crate) async fn admit(db: &PgPool, s: Uuid, risk: i16, writer: Option<Uuid>)
     ensure!(risk < 5, "record is blocked by source policy");
     if let Some(w) = writer {
         crate::sources::depend(db, s, &[w]).await?;
+        ensure!(
+            !crate::taint::stopped(db, w).await?,
+            "record writer was denied"
+        );
     }
     crate::sources::raise(db, s, risk).await?;
     ensure!(

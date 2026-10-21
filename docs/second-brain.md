@@ -9,7 +9,9 @@ records. Session history is separately searchable evidence, not automatically pr
 
 Postgres owns memory, revisions and work receipts. Private projections live in `global/MEMORY.md`,
 `global/memory/records/`, `global/memory/archive/` and `global/memory/export.json`. Generated files
-are edited with revisioned operations, not by silently changing a second authoritative copy.
+are edited with revisioned operations. Manual view edits block further export. After inspecting the
+bytes, owner-only `repair_projection` takes relative `path` and `expected_digest`, retains them in
+`memory/conflicts/`, and restores the generated view. Projection backups are listed in `brain_projections`.
 Knowledge/entity Markdown is authoritative once published; database indexes and graph edges are
 projections. File hashes are checked before reads; manual edits require explicit import. A backup
 needs both the database and files. A search-index rebuild is not a complete backup restore.
@@ -44,8 +46,8 @@ merely by writing a citation. Preserve qualifications and competing claims in th
 ## Memory and sleep
 
 `remember` saves selected recent experience. Source `owner` requires an exact span from an
-actual authenticated owner message; an assistant's attribution is not evidence. Automatic capture
-classifies exact owner-message spans rather than inventing paraphrased preferences. Captures have
+actual authenticated owner message; an assistant's attribution is not evidence. Verified captures require `source_seq` and an exact span of a successful kernel tool result.
+Automatic capture classifies exact owner-message spans rather than inventing paraphrased preferences. Captures have
 stable retry keys. Explicit pins go directly to long-term memory.
 
 The short-term soft target is `ZEN_MEMORY_CHARS` (4,000 characters); its double is the hard view
@@ -67,7 +69,9 @@ from stdin. `--id` and `--query` are shortcuts. Examples:
 
 ```bash
 zen brain schema
+zen brain subjects
 zen brain list --args '{"store":"entity","offset":0}'
+zen brain list --args '{"store":"memory","tier":"archived","offset":0}'
 zen brain get --id ana-partner
 zen brain brief --id ana-partner
 zen brain neighbors --id pilot-meeting
@@ -107,7 +111,7 @@ Dynamic evidence uses the existing per-turn context field, preserving the fixed 
 `zen brain retrieve --args '{"session":"SESSION_UUID","query":"What did Ana promise?"}'`
 returns a context pack and receipts. `GET /api/sessions/{id}/context` shows recent selected
 IDs/revisions, omissions, degradation and elapsed time. `ZEN_BRAIN_MODE=shadow` records retrieval
-without injecting it or automatically capturing; `off` disables automatic retrieval/capture.
+without injecting it, capturing or running scheduled consolidation; `off` also disables automatic retrieval.
 
 Coverage is explicitly unverified: top-K search and a bounded graph expansion cannot establish
 complete context. Read original evidence for agreements, temporal questions or consequential action;

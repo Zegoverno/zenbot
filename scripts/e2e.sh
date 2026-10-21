@@ -307,8 +307,8 @@ web_tools() {
 # memory is found and counted as used, history reads the other session, and every search is logged.
 search_recall() {
   local ws; ws=$(new_workspace search)
-  q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART" >/dev/null
   start_kernel "$ws" "$(script search.json)"
+  q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART" >/dev/null
   local a; a=$(zen ask --json -m faux/smoke "save: the purple elephant config lives in deploy/elephant.yaml" | jq -r .session_id)
   # The indexer takes events once they're 5 seconds old (search.rs): age them instead of waiting.
   q "UPDATE tape_events SET created_at = created_at - interval '10 seconds' WHERE session_id = '$a'" >/dev/null
@@ -319,7 +319,7 @@ search_recall() {
   local res; res=$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult'")
   check "found by words, in the other session" grep -q "session ${a:0:8}" <<<"$res"
   check "the exact path comes first" grep -q "(exact match)" <<<"$res"
-  check "the memory is found" grep -q "m1 — short-term memory (owner)" <<<"$res"
+  check "the memory is found" grep -q "m1 — short-term memory (inferred)" <<<"$res"
   check "and counted as used" eq "$(q "SELECT uses FROM memories WHERE id = 1")" 1
   check "history read the other session" grep -q "purple elephant" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='history'")"
   check "every search is logged" eq "$(q "SELECT count(*) FROM searches WHERE session_id='$sid'")" 3
@@ -665,17 +665,13 @@ system_one_direct() {
   check "the failure is in the ledger" eq "$(q "SELECT source FROM decisions WHERE session_id='$sid' AND point='judge'")" unavailable
 }
 
-# The sleep with System One (stub): of two entries that say the same thing, one stays (and stays
-# searchable); one the owner's profile covers goes; several entries are judged at once (at most 4);
-# and an entry changed with `remember` while the sleep runs is left as it is now, its old text not
-# promoted. The stub (systemone_stub.py on the e2e port + 5, with a release file) holds the questions
-# about the HOLD entries until the scenario has changed them; its `GET /stats` counts calls in flight.
+# Sleep with deterministic dispositions: durable/expired/unresolved experience keeps its evidence.
 memory_sleep_judged() {
   local ws; ws=$(new_workspace sleep-judged)
   local port=$((PORT + 5))
   python3 "$REPO/scripts/e2e/systemone_stub.py" "$port" & local srv=$!
   start_kernel "$ws" "$(script agent.json)" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone"
-  q "INSERT INTO memories(text,source) VALUES('PROMOTE preserve this decision','owner'),('ARCHIVE completed transient state','inferred'),('KEEP unresolved capacity question','inferred'); UPDATE memories SET risk=1" >/dev/null
+  q "DELETE FROM memories; INSERT INTO memories(text,source) VALUES('PROMOTE preserve this decision','owner'),('ARCHIVE completed transient state','inferred'),('KEEP unresolved capacity question','inferred'); UPDATE memories SET risk=1" >/dev/null
   zen memory sleep --json >/dev/null
   check "sleep separates durable, expired and unresolved experience" eq "$(q "SELECT string_agg(tier,',' ORDER BY id) FROM memories")" long,archived,short
   check "consolidation retains revision history" test "$(q 'SELECT count(*) FROM brain_revisions')" -ge 2
@@ -1490,6 +1486,7 @@ phase4_brain() {
   check "fixed prompt stays independent of memory updates" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND kind='base' AND payload->>'text' LIKE '%Ana confirmed%'")" 0
   check "fabricated owner preference is refused" eq "$(zen ask --json -m faux/smoke 'P4-FORGED'|jq -r '.tools[0].is_error')" true
   check "complete source exports exist" test -s "$TMP/home/.zenbot/global/memory/export.json"
+  check "memory lifecycle and projection recovery" python3 "$REPO/scripts/e2e/phase4-memory.py" "$URL" "$TOKEN" "$TMP/home" "$sid" "m$id"
 }
 
 # Scenarios that share a setup run as parts of one; `scripts/e2e.sh <filter>` matches the scenario's

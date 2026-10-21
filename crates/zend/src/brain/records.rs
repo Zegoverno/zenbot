@@ -245,6 +245,35 @@ async fn bind_evidence(
         );
         let reference = string(e, "source");
         let source = reference.strip_prefix("record:").unwrap_or(&reference);
+        if let Some(memory_id) = source
+            .strip_prefix('m')
+            .and_then(|id| id.parse::<i64>().ok())
+        {
+            let memory = memory_json(db, memory_id).await?;
+            let current = memory["revision"].as_i64().unwrap_or(0);
+            let revision = e["revision"].as_i64().unwrap_or(current);
+            if revision != current {
+                let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM brain_revisions WHERE record_id=$1 AND revision=$2)").bind(source).bind(revision).fetch_one(db).await?;
+                ensure!(exists, "unknown memory evidence revision");
+            }
+            e["revision"] = json!(revision);
+            let stopped: bool = sqlx::query_scalar("SELECT zen_memory_contaminated($1)")
+                .bind(memory_id)
+                .fetch_one(db)
+                .await?;
+            *risk = (*risk).max(if stopped {
+                5
+            } else {
+                memory["risk"].as_i64().unwrap_or(4) as i16
+            });
+            let inputs: Vec<Uuid> =
+                sqlx::query_scalar("SELECT writer FROM brain_memory_inputs WHERE memory_id=$1")
+                    .bind(memory_id)
+                    .fetch_all(db)
+                    .await?;
+            writers.extend(inputs);
+            continue;
+        }
         if let Some(row) = sqlx::query("SELECT revision,digest,CASE WHEN zen_brain_contaminated(id) THEN 5::smallint ELSE risk END AS risk,session_id FROM brain_records WHERE id=$1 AND published").bind(source).fetch_optional(db).await? {
             let current: i64 = row.get("revision");
             let revision = e["revision"].as_i64().unwrap_or(current);
@@ -697,6 +726,27 @@ pub async fn manage(app: &crate::AppState, session: Option<Uuid>, a: &Value) -> 
         "list" | "search" => {
             let q = string(a, "query");
             let offset = a["offset"].as_i64().unwrap_or(0).max(0);
+            if a["store"] == "memory" {
+                let tier = string(a, "tier");
+                ensure!(
+                    matches!(
+                        tier.as_str(),
+                        "" | "short" | "long" | "archived" | "pending"
+                    ),
+                    "invalid memory tier"
+                );
+                let ids:Vec<i64>=sqlx::query_scalar("SELECT id FROM memories WHERE ($1='' AND tier!='archived' OR tier=$1) AND ($2='' OR record_type=$2) AND (text ILIKE '%'||$3||'%' OR details::text ILIKE '%'||$3||'%') ORDER BY id LIMIT 50 OFFSET $4").bind(tier).bind(string(a,"kind")).bind(&q).bind(offset).fetch_all(&app.db).await?;
+                let mut out = vec![];
+                for id in ids {
+                    match super::sleep::get(&app.db, &format!("m{id}"), session).await {
+                        Ok(r) => out.push(r),
+                        Err(e) => out.push(json!({"id":format!("m{id}"),"withheld":e.to_string()})),
+                    }
+                }
+                return Ok(
+                    json!({"records":out,"offset":offset,"next_offset":if out.len()==50{Some(offset+50)}else{None},"complete":out.len()<50}),
+                );
+            }
             let ids:Vec<String>=sqlx::query_scalar("SELECT id FROM brain_records WHERE published AND ($1='' OR store=$1) AND ($2='' OR kind=$2) AND ($3='' OR status=$3) AND (title ILIKE '%'||$4||'%' OR body ILIKE '%'||$4||'%' OR metadata::text ILIKE '%'||$4||'%') ORDER BY id LIMIT 50 OFFSET $5")
                 .bind(string(a,"store")).bind(string(a,"kind")).bind(string(a,"status")).bind(q).bind(offset).fetch_all(&app.db).await?;
             let mut out = vec![];
@@ -735,8 +785,15 @@ pub async fn manage(app: &crate::AppState, session: Option<Uuid>, a: &Value) -> 
                     memories.push(v);
                 }
             }
+            let related_ids:Vec<String>=sqlx::query_scalar("SELECT DISTINCT CASE WHEN source=$1 THEN target ELSE source END FROM brain_links WHERE source=$1 OR target=$1 LIMIT 30").bind(&id).fetch_all(&app.db).await?;
+            let mut related = vec![];
+            for linked in related_ids {
+                if let Ok(record) = read(&app.db, &linked, session).await {
+                    related.push(record);
+                }
+            }
             Ok(
-                json!({"entity":entity,"memories":memories,"notice":"Attributed records, not a complete relationship history. Check dates and unresolved commitments."}),
+                json!({"entity":entity,"memories":memories,"related":related,"notice":"Attributed records, not a complete relationship history. Check dates and unresolved commitments."}),
             )
         }
         "history" => {
@@ -800,6 +857,10 @@ pub async fn manage(app: &crate::AppState, session: Option<Uuid>, a: &Value) -> 
             .await?;
             Ok(json!(rows))
         }
+        "repair_projection" => {
+            ensure!(session.is_none(), "projection repair is owner-only");
+            super::sleep::repair_projection(&app.db, a).await
+        }
         "repair" => {
             ensure!(session.is_none(), "repair is owner-only");
             let count=sqlx::query("UPDATE brain_work w SET state='pending',error=NULL WHERE kind='publish' AND payload->>'id'=$1 AND (payload->>'revision')::bigint=(SELECT revision FROM brain_records WHERE id=$1)").bind(&id).execute(&app.db).await?.rows_affected();
@@ -814,6 +875,13 @@ pub async fn manage(app: &crate::AppState, session: Option<Uuid>, a: &Value) -> 
                 .await?;
             recover(app).await?;
             Ok(json!({"ok":true}))
+        }
+        "subjects" => {
+            ensure!(session.is_none(), "subject inventory is owner-only");
+            let subjects:Vec<String>=sqlx::query_scalar("SELECT DISTINCT jsonb_array_elements_text(metadata->'subjects') FROM brain_records WHERE published AND metadata->'subjects' IS NOT NULL ORDER BY 1").fetch_all(&app.db).await?;
+            Ok(
+                json!({"subjects":subjects,"notice":"Derived subject inventory; use list/search to inspect source records."}),
+            )
         }
         "schema" => Ok(json!({"schema":SCHEMA,"kinds":KINDS,"relations":RELATIONS})),
         _ => anyhow::bail!("unknown brain action"),

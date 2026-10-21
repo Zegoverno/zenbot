@@ -80,6 +80,14 @@ async fn add(db: &PgPool, session: Option<Uuid>, capture: Capture<'_>) -> Result
     };
     let id:i64=sqlx::query_scalar("INSERT INTO memories(text,source,session_id,tier,record_type,evidence,entities,pinned,capture_key,tainted) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(capture_key) WHERE capture_key IS NOT NULL DO UPDATE SET capture_key=EXCLUDED.capture_key RETURNING id")
         .bind(crate::secrets::mask(text)).bind(source).bind(session).bind(tier).bind(kind).bind(evidence).bind(entities).bind(pinned).bind(key).bind(risk>=4).fetch_one(&mut *tx).await?;
+    let existing: String = sqlx::query_scalar("SELECT text FROM memories WHERE id=$1")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+    ensure!(
+        existing == crate::secrets::mask(text),
+        "capture key already identifies different content"
+    );
     enqueue_export(&mut tx).await?;
     tx.commit().await?;
     let state: String = sqlx::query_scalar("SELECT tier FROM memories WHERE id=$1")
@@ -103,23 +111,35 @@ pub async fn remember(app: &crate::AppState, session: Uuid, a: &Value) -> Result
     }
     let text = string(a, "text");
     let source = string(a, "source");
-    let source = if source == "owner" {
-        // Exact owner evidence, never an assistant's invented attribution.
-        let yes:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tape_events WHERE session_id=$1 AND origin='owner' AND kind='message' AND payload->>'role'='user' AND strpos(payload->>'content',$2)>0)").bind(session).bind(&text).fetch_one(&app.db).await?;
+    let (source, locator, basis) = if source == "owner" {
+        let seq: Option<i32> = sqlx::query_scalar("SELECT seq FROM tape_events WHERE session_id=$1 AND origin='owner' AND kind='message' AND payload->>'role'='user' AND strpos(payload->>'content',$2)>0 ORDER BY seq DESC LIMIT 1").bind(session).bind(&text).fetch_optional(&app.db).await?;
+        let seq = seq.ok_or_else(|| {
+            anyhow::anyhow!(
+                "owner attribution requires an exact span of an authenticated owner message"
+            )
+        })?;
+        ("owner", format!("message:{seq}"), "owner_statement")
+    } else if source == "verified" {
+        let seq = a["source_seq"].as_i64().ok_or_else(|| {
+            anyhow::anyhow!(
+                "verified capture needs source_seq from an actual successful tool result"
+            )
+        })?;
+        let payload: Value = sqlx::query_scalar("SELECT payload FROM tape_events WHERE session_id=$1 AND seq=$2 AND kind='message' AND payload->>'role'='toolResult' AND tool_call_record IS NOT NULL AND COALESCE((payload->>'isError')::boolean,false)=false").bind(session).bind(seq as i32).fetch_one(&app.db).await?;
         ensure!(
-            yes,
-            "owner attribution requires an exact span of an authenticated owner message"
+            zen_proto::text_of(&payload["content"]).contains(&text),
+            "verified capture requires an exact tool-result span"
         );
-        "owner"
+        ("verified", format!("tool-result:{seq}"), "observed")
     } else {
-        "inferred"
+        ("inferred", "remember tool call".into(), "inference")
     };
-    let evidence = json!([{"source":format!("session:{session}"),"locator":"remember tool call","basis":if source=="owner"{"owner_statement"}else{"inference"}}]);
+    let evidence = json!([{"source":format!("session:{session}"),"locator":locator,"basis":basis}]);
     let key = a["key"]
         .as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| format!("explicit:{session}:{}", hash(&text)));
-    let v = add(
+    let mut v = add(
         &app.db,
         Some(session),
         Capture {
@@ -133,7 +153,9 @@ pub async fn remember(app: &crate::AppState, session: Uuid, a: &Value) -> Result
         },
     )
     .await?;
-    export(&app.db).await?;
+    if let Err(e) = export(&app.db).await {
+        v["projection_error"] = json!(e.to_string());
+    }
     let used:i64=sqlx::query_scalar("SELECT COALESCE(sum(length(text)+80),0)::bigint FROM memories WHERE tier='short' AND risk<4 AND NOT zen_memory_contaminated(id)").fetch_one(&app.db).await?;
     if v["state"] == "pending" || used as usize > crate::memory::cap() {
         let app = app.clone();
@@ -155,6 +177,11 @@ pub(crate) async fn get(db: &PgPool, id: &str, session: Option<Uuid>) -> Result<
                 .fetch_all(db)
                 .await?;
         crate::sources::depend(db, s, &writers).await?;
+        let contaminated: bool = sqlx::query_scalar("SELECT zen_memory_contaminated($1)")
+            .bind(id)
+            .fetch_one(db)
+            .await?;
+        ensure!(!contaminated, "memory writer was denied");
         let writer = v["session_id"].as_str().and_then(|s| s.parse().ok());
         admit(db, s, v["risk"].as_i64().unwrap_or(4) as i16, writer).await?;
     }
@@ -178,13 +205,7 @@ pub(crate) async fn edit(db: &PgPool, session: Option<Uuid>, a: &Value) -> Resul
         "expected_revision required; current revision is {revision}"
     );
     if let Some(s) = session {
-        admit(
-            db,
-            s,
-            old["risk"].as_i64().unwrap_or(4) as i16,
-            old["session_id"].as_str().and_then(|s| s.parse().ok()),
-        )
-        .await?;
+        get(db, &format!("m{id}"), Some(s)).await?;
     }
     let action = string(a, "action");
     match action.as_str() {
@@ -220,6 +241,9 @@ pub(crate) async fn edit(db: &PgPool, session: Option<Uuid>, a: &Value) -> Resul
                 source["revision"].as_i64() == a["merge_revision"].as_i64(),
                 "source merge_revision required"
             );
+            if let Some(s) = session {
+                get(db, &format!("m{other}"), Some(s)).await?;
+            }
             let text = crate::secrets::mask(&string(a, "text"));
             ensure!(
                 !text.is_empty() && text.chars().count() <= 600,
@@ -256,15 +280,28 @@ pub(crate) async fn edit(db: &PgPool, session: Option<Uuid>, a: &Value) -> Resul
             .fetch_one(&mut *tx)
             .await?;
             // Restore content but never lower current provenance or reactivate a denied writer.
-            sqlx::query("UPDATE memories SET text=$2,tier=$3,pinned=$4,reason='owner undo',updated_at=now() WHERE id=$1")
-                .bind(id).bind(string(&prior,"text")).bind(string(&prior,"tier")).bind(prior["pinned"].as_bool().unwrap_or(false)).execute(&mut *tx).await?;
+            sqlx::query("UPDATE memories SET text=$2,tier=$3,pinned=$4,details=$5,evidence=$6,entities=$7,record_type=$8,event_at=$9,reason='owner undo',updated_at=now() WHERE id=$1")
+                .bind(id).bind(string(&prior,"text")).bind(string(&prior,"tier")).bind(prior["pinned"].as_bool().unwrap_or(false)).bind(&prior["details"]).bind(&prior["evidence"]).bind(&prior["entities"]).bind(string(&prior,"record_type")).bind(prior["event_at"].as_str().map(str::parse::<chrono::DateTime<chrono::Utc>>).transpose()?).execute(&mut *tx).await?;
         }
         _ => anyhow::bail!("unknown memory edit"),
     }
+    // Editing content never lowers the origin rating retained before the correction.
+    sqlx::query("UPDATE memories SET risk=GREATEST(risk,$2) WHERE id=$1")
+        .bind(id)
+        .bind(old["risk"].as_i64().unwrap_or(4) as i16)
+        .execute(&mut *tx)
+        .await?;
+    guard(db, session).await?;
     enqueue_export(&mut tx).await?;
     tx.commit().await?;
-    export(db).await?;
-    Ok(json!({"ok":true,"id":format!("m{id}"),"revision":revision+1}))
+    let projection_error = export(db).await.err().map(|e| e.to_string());
+    let current: i64 = sqlx::query_scalar("SELECT revision FROM memories WHERE id=$1")
+        .bind(id)
+        .fetch_one(db)
+        .await?;
+    Ok(
+        json!({"ok":true,"id":format!("m{id}"),"revision":current,"projection_error":projection_error}),
+    )
 }
 async fn export_file(
     db: &PgPool,
@@ -272,6 +309,26 @@ async fn export_file(
     text: &str,
     records: &[Value],
 ) -> Result<()> {
+    let published: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT digest,pending_digest FROM brain_projections WHERE path=$1")
+            .bind(path.to_string_lossy().as_ref())
+            .fetch_optional(db)
+            .await?;
+    if let Ok(existing) = tokio::fs::read_to_string(path).await {
+        if existing != text {
+            if let Some((digest, pending)) = published {
+                ensure!(
+                    hash(&existing) == digest || Some(hash(&existing)) == pending,
+                    "manual memory projection edit at {}; review with repair_projection and expected_digest {}",
+                    path.display(),
+                    hash(&existing)
+                );
+            } else {
+                // First migration retains the old projection, including any pre-existing manual edit.
+                retain_projection(db, path, &existing).await?;
+            }
+        }
+    }
     // Ratings are registered before publication, with every originating writer. A projection
     // containing several memories inherits every dependency, including denied writers.
     for v in records {
@@ -286,7 +343,50 @@ async fn export_file(
         sqlx::query("INSERT INTO item_ratings(path,sha256,session_id,risk) VALUES($1,$2,$3,$4) ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=GREATEST(item_ratings.risk,EXCLUDED.risk)")
             .bind(path.to_string_lossy().as_ref()).bind(hash(text)).bind(v["session_id"].as_str().and_then(|s|s.parse::<Uuid>().ok())).bind(v["risk"].as_i64().unwrap_or(4) as i16).execute(db).await?;
     }
-    super::records::private_write(path, text).await
+    sqlx::query("UPDATE brain_projections SET pending_digest=$2 WHERE path=$1")
+        .bind(path.to_string_lossy().as_ref())
+        .bind(hash(text))
+        .execute(db)
+        .await?;
+    super::records::private_write(path, text).await?;
+    sqlx::query("INSERT INTO brain_projections(path,digest) VALUES($1,$2) ON CONFLICT(path) DO UPDATE SET digest=$2,pending_digest=NULL,updated_at=now()").bind(path.to_string_lossy().as_ref()).bind(hash(text)).execute(db).await?;
+    Ok(())
+}
+async fn retain_projection(db: &PgPool, path: &std::path::Path, text: &str) -> Result<()> {
+    let backup = root().join("memory/conflicts").join(format!(
+        "{}-{}.md",
+        path.file_stem()
+            .and_then(|p| p.to_str())
+            .unwrap_or("projection"),
+        hash(text)
+    ));
+    sqlx::query("INSERT INTO item_ratings(path,sha256,session_id,risk) VALUES($1,$2,NULL,4) ON CONFLICT DO NOTHING").bind(backup.to_string_lossy().as_ref()).bind(hash(text)).execute(db).await?;
+    super::records::private_write(&backup, text).await?;
+    sqlx::query("INSERT INTO brain_projections(path,digest,backup_path) VALUES($1,$2,$3) ON CONFLICT(path) DO UPDATE SET digest=$2,backup_path=$3,updated_at=now()").bind(path.to_string_lossy().as_ref()).bind(hash(text)).bind(backup.to_string_lossy().as_ref()).execute(db).await?;
+    Ok(())
+}
+pub(crate) async fn repair_projection(db: &PgPool, args: &Value) -> Result<Value> {
+    let relative = string(args, "path");
+    let path = root().join(&relative);
+    let known: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM brain_projections WHERE path=$1)")
+            .bind(path.to_string_lossy().as_ref())
+            .fetch_one(db)
+            .await?;
+    ensure!(
+        known,
+        "unknown generated projection path; use relative canonical path"
+    );
+    let text = tokio::fs::read_to_string(&path).await?;
+    ensure!(
+        hash(&text) == string(args, "expected_digest"),
+        "projection changed since review"
+    );
+    retain_projection(db, &path, &text).await?;
+    export(db).await?;
+    Ok(
+        json!({"repaired":relative,"notice":"Reviewed manual bytes retained in memory/conflicts; generated view restored. Incorporate intended changes using revisioned brain operations."}),
+    )
 }
 pub(crate) async fn export(db: &PgPool) -> Result<()> {
     let mut lease = db.begin().await?;
@@ -389,7 +489,7 @@ async fn consolidate_inner(app: &crate::AppState, trigger: &str) -> Result<Value
             .bind(crate::s1::default_model())
             .fetch_one(db)
             .await?;
-    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(m) FROM memories m WHERE tier IN ('short','pending') ORDER BY id LIMIT 200").fetch_all(db).await?;
+    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(m) FROM memories m WHERE tier IN ('short','pending') AND risk<4 AND NOT zen_memory_contaminated(id) ORDER BY id LIMIT 200").fetch_all(db).await?;
     let items: Vec<Value> = rows
         .iter()
         .map(
