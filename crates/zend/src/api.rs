@@ -118,7 +118,8 @@ const BOARD_CHILDREN: i64 = 20;
 /// with the task it was given; `children` says how many a session has in all. Each says whether
 /// a turn is running in it right now, and whether it's waiting on the owner: its latest `ask`
 /// questions came after the owner's latest message (a message the kernel sent in the owner's
-/// place, `kernel: true`, isn't an answer). The client nests children under their parent.
+/// place, `kernel: true`, isn't an answer), or an MCP form awaits an explicit response.
+/// The client nests children under their parent.
 /// No costs: the board polls this, and they'd double its time.
 pub(crate) async fn board(State(app): State<AppState>, Query(q): Query<BoardQuery>) -> ApiResult<Json<Value>> {
     let archived = q.archived.unwrap_or(false);
@@ -138,12 +139,12 @@ pub(crate) async fn board(State(app): State<AppState>, Query(q): Query<BoardQuer
               WHERE e.session_id = s.id AND e.kind = 'message' AND e.payload->>'role' = 'user' ORDER BY e.seq LIMIT 1)
            END AS task,
            CASE WHEN s.parent IS NULL THEN (SELECT count(*) FROM sessions c WHERE c.parent = s.id) END AS children,
-           q.last IS NOT NULL AND NOT EXISTS (
+           (q.last IS NOT NULL AND NOT EXISTS (
              SELECT 1 FROM tape_events m
              WHERE m.session_id = s.id AND m.kind = 'message' AND m.seq > q.last
-               AND m.payload->>'role' = 'user' AND m.payload->>'kernel' IS NULL) AS waiting
+               AND m.payload->>'role' = 'user' AND m.payload->>'kernel' IS NULL)) OR EXISTS (SELECT 1 FROM mcp_interactions i WHERE i.session_id=s.id AND i.status='pending' AND i.expires_at>now()) AS waiting
          FROM sessions s
-         LEFT JOIN LATERAL (SELECT max(e.seq) AS last FROM tape_events e WHERE e.session_id = s.id AND e.kind = 'questions') q ON true
+         LEFT JOIN LATERAL (SELECT max(e.seq) AS last FROM tape_events e WHERE e.session_id = s.id AND e.kind = 'questions' AND e.payload->>'mcp_request' IS NULL) q ON true
          WHERE s.id IN (SELECT id FROM top UNION ALL SELECT id FROM kids)
          ORDER BY s.updated_at DESC"
     ))
@@ -723,4 +724,13 @@ pub(crate) async fn list_job_runs(State(app): State<AppState>, Query(q): Query<R
 /// The owner's `brain` actions (`zen brain`): get, list, put, schema, lint, index.
 pub(crate) async fn brain_action(State(app): State<AppState>, Json(args): Json<Value>) -> ApiResult<Json<Value>> {
     Ok(Json(crate::brain::manage(&app.db, None, &args).await.map_err(bad_request)?.0))
+}
+
+/// Owner-only pending MCP form requests. Responses are never inferred from agent messages.
+pub(crate) async fn mcp_pending(State(app): State<AppState>) -> ApiResult<Json<Value>> {
+    Ok(Json(crate::mcp_interaction::list(&app.db).await.map_err(bad_request)?))
+}
+
+pub(crate) async fn mcp_respond(State(app): State<AppState>, Path(id): Path<Uuid>, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
+    Ok(Json(crate::mcp_interaction::respond(&app.db, id, &body).await.map_err(bad_request)?))
 }

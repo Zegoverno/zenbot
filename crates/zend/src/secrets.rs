@@ -52,7 +52,7 @@ pub fn is_secret_var(name: &str) -> bool {
 pub fn secret_files() -> Vec<std::path::PathBuf> {
     let home = crate::zen_home();
     let user = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    let mut paths: Vec<std::path::PathBuf> = ["token", "db-password", "env", "env.prev", "mcp.json", "matrix.env", "matrix"].iter().map(|f| home.join(f)).collect();
+    let mut paths: Vec<std::path::PathBuf> = ["mcp-auth", "token", "db-password", "env", "env.prev", "mcp.json", "matrix.env", "matrix"].iter().map(|f| home.join(f)).collect();
     paths.push(crate::mcp::config_path());
     paths.extend([user.join(".codex/auth.json"), user.join(".claude/.credentials.json"),
         user.join(".ssh"), user.join(".gnupg"), user.join(".config/gh"), user.join(".aws"), user.join(".netrc"),
@@ -69,7 +69,12 @@ const PLAIN_FILES: usize = 2;
 fn known_files() -> Vec<std::path::PathBuf> {
     let home = crate::zen_home();
     let user = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    vec![home.join("token"), home.join("db-password"), user.join(".codex/auth.json"), user.join(".claude/.credentials.json")]
+    let mut paths = vec![home.join("token"), home.join("db-password"), user.join(".codex/auth.json"), user.join(".claude/.credentials.json")];
+    if let Ok(entries) = std::fs::read_dir(home.join("mcp-auth")) {
+        let mut tokens: Vec<_> = entries.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && e.path().extension().is_some_and(|s| s == "json")).map(|e| e.path()).collect();
+        tokens.sort(); paths.extend(tokens);
+    }
+    paths
 }
 
 /// Secret values the kernel knows, longest first (so a value containing another is masked whole).

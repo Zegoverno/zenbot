@@ -26,11 +26,18 @@
 //! it's dropped. Stdio runs contained, with a private writable cache folder and network through
 //! a proxy governed by the server's own trust level; status only reads cached counts. A message from a server (a stdio line, an HTTP body) over 8 MB fails the call.
 //!
-//! The client is written here, against the MCP spec (2025-06-18), instead of using the `rmcp` crate:
-//! three methods are needed (initialize, tools/list, tools/call), and rmcp would add a second
-//! reqwest and a C crypto build.
+//! The client asks for MCP 2025-06-18 and accepts a server that answers 2025-03-26 or 2024-11-05;
+//! it refuses other revisions. Resources and prompts
+//! appear as reserved `zen_` operations through the same three wrappers; server tools may not use
+//! that prefix (such a tool is left out). Structured JSON and validated images survive tool results. HTTP SSE responses are
+//! processed as complete events arrive. Named calls connect only their server; discovery has a
+//! three-second per-server budget and reports incomplete catalogs instead of hiding delays.
+//! Form elicitation is routed to owner-only pending-request endpoints, with HTTP request context
+//! or one unambiguous active stdio call; ambiguous stdio requests are refused. OAuth refresh uses
+//! owner-provisioned credentials (auth.rs), not an automatic browser login. Sampling, roots,
+//! subscriptions, legacy HTTP+SSE and the newer 2026 protocol lifecycle remain unsupported.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -42,13 +49,16 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
+
+type Elicitation = (Value, oneshot::Sender<Value>);
 use uuid::Uuid;
 
 use crate::{tools, App};
 
+mod auth;
+
 const PROTOCOL: &str = "2025-06-18";
-const MAX_OUTPUT: usize = 50 * 1024;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServerConfig {
@@ -58,6 +68,7 @@ pub struct ServerConfig {
     pub env: Vec<(String, String)>,
     pub url: Option<String>,
     pub headers: Vec<(String, String)>,
+    pub oauth: Option<auth::OAuthConfig>,
     pub timeout: Duration,
     pub include: Vec<String>,
     pub exclude: Vec<String>,
@@ -152,8 +163,19 @@ pub fn parse_config(text: &str) -> (Vec<ServerConfig>, Vec<String>) {
             problems.push(format!("server `{name}`: give either `command` (local) or `url` (remote)"));
             continue;
         }
+        let oauth = if s["oauth"].is_object() {
+            match auth::OAuthConfig::parse(&s["oauth"], &allow, &mut missing) {
+                Ok(value) => Some(value),
+                Err(e) => { problems.push(format!("server `{name}`: {e}")); continue; }
+            }
+        } else { None };
+        if oauth.is_some() && s["headers"].as_object().is_some_and(|h| h.keys().any(|k| k.eq_ignore_ascii_case("authorization"))) {
+            problems.push(format!("server `{name}`: choose oauth or a static Authorization header"));
+            continue;
+        }
         let cfg = ServerConfig {
             name: name.clone(),
+            oauth,
             args: strs("args", &mut missing),
             env: map("env", &mut missing),
             headers: map("headers", &mut missing),
@@ -188,6 +210,7 @@ const MAX_MESSAGE: usize = 8 * 1024 * 1024;
 struct StdioConn {
     stdin: Mutex<ChildStdin>,
     pending: std::sync::Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>,
+    elicitation: std::sync::Mutex<HashMap<i64, mpsc::UnboundedSender<Elicitation>>>,
     /// Set by the reader when the server exited or broke the protocol: connect again.
     closed: AtomicBool,
     /// Set when the server said its tool list changed (`notifications/tools/list_changed`).
@@ -231,7 +254,28 @@ async fn read_stdio(conn: std::sync::Weak<StdioConn>, mut stdout: BufReader<Chil
                     let _ = w.send(Ok(v));
                 }
             }
-            // A request from the server (sampling, roots, …): not supported.
+            (Some("elicitation/create"), Some(id)) => {
+                // Legacy stdio has no mandatory parent request ID. Never guess between sessions.
+                let context = {
+                    let pending = conn.pending.lock().unwrap_or_else(|e| e.into_inner());
+                    if pending.len() == 1 {
+                        pending.keys().next().and_then(|id| conn.elicitation.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned())
+                    } else { None }
+                };
+                if let Some(context) = context {
+                    let (tx, rx) = oneshot::channel();
+                    if context.send((v.clone(), tx)).is_ok() {
+                        let io = conn.clone();
+                        let id = id.clone();
+                        tokio::spawn(async move {
+                            if let Ok(result) = rx.await { let _ = io.write(&json!({"jsonrpc":"2.0","id":id,"result":result})).await; }
+                        });
+                        continue;
+                    }
+                }
+                let _ = conn.write(&json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"elicitation requires one unambiguous active owner tool call"}})).await;
+            }
+            // Sampling and filesystem roots remain unsupported.
             (Some(_), Some(id)) => {
                 let reply = json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": "not supported by zenbot" } });
                 let _ = conn.write(&reply).await;
@@ -302,6 +346,7 @@ struct Server {
     cfg: ServerConfig,
     next_id: AtomicI64,
     state: Mutex<State>,
+    auth: Mutex<Option<auth::Token>>,
 }
 
 #[derive(Default)]
@@ -326,7 +371,7 @@ struct Registry {
 
 static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(|| Mutex::new(Registry { servers: HashMap::new(), loaded: None, problems: Vec::new() }));
 
-static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).build().expect("http client"));
+static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).connect_timeout(Duration::from_secs(10)).build().expect("http client"));
 
 /// Read the config again when it changed since it was loaded; servers whose config changed are
 /// restarted, removed ones dropped.
@@ -343,7 +388,7 @@ async fn refresh() {
     };
     // A config change replaces the handles without waiting for active calls. Those calls finish on
     // their old Arc; subsequent calls use the new server. Never hold the registry lock over I/O.
-    reg.servers = cfgs.into_iter().map(|cfg| (cfg.name.clone(), Arc::new(Server { cfg, next_id: AtomicI64::new(1), state: Mutex::default() }))).collect();
+    reg.servers = cfgs.into_iter().map(|cfg| (cfg.name.clone(), Arc::new(Server { cfg, next_id: AtomicI64::new(1), state: Mutex::default(), auth: Mutex::default() }))).collect();
     reg.loaded = mtime;
     reg.problems = problems;
 }
@@ -360,7 +405,10 @@ impl Server {
                 io.stale.store(false, Ordering::SeqCst);
             }
             match self.list_tools(&conn).await {
-                Ok(tools) => st.tools = tools,
+                Ok(mut tools) => {
+                    tools.extend(st.tools.iter().filter(|t| service_method(&t.name).is_some()).cloned());
+                    st.tools = tools;
+                },
                 Err(e) => tracing::warn!("listing the tools of MCP server `{}` again: {e:#}", self.cfg.name),
             }
             return Ok((conn, st.tools.clone()));
@@ -425,6 +473,7 @@ impl Server {
                 let io = Arc::new(StdioConn {
                     stdin: Mutex::new(stdin),
                     pending: Default::default(),
+                    elicitation: Default::default(),
                     closed: AtomicBool::new(false),
                     stale: AtomicBool::new(false),
                     _group: group,
@@ -436,18 +485,20 @@ impl Server {
             _ => Arc::new(Conn::Http { session: std::sync::Mutex::new(None), closed: AtomicBool::new(false) }),
         };
         let init = self
-            .request(&conn, "initialize", json!({ "protocolVersion": PROTOCOL, "capabilities": {}, "clientInfo": { "name": "zenbot", "version": env!("CARGO_PKG_VERSION") } }))
+            .request(&conn, "initialize", json!({ "protocolVersion": PROTOCOL, "capabilities": {"elicitation":{}}, "clientInfo": { "name": "zenbot", "version": env!("CARGO_PKG_VERSION") } }))
             .await?;
-        anyhow::ensure!(init["protocolVersion"].is_string(), "the server's initialize answer has no protocolVersion");
+        validate_protocol(&init)?;
         self.notify(&conn, "notifications/initialized", json!({})).await?;
-        let tools = self.list_tools(&conn).await?;
+        let mut tools = if init["capabilities"].get("tools").is_some() { self.list_tools(&conn).await? } else { Vec::new() };
+        tools.extend(service_entries(&self.cfg, &init["capabilities"]));
         Ok((conn, tools))
     }
 
     async fn list_tools(&self, conn: &Arc<Conn>) -> Result<Vec<ToolEntry>> {
         let mut tools = Vec::new();
         let mut cursor: Option<String> = None;
-        for _ in 0..20 {
+        let mut seen = HashSet::new();
+        loop {
             let params = match &cursor {
                 Some(c) => json!({ "cursor": c }),
                 None => json!({}),
@@ -455,6 +506,12 @@ impl Server {
             let page = self.request(conn, "tools/list", params).await?;
             for t in page["tools"].as_array().into_iter().flatten() {
                 let name = t["name"].as_str().unwrap_or("").to_string();
+                if name.starts_with("zen_") {
+                    // Reserved for the resource and prompt operations: skip it, keep the rest.
+                    tracing::warn!("MCP server `{}`: tool `{name}` uses the reserved zen_ prefix; left out", self.cfg.name);
+                    continue;
+                }
+                anyhow::ensure!(tools.len() < 10000, "tools/list exceeds 10000 entries; catalog withheld");
                 if name.is_empty() || (!self.cfg.include.is_empty() && !self.cfg.include.contains(&name)) || self.cfg.exclude.contains(&name) {
                     continue;
                 }
@@ -469,7 +526,10 @@ impl Server {
                 });
             }
             cursor = page["nextCursor"].as_str().map(String::from);
-            if cursor.is_none() {
+            if let Some(c) = &cursor {
+                anyhow::ensure!(seen.insert(c.clone()), "tools/list repeated a pagination cursor");
+                anyhow::ensure!(seen.len() < 1000, "tools/list exceeded 1000 pages; catalog withheld rather than truncated");
+            } else {
                 break;
             }
         }
@@ -490,23 +550,43 @@ impl Server {
     /// A request on `conn`: its result, or its JSON-RPC error. A broken connection (an exited
     /// server, a failed HTTP call, a message too large) is an error too, and isn't used again.
     async fn request(&self, conn: &Arc<Conn>, method: &str, params: Value) -> Result<Value> {
+        self.request_inner(conn, method, params, None).await
+    }
+
+    async fn request_inner(&self, conn: &Arc<Conn>, method: &str, params: Value, context: Option<(&App, Uuid)>) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        let timeout = self.cfg.timeout;
+        let timeout = if context.is_some() { self.cfg.timeout.max(Duration::from_secs(600)) } else { self.cfg.timeout };
         let res = tokio::time::timeout(timeout, async {
             match &**conn {
                 Conn::Stdio(io) => {
                     let (tx, rx) = oneshot::channel();
                     io.pending.lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
                     // Unanswered (a timeout, a dropped call): forget the waiter.
-                    let _forget = Forget(io, id);
+                    let _forget = Forget(io.clone(), id);
                     anyhow::ensure!(io.usable(), "the server exited");
+                    let (elicits, mut requests) = mpsc::unbounded_channel();
+                    if context.is_some() { io.elicitation.lock().unwrap_or_else(|e| e.into_inner()).insert(id, elicits); }
                     io.write(&msg).await?;
-                    rx.await.map_err(|_| anyhow!("the server exited"))?.map_err(|e| anyhow!(e))
+                    let mut rx = rx;
+                    // As for HTTP: the server's timeout restarts once the owner answered a form.
+                    let mut deadline = tokio::time::Instant::now() + self.cfg.timeout;
+                    loop {
+                        tokio::select! {
+                            result = &mut rx => break result.map_err(|_| anyhow!("the server exited"))?.map_err(|e| anyhow!(e)),
+                            Some((request, reply)) = requests.recv(), if context.is_some() => {
+                                let (app, session) = context.unwrap();
+                                let result = crate::mcp_interaction::elicit(app, session, &self.cfg.name, &request["id"], &request["params"]).await.unwrap_or_else(|_| json!({"action":"cancel"}));
+                                let _ = reply.send(result);
+                                deadline = tokio::time::Instant::now() + self.cfg.timeout;
+                            }
+                            _ = tokio::time::sleep_until(deadline) => anyhow::bail!("timed out after {}s", self.cfg.timeout.as_secs()),
+                        }
+                    }
                 }
                 Conn::Http { session, .. } => {
                     let current = session.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                    let (body, new_session) = self.post(&msg, current.as_deref()).await?;
+                    let (body, new_session) = self.post_inner(&msg, current.as_deref(), context).await?;
                     if let Some(s) = new_session {
                         *session.lock().unwrap_or_else(|e| e.into_inner()) = Some(s);
                     }
@@ -539,29 +619,85 @@ impl Server {
     /// POST a message (streamable HTTP): the answer is JSON or an event stream of JSON messages,
     /// read up to MAX_MESSAGE.
     async fn post(&self, msg: &Value, session: Option<&str>) -> Result<(Vec<Value>, Option<String>)> {
+        self.post_inner(msg, session, None).await
+    }
+
+    async fn post_inner(&self, msg: &Value, session: Option<&str>, context: Option<(&App, Uuid)>) -> Result<(Vec<Value>, Option<String>)> {
         let url = self.cfg.url.as_deref().context("no url")?;
-        let mut req = HTTP
-            .post(url)
-            .timeout(self.cfg.timeout)
-            .header("Accept", "application/json, text/event-stream")
-            .header("MCP-Protocol-Version", PROTOCOL)
-            .json(msg);
-        for (k, v) in &self.cfg.headers {
-            req = req.header(k.as_str(), v.as_str());
+        // The server's timeout counts only time spent waiting for it: an owner's answer to a form
+        // restarts it (below). The whole call stays under `request_inner`'s cap.
+        let mut deadline = tokio::time::Instant::now() + self.cfg.timeout;
+        let build = |token: Option<String>| {
+            let mut req = HTTP
+                .post(url)
+                .header("Accept", "application/json, text/event-stream")
+                .header("MCP-Protocol-Version", PROTOCOL)
+                .json(msg);
+            for (k, v) in &self.cfg.headers {
+                req = req.header(k.as_str(), v.as_str());
+            }
+            if let Some(token) = token {
+                req = req.bearer_auth(token);
+            }
+            if let Some(s) = session {
+                req = req.header("Mcp-Session-Id", s);
+            }
+            req
+        };
+        let token = match &self.cfg.oauth {
+            Some(config) => Some(auth::access_token(config, &self.cfg.name, &self.auth).await?),
+            None => None,
+        };
+        let send = |req: reqwest::RequestBuilder| tokio::time::timeout_at(deadline, req.send());
+        let mut resp = send(build(token)).await.context("the server didn't answer in time")?.context("contacting the server")?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            if let Some(config) = &self.cfg.oauth {
+                // A fresh request: appending to the first would send both bearer tokens.
+                auth::expire(&self.auth).await;
+                let token = auth::access_token(config, &self.cfg.name, &self.auth).await?;
+                resp = send(build(Some(token))).await.context("the server didn't answer in time")?.context("contacting the server after OAuth refresh")?;
+            }
         }
-        if let Some(s) = session {
-            req = req.header("Mcp-Session-Id", s);
-        }
-        let resp = req.send().await.context("contacting the server")?;
         let status = resp.status();
         let new_session = resp.headers().get("mcp-session-id").and_then(|v| v.to_str().ok()).map(String::from);
         let kind = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
         let mut body: Vec<u8> = Vec::new();
+        let streaming = status.is_success() && kind.contains("text/event-stream");
+        let wanted = msg.get("id");
+        // Notifications may return 202 without a body.
+        if status.is_success() && wanted.is_none() { return Ok((Vec::new(), new_session)); }
+        let mut processed = 0;
         let mut stream = resp.bytes_stream();
-        while let Some(chunk) = stream.next().await {
+        while let Some(chunk) = tokio::time::timeout_at(deadline, stream.next()).await.context("the server didn't answer in time")? {
             let chunk = chunk.context("reading the server's answer")?;
             anyhow::ensure!(body.len() + chunk.len() <= MAX_MESSAGE, "the server's answer is over {} MB", MAX_MESSAGE / 1024 / 1024);
             body.extend_from_slice(&chunk);
+            if streaming {
+                // Only dispatch complete SSE events; a response can arrive while the server
+                // deliberately keeps its connection open. Dropping it after the reply is valid.
+                let text = String::from_utf8_lossy(&body);
+                let normalized = text.replace("\r\n", "\n");
+                if let Some(end) = normalized.rfind("\n\n") {
+                    let events = sse_messages(&normalized[..end]);
+                    for event in events.iter().skip(processed) {
+                        if event.get("id") == wanted && event.get("method").is_none() {
+                            return Ok((vec![event.clone()], new_session));
+                        }
+                        if event.get("id").is_some() && event.get("method").is_some() {
+                            let result = if event["method"] == "elicitation/create" {
+                                if let Some((app, owner_session)) = context {
+                                    let result = crate::mcp_interaction::elicit(app, owner_session, &self.cfg.name, &event["id"], &event["params"]).await.unwrap_or_else(|_| json!({"action":"cancel"}));
+                                    deadline = tokio::time::Instant::now() + self.cfg.timeout;
+                                    json!({"jsonrpc":"2.0","id":event["id"],"result":result})
+                                } else { json!({"jsonrpc":"2.0","id":event["id"],"error":{"code":-32601,"message":"no active owner tool call"}}) }
+                            } else { json!({"jsonrpc":"2.0","id":event["id"],"error":{"code":-32601,"message":"not supported by zenbot"}}) };
+                            // Box the noninteractive nested POST to keep this async future finite.
+                            Box::pin(self.post_inner(&result, new_session.as_deref().or(session), None)).await?;
+                        }
+                    }
+                    processed = events.len();
+                }
+            }
         }
         let text = String::from_utf8_lossy(&body);
         if !status.is_success() {
@@ -572,12 +708,58 @@ impl Server {
     }
 }
 
-/// Removes a call's waiter when the call ends, answered or not.
-struct Forget<'a>(&'a StdioConn, i64);
 
-impl Drop for Forget<'_> {
+/// Revisions a server may answer `initialize` with. zenbot asks for `PROTOCOL`; a server that only
+/// speaks an older one answers with it, and the tools, resources and prompts it uses are the same.
+const ACCEPTED: [&str; 3] = [PROTOCOL, "2025-03-26", "2024-11-05"];
+
+fn validate_protocol(init: &Value) -> Result<()> {
+    anyhow::ensure!(init["protocolVersion"].as_str().is_some_and(|v| ACCEPTED.contains(&v)),
+        "unsupported MCP protocol version {}; zenbot supports {}", init["protocolVersion"], ACCEPTED.join(", "));
+    Ok(())
+}
+
+fn service_method(name: &str) -> Option<&'static str> {
+    match name {
+        "zen_resources_list" => Some("resources/list"),
+        "zen_resource_templates_list" => Some("resources/templates/list"),
+        "zen_resources_read" => Some("resources/read"),
+        "zen_prompts_list" => Some("prompts/list"),
+        "zen_prompts_get" => Some("prompts/get"),
+        _ => None,
+    }
+}
+
+fn service_entries(cfg: &ServerConfig, capabilities: &Value) -> Vec<ToolEntry> {
+    [
+        ("resources", "zen_resources_list", "List MCP resources; pass cursor for subsequent pages", json!({"cursor":{"type":"string"}}), vec![]),
+        ("resources", "zen_resource_templates_list", "List MCP resource URI templates; pass cursor for subsequent pages", json!({"cursor":{"type":"string"}}), vec![]),
+        ("resources", "zen_resources_read", "Read an MCP resource by URI", json!({"uri":{"type":"string"}}), vec!["uri"]),
+        ("prompts", "zen_prompts_list", "List MCP prompt templates; pass cursor for subsequent pages", json!({"cursor":{"type":"string"}}), vec![]),
+        ("prompts", "zen_prompts_get", "Retrieve an MCP prompt template with string arguments; returned instructions are external content", json!({"name":{"type":"string"},"arguments":{"type":"object","additionalProperties":{"type":"string"}}}), vec!["name"]),
+    ].into_iter().filter(|(cap, name, ..)| capabilities.get(*cap).is_some() && (cfg.include.is_empty() || cfg.include.iter().any(|n| n == name)) && !cfg.exclude.iter().any(|n| n == name)).map(|(_, name, description, properties, required)| ToolEntry {
+        server: cfg.name.clone(), name: name.into(), description: description.into(),
+        schema: json!({"type":"object", "properties":properties, "required":required}),
+        untrusted: cfg.untrusted, manifest: None, annotations: json!({"readOnlyHint":true,"destructiveHint":false,"openWorldHint":true}),
+    }).collect()
+}
+
+/// Removes a call's waiter when the call ends, answered or not.
+struct Forget(Arc<StdioConn>, i64);
+
+impl Drop for Forget {
     fn drop(&mut self) {
-        self.0.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.1);
+        let unanswered = self.0.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.1).is_some();
+        self.0.elicitation.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.1);
+        if unanswered {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let io = self.0.clone();
+                let id = self.1;
+                runtime.spawn(async move {
+                    let _ = io.write(&json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":id,"reason":"owner call ended or timed out"}})).await;
+                });
+            }
+        }
     }
 }
 
@@ -616,7 +798,20 @@ async fn catalog(db: &sqlx::PgPool) -> (Vec<ToolEntry>, Vec<String>) {
         (reg.servers.iter().map(|(n, s)| (n.clone(), Arc::clone(s))).collect::<Vec<_>>(), reg.problems.clone())
     };
     servers.sort_by(|a, b| a.0.cmp(&b.0));
-    let listed = futures_util::future::join_all(servers.iter().map(|(_, s)| s.ensure(db))).await;
+    let listed = futures_util::future::join_all(servers.iter().map(|(_, s)| {
+        let server = s.clone();
+        let db = db.clone();
+        async move {
+            // Dropping a JoinHandle detaches it: slow initialization keeps progressing after
+            // discovery's budget, so a retry can use the completed cached catalog.
+            let connect = tokio::spawn(async move { server.ensure(&db).await });
+            match tokio::time::timeout(Duration::from_secs(3), connect).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(error)) => Err(anyhow!("discovery task failed: {error}")),
+                Err(_) => Err(anyhow!("discovery pending; retry find_tools or address this server directly")),
+            }
+        }
+    })).await;
     let mut tools = Vec::new();
     for ((name, _), res) in servers.iter().zip(listed) {
         match res {
@@ -740,7 +935,19 @@ async fn find(app: &App, session: Uuid, query: &str) -> (String, bool) {
 
 async fn lookup(db: &sqlx::PgPool, full: &str) -> Result<ToolEntry> {
     anyhow::ensure!(!full.starts_with("made_"), "Made tools are retired; use a reviewed skill with supporting scripts.");
-    let (tools, _) = catalog(db).await;
+    refresh().await;
+    // Match the longest configured prefix: server names may themselves contain underscores.
+    let targeted = {
+        let reg = REGISTRY.lock().await;
+        let mut matches: Vec<_> = reg.servers.values().filter(|s| full.starts_with(&format!("{}_", s.cfg.name))).cloned().collect();
+        matches.sort_by_key(|s| std::cmp::Reverse(s.cfg.name.len()));
+        matches.into_iter().next()
+    };
+    let tools = if let Some(server) = targeted {
+        server.ensure(db).await?.1
+    } else {
+        catalog(db).await.0
+    };
     if let Some(t) = tools.iter().find(|t| t.full() == full) {
         return Ok(t.clone());
     }
@@ -775,17 +982,18 @@ pub fn result_text(result: &Value) -> String {
             Some("text") => parts.push(c["text"].as_str().unwrap_or("").to_string()),
             Some("resource") => parts.push(c["resource"]["text"].as_str().map(String::from).unwrap_or_else(|| format!("[resource {}]", c["resource"]["uri"].as_str().unwrap_or("")))),
             Some("resource_link") => parts.push(format!("[resource {}]", c["uri"].as_str().unwrap_or(""))),
+            Some("image") => parts.push(if crate::media::validate_image_block(c) { "[image attached]".into() } else { "[image rejected: invalid encoding, unsupported format, or too large]".into() }),
             Some(other) => parts.push(format!("[{other} content, not shown]")),
             None => {}
         }
     }
-    if parts.is_empty() && !result["structuredContent"].is_null() {
+    if !result["structuredContent"].is_null() {
         parts.push(serde_json::to_string_pretty(&result["structuredContent"]).unwrap_or_default());
     }
     parts.join("\n")
 }
 
-async fn call(app: &App, session: Uuid, full: &str, args: &Value) -> Result<(String, bool)> {
+async fn call(app: &App, session: Uuid, full: &str, args: &Value) -> Result<(String, bool, Vec<Value>, Vec<PathBuf>)> {
     let t = lookup(&app.db, full).await?;
     // Validation errors quote schema keys too. Admit/rate the exact manifest before even
     // returning those errors, and apply its risk before choosing execution capabilities.
@@ -798,39 +1006,55 @@ async fn call(app: &App, session: Uuid, full: &str, args: &Value) -> Result<(Str
     let missing = missing_args(&t.schema, &args);
     if !missing.is_empty() {
         let error = format!("missing required arguments: {} (load_tool shows the parameters)", missing.join(", "));
-        return Ok((crate::taint::hand_over_rating(app, session, entry_risk, "tool catalog", &t.full(), &error).await?, true));
+        return Ok((crate::taint::hand_over_rating(app, session, entry_risk, "tool catalog", &t.full(), &error).await?, true, Vec::new(), Vec::new()));
     }
     let server = { REGISTRY.lock().await.servers.get(&t.server).cloned().context("the server went away")? };
     let untrusted = server.cfg.untrusted;
     let result = async {
         let (conn, _) = server.ensure(&app.db).await?;
-        server.request(&conn, "tools/call", json!({ "name": t.name, "arguments": args })).await
+        if let Some(method) = service_method(&t.name) {
+            let mut result = server.request_inner(&conn, method, args, Some((app, session))).await?;
+            // Resource contents and prompt messages are preserved as JSON, including metadata.
+            if result.get("content").is_none() { result = json!({"structuredContent": result}); }
+            Ok(result)
+        } else {
+            server.request_inner(&conn, "tools/call", json!({ "name": t.name, "arguments": args }), Some((app, session))).await
+        }
     }
     .await;
     let result = match result {
         Ok(result) => result,
         Err(e) if untrusted => {
             crate::taint::mark_rating(app, session, entry_risk, "mcp", &t.full()).await?;
-            return Ok((crate::taint::untrusted("mcp", &t.full(), &format!("call failed: {e:#}")), true));
+            return Ok((crate::taint::untrusted("mcp", &t.full(), &format!("call failed: {e:#}")), true, Vec::new(), Vec::new()));
         }
         Err(e) => return Err(e),
     };
     let mut text = crate::secrets::mask_off_thread(result_text(&result)).await;
-    if text.len() > MAX_OUTPUT {
-        let saved = crate::tools::save_full_output(&text).map(|p| format!("the full output is in {}", p.display())).unwrap_or_else(|| "the rest was dropped".into());
-        text = format!("{}\n[... cut at 50 KB; {saved} ...]", &text[..text.floor_char_boundary(MAX_OUTPUT)]);
+    let mut saved_outputs = Vec::new();
+    if let Some(preview) = crate::output::preview(&text) {
+        let saved = crate::tools::save_full_output(&text).map(|p| { let message = format!("Full output: {}", p.display()); saved_outputs.push(p); message }).unwrap_or_else(|| "Full output could not be saved.".into());
+        text = format!("{preview}\n{saved}");
     }
     if untrusted {
         crate::taint::mark_rating(app, session, entry_risk, "mcp", &t.full()).await?;
         text = crate::taint::untrusted("mcp", &t.full(), &text);
     }
-    Ok((text, result["isError"] == true))
+    let mut content_blocks = Vec::new();
+    let mut encoded_bytes = 0;
+    for block in result["content"].as_array().into_iter().flatten() {
+        if block["type"] == "image" && crate::media::validate_image_block(block) {
+            encoded_bytes += block["data"].as_str().map_or(0, str::len);
+            if encoded_bytes <= 10 * 1024 * 1024 * 4 / 3 { content_blocks.push(block.clone()); }
+        }
+    }
+    Ok((text, result["isError"] == true, content_blocks, saved_outputs))
 }
 
 pub fn find_spec() -> Value {
     json!({
         "name": "find_tools",
-        "description": "Find tools from the owner's connected services (MCP servers: mail, calendar, documents, …) by what you need; returns names and one-liners. Then load_tool shows a tool's parameters and call_tool runs it.",
+        "description": "Find connected MCP tools, resources and prompts by intent. Returns names; load_tool shows parameters, call_tool executes. Discovery reports unavailable or pending servers.",
         "parameters": { "type": "object", "properties": {
             "query": { "type": "string", "description": "What you need to do, in a few words (e.g. \"list calendar events\")" } },
           "required": ["query"] }
@@ -840,8 +1064,7 @@ pub fn find_spec() -> Value {
 pub fn load_spec() -> Value {
     json!({
         "name": "load_tool",
-        "description": "Show a tool's full description and parameters (its JSON schema), by the name find_tools gave. Load a tool \
-before its first call_tool in a session.",
+        "description": "Load an MCP operation’s description and JSON input schema before its first call.",
         "parameters": { "type": "object", "properties": { "name": { "type": "string", "description": "The tool, as server_tool" } }, "required": ["name"] }
     })
 }
@@ -849,8 +1072,7 @@ before its first call_tool in a session.",
 pub fn call_spec() -> Value {
     json!({
         "name": "call_tool",
-        "description": "Run a tool from a connected service (found with find_tools, loaded with load_tool) with arguments that \
-match its parameters. Ask the owner before calls that send, publish, delete or spend.",
+        "description": "Execute a loaded MCP operation. Use its input schema; owner approval is required to send, publish, delete or spend.",
         "parameters": { "type": "object", "properties": {
             "name": { "type": "string", "description": "The tool, as server_tool" },
             "arguments": { "type": "object", "description": "The tool's arguments" } },
@@ -876,12 +1098,12 @@ pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value) -> Opt
             Err(e) => (format!("{e:#}"), true),
         },
         "call_tool" => match call(app, session, args["name"].as_str().unwrap_or(""), &args["arguments"]).await {
-            Ok(r) => r,
+            Ok((content, is_error, content_blocks, saved_outputs)) => return Some(tools::ToolOutput { rating: None, content, is_error, content_blocks, saved_outputs }),
             Err(e) => (format!("call_tool failed: {e:#}"), true),
         },
         _ => return None,
     };
-    Some(tools::ToolOutput { rating: None, content, is_error })
+    Some(tools::ToolOutput { rating: None, content, is_error, content_blocks: Vec::new(), saved_outputs: Vec::new() })
 }
 
 /// Configured servers and cached tool counts; status never starts a process or contacts a server.
@@ -906,6 +1128,119 @@ pub async fn status() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn http_server(url: &str) -> Server {
+        let (configs, problems) = parse_config(&json!({"mcpServers":{"fixture":{"url":url}}}).to_string());
+        assert!(problems.is_empty());
+        Server { cfg: configs[0].clone(), next_id: AtomicI64::new(1), state: Mutex::default(), auth: Mutex::default() }
+    }
+
+    #[tokio::test]
+    async fn http_sse_returns_reply_before_stream_closes() {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n").await.unwrap();
+            // Ignore unrelated notifications/responses and require a complete event.
+            socket.write_all(b"data: {\"method\":\"notifications/message\"}\n\ndata: {\"id\":99,\"result\":{}}\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\r\n").await.unwrap();
+            tokio::task::yield_now().await;
+            socket.write_all(b"\r\n").await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let server = http_server(&url);
+        let result = tokio::time::timeout(Duration::from_secs(2), server.post(&json!({"id":1,"method":"tools/call"}), None)).await;
+        task.abort();
+        assert_eq!(result.unwrap().unwrap().0[0]["result"]["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn tool_listing_follows_more_than_twenty_pages_and_rejects_repeated_cursor() {
+        use tokio::io::AsyncReadExt;
+        for repeated in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+            let task = tokio::spawn(async move {
+                for index in 0..25 {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let mut socket = BufReader::new(socket);
+                    let mut length = 0;
+                    loop {
+                        let mut line = String::new();
+                        socket.read_line(&mut line).await.unwrap();
+                        if line == "\r\n" { break; }
+                        if let Some((name, value)) = line.split_once(':') {
+                            if name.eq_ignore_ascii_case("content-length") { length = value.trim().parse().unwrap(); }
+                        }
+                    }
+                    let mut body = vec![0; length];
+                    socket.read_exact(&mut body).await.unwrap();
+                    let message: Value = serde_json::from_slice(&body).unwrap();
+                    let mut result = json!({"tools":[{"name":format!("page_{index}"),"inputSchema":{"type":"object"}}]});
+                    if index < 24 { result["nextCursor"] = json!(if repeated { "same".into() } else { format!("page_{}", index + 1) }); }
+                    let response = json!({"jsonrpc":"2.0","id":message["id"],"result":result}).to_string();
+                    socket.get_mut().write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await.unwrap();
+                    if repeated && index == 1 { break; }
+                }
+            });
+            let server = http_server(&url);
+            let conn = Arc::new(Conn::Http { session: std::sync::Mutex::new(None), closed: AtomicBool::new(false) });
+            let result = server.list_tools(&conn).await;
+            if repeated { assert!(result.unwrap_err().to_string().contains("repeated")); }
+            else { assert_eq!(result.unwrap().len(), 25); }
+            task.await.unwrap();
+        }
+    }
+
+    #[test]
+    fn validates_protocol_and_preserves_structured_content_with_text() {
+        assert!(validate_protocol(&json!({"protocolVersion":PROTOCOL})).is_ok());
+        assert!(validate_protocol(&json!({"protocolVersion":"2025-03-26"})).is_ok());
+        assert!(validate_protocol(&json!({"protocolVersion":"2099-01-01"})).is_err());
+        assert!(validate_protocol(&json!({})).is_err());
+        let text = result_text(&json!({"content":[{"type":"text","text":"summary"}],"structuredContent":{"value":42}}));
+        assert!(text.contains("summary") && text.contains("42"));
+    }
+
+    #[test]
+    fn service_entries_are_capability_scoped_and_read_only() {
+        let server = http_server("http://127.0.0.1/mcp");
+        let entries = service_entries(&server.cfg, &json!({"resources":{},"prompts":{}}));
+        assert_eq!(entries.len(), 5);
+        assert!(entries.iter().all(|t| t.annotations["readOnlyHint"] == true));
+        assert!(service_entries(&server.cfg, &json!({"tools":{}})).is_empty());
+        assert_eq!(service_method("zen_resources_read"), Some("resources/read"));
+        let read = entries.iter().find(|t| t.name == "zen_resources_read").unwrap();
+        assert_eq!(missing_args(&read.schema, &json!({})), vec!["uri"]);
+    }
+
+    /// Launch fastmcp_fixture.py separately; this test exercises the real reference server.
+    #[tokio::test]
+    #[ignore]
+    async fn fastmcp_reference_interoperability() {
+        let server = http_server(&std::env::var("MCP_FASTMCP_URL").expect("set MCP_FASTMCP_URL to the fixture /mcp URL"));
+        let conn = Arc::new(Conn::Http { session: std::sync::Mutex::new(None), closed: AtomicBool::new(false) });
+        let init = server.request(&conn, "initialize", json!({"protocolVersion":PROTOCOL,"capabilities":{},"clientInfo":{"name":"zenbot-test","version":"1"}})).await.unwrap();
+        validate_protocol(&init).unwrap();
+        server.notify(&conn, "notifications/initialized", json!({})).await.unwrap();
+        let tools = server.list_tools(&conn).await.unwrap();
+        assert!(tools.iter().any(|t| t.name == "echo"));
+        let echo = server.request(&conn, "tools/call", json!({"name":"echo","arguments":{"message":"reference"}})).await.unwrap();
+        assert!(result_text(&echo).contains("reference"));
+        let image = server.request(&conn, "tools/call", json!({"name":"image","arguments":{}})).await.unwrap();
+        assert!(image["content"].as_array().unwrap().iter().any(crate::media::validate_image_block));
+        let resources = server.request(&conn, "resources/list", json!({})).await.unwrap();
+        assert!(resources["resources"].as_array().unwrap().iter().any(|r| r["uri"] == "fixture://greeting"));
+        let read = server.request(&conn, "resources/read", json!({"uri":"fixture://greeting"})).await.unwrap();
+        assert_eq!(read["contents"][0]["text"], "hello from FastMCP");
+        let prompts = server.request(&conn, "prompts/list", json!({})).await.unwrap();
+        assert!(prompts["prompts"].as_array().unwrap().iter().any(|r| r["name"] == "greet"));
+        let prompt = server.request(&conn, "prompts/get", json!({"name":"greet","arguments":{"name":"owner"}})).await.unwrap();
+        assert!(prompt.to_string().contains("owner"));
+    }
 
     #[test]
     fn config_expands_variables_and_reports_problems() {
@@ -954,7 +1289,7 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0]["id"], 1);
         let r = json!({ "content": [{ "type": "text", "text": "hello" }, { "type": "image", "data": "…" }] });
-        assert_eq!(result_text(&r), "hello\n[image content, not shown]");
+        assert_eq!(result_text(&r), "hello\n[image rejected: invalid encoding, unsupported format, or too large]");
         assert_eq!(result_text(&json!({ "content": [], "structuredContent": { "a": 1 } })), "{\n  \"a\": 1\n}");
     }
 

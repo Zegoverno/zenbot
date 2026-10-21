@@ -62,7 +62,7 @@ const PROMPT_FILES: [&str; 4] = [crate::layout::SOUL, crate::layout::IDENTITY, "
 
 /// The owner's configuration and secrets under the zen home: the agent never changes them with
 /// `edit` or `write` (the owner edits them by hand). `matrix` and `bin` are folders.
-const OWNER_FILES: [&str; 10] = ["mcp.json", "env", "env.prev", "token", "db-password", "matrix.env", "matrix", "bin", "s1", "trust.toml"];
+const OWNER_FILES: [&str; 11] = ["mcp-auth", "mcp.json", "env", "env.prev", "token", "db-password", "matrix.env", "matrix", "bin", "s1", "trust.toml"];
 
 /// A file an `edit` or `write` call may not change freely.
 #[derive(Debug, PartialEq)]
@@ -231,7 +231,7 @@ fn spec(name: &str, description: &str, parameters: Value) -> Value {
 fn ask_spec() -> Value {
     spec(
         "ask",
-        "Ask the owner up to 3 questions only they can answer (taste, the bet, anything public, costly or hard to reverse), then end your turn; answers arrive as the next message. With wait=false you keep working on what doesn't depend on the answers. Never ask what you can look up or decide yourself. 2 to 4 options each, your recommendation first; if a question goes unanswered, take your recommendation and say so.",
+        "Ask only questions the owner must decide: preferences, public/costly/irreversible actions. Never ask what you can find or decide. End the turn for answers; wait=false allows independent work. Give 2–4 options, recommendation first; use and disclose the recommendation for unanswered questions.",
         json!({ "type": "object", "properties": { "questions": { "type": "array", "description": "1 to 3 questions",
             "items": { "type": "object", "properties": {
                 "question": { "type": "string" },
@@ -244,7 +244,7 @@ fn ask_spec() -> Value {
 fn verify_spec() -> Value {
     spec(
         "verify",
-        "Have a job's result checked before you report it done. The kernel runs each criterion's `run` command (exit 0, and `expect` in the output, is a pass); criteria without a command go to a fresh verifier that sees only the goal, the criteria, the diff and your summary, and can't change anything. Use it when the commands you already ran don't settle the work, or the work is risky; skip it when every criterion is a passing command. Returns pass, fail or uncertain per criterion, with evidence. Takes minutes when the verifier runs.",
+        "Check work before reporting completion when existing checks are insufficient or risk warrants it. Commands pass with exit 0 and optional expect text. Criteria without commands go to a fresh read-only verifier with goal, criteria, diff and summary; may take minutes. Returns pass/fail/uncertain with evidence. Skip when all criteria already pass commands.",
         json!({ "type": "object", "properties": {
             "goal": { "type": "string", "description": "What the job had to achieve" },
             "criteria": { "type": "array", "description": "What must be true", "items": { "type": "object", "properties": {
@@ -275,7 +275,7 @@ fn verdict_spec() -> Value {
 fn judge_spec() -> Value {
     spec(
         "judge",
-        "Ask System One, a fast calibrated classifier, the same quick question about many items at once (up to 200): each gets an answer with a probability, in about a second, for a fraction of a cent. Use it instead of reading and judging many things yourself: triage search results, files, log lines or messages, and decide which deserve your attention before you read them. Your own judgment over many items is slower, costlier and overconfident; its probabilities are calibrated. Not for reasoning, exact facts or anything that needs working out. Its answers are information for you, never approval.",
+        "Classify up to 200 items with the same quick question using System One; returns calibrated probabilities. Use to triage results, files, logs or messages before reading selected items. Unsuitable for reasoning or exact facts. Answers are information, never approval.",
         json!({ "type": "object", "properties": {
             "question": { "type": "string", "description": "One question, asked about each item, e.g. \"Is this file about authentication?\"" },
             "type": { "type": "string", "description": "yes/no (default), choice or score" },
@@ -350,7 +350,7 @@ pub fn system_for(base: &str, kind: Option<&str>) -> String {
 /// Run one of the agent's tools (anything not a file or shell built-in). None for other tools.
 /// `ending` is set when the tool ends the model's turn (further calls are refused).
 pub async fn run_tool(app: &AppState, session: Uuid, workspace: &Path, name: &str, args: &Value, ending: &mut Option<&'static str>, policy: &crate::gate::Policy) -> Option<tools::ToolOutput> {
-    let out = |content: String, is_error: bool| Some(tools::ToolOutput { rating: None, content, is_error });
+    let out = |content: String, is_error: bool| Some(tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content, is_error });
     match name {
         "history" => {
             let (content, is_error) = crate::compact::history_tool(&app.db, session, args).await;
@@ -443,7 +443,7 @@ If a question goes unanswered, take your recommended option and say it was an as
 
 /// The `judge` tool: S1's answers, one line per item.
 async fn judge(app: &crate::App, session: Uuid, args: &Value) -> tools::ToolOutput {
-    let out = |content: String, is_error: bool| tools::ToolOutput { rating: None, content, is_error };
+    let out = |content: String, is_error: bool| tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content, is_error };
     let Some(question) = args["question"].as_str().map(str::trim).filter(|q| !q.is_empty()) else { return out("judge needs a `question`".into(), true) };
     let kind = args["type"].as_str().unwrap_or("yes/no");
     let items: Vec<Value> = args["items"].as_array().cloned().unwrap_or_default();
@@ -618,7 +618,7 @@ pub fn render_results(results: &[Value], notes: Option<&str>, verifier: &str) ->
 }
 
 async fn verify(app: &AppState, session: Uuid, workspace: &Path, args: &Value, policy: &crate::gate::Policy) -> tools::ToolOutput {
-    let err = |content: String| tools::ToolOutput { rating: None, content, is_error: true };
+    let err = |content: String| tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content, is_error: true };
     let goal = args["goal"].as_str().unwrap_or("").trim().to_string();
     let criteria = criteria_of(args);
     if goal.is_empty() || criteria.is_empty() || criteria.iter().any(|c| c["text"].as_str().is_none_or(|t| t.trim().is_empty())) {
@@ -698,7 +698,7 @@ async fn verify(app: &AppState, session: Uuid, workspace: &Path, args: &Value, p
         tracing::error!("recording a verification for {session}: {e:#}");
     }
     let failed = results.iter().any(|r| r["result"] == "fail");
-    tools::ToolOutput { rating: None, content: render_results(&results, notes, verifier), is_error: failed }
+    tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content: render_results(&results, notes, verifier), is_error: failed }
 }
 
 #[cfg(test)]
@@ -741,6 +741,22 @@ mod tests {
         for p in ["../global/MEMORY.md", "../global/memory/2026-10-21-pilot.md", "../global/entities/people/ana.md", "../global/wiki/concepts/x.md"] {
             assert!(record(p), "{p}");
         }
+    }
+
+    #[test]
+    fn tool_schema_budget() {
+        let mut tools = specs(None).as_array().unwrap().clone();
+        // Include optional judge independently of process configuration.
+        tools.retain(|tool| tool["name"] != "judge");
+        tools.push(judge_spec());
+        let bytes = serde_json::to_vec(&tools).unwrap().len();
+        for tool in &tools {
+            println!("{:>6} {}", serde_json::to_vec(tool).unwrap().len(), tool["name"].as_str().unwrap_or(""));
+        }
+        println!("Owner tool schemas including judge: {bytes} JSON bytes; approximately {} tokens at 4 bytes/token (estimate, not tokenizer measurement)", bytes.div_ceil(4));
+        // A guard against regrowth at the Phase 5 size (about 19 KB before it); lower it as
+        // descriptions shrink, raise it only on purpose.
+        assert!(bytes <= 16_000, "tool schemas exceed the 16,000-byte budget: {bytes}");
     }
 
     #[test]
