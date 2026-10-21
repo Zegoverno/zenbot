@@ -48,6 +48,10 @@ use spec::Spec;
 
 /// The default decision files, built into the binary.
 pub const DEFAULTS: &[(&str, &str)] = &[
+    ("memory_disposition", include_str!("../../s1/memory_disposition.toml")),
+    ("memory_capture", include_str!("../../s1/memory_capture.toml")),
+    ("memory_durable", include_str!("../../s1/memory_durable.toml")),
+    ("context_curator", include_str!("../../s1/context_curator.toml")),
     ("job_approval", include_str!("../../s1/job_approval.toml")),
     ("owner_url", include_str!("../../s1/owner_url.toml")),
     ("source_risk", include_str!("../../s1/source_risk.toml")),

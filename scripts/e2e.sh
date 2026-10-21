@@ -168,7 +168,7 @@ The owner's name is E2E Owner." >"$TMP/home/.zenbot/USER.md"
   check "the skills index is in the instructions" grep -q "work/verify:" <<<"$base"
   check "memory starts empty" grep -q "(empty)" <<<"$base"
   local tools; tools=$(q "SELECT string_agg(t->>'name', ',') FROM turns, envelopes e, jsonb_array_elements(e.tools) t WHERE turns.session_id='$sid' AND e.hash = turns.envelope")
-  check "the system tools, in order, no workflow tools" eq "$tools" bash,read,write,edit,history,search,ask,remember,capture,web_search,web_fetch,find_skills,load_skill,save_skill,find_tools,load_tool,call_tool,save_tool,verify,delegate,schedule
+  check "the system tools, in order, no workflow tools" eq "$tools" bash,read,write,edit,history,search,ask,remember,brain,capture,web_search,web_fetch,find_skills,load_skill,save_skill,find_tools,load_tool,call_tool,save_tool,verify,delegate,schedule
 }
 
 # A home in the old flat layout moves into the scoped one (layout.rs) when the kernel starts, once:
@@ -458,7 +458,10 @@ workshop() {
   check "the made tool is found" grep -q "made_word-count: Count the words" <<<"$res"
   check "it ran, sandboxed: files read-only" bash -c 'grep -q "^3" <<<"$1" && grep -q "write: refused" <<<"$1" && grep -q "ran sandboxed" <<<"$1"' _ "$res"
   zen sessions decide "$sid" accept >/dev/null
-  check "an accepted session activates the draft it used" until_ok test -s "$sk/work/release-notes/SKILL.md"
+  check "accepting work does not silently activate a skill" test -s "$sk/_proposed/work/release-notes/SKILL.md"
+  local release_sha; release_sha=$(zen skills --json|jq -r '.skills[]|select(.skill=="work/release-notes")|.sha')
+  zen skills accept work/release-notes "$release_sha" >/dev/null
+  check "owner review activates exactly the skill version" test -s "$sk/work/release-notes/SKILL.md"
   check "a new domain stays a draft" test -s "$sk/_proposed/finance/budget-review/SKILL.md"
   # The owner's decision names the fingerprint `zen skills` showed: a stale one is refused.
   local listed; listed=$(zen skills --json)
@@ -547,34 +550,24 @@ memory_across_sessions() {
   local ws; ws=$(new_workspace memory)
   start_kernel "$ws" "$(script agent.json)"
   local s1; s1=$(zen ask --json -m faux/smoke "remember this" | jq -r .session_id)
-  check "saved with its source" eq "$(q "SELECT source || '/' || tier FROM memories")" owner/short
-  check "exported to MEMORY.md" grep -q "\[m1\] The owner prefers tabs" "$TMP/home/.zenbot/global/MEMORY.md"
+  check "agent attribution remains an inference" eq "$(q "SELECT source || '/' || tier FROM memories LIMIT 1")" inferred/short
+  check "exported short memory is readable" grep -q "The owner prefers tabs" "$TMP/home/.zenbot/global/MEMORY.md"
   zen ask --json -s "$s1" "and now" >/dev/null
-  check "frozen for the session that wrote it" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$s1' AND kind='base' AND payload->>'text' LIKE '%prefers tabs%'")" 0
-  local s2; s2=$(zen ask --json -m faux/smoke "hello" | jq -r .session_id)
-  check "in the next session's instructions" grep -q "\[m1\] The owner prefers tabs" <<<"$(q "SELECT payload->>'text' FROM tape_events WHERE session_id='$s2' AND kind='base'")"
+  check "fixed instructions are not rewritten" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$s1' AND kind='base' AND payload->>'text' LIKE '%prefers tabs%'")" 0
+  check "the next turn receives current evidence" test "$(q "SELECT count(*) FROM brain_contexts WHERE session_id='$s1' AND receipt->'selected' IS NOT NULL")" -ge 1
 }
 
-# The sleep tidies short-term memory to its size, archives (never deletes) and records what it did;
-# writes past the ceiling are refused and start a sleep; the next session gets the morning note.
+# Without S1 uncertain experience remains durable; export is bounded rather than destructive.
 memory_sleep() {
   local ws; ws=$(new_workspace sleep)
   start_kernel "$ws" "$(script agent.json)" ZEN_MEMORY_CHARS=1000
-  q "DELETE FROM decisions WHERE point='sleep'; DELETE FROM sleep_runs; DELETE FROM memories" >/dev/null
-  q "INSERT INTO memories (text, source, updated_at) SELECT 'memory number ' || i || ' ' || repeat('x', 80), 'inferred', now() - (i || ' hours')::interval FROM generate_series(1, 30) i" >/dev/null
-  local r; r=$(zen ask --json -m faux/smoke "remember this")
-  check "over the hard limit, add is refused" eq "$(echo "$r" | jq -r '.tools[0].is_error')" true
-  for _ in $(seq 1 20); do [ "$(q "SELECT count(*) FROM sleep_runs WHERE ended_at IS NOT NULL")" -gt 0 ] && break; sleep 0.5; done
-  check "and starts a sleep" eq "$(q "SELECT trigger FROM sleep_runs ORDER BY id LIMIT 1")" ceiling
-  r=$(zen memory sleep --json)
-  check "a sleep by hand reports what it did" eq "$(echo "$r" | jq -r .entries)" "$(echo "$r" | jq -r '.kept + .dropped')"
-  check "memory fits its size" test "$(q "SELECT COALESCE(SUM(length(text) + 10), 0) FROM memories WHERE tier='short'")" -le 1000
-  check "the freshest were kept" eq "$(q "SELECT count(*) FROM memories WHERE tier='short' AND text LIKE 'memory number 1 %'")" 1
-  check "nothing deleted" eq "$(q "SELECT count(*) FROM memories")" 30
-  check "every entry's fate is a decision" test "$(q "SELECT count(*) FROM decisions WHERE point='sleep'")" -ge 30
-  local s2; s2=$(zen ask --json -m faux/smoke "hello" | jq -r .session_id)
-  check "the next session hears about the sleep" grep -q "Last sleep" <<<"$(q "SELECT payload->>'text' FROM tape_events WHERE session_id='$s2' AND kind='base'")"
-  check "zen memory lists it" grep -q "last sleep" <<<"$(zen memory)"
+  q "DELETE FROM memories; INSERT INTO memories(text,source) SELECT 'legacy experience '||i||repeat('x',80),'inferred' FROM generate_series(1,30) i" >/dev/null
+  local r; r=$(zen memory sleep --json)
+  check "model outage never deletes experience" eq "$(q 'SELECT count(*) FROM memories')" 30
+  check "uncertain entries stay pending review" eq "$(echo "$r"|jq -r .promoted)" 0
+  check "short-term view has a hard bound" test "$(wc -m < "$TMP/home/.zenbot/global/MEMORY.md")" -le 2000
+  check "complete export preserves excluded content" test -s "$TMP/home/.zenbot/global/memory/export.json"
+  check "sleep is observable" eq "$(q 'SELECT count(*) FROM sleep_runs WHERE ended_at IS NOT NULL')" 1
 }
 
 # ask ends the turn; tools that are gone are refused.
@@ -649,7 +642,7 @@ system_one_direct() {
   # The decision files: the built-in ones pass the checker; an owner file with a typo is reported with
   # its line and a suggestion, and never takes effect.
   local zs="$TMP/home/.zenbot/s1"; mkdir -p "$zs"
-  check "the built-in decision files pass the checker" grep -q "14 decisions in force (0 from your files), 0 error" <<<"$(zen s1 check)"
+  check "the built-in decision files pass the checker" grep -q "18 decisions in force (0 from your files), 0 error" <<<"$(zen s1 check)"
   sed 's/^false_no = 1$/false_noo = 1/' "$REPO/crates/zend/s1/job_approval.toml" >"$zs/job_approval.toml"
   sleep 2.5
   local report; report=$(zen s1 check 2>&1 || true)
@@ -657,32 +650,12 @@ system_one_direct() {
   check "and the built-in file stays in force" eq "$(zen s1 check --json 2>/dev/null | jq -r '.files[] | select(.name=="job_approval") | .source')" built-in
   check "zen status points at the problem" grep -q "problem(s) in the decision files" <<<"$(zen status 2>&1)"
   rm -f "$zs/job_approval.toml"
-  # The sleep promotes on its own: the owner's lasting fact moves to USER.md (backup first), an
-  # inference stays out of it, lasting knowledge is copied into the wiki.
-  local zh="$TMP/home/.zenbot"; rm -rf "$zh/backups"; printf '# USER.md\n\nE2E Owner.\n' >"$zh/USER.md"
-  q "DELETE FROM memories; INSERT INTO memories (text, source) VALUES ('PROMOTE-USER the owner swims every morning', 'owner'), ('PROMOTE-USER the owner likes web gossip', 'inferred'), ('PROMOTE-WIKI the purple service retries three times', 'verified'); UPDATE memories SET risk=1" >/dev/null
+  local zh="$TMP/home/.zenbot"; printf '# USER.md\n\nE2E Owner.\n' >"$zh/USER.md"
+  q "INSERT INTO memories(text,source) VALUES('PROMOTE durable owner decision','owner'); UPDATE memories SET risk=1" >/dev/null
   local r; r=$(zen memory sleep --json)
-  check "the sleep reports its promotions" eq "$(echo "$r" | jq -r .promoted)" 2
-  check "the owner's fact is in USER.md, under Learned" bash -c 'sed -n "/^## Learned/,\$p" "$1" | grep -q "PROMOTE-USER the owner swims every morning (from memory m"' _ "$zh/USER.md"
-  check "with a backup of the old USER.md" bash -c 'ls "$1"/USER-*.md >/dev/null && ! grep -q "swims every morning" "$1"/USER-*.md' _ "$zh/backups/prompt-files"
-  check "and it left memory" eq "$(q "SELECT tier || '/' || reason FROM memories WHERE text LIKE '%swims%'")" "archived/promoted to USER.md"
-  check "an inference doesn't reach USER.md" bash -c '! grep -q "web gossip" "$1" && grep -q "it.s an inference" <<<"$2"' _ "$zh/USER.md" "$(echo "$r" | jq -r .note)"
-  check "knowledge is copied into the wiki, by the sleep" grep -rq "memory m[0-9]*, the sleep (verified) — PROMOTE-WIKI the purple service" "$zh/global/wiki"
-  check "and marked so it isn't copied twice" eq "$(q "SELECT proposed FROM memories WHERE text LIKE 'PROMOTE-WIKI%'")" wiki
-  r=$(zen memory sleep --json)
-  check "a second sleep promotes nothing again" eq "$(echo "$r" | jq -r .promoted)" 0
-  q "DELETE FROM memories" >/dev/null
-  # The agent writes USER.md itself: backed up first, told to compact it when it's over its size;
-  # then the sleep compacts it through a session of its own, and checks and backs up the result.
-  local before; before=$(ls "$zh/backups/prompt-files" | wc -l)
-  sid=$(zen ask --json -m faux/smoke "grow the profile" | jq -r .session_id)
-  check "an agent's edit of USER.md is backed up" eq "$(ls "$zh/backups/prompt-files" | wc -l)" $((before + 1))
-  check "and over its size the agent is told to compact it" grep -q "over the 1200 that fit in your instructions" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='write'")"
-  r=$(zen memory sleep --json)
-  check "the sleep compacted USER.md" bash -c 'grep -q "Compacted by the e2e" "$1" && test "$(wc -c <"$1")" -le 1200' _ "$zh/USER.md"
-  check "said so in its note, with a backup of the long version" bash -c 'grep -q "compacted USER.md from" <<<"$1" && grep -l "agent will have to compact" "$2"/USER-*.md >/dev/null' _ "$(echo "$r" | jq -r .note)" "$zh/backups/prompt-files"
-  check "through a session of the kernel's own" eq "$(q "SELECT kind || '/' || coalesce(parent::text, 'none') FROM sessions WHERE title = 'sleep: compact USER.md'")" subagent/none
-  check "the sleep's judgments are in the ledger" test "$(q "SELECT count(*) FROM decisions WHERE point='sleep_judge' AND source='model' AND spec_sha IS NOT NULL")" -ge 3
+  check "durable experience becomes long-term" eq "$(echo "$r"|jq -r .promoted)" 1
+  check "sleep leaves prompt configuration alone" bash -c '! grep -q PROMOTE "$1"' _ "$zh/USER.md"
+  check "the decision is recorded" test "$(q "SELECT count(*) FROM decisions WHERE point='memory_durable' AND source='model'")" -ge 1
   # System One down: a decision fails fast and says so; nothing waits for it.
   kill "$srv" 2>/dev/null || true; wait "$srv" 2>/dev/null || true
   local t0=$SECONDS
@@ -699,35 +672,15 @@ system_one_direct() {
 # about the HOLD entries until the scenario has changed them; its `GET /stats` counts calls in flight.
 memory_sleep_judged() {
   local ws; ws=$(new_workspace sleep-judged)
-  local port=$((PORT + 5)) release="$TMP/s1-release"; rm -f "$release"
-  python3 "$REPO/scripts/e2e/systemone_stub.py" "$port" "$release" & local srv=$!
-  start_kernel "$ws" "$(script sleep-judged.json)" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone"
-  local zh="$TMP/home/.zenbot"; printf '# USER.md\n\nE2E Owner.\n' >"$zh/USER.md"
-  q "DELETE FROM decisions WHERE point='sleep'; DELETE FROM sleep_runs; DELETE FROM memories; DELETE FROM search_docs WHERE kind='memory'; ALTER SEQUENCE memories_id_seq RESTART WITH 901" >/dev/null
-  q "INSERT INTO memories (text, source, created_at, updated_at) VALUES
-       ('HOLD the build machine is called osprey', 'owner', now() - interval '4 days', now() - interval '4 days'),
-       ('HOLD PROMOTE-USER the owner runs every night', 'owner', now() - interval '3 days', now() - interval '3 days'),
-       ('DUPLICATE staging deploys on Fridays', 'owner', now() - interval '2 days', now() - interval '2 days'),
-       ('DUPLICATE: staging is deployed on Fridays', 'owner', now() - interval '1 day', now() - interval '1 day'),
-       ('PROFILE-COPY the owner is called E2E Owner', 'owner', now(), now()); UPDATE memories SET risk=1" >/dev/null
-  zen memory sleep --json >"$TMP/sleep-judged.json" & local sleeper=$!
-  local i held=0; for i in $(seq 1 100); do held=$(curl -s "http://127.0.0.1:$port/stats" | jq -r .held); [ "$held" = 2 ] && break; sleep 0.2; done
-  check "System One judges entries at once" eq "$held" 2
-  zen ask --json -m faux/smoke "change memories mid-sleep" >/dev/null
-  touch "$release"; wait "$sleeper"
-  local r; r=$(cat "$TMP/sleep-judged.json")
-  check "at most four at a time" test "$(curl -s "http://127.0.0.1:$port/stats" | jq -r .max_inflight)" -le 4
-  check "of two entries that say the same, the newer stays" eq "$(q "SELECT string_agg(id || ':' || tier || ':' || coalesce(reason, ''), ',' ORDER BY id) FROM memories WHERE text LIKE 'DUPLICATE%'")" "903:archived:already covered,904:short:"
-  check "an entry the profile covers goes" eq "$(q "SELECT tier || '/' || reason FROM memories WHERE id = 905")" "archived/already covered"
-  check "a replace during the sleep stands" eq "$(q "SELECT tier || '/' || text FROM memories WHERE id = 901")" "short/the build machine is now called kestrel"
-  check "a remove during the sleep stands" eq "$(q "SELECT tier || '/' || reason FROM memories WHERE id = 902")" "archived/removed by the agent"
-  check "and its old text isn't promoted" bash -c '! grep -q "runs every night" "$1" && [ "$2" = 0 ]' _ "$zh/USER.md" "$(echo "$r" | jq -r .promoted)"
-  check "the sleep says what it left alone" bash -c 'grep -q "changed during the sleep, so left as they are now: m901, m902" <<<"$1" && [ "$2" = 2 ]' _ "$(echo "$r" | jq -r .note)" "$(echo "$r" | jq -r .changed)"
-  check "and logs it" eq "$(q "SELECT string_agg(chosen || ':' || acted, ',' ORDER BY (input->>'memory')::int) FROM decisions WHERE point = 'sleep'")" "changed:false,changed:false,drop:true,keep:true,drop:true"
-  local sid; sid=$(zen ask --json -m faux/smoke "find the staging day" | jq -r .session_id)
-  local res; res=$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='search'")
-  check "the copy that stays is still found" bash -c 'grep -q "m904 — short-term memory" <<<"$1" && ! grep -q "m903 —" <<<"$1"' _ "$res"
-  kill "$srv" 2>/dev/null || true
+  local port=$((PORT + 5))
+  python3 "$REPO/scripts/e2e/systemone_stub.py" "$port" & local srv=$!
+  start_kernel "$ws" "$(script agent.json)" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone"
+  q "INSERT INTO memories(text,source) VALUES('PROMOTE preserve this decision','owner'),('ARCHIVE completed transient state','inferred'),('KEEP unresolved capacity question','inferred'); UPDATE memories SET risk=1" >/dev/null
+  zen memory sleep --json >/dev/null
+  check "sleep separates durable, expired and unresolved experience" eq "$(q "SELECT string_agg(tier,',' ORDER BY id) FROM memories")" long,archived,short
+  check "consolidation retains revision history" test "$(q 'SELECT count(*) FROM brain_revisions')" -ge 2
+  check "repeat sleep does not duplicate promotion" eq "$(zen memory sleep --json|jq -r .promoted)" 0
+  kill "$srv"; wait "$srv" 2>/dev/null || true
 }
 
 # The file tools: the zen home's files aren't attached as project context; even the owner's own
@@ -1052,7 +1005,7 @@ taint_on_data() {
   check "the draft's commit says so" grep -q "web-notes (session ${sid:0:8}; it read untrusted content)" <<<"$(git -C "$sk" log --format=%s)"
   r=$(zen ask --json -m faux/smoke "TAINT-B"); sid=$(echo "$r" | jq -r .session_id)
   local base; base=$(q "SELECT payload->>'text' FROM tape_events WHERE session_id='$sid' AND kind='base'")
-  check "the next session's instructions leave the memory out, by id" bash -c '! grep -q 4417 <<<"$1" && grep -q "(m1 saved by sessions that read untrusted content" <<<"$1"' _ "$base"
+  check "the fixed prefix never contains outside memory" bash -c '! grep -q 4417 <<<"$1"' _ "$base"
   check "a search that comes across it lists it without its text, and doesn't mark the reader (D-056)" bash -c '! grep -q 4417 <<<"$1" && ! grep -q "<untrusted" <<<"$1" && grep -q "memory m1 (.*): search \"\`m1\`\" to read it" <<<"$1" && [ "$2" = f ]' _ "$(res_of "$sid")" "$(tainted "$sid")"
   r=$(zen ask --json -m faux/smoke "TAINT-EXACT"); sid=$(echo "$r" | jq -r .session_id)
   check "searching it by name returns it wrapped, and marks the reader" bash -c 'grep -q "<untrusted source=\"search\"" <<<"$1" && grep -q "PROMOTE-WIKI the" <<<"$1" && [ "$2" = t ]' _ "$(res_of "$sid")" "$(tainted "$sid")"
@@ -1073,12 +1026,8 @@ taint_on_data() {
   printf '# USER.md\n\nE2E Owner.\n' >"$zh/USER.md"
   q "INSERT INTO memories (text, source, tainted) VALUES ('PROMOTE-USER the owner loves web pages', 'owner', true)" >/dev/null
   local note; note=$(zen memory sleep --json | jq -r .note)
-  check "the sleep copies a tainted memory to the wiki labelled web" grep -rq "memory m1, the sleep (web) — PROMOTE-WIKI the harbour code is 4417" "$zh/global/wiki"
-  check "and never into USER.md" bash -c '! grep -q "loves web pages" "$1" && grep -q "a session that read untrusted content saved it" <<<"$2"' _ "$zh/USER.md" "$note"
-  check "its note leaves the tainted text out" bash -c '! grep -q 4417 <<<"$1" && ! grep -q "loves web" <<<"$1"' _ "$note"
-  sleep 1
-  r=$(zen ask --json -m faux/smoke "TAINT-E"); sid=$(echo "$r" | jq -r .session_id)
-  check "a wiki search finding it lists the page without its text or name" bash -c '! grep -q 4417 <<<"$1" && ! grep -q harbour-code <<<"$1" && grep -q "a wiki page with entries from outside .*name withheld" <<<"$1" && [ "$2" = f ]' _ "$(res_of "$sid")" "$(tainted "$sid")"
+  check "sleep never writes tainted material into behavior configuration" bash -c '! grep -q "loves web pages" "$1"' _ "$zh/USER.md"
+  check "sleep receipts do not expose withheld source text" bash -c '! grep -q 4417 <<<"$1"' _ "$note"
   local runs="SELECT string_agg(r.status || '/' || r.tainted, ',' ORDER BY r.id) FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name = 'tjob'"
   zen jobs add tjob --schedule "every 1h" --prompt "JOBTASK-T" >/dev/null
   zen jobs run tjob >/dev/null
@@ -1523,8 +1472,29 @@ phase3_kernel() {
   kill "$search_srv" "$model_srv" "$www_srv"; wait "$search_srv" "$model_srv" "$www_srv" 2>/dev/null || true
 }
 
+# Phase 4: knowledge/entity publishing, identity resolution, memory revisions and context.
+phase4_brain() {
+  local ws; ws=$(new_workspace phase4)
+  start_kernel "$ws" "$(script phase4.json)" ZEN_DEFAULT_MODEL=faux/smoke
+  local sid; sid=$(zen ask --json -m faux/smoke 'P4-HELLO'|jq -r .session_id)
+  check "knowledge and relationship owner workflows" python3 "$REPO/scripts/e2e/phase4.py" "$URL" "$TOKEN" "$TMP/home" "$sid"
+  local r; r=$(zen ask --json -m faux/smoke 'P4-REMEMBER')
+  sid=$(echo "$r"|jq -r .session_id)
+  check "selected meeting experience is saved" eq "$(q "SELECT count(*) FROM memories WHERE entities ? 'ana-partner'")" 1
+  check "relationship brief draws from linked memory" grep -q 'paused the pilot' <<<"$(zen brain brief --id ana-partner)"
+  local id rev; id=$(q 'SELECT id FROM memories ORDER BY id DESC LIMIT 1'); rev=$(q "SELECT revision FROM memories WHERE id=$id")
+  zen brain correct --id "m$id" --args "{\"expected_revision\":$rev,\"text\":\"Ana confirmed capacity; pilot decision needs revisiting.\"}" >/dev/null
+  check "correction history retains the original" grep -q 'paused the pilot' <<<"$(zen brain history --id "m$id")"
+  zen ask --json -s "$sid" 'What did Ana confirm about the pilot?' >/dev/null
+  check "per-turn context uses the corrected record" test "$(q "SELECT count(*) FROM brain_contexts WHERE session_id='$sid' AND receipt->'selected' @> '[{\"id\":\"m$id\"}]'::jsonb")" -ge 1
+  check "fixed prompt stays independent of memory updates" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND kind='base' AND payload->>'text' LIKE '%Ana confirmed%'")" 0
+  check "fabricated owner preference is refused" eq "$(zen ask --json -m faux/smoke 'P4-FORGED'|jq -r '.tools[0].is_error')" true
+  check "complete source exports exist" test -s "$TMP/home/.zenbot/global/memory/export.json"
+}
+
 # Scenarios that share a setup run as parts of one; `scripts/e2e.sh <filter>` matches the scenario's
 # name or a part's function name. Slowest first, so the parallel run ends sooner.
+run phase4 phase4_brain
 run phase3 phase3_kernel
 run turns abort_tool stale_turn
 run jobs scheduled_jobs job_report_file job_post_to

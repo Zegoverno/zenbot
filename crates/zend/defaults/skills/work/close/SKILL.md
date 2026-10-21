@@ -12,8 +12,7 @@ not an hour; most jobs teach little, and that's fine. Save nothing just to have 
 
 Decisions, corrections, open questions, the state of their projects → `remember` (source `owner`
 for their words). Replace an entry rather than adding a near-duplicate. A correction of something
-you believed wins: fix the old entry. A preference or standing guidance that is really important
-and lasting isn't memory: write it into `USER.md` (about the owner) or `IDENTITY.md` (about you).
+you believed wins: fix the old entry. Preferences are sourced memory too; behavioral configuration changes require an explicit owner request.
 
 ## 2. What did you learn about the world?
 
@@ -27,7 +26,7 @@ that caught a mistake.
 - `find_skills` first. If a skill covers this work, improve it (`save_skill` with its name).
 - Only if none does, and the work will come back, save a new skill: short, steps that end in
   something checkable, the reason being what happened here.
-- A chore you did by hand twice, or a fragile command sequence → `save_tool`.
+- A repeated chore can become a reviewed skill with a supporting script; retain verification steps.
 
 ## 4. Leave things clean
 

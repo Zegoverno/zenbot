@@ -383,6 +383,17 @@ async fn run(cli: Cli) -> Result<()> {
                 print_suggestions(&st);
             }
         }
+        Cmd::Brain { action,id,query,args } => {
+            let mut a:Value=if let Some(args)=args {
+                let text=if args=="-" {let mut s=String::new();std::io::Read::read_to_string(&mut std::io::stdin(),&mut s)?;s}else{args};
+                serde_json::from_str(&text)?
+            }else{json!({})};
+            anyhow::ensure!(a.is_object(),"--args must be a JSON object");
+            a["action"]=json!(action);
+            if let Some(id)=id{a["id"]=json!(id);}
+            if let Some(query)=query{a["query"]=json!(query);}
+            let response=c.post("/api/brain",a).await?;out(&response);
+        }
         Cmd::Memory { cmd: None, tier } => {
             let m = c.get(&format!("/api/memory?tier={}", enc(&tier))).await?;
             if json {

@@ -242,13 +242,6 @@ pub fn has_web_entry(text: &str) -> bool {
     text.contains("(web) —")
 }
 
-/// Copy a memory into the wiki (the sleep's promotion), as a capture with the memory's source, or
-/// labelled `web` when a session that read untrusted content saved it.
-pub async fn capture_memory(app: &App, id: i64, text: &str, source: &str, tainted: bool) -> Result<String> {
-    let source = if tainted { "web" } else { source };
-    capture(app, None, &json!({ "note": text, "source": source, "from": format!("memory m{id}") })).await
-}
-
 /// A capture from a session (the `capture` tool) or, with no session, from the sleep.
 async fn capture(app: &App, session: Option<Uuid>, args: &Value) -> Result<String> {
     let note = args["note"].as_str().map(str::trim).filter(|n| !n.is_empty()).context("capture needs a `note`")?;

@@ -1,0 +1,11 @@
+name = "memory_disposition"
+version = 1
+description = "Keep active experience or archive it without losing history"
+exposure = "private"
+evidence = []
+item = "record"
+timeout = "2s"
+[question.disposition]
+type = "choice"
+text = "For {item}, is this still active, or clearly expired transient detail? Never archive an unresolved commitment, explicit standing directive, or uncertain case."
+options = { keep = "Still useful, unresolved, or uncertain", archive = "Clearly finished or obsolete transient experience" }

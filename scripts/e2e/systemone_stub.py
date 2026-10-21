@@ -102,7 +102,17 @@ class H(BaseHTTPRequestHandler):
             marked = next((v for k, v in high.items() if k in memory), None)
             for name, question in request["questions"].items():
                 kind = question["type"]
-                if source_batch:
+                instructions = question.get("instructions", "")
+                item = state.get("record_" + name.removeprefix("q"), {})
+                if "long-term preservation" in instructions:
+                    yes = "PROMOTE" in json.dumps(item)
+                    answers[name] = {"type":"noul", "noul":0.99 if yes else 0.01}
+                elif "clearly expired transient" in instructions:
+                    choice = "archive" if "ARCHIVE" in json.dumps(item) else "keep"
+                    answers[name] = {"type":"choice", "choice":choice, "probabilities":{choice:1.0}}
+                elif "exact owner statement" in instructions:
+                    answers[name] = {"type":"noul", "noul":0.01}
+                elif source_batch:
                     entry = state if "host" in state else state[name.split("_", 1)[0]]
                     field = name.rsplit("_", 1)[-1]
                     if field == "scope":

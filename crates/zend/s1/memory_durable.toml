@@ -1,0 +1,13 @@
+name = "memory_durable"
+version = 1
+description = "Phase 4 memory_durable"
+exposure = "private"
+evidence = []
+item = "record"
+timeout = "2s"
+
+[question.durable]
+type = "yes/no"
+text = "Does this selected experience merit long-term preservation for its lasting significance? Do not treat repetition as truth. Keep unresolved active work available. Record: {item}"
+yes = "Relevant"
+no = "Not relevant"

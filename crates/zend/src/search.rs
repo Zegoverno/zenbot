@@ -547,7 +547,7 @@ pub async fn query(db: &PgPool, q: &str, kinds: &[&str], session: Option<Uuid>, 
          fts AS (
            SELECT id, row_number() OVER (ORDER BY ts_rank_cd(tsv, websearch_to_tsquery('simple', $1), 32) DESC, id) AS r
            FROM search_docs
-           WHERE tsv @@ websearch_to_tsquery('simple', $1) AND kind = ANY($4) AND ($6::uuid IS NULL OR session_id = $6)
+           WHERE (tsv @@ websearch_to_tsquery('simple', $1) OR fts_en @@ websearch_to_tsquery('english',$1) OR fts_pt @@ websearch_to_tsquery('portuguese',$1)) AND kind = ANY($4) AND ($6::uuid IS NULL OR session_id = $6)
            ORDER BY r LIMIT 50),
          vec AS (
            SELECT id, row_number() OVER () AS r FROM (
@@ -629,6 +629,7 @@ fn render(found: &[(Found, Option<f64>)]) -> String {
         let head = match f.kind.as_str() {
             "memory" => format!("{} — {} ({when})", f.reference, f.title),
             "wiki" => format!("wiki [[{}]] {} (updated {when}; {})", f.reference, f.title, crate::wiki::root().join(format!("{}.md", f.reference)).display()),
+            "brain" => format!("knowledge/entity {} — {} ({when}); use brain get",f.reference,f.title),
             "turn" => {
                 let (s, seq) = f.reference.split_once(':').unwrap_or((&f.reference, ""));
                 let title = if f.title.is_empty() { String::new() } else { format!(" \"{}\"", zen_proto::head(&f.title, 60)) };
@@ -654,7 +655,7 @@ pub fn spec() -> Value {
             "type": "object",
             "properties": {
                 "query": { "type": "string", "description": "What you're looking for: words, a question, or an exact name or path (quote it)" },
-                "scope": { "type": "string", "enum": ["all", "sessions", "memories", "wiki", "this_session"], "description": "Where to look (default all)" },
+                "scope": { "type": "string", "enum": ["all", "sessions", "memories", "wiki", "knowledge", "entities", "this_session"], "description": "Where to look (default all)" },
                 "limit": { "type": "integer", "description": "How many results (default 8, at most 20)" }
             },
             "required": ["query"]
@@ -669,9 +670,9 @@ async fn run(app: &App, session: Uuid, args: &Value) -> Result<String> {
     let (kinds, only): (Vec<&str>, Option<Uuid>) = match scope {
         "sessions" => (vec!["turn"], None),
         "memories" => (vec!["memory"], None),
-        "wiki" => (vec!["wiki"], None),
+        "wiki" | "knowledge" | "entities" => (vec!["wiki","brain"], None),
         "this_session" => (vec!["turn"], Some(session)),
-        _ => (vec!["turn", "memory", "wiki"], None),
+        _ => (vec!["turn", "memory", "wiki", "brain"], None),
     };
     // Make sure the latest turns and memories are in (a pass is cheap when nothing changed).
     let indexed = {
@@ -737,13 +738,18 @@ pub(crate) async fn rated_results(db: &PgPool, reader: Uuid, listed: &[(Found, O
     let mut ratings = Vec::new();
     for (f,_) in listed {
         let rating = match f.kind.as_str() {
+            "brain" => crate::brain::search_rating(db,reader,f).await.ok(),
             "memory" => {
                 if let Ok(id) = f.reference.trim_start_matches('m').parse::<i64>() {
                     // Bind origin and writer to the same row snapshot, then insert the edge
                     // through the provenance boundary shared with deny/delivery/spawn.
-                    match sqlx::query_as::<_, (i16, Option<Uuid>)>("SELECT CASE WHEN zen_session_contaminated(session_id) THEN 5::smallint ELSE risk END, session_id FROM memories WHERE id=$1 AND text=$2 AND $3=(tier || '-term memory (' || source || ')') AND tier!='archived'")
+                    match sqlx::query_as::<_, (i16, Option<Uuid>)>("SELECT CASE WHEN zen_memory_contaminated(id) THEN 5::smallint ELSE risk END, session_id FROM memories WHERE id=$1 AND text=$2 AND $3=(tier || '-term memory (' || source || ')') AND tier!='archived'")
                         .bind(id).bind(&f.body).bind(&f.title).fetch_optional(db).await {
                         Ok(Some((risk, writer))) => {
+                            if risk<4||f.exact {
+                                let writers:Vec<Uuid>=sqlx::query_scalar("SELECT writer FROM brain_memory_inputs WHERE memory_id=$1").bind(id).fetch_all(db).await.unwrap_or_default();
+                                if crate::sources::depend(db,reader,&writers).await.is_err(){ratings.push(None);continue;}
+                            }
                             if (risk < 4 || f.exact) && crate::sources::depend(db, reader, &writer.into_iter().collect::<Vec<_>>()).await.is_err() {
                                 None
                             } else { Some(risk) }

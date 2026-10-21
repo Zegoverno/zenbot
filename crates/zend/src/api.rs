@@ -719,3 +719,11 @@ pub(crate) async fn list_job_runs(State(app): State<AppState>, Query(q): Query<R
     let runs = jobs::runs(&app.db, q.job.as_deref(), q.limit.unwrap_or(20)).await.map_err(bad_request)?;
     Ok(Json(Value::Array(runs)))
 }
+
+/// Owner interface to curated memory, knowledge and relationship context.
+pub(crate) async fn brain_action(State(app): State<AppState>, Json(args): Json<Value>) -> ApiResult<Json<Value>> {
+    Ok(Json(crate::brain::manage(&app,None,&args).await.map_err(bad_request)?))
+}
+pub(crate) async fn brain_context(State(app): State<AppState>, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
+    Ok(Json(crate::brain::explain(&app.db,id).await?))
+}

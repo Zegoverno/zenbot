@@ -128,7 +128,10 @@ pub fn protected_target(g: &Guarded, workspace: &Path, name: &str, args: &Value)
     if OWNER_FILES.iter().any(|rel| under(g.home.join(rel))) || is(g.mcp.clone()) {
         return Some(Protected::OwnerOnly(target));
     }
-    if (under(g.skills.clone()) && !under(g.skills.join("_proposed"))) || under(g.tools.clone()) {
+    if under(g.skills.clone()) && !under(g.skills.join("_proposed")) {
+        return Some(Protected::OwnerOnly(target));
+    }
+    if under(g.tools.clone()) {
         return Some(Protected::Steering(target));
     }
     None
@@ -295,6 +298,7 @@ pub fn specs(kind: Option<&str>) -> Value {
         all.push(ask_spec());
     }
     all.push(crate::memory::spec());
+    all.push(crate::brain::spec());
     all.push(crate::wiki::spec());
     all.push(crate::web::search_spec());
     all.push(crate::web::fetch_spec());
@@ -389,6 +393,10 @@ If a question goes unanswered, take your recommended option and say it was an as
             }
             *ending = Some("verdict given");
             out("Verdict recorded. End your turn now.".into(), false)
+        }
+        "brain" => {
+            let (content, is_error) = crate::brain::run_tool(app, session, args).await;
+            out(content,is_error)
         }
         "remember" => {
             let (content, is_error) = crate::memory::run_tool(app, session, args).await;
@@ -708,9 +716,9 @@ mod tests {
             assert!(owner(p), "{p}");
         }
         let steering = |path: &str| matches!(at("write", path), Some(Protected::Steering(_)));
-        assert!(steering("../global/skills/work/verify/SKILL.md"), "an active skill");
-        assert!(steering("../skills/new-domain/new-skill/SKILL.md"), "through the old symlink, in folders that don't exist yet");
-        assert!(steering("../global/skills/nope/../work/x/../verify/SKILL.md"), "`..` past missing folders");
+        assert!(owner("../global/skills/work/verify/SKILL.md"), "an active skill");
+        assert!(owner("../skills/new-domain/new-skill/SKILL.md"), "through the old symlink, in folders that don't exist yet");
+        assert!(owner("../global/skills/nope/../work/x/../verify/SKILL.md"), "`..` past missing folders");
         assert!(steering("../global/tools/word-count/run.py"), "a made tool");
         assert!(at("write", "../global/skills/_proposed/work/new/SKILL.md").is_none(), "drafts go through review");
         assert!(at("write", "../global/wiki/page.md").is_none());

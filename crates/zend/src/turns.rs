@@ -112,6 +112,7 @@ pub(crate) async fn finish_turn(app: &AppState, id: Uuid, error: Value) -> bool 
     }
     if error.is_null() {
         assist::after_turn(app, id, turn.kind.as_deref(), turn.ending);
+        if let Err(e)=crate::brain::capture_turn(app,id,turn.turn_id).await {tracing::warn!("queueing memory capture: {e:#}");}
         let size = summary["context_tokens"].as_i64().or(turn.sent["est_tokens"].as_i64()).unwrap_or(0);
         prepare_summary_if_needed(app, id, &turn.model, size).await;
     }
@@ -397,22 +398,6 @@ pub(crate) async fn run_child(app: &AppState, parent: Uuid, kind: &str, prompt: 
     Ok(child)
 }
 
-/// Run a session the kernel starts on its own, with no parent (the sleep compacting a prompt file),
-/// with one kernel prompt, and wait for it to end (30 minutes at most). Returns its id.
-pub(crate) async fn run_kernel_session(app: &AppState, kind: &str, title: &str, prompt: &str, dir: &std::path::Path, model: &str) -> Result<Uuid> {
-    let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO sessions (id, title, model, kind, workspace) VALUES ($1, $2, $3, $4, $5)")
-        .bind(id)
-        .bind(title)
-        .bind(model)
-        .bind(kind)
-        .bind(dir.display().to_string())
-        .execute(&app.db)
-        .await?;
-    run_and_wait(app, id, kind, prompt).await?;
-    Ok(id)
-}
-
 pub(crate) async fn run_and_wait(app: &AppState, id: Uuid, kind: &str, prompt: &str) -> Result<()> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.waiters.lock().await.insert(id, tx);
@@ -574,7 +559,12 @@ async fn begin_queued(app: &AppState, id: Uuid, text: String, origin: Origin, qu
         };
         let (history, summary) = compile::history(&blocks);
         let today = chrono::Local::now().format("%Y-%m-%d (%A)").to_string();
-        let turn_context = compile::turn_context(&blocks, &today);
+        let mut turn_context = compile::turn_context(&blocks, &today);
+        if kind.is_none() {
+            if let Some(evidence)=crate::brain::context(app,id,&text).await? {
+                turn_context=Some(format!("{}\n{}",turn_context.unwrap_or_default(),evidence));
+            }
+        }
         let sent = measure::record(&envelope, &history, &summary, &text, &turn_context, resume.is_some(), new_envelope);
         let cache_break = measure::break_at_start(prev.as_ref(), &model, &envelope.hash, &sent);
         // An abort or the watchdog may have ended the turn while it was being prepared: then

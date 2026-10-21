@@ -144,7 +144,7 @@ async fn save_skill(app: &App, session: Uuid, args: &Value) -> Result<String> {
         bail!("this session read untrusted content, so it can't change an active skill; tell the owner what you'd change and why");
     }
     let (dir, what) = match (&current, &draft) {
-        (Some(c), _) => (c.dir.clone(), "Updated the active skill"),
+        (Some(_), _) => (proposed_root().join(&domain).join(&name), "Saved a revision draft"),
         (None, Some(d)) => (d.dir.clone(), "Updated the draft"),
         (None, None) => {
             let mut everything = active.clone();
@@ -176,13 +176,13 @@ async fn save_skill(app: &App, session: Uuid, args: &Value) -> Result<String> {
     crate::git::commit_all(&root, &format!("{what}: {domain}/{name} (session {}{mark})\n\n{reason}", &session.to_string()[..8])).await;
     let new_domain = current.is_none() && draft.is_none() && !active.iter().any(|x| x.domain == domain);
     let next = if current.is_some() {
-        "It's in use from the next session that loads it.".to_string()
+        format!("The active version is unchanged; owner reviews this revision with zen skills accept {domain}/{name}.")
     } else if tainted {
         format!("This session read untrusted content, so the draft is marked untrusted: only the owner can make it active (zen skills accept {domain}/{name}). Say so in your report.")
     } else if new_domain {
         format!("`{domain}` is a new domain: the owner decides whether it becomes active (zen skills accept {domain}/{name}). Say so in your report.")
     } else {
-        format!("It can be found and loaded as a draft now; it becomes active when the owner accepts it (zen skills accept {domain}/{name}) or a session that used it is accepted.")
+        format!("It can be found and loaded as a draft now; it becomes active when the owner accepts it (zen skills accept {domain}/{name}) after explicit owner review.")
     };
     Ok(format!("{what} {domain}/{name} ({}). {next}", dir.display()))
 }
@@ -198,7 +198,10 @@ pub async fn decide_draft(db: &sqlx::PgPool, name: &str, accept: bool, by: &str,
     }
     let to = if accept { skills::root().join(&draft.domain).join(&draft.name) } else { archived_root().join(&draft.domain).join(&draft.name) };
     if to.exists() {
-        bail!("{} already exists", to.display());
+        anyhow::ensure!(accept && reviewed.is_some(),"replacement requires owner fingerprint review");
+        let previous=archived_root().join(&draft.domain).join(format!("{}-{}",draft.name,Uuid::new_v4()));
+        std::fs::create_dir_all(previous.parent().context("missing parent")?)?;
+        std::fs::rename(&to,&previous)?;
     }
     std::fs::create_dir_all(to.parent().context("no parent")?)?;
     std::fs::rename(&draft.dir, &to)?;
@@ -250,38 +253,9 @@ pub async fn mark_draft_write(app: &App, session: Uuid, workspace: &Path, name: 
 /// After the owner accepts a session's work: drafts it loaded (in domains that exist) become
 /// active, except drafts marked untrusted (only the owner's own `zen skills accept` activates those).
 pub async fn on_accept(app: &App, session: Uuid) {
-    let loaded: Vec<String> = sqlx::query_scalar("SELECT DISTINCT args->>'name' FROM tool_calls WHERE session_id = $1 AND name = 'load_skill' AND NOT is_error")
-        .bind(session)
-        .fetch_all(&app.db)
-        .await
-        .unwrap_or_default();
-    let domains: Vec<String> = skills::scan(&skills::root()).into_iter().map(|s| s.domain).collect();
-    let untrusted = tainted_drafts(&app.db).await;
-    for name in loaded {
-        let Ok(d) = skills::lookup(&skills::drafts(), &name).cloned() else { continue };
-        if untrusted.contains(&format!("{}/{}", d.domain, d.name)) {
-            tracing::info!("not activating {}/{}: a session that read untrusted content wrote it (the owner accepts it with zen skills)", d.domain, d.name);
-            continue;
-        }
-        // By origin too (D-062): a draft whose files are rated 4 or more, or written by a session
-        // since stopped, is activated only by the owner's own accept. Unknown means no.
-        match folder_rating(&app.db, &d.dir).await {
-            Ok((risk, _)) if risk <= 3 => {}
-            other => {
-                tracing::info!("not activating {}/{}: its files are rated {:?} by origin (the owner accepts it with zen skills)", d.domain, d.name, other.map(|r| r.0).map_err(|e| e.to_string()));
-                continue;
-            }
-        }
-        if domains.contains(&d.domain) {
-            match decide_draft(&app.db, &format!("{}/{}", d.domain, d.name), true, "a session that used it was accepted", None).await {
-                Ok(m) => tracing::info!("{m}"),
-                Err(e) => tracing::warn!("activating {name}: {e:#}"),
-            }
-        }
-    }
+    if let Err(e)=sqlx::query("UPDATE brain_skill_uses SET outcome='session accepted by owner' WHERE session_id=$1").bind(session).execute(&app.db).await {tracing::warn!("recording skill outcome: {e:#}");}
 }
 
-/// Each skill's use: loads, the last one, and the owner's verdicts on sessions that loaded it.
 pub async fn stats(db: &sqlx::PgPool) -> Result<Value> {
     let rows = sqlx::query(
         "WITH loads AS (SELECT args->>'name' AS name, session_id, created_at FROM tool_calls WHERE name = 'load_skill' AND NOT is_error),

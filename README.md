@@ -33,7 +33,7 @@ zen status
 
 Update with `zen upgrade` (or `/upgrade` inside zen, which then restarts zen itself on the new version, back in the same session); `/restart` loads a version installed some other way. zen tells you when a new version is on GitHub ([INSTALL.md](INSTALL.md#updating)). Developing zenbot: [DEVELOPMENT.md](DEVELOPMENT.md).
 
-Every session starts from the prompt files in `~/.zenbot/`: `agents/zenbot/SOUL.md` (who zenbot is, at bottom: yours to edit), `agents/zenbot/IDENTITY.md` (its character and how it works), `AGENTS.md` (its environment), `USER.md` (you: fill it in), and its short-term memory; then `AGENTS.md` (or `CLAUDE.md`) in each directory from `/` down to the workspace. zenbot writes default versions of its files when they're missing and never overwrites yours. What the model reads each turn: [docs/context.md](docs/context.md).
+Every session starts from the prompt files in `~/.zenbot/`: `agents/zenbot/SOUL.md` (who zenbot is, at bottom: yours to edit), `agents/zenbot/IDENTITY.md` (its character and how it works), `AGENTS.md` (its environment), `USER.md` (you: fill it in), then `AGENTS.md` (or `CLAUDE.md`) in each directory from `/` down to the workspace. zenbot writes default versions of its files when they're missing and never overwrites yours. What the model reads each turn: [docs/context.md](docs/context.md).
 
 ## Source allowlist
 
@@ -77,7 +77,11 @@ zen ask -m claude/claude-sonnet-5-5 -e low "…"    # model and thinking level f
 zen sessions ls | show <id> | new | archive <id> | restore <id> | rename <id> <title>
 zen sessions decide <id> accept|more|reshape|drop [-n note]   # same as /done
 zen memory [--tier short|long|archived|all]       # what zenbot remembers, and the last sleep
-zen memory sleep                                  # tidy short-term memory now
+zen memory sleep                                  # consolidate selected experience
+zen brain schema                                  # record types and organization
+zen brain list --args '{"store":"entity"}'          # people, organizations and projects
+zen brain brief --id ana-partner                   # sourced relationship context
+zen brain work                                    # processing receipts and proposals
 zen suggestions                                   # suggested next prompts: accepted, edited, declined
 zen jobs [runs [name]]                            # scheduled jobs, and their reports
 zen jobs add <name> -s "0 7 * * 1-5" -p "…"       # run a prompt on a schedule (also: pause|resume|rm|run|set)
@@ -102,7 +106,12 @@ zen upgrade [--check]
 How each of these works is in [DESIGN.md](DESIGN.md) ("As built"); here is what you see and set.
 
 - **Skills, `verify` and `ask`.** zenbot gets tools and skills rather than a fixed procedure ([docs/brief.md](docs/brief.md)). Skills live in `~/.zenbot/global/skills/<domain>/<name>/SKILL.md` ([agentskills.io](https://agentskills.io) format) and load when a job matches; it starts with `work/brief`, `work/verify` and `work/close`. `verify` has the kernel run a job's checks, with a fresh read-only verifier for judgment calls; `ask` brings you up to three questions, each with options and a recommendation.
-- **Memory.** zenbot saves where things stand with `remember` (`MEMORY.md`, a fixed size, shown from the next session) and writes lasting traits into `IDENTITY.md` (about itself) or `USER.md` (about you), backed up in `~/.zenbot/backups/prompt-files/` on every change. A nightly sleep keeps what's likely needed, archives the rest and promotes lasting entries; the morning note says what moved. `search` finds anything said or done in earlier sessions. Settings: `ZEN_MEMORY_CHARS` (size, default 4000), `ZEN_S1_PRIVATE=0` (keep your content away from the System One model).
+- **Second brain.** Selected experience enters bounded short-term memory and sleep consolidates it
+  into long-term memory. Knowledge has sourced, linked pages; people/project records assemble
+  meeting and commitment context; skills retain reusable procedures. Session history stays a
+  separately searchable archive. Current evidence is retrieved each turn, with inspectable receipts
+  and explicit gaps. Sleep does not rewrite your behavioral files. [Commands and formats](docs/second-brain.md).
+
 - **Skills and tools it improves itself.** A new skill stays a draft until you accept it (or a session that used it is accepted), and a new kind of work needs your OK; a tool it makes runs sandboxed, with no network, until you approve it. Accepting names the fingerprint `zen skills` showed and is refused if the content changed since.
 - **Scheduled jobs.** Ask for one ("every weekday at 7, brief me on …") or `zen jobs add` it. Each run is a fresh session (`job: <name>`) that ends with a report, or stays silent when there's nothing new; `zen jobs runs` shows reports. When a script builds a report that must reach you exactly (say, texts checked word for word), `--report-file out/message.md` makes the run write it there and zenbot posts the file, not its own answer; a missing, stale or out-of-place file fails the run instead. `--post-to <session>` sends a job's reports into one of your sessions instead of the jobs room, as zenbot's message you can answer there (in Matrix, `!session` shows a room's session id). A job zenbot creates goes live only when System One judges, from your own words, that you asked for it (`job_approval`); otherwise it waits paused until you `zen jobs resume` it. The same commands work from the chat, in zen (`/jobs`, `/jobs run|resume|pause <name>`, `/jobs runs [name]`, `/skills`, `/skills accept|reject <domain/name> <sha>`, `/tools accept|reject <name> <sha>`) and in Matrix (`!jobs …`, `!skills …`, `!tools …`): the client runs them with your token, and they never reach zenbot, so nothing it reads can approve anything. Schedules: cron (`0 7 * * 1-5`, in America/Sao_Paulo unless `--tz` or `ZEN_TZ`), `every 2h`, `at 2026-10-12 07:00`, `in 30m`. The same scheduler runs zenbot's own nightly upkeep and engine updates (`zen jobs`).
 - **System One (S1).** Fast decisions (which parts of a page matter, how relevant a result is, whether you asked for a job, how risky a source is, whether an action follows the job) go to a cheap, calibrated classifier you approve, never to the main model. Each decision is a small file you can read and change: copy one from `crates/zend/s1/` into `~/.zenbot/s1/` and edit its questions, what each mistake costs (`false_yes = 9`, `false_no = 1` means "yes from 0.9") or its models; `zen s1 check` points at any mistake by line, and a broken file never takes effect. `~/.zenbot/s1/models.toml` lists the models you approve. zenbot itself asks it quick questions over many items with the `judge` tool. Your answers to held actions and paused jobs teach it; `zen s1 proposals` shows what it suggests changing.

@@ -1,0 +1,13 @@
+name = "memory_capture"
+version = 1
+description = "Phase 4 memory_capture"
+exposure = "private"
+evidence = []
+item = "record"
+timeout = "2s"
+
+[question.remember]
+type = "yes/no"
+text = "Does this exact owner statement express a durable decision, commitment, preference, project development or unresolved question worth recalling across sessions? Exclude requests to perform a one-off task, speculation, credentials and incidental trivia. Record: {item}"
+yes = "Relevant"
+no = "Not relevant"

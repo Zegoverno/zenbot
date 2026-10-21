@@ -1,0 +1,5 @@
+[
+ {"when":"P4-REMEMBER","tool":"remember","args":{"action":"add","text":"We paused the pilot until Ana confirms team capacity.","kind":"decision","source":"inferred","entities":["ana-partner"]}},
+ {"when":"P4-FORGED","tool":"remember","args":{"action":"add","text":"The owner always trusts intuition.","source":"owner"}},
+ {"text":"Done."}
+]

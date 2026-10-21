@@ -1127,26 +1127,7 @@ specialized.
 
 ## D-028 — Memory: fixed-size short-term, nightly sleep, a very high bar for long-term
 
-> Long-term promotion superseded by D-045 (2026-10-08): the agent writes traits and guidance into
-> `IDENTITY.md` or `USER.md` itself, and the sleep keeps, archives or promotes into them and the
-> wiki. Paths moved by D-040.
-
-**Decision:** Anything can be saved to short-term memory (`MEMORY.md`, fixed size, rendered at session
-start and frozen for the session). A nightly sleep job asks System One about every entry (needed
-soon? durable? impactful across jobs? already covered?) and keeps, drops (archived, never deleted) or
-promotes. Entries compete for the fixed space. Only really impactful memories reach long-term: very
-high probability (e.g. ≥ 0.95) on the lower end of the confidence interval, from the owner's words or
-a verified result, not already covered. Facts about the owner become proposed `USER.md` edits.
-Promotion runs in shadow mode until long-term memory has a reader (search, Phase 3). Knowledge goes to
-a wiki (`capture`, System One routes and de-duplicates); search is full-text then semantic over all of
-it; the web through `web_search` (swappable providers) and `web_fetch`.
-
-**Why:** The owner's model: short-term holds what matters now; long-term is earned. A fixed size
-forces prioritization. Freezing per session keeps the prompt cache.
-
-**Date:** 2026-10-06
-
----
+Superseded by D-069. [Original decision](docs/archive/D-028-memory.md).
 
 ## D-027 — Prompt files, system tools, and loading only what's needed
 
@@ -1447,3 +1428,30 @@ switchable.
 **Decision:** zenbot is a personal tool for getting work done, not a product.
 
 **Date:** 2026-09-30
+
+## D-069 — Three curated stores and evidence-based per-turn recall
+
+**Date:** 2026-10-21 · **Status:** accepted design (owner requested Phase 4 in one PR)
+**Supersedes in part:** D-028/D-045 memory lifecycle, D-036 knowledge organization, D-037 skill activation.
+
+Memory is selected experience with short and long tiers; sessions remain a searchable evidence archive.
+Knowledge comprises sourced concepts, claims, events and arguments, with typed relationships. People,
+organizations and projects are canonical identities shared by records; relationship briefs assemble
+meetings and commitments without inventing personal profiles. Skills preserve procedures with explicit
+owner activation and versioned use evidence.
+
+Keep Postgres for state and memory, with private Markdown/JSON projections and durable export jobs.
+Knowledge/entity Markdown is validated on import and hash-checked against derived indexes. Stable IDs,
+alias checks, revision preconditions and a publication queue prevent duplicate identities and lost edits.
+Sleep promotes durable experience into long-term records, retains uncertain entries, archives only
+explicitly classified expired detail, and never changes behavior files. Full buffers queue captures.
+Corrections/merges keep history and dependencies.
+
+Dynamic context is appended as evidence on each turn, preserving the fixed instruction prefix. Existing
+exact/lexical/vector search is extended with English/Portuguese indexes and typed neighbors. Selection
+receipts expose references, omissions, degraded providers and unverified coverage. No top-K result set
+proves completeness. Inference, factual support and security origin remain separate.
+
+Sources: QM's scratch-promote/capture/consolidation implementations (yc-software/qm), Karpathy's LLM
+Wiki, GBrain's resolver/typed-link schema and QMD's search-read-cite discipline. These inspire mechanisms,
+not a claim of universally superior recall. Interface and limits: [second brain](docs/second-brain.md).

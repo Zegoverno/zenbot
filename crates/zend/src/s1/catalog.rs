@@ -43,6 +43,10 @@ pub struct Kind {
 use Effect::*;
 
 pub const KINDS: &[Kind] = &[
+    Kind { name: "memory_disposition", exposure: Exposure::Private, mode: Mode::Items, facts: &[], outcomes: None, unavailable: None, owner_rung: false },
+    Kind { name: "memory_capture", exposure: Exposure::Private, mode: Mode::Items, facts: &[], outcomes: None, unavailable: None, owner_rung: false },
+    Kind { name: "memory_durable", exposure: Exposure::Private, mode: Mode::Items, facts: &[], outcomes: None, unavailable: None, owner_rung: false },
+    Kind { name: "context_curator", exposure: Exposure::Private, mode: Mode::Items, facts: &["query"], outcomes: None, unavailable: None, owner_rung: false },
     Kind {
         name: "job_approval", exposure: Exposure::Owner, mode: Mode::Single,
         facts: &["owner_messages", "job"],

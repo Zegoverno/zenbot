@@ -19,6 +19,7 @@ mod jobs;
 mod mcp;
 mod measure;
 mod memory;
+mod brain;
 mod mind;
 mod s1;
 mod search;
@@ -266,6 +267,7 @@ async fn serve() -> Result<()> {
     tokio::spawn(turns::prompt_loop(app.clone()));
     tokio::spawn(tape::mirror_loop(app.db.clone()));
     tokio::spawn(search::index_loop(app.clone()));
+    tokio::spawn(brain::worker(app.clone()));
     tokio::spawn(jobs::run_loop(app.clone()));
 
     let api = Router::new()
@@ -293,6 +295,8 @@ async fn serve() -> Result<()> {
         .route("/sessions/{id}/allow", axum::routing::get(session_gates).post(allow_action))
         .route("/suggestions", get(assist::stats))
         .route("/memory", get(list_memory))
+        .route("/brain", axum::routing::post(brain_action))
+        .route("/sessions/{id}/context", get(brain_context))
         .route("/mcp", get(mcp_status))
         .route("/skills", get(list_skills))
         .route("/policy", get(get_policy).post(put_policy))

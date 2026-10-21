@@ -641,3 +641,31 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 Every doc and what it holds: [README.md](README.md#docs).
 
 Phase 2b/3 (D-068): `jobs.owner_approved` records authority (0034); `crates/zend/public-suffix-list.dat` supplies domain boundaries. `turns` handles durable prompts and steering; `tape` exports histories; `mcp::status` reads cached counts. The `phase3` e2e scenario (`phase3_kernel`, `scripts/e2e/phase3.json`) replays job authority, high-risk edits, held-job resumption, queued/steered prompts and JSONL recovery.
+
+## Phase 4 second brain (D-069)
+
+- `crates/zend/src/brain/mod.rs`: tool contract, shared admission, durable work dispatcher.
+- `crates/zend/src/brain/records.rs`: canonical files, aliases, typed links, publication recovery,
+  schema checks, import, lint, relationship briefs and revision history.
+- `crates/zend/src/brain/sleep.rs`: capture, bounded short/pending tiers, long-term memory,
+  sleep, revisions/merge, provenance-preserving exports and dream proposals.
+- `crates/zend/src/brain/recall.rs`: per-turn current evidence, graph expansion, skill pointers,
+  archive search, budget/deadline fallback and context receipts.
+- `crates/zend/src/brain/synthesis.rs`: subscription-worker synthesis; inspectable proposals with usage.
+- `/api/brain` (POST): owner record/lifecycle operations; `/api/sessions/{id}/context` (GET): receipts.
+  Agent tool `brain` uses the same source-aware service. CLI `zen brain ACTION --id ID --query TEXT
+  --args JSON` accepts JSON from stdin with `--args -`.
+- Migration `0035_second_brain.sql`: `brain_records`, `brain_aliases`, `brain_links`, `brain_work`,
+  `brain_revisions`, `brain_contexts`, `brain_skill_uses`, `brain_memory_inputs`; memory metadata,
+  history and dependencies; English/Portuguese search indexes.
+- `ZEN_BRAIN_MODE` = `on`: automatic context/capture; `shadow`: context receipts only; `off`: neither.
+  Explicit memory operations remain available. `ZEN_BRAIN_CONTEXT_BYTES` = `4000` (500..16000),
+  conservative per-turn evidence size. `ZEN_MEMORY_CHARS` remains the soft short-memory target;
+  its double is the hard view limit. `ZEN_PROMOTE_BAR` controls durable classification.
+- S1 decisions `memory_capture`, `memory_durable`, `memory_disposition`, `context_curator`: private
+  evidence only; unavailable capture stays retryable, unavailable selection falls back to lexical.
+- `global/MEMORY.md`, `global/memory/records/`, `global/memory/archive/`, `global/memory/export.json`:
+  private database projections; `global/entities/`: people, organizations and projects; knowledge
+  uses shallow typed folders under the configured wiki root.
+- `scripts/e2e/phase4.py`, `scripts/e2e/phase4.json`, scenario `phase4` / `phase4_brain`: isolated
+  identity, knowledge, relationship, revision/import, memory and dynamic-context checks.

@@ -39,10 +39,11 @@ changes. Candidate follow-ups, each only when use calls for it:
   authenticated task checks and a combined owner queue on the branch; release validation and
   owner review/merge/install remain before these changes are live.
   Full read-only limits begin at 4; budgets remain out of scope.
-- **Phase 2b + Phase 3 (D-068), pending release:** approved job authority, contextual source
+- **Phase 4 (D-069), implementation branch:** short/long memory, knowledge graph, skills and
+  relationship context; validation, evaluation and owner merge review precede release.
+- **Phase 2b + Phase 3 (D-068), merged:** approved job authority, contextual source
   ratings, aligned high-risk edits, held-run continuation, contained MCP, trust suggestions,
-  worker hang recovery, durable prompts, permission snapshots and JSONL histories are on the
-  combined branch. Full validation, advisory eval and owner review remain before merge/install.
+  worker hang recovery, durable prompts, permission snapshots and JSONL histories were merged in PR #85. The advisory model comparison lacked a usable local Docker environment.
 - **Earlier action-gate plan (D-056), superseded in part by D-062:** a session that reads outside content becomes *risky*, not
   limited; its actions are checked before they run by fixed rules over parsed facts (run, run in
   the offline sandbox, or ask the owner, with a one-tap `/allow`); then System One reads only the
