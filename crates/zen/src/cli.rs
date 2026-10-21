@@ -36,7 +36,7 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Cmd {
-    /// Records (knowledge, people/projects, long-term memory): get, list, put, schema, lint, index.
+    /// Records: get, list, put, schema, lint, index; migrate_legacy previews old wiki migration.
     /// Arguments as JSON with --args (or - for stdin).
     Brain {
         action: String,

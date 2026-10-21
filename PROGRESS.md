@@ -6,6 +6,11 @@
 
 ---
 
+## 2026-10-21 — Hold duplicate legacy knowledge names
+
+Migration holds duplicate titles/aliases before writing archives; a regression covers duplicate
+titles. CLI help and development instructions describe migration and retired tools.
+
 ## 2026-10-21 — Finish Phase 4's legacy paths (D-070)
 
 Owner-run preview/apply migrates flat wiki pages into provisional source records, retaining all

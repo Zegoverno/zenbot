@@ -160,14 +160,14 @@ From `main.rs` (router) and `api.rs`. Everything under `/api` needs the token in
 | POST | `/api/sessions/{id}/deny` | `deny_session` | Owner-only stop: session and causal descendants/products receive reversible contamination marks (D-062); no model tool exposes deny/trust |
 | POST | `/api/sessions/{id}/decision` | `decide` | `{decision: accept\|more\|reshape\|drop, note?}` → `session_decisions`; `accept` activates draft skills the session loaded (`workshop::on_accept`) |
 | GET | `/api/memory?tier=` | `list_memory` | Memories of a tier (`short` by default, `archived`, `all`; `long` and `proposed` only hold rows from before D-045), the last sleep and the size |
-| POST | `/api/brain` | `brain_action` | The owner's record actions (`zen brain`): `get`, `list`, `put` (a new long-term memory too), `schema`, `lint`, `index` |
+| POST | `/api/brain` | `brain_action` | The owner's record actions (`zen brain`): `get`, `list`, `put` (a new long-term memory too), `schema`, `lint`, `index`, `migrate_legacy` (preview; `apply: true` archives originals) |
 | POST | `/api/memory/sleep?trigger=` | `run_sleep` | Tidy short-term memory now (`trigger=nightly` is recorded as the nightly sleep, else `owner`; the scheduled `sleep` job calls `memory::sleep` directly) |
 | GET | `/api/suggestions` | `assist::stats` | Suggested next prompts: outcomes (`accepted`, `edited`, `declined`, `unseen`, open) by prompt version and model, latency and cost; the latest 20 |
 | GET/POST | `/api/jobs` | `list_jobs` / `create_job` | Every job (`jobs`, `scheduler` on/off); POST `{name, prompt, schedule, tz?, context?, skills?, model?, workspace?, report_file?, post_to?}` creates an agent job as the owner |
 | PATCH/DELETE | `/api/jobs/{name}` | `update_job` / `delete_job` | `{enabled}` pauses or resumes (resume approves an agent's paused job); other fields change an agent job (`report_file: ""` and `post_to: ""` clear them); DELETE removes an agent job (runs kept) |
 | POST | `/api/jobs/{name}/run` | `run_job` | Run a job now in the background (`{run}`; 400 when it's already running) |
 | GET | `/api/jobs/runs?job=&limit=` | `list_job_runs` | Recent runs, newest first: status, trigger, session, report or error |
-| GET | `/api/mcp` | `mcp_status` | `{config, servers:{name:tool count}, problems}` from `~/.zenbot/mcp.json` (the agent's own tools count as server `made`); connects servers not yet connected |
+| GET | `/api/mcp` | `mcp_status` | `{config, servers:{name:tool count}, problems}` from `~/.zenbot/mcp.json`; cached counts only, never starts processes or contacts servers |
 | GET | `/api/policy` | `get_policy` | The routing policy in force (`version`, `policy`), the evidence (`stats`) and what it suggests |
 | POST | `/api/policy` | `put_policy` | `{policy: {routes, explore?}, reason?}`: a new version by the owner |
 | POST | `/api/policy/undo` | `undo_policy` | A new version with the data of the one before the latest (409 when there is none) |

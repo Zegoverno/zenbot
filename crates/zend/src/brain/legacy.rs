@@ -164,6 +164,17 @@ async fn migrate_at(db: &PgPool, apply: bool, root: &Path) -> Result<Value> {
                     "existing record conflicts; left both files unchanged"
                 );
             }
+            // Use the same name uniqueness boundary as normal brain puts. Legacy titles can
+            // collide even when their filenames differ; hold those for owner resolution.
+            let current = records::parse(&text)?;
+            let mut names = vec![string(&current, "title").to_lowercase()];
+            names.extend(current["metadata"]["aliases"].as_array().into_iter().flatten()
+                .filter_map(|a| a.as_str()).map(|a| a.trim().to_lowercase()));
+            let taken: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM brain_aliases a JOIN brain_records r ON r.id=a.record_id
+                 WHERE a.alias=ANY($1) AND a.record_id<>$2 AND r.store='knowledge')")
+                .bind(&names).bind(id(&slug)).fetch_one(&mut *tx).await?;
+            ensure!(!taken, "a name or alias already belongs to another knowledge record; resolve with the owner");
             if archive.exists() {
                 regular(&archive)?;
                 ensure!(

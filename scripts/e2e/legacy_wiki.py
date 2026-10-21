@@ -64,6 +64,10 @@ check(retry['migrated'] == 1 and record_path.read_text() == record,
 conflict = call('migrate_legacy', apply=True)
 check(conflict['held'] == 2 and record_path.read_text() == record and (root / 'alex.md').exists(),
       'changed originals conflict without overwriting either version')
+(root / 'copy.md').write_text(original)
+collision = call('migrate_legacy', apply=True)
+check(collision['held'] == 3 and (root / 'copy.md').exists(),
+      'duplicate knowledge names stay held for owner resolution')
 check((root / 'index.md').read_text() == '# Original index\n', 'historical index is preserved')
 # Invalid typed files are reported only by count in the compatibility upkeep job.
 (root / 'sources' / 'invalid.md').write_text('not a record')

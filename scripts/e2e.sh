@@ -404,7 +404,9 @@ wiki_capture() {
   local r; r=$(zen ask --json -m faux/smoke "retired tools")
   check "stale capture and save_tool calls are refused even with the old flag" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" capture:true,save_tool:true,search:false,brain:false
   local sid; sid=$(jq -r .session_id <<<"$r")
-  check "migrated knowledge is searchable and reads the owner's current correction" grep -q "Owner corrected the meeting claim" <<<"$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='search'")"
+  local legacy_id; legacy_id=$(jq -r '.[] | select(.tool=="brain") | .args.id' scripts/e2e/retired.json)
+  check "search retrieves the migrated knowledge record" eq "$(q "SELECT count(*) FROM searches s CROSS JOIN LATERAL jsonb_array_elements(s.results) f WHERE s.session_id='$sid' AND f->>'ref'='$legacy_id'")" 1
+  check "brain reads the owner's current correction after retrieval" grep -q "Owner corrected the meeting claim" <<<"$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='brain'")"
   zen jobs run wiki >/dev/null
   check "the compatibility wiki job checks records" poll "SELECT string_agg(r.status, ',') FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name = 'wiki'" ok
 }
@@ -1147,7 +1149,7 @@ origin_attacks() {
   check "a clean reader gets the memory, the file and the history wrapped" bash -c \
     'grep -q "<untrusted source=\"search\"" <<<"$1" && grep -q "<untrusted source=\"file\" about=\"w-note.md\"" <<<"$1" && grep -q "<untrusted source=\"history\"" <<<"$1"' _ "$res"
   check "the knowledge record is listed with its text and id withheld" bash -c '! grep -q "ORIGWIKI the" <<<"$1" && grep -q "id withheld" <<<"$1"' _ \
-    "$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$r1' AND payload->>'role'='toolResult' AND payload->>'toolName'='search' AND payload->'content'->0->>'text' LIKE '%(wiki)%'")"
+    "$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$r1' AND payload->>'role'='toolResult' AND payload->>'toolName'='search' AND payload->'content'->0->>'text' LIKE '%(wiki%'")"
   check "and its risk is raised, a dependency recorded, nothing stopped" eq \
     "$(q "SELECT s.risk || '/' || (SELECT count(*) FROM session_inputs WHERE reader=s.id AND writer='$w') FROM sessions s WHERE s.id='$r1'")/$(stopped "$r1")" 4/1/f
   # The owner denies a session while its turn runs: the turn stops before its next tool.
