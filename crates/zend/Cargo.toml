@@ -8,6 +8,7 @@ description = "zenbot kernel"
 [dependencies]
 zen-proto = { path = "../zen-proto" }
 anyhow = "1"
+base64 = "0.22"
 axum = { version = "0.8", features = ["ws"] }
 chrono = { version = "0.4", features = ["serde"] }
 dom_smoothie = "0.18"

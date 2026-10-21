@@ -23,6 +23,16 @@ pub fn text_of(content: &Value) -> String {
     }
 }
 
+/// What the kernel's provenance record of a result hashes: its text, then each image's media type
+/// and data. A text-only result digests as its text, so older records still match.
+pub fn digest_text(content: &Value) -> String {
+    let mut text = text_of(content);
+    for part in content.as_array().into_iter().flatten().filter(|p| p["type"] == "image") {
+        text.push_str(&format!("\n[image {} {}]", part["mimeType"].as_str().unwrap_or(""), part["data"].as_str().unwrap_or("")));
+    }
+    text
+}
+
 /// The first `max` characters of `s`, saying how much was left out.
 pub fn head(s: &str, max: usize) -> String {
     let n = s.chars().count();

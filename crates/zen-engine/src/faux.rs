@@ -96,7 +96,7 @@ async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bo
                 let args = step.get("args").cloned().unwrap_or(json!({}));
                 let call = json!({ "type": "toolCall", "id": call_id, "name": name, "arguments": args });
                 ctx.notify(TurnEvent::Message { message: assistant(vec![call], "toolUse", sent) }).await;
-                let (out, _) = ctx.call_tool(name, args, Some(call_id)).await;
+                let out = ctx.call_tool(name, args, Some(call_id)).await.content;
                 sent += out.len() as i64 / 4;
             } else if let Some(text) = step["text"].as_str() {
                 for word in text.split_inclusive(' ') {

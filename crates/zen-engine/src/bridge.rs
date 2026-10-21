@@ -48,7 +48,7 @@ pub async fn run(socket: String) -> Result<()> {
                     let req = json!({ "op": "call", "name": params["name"], "args": params.get("arguments").cloned().unwrap_or(json!({})) });
                     match ask(&socket, &req).await {
                         Ok(v) => json!({ "result": {
-                            "content": [{ "type": "text", "text": v["content"].as_str().unwrap_or("") }],
+                            "content": crate::turn::result_blocks(&serde_json::from_value::<zen_proto::worker::ToolResult>(v.clone()).unwrap_or_default()),
                             "isError": v["is_error"].as_bool().unwrap_or(false)
                         }}),
                         Err(e) => json!({ "result": { "content": [{ "type": "text", "text": e.to_string() }], "isError": true } }),

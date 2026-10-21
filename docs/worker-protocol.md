@@ -43,7 +43,7 @@ open JSON. A change to the protocol changes this page, those types and their tes
 
 | Message | Kind | Params |
 |---|---|---|
-| `tool.call` | request | `{ session_id, turn_id, call_id, name, args }` → result `{ content: string, is_error: bool }`. The kernel executes the tool. |
+| `tool.call` | request | `{ session_id, turn_id, call_id, name, args }` → result `{ content: string, is_error: bool, content_blocks?: [...] }`. The kernel executes the tool. Optional MCP-shaped text/image blocks carry rich results; workers preserve these in tape messages and map images to their provider interface. The text includes source labels. |
 | `turn.delta` | notification | `{ session_id, turn_id, delta }`: streamed answer text |
 | `turn.thinking` | notification | `{ session_id, turn_id, delta }`: streamed reasoning (optional) |
 | `turn.message` | notification | `{ session_id, turn_id, message }`: a finished message, appended to the session's tape |

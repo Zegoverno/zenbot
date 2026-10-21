@@ -488,9 +488,9 @@ async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bo
             match msg["method"].as_str().unwrap_or("") {
                 "item/tool/call" => {
                     let call_id = p["callId"].as_str().unwrap_or("").to_string();
-                    let (content, is_error) = ctx.call_tool(p["tool"].as_str().unwrap_or(""), p["arguments"].clone(), Some(call_id)).await;
+                    let result = ctx.call_tool(p["tool"].as_str().unwrap_or(""), p["arguments"].clone(), Some(call_id)).await;
                     let id = msg["id"].clone();
-                    s.send(json!({ "id": id, "result": { "contentItems": [{ "type": "inputText", "text": content }], "success": !is_error } })).await?;
+                    s.send(json!({ "id": id, "result": { "contentItems": dynamic_content(&result), "success": !result.is_error } })).await?;
                 }
                 "item/started" if p["item"]["type"] == "dynamicToolCall" => {
                     let it = &p["item"];
@@ -612,6 +612,17 @@ async fn complete_now(model: &str, system: &str, prompt: &str) -> Result<Complet
     Ok(Completion { text, usage: json!({ "input": input, "output": output }), model: model.to_string() })
 }
 
+/// The app-server's dynamic tool response supports inline images with subscription sign-in.
+fn dynamic_content(result: &zen_proto::worker::ToolResult) -> Vec<Value> {
+    crate::turn::result_blocks(result).iter().filter_map(|block| {
+        match block["type"].as_str() {
+            Some("text") => Some(json!({ "type": "inputText", "text": block["text"] })),
+            Some("image") => Some(json!({ "type": "inputImage", "imageUrl": format!("data:{};base64,{}", block["mimeType"].as_str()?, block["data"].as_str()?) })),
+            _ => None,
+        }
+    }).collect()
+}
+
 /// The kernel's history as Responses API items for `thread/inject_items`: messages as messages,
 /// tool calls and results as function calls and outputs (call ids longer than the API allows are
 /// shortened the same way everywhere). Thinking is left out: it can't be replayed to another model.
@@ -620,7 +631,8 @@ fn history_items(history: &[Value]) -> Vec<Value> {
     let call_id = |id: &str| if id.len() > 64 { id[id.ceil_char_boundary(id.len() - 64)..].to_string() } else { id.to_string() };
     let text = |t: &str, kind: &str| json!({ "type": kind, "text": t });
     let mut items = Vec::new();
-    for m in history {
+    let kept = crate::turn::replayed_images(history);
+    for (i, m) in history.iter().enumerate() {
         match m["role"].as_str() {
             Some("user") => {
                 let mut content: Vec<Value> = match &m["content"] {
@@ -646,7 +658,13 @@ fn history_items(history: &[Value]) -> Vec<Value> {
             }
             Some("toolResult") => {
                 let out: String = m["content"].as_array().into_iter().flatten().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n");
-                items.push(json!({ "type": "function_call_output", "call_id": call_id(m["toolCallId"].as_str().unwrap_or("")), "output": out }));
+                // Only the latest images are sent again (turn::replayed_images).
+                let mut images: Vec<_> = m["content"].as_array().into_iter().flatten().enumerate().filter(|(j, b)| b["type"] == "image" && kept.contains(&(i, *j))).filter_map(|(_, b)| Some(json!({ "type": "input_image", "image_url": format!("data:{};base64,{}", b["mimeType"].as_str()?, b["data"].as_str()?) }))).collect();
+                let output = if images.is_empty() { Value::String(out) } else {
+                    images.insert(0, text(&out, "input_text"));
+                    Value::Array(images)
+                };
+                items.push(json!({ "type": "function_call_output", "call_id": call_id(m["toolCallId"].as_str().unwrap_or("")), "output": output }));
             }
             _ => {}
         }
@@ -657,6 +675,30 @@ fn history_items(history: &[Value]) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dynamic_images_and_replay_use_supported_content_items() {
+        let image = json!({"type":"image","mimeType":"image/png","data":"AAAA"});
+        let result = zen_proto::worker::ToolResult {
+            content: "[source 4] image".into(),
+            content_blocks: vec![image.clone()],
+            is_error: false,
+        };
+        let live = dynamic_content(&result);
+        assert_eq!(live[0]["text"], "[source 4] image");
+        assert_eq!(
+            live[1],
+            json!({"type":"inputImage","imageUrl":"data:image/png;base64,AAAA"})
+        );
+        let replay = history_items(&[
+            json!({"role":"toolResult","toolCallId":"c1","content":[{"type":"text","text":"[source 4] image"},image]}),
+        ]);
+        assert_eq!(replay[0]["type"], "function_call_output");
+        assert_eq!(
+            replay[0]["output"][1],
+            json!({"type":"input_image","image_url":"data:image/png;base64,AAAA"})
+        );
+    }
 
     #[test]
     fn only_messages_and_zen_tools_may_run() {

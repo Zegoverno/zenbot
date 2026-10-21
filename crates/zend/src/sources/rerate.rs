@@ -18,7 +18,7 @@ pub async fn rerate(db: &PgPool) -> Result<Value> {
     for row in rows {
         let payload: Value=row.get("payload");
         let text=zen_proto::text_of(&payload["content"]);
-        let hash: String=sqlx::query_scalar("SELECT encode(sha256(convert_to($1,'UTF8')),'hex')").bind(&text).fetch_one(db).await?;
+        let hash: String=sqlx::query_scalar("SELECT encode(sha256(convert_to($1,'UTF8')),'hex')").bind(zen_proto::digest_text(&payload["content"])).fetch_one(db).await?;
         if row.get::<Option<String>,_>("result_sha256").as_deref()!=Some(&hash) { continue; }
         let origin: String=row.get("origin");
         let Some(url)=origin.strip_prefix("web_fetch:") else {continue};
