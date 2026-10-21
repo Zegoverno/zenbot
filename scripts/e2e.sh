@@ -1481,7 +1481,9 @@ phase3_kernel() {
 # Phase 4: knowledge/entity publishing, identity resolution, memory revisions and context.
 phase4_brain() {
   local ws; ws=$(new_workspace phase4)
-  start_kernel "$ws" "$(script phase4.json)" ZEN_DEFAULT_MODEL=faux/smoke ZEN_LEGACY_TOOL_AUTHORING=0
+  local embed_port=$((PORT + 7))
+  python3 "$REPO/scripts/e2e/embed_stub.py" "$embed_port" & local embed_server=$!
+  start_kernel "$ws" "$(script phase4.json)" ZEN_DEFAULT_MODEL=faux/smoke ZEN_LEGACY_TOOL_AUTHORING=0 OPENROUTER_API_KEY=e2e-key ZEN_EMBED_URL="http://127.0.0.1:$embed_port" ZEN_INDEX_SECS=1
   local sid; sid=$(zen ask --json -m faux/smoke 'P4-HELLO'|jq -r .session_id)
   check "knowledge and relationship owner workflows" python3 "$REPO/scripts/e2e/phase4.py" "$URL" "$TOKEN" "$TMP/home" "$sid"
   local r; r=$(zen ask --json -m faux/smoke 'P4-REMEMBER')
@@ -1497,6 +1499,13 @@ phase4_brain() {
   check "fabricated owner preference is refused" eq "$(zen ask --json -m faux/smoke 'P4-FORGED'|jq -r '.tools[0].is_error')" true
   check "complete source exports exist" test -s "$TMP/home/.zenbot/global/memory/export.json"
   check "memory lifecycle and projection recovery" python3 "$REPO/scripts/e2e/phase4-memory.py" "$URL" "$TOKEN" "$TMP/home" "$sid" "m$id"
+  zen brain put --args '{"record":{"id":"fluxo","store":"knowledge","kind":"concept","title":"Blood circulation","body":"Blood circulation.","metadata":{}}}' >/dev/null
+  zen brain put --args '{"record":{"id":"axioma","store":"knowledge","kind":"concept","title":"Demonstração e continuidade","body":"Demonstração continuidade.","metadata":{}}}' >/dev/null
+  check "controlled multilingual vectors are indexed" poll "SELECT count(*) FROM search_docs WHERE kind='brain' AND ref IN('fluxo','axioma') AND embedding IS NOT NULL" 2
+  local reader; reader=$(zen sessions new --json -m faux/smoke|jq -r .id)
+  check "Portuguese query retrieves English evidence through vectors" grep -q '\"id\": \"fluxo\"' <<<"$(zen brain retrieve --args "{\"session\":\"$reader\",\"query\":\"circulacao sangue\"}")"
+  check "English query retrieves Portuguese evidence through vectors" grep -q '\"id\": \"axioma\"' <<<"$(zen brain retrieve --args "{\"session\":\"$reader\",\"query\":\"proof continuity\"}")"
+  kill "$embed_server"; wait "$embed_server" 2>/dev/null || true
 }
 
 # Crash/replay, capacity outages and multi-writer denial use the same disposable Phase 4 corpus.
@@ -1528,6 +1537,9 @@ phase4_recovery() {
   rev=$(q "SELECT revision FROM memories WHERE id=$mid")
   zen brain merge --id "m$mid" --args "{\"expected_revision\":$rev,\"merge_id\":\"m$other\",\"merge_revision\":1,\"text\":\"Merged capacity evidence from two writers.\"}" >/dev/null
   check "merge retains every contributing writer" eq "$(q "SELECT count(*) FROM brain_memory_inputs WHERE memory_id=$mid")" 2
+  local duplicate; duplicate=$(q "INSERT INTO memories(text,source,record_type,entities,details,event_at,evidence,session_id) SELECT text,source,record_type,entities,details,event_at,evidence,session_id FROM memories WHERE id=$mid RETURNING id")
+  zen memory sleep --json >"$TMP/sleep-deduplicated.json"
+  check "sleep folds exact repeats into existing long-term experience" eq "$(q "SELECT tier FROM memories WHERE id=$duplicate")/$(jq -r .merged "$TMP/sleep-deduplicated.json")" archived/1
   curl -sf -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{}' "$URL/api/sessions/$writer/deny" >/dev/null
   check "denial reaches a merged memory through its second writer" eq "$(q "SELECT zen_memory_contaminated($mid)")" t
   zen brain put --args "{\"record\":{\"id\":\"derived-denied\",\"store\":\"knowledge\",\"kind\":\"claim\",\"title\":\"Derived capacity account\",\"body\":\"A derived account requires its original evidence.\",\"metadata\":{\"evidence\":[{\"source\":\"m$mid\",\"locator\":\"merged account\",\"basis\":\"interpretation\"}]}}}" >/dev/null

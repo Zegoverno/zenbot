@@ -83,7 +83,7 @@ pub(crate) async fn finish_turn(app: &AppState, id: Uuid, error: Value) -> bool 
     let Some(turn) = app.turns.lock().await.remove(&id) else { return false };
     finishing.insert(id);
     drop(finishing);
-    let _finishing = SessionFlag { app: app.clone(), id, finishing: true };
+    let finishing = SessionFlag { app: app.clone(), id, finishing: true, armed: true };
     let _ = turn.cancel.send(true);
     let Recorded { turn: summary, parent, session_cost: cost } = match record_turn(app, &turn, &error).await {
         Ok(r) => r,
@@ -111,11 +111,14 @@ pub(crate) async fn finish_turn(app: &AppState, id: Uuid, error: Value) -> bool 
         app.emit(parent, json!({ "type": "child_end", "turn": summary })).await;
     }
     if error.is_null() {
-        assist::after_turn(app, id, turn.kind.as_deref(), turn.ending);
         if let Err(e)=crate::brain::capture_turn(app,id,turn.turn_id).await {tracing::warn!("queueing memory capture: {e:#}");}
         let size = summary["context_tokens"].as_i64().or(turn.sent["est_tokens"].as_i64()).unwrap_or(0);
         prepare_summary_if_needed(app, id, &turn.model, size).await;
     }
+    // Capture persistence may yield long enough for a fast assist call to finish. Release the
+    // finishing reservation before starting it, so it does not mistake this turn for new work.
+    finishing.release().await;
+    if error.is_null() { assist::after_turn(app, id, turn.kind.as_deref(), turn.ending); }
     true
 }
 
@@ -360,7 +363,7 @@ pub(crate) async fn prompt_loop(app: AppState) {
             if !app.starting_prompts.lock().await.insert(session) { continue; }
             let app = app.clone();
             tokio::spawn(async move {
-                let _starting = SessionFlag { app: app.clone(), id: session, finishing: false };
+                let _starting = SessionFlag { app: app.clone(), id: session, finishing: false, armed: true };
                 let queued: i64 = row.get("id");
                 let pending = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pending_prompts WHERE id=$1 AND error IS NULL)")
                     .bind(queued).fetch_one(&app.db).await.unwrap_or(false);
@@ -728,9 +731,17 @@ mod tests {
 }
 
 /// Keep start/finish reservations even when their owning task panics or is cancelled.
-struct SessionFlag { app: AppState, id: Uuid, finishing: bool }
+struct SessionFlag { app: AppState, id: Uuid, finishing: bool, armed: bool }
+impl SessionFlag {
+    async fn release(mut self) {
+        if self.finishing { self.app.finishing.lock().await.remove(&self.id); }
+        else { self.app.starting_prompts.lock().await.remove(&self.id); }
+        self.armed = false;
+    }
+}
 impl Drop for SessionFlag {
     fn drop(&mut self) {
+        if !self.armed { return; }
         let (app, id, finishing) = (self.app.clone(), self.id, self.finishing);
         tokio::spawn(async move {
             if finishing { app.finishing.lock().await.remove(&id); }

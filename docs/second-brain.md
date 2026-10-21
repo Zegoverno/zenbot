@@ -53,6 +53,7 @@ stable retry keys. Explicit pins go directly to long-term memory.
 The short-term soft target is `ZEN_MEMORY_CHARS` (4,000 characters); its double is the hard view
 limit. Full buffers save pending entries durably. Sleep uses bounded S1 batches, keeps uncertainty,
 promotes durable experience and archives clearly expired detail. Changed revisions are left alone.
+Exact repeats with matching scope/details/event time fold into existing long-term records with all evidence retained; semantic merges require review.
 Stale long-term/archive projections are withdrawn after disposition changes.
 No automatic sleep writes USER/IDENTITY/SOUL/AGENTS. Model outages retain pending work; inspect
 failed receipts and retry them. Archive is retention outside normal recall, not physical erasure.

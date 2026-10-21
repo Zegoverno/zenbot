@@ -80,7 +80,7 @@ async fn candidates(app: &crate::AppState, s: Uuid, q: &str) -> Result<Vec<Candi
     }
     for id in expanded {
         if let Ok(r) = super::records::get_record(db, &id, Some(s)).await {
-            if r["risk"].as_i64().unwrap_or(4) >= 4 {
+            if r["risk"].as_i64().unwrap_or(4) >= 4 || r["status"] == "archived" {
                 continue;
             }
             out.push(Candidate {
@@ -114,16 +114,17 @@ async fn candidates(app: &crate::AppState, s: Uuid, q: &str) -> Result<Vec<Candi
             match f.kind.as_str() {
                 "brain" => {
                     if let Ok(v) = super::records::get_record(db, &f.reference, Some(s)).await {
-                        if v["risk"].as_i64().unwrap_or(4) >= 4 {
+                        if v["risk"].as_i64().unwrap_or(4) >= 4 || v["status"] == "archived" {
                             continue;
                         }
                         out.push(Candidate {
                             id: f.reference,
                             text: format!(
-                                "{}\n{}\nEvidence: {}",
+                                "{}\n{}\nEvidence: {}\nStatus: {}",
                                 v["title"],
                                 string(&v, "body"),
-                                v["metadata"]["evidence"]
+                                v["metadata"]["evidence"],
+                                v["status"]
                             ),
                             revision: v["revision"].clone(),
                             risk: v["risk"].as_i64().unwrap_or(4) as i16,

@@ -520,7 +520,7 @@ async fn consolidate_inner(app: &crate::AppState, trigger: &str) -> Result<Value
     sqlx::query("SELECT pg_advisory_xact_lock(704,5)")
         .execute(&mut *tx)
         .await?;
-    let (mut promoted, mut kept, mut held, mut archived) = (0, 0, 0, 0);
+    let (mut promoted, mut kept, mut held, mut archived, mut merged) = (0, 0, 0, 0, 0);
     for (i, v) in rows.iter().enumerate() {
         let fresh: bool =
             sqlx::query_scalar("SELECT revision=$2 FROM memories WHERE id=$1 FOR UPDATE")
@@ -533,6 +533,31 @@ async fn consolidate_inner(app: &crate::AppState, trigger: &str) -> Result<Value
             continue;
         }
         let pinned = v["pinned"] == true;
+        // Exact duplicate experience can fold into an already durable record without a model.
+        // Scope, event time and structured details must agree; semantic duplicates need review.
+        let event_at = v["event_at"]
+            .as_str()
+            .map(str::parse::<chrono::DateTime<chrono::Utc>>)
+            .transpose()?;
+        let duplicate: Option<i64> = if pinned {
+            None
+        } else {
+            sqlx::query_scalar("SELECT id FROM memories WHERE id<$1 AND tier='long' AND text=$2 AND source=$3 AND record_type=$4 AND entities=$5 AND details=$6 AND event_at IS NOT DISTINCT FROM $7 AND risk<4 AND NOT zen_memory_contaminated(id) ORDER BY id LIMIT 1 FOR UPDATE")
+                .bind(v["id"].as_i64()).bind(string(v,"text")).bind(string(v,"source")).bind(string(v,"record_type")).bind(&v["entities"]).bind(&v["details"]).bind(event_at).fetch_optional(&mut *tx).await?
+        };
+        if let Some(target) = duplicate {
+            sqlx::query("INSERT INTO brain_memory_inputs SELECT $1,writer FROM brain_memory_inputs WHERE memory_id=$2 ON CONFLICT DO NOTHING").bind(target).bind(v["id"].as_i64()).execute(&mut *tx).await?;
+            sqlx::query("UPDATE memories SET evidence=evidence||$2,risk=GREATEST(risk,$3),updated_at=now() WHERE id=$1").bind(target).bind(&v["evidence"]).bind(v["risk"].as_i64().unwrap_or(4) as i16).execute(&mut *tx).await?;
+            sqlx::query(
+                "UPDATE memories SET tier='archived',reason=$2,updated_at=now() WHERE id=$1",
+            )
+            .bind(v["id"].as_i64())
+            .bind(format!("sleep: exact duplicate retained in m{target}"))
+            .execute(&mut *tx)
+            .await?;
+            merged += 1;
+            continue;
+        }
         let durable = decisions.get(i).is_some_and(|d| {
             d.answered
                 && d.prob("durable")
@@ -573,14 +598,14 @@ async fn consolidate_inner(app: &crate::AppState, trigger: &str) -> Result<Value
         used += text.chars().count() + 80;
     }
     let note = format!(
-        "Promoted {promoted}; kept {kept}; archived {archived}; changed {held}. Uncertain entries retained; prompt files unchanged."
+        "Promoted {promoted}; kept {kept}; merged {merged}; archived {archived}; changed {held}. Uncertain entries retained; prompt files unchanged."
     );
     sqlx::query("UPDATE sleep_runs SET ended_at=now(),entries=$2,kept=$3,promoted=$4,dropped=$6,note=$5 WHERE id=$1").bind(run).bind(rows.len() as i32).bind(kept).bind(promoted).bind(&note).bind(archived).execute(&mut *tx).await?;
     enqueue_export(&mut tx).await?;
     tx.commit().await?;
     export(db).await?;
     Ok(
-        json!({"run":run,"promoted":promoted,"kept":kept,"changed":held,"archived":archived,"note":note}),
+        json!({"run":run,"promoted":promoted,"kept":kept,"merged":merged,"changed":held,"archived":archived,"note":note}),
     )
 }
 pub async fn capture_turn(app: &crate::AppState, session: Uuid, turn: Uuid) -> Result<()> {
