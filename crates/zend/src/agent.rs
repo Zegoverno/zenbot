@@ -34,6 +34,8 @@ pub fn read_only(kind: Option<&str>) -> bool {
 /// Each kind is allowed what it needs; a kind not named here gets nothing.
 pub fn refusal(kind: Option<&str>, name: &str) -> Option<String> {
     match kind {
+        None if name=="save_tool" && !crate::config::get().legacy_tool_authoring=>Some("New made-tool authoring is retired; use a reviewed skill with supporting scripts.".into()),
+        Some(crate::delegate::SUBAGENT | crate::jobs::JOB) if name=="save_tool" && !crate::config::get().legacy_tool_authoring=>Some("New made-tool authoring is retired; use a skill draft.".into()),
         None => (name == "submit_verdict").then(|| "`submit_verdict` is only for a verifier session".into()),
         Some(VERIFIER) => (!matches!(name, "bash" | "read" | "submit_verdict")).then(|| format!("`{name}` isn't available to a verifier")),
         // A subagent (also the sleep's kernel sessions) or a scheduled job can't ask the owner,
@@ -308,7 +310,7 @@ pub fn specs(kind: Option<&str>) -> Value {
     all.push(crate::mcp::find_spec());
     all.push(crate::mcp::load_spec());
     all.push(crate::mcp::call_spec());
-    all.push(crate::workshop::save_tool_spec());
+    if crate::config::get().legacy_tool_authoring {all.push(crate::workshop::save_tool_spec());}
     all.push(verify_spec());
     if !subagent {
         all.push(crate::delegate::spec());
@@ -736,7 +738,7 @@ mod tests {
             }
         }
         let all = names(specs(None));
-        for t in ["bash", "read", "write", "edit", "history", "search", "ask", "remember", "capture", "web_search", "web_fetch", "find_skills", "load_skill", "save_skill", "find_tools", "load_tool", "call_tool", "save_tool", "verify", "delegate", "schedule"] {
+        for t in ["bash", "read", "write", "edit", "history", "search", "ask", "remember", "brain", "capture", "web_search", "web_fetch", "find_skills", "load_skill", "save_skill", "find_tools", "load_tool", "call_tool", "verify", "delegate", "schedule"] {
             assert!(all.contains(&t.to_string()), "{t} offered");
         }
         assert!(!all.contains(&"move".to_string()) && !all.contains(&"propose_brief".to_string()));

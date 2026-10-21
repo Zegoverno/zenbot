@@ -24,10 +24,33 @@ fn lexical(q: &str, text: &str) -> usize {
 }
 async fn candidates(app: &crate::AppState, s: Uuid, q: &str) -> Result<Vec<Candidate>> {
     let db = &app.db;
+    let lexical_query = words(q)
+        .into_iter()
+        .filter(|w| {
+            !matches!(
+                w.as_str(),
+                "the"
+                    | "and"
+                    | "what"
+                    | "did"
+                    | "about"
+                    | "this"
+                    | "that"
+                    | "with"
+                    | "uma"
+                    | "para"
+                    | "como"
+                    | "sobre"
+                    | "qual"
+                    | "que"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
     let mut out = vec![];
     // Fresh rows participate without waiting for background vector indexing. Short entries provide
     // continuity; long entries need lexical or multilingual stemming matches.
-    let memories:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(m) FROM memories m WHERE tier IN ('short','long','pending') AND risk<4 AND NOT zen_memory_contaminated(id) AND (tier='short' OR pinned OR text ILIKE '%'||$1||'%' OR to_tsvector('english',text) @@ websearch_to_tsquery('english',$1) OR to_tsvector('portuguese',text) @@ websearch_to_tsquery('portuguese',$1)) ORDER BY pinned DESC,updated_at DESC LIMIT 40").bind(q).fetch_all(db).await?;
+    let memories:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(m) FROM memories m WHERE tier IN ('short','long','pending') AND risk<4 AND NOT zen_memory_contaminated(id) AND (tier='short' OR pinned OR text ILIKE '%'||$1||'%' OR to_tsvector('english',text) @@ websearch_to_tsquery('english',$1) OR to_tsvector('portuguese',text) @@ websearch_to_tsquery('portuguese',$1)) ORDER BY pinned DESC,updated_at DESC LIMIT 40").bind(&lexical_query).fetch_all(db).await?;
     for v in memories {
         out.push(Candidate {
             id: format!("m{}", v["id"]),
@@ -44,7 +67,7 @@ async fn candidates(app: &crate::AppState, s: Uuid, q: &str) -> Result<Vec<Candi
             kind: "memory".into(),
         });
     }
-    let ids:Vec<String>=sqlx::query_scalar("SELECT DISTINCT r.id FROM brain_records r LEFT JOIN brain_aliases a ON a.record_id=r.id WHERE published AND status IN ('active','provisional') AND risk<4 AND NOT zen_session_contaminated(session_id) AND (r.title ILIKE '%'||$1||'%' OR a.alias=lower($1) OR to_tsvector('english',r.title||' '||r.body) @@ websearch_to_tsquery('english',$1) OR to_tsvector('portuguese',r.title||' '||r.body) @@ websearch_to_tsquery('portuguese',$1)) LIMIT 30").bind(q).fetch_all(db).await?;
+    let ids:Vec<String>=sqlx::query_scalar("SELECT DISTINCT r.id FROM brain_records r LEFT JOIN brain_aliases a ON a.record_id=r.id WHERE published AND status IN ('active','provisional') AND risk<4 AND NOT zen_session_contaminated(session_id) AND (r.title ILIKE '%'||$1||'%' OR a.alias=lower($1) OR to_tsvector('english',r.title||' '||r.body) @@ websearch_to_tsquery('english',$1) OR to_tsvector('portuguese',r.title||' '||r.body) @@ websearch_to_tsquery('portuguese',$1)) LIMIT 30").bind(&lexical_query).fetch_all(db).await?;
     let mut expanded = ids.clone();
     for id in ids.iter().take(8) {
         let neighbors:Vec<String>=sqlx::query_scalar("SELECT CASE WHEN source=$1 THEN target ELSE source END FROM brain_links WHERE source=$1 OR target=$1 ORDER BY relation LIMIT 3").bind(id).fetch_all(db).await?;
@@ -131,8 +154,8 @@ async fn candidates(app: &crate::AppState, s: Uuid, q: &str) -> Result<Vec<Candi
                             crate::sources::depend_file(db, s, &text).await?;
                             out.push(Candidate {
                                 id: format!("wiki:{}", f.reference),
+                                revision: json!(hash(&text)),
                                 text,
-                                revision: json!(hash(&f.body)),
                                 risk,
                                 writer: None,
                                 kind: "knowledge".into(),
@@ -141,6 +164,10 @@ async fn candidates(app: &crate::AppState, s: Uuid, q: &str) -> Result<Vec<Candi
                     }
                 }
                 "turn" => {
+                    let ratings = crate::search::rated_results(db, s, &[(f.clone(), None)]).await;
+                    if !ratings.first().and_then(|r| *r).is_some_and(|r| r < 4) {
+                        continue;
+                    }
                     if let Some((writer, _)) = f
                         .reference
                         .split_once(':')
@@ -233,18 +260,96 @@ pub async fn context(app: &crate::AppState, s: Uuid, query: &str) -> Result<Opti
             q.push_str(&zen_proto::head(&text, 300));
         }
     }
-    let found =
-        match tokio::time::timeout(Duration::from_millis(1800), candidates(app, s, &q)).await {
-            Ok(Ok(v)) => v,
-            Ok(Err(e)) => {
-                degraded.push(format!("retrieval unavailable: {e}"));
-                vec![]
+    let need_decision = tokio::time::timeout(
+        Duration::from_millis(650),
+        crate::s1::decide(
+            &app.db,
+            "context_needs",
+            crate::s1::Facts::new(Some(s)).with("query", q.as_str()),
+        ),
+    )
+    .await
+    .ok();
+    let fallback = q.to_lowercase();
+    let needs: Vec<&str> = [
+        ("decisions", &["decid", "agreed", "acord", "decision"][..]),
+        (
+            "commitments",
+            &["promis", "commit", "compromiss", "follow up"][..],
+        ),
+        (
+            "history",
+            &[
+                "earlier", "last", "before", "previous", "anterior", "history",
+            ][..],
+        ),
+        (
+            "skills",
+            &["how to", "procedure", "como fazer", "skill"][..],
+        ),
+        (
+            "people",
+            &["meeting", "reuni", "person", "relationship"][..],
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(name, terms)| {
+        let requested = need_decision
+            .as_ref()
+            .filter(|d| d.answered)
+            .and_then(|d| d.prob(name))
+            .map(|p| p >= 0.65)
+            .unwrap_or_else(|| terms.iter().any(|t| fallback.contains(t)));
+        requested.then_some(name)
+    })
+    .collect();
+    let mut found = match tokio::time::timeout(
+        Duration::from_millis(1800).min(Duration::from_secs(3).saturating_sub(started.elapsed())),
+        candidates(app, s, &q),
+    )
+    .await
+    {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            degraded.push(format!("retrieval unavailable: {e}"));
+            vec![]
+        }
+        Err(_) => {
+            degraded.push("retrieval deadline".into());
+            vec![]
+        }
+    };
+    let mut gap_search = false;
+    if needs.contains(&"history")
+        && !found.iter().any(|c| c.kind == "archive")
+        && started.elapsed() < Duration::from_millis(2400)
+    {
+        gap_search = true;
+        if let Ok(Ok(extra)) = tokio::time::timeout(
+            Duration::from_millis(250),
+            crate::search::query(&app.db, query, &["turn"], None, 4),
+        )
+        .await
+        {
+            for f in extra {
+                let ratings = crate::search::rated_results(&app.db, s, &[(f.clone(), None)]).await;
+                if let Some(risk) = ratings.first().and_then(|r| *r).filter(|r| *r < 4) {
+                    let writer = f
+                        .reference
+                        .split_once(':')
+                        .and_then(|(s, _)| s.parse().ok());
+                    found.push(Candidate {
+                        id: format!("archive:{}", f.reference),
+                        revision: json!(hash(&f.body)),
+                        text: f.body,
+                        risk,
+                        writer,
+                        kind: "archive".into(),
+                    });
+                }
             }
-            Err(_) => {
-                degraded.push("retrieval deadline".into());
-                vec![]
-            }
-        };
+        }
+    }
     let remaining = Duration::from_secs(3).saturating_sub(started.elapsed());
     let decisions = match tokio::time::timeout(
         remaining,
@@ -296,13 +401,19 @@ pub async fn context(app: &crate::AppState, s: Uuid, query: &str) -> Result<Opti
         if excerpt.len() < c.text.len() {
             omitted.push(json!({"id":c.id,"reason":"partial record; fetch full source for unresolved details"}));
         }
-        budget -= head.len() + excerpt.len();
+        let labelled = crate::context::label(&c.id, c.risk, &excerpt);
+        if head.len() + labelled.len() > budget {
+            omitted.push(json!({"id":c.id,"reason":"source labels exceed remaining budget"}));
+            continue;
+        }
+        budget -= head.len() + labelled.len();
         text.push_str(&head);
-        text.push_str(&crate::context::label(&c.id, c.risk, &excerpt));
+        text.push_str(&labelled);
         selected.push(json!({"id":c.id,"revision":c.revision,"kind":c.kind,"reason":"task relevance / linked context","bytes":c.text.len()}));
     }
     text.push_str("\nCoverage: bounded retrieval; verify decisions, dates, constraints and missing sources before consequential actions.\n</second_brain_context>");
-    let receipt = json!({"selected":selected,"omitted":omitted,"degraded":degraded,"coverage":"unverified","gaps":if selected.is_empty(){vec!["No admitted relevant evidence found; inspect archives or ask the owner."]}else{vec!["Completeness not established; source and relationship coverage may be partial."]},"elapsed_ms":started.elapsed().as_millis(),"bytes":text.len(),"query_hash":hash(&q)});
+    let requirements:Vec<Value>=needs.iter().map(|need|{let refs:Vec<Value>=selected.iter().filter(|v|match *need{"history"=>v["kind"]=="archive","skills"=>v["kind"]=="skill","people"=>v["kind"]=="person"||v["kind"]=="event",_=>v["kind"]=="memory"}).map(|v|v["id"].clone()).collect();json!({"need":need,"state":if refs.is_empty(){"missing_candidate"}else{"evidence_needs_verification"},"references":refs})}).collect();
+    let receipt = json!({"requirements":requirements,"gap_search":gap_search,"selected":selected,"omitted":omitted,"degraded":degraded,"coverage":"unverified","gaps":if selected.is_empty(){vec!["No admitted relevant evidence found; inspect archives or ask the owner."]}else{vec!["Completeness not established; source and relationship coverage may be partial."]},"elapsed_ms":started.elapsed().as_millis(),"bytes":text.len(),"query_hash":hash(&q)});
     sqlx::query("INSERT INTO brain_contexts(id,session_id,query,receipt) VALUES($1,$2,$3,$4)")
         .bind(Uuid::new_v4())
         .bind(s)

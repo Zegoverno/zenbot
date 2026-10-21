@@ -658,11 +658,12 @@ Phase 2b/3 (D-068): `jobs.owner_approved` records authority (0034); `crates/zend
 - Migration `0035_second_brain.sql`: `brain_records`, `brain_aliases`, `brain_links`, `brain_work`,
   `brain_revisions`, `brain_contexts`, `brain_skill_uses`, `brain_memory_inputs`; memory metadata,
   history and dependencies; English/Portuguese search indexes.
+- `ZEN_LEGACY_TOOL_AUTHORING` defaults off; enable only for legacy `save_tool` migration.
 - `ZEN_BRAIN_MODE` = `on`: automatic context/capture; `shadow`: context receipts only; `off`: neither.
   Explicit memory operations remain available. `ZEN_BRAIN_CONTEXT_BYTES` = `4000` (500..16000),
   conservative per-turn evidence size. `ZEN_MEMORY_CHARS` remains the soft short-memory target;
   its double is the hard view limit. `ZEN_PROMOTE_BAR` controls durable classification.
-- S1 decisions `memory_capture`, `memory_durable`, `memory_disposition`, `context_curator`: private
+- S1 decisions `memory_capture`, `memory_durable`, `memory_disposition`, `context_curator`, `context_needs`: private
   evidence only; unavailable capture stays retryable, unavailable selection falls back to lexical.
 - `global/MEMORY.md`, `global/memory/records/`, `global/memory/archive/`, `global/memory/export.json`:
   private database projections; `global/entities/`: people, organizations and projects; knowledge

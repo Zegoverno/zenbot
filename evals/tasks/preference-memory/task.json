@@ -1,0 +1,23 @@
+{
+  "description": "A standing owner preference is explicitly persisted as sourced memory, without silently rewriting behavioral configuration (Phase 4 replaces the previous prompt-file promotion policy).",
+  "areas": [
+    "prompt",
+    "memory"
+  ],
+  "work": "reflect",
+  "steps": [
+    {
+      "prompt": "From now on, whenever you finish a job, end your report with one line saying roughly what it cost."
+    }
+  ],
+  "checks": [
+    {
+      "name": "preference persisted",
+      "run": "jq -e 'select(any(.tools[]?; .name == \"remember\" or .name == \"brain\"))' \"$TURNS\" >/dev/null"
+    },
+    {
+      "name": "does not rewrite behavior files",
+      "run": "! jq -e 'select(any(.tools[]?; (.name == \"write\" or .name == \"edit\") and ((.args.path // \"\") | test(\"USER\\\\.md|IDENTITY\\\\.md\"))))' \"$TURNS\" >/dev/null"
+    }
+  ]
+}

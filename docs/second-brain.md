@@ -117,8 +117,8 @@ Skills retain SKILL.md folders and progressive loading. Loads record the content
 owner's accepted-session verdict is associated with those uses. New skills and revisions are drafts;
 only explicit fingerprint review activates them. Earlier active content is archived before replacing
 it. Loading a skill grants no execution permission, and a successful session is not proof every
-step of a skill worked. Existing made-tool execution remains compatible while procedural work moves
-to skills and supporting scripts.
+step of a skill worked. Existing made-tool execution remains compatible. New authoring is retired by default;
+`ZEN_LEGACY_TOOL_AUTHORING=1` is a migration switch. Prefer skills and supporting scripts.
 
 Source-risk/contamination rules apply across memory and graph reads, merges, exports and context.
 Private model calls obey `ZEN_S1_PRIVATE`. A correction cannot remove text a running model already

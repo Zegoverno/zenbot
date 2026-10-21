@@ -36,9 +36,9 @@ CREATE TABLE brain_aliases (
  PRIMARY KEY(alias,record_id)
 );
 CREATE TABLE brain_links (
- source text NOT NULL REFERENCES brain_records(id), relation text NOT NULL,
- target text NOT NULL REFERENCES brain_records(id), evidence jsonb NOT NULL DEFAULT '[]',
- tentative boolean NOT NULL DEFAULT false, PRIMARY KEY(source,relation,target)
+ source text NOT NULL REFERENCES brain_records(id), source_anchor text NOT NULL DEFAULT '', relation text NOT NULL,
+ target text NOT NULL REFERENCES brain_records(id), target_anchor text NOT NULL DEFAULT '', evidence jsonb NOT NULL DEFAULT '[]',
+ tentative boolean NOT NULL DEFAULT false, PRIMARY KEY(source,source_anchor,relation,target,target_anchor)
 );
 CREATE INDEX brain_links_target ON brain_links(target);
 CREATE TABLE brain_work (

@@ -86,6 +86,8 @@ pub struct Config {
     pub memory_chars: usize,
     /// `ZEN_BRAIN_MODE` (on): on, shadow (record context only), or off (no automatic recall/capture).
     pub brain_mode: String,
+    /// `ZEN_LEGACY_TOOL_AUTHORING` (off): compatibility for existing save_tool workflows.
+    pub legacy_tool_authoring: bool,
     /// `ZEN_BRAIN_CONTEXT_BYTES` (4000, 500..16000): conservative context evidence byte budget.
     pub brain_context_bytes: usize,
     /// `ZEN_PROMOTE_BAR` (0.9): the sleep's bar for promoting an entry on its own.
@@ -169,6 +171,7 @@ impl Config {
             compact_idle_secs: num("ZEN_COMPACT_IDLE_SECS", 300.0) as i64,
             suggest: on("ZEN_SUGGEST"),
             memory_chars: num("ZEN_MEMORY_CHARS", 4000.0).max(200.0) as usize,
+            legacy_tool_authoring: set("ZEN_LEGACY_TOOL_AUTHORING").is_some_and(|s|matches!(s.as_str(),"1"|"on"|"true")),
             brain_mode: set("ZEN_BRAIN_MODE").filter(|s|matches!(s.as_str(),"on"|"shadow"|"off")).unwrap_or_else(||"on".into()),
             brain_context_bytes: num("ZEN_BRAIN_CONTEXT_BYTES",4000.0).clamp(500.0,16000.0) as usize,
             promote_bar: num("ZEN_PROMOTE_BAR", 0.9),

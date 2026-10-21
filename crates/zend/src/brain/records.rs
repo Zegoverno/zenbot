@@ -38,6 +38,15 @@ fn valid_id(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
+fn target_parts(value: &str) -> (&str, Option<&str>) {
+    match value.split_once('#') {
+        Some((id, anchor)) => (id, Some(anchor)),
+        None => (value, None),
+    }
+}
+fn has_anchor(body: &str, anchor: &str) -> bool {
+    body.contains(&format!("{{#{anchor}}}")) || body.contains(&format!("id=\"{anchor}\""))
+}
 fn folder(kind: &str) -> &str {
     match kind {
         "person" => "people",
@@ -98,7 +107,23 @@ fn validate(r: &Value) -> Result<()> {
         ),
         "invalid status"
     );
+    ensure!(
+        r["schema_version"].is_null() || r["schema_version"] == 1,
+        "unsupported schema version"
+    );
+    let id = string(r, "id");
+    ensure!(
+        !(id.starts_with('m') && id[1..].parse::<i64>().is_ok()),
+        "numeric m IDs are reserved for memory"
+    );
     let m = &r["metadata"];
+    ensure!(m.to_string().len() <= 24000, "metadata exceeds 24k bytes");
+    for subject in m["subjects"].as_array().into_iter().flatten() {
+        ensure!(
+            subject.as_str().is_some_and(valid_id),
+            "subject IDs must be canonical slugs"
+        );
+    }
     ensure!(m.is_null() || m.is_object(), "metadata must be an object");
     for key in ["aliases", "subjects", "evidence", "links"] {
         ensure!(
@@ -129,7 +154,11 @@ fn validate(r: &Value) -> Result<()> {
     }
     for l in m["links"].as_array().into_iter().flatten() {
         ensure!(
-            RELATIONS.contains(&string(l, "relation").as_str()) && valid_id(&string(l, "target")),
+            RELATIONS.contains(&string(l, "relation").as_str()) && {
+                let target = string(l, "target");
+                let (id, anchor) = target_parts(&target);
+                valid_id(id) && anchor.is_none_or(valid_id)
+            },
             "invalid relationship"
         );
         ensure!(
@@ -245,6 +274,20 @@ async fn put(
     } else {
         ensure!(expected.is_none(), "record not found");
     }
+    if r["status"].is_null() {
+        r["status"] = json!("active");
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    r["updated"] = json!(now);
+    if let Some(old) = &prior {
+        let old_text = tokio::fs::read_to_string(old.get::<String, _>("path")).await?;
+        r["created"] = parse(&old_text)?
+            .get("created")
+            .cloned()
+            .unwrap_or(json!(now));
+    } else {
+        r["created"] = json!(now);
+    }
     let rev = prior
         .as_ref()
         .map(|o| o.get::<i64, _>("revision") + 1)
@@ -271,8 +314,12 @@ async fn put(
         );
     }
     for l in r["metadata"]["links"].as_array().into_iter().flatten() {
-        let target = string(l, "target");
-        ensure!(target != id, "self-link not useful");
+        let target_ref = string(l, "target");
+        let (target, anchor) = target_parts(&target_ref);
+        ensure!(
+            target != id || anchor.is_some(),
+            "self-link needs an explicit claim anchor"
+        );
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM brain_records WHERE id=$1 AND published)",
         )
@@ -280,6 +327,19 @@ async fn put(
         .fetch_one(&mut *tx)
         .await?;
         ensure!(exists, "unknown or pending link target {target}");
+        if let Some(anchor) = anchor {
+            let body: String = sqlx::query_scalar("SELECT body FROM brain_records WHERE id=$1")
+                .bind(target)
+                .fetch_one(&mut *tx)
+                .await?;
+            ensure!(has_anchor(&body, anchor), "target claim anchor missing");
+        }
+        if let Some(anchor) = l["source_anchor"].as_str() {
+            ensure!(
+                valid_id(anchor) && has_anchor(&string(&r, "body"), anchor),
+                "source claim anchor missing"
+            );
+        }
     }
     r["revision"] = json!(rev);
     r["schema_version"] = json!(1);
@@ -378,7 +438,10 @@ async fn publish(app: &crate::AppState, p: &Value) -> Result<()> {
         .execute(&mut *tx)
         .await?;
     for l in r["metadata"]["links"].as_array().into_iter().flatten() {
-        sqlx::query("INSERT INTO brain_links(source,relation,target,evidence,tentative) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING").bind(&id).bind(string(l,"relation")).bind(string(l,"target")).bind(l.get("evidence").cloned().unwrap_or(json!([]))).bind(l["tentative"].as_bool().unwrap_or(false)).execute(&mut *tx).await?;
+        let reference = string(l, "target");
+        let (target, anchor) = target_parts(&reference);
+        sqlx::query("INSERT INTO brain_links(source,source_anchor,relation,target,target_anchor,evidence,tentative) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING")
+            .bind(&id).bind(l["source_anchor"].as_str().unwrap_or("")).bind(string(l,"relation")).bind(target).bind(anchor.unwrap_or("")).bind(l.get("evidence").cloned().unwrap_or(json!([]))).bind(l["tentative"].as_bool().unwrap_or(false)).execute(&mut *tx).await?;
     }
     sqlx::query("UPDATE brain_records SET digest=$2,published=true WHERE id=$1")
         .bind(&id)
@@ -430,6 +493,10 @@ pub(crate) async fn private_write(path: &std::path::Path, text: &str) -> Result<
     Ok(())
 }
 pub async fn recover(app: &crate::AppState) -> Result<()> {
+    let schema_path = root().join("brain-schema.md");
+    if !schema_path.exists() {
+        private_write(&schema_path, SCHEMA).await?;
+    }
     sqlx::query("UPDATE brain_work SET state='pending' WHERE kind='capture' AND state='failed' AND attempts<8 AND updated_at < now()-interval '1 minute'*attempts").execute(&app.db).await?;
     let rows=sqlx::query("UPDATE brain_work SET state='running',lease_until=now()+interval '2 minutes',attempts=attempts+1 WHERE id IN (SELECT id FROM brain_work WHERE state='pending' OR (state='running' AND lease_until<now()) ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 8) RETURNING id,kind,payload,attempts")
         .fetch_all(&app.db).await?;
@@ -510,12 +577,30 @@ pub async fn manage(app: &crate::AppState, session: Option<Uuid>, a: &Value) -> 
             ensure!(session.is_none(), "manual file import is owner-only");
             let row = sqlx::query("SELECT path,revision FROM brain_records WHERE id=$1")
                 .bind(&id)
-                .fetch_one(&app.db)
+                .fetch_optional(&app.db)
                 .await?;
-            let text = tokio::fs::read_to_string(row.get::<String, _>("path")).await?;
+            let (file, revision) = if let Some(row) = row {
+                (
+                    PathBuf::from(row.get::<String, _>("path")),
+                    Some(row.get::<i64, _>("revision")),
+                )
+            } else {
+                let kind = a["kind"].as_str().unwrap_or("concept");
+                let store = a["store"].as_str().unwrap_or("knowledge");
+                ensure!(
+                    valid_id(&id) && KINDS.contains(&kind),
+                    "canonical ID and kind required"
+                );
+                (path(store, kind, &id), None)
+            };
+            let text = tokio::fs::read_to_string(&file).await?;
             let record = parse(&text)?;
-            ensure!(record["id"] == id, "manual edit changed stable identity");
-            put(app, None, &record, Some(row.get("revision")), true).await
+            ensure!(
+                record["id"] == id
+                    && path(&string(&record, "store"), &string(&record, "kind"), &id) == file,
+                "file identity/path mismatch"
+            );
+            put(app, None, &record, revision, true).await
         }
         "get" => {
             if id.starts_with('m') && id[1..].parse::<i64>().is_ok() {
@@ -542,7 +627,7 @@ pub async fn manage(app: &crate::AppState, session: Option<Uuid>, a: &Value) -> 
         }
         "neighbors" => {
             read(&app.db, &id, session).await?;
-            let rows=sqlx::query("SELECT source,relation,target,evidence,tentative FROM brain_links WHERE source=$1 OR target=$1 ORDER BY source,relation,target LIMIT 100").bind(&id).fetch_all(&app.db).await?;
+            let rows=sqlx::query("SELECT source,source_anchor,relation,target,target_anchor,evidence,tentative FROM brain_links WHERE source=$1 OR target=$1 ORDER BY source,relation,target LIMIT 100").bind(&id).fetch_all(&app.db).await?;
             let mut edges = vec![];
             for r in rows {
                 let other = if r.get::<String, _>("source") == id {
@@ -551,7 +636,7 @@ pub async fn manage(app: &crate::AppState, session: Option<Uuid>, a: &Value) -> 
                     r.get::<String, _>("source")
                 };
                 if read(&app.db, &other, session).await.is_ok() {
-                    edges.push(json!({"source":r.get::<String,_>("source"),"relation":r.get::<String,_>("relation"),"target":r.get::<String,_>("target"),"evidence":r.get::<Value,_>("evidence"),"tentative":r.get::<bool,_>("tentative")}));
+                    edges.push(json!({"source":r.get::<String,_>("source"),"source_anchor":r.get::<String,_>("source_anchor"),"target_anchor":r.get::<String,_>("target_anchor"),"relation":r.get::<String,_>("relation"),"target":r.get::<String,_>("target"),"evidence":r.get::<Value,_>("evidence"),"tentative":r.get::<bool,_>("tentative")}));
                 }
             }
             Ok(json!({"links":edges,"truncated":edges.len()==100}))

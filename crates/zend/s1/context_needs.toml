@@ -1,0 +1,36 @@
+name = "context_needs"
+version = 1
+description = "Which evidence is needed for this task?"
+exposure = "private"
+evidence = ["query"]
+timeout = "650ms"
+
+[question.decisions]
+type = "yes/no"
+text = "Does this task require prior decisions and their reasons? Judge the request, not whether evidence exists. Query: query"
+yes = "Needed"
+no = "Not needed"
+
+[question.commitments]
+type = "yes/no"
+text = "Does this task require promises, owners and unresolved commitments? Judge the request, not whether evidence exists. Query: query"
+yes = "Needed"
+no = "Not needed"
+
+[question.history]
+type = "yes/no"
+text = "Does this task require original historical agreements or previous events? Judge the request, not whether evidence exists. Query: query"
+yes = "Needed"
+no = "Not needed"
+
+[question.skills]
+type = "yes/no"
+text = "Does this task require a reusable procedure? Judge the request, not whether evidence exists. Query: query"
+yes = "Needed"
+no = "Not needed"
+
+[question.people]
+type = "yes/no"
+text = "Does this task require people and relationship context? Judge the request, not whether evidence exists. Query: query"
+yes = "Needed"
+no = "Not needed"

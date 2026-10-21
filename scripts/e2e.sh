@@ -52,7 +52,7 @@ start_kernel() {
   local ws=$1 script=$2; shift 2
   (
     # The scheduler is off unless a scenario turns it on (ZEN_JOBS=1).
-    export ZEN_JOBS=0 ZEN_TOKEN=$TOKEN ZEN_PORT=$PORT ZEN_WORKERS=engine ZEN_FAUX=1 ZEN_FAUX_SCRIPT=$script ZEN_WORKSPACE=$ws \
+    export ZEN_LEGACY_TOOL_AUTHORING=1 ZEN_JOBS=0 ZEN_TOKEN=$TOKEN ZEN_PORT=$PORT ZEN_WORKERS=engine ZEN_FAUX=1 ZEN_FAUX_SCRIPT=$script ZEN_WORKSPACE=$ws \
       ZEN_ENGINE_CMD="$BIN/zen-engine" DATABASE_URL="$DB_URL" HOME="$TMP/home"
     unset ZEN_S1_MODEL OPENROUTER_API_KEY
     for kv in "$@"; do export "$kv"; done
@@ -642,7 +642,7 @@ system_one_direct() {
   # The decision files: the built-in ones pass the checker; an owner file with a typo is reported with
   # its line and a suggestion, and never takes effect.
   local zs="$TMP/home/.zenbot/s1"; mkdir -p "$zs"
-  check "the built-in decision files pass the checker" grep -q "18 decisions in force (0 from your files), 0 error" <<<"$(zen s1 check)"
+  check "the built-in decision files pass the checker" grep -q "19 decisions in force (0 from your files), 0 error" <<<"$(zen s1 check)"
   sed 's/^false_no = 1$/false_noo = 1/' "$REPO/crates/zend/s1/job_approval.toml" >"$zs/job_approval.toml"
   sleep 2.5
   local report; report=$(zen s1 check 2>&1 || true)
@@ -1475,7 +1475,7 @@ phase3_kernel() {
 # Phase 4: knowledge/entity publishing, identity resolution, memory revisions and context.
 phase4_brain() {
   local ws; ws=$(new_workspace phase4)
-  start_kernel "$ws" "$(script phase4.json)" ZEN_DEFAULT_MODEL=faux/smoke
+  start_kernel "$ws" "$(script phase4.json)" ZEN_DEFAULT_MODEL=faux/smoke ZEN_LEGACY_TOOL_AUTHORING=0
   local sid; sid=$(zen ask --json -m faux/smoke 'P4-HELLO'|jq -r .session_id)
   check "knowledge and relationship owner workflows" python3 "$REPO/scripts/e2e/phase4.py" "$URL" "$TOKEN" "$TMP/home" "$sid"
   local r; r=$(zen ask --json -m faux/smoke 'P4-REMEMBER')
