@@ -1547,8 +1547,8 @@ phase4_recovery() {
   stop_kernel
   start_kernel "$ws" "$(script phase4.json "s|P4DENIED|m$mid|g")" ZEN_MEMORY_CHARS=200 ZEN_DEFAULT_MODEL=faux/smoke ZEN_LEGACY_TOOL_AUTHORING=0
   check "direct agent reads cannot expose a denied merged memory" eq "$(zen ask --json -m faux/smoke P4-DENIED|jq -r '.tools[0].is_error')" true
-  q "INSERT INTO brain_work(kind,work_key,payload) SELECT 'capture','phase4-shadow-held',payload FROM brain_work WHERE kind='capture' ORDER BY id LIMIT 1" >/dev/null
   stop_kernel
+  q "INSERT INTO brain_work(kind,work_key,payload) SELECT 'capture','phase4-shadow-held',payload FROM brain_work WHERE kind='capture' ORDER BY id LIMIT 1" >/dev/null
   start_kernel "$ws" "$(script phase4.json)" ZEN_BRAIN_MODE=shadow ZEN_DEFAULT_MODEL=faux/smoke ZEN_LEGACY_TOOL_AUTHORING=0
   sleep 5.5
   check "shadow mode leaves previously queued capture untouched" eq "$(q "SELECT state FROM brain_work WHERE work_key='phase4-shadow-held'")" pending
