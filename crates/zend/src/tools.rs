@@ -11,10 +11,11 @@ use serde_json::{json, Value};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-const MAX_OUTPUT: usize = 50 * 1024;
+const MAX_OUTPUT: usize = crate::output::PREVIEW_BYTES;
 const DEFAULT_READ_LINES: usize = 2000;
+const READ_BYTES: usize = crate::output::READ_BYTES;
 /// Most bash output kept in memory; the rest is counted but dropped.
-const MAX_CAPTURE: usize = 16 * 1024 * 1024;
+const MAX_CAPTURE: usize = crate::output::CAPTURE_BYTES;
 
 /// The file and shell tools, in a fixed order (they are part of the cached prefix). The agent's
 /// other tools are added after them (agent.rs). Each description says what the tool does, when to
@@ -23,13 +24,7 @@ pub fn specs() -> Value {
     json!([
         {
             "name": "bash",
-            "description": "Run a shell command with bash in the workspace directory. Use it for searching (rg, grep, find), git, \
-builds, tests and running programs. Not for reading or changing files: use read, write and edit, which are safer and \
-easier to review. Returns stdout and stderr together, then the exit code; output over 50KB is cut to its head and tail \
-and the full output saved to a file you can read. It runs contained: your secrets, the zen home's config, sudo, Docker and \
-local services are out of reach, and the network goes through zenbot's proxy (so curl, git, cargo, pip and npm work). \
-Set `host: true` only for what needs the owner's machine or credentials (git push, gh, ssh, deploys, docker, systemctl): \
-it is checked against the owner's job first. Background processes end with the command.",
+            "description": "Run bash in the workspace for searches, git, builds, tests and programs. Use read/write/edit for files. Runs contained: no owner credentials, sudo, Docker or local services; network uses the egress proxy. host:true requests checked access to the owner's host/credentials. Returns combined output and exit status, with a bounded head/tail preview and saved capture when large. Background processes are not a durable service mechanism.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -42,25 +37,21 @@ it is checked against the owner's job first. Background processes end with the c
         },
         {
             "name": "read",
-            "description": "Read a text file, or part of one, as numbered lines. Use it to look at files (not cat, head or \
-sed) and always before editing one. Returns up to 2000 lines or 50KB per call; the footer says which offset to \
-continue from. Paths are relative to the workspace unless absolute; `~` is the home directory. Example: \
-{\"path\": \"src/main.rs\", \"offset\": 120, \"limit\": 80}.",
+            "description": "Read text as numbered lines (default 2000, bounded preview); continue at the returned offset. Also inspect PNG/JPEG/GIF/WebP images and selected PDF pages (pages:[1,3], default first page; requires poppler-utils). Paths are workspace-relative or absolute; ~ means home. Read before editing.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "File path" },
                     "offset": { "type": "integer", "description": "1-based line to start from" },
-                    "limit": { "type": "integer", "description": "Maximum number of lines (default 2000)" }
+                    "limit": { "type": "integer", "description": "Maximum text lines (default 2000)" },
+                    "pages": { "type": "array", "minItems": 1, "maxItems": 4, "items": { "type": "integer", "minimum": 1 }, "description": "PDF pages, 1-based; default [1]" }
                 },
                 "required": ["path"]
             }
         },
         {
             "name": "write",
-            "description": "Create a file, or replace a whole file, with the given content; parent directories are created. \
-Use it for new files and complete rewrites; for changes to an existing file use edit, which keeps the rest intact. \
-To move or delete files, use bash (mv, rm). Returns the path and size written.",
+            "description": "Create or replace a complete UTF-8 file, creating parent directories. Use edit for partial changes. Returns path and byte count. Use bash to move/delete files.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -72,20 +63,20 @@ To move or delete files, use bash (mv, rm). Returns the path and size written.",
         },
         {
             "name": "edit",
-            "description": "Change an existing file by replacing exact text. Read the file first, then copy old_text from it \
-(without the line numbers), with enough surrounding lines to be unique, unless replace_all is true. Line endings and \
-trailing whitespace are handled for you; edits to the same file are applied one at a time, so several in one step are \
-safe. Returns how many occurrences were replaced, or why none matched. Example: {\"path\": \"app.py\", \
-\"old_text\": \"DEBUG = True\", \"new_text\": \"DEBUG = False\"}.",
+            "description": "Replace text in one file. Read first; old_text must match uniquely unless replace_all:true. Give old_text/new_text, or edits (up to 100) applied in order, all matched before one atomic write. Preserves line endings and permissions. Returns replacement count and a bounded diff.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "File path" },
                     "old_text": { "type": "string", "description": "Exact text to replace" },
                     "new_text": { "type": "string", "description": "Replacement text" },
-                    "replace_all": { "type": "boolean", "description": "Replace every occurrence" }
+                    "replace_all": { "type": "boolean", "description": "Replace every occurrence" },
+                    "edits": { "type": "array", "minItems": 1, "maxItems": 100, "description": "Ordered replacements in this file; all validate before one write",
+                        "items": { "type": "object", "properties": {
+                            "old_text": { "type": "string" }, "new_text": { "type": "string" }, "replace_all": { "type": "boolean" }
+                        }, "required": ["old_text", "new_text"] } }
                 },
-                "required": ["path", "old_text", "new_text"]
+                "required": ["path"]
             }
         }
     ])
@@ -93,6 +84,8 @@ safe. Returns how many occurrences were replaced, or why none matched. Example: 
 
 /// Text plus optional kernel provenance. Dispatch persists it before responding to a worker.
 pub struct ToolOutput {
+    pub content_blocks: Vec<Value>,
+    pub saved_outputs: Vec<PathBuf>,
     /// Kernel-owned provenance, never taken from a worker message or page text.
     pub rating: Option<crate::sources::Rating>,
     pub content: String,
@@ -100,11 +93,11 @@ pub struct ToolOutput {
 }
 
 fn ok(content: impl Into<String>) -> ToolOutput {
-    ToolOutput { rating: None, content: content.into(), is_error: false }
+    ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content: content.into(), is_error: false }
 }
 
 fn err(content: impl Into<String>) -> ToolOutput {
-    ToolOutput { rating: None, content: content.into(), is_error: true }
+    ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content: content.into(), is_error: true }
 }
 
 /// Resolve a tool path: `~` is the home directory, a leading `@` (as in `@file` mentions) is dropped,
@@ -165,28 +158,7 @@ async fn lock_files(paths: &[&Path]) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
 
 /// Keep the head and tail of oversized output (cut at line boundaries) so errors at the end stay visible.
 fn truncate(s: &str) -> Option<String> {
-    if s.len() <= MAX_OUTPUT {
-        return None;
-    }
-    let half = MAX_OUTPUT / 2;
-    let mut head_end = s.floor_char_boundary(half);
-    if let Some(nl) = s[..head_end].rfind('\n') {
-        head_end = nl + 1;
-    }
-    let mut tail_start = s.ceil_char_boundary(s.len() - half);
-    if let Some(nl) = s[tail_start..].find('\n') {
-        if tail_start + nl + 1 < s.len() {
-            tail_start += nl + 1;
-        }
-    }
-    let skipped_lines = s[head_end..tail_start].matches('\n').count();
-    Some(format!(
-        "{}\n[... {} lines ({} bytes) omitted ...]\n\n{}",
-        &s[..head_end],
-        skipped_lines,
-        tail_start - head_end,
-        &s[tail_start..]
-    ))
+    crate::output::preview(s)
 }
 
 /// Save the full text of an oversized output so the model can page through it with `read`. Kept in
@@ -197,13 +169,7 @@ pub(crate) fn save_full_output(text: &str) -> Option<PathBuf> {
 }
 
 fn save_full_output_in(dir: &Path, text: &str) -> Option<PathBuf> {
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).ok()?;
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
-    let path = dir.join(format!("{nanos}.log"));
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).ok()?;
-    std::io::Write::write_all(&mut f, crate::secrets::mask(text).as_bytes()).ok()?;
-    Some(path)
+    crate::output::save_text(dir, text)
 }
 
 /// Where a shell runs (bubblewrap). Every session's shell is `Contained` (D-067); `None` is the
@@ -605,6 +571,7 @@ async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], sandbox: San
     let timeout = args.get("timeout_secs").and_then(Value::as_u64).unwrap_or(120).clamp(1, 600);
     let Shell { text, status } = run_shell(workspace, command, env, sandbox, masks, Duration::from_secs(timeout)).await.map_err(err)?;
     // Cutting and saving (with masking) up to 16 MB of output is blocking work: off the runtime's threads.
+    let mut saved_outputs = Vec::new();
     let mut body = if text.len() <= MAX_OUTPUT {
         text
     } else {
@@ -617,11 +584,13 @@ async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], sandbox: San
                 None => save_full_output(&text),
             };
             match saved {
-                Some(path) => format!("{cut}\n[output truncated; full output ({} bytes) saved to {}]", text.len(), path.display()),
-                None => cut,
+                Some(path) => (format!("{cut}\n[output truncated; captured output ({} bytes) saved to {}]", text.len(), path.display()), Some(path)),
+                None => (format!("{cut}\n[output truncated; omitted output could not be saved]"), None),
             }
         });
-        cut.await.map_err(|e| err(format!("failed to collect the output: {e}")))?
+        let (body, path) = cut.await.map_err(|e| err(format!("failed to collect the output: {e}")))?;
+        saved_outputs.extend(path);
+        body
     };
     if !body.is_empty() && !body.ends_with('\n') {
         body.push('\n');
@@ -633,13 +602,15 @@ async fn bash(workspace: &Path, args: &Value, env: &[(&str, &str)], sandbox: San
     match status {
         None => {
             body.push_str(&format!("[command timed out after {timeout}s and was killed; output so far is shown above]"));
-            Err(err(body))
+            let mut out = err(body); out.saved_outputs = saved_outputs; Err(out)
         }
-        Some(Err(e)) => Err(err(format!("{body}[failed waiting for bash: {e}]"))),
+        Some(Err(e)) => { let mut out = err(format!("{body}[failed waiting for bash: {e}]")); out.saved_outputs = saved_outputs; Err(out) },
         Some(Ok(status)) => {
             let code = status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into());
             body.push_str(&format!("[exit code: {code}]"));
-            Ok(if status.success() { ok(body) } else { err(body) })
+            let mut out = if status.success() { ok(body) } else { err(body) };
+            out.saved_outputs = saved_outputs;
+            Ok(out)
         }
     }
 }
@@ -651,7 +622,7 @@ fn is_binary(bytes: &[u8]) -> bool {
 }
 
 async fn read(workspace: &Path, args: &Value, origin: Option<Origin<'_>>) -> Result<ToolOutput, ToolOutput> {
-    const MAX_READ_FILE: u64 = 16 * 1024 * 1024;
+    const MAX_READ_FILE: u64 = crate::media::MAX_FILE_BYTES as u64;
     let path = resolve(workspace, str_arg(args, "path")?);
     let file = tokio::fs::OpenOptions::new().read(true).custom_flags(0x800).open(&path).await
         .map_err(|e| err(format!("cannot read {}: {e}", path.display())))?;
@@ -672,7 +643,7 @@ async fn read(workspace: &Path, args: &Value, origin: Option<Origin<'_>>) -> Res
     if !meta.is_file() { return Err(err("read accepts only regular files, not pipes or devices")); }
     let size = meta.len();
     if size > MAX_READ_FILE {
-        return Err(err(format!("{} is {} bytes, over read's 16 MiB limit; use bash to inspect a range", path.display(), size)));
+        return Err(err(format!("{} is {} bytes, over read's 20 MiB limit; use bash to inspect a range", path.display(), size)));
     }
     // The same open file may grow after stat, and procfs files often report size zero.
     let mut bytes = Vec::with_capacity(size as usize);
@@ -682,7 +653,20 @@ async fn read(workspace: &Path, args: &Value, origin: Option<Origin<'_>>) -> Res
         let mut file = limited.into_inner();
         let mut extra = [0_u8; 1];
         if file.read(&mut extra).await.map_err(|e| err(format!("cannot read {}: {e}", path.display())))? > 0 {
-            return Err(err(format!("{} exceeds read's 16 MiB limit; use bash to inspect a range", path.display())));
+            return Err(err(format!("{} exceeds read's 20 MiB limit; use bash to inspect a range", path.display())));
+        }
+    }
+    // Media conversion consumes exactly the authorized snapshot, never reopens a mutable path.
+    let media = crate::media::recognized(&bytes) || is_binary(&bytes);
+    if media {
+        let rating = match origin {
+            Some(o) => Some(crate::sources::read_binary_rating(o.db, o.session, &opened, &bytes).await
+                .map_err(|e| err(format!("media provenance unavailable: {e}")))?),
+            None => None,
+        };
+        if let Some((content, content_blocks)) = crate::media::read(&bytes, args).await
+            .map_err(|e| err(format!("cannot inspect media: {e:#}")))? {
+            return Ok(ToolOutput { rating, content, content_blocks, saved_outputs: Vec::new(), is_error: false });
         }
     }
     if is_binary(&bytes) {
@@ -697,12 +681,13 @@ async fn read(workspace: &Path, args: &Value, origin: Option<Origin<'_>>) -> Res
         crate::sources::depend_file(origin.db,origin.session,&text).await.map_err(|e|err(format!("file origin dependencies unavailable: {e}")))?;
         Some(crate::sources::Rating {risk: crate::sources::file_rating(origin.db,&opened,&text).await.map_err(|e|err(format!("file provenance unavailable: {e}")))?,origin:format!("file:{}",opened.display())})
     } else {None};
+    let text = crate::secrets::mask(&text);
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(1).max(1) as usize;
     let limit = args.get("limit").and_then(Value::as_u64).map(|l| (l as usize).max(1)).unwrap_or(DEFAULT_READ_LINES);
     let total = text.lines().count();
     if total == 0 {
-        return Ok(ToolOutput {rating,content:"[empty file]\n".into(),is_error:false});
+        return Ok(ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating,content:"[empty file]\n".into(),is_error:false});
     }
     if offset > total {
         return Err(err(format!("offset {offset} is past the end of the file ({total} lines)")));
@@ -711,10 +696,10 @@ async fn read(workspace: &Path, args: &Value, origin: Option<Origin<'_>>) -> Res
     let mut last = offset - 1;
     for (i, line) in text.lines().enumerate().skip(offset - 1).take(limit) {
         let numbered = format!("{:>6}\t{}\n", i + 1, line);
-        if out.len() + numbered.len() > MAX_OUTPUT {
+        if out.len() + numbered.len() > READ_BYTES {
             if out.is_empty() {
                 // A single line longer than the whole budget: show its start.
-                out.push_str(&numbered[..numbered.floor_char_boundary(MAX_OUTPUT)]);
+                out.push_str(&numbered[..numbered.floor_char_boundary(READ_BYTES)]);
                 out.push_str(&format!(
                     "\n[line {} is {} bytes long and was cut; use bash (e.g. `sed -n '{}p' FILE | cut -c1-2000`) to see parts of it]\n",
                     i + 1,
@@ -731,7 +716,7 @@ async fn read(workspace: &Path, args: &Value, origin: Option<Origin<'_>>) -> Res
     if last < total {
         out.push_str(&format!("[showing lines {offset}-{last} of {total}; continue with offset={}]\n", last + 1));
     }
-    Ok(ToolOutput {rating,content:out,is_error:false})
+    Ok(ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating,content:out,is_error:false})
 }
 
 // ---------- write / edit ----------
@@ -867,17 +852,52 @@ fn find_matches(hay: &str, needle: &str) -> (Vec<(usize, usize)>, bool) {
     (found, true)
 }
 
+/// A batch applies in order against the preceding edit's result, with one final atomic write.
+fn edit_requests(args: &Value) -> Result<Vec<(String, String, bool)>, ToolOutput> {
+    let requests = if let Some(batch) = args.get("edits") {
+        if args.get("old_text").is_some() || args.get("new_text").is_some() || args.get("replace_all").is_some() {
+            return Err(err("use either edits or old_text/new_text, not both"));
+        }
+        let items = batch.as_array().filter(|v| !v.is_empty() && v.len() <= 100)
+            .ok_or_else(|| err("edits must contain 1 to 100 replacements"))?;
+        items.iter().collect::<Vec<_>>()
+    } else { vec![args] };
+    requests.into_iter().map(|a| {
+        let old = str_arg(a, "old_text")?.replace("\r\n", "\n");
+        let new = str_arg(a, "new_text")?.replace("\r\n", "\n");
+        if old.is_empty() { return Err(err("old_text must not be empty")); }
+        if old == new { return Err(err("old_text and new_text are identical; nothing to change")); }
+        Ok((old, new, a.get("replace_all").and_then(Value::as_bool).unwrap_or(false)))
+    }).collect()
+}
+
+/// One valid unified hunk spanning the changed lines, with three unchanged context lines.
+fn edit_diff(path: &Path, before: &str, after: &str) -> String {
+    let old: Vec<&str> = before.split_inclusive('\n').collect();
+    let new: Vec<&str> = after.split_inclusive('\n').collect();
+    let prefix = old.iter().zip(&new).take_while(|(a,b)| a == b).count();
+    let suffix = old[prefix..].iter().rev().zip(new[prefix..].iter().rev()).take_while(|(a,b)| a == b).count();
+    let start = prefix.saturating_sub(3);
+    let old_end = (old.len() - suffix + 3).min(old.len());
+    let new_end = (new.len() - suffix + 3).min(new.len());
+    let mut diff = format!("--- {}\n+++ {}\n@@ -{},{} +{},{} @@\n", path.display(), path.display(),
+        if old.is_empty() {0} else {start + 1}, old_end-start,
+        if new.is_empty() {0} else {start + 1}, new_end-start);
+    let mut line = |mark: char, text: &str| {
+        diff.push(mark); diff.push_str(text);
+        if !text.ends_with('\n') { diff.push_str("\n\\ No newline at end of file\n"); }
+    };
+    for text in &old[start..prefix] { line(' ', text); }
+    for text in &old[prefix..old.len()-suffix] { line('-', text); }
+    for text in &new[prefix..new.len()-suffix] { line('+', text); }
+    for text in &old[old.len()-suffix..old_end] { line(' ', text); }
+    let diff = crate::secrets::mask(&diff);
+    crate::output::preview(&diff).unwrap_or(diff)
+}
+
 async fn edit(workspace: &Path, args: &Value, gated: bool, origin: Option<Origin<'_>>) -> Result<ToolOutput, ToolOutput> {
     let path = resolve(workspace, str_arg(args, "path")?);
-    let old = str_arg(args, "old_text")?.replace("\r\n", "\n");
-    let new = str_arg(args, "new_text")?.replace("\r\n", "\n");
-    let all = args.get("replace_all").and_then(Value::as_bool).unwrap_or(false);
-    if old.is_empty() {
-        return Err(err("old_text must not be empty"));
-    }
-    if old == new {
-        return Err(err("old_text and new_text are identical; nothing to change"));
-    }
+    let edits = edit_requests(args)?;
     let _guard = lock_files(&[&path]).await;
     let anchor = if gated { Some(anchored(workspace, &path).map_err(|e| err(format!("cannot confine edit: {e}")))?) } else { None };
     let target = anchor.as_ref().map(|(_, p)| p.as_path()).unwrap_or(&path);
@@ -913,36 +933,41 @@ async fn edit(workspace: &Path, args: &Value, gated: bool, origin: Option<Origin
     let crlf = newlines > 0 && crlf_lines == newlines;
     let text = if crlf { body.replace("\r\n", "\n") } else { body.to_string() };
 
-    let (matches, loose) = find_matches(&text, &old);
-    if matches.is_empty() {
-        return Err(err(format!(
-            "old_text not found in {}; read the file again and copy the exact text (without line numbers)",
-            path.display()
-        )));
+    let mut updated = text.clone();
+    let mut n = 0;
+    let mut loose = false;
+    for (i, (old, new, all)) in edits.iter().enumerate() {
+        let (matches, normalized) = find_matches(&updated, old);
+        if matches.is_empty() {
+            return Err(err(format!("edit {}: old_text not found in {}; no edits written; read the file again", i + 1, path.display())));
+        }
+        if matches.len() > 1 && !all {
+            return Err(err(format!("edit {}: old_text matches {} times; include more surrounding lines or set replace_all; no edits written", i + 1, matches.len())));
+        }
+        let mut next = String::with_capacity(updated.len() + new.len());
+        let mut pos = 0;
+        for &(a, b) in if *all { &matches[..] } else { &matches[..1] } {
+            next.push_str(&updated[pos..a]);
+            next.push_str(new);
+            pos = b;
+        }
+        next.push_str(&updated[pos..]);
+        n += if *all { matches.len() } else { 1 };
+        loose |= normalized;
+        updated = next;
     }
-    if matches.len() > 1 && !all {
-        return Err(err(format!("old_text matches {} times; include more surrounding lines to make it unique, or set replace_all", matches.len())));
-    }
-    let mut updated = String::with_capacity(text.len() + new.len());
-    let mut pos = 0;
-    for &(a, b) in if all { &matches[..] } else { &matches[..1] } {
-        updated.push_str(&text[pos..a]);
-        updated.push_str(&new);
-        pos = b;
-    }
-    updated.push_str(&text[pos..]);
     if updated == text {
         return Err(err("the replacement produced identical content; nothing changed"));
     }
+    let diff = edit_diff(&path, &text, &updated);
     let updated = if crlf { updated.replace('\n', "\r\n") } else { updated };
     let updated = format!("{bom}{updated}");
     if let Some(o) = origin { crate::sources::record_bytes(o.db,o.session,&path,&updated,Some(&original)).await.map_err(|e|err(format!("not edited: provenance unavailable: {e}")))?; }
     write_atomic(target, updated.as_bytes(), !gated)
         .await
         .map_err(|e| err(format!("cannot write {}: {e}", path.display())))?;
-    let n = if all { matches.len() } else { 1 };
     let note = if loose { " (matched after normalizing whitespace and quotes)" } else { "" };
-    Ok(ok(format!("replaced {n} occurrence(s) in {}{note}", path.display())))
+    Ok(ok(format!("replaced {n} occurrence(s) in {}{note}\n{diff}", path.display())))
 }
 
 #[cfg(test)]
@@ -960,6 +985,36 @@ mod tests {
         } else {
             execute(ws, name, &args, &[], Sandbox::None).await
         }
+    }
+
+    #[tokio::test]
+    async fn batch_edit_validates_every_replacement_before_writing() {
+        use std::os::unix::fs::PermissionsExt;
+        let ws = scratch("batch-edit");
+        let file = ws.join("a.txt");
+        std::fs::write(&file, "alpha\nbeta\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let failed = run(&ws, "edit", json!({"path":"a.txt","edits":[
+            {"old_text":"alpha","new_text":"changed"}, {"old_text":"missing","new_text":"x"}]})).await;
+        assert!(failed.is_error);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "alpha\nbeta\n");
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o640);
+        let good = run(&ws, "edit", json!({"path":"a.txt","edits":[
+            {"old_text":"alpha","new_text":"changed"}, {"old_text":"changed","new_text":"final"}]})).await;
+        assert!(!good.is_error, "{}", good.content);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "final\nbeta\n");
+        assert!(good.content.contains("-alpha") && good.content.contains("+final"));
+        let mixed = run(&ws, "edit", json!({"path":"a.txt","old_text":"final","new_text":"other","edits":[]})).await;
+        assert!(mixed.is_error);
+    }
+
+    #[test]
+    fn edit_diff_handles_missing_newlines_and_masks_before_cutting() {
+        let diff = edit_diff(Path::new("a.txt"), "before", "after");
+        assert!(diff.contains("-before\n\\ No newline at end of file"));
+        assert!(diff.contains("+after\n\\ No newline at end of file"));
+        let large = edit_diff(Path::new("a.txt"), &"x".repeat(30_000), &"y".repeat(30_000));
+        assert!(large.len() < crate::output::PREVIEW_BYTES + 200);
     }
 
     #[tokio::test]
@@ -1091,10 +1146,10 @@ mod tests {
     async fn read_refuses_a_huge_file_before_loading_it() {
         let ws = scratch("huge-read");
         let file = std::fs::File::create(ws.join("huge.txt")).unwrap();
-        file.set_len(16 * 1024 * 1024 + 1).unwrap();
+        file.set_len(20 * 1024 * 1024 + 1).unwrap();
         let r = run(&ws, "read", json!({ "path": "huge.txt" })).await;
         assert!(r.is_error);
-        assert!(r.content.contains("16 MiB limit"), "{}", r.content);
+        assert!(r.content.contains("20 MiB limit"), "{}", r.content);
     }
 
     #[tokio::test]
@@ -1149,7 +1204,7 @@ mod tests {
         std::fs::write(ws.join("big.txt"), &body).unwrap();
         let r = run(&ws, "read", json!({ "path": "big.txt" })).await;
         assert!(!r.is_error);
-        assert!(r.content.len() <= MAX_OUTPUT + 200);
+        assert!(r.content.len() <= READ_BYTES + 200);
         let footer = r.content.lines().last().unwrap();
         assert!(footer.contains("continue with offset="), "{footer}");
         let next: usize = footer.rsplit('=').next().unwrap().trim_end_matches(']').parse().unwrap();

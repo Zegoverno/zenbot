@@ -15,7 +15,7 @@ enum FromWorker {
 
 /// The answer to a `tool.call` the kernel doesn't run.
 fn refused(content: impl Into<String>) -> ToolResult {
-    ToolResult { content: content.into(), is_error: true }
+    ToolResult { content: content.into(), content_blocks: Vec::new(), is_error: true }
 }
 
 /// A session's ordered queue of worker notifications.
@@ -234,7 +234,7 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             // Abort (or the turn ending) drops the tool future, which kills a running command.
             let run = async {
                 if *cancel.borrow() {
-                    return tools::ToolOutput { rating: None, content: "not run: the turn was interrupted".into(), is_error: true };
+                    return tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content: "not run: the turn was interrupted".into(), is_error: true };
                 }
                 tokio::select! {
                     out = async {
@@ -242,14 +242,14 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                         // (agent.rs), or the kernel's built-ins.
                         let read_only = agent::read_only(kind.as_deref());
                         if crate::taint::stopped(&app.db,id).await.unwrap_or(true) {
-                            return tools::ToolOutput { rating: None, content: "not run: session stopped by contamination; owner review required".into(), is_error: true };
+                            return tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content: "not run: session stopped by contamination; owner review required".into(), is_error: true };
                         }
                         // Immutable owner-only and kind boundaries cannot be overridden by a grant.
                         if let Some(why) = agent::refusal(kind.as_deref(), &name) {
-                            return tools::ToolOutput { rating: None, content: why, is_error: true };
+                            return tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content: why, is_error: true };
                         }
                         if let Some(why) = agent::protected_refusal(&app.db, id, kind.as_deref(), &workspace, &name, &args, true).await {
-                            return tools::ToolOutput { rating: None, content: why, is_error: true };
+                            return tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content: why, is_error: true };
                         }
                         // A shell's view is rated (and its masks found) before the gate decides on it.
                         let view = if matches!(name.as_str(), "bash" | "verify") {
@@ -259,24 +259,24 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                             };
                             match view {
                                 Ok(v) => v,
-                                Err(e) => return tools::ToolOutput { rating: None, content: format!("not run: the shell's view couldn't be checked ({e:#})"), is_error: true },
+                                Err(e) => return tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content: format!("not run: the shell's view couldn't be checked ({e:#})"), is_error: true },
                             }
                         } else { crate::fsview::View::default() };
                         let policy = if read_only { Ok(crate::gate::Policy::Run) }
                             else { crate::gate::check(app, id, &workspace, &name, &args).await };
                         let policy = match policy {
                             Ok(p) => p,
-                            Err(e) => return tools::ToolOutput { rating: None, content: format!("not run: action gate unavailable ({e})"), is_error: true },
+                            Err(e) => return tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content: format!("not run: action gate unavailable ({e})"), is_error: true },
                         };
                         if let crate::gate::Policy::Hold(why) | crate::gate::Policy::Lock(why) = &policy {
-                            return tools::ToolOutput { rating: None, content: crate::gate::held_note(why), is_error: true };
+                            return tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content: crate::gate::held_note(why), is_error: true };
                         }
                         if let Some(why) = agent::refuse(ending) {
-                            tools::ToolOutput { rating: None, content: why, is_error: true }
+                            tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content: why, is_error: true }
                         } else if let Some(why) = agent::protected_refusal(&app.db, id, kind.as_deref(), &workspace, &name, &args, matches!(policy, crate::gate::Policy::Granted)).await {
-                            tools::ToolOutput { rating: None, content: why, is_error: true }
+                            tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content: why, is_error: true }
                         } else if let Some(why) = crate::workshop::mark_draft_write(app, id, &workspace, &name, &args).await {
-                            tools::ToolOutput { rating: None, content: why, is_error: true }
+                            tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content: why, is_error: true }
                         } else {
                             // A prompt file is backed up before the agent changes it, and the agent
                             // is told to compact it when the change takes it past its size.
@@ -312,7 +312,14 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                                 if name == "bash" {
                                     // What the output shows of rated files rates it, as a `read` would;
                                     // so do the hosts the command reached through the proxy (D-067).
-                                    let (risk, writers) = view.exposure(&out.content);
+                                    let (mut risk, mut writers) = view.exposure(&out.content);
+                                    // The saved capture must carry ratings for omitted lines too.
+                                    for path in &out.saved_outputs {
+                                        match tokio::fs::read_to_string(path).await {
+                                            Ok(text) => { let (r, w) = view.exposure(&text); risk = risk.max(r); writers.extend(w); },
+                                            Err(_) => { risk = 5; },
+                                        }
+                                    }
                                     let risk = risk.max(crate::proxy::contacted_since(id, proxy_since).unwrap_or(1));
                                     let shown = async {
                                         crate::fsview::finish(&app.db, id, &workspace, start, sandbox == tools::Sandbox::None).await?;
@@ -321,7 +328,7 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                                     };
                                     match shown.await {
                                         Ok(content) => out.content = content,
-                                        Err(e) => out = tools::ToolOutput { rating: None, content: format!("{e:#}"), is_error: true },
+                                        Err(e) => out = tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content: format!("{e:#}"), is_error: true },
                                     }
                                 }
                                 // Stored content a tainted session wrote is untrusted however it's read.
@@ -342,7 +349,7 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                             out
                         }
                     } => out,
-                    _ = cancel.wait_for(|c| *c) => tools::ToolOutput { rating: None, content: "interrupted: the turn was stopped before this tool finished".into(), is_error: true },
+                    _ = cancel.wait_for(|c| *c) => tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content: "interrupted: the turn was stopped before this tool finished".into(), is_error: true },
                 }
             };
             // A tool that panics still gets an answer: the model must not wait for it.
@@ -350,7 +357,7 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                 Ok(out) => out,
                 Err(_) => {
                     tracing::error!("tool `{name}` panicked in session {id}");
-                    tools::ToolOutput { rating: None, content: format!("the `{name}` tool failed with an internal error in the kernel"), is_error: true }
+                    tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content: format!("the `{name}` tool failed with an internal error in the kernel"), is_error: true }
                 }
             };
             let ms = started.elapsed().as_millis() as i64;
@@ -419,6 +426,36 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             }
             // Every tool's output, instruction files included, is masked before the model or the tape sees it.
             out.content = crate::secrets::mask_off_thread(std::mem::take(&mut out.content)).await;
+            // Mask text blocks before any cut; binary blocks are validated without interpreting
+            // their base64 as text. Tool errors never forward a partially authorized image.
+            if !out.is_error {
+                if out.content_blocks.iter().any(|b| match b["type"].as_str() {
+                    Some("text") => !b["text"].is_string(),
+                    Some("image") => !crate::media::validate_image_block(b),
+                    _ => true,
+                }) {
+                    out.content = "result withheld: invalid or unsupported media block".into();
+                    out.is_error = true;
+                }
+                let mut remaining = crate::output::PREVIEW_BYTES;
+                out.content_blocks.retain_mut(|block| {
+                    if let Some(text) = block["text"].as_str() {
+                        if remaining == 0 { return false; }
+                        let text = crate::secrets::mask(text);
+                        let end = text.floor_char_boundary(remaining.min(text.len()));
+                        let bounded = format!("{}{}", &text[..end], if end < text.len() {" [text block truncated]"} else {""});
+                        remaining = remaining.saturating_sub(end);
+                        block["text"] = json!(bounded);
+                    }
+                    true
+                });
+            }
+            if let Some(preview) = crate::output::preview_at(&out.content, crate::output::RESULT_BYTES) {
+                match crate::tools::save_full_output(&out.content) {
+                    Some(path) => { out.content = format!("{preview}\n[full captured result saved to {}]", path.display()); out.saved_outputs.push(path); },
+                    None => out.content = format!("{preview}\n[omitted result could not be saved]"),
+                }
+            }
             // Record provenance before giving the worker content. Failure withholds the result.
             let rating = match out.rating.take() {
                 Some(r) => r,
@@ -442,7 +479,19 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                 out.content = "content withheld: level-5 block stopped this session; owner review required".into();
                 out.is_error = true;
             }
-            let output_bytes = out.content.len() as i64;
+            for path in &out.saved_outputs {
+                let saved = async {
+                    let text = tokio::fs::read_to_string(path).await?;
+                    crate::sources::register_bytes(&app.db, path, &text, Some(id), rating.risk).await
+                }.await;
+                if saved.is_err() {
+                    out.content = "result withheld: saved-output provenance could not be recorded".into();
+                    out.is_error = true;
+                    break;
+                }
+            }
+            if out.is_error { out.content_blocks.clear(); }
+            let output_bytes = (out.content.len() + out.content_blocks.iter().map(|b| b.to_string().len()).sum::<usize>()) as i64;
             // Cut arguments keep the sha256 and size of the whole (masked) arguments under `_full`.
             let recorded = sqlx::query(
                 "INSERT INTO tool_calls (session_id, call_id, name, args, is_error, duration_ms, output_bytes, turn_id, risk, origin, result_sha256, source_args)
@@ -460,17 +509,19 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             .bind(full)
             .bind(rating.risk)
             .bind(&rating.origin)
-            .bind(&out.content)
+            // The digest of exactly what the worker will write to the tape (tape.rs checks it).
+            .bind(zen_proto::digest_text(&json!(ToolResult { content: out.content.clone(), content_blocks: out.content_blocks.clone(), is_error: out.is_error }.blocks())))
             .bind(json!({"query":args["query"].as_str().map(crate::secrets::mask), "focus":args["focus"].as_str().map(crate::secrets::mask)}))
             .execute(&app.db)
             .await;
             if let Err(e) = recorded {
                 tracing::error!("recording tool call {call_id} for {id}: {e:#}");
                 out.content = "result withheld: provenance could not be recorded".into();
+                out.content_blocks.clear();
                 out.is_error = true;
             }
             if let Some(req_id) = msg.id {
-                mind.respond(req_id, &ToolResult { content: out.content, is_error: out.is_error }).await?;
+                mind.respond(req_id, &ToolResult { content: out.content, content_blocks: out.content_blocks, is_error: out.is_error }).await?;
             }
             app.emit(id, json!({ "type": "tool_end", "call_id": call_id, "is_error": out.is_error, "ms": ms })).await;
         }
