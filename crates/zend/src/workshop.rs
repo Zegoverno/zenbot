@@ -447,11 +447,7 @@ pub async fn folder_rating(db: &sqlx::PgPool, dir: &Path) -> Result<(i16, Vec<Uu
 pub fn save_skill_spec() -> Value {
     json!({
         "name": "save_skill",
-        "description": "Create or improve one of your skills (how to do a kind of work well). Save from evidence: after a job taught you a \
-procedure that worked (or what failed), not after a one-off. Improve an existing skill rather than adding a near-duplicate: find_skills \
-first, then save under its domain/name with the improved instructions. New skills and revisions stay drafts until the owner reviews \
-and accepts their fingerprint; a new domain always needs the owner. Keep SKILL.md short and checkable (steps that end in something you can \
-verify); put detail in references/ and repeatable steps in scripts/ (`files`).",
+        "description": "Create or improve an evidence-based reusable skill, not a one-off. find_skills first; update an existing domain/name instead of duplicating. Changes remain drafts until the owner accepts their fingerprint; new domains need the owner. Keep instructions short and verifiable; put detail in references/ and repeatable steps in scripts/ via files.",
         "parameters": { "type": "object", "properties": {
             "domain": { "type": "string", "description": "The kind of work, e.g. build, research, ops, work" },
             "name": { "type": "string", "description": "The skill, 2–4 words with hyphens (e.g. rust-release)" },
@@ -470,8 +466,8 @@ pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value) -> Opt
         _ => return None,
     };
     Some(match res {
-        Ok(content) => tools::ToolOutput { rating: None, content, is_error: false },
-        Err(e) => tools::ToolOutput { rating: None, content: format!("{e:#}"), is_error: true },
+        Ok(content) => tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content, is_error: false },
+        Err(e) => tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content: format!("{e:#}"), is_error: true },
     })
 }
 

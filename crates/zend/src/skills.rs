@@ -293,7 +293,7 @@ fn files_of(dir: &Path) -> Vec<String> {
 pub fn find_spec() -> Value {
     json!({
         "name": "find_skills",
-        "description": "Find your skills (how to do a kind of work well: framing a job, verifying work, …) by what you need to do; returns names and descriptions. Load one with load_skill when a job matches it.",
+        "description": "Find skills by task; returns names and descriptions. Load matching instructions with load_skill.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -307,7 +307,7 @@ pub fn find_spec() -> Value {
 pub fn load_spec() -> Value {
     json!({
         "name": "load_skill",
-        "description": "Load a skill's SKILL.md (or a file inside it, with `file`) and follow it. Name it domain/name. Once loaded it stays in the conversation.",
+        "description": "Load and follow a skill by domain/name. file reads a supporting file instead of SKILL.md; loaded instructions remain in this conversation.",
         "parameters": {
             "type": "object",
             "properties": {

@@ -34,7 +34,7 @@ pub(crate) fn string(v: &Value, key: &str) -> String {
 pub fn spec() -> Value {
     json!({
         "name": "brain",
-        "description": "Your curated records, one Markdown file each: knowledge (concepts, claims, arguments, questions, sources, events, subjects, each with how we know it: its evidence and their basis), people, organizations and projects, and long-term memory. Find them with `search`, which follows their links. `get` reads one by id with its links; `list` by store, kind or tag; `put` creates or updates one (an update passes the expected_revision you read; a new long-term memory comes from `remember` instead); `schema` explains the format. Search before creating; never invent a source; keep disagreements and uncertainty; resolve an ambiguous person with the owner.",
+        "description": "Curated Markdown records: knowledge with evidence, people, organizations, projects and long-term memory. Search before creating. get reads links; list filters; put creates/updates using expected_revision; schema explains format. New long-term memories use remember. Never invent sources; preserve uncertainty and disagreements; ask the owner to disambiguate people.",
         "parameters": {
             "type": "object",
             "properties": {
