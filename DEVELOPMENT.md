@@ -24,7 +24,7 @@ every file, route, table and setting in `MAP.md`. The dev kernel has its own hom
 | `git`, `curl`, `jq` | apt | every script |
 | `python3` | preinstalled on Ubuntu | the e2e test servers (`scripts/e2e/*.py`) |
 | `pdftotext` (`poppler-utils`) | apt (`install.sh` installs it) | reading PDFs that `web_fetch` saves |
-| `bubblewrap` | apt | the verifier's read-only shell, a tainted session's offline shell and the sandbox for unapproved made tools; the e2e scenarios need it |
+| `bubblewrap` | apt | the verifier's read-only shell and a tainted session's offline shell; the e2e scenarios need it |
 | Node.js 22+ | `install.sh` puts it in `~/.local/node` | installing and running the Codex CLI (an npm package: Node runs it on every Codex turn) |
 | `gh` | GitHub CLI | pull requests, checking CI |
 

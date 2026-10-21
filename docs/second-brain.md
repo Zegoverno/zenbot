@@ -56,7 +56,7 @@ Exact names first, then words (English and Portuguese stemming) and meaning, ran
 (`search_rerank`). From each record it keeps, search follows typed links: a linked record joins when
 kept too, two hops at most; `contradicts` is always followed one hop and a superseded record gives
 way to the newer one. Results say how they were reached and list their links; `brain get` reads a
-record with its links both ways. Owner commands: `zen brain schema|list|get|put|lint|index`
+record with its links both ways. Owner commands: `zen brain schema|list|get|put|lint|index|migrate_legacy`
 (arguments as JSON with `--args`), `zen memory`, `zen memory sleep`.
 
 **Ratings.** A record's rating is its bytes' (D-067): the writer's and every cited memory's or
@@ -65,4 +65,14 @@ reader to it and records its writers as inputs; from 2 it is wrapped as untruste
 writer was denied is withheld. A short-term memory keeps every session that wrote or replaced it.
 
 **Skills** stay `SKILL.md` folders. New skills and revisions of active ones are drafts until the owner
-accepts them by fingerprint. New made tools are retired (`ZEN_LEGACY_TOOL_AUTHORING=1` re-enables them).
+accepts them by fingerprint. Made-tool authoring, execution and approval are retired; old artifacts
+remain inspectable through `zen skills`, marked retired. Use skill scripts for repeatable procedures.
+
+**Legacy wiki migration** (owner only): `zen brain migrate_legacy` previews; pass `--args '{"apply":true}'` to apply. Every valid flat page becomes a provisional `source` record,
+not an assertion that its old claims are true. The entire original is the body; old types and aliases
+stay in metadata, resolvable page links become `related_to`, unresolved links stay in the prose.
+Exact originals remain private in `wiki/_legacy/`, with original writers and ratings carried to
+both archive and record. Only committed pages leave the flat wiki; conflicts, symlinks and pages
+over the 64 KiB body limit stay held. Retry preserves existing records, including owner edits.
+Historical `index.md`, `log.md` and git history stay intact. `capture` is refused, even from an old
+session; the compatibility nightly `wiki` job indexes and lints records, reporting counts only.

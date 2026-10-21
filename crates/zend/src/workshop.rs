@@ -1,4 +1,4 @@
-//! The workshop: the agent improves its own skills and makes its own tools, without sprawl
+//! The workshop: the agent improves its own skills, without sprawl
 //! (DESIGN.md, "Skills and tools that improve themselves"; D-029, D-037; Phase 5).
 //!
 //! Hermes sprawls because creating a skill is cheaper than finding and improving one, a fork after
@@ -9,29 +9,19 @@
 //! - edit before create: a new skill that does the same job as one in its domain is refused with
 //!   "extend X instead" (System One judges; without it, word overlap);
 //! - a new skill is a draft (`skills/_proposed/<domain>/<name>`): found and loaded marked as a draft,
-//!   active once the owner accepts it (`zen skills accept`) or a session that loaded it gets the
-//!   owner's `accept` verdict; a new domain always needs the owner; a draft a session that read
+//!   active only after owner fingerprint review (`zen skills accept`); a new domain always needs
+//!   the owner; a draft a session that read
 //!   untrusted content wrote (by `save_skill` or `edit`/`write`) is marked (`draft_taint`), read
 //!   as untrusted content, and activated only by the owner's own accept (D-053);
-//! - changes to an active skill apply at once; every change is a commit in the skills repository;
+//! - changes to an active skill stay drafts until owner review; every change is a skills commit;
 //! - the nightly sleep flags skills unused for 30 days and archives (never deletes) those unused
 //!   for 90 (`skills/_archived`).
 //!
-//! `save_tool` makes a tool: a manifest (name, description, JSON-schema parameters, command) and its
-//! files in `<zen home>/global/tools/<name>/`. It is found with `find_tools` (as `made_<name>`) and run with
-//! `call_tool`: the arguments arrive as JSON on stdin. Until the owner approves it (`made_tools`, in
-//! the database, out of the agent's reach) it runs in bubblewrap with no network and a read-only
-//! filesystem; approved, it runs with the network. It never gets the kernel's environment (tokens,
-//! keys), only the basics.
-//!
-//! The owner's decision covers what they reviewed: `zen skills` shows each draft's and tool's
-//! fingerprint, and accepting or rejecting one sends it back; the kernel refuses when the content
-//! changed since. A tool runs from a fresh copy of its folder, fingerprinted as it runs, so it
-//! can't change between the check and the run, and what it writes (a `__pycache__`) never lands in
-//! its folder and never costs it its approval.
+//! Made-tool execution and authoring are retired (D-070). Existing files and fingerprints stay
+//! available for owner inspection; old approvals cannot activate them. Repeatable procedures
+//! belong in reviewed skills and their supporting scripts.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -298,7 +288,7 @@ pub async fn stats(db: &sqlx::PgPool) -> Result<Value> {
     let mut tools = Vec::new();
     for (t, approved) in made_tools(db).await {
         let sha = fingerprint(db, &tools_root().join(&t.name)).await.ok();
-        tools.push(json!({ "tool": t.name, "approved": approved, "description": t.description, "sha": sha }));
+        tools.push(json!({ "tool": t.name, "approved": approved, "retired": true, "description": t.description, "sha": sha }));
     }
     Ok(json!({ "skills": out, "tools": tools }))
 }
@@ -359,50 +349,6 @@ pub fn made_entries() -> Vec<crate::mcp::ToolEntry> {
     out
 }
 
-async fn save_tool(app: &App, session: Uuid, args: &Value) -> Result<String> {
-    let name = args["name"].as_str().map(str::trim).unwrap_or("");
-    if !valid_name(name) {
-        bail!("name: lowercase letters, digits and single hyphens");
-    }
-    let description = args["description"].as_str().map(str::trim).filter(|d| !d.is_empty()).context("give a `description`: what it does, when to use it, what it returns")?;
-    let command = args["command"].as_str().map(str::trim).filter(|c| !c.is_empty()).context("give the `command` that runs it, e.g. `python3 run.py` (it reads the arguments as JSON on stdin)")?;
-    let reason = args["reason"].as_str().map(str::trim).filter(|r| !r.is_empty()).context("give the `reason`: what it saves (a repeated chore, a fragile procedure)")?;
-    let params = if args["parameters"].is_object() { args["parameters"].clone() } else { json!({ "type": "object", "properties": {} }) };
-    if params["type"] != "object" {
-        bail!("`parameters` must be a JSON schema of type object");
-    }
-    let dir = tools_root().join(name);
-    std::fs::create_dir_all(&dir)?;
-    for (rel, content) in args["files"].as_object().into_iter().flatten() {
-        let rel = Path::new(rel);
-        if rel.is_absolute() || rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) || rel == Path::new("tool.json") {
-            bail!("file `{}` must be a relative path inside the tool (and not tool.json)", rel.display());
-        }
-        let path = dir.join(rel);
-        if let Some(p) = path.parent() {
-            std::fs::create_dir_all(p)?;
-        }
-        crate::sources::record_bytes(&app.db,session,&path,content.as_str().unwrap_or(""),None).await?;
-        std::fs::write(&path, content.as_str().unwrap_or(""))?;
-    }
-    let manifest = json!({ "name": name, "description": description, "parameters": params, "command": command });
-    let manifest = serde_json::to_string_pretty(&manifest)?;
-    crate::sources::record_bytes(&app.db,session,&dir.join("tool.json"),&manifest,None).await?;
-    std::fs::write(dir.join("tool.json"),manifest)?;
-    sqlx::query("INSERT INTO made_tools (name) VALUES ($1) ON CONFLICT (name) DO NOTHING").bind(name).execute(&app.db).await?;
-    crate::git::commit_all(&tools_root(), &format!("save_tool: {name} (session {})\n\n{reason}", &session.to_string()[..8])).await;
-    let approved: bool = sqlx::query_scalar("SELECT approved_at IS NOT NULL AND rejected_at IS NULL FROM made_tools WHERE name = $1").bind(name).fetch_one(&app.db).await.unwrap_or(false);
-    Ok(format!(
-        "Saved tool made_{name} ({}). {}",
-        dir.display(),
-        if approved {
-            "It is approved: it runs with the network.".to_string()
-        } else {
-            format!("Until the owner approves it (zen tools accept {name}) it runs sandboxed: no network, files read-only. Try it with call_tool.")
-        }
-    ))
-}
-
 /// A tool's content (its manifest and files, in path order) as bytes, for its fingerprint.
 fn content(dir: &Path) -> Vec<u8> {
     fn walk(dir: &Path, base: &Path, out: &mut Vec<(String, Vec<u8>)>) {
@@ -455,67 +401,16 @@ fn same_content(now: &str, reviewed: &str) -> Result<()> {
     Ok(())
 }
 
-/// The owner approves (or rejects) a tool the agent made, as reviewed (its fingerprint, `reviewed`).
-/// Approval covers the tool as it is now: a later change to its manifest or files puts it back in
-/// the sandbox until approved again.
-pub async fn decide_tool(db: &sqlx::PgPool, name: &str, accept: bool, reviewed: &str) -> Result<String> {
-    let dir = tools_root().join(name);
-    anyhow::ensure!(valid_name(name) && dir.join("tool.json").is_file(), "no tool `{name}`");
-    let sha = fingerprint(db, &dir).await?;
-    same_content(&sha, reviewed)?;
-    let n = sqlx::query(if accept {
-        "UPDATE made_tools SET approved_at = now(), approved_sha = $2, rejected_at = NULL WHERE name = $1"
-    } else {
-        "UPDATE made_tools SET rejected_at = now() WHERE name = $1 AND $2 IS NOT NULL"
-    })
-    .bind(name)
-    .bind(&sha)
-    .execute(db)
-    .await?
-    .rows_affected();
-    anyhow::ensure!(n == 1, "no tool `{name}`");
-    Ok(format!("{} {name}", if accept { "Approved" } else { "Rejected" }))
-}
-
-/// How much of a made tool's stdout and stderr is kept (each); the rest is drained and dropped.
-const MADE_CAP: usize = 256 * 1024;
-
-async fn drain_capped(mut pipe: impl tokio::io::AsyncRead + Unpin, cap: usize) -> Vec<u8> {
-    use tokio::io::AsyncReadExt;
-    let mut kept = Vec::new();
-    let mut chunk = [0u8; 8192];
-    while let Ok(n) = pipe.read(&mut chunk).await {
-        if n == 0 { break; }
-        kept.extend_from_slice(&chunk[..n.min(cap.saturating_sub(kept.len()))]);
-    }
-    kept
-}
-
-/// Copy a tool's folder (without `.git`; symlinks as symlinks, never followed).
-fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(to)?;
-    for e in std::fs::read_dir(from)? {
-        let e = e?;
-        if e.file_name() == ".git" {
-            continue;
-        }
-        let (src, dst) = (e.path(), to.join(e.file_name()));
-        let kind = e.file_type()?;
-        if kind.is_dir() {
-            copy_tree(&src, &dst)?;
-        } else if kind.is_symlink() {
-            std::os::unix::fs::symlink(std::fs::read_link(&src)?, &dst)?;
-        } else if kind.is_file() {
-            std::fs::copy(&src, &dst)?;
-        }
-    }
-    Ok(())
+/// Compatibility endpoint: old approvals cannot reactivate retired made tools. Files remain on disk.
+pub async fn decide_tool(_db: &sqlx::PgPool, _name: &str, _accept: bool, _reviewed: &str) -> Result<String> {
+    bail!("Made tools are retired; migrate the procedure into a reviewed skill with supporting scripts.")
 }
 
 /// The origin rating of a made tool's (or a draft skill's) folder (D-062): the highest of its files' ratings by exact
 /// bytes (`context::rate`), and their writers. Non-text files and links cannot be rated by
 /// this text provenance path and are rejected, not executed with an assumed rating.
 /// Errors fail closed: the tool doesn't run.
+#[cfg(test)]
 pub async fn folder_rating(db: &sqlx::PgPool, dir: &Path) -> Result<(i16, Vec<Uuid>)> {
     fn walk(dir: &Path, out: &mut Vec<(PathBuf, bool)>) -> std::io::Result<()> {
         for e in std::fs::read_dir(dir)? {
@@ -547,178 +442,6 @@ pub async fn folder_rating(db: &sqlx::PgPool, dir: &Path) -> Result<(i16, Vec<Uu
     Ok((risk, writers))
 }
 
-/// A private copy of a tool's folder, removed when dropped.
-struct RunCopy(PathBuf);
-
-impl RunCopy {
-    fn of(name: &str) -> Result<Self> {
-        Self::from_dir(name, &tools_root().join(name))
-    }
-
-    fn from_dir(name: &str, source: &Path) -> Result<Self> {
-        use std::os::unix::fs::DirBuilderExt;
-        let root = std::env::temp_dir().join(format!("zen-tool-{}", Uuid::new_v4()));
-        std::fs::DirBuilder::new().mode(0o700).create(&root)?;
-        let copy = RunCopy(root);
-        copy_tree(source, &copy.dir(name)).context("copying the tool")?;
-        Ok(copy)
-    }
-
-    fn dir(&self, name: &str) -> PathBuf {
-        self.0.join(name)
-    }
-}
-
-impl Drop for RunCopy {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// Run a tool the agent made: arguments as JSON on stdin, output from stdout and stderr. Sandboxed
-/// (no network, read-only files, an empty home folder) until the owner approves it; never with the
-/// kernel's environment; its process group is killed after 120 s. It runs from a private copy of
-/// its folder, which is what is checked against the approval (nothing can change it in between)
-/// and what it writes to (dropped after the run).
-/// The copy is rated by its exact bytes before it runs (`folder_rating`), and `session` depends on
-/// its writers: a tool a stopped session wrote doesn't run (rating 5, nothing else returned).
-/// Returns the output, whether it failed, whether it ran with the network (approved), and the
-/// tool's origin rating.
-pub async fn run_made(db: &sqlx::PgPool, session: Uuid, name: &str, args: &Value, force_sandbox: bool, owner_allowed: bool) -> Result<(String, bool, bool, i16)> {
-    anyhow::ensure!(valid_name(name) && tools_root().join(name).join("tool.json").is_file(), "no such tool");
-    let copy = RunCopy::of(name)?;
-    run_snapshot(db, session, name, args, force_sandbox, owner_allowed, &copy).await
-}
-
-/// The unapproved tool's sandbox: read-only, no network, the home folder replaced by an empty one
-/// (so the tool can't read the owner's keys or tokens), only its own folder bound back. A network
-/// namespace doesn't isolate pathname Unix sockets (the Docker socket is root on this host), so
-/// `/run` is emptied and the offline shell's seccomp filter refuses connect and send on any
-/// socket. The returned file must outlive the spawn.
-fn sandboxed(home: &str, dir: &Path, command: &str) -> Result<(tokio::process::Command, std::fs::File)> {
-    let filter = crate::tools::network_filter().map_err(|e| anyhow::anyhow!(e))?;
-    let fd = std::os::fd::AsRawFd::as_raw_fd(&filter);
-    let mut c = tokio::process::Command::new("bwrap");
-    // SAFETY: fcntl is async-signal-safe; it only clears close-on-exec on the child's copy of the
-    // filter fd, which bwrap consumes.
-    unsafe {
-        c.pre_exec(move || {
-            if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    c.arg("--seccomp").arg(fd.to_string());
-    c.args(["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--tmpfs", "/run", "--unshare-net", "--unshare-pid", "--new-session", "--die-with-parent"])
-        .arg("--tmpfs")
-        .arg(home)
-        .arg("--ro-bind")
-        .arg(dir)
-        .arg(dir)
-        .arg("--chdir")
-        .arg(dir)
-        .args(["bash", "-c"])
-        .arg(command);
-    Ok((c, filter))
-}
-
-/// Execute only the private snapshot whose bytes are rated below; never reread the source.
-async fn run_snapshot(db: &sqlx::PgPool, session: Uuid, name: &str, args: &Value, force_sandbox: bool, owner_allowed: bool, copy: &RunCopy) -> Result<(String, bool, bool, i16)> {
-    let dir = copy.dir(name);
-    let (risk, writers) = folder_rating(db, &dir).await?;
-    if risk >= 5 {
-        return Ok((String::new(), true, false, 5));
-    }
-    crate::sources::depend(db, session, &writers).await?;
-    crate::sources::raise(db, session, risk).await?;
-    // Denial and new dependency edges cannot commit between this check and process creation.
-    let mut spawn_tx = db.begin().await?;
-    crate::sources::lock_provenance(&mut spawn_tx).await?;
-    anyhow::ensure!(!crate::taint::stopped(db, session).await?, "tool withheld: a writer was stopped");
-    // The code's rating affects capabilities before execution, not just its returned output.
-    let session_risk: i16 = sqlx::query_scalar("SELECT risk FROM sessions WHERE id=$1").bind(session).fetch_one(db).await?;
-    let force_sandbox = force_sandbox || (session_risk >= 4 && !owner_allowed);
-    let m: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("tool.json")).context("no such tool")?)?;
-    let command = m["command"].as_str().context("the manifest has no command")?.to_string();
-    let row = sqlx::query("SELECT approved_at IS NOT NULL AND rejected_at IS NULL AS ok, rejected_at IS NOT NULL AS rejected, approved_sha FROM made_tools WHERE name = $1")
-        .bind(name)
-        .fetch_optional(db)
-        .await?;
-    let (approved, rejected, sha) = row.map(|r| (r.get::<bool, _>("ok"), r.get::<bool, _>("rejected"), r.get::<Option<String>, _>("approved_sha"))).unwrap_or((false, false, None));
-    anyhow::ensure!(!rejected, "the owner rejected this tool");
-    // Approval covers the content the owner saw: a changed tool runs sandboxed again.
-    let changed = approved && sha.as_deref() != Some(fingerprint(db, &dir).await?.as_str());
-    let approved = approved && !changed && !force_sandbox;
-    let keep = ["PATH", "HOME", "USER", "LANG", "LC_ALL", "TZ"];
-    let mut _filter: Option<std::fs::File> = None;
-    let mut cmd = if approved {
-        // `bash -c`, not a login shell: a profile could export secrets.
-        let mut c = tokio::process::Command::new("bash");
-        c.arg("-c").arg(&command);
-        c
-    } else {
-        // Read-only, no network, and the home folder replaced by an empty one, so the tool can't
-        // read the owner's keys or tokens; only its own folder is bound back. A network namespace
-        // doesn't isolate pathname Unix sockets (the Docker socket is root on this host), so
-        // `/run` is emptied and the same seccomp filter as the offline shell refuses connect and
-        // send on any socket.
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/home".into());
-        let (c, filter) = sandboxed(&home, &dir, &command)?;
-        _filter = Some(filter);
-        c
-    };
-    let mut child = cmd
-        .current_dir(&dir)
-        .env_clear()
-        .envs(keep.iter().filter_map(|k| std::env::var(k).ok().map(|v| (*k, v))))
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .process_group(0)
-        .kill_on_drop(true)
-        .spawn()
-        .context("starting the tool")?;
-    // Kill the whole group on a timeout or an abort, not just bash.
-    let _group = crate::tools::GroupKill(child.id().map(|p| p as i32));
-    spawn_tx.commit().await?;
-    let input = args.to_string();
-    let mut stdin = child.stdin.take();
-    let run = async move {
-        use tokio::io::AsyncWriteExt;
-        // Write the arguments in their own task, so a tool that prints before reading can't deadlock.
-        let writer = tokio::spawn(async move {
-            if let Some(mut s) = stdin.take() {
-                let _ = s.write_all(input.as_bytes()).await;
-            }
-        });
-        let (so, se) = (child.stdout.take(), child.stderr.take());
-        let read_out = async { match so { Some(p) => drain_capped(p, MADE_CAP).await, None => Vec::new() } };
-        let read_err = async { match se { Some(p) => drain_capped(p, MADE_CAP).await, None => Vec::new() } };
-        let (out, err) = tokio::join!(read_out, read_err);
-        let status = child.wait().await;
-        writer.abort();
-        (out, err, status)
-    };
-    let (out, err, status) = tokio::time::timeout(Duration::from_secs(120), run).await.context("the tool took over 120 s")?;
-    let status = status.context("waiting for the tool")?;
-    let mut text = String::from_utf8_lossy(&out).into_owned();
-    let err = String::from_utf8_lossy(&err);
-    if !err.trim().is_empty() {
-        text.push_str(&format!("\n[stderr]\n{}", err.trim_end()));
-    }
-    let text = crate::secrets::mask_off_thread(zen_proto::head(&text, 50_000)).await;
-    let note = if approved {
-        ""
-    } else if changed {
-        "\n[ran sandboxed: the tool changed since the owner approved it; it needs approval again]"
-    } else {
-        "\n[ran sandboxed: no network, files read-only, until the owner approves it]"
-    };
-    anyhow::ensure!(!crate::taint::stopped(db, session).await?, "tool result withheld: a writer was stopped during execution");
-    Ok((format!("{}{note}", text.trim_end()), !status.success(), approved, risk))
-}
-
 // ---------- the tools ----------
 
 pub fn save_skill_spec() -> Value {
@@ -726,8 +449,8 @@ pub fn save_skill_spec() -> Value {
         "name": "save_skill",
         "description": "Create or improve one of your skills (how to do a kind of work well). Save from evidence: after a job taught you a \
 procedure that worked (or what failed), not after a one-off. Improve an existing skill rather than adding a near-duplicate: find_skills \
-first, then save under its domain/name with the improved instructions. A new skill is a draft until the owner accepts it or a session \
-that used it is accepted; a new domain always needs the owner. Keep SKILL.md short and checkable (steps that end in something you can \
+first, then save under its domain/name with the improved instructions. New skills and revisions stay drafts until the owner reviews \
+and accepts their fingerprint; a new domain always needs the owner. Keep SKILL.md short and checkable (steps that end in something you can \
 verify); put detail in references/ and repeatable steps in scripts/ (`files`).",
         "parameters": { "type": "object", "properties": {
             "domain": { "type": "string", "description": "The kind of work, e.g. build, research, ops, work" },
@@ -740,28 +463,10 @@ verify); put detail in references/ and repeatable steps in scripts/ (`files`).",
     })
 }
 
-pub fn save_tool_spec() -> Value {
-    json!({
-        "name": "save_tool",
-        "description": "Make (or update) a tool of your own when a chore keeps coming back or a procedure is fragile by hand: a command \
-that reads its arguments as JSON on stdin and prints its result. It is then found with find_tools (as made_<name>) and run with \
-call_tool. Until the owner approves it, it runs sandboxed (no network, files read-only); it never gets your environment's secrets.",
-        "parameters": { "type": "object", "properties": {
-            "name": { "type": "string", "description": "lowercase-with-hyphens" },
-            "description": { "type": "string", "description": "What it does, when to use it, what it returns" },
-            "parameters": { "type": "object", "description": "JSON schema (type object) of its arguments" },
-            "command": { "type": "string", "description": "How to run it from its folder, e.g. `python3 run.py`" },
-            "files": { "type": "object", "description": "Its files: relative path -> content (e.g. run.py)" },
-            "reason": { "type": "string", "description": "What it saves" } },
-          "required": ["name", "description", "command", "files", "reason"] }
-    })
-}
-
-/// Run `save_skill` or `save_tool`. None for other tools.
+/// Run `save_skill`. None for other tools.
 pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value) -> Option<tools::ToolOutput> {
     let res = match name {
         "save_skill" => save_skill(app, session, args).await,
-        "save_tool" => save_tool(app, session, args).await,
         _ => return None,
     };
     Some(match res {
@@ -777,43 +482,11 @@ mod tests {
     /// An unapproved tool can't reach a host Unix socket (the Docker socket is root): `/run` is
     /// emptied and connect is refused on any socket, here one inside the tool's own folder, the
     /// one place the sandbox still shows.
-    #[tokio::test]
-    async fn unapproved_tools_cannot_reach_unix_sockets() {
-        if std::process::Command::new("bwrap").arg("--version").output().is_err() {
-            eprintln!("skipped: no bwrap");
-            return;
-        }
-        let dir = crate::test_util::TestDir::new("made-tool-socket");
-        let sock = dir.join("daemon.sock");
-        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
-        let home = crate::test_util::TestDir::new("made-tool-home");
-        let probe = format!(
-            "python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); print(\"CONNECTED\")' {} 2>&1; ls /run",
-            sock.display()
-        );
-        let (mut c, _filter) = sandboxed(&home.display().to_string(), &dir, &probe).unwrap();
-        let out = c.output().await.unwrap();
-        let text = String::from_utf8_lossy(&out.stdout);
-        assert!(!text.contains("CONNECTED"), "{text}");
-        assert!(text.contains("Operation not permitted"), "{text}");
-        assert!(!text.contains("docker.sock"), "/run is emptied: {text}");
-    }
-
     #[test]
     fn names_and_overlap() {
         assert!(valid_name("rust-release") && !valid_name("Rust") && !valid_name("a--b") && !valid_name("-a"));
         assert!(overlap("verify work before reporting it done", "verify the work before reporting done") > 0.6);
         assert!(overlap("verify work before reporting", "deploy a rust binary to the server") < 0.2);
-    }
-
-    #[tokio::test]
-    async fn made_tool_output_is_drained_after_cap() {
-        use tokio::io::AsyncWriteExt;
-        let (mut writer, reader) = tokio::io::duplex(4096);
-        let writing = tokio::spawn(async move { writer.write_all(&vec![b'x'; MADE_CAP * 2]).await.unwrap(); });
-        let kept = tokio::time::timeout(Duration::from_secs(2), drain_capped(reader, MADE_CAP)).await.unwrap();
-        writing.await.unwrap();
-        assert_eq!(kept.len(), MADE_CAP);
     }
 
     #[test]
@@ -828,78 +501,11 @@ mod tests {
     }
 
     #[test]
-    fn a_copy_has_the_same_content_and_a_review_names_it() {
-        let dir = crate::test_util::TestDir::new("copy-tool");
-        let tool = dir.join("t");
-        std::fs::create_dir_all(tool.join("lib/.git")).unwrap();
-        std::fs::write(tool.join("tool.json"), "{}").unwrap();
-        std::fs::write(tool.join("lib/run.py"), "print(1)").unwrap();
-        std::os::unix::fs::symlink("lib/run.py", tool.join("run.py")).unwrap();
-        copy_tree(&tool, &dir.join("copy")).unwrap();
-        assert_eq!(content(&tool), content(&dir.join("copy")), "the copy is what gets fingerprinted");
-        assert!(std::fs::symlink_metadata(dir.join("copy/run.py")).unwrap().file_type().is_symlink());
+    fn a_review_names_the_content() {
         let now = "0123456789abcdef";
         assert!(same_content(now, "0123456789AB").is_ok() && same_content(now, now).is_ok());
         assert!(same_content(now, "01234").is_err(), "too short to mean anything");
         assert!(same_content(now, "fedcba98").unwrap_err().to_string().contains("changed since you reviewed it"));
-    }
-
-    /// Execute a private rated snapshot, with no global path/environment overrides.
-    #[tokio::test]
-    #[ignore]
-    async fn made_execution_provenance_database() {
-        let db = sqlx::PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
-        sqlx::migrate!().run(&db).await.unwrap();
-        let app = crate::test_util::app(db.clone());
-        let session = |risk: i16| {
-            let db = db.clone();
-            async move {
-                let id = Uuid::new_v4();
-                sqlx::query("INSERT INTO sessions(id,title,model,risk) VALUES($1,'made execution','faux/smoke',$2)")
-                    .bind(id).bind(risk).execute(&db).await.unwrap();
-                id
-            }
-        };
-        let dir = crate::test_util::TestDir::new("made-execution");
-        let name = format!("probe-{}", Uuid::new_v4());
-        let tool = dir.join(&name);
-        std::fs::create_dir_all(&tool).unwrap();
-        let manifest = format!(r#"{{"name":"{name}","command":"sleep 0.2; printf SAFE"}}"#);
-        std::fs::write(tool.join("tool.json"), &manifest).unwrap();
-        let writer = session(4).await;
-        crate::sources::record_bytes(&db, writer, &tool.join("tool.json"), &manifest, None).await.unwrap();
-        let copy = RunCopy::from_dir(&name, &tool).unwrap();
-        // An owner-approved fingerprint must not override the code's numeric origin.
-        let sha = fingerprint(&db, &copy.dir(&name)).await.unwrap();
-        sqlx::query("INSERT INTO made_tools(name,approved_at,approved_sha) VALUES($1,now(),$2)")
-            .bind(&name).bind(sha).execute(&db).await.unwrap();
-        // Change the live source after copying: only the rated private snapshot executes.
-        std::fs::write(tool.join("tool.json"), r#"{"command":"printf UNRATED"}"#).unwrap();
-        let reader = session(1).await;
-        let (text, error, networked, risk) = run_snapshot(&db, reader, &name, &json!({}), false, false, &copy).await.unwrap();
-        assert!(!error && !networked && risk == 4 && text.starts_with("SAFE"), "{text}");
-        let stored: i16 = sqlx::query_scalar("SELECT risk FROM sessions WHERE id=$1").bind(reader).fetch_one(&db).await.unwrap();
-        assert_eq!(stored, 4);
-        let granted = session(4).await;
-        let (_, error, networked, risk) = run_snapshot(&db, granted, &name, &json!({}), false, true, &copy).await.unwrap();
-        assert!(!error && networked && risk == 4, "an exact owner grant changes capabilities, not origin");
-        // Denial in flight withholds even a successful result. A denial before start may reject
-        // it earlier; neither timing is allowed to return the tool's words.
-        let reader2 = session(1).await;
-        let args = json!({});
-        let (result, denied) = tokio::join!(
-            run_snapshot(&db, reader2, &name, &args, false, false, &copy),
-            async {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                crate::taint::deny(&app, writer, "made execution race").await
-            }
-        );
-        denied.unwrap();
-        assert!(result.is_err(), "an in-flight denied tool's output must be withheld");
-        assert!(crate::taint::stopped(&db, reader2).await.unwrap());
-        let reader3 = session(1).await;
-        let (text, error, networked, risk) = run_snapshot(&db, reader3, &name, &args, false, true, &copy).await.unwrap();
-        assert!(text.is_empty() && error && !networked && risk == 5, "an exact grant cannot execute a contaminated snapshot");
     }
 
     #[test]

@@ -60,7 +60,6 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("web_focus", include_str!("../../s1/web_focus.toml")),
     ("web_rerank", include_str!("../../s1/web_rerank.toml")),
     ("search_rerank", include_str!("../../s1/search_rerank.toml")),
-    ("wiki_capture", include_str!("../../s1/wiki_capture.toml")),
     ("skill_duplicate", include_str!("../../s1/skill_duplicate.toml")),
     ("judge", include_str!("../../s1/judge.toml")),
     ("egress", include_str!("../../s1/egress.toml")),

@@ -1,0 +1,19 @@
+[
+  {
+    "tool": "capture",
+    "args": {
+      "title": "Retired",
+      "note": "Must not write"
+    }
+  },
+  {
+    "tool": "save_tool",
+    "args": {
+      "name": "retired",
+      "command": "touch EXECUTED"
+    }
+  },
+  {
+    "text": "Done."
+  }
+]

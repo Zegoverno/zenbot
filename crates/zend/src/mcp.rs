@@ -16,9 +16,8 @@
 //! engine; the Phase 0 spike), so MCP tools aren't added to it. Instead the model gets three fixed
 //! tools: `find_tools` (names and one-line descriptions), `load_tool` (a tool's full definition, as
 //! a tool result) and `call_tool` (run it). Every call goes through the kernel: recorded like any
-//! tool call, with a timeout, output capped and secrets masked. Made catalog entries retain the
-//! exact manifest snapshot's numeric origin rating and writer dependencies; contaminated entries
-//! are omitted from discovery and withheld on explicit load/call. Metadata failures fail closed.
+//! tool call, with a timeout, output capped and secrets masked. Made-tool artifacts are no longer
+//! published in the catalog, and stale made_ names are refused (D-070).
 //!
 //! Calls run at the same time, to one server and to several: a server's lock is held only to
 //! connect, and its tools are looked up from its last listing (listed again when a stdio server
@@ -625,8 +624,7 @@ async fn catalog(db: &sqlx::PgPool) -> (Vec<ToolEntry>, Vec<String>) {
             Err(e) => problems.push(format!("server `{name}`: {e:#}")),
         }
     }
-    // The agent's own tools (workshop.rs), found and called the same way.
-    tools.extend(crate::workshop::made_entries());
+    tools.retain(|t| t.server != "made");
     (tools, problems)
 }
 
@@ -741,12 +739,13 @@ async fn find(app: &App, session: Uuid, query: &str) -> (String, bool) {
 }
 
 async fn lookup(db: &sqlx::PgPool, full: &str) -> Result<ToolEntry> {
+    anyhow::ensure!(!full.starts_with("made_"), "Made tools are retired; use a reviewed skill with supporting scripts.");
     let (tools, _) = catalog(db).await;
     if let Some(t) = tools.iter().find(|t| t.full() == full) {
         return Ok(t.clone());
     }
     // A bare tool name only when exactly one server has it: otherwise it could run another
-    // server's tool (or a made tool) of the same name.
+    // server's tool of the same name.
     let mut bare = tools.into_iter().filter(|t| t.name == full);
     match (bare.next(), bare.next()) {
         (Some(t), None) => Ok(t),
@@ -786,7 +785,7 @@ pub fn result_text(result: &Value) -> String {
     parts.join("\n")
 }
 
-async fn call(app: &App, session: Uuid, full: &str, args: &Value, force_sandbox: bool, owner_allowed: bool) -> Result<(String, bool)> {
+async fn call(app: &App, session: Uuid, full: &str, args: &Value) -> Result<(String, bool)> {
     let t = lookup(&app.db, full).await?;
     // Validation errors quote schema keys too. Admit/rate the exact manifest before even
     // returning those errors, and apply its risk before choosing execution capabilities.
@@ -800,14 +799,6 @@ async fn call(app: &App, session: Uuid, full: &str, args: &Value, force_sandbox:
     if !missing.is_empty() {
         let error = format!("missing required arguments: {} (load_tool shows the parameters)", missing.join(", "));
         return Ok((crate::taint::hand_over_rating(app, session, entry_risk, "tool catalog", &t.full(), &error).await?, true));
-    }
-    if t.server == "made" {
-        let (text, is_error, networked, risk) = crate::workshop::run_made(&app.db, session, &t.name, &args, force_sandbox, owner_allowed).await?;
-        // Its output is at least its code's origin rating; an approved tool can reach the
-        // network, so what it returns may be web content. A tool a stopped session wrote never
-        // ran (5): this session stops too.
-        let risk = if networked { risk.max(4) } else { risk };
-        return Ok((crate::taint::hand_over_rating(app, session, risk, "made", &t.full(), &text).await?, is_error));
     }
     let server = { REGISTRY.lock().await.servers.get(&t.server).cloned().context("the server went away")? };
     let untrusted = server.cfg.untrusted;
@@ -839,7 +830,7 @@ async fn call(app: &App, session: Uuid, full: &str, args: &Value, force_sandbox:
 pub fn find_spec() -> Value {
     json!({
         "name": "find_tools",
-        "description": "Find tools from the owner's connected services (MCP servers: mail, calendar, documents, …) and tools you made (made_…) by what you need; returns names and one-liners. Then load_tool shows a tool's parameters and call_tool runs it.",
+        "description": "Find tools from the owner's connected services (MCP servers: mail, calendar, documents, …) by what you need; returns names and one-liners. Then load_tool shows a tool's parameters and call_tool runs it.",
         "parameters": { "type": "object", "properties": {
             "query": { "type": "string", "description": "What you need to do, in a few words (e.g. \"list calendar events\")" } },
           "required": ["query"] }
@@ -868,7 +859,7 @@ match its parameters. Ask the owner before calls that send, publish, delete or s
 }
 
 /// Run `find_tools`, `load_tool` or `call_tool`. None for other tools.
-pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value, force_sandbox: bool, owner_allowed: bool) -> Option<tools::ToolOutput> {
+pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value) -> Option<tools::ToolOutput> {
     let (content, is_error) = match name {
         "find_tools" => find(app, session, args["query"].as_str().unwrap_or("")).await,
         "load_tool" => match lookup(&app.db, args["name"].as_str().unwrap_or("")).await {
@@ -884,7 +875,7 @@ pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value, force_
             }
             Err(e) => (format!("{e:#}"), true),
         },
-        "call_tool" => match call(app, session, args["name"].as_str().unwrap_or(""), &args["arguments"], force_sandbox, owner_allowed).await {
+        "call_tool" => match call(app, session, args["name"].as_str().unwrap_or(""), &args["arguments"]).await {
             Ok(r) => r,
             Err(e) => (format!("call_tool failed: {e:#}"), true),
         },

@@ -39,9 +39,10 @@ changes. Candidate follow-ups, each only when use calls for it:
   authenticated task checks and a combined owner queue on the branch; release validation and
   owner review/merge/install remain before these changes are live.
   Full read-only limits begin at 4; budgets remain out of scope.
-- **Phase 4 (D-069), PR #86:** short-term `MEMORY.md`, long-term memory, knowledge and entities as
-  Markdown records, search over typed links; eval and owner review before merge. Next: move the flat
-  wiki pages into knowledge records and retire `capture`; retire running made tools.
+- **Phase 4 (D-069), merged in PR #86:** short-term `MEMORY.md`, long-term memory, knowledge
+  and entities as Markdown records, search over typed links. D-070 adds owner-run flat wiki migration
+  and retires `capture` and made-tool execution. Release validation and retrieval on real work
+  precede Phase 5 planning; no new Phase 5 scope has been agreed.
 - **Phase 2b + Phase 3 (D-068), merged:** approved job authority, contextual source
   ratings, aligned high-risk edits, held-run continuation, contained MCP, trust suggestions,
   worker hang recovery, durable prompts, permission snapshots and JSONL histories were merged in PR #85. The advisory model comparison lacked a usable local Docker environment.
@@ -111,12 +112,9 @@ changes. Candidate follow-ups, each only when use calls for it:
 - What each kind of session may call is decided in one place (`agent::refusal`, an allow-list per
   kind), and what a tainted session may do in another (`taint::limited`, D-053), but each tool still
   asks it and applies the answer itself; the shell sandbox is chosen at the dispatcher.
-- A draft activated because a session that loaded it was accepted (`workshop::on_accept`) isn't
-  tied to the content that session loaded; the owner's own accept is (D-051). Reading a project's
-  files with `read` or `bash` isn't taint, only its AGENTS.md is; reading stored tainted content
-  (a wiki page with `web` entries, a marked draft) with `bash` (`cat`) isn't either, only with
-  `read`, `search`, `history`, `load_skill` and `schedule runs`. The wiki's `index.md` lists a
-  page's title even when the title came from untrusted text.
+- Reading record files through `bash` is outside the curated `brain` handover path. The
+  kernel's structured tools preserve provenance and enforce owner review of skill revisions;
+  shell permissions remain the broader boundary described above.
 - MCP over HTTP doesn't open the server's event stream, so only stdio servers' `tools/list_changed`
   is seen; an HTTP server's tools are listed again only when it reconnects or `mcp.json` changes. A
   stdio server that times out is started again only when no other call to it is running.

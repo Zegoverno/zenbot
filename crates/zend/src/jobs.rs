@@ -3,7 +3,7 @@
 //!
 //! - **system** jobs, the kernel's own maintenance, seeded at start (an install from before a job
 //!   existed gets it at its next start): `sleep` (the nightly memory sleep, `memory::sleep`),
-//!   `wiki` (commit the agent's wiki edits, report problems: `wiki::tend`), `skills` (flag and
+//!   `wiki` (index and lint brain records: `brain::tend`), `skills` (flag and
 //!   archive unused skills: `workshop::tend`), `routes` (switch a delegation route on clear
 //!   evidence: `delegate::tune`), `prune` (old saved outputs, prompt-file backups, database dumps and eval runs) and `engines`
 //!   (`scripts/update-engines.sh`). Each records its own run; a run with nothing to report is
@@ -69,7 +69,7 @@ const BACKOFF_SECS: [i64; 4] = [60, 300, 900, 3600];
 /// minutes apart after the sleep, so each has the machine to itself and its own record.
 const SYSTEM: [(&str, &str, &str, &str); 6] = [
     ("sleep", "sleep", "0 3 * * *", "tidy short-term memory: promote, rank, archive (memory::sleep)"),
-    ("wiki", "wiki", "10 3 * * *", "commit the agent's wiki edits since the last capture, report pages without a summary and broken links (wiki::tend)"),
+    ("wiki", "wiki", "10 3 * * *", "index and lint brain records (brain::tend)"),
     ("skills", "skills", "20 3 * * *", "flag skills unused for 30 days, archive them at 90 (workshop::tend)"),
     ("routes", "routes", "30 3 * * *", "switch a delegation route where the owner's verdicts clearly favour another model (delegate::tune)"),
     ("prune", "prune", "40 3 * * *", "remove saved tool outputs older than 30 days, prompt-file backups older than 90, database dumps but the newest 3 and eval runs older than 7 days (jobs::prune_files)"),
@@ -1166,7 +1166,7 @@ async fn run_system(app: &AppState, job: &Job) -> Result<Outcome> {
             let learned = crate::s1::learn::nightly(&app.db).await.unwrap_or_else(|e| format!("System One learning failed: {e:#}"));
             Ok(Outcome { status: "ok", output: Some(format!("{line}; {learned}")), error: None })
         }
-        Some("wiki") => Ok(upkeep(crate::wiki::tend().await)),
+        Some("wiki") => Ok(upkeep(crate::brain::tend(&app.db).await?)),
         Some("skills") => Ok(upkeep(crate::workshop::tend(&app.db).await)),
         Some("routes") => Ok(upkeep(crate::delegate::tune(&app.db).await)),
         Some("prune") => Ok(upkeep(prune_files(&crate::zen_home()))),

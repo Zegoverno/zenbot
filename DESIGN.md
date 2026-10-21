@@ -120,8 +120,7 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
 
 - **System jobs**, seeded at start (an install from before a job existed gets it at its next
   start), each with its own run record: `sleep` (03:00 UTC, `memory::sleep`), then the nightly
-  upkeep ten minutes apart: `wiki` (03:10, `wiki::tend`: commit the agent's own wiki edits, report
-  pages without a summary and broken links), `skills` (03:20, `workshop::tend`: flag skills unused
+  upkeep ten minutes apart: `wiki` (03:10, `brain::tend`: index and lint records, report issue counts), `skills` (03:20, `workshop::tend`: flag skills unused
   for 30 days, archive them at 90), `routes` (03:30, `delegate::tune`: switch a delegation route on
   clear evidence) and `prune` (03:40: saved tool outputs after 30 days, prompt-file backups after
   90, database dumps but the newest 3, eval runs after 7 days); and `engines` (04:00 UTC, `scripts/update-engines.sh` with the kernel's secrets removed). An
@@ -223,20 +222,17 @@ reaches a turn on its own; the brain looks things up with `search`. Contract and
   number. Results from a tainted session's turns, a marked memory or a wiki page with an entry
   labelled `web` come back as untrusted content and taint the searching session; so does `history`
   of a tainted session.
-- **Wiki** (`wiki.rs`, D-036): pages in `~/.zenbot/global/wiki/` (git) with a summary over an append-only
-  dated timeline; `capture` finds candidate pages with search, System One picks the page (or a new
-  one) and catches duplicates and sensitive notes, the kernel appends, masks, labels notes from a
-  tainted session `web`, keeps `index.md` and `log.md`,
-  and commits; the agent writes the summary. A page with a `web` entry is untrusted content wherever
-  it's read (`search`, `read`). Indexed for `search`; linted and committed by the nightly `wiki`
-  job (whose report doesn't name a page with `web` entries).
+- **Legacy wiki** (`wiki.rs`, D-070): old flat pages remain searchable until the owner migrates
+  them (`brain/legacy.rs`): preview, then apply. Each becomes a provisional source record retaining
+  the full original, metadata and resolvable links, with exact originals privately archived and all
+  writers and ratings preserved. Conflicts stay held; retries never overwrite records. `capture`
+  is retired. The compatibility nightly `wiki` job indexes and lints records, reporting counts.
 - **Workshop** (`workshop.rs`, D-037): `save_skill` (reason required, format and size checked,
   near-duplicates refused; new skills and revisions of active ones are drafts in `skills/_proposed`
   until the owner accepts them by fingerprint (D-069), new domains the owner's call, commits; the
-  nightly `skills` job flags and archives unused skills) and `save_tool` (offered only with
-  `ZEN_LEGACY_TOOL_AUTHORING=1`; made tools in `~/.zenbot/global/tools/`, called as `made_<name>`, sandboxed without network
-  until approved in `made_tools`; each run uses a private copy of the tool's folder, which is what
-  is checked against the approval). The owner accepts or rejects a draft or a tool by the
+  nightly `skills` job flags and archives unused skills). Made-tool authoring and execution are
+  retired; existing files remain inspectable, and old approvals cannot activate them (D-070).
+  The owner accepts or rejects a skill draft by the
   fingerprint `zen skills` showed, refused when the content changed since (D-051). A draft a
   tainted session wrote (`save_skill`, or `edit`/`write` into it) is marked in `draft_taint`
   before it's written and in its commit; `find_skills`, `load_skill` and `read` give it as
@@ -263,7 +259,7 @@ the evidence facts, a policy (what each mistake costs, ordered levels, or explic
 `~/.zenbot/s1/<name>.toml` replaces a built-in one once it passes the checker. The catalog in code
 fixes each caller's facts, exposure and outcomes, so a decision on outside content can only lead
 toward caution. Decisions today: `job_approval`, `owner_url`, `source_risk`, `content_risk`,
-`task_check`, `web_focus`, `web_rerank`, `search_rerank`, `wiki_capture`, `skill_duplicate`,
+`task_check`, `web_focus`, `web_rerank`, `search_rerank`, `skill_duplicate`,
 `memory_capture`, `memory_durable`, `memory_disposition`, `memory_long`, and `judge` (the brain's
 tool). Every call is recorded with its
 model, latency and cost; the owner's answers to held actions and paused jobs label decisions, and
@@ -428,28 +424,25 @@ Loaded at session start.
 | `find_skills` | Search skills by need: names and one-line descriptions | built (word match; System One ranking later) |
 | `load_skill` | Load a skill, or one of its reference files | built |
 | `save_skill` | Create or improve a skill, from evidence | built (D-037) |
-| `find_tools` | Search MCP and agent-made tools by need: names and one-line descriptions | built (word match) |
+| `find_tools` | Search MCP tools by need: names and one-line descriptions | built (word match) |
 | `load_tool` | Load a tool's full definition so it can be called | built |
 | `call_tool` | Run a loaded tool (the list stays fixed, D-033) | built |
-| `save_tool` | Make a tool: a script plus a manifest, sandboxed until the owner approves | built (D-037) |
 | `judge` | Ask System One one question over many items, with a probability each | built (D-066) |
 | `verify` | A fresh verifier checks work against criteria, without the maker's reasoning | built |
-| `capture` | Put a concept into the wiki | built (D-036) |
 | `delegate` | Hand subtasks to subagents with fresh context and a chosen model, in parallel | built (D-038) |
 | `schedule` | Create, change or remove a scheduled job | built (D-046) |
 
 Gone (2026-10-07): `move` (`bash mv`), `propose_brief` (a brief is a file the `brief` skill
 writes), `submit_work`, `note_ruling` and the approvals. Going: `history`, once `search` covers it
-(`search` shipped in D-035; `history` is still offered, and reads messages by number). Skills and
-made tools are authored through `save_skill` and `save_tool`, which check the format and the
-rules (D-037); wiki pages through `capture` (timeline) and `edit` (the summary).
+(`search` shipped in D-035; `history` is still offered, and reads messages by number). Skills are authored through `save_skill` and activated by owner fingerprint review; curated
+records through `brain` (D-069). `capture` and made-tool execution are retired (D-070).
 
 ### System One, used heavily
 
 - **Called by the brain** through `judge`: one question over up to 200 items, an answer and a
   probability each, instead of reading and judging many things itself (D-066).
 - **Built into tools** as decision files, so every engine benefits: `search` and `web_search` rank
-  by relevance, `web_fetch` keeps the parts that help, the sleep judges memories, `capture` routes,
+  by relevance, `web_fetch` keeps the parts that help, the sleep judges memories,
   sources and content are rated, risky actions are checked against the job. `find_skills` and
   `find_tools` still match words.
 - **Recorded and learned from:** every decision with its probabilities and, when known, what really
@@ -503,9 +496,8 @@ every change a revertible commit. `save_skill` and the nightly `skills` job enfo
 (`<server>_<tool>`, built), and not built yet: tool transformation (rename, hide arguments, rewrite descriptions), middleware
 (audit, permissions, secret injection), proxying (zenbot's own tools as an MCP server, SPEC.md §3).
 
-**Agent-made tools** are a script plus a manifest (name, input schema, command), run by the kernel in
-the sandbox and kept in git; a full MCP server only when a tool must keep state. A new tool gets no
-network until the owner approves, and never the kernel's secrets (built, D-037).
+**Agent-made tools** are retired (D-070). Existing artifacts remain on disk for inspection; the
+kernel does not publish or execute them. Procedures belong in reviewed skills with scripts.
 
 **Loading tools mid-session** would change the tool list, which rewrites the cached prefix on every
 engine (the Phase 0 spike), so the list stays fixed and `call_tool` runs whatever `load_tool`

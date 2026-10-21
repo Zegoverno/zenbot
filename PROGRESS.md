@@ -6,6 +6,15 @@
 
 ---
 
+## 2026-10-21 — Finish Phase 4's legacy paths (D-070)
+
+Owner-run preview/apply migrates flat wiki pages into provisional source records, retaining all
+prose, exact private originals, writer ratings and resolvable links. Conflicts and oversized pages
+stay held; retries preserve owner edits. `capture` and made-tool authoring/execution are retired;
+old tool files remain inspectable but approvals cannot reactivate them. The nightly `wiki` job now
+indexes and lints records, reporting counts. Tests cover migration, retries, provenance after denial
+and stale tool calls; real-work retrieval validation remains a release check.
+
 ## 2026-10-21 — Phase 4: memory, knowledge and skills in Markdown; search follows links (D-069)
 
 Short-term memory is one capped `MEMORY.md` in the instructions: `remember` never refuses (the sleep

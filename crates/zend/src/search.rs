@@ -437,18 +437,12 @@ async fn embed_pending(db: &PgPool) -> Result<usize> {
     Ok(stored)
 }
 
-/// One index pass at a time: the background loop, `search`'s pre-index and `capture` would
+/// One index pass at a time: the background loop, `search`'s pre-index would
 /// otherwise move the same watermarks concurrently and redo each other's work.
 static INDEXING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Index changed wiki pages only (no embeddings, no network): for `capture`.
-pub(crate) async fn refresh_wiki(db: &PgPool) -> Result<usize> {
-    let _one = INDEXING.lock().await;
-    index_wiki(db).await
-}
-
 /// One indexing pass (turns, memories, wiki, record files), then embeddings. Only the first holds
-/// the indexing lock, so a search or capture never waits on the embeddings provider.
+/// the indexing lock, so a search never waits on the embeddings provider.
 pub async fn index_once(db: &PgPool) -> Result<(usize, usize, usize)> {
     let (t, m) = {
         let _one = INDEXING.lock().await;

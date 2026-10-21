@@ -85,11 +85,6 @@ pub const KINDS: &[Kind] = &[
     Kind { name: "web_rerank", exposure: Exposure::Outside, mode: Mode::Items, facts: &["query"], outcomes: None, unavailable: None, owner_rung: false },
     Kind { name: "search_rerank", exposure: Exposure::Private, mode: Mode::Items, facts: &["query"], outcomes: Some(&[("keep", Neutral), ("drop", Cautious)]), unavailable: Some("drop"), owner_rung: false },
     Kind {
-        name: "wiki_capture", exposure: Exposure::Private, mode: Mode::Single,
-        facts: &["note", "pages", "candidates"],
-        outcomes: Some(&[("add", Neutral), ("skip", Cautious), ("refuse", Cautious)]), unavailable: Some("add"), owner_rung: false,
-    },
-    Kind {
         name: "skill_duplicate", exposure: Exposure::Private, mode: Mode::Single,
         facts: &["new_skill", "skills"],
         outcomes: Some(&[("duplicate", Cautious), ("new", Neutral)]), unavailable: None, owner_rung: false,
