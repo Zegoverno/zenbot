@@ -189,8 +189,10 @@ async fn migrate_at(db: &PgPool, apply: bool, root: &Path) -> Result<Value> {
                 provenance(db, &source, &old, &archive, &old).await?;
                 records::private_write(&archive, &old).await?;
             }
+            // A retry may find an owner-edited record with new bytes. Carry the original
+            // writers into those bytes too, without replacing the owner's content.
+            provenance(db, &source, &old, &dest, &text).await?;
             if !dest.exists() {
-                provenance(db, &source, &old, &dest, &text).await?;
                 records::private_write(&dest, &text).await?;
             }
             // The index is rebuildable; the two file copies are not. Flush both files and
@@ -304,6 +306,15 @@ mod tests {
             std::fs::read_to_string(r["metadata"]["legacy"]["archive"].as_str().unwrap()).unwrap(),
             original
         );
+        let edited = text.replace(
+            "Tentative: the launch is Friday.",
+            "Owner corrected: launch is Monday.",
+        );
+        std::fs::write(&dest, &edited).unwrap();
+        std::fs::write(&source, original).unwrap();
+        assert_eq!(migrate_at(&db, true, &dir).await.unwrap()["migrated"], 1);
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), edited);
+        let text = edited;
         let app = crate::test_util::app(db.clone());
         crate::taint::deny(&app, a, "migration provenance check")
             .await
