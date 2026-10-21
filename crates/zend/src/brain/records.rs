@@ -605,6 +605,15 @@ pub async fn recover(app: &crate::AppState) -> Result<()> {
     if !schema_path.exists() {
         private_write(&schema_path, SCHEMA).await?;
     }
+    // Close interrupted receipts only while no consolidation holds its snapshot lock.
+    let mut sleep_lease = app.db.begin().await?;
+    let idle: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(704,6)")
+        .fetch_one(&mut *sleep_lease)
+        .await?;
+    if idle {
+        sqlx::query("UPDATE sleep_runs SET ended_at=now(),error='interrupted; retained inputs will be re-snapshotted' WHERE ended_at IS NULL").execute(&mut *sleep_lease).await?;
+    }
+    sleep_lease.commit().await?;
     sqlx::query("UPDATE brain_work SET state='pending' WHERE kind='capture' AND state='failed' AND attempts<8 AND updated_at < now()-interval '1 minute'*attempts").execute(&app.db).await?;
     let rows=sqlx::query("UPDATE brain_work SET state='running',lease_until=now()+interval '2 minutes',attempts=attempts+1 WHERE id IN (SELECT id FROM brain_work WHERE state='pending' OR (state='running' AND lease_until<now()) ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 8) RETURNING id,kind,payload,attempts")
         .fetch_all(&app.db).await?;
@@ -717,6 +726,39 @@ pub async fn manage(app: &crate::AppState, session: Option<Uuid>, a: &Value) -> 
             put(app, None, &record, revision, true).await
         }
         "get" => {
+            if let Some(revision) = a["revision"].as_i64() {
+                let current = if id.starts_with('m') && id[1..].parse::<i64>().is_ok() {
+                    super::sleep::get(&app.db, &id, session).await?
+                } else {
+                    read(&app.db, &id, session).await?
+                };
+                if current["revision"].as_i64() == Some(revision) {
+                    return Ok(current);
+                }
+                let mut prior: Value = sqlx::query_scalar(
+                    "SELECT snapshot FROM brain_revisions WHERE record_id=$1 AND revision=$2",
+                )
+                .bind(&id)
+                .bind(revision)
+                .fetch_one(&app.db)
+                .await?;
+                if let Some(s) = session {
+                    admit(
+                        &app.db,
+                        s,
+                        prior["risk"]
+                            .as_i64()
+                            .unwrap_or(current["risk"].as_i64().unwrap_or(4))
+                            as i16,
+                        None,
+                    )
+                    .await?;
+                }
+                prior["historical"] = json!(true);
+                prior["notice"] =
+                    json!("Historical evidence; current content may supersede this version.");
+                return Ok(prior);
+            }
             if id.starts_with('m') && id[1..].parse::<i64>().is_ok() {
                 super::sleep::get(&app.db, &id, session).await
             } else {

@@ -55,11 +55,12 @@ async fn candidates(app: &crate::AppState, s: Uuid, q: &str) -> Result<Vec<Candi
         out.push(Candidate {
             id: format!("m{}", v["id"]),
             text: format!(
-                "{}\nSource: {}\nState: {}\nEvent date: {}",
+                "{}\nSource: {}\nState: {}\nEvent date: {}\nDetails: {}",
                 string(&v, "text"),
                 v["evidence"],
                 v["tier"],
-                v["event_at"]
+                v["event_at"],
+                v["details"]
             ),
             revision: v["revision"].clone(),
             risk: v["risk"].as_i64().unwrap_or(4) as i16,
@@ -136,7 +137,13 @@ async fn candidates(app: &crate::AppState, s: Uuid, q: &str) -> Result<Vec<Candi
                         if v["tier"] != "archived" && v["risk"].as_i64().unwrap_or(4) < 4 {
                             out.push(Candidate {
                                 id: f.reference,
-                                text: string(&v, "text"),
+                                text: format!(
+                                    "{}\nSource: {}\nEvent date: {}\nDetails: {}",
+                                    string(&v, "text"),
+                                    v["evidence"],
+                                    v["event_at"],
+                                    v["details"]
+                                ),
                                 revision: v["revision"].clone(),
                                 risk: v["risk"].as_i64().unwrap_or(4) as i16,
                                 writer: v["session_id"].as_str().and_then(|s| s.parse().ok()),

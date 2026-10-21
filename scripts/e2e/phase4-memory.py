@@ -29,6 +29,7 @@ def edit(action, **args):
 
 edit('annotate', details={'owner':'Ana','state':'open','due':'2026-11-01'},event_at='2026-10-20T10:00:00Z')
 record = call('get', id=ID)
+check('paused the pilot' in call('get',id=ID,revision=1)['text'], 'historical versions remain explicitly retrievable')
 check(record['details']['state']=='open' and record['event_at'].startswith('2026-10-20'), 'commitment metadata preserves event time independently of recording time')
 edit('pin')
 long_path = root/'memory/records'/f'{ID}.md'

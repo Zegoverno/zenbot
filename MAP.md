@@ -668,5 +668,5 @@ Phase 2b/3 (D-068): `jobs.owner_approved` records authority (0034); `crates/zend
 - `global/MEMORY.md`, `global/memory/records/`, `global/memory/archive/`, `global/memory/export.json`:
   private database projections; `global/entities/`: people, organizations and projects; knowledge
   uses shallow typed folders under the configured wiki root.
-- `scripts/e2e/phase4.py`, `scripts/e2e/phase4-memory.py`, `scripts/e2e/phase4.json`, scenario `phase4` / `phase4_brain`: isolated
+- `scripts/e2e/phase4.py`, `scripts/e2e/phase4-memory.py`, `scripts/e2e/phase4.json`, scenario `phase4` / `phase4_brain`, `phase4_recovery`: isolated
   identity, knowledge, relationship, revision/import, memory and dynamic-context checks.

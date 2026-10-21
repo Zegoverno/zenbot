@@ -89,7 +89,7 @@ class H(BaseHTTPRequestHandler):
                 if any(e["host"] == "unavailable.source.test" for e in entries):
                     return self.reply(503, {"error": "unavailable fixture"})
             # The sleep's marker entries: lasting and about the owner, or lasting knowledge.
-            memory = str(state.get("memory", ""))
+            memory = str(state.get("memory", state))
             if "HOLD" in memory and RELEASE:
                 with LOCK:
                     STATS["held"] += 1

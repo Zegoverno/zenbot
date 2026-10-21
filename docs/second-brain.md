@@ -80,6 +80,7 @@ zen brain import --id pilot-project
 zen brain repair --id pilot-project
 zen brain correct --id m12 --args '{"expected_revision":2,"text":"The pilot is now paused."}'
 zen brain history --id m12
+zen brain get --id m12 --args '{"revision":1}'
 zen brain annotate --id m12 --args '{"expected_revision":3,"details":{"state":"open","owner":"Jose"}}'
 zen brain work
 zen brain retry

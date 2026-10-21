@@ -668,14 +668,24 @@ system_one_direct() {
 # Sleep with deterministic dispositions: durable/expired/unresolved experience keeps its evidence.
 memory_sleep_judged() {
   local ws; ws=$(new_workspace sleep-judged)
-  local port=$((PORT + 5))
-  python3 "$REPO/scripts/e2e/systemone_stub.py" "$port" & local srv=$!
+  local port=$((PORT + 5)) release="$TMP/sleep-release"
+  python3 "$REPO/scripts/e2e/systemone_stub.py" "$port" "$release" & local srv=$!
   start_kernel "$ws" "$(script agent.json)" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone"
   q "DELETE FROM memories; INSERT INTO memories(text,source) VALUES('PROMOTE preserve this decision','owner'),('ARCHIVE completed transient state','inferred'),('KEEP unresolved capacity question','inferred'); UPDATE memories SET risk=1" >/dev/null
   zen memory sleep --json >/dev/null
   check "sleep separates durable, expired and unresolved experience" eq "$(q "SELECT string_agg(tier,',' ORDER BY id) FROM memories")" long,archived,short
   check "consolidation retains revision history" test "$(q 'SELECT count(*) FROM brain_revisions')" -ge 2
   check "repeat sleep does not duplicate promotion" eq "$(zen memory sleep --json|jq -r .promoted)" 0
+  local mid; mid=$(q "INSERT INTO memories(text,source) VALUES('HOLD PROMOTE pending decision','inferred') RETURNING id")
+  q "UPDATE memories SET risk=1 WHERE id=$mid" >/dev/null
+  zen memory sleep --json >"$TMP/sleep-concurrent.json" & local sleeper=$!
+  sleep_held() { curl -sf "http://127.0.0.1:$port/stats"|jq -e '.held>0' >/dev/null; }
+  check "sleep releases row locks while classifying its snapshot" until_ok sleep_held
+  zen brain correct --id "m$mid" --args '{"expected_revision":1,"text":"Concurrent correction remains active."}' >/dev/null
+  touch "$release"
+  wait "$sleeper"
+  check "sleep leaves concurrently corrected content alone" eq "$(q "SELECT text || '/' || tier FROM memories WHERE id=$mid")" 'Concurrent correction remains active./short'
+  check "sleep reports the changed snapshot" eq "$(jq -r .changed "$TMP/sleep-concurrent.json")" 1
   kill "$srv"; wait "$srv" 2>/dev/null || true
 }
 
@@ -1489,9 +1499,47 @@ phase4_brain() {
   check "memory lifecycle and projection recovery" python3 "$REPO/scripts/e2e/phase4-memory.py" "$URL" "$TOKEN" "$TMP/home" "$sid" "m$id"
 }
 
+# Crash/replay, capacity outages and multi-writer denial use the same disposable Phase 4 corpus.
+phase4_recovery() {
+  local ws; ws=$(new_workspace phase4-recovery)
+  start_kernel "$ws" "$(script phase4.json)" ZEN_MEMORY_CHARS=200 ZEN_DEFAULT_MODEL=faux/smoke ZEN_LEGACY_TOOL_AUTHORING=0
+  zen brain put --args '{"record":{"id":"replay-proof","store":"knowledge","kind":"concept","title":"Publication replay","body":"Retained publication bytes.","metadata":{}}}' >/dev/null
+  local proof="$TMP/home/.zenbot/global/wiki/concepts/replay-proof.md"
+  rm "$proof"
+  q "UPDATE brain_work SET state='running',lease_until=now()-interval '1 minute' WHERE work_key='publish:replay-proof:1'" >/dev/null
+  stop_kernel
+  start_kernel "$ws" "$(script phase4.json)" ZEN_MEMORY_CHARS=200 ZEN_DEFAULT_MODEL=faux/smoke ZEN_LEGACY_TOOL_AUTHORING=0
+  check "expired publication lease replays after restart" until_ok test -s "$proof"
+  check "replay does not create another revision" eq "$(zen brain get --id replay-proof|jq -r .revision)" 1
+  q "INSERT INTO memories(text,source) VALUES(repeat('a',180),'inferred'),(repeat('b',180),'inferred'); UPDATE memories SET risk=1 WHERE text IN(repeat('a',180),repeat('b',180))" >/dev/null
+  local r sid mid count; r=$(zen ask --json -m faux/smoke P4-REMEMBER); sid=$(echo "$r"|jq -r .session_id)
+  mid=$(q "SELECT id FROM memories WHERE session_id='$sid' AND text LIKE 'We paused%'")
+  check "a full buffer saves the explicit request pending" eq "$(q "SELECT tier FROM memories WHERE id=$mid")" pending
+  zen ask --json -s "$sid" P4-REMEMBER >/dev/null
+  check "retrying capture does not duplicate the experience" eq "$(q "SELECT count(*) FROM memories WHERE session_id='$sid' AND text LIKE 'We paused%'")" 1
+  zen memory sleep --json >/dev/null
+  check "a model outage retains pending captures" eq "$(q "SELECT tier FROM memories WHERE id=$mid")" pending
+  check "the hard view bound holds with oversized legacy rows" test "$(wc -m < "$TMP/home/.zenbot/global/MEMORY.md")" -le 400
+  stop_kernel
+  start_kernel "$ws" "$(script phase4.json)" ZEN_MEMORY_CHARS=200 ZEN_DEFAULT_MODEL=faux/smoke ZEN_LEGACY_TOOL_AUTHORING=0
+  check "pending capture survives restart" eq "$(q "SELECT tier FROM memories WHERE id=$mid")" pending
+  local writer other rev; writer=$(zen sessions new --json -m faux/smoke|jq -r .id)
+  other=$(q "INSERT INTO memories(text,source,session_id) VALUES('Other writer contribution','inferred','$writer') RETURNING id")
+  rev=$(q "SELECT revision FROM memories WHERE id=$mid")
+  zen brain merge --id "m$mid" --args "{\"expected_revision\":$rev,\"merge_id\":\"m$other\",\"merge_revision\":1,\"text\":\"Merged capacity evidence from two writers.\"}" >/dev/null
+  check "merge retains every contributing writer" eq "$(q "SELECT count(*) FROM brain_memory_inputs WHERE memory_id=$mid")" 2
+  curl -sf -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{}' "$URL/api/sessions/$writer/deny" >/dev/null
+  check "denial reaches a merged memory through its second writer" eq "$(q "SELECT zen_memory_contaminated($mid)")" t
+  zen brain put --args "{\"record\":{\"id\":\"derived-denied\",\"store\":\"knowledge\",\"kind\":\"claim\",\"title\":\"Derived capacity account\",\"body\":\"A derived account requires its original evidence.\",\"metadata\":{\"evidence\":[{\"source\":\"m$mid\",\"locator\":\"merged account\",\"basis\":\"interpretation\"}]}}}" >/dev/null
+  check "knowledge derived from denied memory stays blocked" eq "$(q "SELECT risk FROM brain_records WHERE id='derived-denied'")" 5
+  stop_kernel
+  start_kernel "$ws" "$(script phase4.json "s|P4DENIED|m$mid|g")" ZEN_MEMORY_CHARS=200 ZEN_DEFAULT_MODEL=faux/smoke ZEN_LEGACY_TOOL_AUTHORING=0
+  check "direct agent reads cannot expose a denied merged memory" eq "$(zen ask --json -m faux/smoke P4-DENIED|jq -r '.tools[0].is_error')" true
+}
+
 # Scenarios that share a setup run as parts of one; `scripts/e2e.sh <filter>` matches the scenario's
 # name or a part's function name. Slowest first, so the parallel run ends sooner.
-run phase4 phase4_brain
+run phase4 phase4_brain phase4_recovery
 run phase3 phase3_kernel
 run turns abort_tool stale_turn
 run jobs scheduled_jobs job_report_file job_post_to
