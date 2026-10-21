@@ -182,6 +182,14 @@ async fn migrate_at(db: &PgPool, apply: bool, root: &Path) -> Result<Value> {
                 provenance(db, &source, &old, &dest, &text).await?;
                 records::private_write(&dest, &text).await?;
             }
+            // The index is rebuildable; the two file copies are not. Flush both files and
+            // directory entries before committing/removing the flat original, including retry
+            // copies written before a previous crash.
+            for file in [&archive, &dest] {
+                std::fs::File::open(file)?.sync_all()?;
+                std::fs::File::open(file.parent().unwrap())?.sync_all()?;
+            }
+            std::fs::File::open(root)?.sync_all()?;
             records::index_file(&mut tx, &dest, "knowledge", &text).await?;
             sqlx::query("DELETE FROM search_docs WHERE kind='wiki' AND ref=$1")
                 .bind(&slug)
@@ -195,6 +203,7 @@ async fn migrate_at(db: &PgPool, apply: bool, root: &Path) -> Result<Value> {
             tokio::fs::remove_file(&source)
                 .await
                 .context("record committed, but original could not be removed; retry safely")?;
+            std::fs::File::open(root)?.sync_all()?;
             Ok(dest)
         }
         .await;

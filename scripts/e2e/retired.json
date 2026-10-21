@@ -14,6 +14,20 @@
     }
   },
   {
+    "tool": "search",
+    "args": {
+      "query": "`legacy-wiki-4135aa9dc1b842a653dea846`",
+      "scope": "knowledge"
+    }
+  },
+  {
+    "tool": "brain",
+    "args": {
+      "action": "get",
+      "id": "legacy-wiki-4135aa9dc1b842a653dea846"
+    }
+  },
+  {
     "text": "Done."
   }
 ]

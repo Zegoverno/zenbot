@@ -402,7 +402,9 @@ wiki_capture() {
   start_kernel "$ws" "$(script retired.json)" ZEN_LEGACY_TOOL_AUTHORING=1
   check "legacy pages migrate without losing provenance or content" python3 "$REPO/scripts/e2e/legacy_wiki.py" "$URL" "$TOKEN" "$TMP/home"
   local r; r=$(zen ask --json -m faux/smoke "retired tools")
-  check "stale capture and save_tool calls are refused even with the old flag" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" capture:true,save_tool:true
+  check "stale capture and save_tool calls are refused even with the old flag" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" capture:true,save_tool:true,search:false,brain:false
+  local sid; sid=$(jq -r .session_id <<<"$r")
+  check "migrated knowledge is searchable and reads the owner's current correction" grep -q "Owner corrected the meeting claim" <<<"$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='search'")"
   zen jobs run wiki >/dev/null
   check "the compatibility wiki job checks records" poll "SELECT string_agg(r.status, ',') FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name = 'wiki'" ok
 }
