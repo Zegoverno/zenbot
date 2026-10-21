@@ -16,16 +16,19 @@ import re
 import sys
 import threading
 import time
+import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 RELEASE = sys.argv[2] if len(sys.argv) > 2 else None
 LOCK = threading.Lock()
 STATS = {"batches": 0, "texts": 0, "held": 0, "rejected": 0}
-SAME = {"automobile": "car", "vehicle": "car", "sedan": "car"}
+SAME = {"automobile": "car", "vehicle": "car", "sedan": "car",
+        "circulacao": "circulation", "sangue": "blood", "demonstracao": "proof", "continuidade": "continuity"}
 
 
 def vector(text):
     v = [0] * 1536
+    text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode()
     for w in re.findall(r"[a-z0-9]+", text.lower()):
         w = SAME.get(w, w)
         v[int(hashlib.md5(w.encode()).hexdigest(), 16) % 1536] += 1

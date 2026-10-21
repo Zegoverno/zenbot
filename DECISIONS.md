@@ -745,6 +745,9 @@ if job costs call for it). Patterns from Hermes (`cron/`) and OpenClaw (`src/cro
 
 ## D-045 — IDENTITY.md; the agent keeps its prompt files; memory is promoted into them and the wiki
 
+> The sleep's promotion into prompt files and the wiki superseded by D-069 (2026-10-21); the agent
+> still writes traits and guidance into them itself.
+
 **Date:** 2026-10-08 · **Status:** accepted (owner) · **Supersedes:** D-035's promotion to
 long-term memory and D-028's long-term tier (search over memories stays)
 
@@ -1125,28 +1128,7 @@ specialized.
 
 ---
 
-## D-028 — Memory: fixed-size short-term, nightly sleep, a very high bar for long-term
-
-> Long-term promotion superseded by D-045 (2026-10-08): the agent writes traits and guidance into
-> `IDENTITY.md` or `USER.md` itself, and the sleep keeps, archives or promotes into them and the
-> wiki. Paths moved by D-040.
-
-**Decision:** Anything can be saved to short-term memory (`MEMORY.md`, fixed size, rendered at session
-start and frozen for the session). A nightly sleep job asks System One about every entry (needed
-soon? durable? impactful across jobs? already covered?) and keeps, drops (archived, never deleted) or
-promotes. Entries compete for the fixed space. Only really impactful memories reach long-term: very
-high probability (e.g. ≥ 0.95) on the lower end of the confidence interval, from the owner's words or
-a verified result, not already covered. Facts about the owner become proposed `USER.md` edits.
-Promotion runs in shadow mode until long-term memory has a reader (search, Phase 3). Knowledge goes to
-a wiki (`capture`, System One routes and de-duplicates); search is full-text then semantic over all of
-it; the web through `web_search` (swappable providers) and `web_fetch`.
-
-**Why:** The owner's model: short-term holds what matters now; long-term is earned. A fixed size
-forces prioritization. Freezing per session keeps the prompt cache.
-
-**Date:** 2026-10-06
-
----
+## D-028 — Memory: fixed-size short-term, nightly sleep, a very high bar for long-term · superseded, [archived](docs/archive/DECISIONS-superseded.md)
 
 ## D-027 — Prompt files, system tools, and loading only what's needed
 
@@ -1447,3 +1429,41 @@ switchable.
 **Decision:** zenbot is a personal tool for getting work done, not a product.
 
 **Date:** 2026-09-30
+
+## D-069 — Three curated stores in Markdown; search is a tool, guided by System One
+
+**Date:** 2026-10-21 · **Status:** accepted (owner, 2026-10-19 to 2026-10-21; reworked after the PR #86
+review) · **Supersedes:** D-028's long-term tier, D-045's promotion by the sleep into prompt files and
+the wiki, D-037's activation of a draft by an accepted session
+
+**Decision:** Three curated stores. Memory keeps what matters from lived work; knowledge is
+understanding of a subject and how we know it (proof, evidence, argument, teaching), keeping
+disagreement and uncertainty; skills say how to do a task well. People, organizations and projects
+are records the three share (the owner's "inner CRM"). Session history is a searchable archive, not
+memory.
+
+- Markdown is the source of truth; the database is an index rebuilt from the files. Short-term
+  memory is one capped `MEMORY.md` in every session's instructions, saved to freely with `remember`
+  (and from the owner's own words after a turn, `memory_capture`); the owner may edit it. Long-term
+  memory, knowledge and entities are one file per record with tags, aliases, subjects, evidence (its
+  basis) and typed links, in a shallow folder per store (knowledge by kind under the wiki).
+- Long-term memory is earned: mostly through the sleep (`memory_durable`), rarely on the spot
+  (`remember` with `long: true`, a higher bar, `memory_long`), like people. The sleep archives what
+  is finished (`memory_disposition`) and never touches prompt files; the agent still writes really
+  important traits into `IDENTITY.md`/`USER.md` itself (D-045).
+- Nothing is pushed into a turn. Retrieval is the `search` tool, taught by the `work/search` skill:
+  System One ranks results by usefulness to the session and decides which records' links to follow
+  (a linked record joins when kept too; two hops at most; `contradicts` always followed one hop; a
+  superseded record replaced). The fixed prefix and the prompt cache are untouched.
+- Ratings follow bytes (D-067): a record carries its writer's and every cited source's; replacing
+  a short-term memory adds the replacing session as a writer and never lowers it; the agent changes
+  memory and record files only through `remember` and `brain`.
+- Thresholds are costs in decision files. New made tools are retired; skill drafts and revisions
+  activate only on the owner's fingerprint review.
+
+**Why:** The owner's model: short-term holds what matters now; long-term is earned, as in sleep.
+Files the owner can read and edit keep the data the owner's. Per-turn recall (the first PR #86
+design) added seconds and model calls to every turn and marked sessions for content they never saw;
+a tool costs nothing until needed, and System One judges usefulness better than fixed depths.
+
+**Date:** 2026-10-21

@@ -112,6 +112,9 @@ pub(crate) async fn finish_turn(app: &AppState, id: Uuid, error: Value) -> bool 
     }
     if error.is_null() {
         assist::after_turn(app, id, turn.kind.as_deref(), turn.ending);
+        if turn.kind.is_none() {
+            crate::memory::capture_turn(app, id);
+        }
         let size = summary["context_tokens"].as_i64().or(turn.sent["est_tokens"].as_i64()).unwrap_or(0);
         prepare_summary_if_needed(app, id, &turn.model, size).await;
     }
@@ -395,22 +398,6 @@ pub(crate) async fn run_child(app: &AppState, parent: Uuid, kind: &str, prompt: 
     .await?;
     run_and_wait(app, child, kind, prompt).await?;
     Ok(child)
-}
-
-/// Run a session the kernel starts on its own, with no parent (the sleep compacting a prompt file),
-/// with one kernel prompt, and wait for it to end (30 minutes at most). Returns its id.
-pub(crate) async fn run_kernel_session(app: &AppState, kind: &str, title: &str, prompt: &str, dir: &std::path::Path, model: &str) -> Result<Uuid> {
-    let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO sessions (id, title, model, kind, workspace) VALUES ($1, $2, $3, $4, $5)")
-        .bind(id)
-        .bind(title)
-        .bind(model)
-        .bind(kind)
-        .bind(dir.display().to_string())
-        .execute(&app.db)
-        .await?;
-    run_and_wait(app, id, kind, prompt).await?;
-    Ok(id)
 }
 
 pub(crate) async fn run_and_wait(app: &AppState, id: Uuid, kind: &str, prompt: &str) -> Result<()> {

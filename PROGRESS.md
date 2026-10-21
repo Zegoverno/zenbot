@@ -6,6 +6,19 @@
 
 ---
 
+## 2026-10-21 — Phase 4: memory, knowledge and skills in Markdown; search follows links (D-069)
+
+Short-term memory is one capped `MEMORY.md` in the instructions: `remember` never refuses (the sleep
+runs when it's full), System One keeps lasting sentences of the owner's words, and the owner's edits
+are read back. Long-term memory, knowledge (with how we know it) and people/organizations/projects are
+Markdown records with tags, aliases and typed links; the database only indexes them. The sleep
+promotes lasting memories and archives finished ones, never touching prompt files; `long: true`
+needs a higher bar. Nothing is injected per turn: `search` (new `work/search` skill) follows links
+System One keeps, shows contradictions and replaces superseded records. Reworked after the PR #86
+review: per-turn recall, database-authoritative memory, undo, work queues, synthesis and shadow mode
+removed; replacing a memory keeps every writer. Tests: unit, e2e `memory`, `system-one`,
+`taint-on-data`, `phase4`, `phase4-upgrade` (a migration-34 database shaped like the live one).
+
 ## 2026-10-19 — Phase 2b and Phase 3: approved jobs and kernel recovery (D-068)
 
 Owner-approved jobs retain their named sources and workspace; agent edits reset that authority.
@@ -111,108 +124,4 @@ deny withholds output. `/allow` and `/deny` now work in the terminal app (`/allo
 missing). Codex native subagents are off (`agents.enabled = false`). Tests: unit, 14 database tests
 (races, descendants, stale trust, forged provenance, shell masks), the `origin` e2e scenario.
 
-## 2026-10-15 — Offline, read-only project code by default (D-063)
-
-Risky sessions run project code without network or workspace writes; private `/tmp` remains
-writable. Attempts offer exact owner `/allow` approval without tainting on that basis. An exact
-verification grant also reaches its criteria. Constrained file tools keep their existing policy.
-No migration or unfinished D-062 step-3 implementation is included.
-
-## 2026-10-15 — Source ratings and the owner's allowlist (D-062 step 2)
-
-Migration 0027 adds source entries/audit, ratings and provenance on tape/tool calls, session max
-risk and cached owner-URL judgments. Only authenticated owner turns get risk 0; historical roles
-are not authenticated retroactively. Web fetches use the final URL (exact HTTPS hosts and
-segment-prefix paths); searches take the highest result rating. The owner manages entries with
-`zen sources add/rm/list`, `/sources` or Matrix `!sources`. A risky session can fetch an allowlisted
-target; each redirect is separately checked for SSRF and egress. Owner URL judgments see only the
-owner message, requested URL and base rating: vouch lowers one (floor 2), suspect raises to 4,
-failure leaves it; any cross-host redirect cancels the adjustment. Kernel result digests bind
-worker messages to recorded provenance; a fake/replayed call ID cannot label new text as trusted.
-Children and summaries preserve session risk. Existing taint/limits still enforce actions;
-stored-item ratings, /deny and reversible taint are step 3. Tests include source matching,
-isolated DB provenance/egress checks and e2e owner CRUD plus monotonic search ratings.
-
-## 2026-10-15 — The gate reads plain commands; web_fetch can't carry data out (D-062 step 1)
-
-All 16 holds the gate had made were false, mostly plain reads, and each one also took the
-session's shell away. The shell grammar (`gate/grammar.rs`) now allows listed read programs, each
-with its own flags (`ls cat head tail wc grep rg find sed -n jq sort uniq cut diff du stat echo
-printf …`; `sed` only with print scripts, `find` without actions, `rg` without `--pre`/`-z`), pipes,
-`;`, `&&`, `||`, `cd`, quotes, backslashes, globs expanded by the kernel with every match checked,
-and redirects to `/dev/null`; it re-emits the command from the parsed words. The read-only view
-also sees `/tmp`, read-only, where research clones live. A hold only because the gate can't classify
-the action no longer taints; harmful holds still do. In a risky session `web_fetch` runs only for a
-URL found in the owner's messages or earlier web results, never one the model built. Replay of
-2,396 recorded commands as if every session were risky: read-only route 0 → 869 (36%); the rest are
-writes, builds in the home workspace, outward actions and `$( )`/heredoc/loop syntax. All 36 attacks
-are still held. Tested: unit tests (the 16 holds, peers' CVE bypasses, secrets through globs and
-`cd`), a sandboxed run of re-emitted commands, e2e `action-gate`.
-
-## 2026-10-14 — Lighter docs, checks and e2e (D-061)
-
-Phase 1 of slimming zenbot, with no change to what it does. Docs a contributor reads and keeps
-shrank from ~6.7k to ~4.4k lines: old progress, superseded decisions and `docs/research/` moved to
-`docs/archive/`. A change now updates five docs, not ten, and `scripts/check-docs.py` dropped the
-hand-kept lists (client-protocol routes, events, tape kinds, slash commands, every script) and
-gained line budgets. e2e: 34 scenarios merged into 21 by shared setup, each isolated and run four at
-once, with fewer fixed waits: 244 s to 117 s on this VM. CI's `check` job runs `scripts/check.sh`
-(the docs job folded in), and `scripts/size-budget.sh` fails a build whose binaries outgrow their
-measured size by ~15%.
-
-## 2026-10-14 — A job's report can go into a session (D-060)
-
-The owner wants a daily check-in in his main Matrix room that he can answer right there. A job's
-new `post_to` (a session id or prefix, or `this`) makes the kernel append a clean `ok` run's report
-to that session as an assistant message, after any running turn, and record it in
-`job_runs.posted_to`; the Matrix bridge posts it in that session's room and leaves it out of
-**zen jobs**. A run that read untrusted content still reports to the jobs feed. `zen jobs add/set
---post-to`, the API and the `schedule` tool take it (migration 0026). Tested: e2e `job-post-to`
-(posted once, recorded, restart recovery, the session goes on, a marked run stays in the feed,
-refusals, clearing),
-the bridge's unit tests.
-
----
-
-## 2026-10-14 — Disk hygiene: dumps, eval runs, build dirs, Docker (D-059)
-
-The VM's 25 GB disk once filled up; four kinds of growth had no cleanup. The nightly `prune` job
-now also keeps only the newest 3 database dumps (`db.sh` keeps 3 too, down from 10) and removes eval
-run directories older than 7 days, touching only names the scripts make. After a healthy install,
-`apply-upgrade.sh` trims a cargo target directory of the checkout over 2 GiB (incremental caches and
-`debug/` first, the whole directory only if still over; never while cargo runs) and prunes dangling
-Docker images and week-old build cache. `zen status` shows the root filesystem's use and warns over
-80%. Tested: unit tests for both prune rules and the status line; `trim_target` on scratch dirs.
-
----
-
-
-## 2026-10-14 — A failover's model sticks to the session (D-058)
-
-After a hard usage limit made a turn continue on another model, the next prompt went back to the
-exhausted one, and the terminal's status line kept showing it. Now the kernel moves the session to
-the model it failed over to (effort kept only if that model takes it, the same rule as `/model`,
-now one helper) and tells clients with a new `model` event; `zen` updates its status line from it.
-The model stays until the owner picks another. The assist model (names, suggestions) retries once
-on the session's model when it hits its own usage limit; the summarizer already did. The faux
-engine has a `fallback` step and a second model, `faux/backup`, for the new `failover-model` e2e
-scenario.
-
-## 2026-10-14 — Job sessions archive themselves when the run ends (D-057)
-
-Every finished job run left its session on the board's Jobs section. Now the kernel archives a run's
-session however the run ends (ok, silent, error, interrupted); the report still reaches the owner
-through the jobs room and `zen jobs runs`. Migration 0025 archives the job sessions from before.
-The e2e `scheduled_jobs` scenario checks an ok and a failed run's sessions are archived.
-
----
-
-## 2026-10-14 — Sleep stub concurrency measurement
-
-- Finish the System One stub's inflight accounting before sending the response body. The client
-  can start its next request immediately on receipt; counting response-handler cleanup as active
-  judging falsely exceeded the four-call limit in post-merge CI. Kernel limits are unchanged.
-
----
-
-Older entries: `docs/archive/PROGRESS-*.md`.
+Older progress: [October 14–15](docs/archive/PROGRESS-2026-10-14-to-2026-10-15.md).

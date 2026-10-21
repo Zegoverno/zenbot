@@ -97,6 +97,8 @@ pub async fn classify(db: &sqlx::PgPool, session: Uuid, workspace: &Path, name: 
             let trusted = crate::sources::base(db, url).await? < 4;
             if trusted || url_seen(db, session, url).await? { (Effect::Local, trusted) } else { (Effect::Outward, false) }
         }
+        "brain" if args["action"].as_str() != Some("put") => (Effect::Local, true),
+        "brain" => (Effect::Persistent, true),
         "remember" | "capture" | "save_skill" | "save_tool" => (Effect::Persistent, true),
         "schedule" if matches!(args["action"].as_str(), Some("list" | "runs")) => (Effect::Local, true),
         "schedule" => (Effect::Persistent, true),

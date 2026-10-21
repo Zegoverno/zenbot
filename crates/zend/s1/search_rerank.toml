@@ -1,15 +1,37 @@
-# `search` over sessions, memories and the wiki: how relevant each result is; the caller orders by
-# it (exact name and path hits stay on top).
+# `search`: how relevant each result is to the query. The caller orders by it (exact name and path
+# hits stay on top), follows a record's links only from results kept here, and keeps a linked
+# record only when it is kept here too.
 name = "search_rerank"
-version = 1
+version = 2
 description = "Does this result help answer the query?"
 exposure = "private"
 evidence = ["query"]
 item = "result"
 timeout = "30s"
+unavailable = "drop"
 
 [question.helps]
 type = "yes/no"
 text = "Does {item} help answer `query`?"
 yes = "Relevant"
 no = "Not relevant"
+
+# Following an irrelevant link costs what missing a relevant one does: keep from p ≥ 0.5.
+[policy]
+kind = "costs"
+question = "helps"
+false_yes = 1
+false_no = 1
+yes = "keep"
+no = "drop"
+
+[[test]]
+answers = { helps = 0.6 }
+expect = "keep"
+
+[[test]]
+answers = { helps = 0.3 }
+expect = "drop"
+
+[[test]]
+expect = "drop"

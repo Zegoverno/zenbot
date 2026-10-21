@@ -34,6 +34,8 @@ pub fn read_only(kind: Option<&str>) -> bool {
 /// Each kind is allowed what it needs; a kind not named here gets nothing.
 pub fn refusal(kind: Option<&str>, name: &str) -> Option<String> {
     match kind {
+        None if name=="save_tool" && !crate::config::get().legacy_tool_authoring=>Some("New made-tool authoring is retired; use a reviewed skill with supporting scripts.".into()),
+        Some(crate::delegate::SUBAGENT | crate::jobs::JOB) if name=="save_tool" && !crate::config::get().legacy_tool_authoring=>Some("New made-tool authoring is retired; use a skill draft.".into()),
         None => (name == "submit_verdict").then(|| "`submit_verdict` is only for a verifier session".into()),
         Some(VERIFIER) => (!matches!(name, "bash" | "read" | "submit_verdict")).then(|| format!("`{name}` isn't available to a verifier")),
         // A subagent (also the sleep's kernel sessions) or a scheduled job can't ask the owner,
@@ -71,6 +73,9 @@ pub enum Protected {
     Steering(PathBuf),
     /// The owner's configuration and secrets (`OWNER_FILES`, and mcp.json wherever ZEN_MCP_CONFIG puts it).
     OwnerOnly(PathBuf),
+    /// Short-term memory and record files (long-term memory, knowledge, entities): the agent
+    /// changes them through `remember` and `brain`, which keep their ratings, names and links.
+    Record(PathBuf),
 }
 
 /// Where the protected files are: the zen home, and the skills, tools and MCP config (each can be
@@ -80,11 +85,12 @@ pub struct Guarded {
     pub skills: PathBuf,
     pub tools: PathBuf,
     pub mcp: PathBuf,
+    pub wiki: PathBuf,
 }
 
 impl Guarded {
     pub fn current() -> Self {
-        Guarded { home: crate::zen_home(), skills: crate::skills::root(), tools: crate::workshop::tools_root(), mcp: crate::mcp::config_path() }
+        Guarded { home: crate::zen_home(), skills: crate::skills::root(), tools: crate::workshop::tools_root(), mcp: crate::mcp::config_path(), wiki: crate::wiki::root() }
     }
 }
 
@@ -128,8 +134,16 @@ pub fn protected_target(g: &Guarded, workspace: &Path, name: &str, args: &Value)
     if OWNER_FILES.iter().any(|rel| under(g.home.join(rel))) || is(g.mcp.clone()) {
         return Some(Protected::OwnerOnly(target));
     }
-    if (under(g.skills.clone()) && !under(g.skills.join("_proposed"))) || under(g.tools.clone()) {
+    if under(g.skills.clone()) && !under(g.skills.join("_proposed")) {
+        return Some(Protected::OwnerOnly(target));
+    }
+    if under(g.tools.clone()) {
         return Some(Protected::Steering(target));
+    }
+    let global = g.home.join("global");
+    let knowledge = ["concepts", "claims", "arguments", "questions", "syntheses", "sources", "events", "subjects"];
+    if is(global.join("MEMORY.md")) || under(global.join("memory")) || under(global.join("entities")) || knowledge.iter().any(|k| under(g.wiki.join(k))) {
+        return Some(Protected::Record(target));
     }
     None
 }
@@ -168,6 +182,12 @@ pub async fn protected_refusal(db: &PgPool, session: Uuid, kind: Option<&str>, w
         Protected::OwnerOnly(p) => {
             return Some(format!(
                 "{} is the owner's own configuration (secrets, MCP servers, the kernel's files): only the owner changes it, by hand. Give the exact change in your answer instead.",
+                p.display()
+            ))
+        }
+        Protected::Record(p) => {
+            return Some(format!(
+                "{} is a memory or record file: change it with `remember` (short-term memory) or `brain` put (records), which keep its ratings, names and links.",
                 p.display()
             ))
         }
@@ -295,6 +315,7 @@ pub fn specs(kind: Option<&str>) -> Value {
         all.push(ask_spec());
     }
     all.push(crate::memory::spec());
+    all.push(crate::brain::spec());
     all.push(crate::wiki::spec());
     all.push(crate::web::search_spec());
     all.push(crate::web::fetch_spec());
@@ -304,7 +325,7 @@ pub fn specs(kind: Option<&str>) -> Value {
     all.push(crate::mcp::find_spec());
     all.push(crate::mcp::load_spec());
     all.push(crate::mcp::call_spec());
-    all.push(crate::workshop::save_tool_spec());
+    if crate::config::get().legacy_tool_authoring {all.push(crate::workshop::save_tool_spec());}
     all.push(verify_spec());
     if !subagent {
         all.push(crate::delegate::spec());
@@ -389,6 +410,10 @@ If a question goes unanswered, take your recommended option and say it was an as
             }
             *ending = Some("verdict given");
             out("Verdict recorded. End your turn now.".into(), false)
+        }
+        "brain" => {
+            let (content, is_error) = crate::brain::run_tool(app, session, args).await;
+            out(content,is_error)
         }
         "remember" => {
             let (content, is_error) = crate::memory::run_tool(app, session, args).await;
@@ -692,7 +717,7 @@ mod tests {
         std::fs::write(home.join("USER.md"), "user").unwrap();
         std::os::unix::fs::symlink("agents/zenbot/SOUL.md", home.join("SOUL.md")).unwrap();
         std::os::unix::fs::symlink("global/skills", home.join("skills")).unwrap();
-        let g = Guarded { home: home.to_path_buf(), skills: home.join("global/skills"), tools: home.join("global/tools"), mcp: home.join("mcp.json") };
+        let g = Guarded { home: home.to_path_buf(), skills: home.join("global/skills"), tools: home.join("global/tools"), mcp: home.join("mcp.json"), wiki: home.join("global/wiki") };
         let ws = home.join("agents");
         let at = |name: &str, path: &str| protected_target(&g, &ws, name, &json!({ "path": path }));
         let prompt = |name: &str, path: &str| matches!(at(name, path), Some(Protected::PromptFile(_)));
@@ -708,12 +733,16 @@ mod tests {
             assert!(owner(p), "{p}");
         }
         let steering = |path: &str| matches!(at("write", path), Some(Protected::Steering(_)));
-        assert!(steering("../global/skills/work/verify/SKILL.md"), "an active skill");
-        assert!(steering("../skills/new-domain/new-skill/SKILL.md"), "through the old symlink, in folders that don't exist yet");
-        assert!(steering("../global/skills/nope/../work/x/../verify/SKILL.md"), "`..` past missing folders");
+        assert!(owner("../global/skills/work/verify/SKILL.md"), "an active skill");
+        assert!(owner("../skills/new-domain/new-skill/SKILL.md"), "through the old symlink, in folders that don't exist yet");
+        assert!(owner("../global/skills/nope/../work/x/../verify/SKILL.md"), "`..` past missing folders");
         assert!(steering("../global/tools/word-count/run.py"), "a made tool");
         assert!(at("write", "../global/skills/_proposed/work/new/SKILL.md").is_none(), "drafts go through review");
         assert!(at("write", "../global/wiki/page.md").is_none());
+        let record = |path: &str| matches!(at("write", path), Some(Protected::Record(_)));
+        for p in ["../global/MEMORY.md", "../global/memory/2026-10-21-pilot.md", "../global/entities/people/ana.md", "../global/wiki/concepts/x.md"] {
+            assert!(record(p), "{p}");
+        }
     }
 
     #[test]
@@ -728,7 +757,7 @@ mod tests {
             }
         }
         let all = names(specs(None));
-        for t in ["bash", "read", "write", "edit", "history", "search", "ask", "remember", "capture", "web_search", "web_fetch", "find_skills", "load_skill", "save_skill", "find_tools", "load_tool", "call_tool", "save_tool", "verify", "delegate", "schedule"] {
+        for t in ["bash", "read", "write", "edit", "history", "search", "ask", "remember", "brain", "capture", "web_search", "web_fetch", "find_skills", "load_skill", "save_skill", "find_tools", "load_tool", "call_tool", "verify", "delegate", "schedule"] {
             assert!(all.contains(&t.to_string()), "{t} offered");
         }
         assert!(!all.contains(&"move".to_string()) && !all.contains(&"propose_brief".to_string()));

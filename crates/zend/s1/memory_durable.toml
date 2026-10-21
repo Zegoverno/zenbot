@@ -1,0 +1,37 @@
+# The sleep, for each short-term memory: does it last, so it moves to long-term memory (a file of
+# its own, found through search)? An entry that stays short-term is reconsidered next sleep.
+name = "memory_durable"
+version = 2
+description = "Will this memory still matter months from now?"
+exposure = "private"
+evidence = []
+item = "memory"
+timeout = "30s"
+unavailable = "keep"
+
+[question.durable]
+type = "yes/no"
+text = "Will {item} still be true and useful months from now: a decision and its reason, a commitment, a preference, a lesson, a project's development? Repetition doesn't make it true; an open task still in progress stays short-term."
+yes = "Lasting: worth keeping for good"
+no = "About a passing task, state or moment"
+
+# Promoting a passing detail costs 9 times keeping a lasting one short-term one more night:
+# promote from p ≥ 0.9.
+[policy]
+kind = "costs"
+question = "durable"
+false_yes = 9
+false_no = 1
+yes = "promote"
+no = "keep"
+
+[[test]]
+answers = { durable = 0.95 }
+expect = "promote"
+
+[[test]]
+answers = { durable = 0.8 }
+expect = "keep"
+
+[[test]]
+expect = "keep"

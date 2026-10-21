@@ -1,0 +1,14 @@
+{
+  "description": "Answer from long-term memory: a decision recorded weeks ago is not in the instructions, only in a record file, so the agent must search for it (and may follow its link to the person) instead of saying it doesn't know or asking.",
+  "areas": ["memory", "search"],
+  "work": "reflect",
+  "steps": [
+    { "shell": "mkdir -p \"$PWD.zenbot/global/memory\" \"$PWD.zenbot/global/entities/people\" && cp \"$TASK_DIR/hidden/marta-oliveira.md\" \"$PWD.zenbot/global/entities/people/\" && cp \"$TASK_DIR/hidden/2026-10-02-tax-filing-with-marta.md\" \"$PWD.zenbot/global/memory/\"" },
+    { "prompt": "By when does Marta need my documents, and why did we pick her firm? Answer in two short lines." }
+  ],
+  "checks": [
+    { "name": "searched", "run": "jq -e 'select(any(.tools[]?; .name == \"search\" or .name == \"brain\"))' \"$TURNS\" >/dev/null" },
+    { "name": "the date", "run": "grep -Eq '2026-11-14|14 (de )?nov|nov(ember)? 14' <<<\"$(tr 'A-Z' 'a-z' <<<\"$ANSWER\")\"" },
+    { "name": "the reason", "run": "grep -Eiq 'books|bookkeeping|contabil' <<<\"$ANSWER\"" }
+  ]
+}

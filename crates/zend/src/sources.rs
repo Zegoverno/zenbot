@@ -171,6 +171,24 @@ pub async fn record_bytes(db: &PgPool, session: Uuid, path: &std::path::Path, te
     Ok(())
 }
 
+/// Register bytes the kernel writes on someone's behalf (a record the sleep promotes, the owner's
+/// put): one rating per writer, none for the owner. A writer's rating is never lowered.
+pub async fn register_bytes(db: &PgPool, path: &std::path::Path, text: &str, writer: Option<Uuid>, risk: i16) -> Result<()> {
+    let path = file_key(path).to_string_lossy().into_owned();
+    sqlx::query("INSERT INTO item_ratings(path,sha256,session_id,risk)
+        SELECT $1,encode(sha256(convert_to($2,'UTF8')),'hex'),$3,$4
+        WHERE $3::uuid IS NOT NULL OR NOT EXISTS (SELECT 1 FROM item_ratings WHERE path=$1 AND sha256=encode(sha256(convert_to($2,'UTF8')),'hex') AND session_id IS NULL AND risk>=$4)
+        ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=GREATEST(item_ratings.risk,EXCLUDED.risk)")
+        .bind(&path).bind(text).bind(writer).bind(risk.clamp(0, 5)).execute(db).await?;
+    Ok(())
+}
+
+/// The sessions that wrote these exact bytes, with their ratings.
+pub async fn writers_of(db: &PgPool, text: &str) -> Result<Vec<(Uuid, i16)>> {
+    Ok(sqlx::query_as("SELECT session_id, max(risk) FROM item_ratings WHERE sha256=encode(sha256(convert_to($1,'UTF8')),'hex') AND session_id IS NOT NULL GROUP BY session_id")
+        .bind(text).fetch_all(db).await?)
+}
+
 /// Test helper: registers a file's current bytes (production writers register exact bytes).
 #[cfg(test)]
 pub async fn record_file(db: &PgPool, session: Uuid, path: &std::path::Path, prior_risk: i16) -> Result<()> {

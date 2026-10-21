@@ -381,6 +381,8 @@ pub async fn run_tool(db: &sqlx::PgPool, session: uuid::Uuid, name: &str, args: 
         crate::sources::depend_file(db, session, &text).await?;
         (path, text)
     } else {(skill.dir.join("SKILL.md"), skill.text.clone())};
+    sqlx::query("INSERT INTO brain_skill_uses(session_id,name,digest) VALUES($1,$2,$3)")
+        .bind(session).bind(format!("{}/{}",skill.domain,skill.name)).bind(crate::brain::hash(&skill.text)).execute(db).await?;
     Ok((render_load(skill, &path, text), false, risk))
 }
 

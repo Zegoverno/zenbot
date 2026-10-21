@@ -19,6 +19,7 @@ mod jobs;
 mod mcp;
 mod measure;
 mod memory;
+mod brain;
 mod mind;
 mod s1;
 mod search;
@@ -293,6 +294,7 @@ async fn serve() -> Result<()> {
         .route("/sessions/{id}/allow", axum::routing::get(session_gates).post(allow_action))
         .route("/suggestions", get(assist::stats))
         .route("/memory", get(list_memory))
+        .route("/brain", axum::routing::post(brain_action))
         .route("/mcp", get(mcp_status))
         .route("/skills", get(list_skills))
         .route("/policy", get(get_policy).post(put_policy))

@@ -173,48 +173,52 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
 - `ZEN_JOBS=0` turns the scheduler off (smoke, e2e, eval and dev kernels); system jobs are still
   seeded.
 
-### Memory and skills
+### Memory, knowledge and skills
 
-- **Short-term memory** (`memory.rs`, table `memories`): `remember` adds, replaces or removes an
-  entry with its source (`owner`, `verified`, `inferred`). Rendered into the instructions at a
-  session's start (frozen for the session) and exported to `~/.zenbot/global/MEMORY.md`. Size
-  `ZEN_MEMORY_CHARS` (4000); writes past twice that are refused and start a sleep at once. An entry
-  at risk 4 or above, or from a contaminated writer, is withheld from instructions by text
-  (only its id is listed). Ratings 2–3 enter with a source/risk label and writer dependency, raising
-  the reader's numeric risk without marking it tainted (D-065). Numeric origin, not legacy boolean
-  marks, controls admission.
-- **Sleep** (`memory::sleep`, the kernel's `sleep` job nightly at 03:00 UTC, `zen memory
-  sleep`): ranks entries (System One's "needed soon" when allowed, else recency; the owner's words
-  and verified results a little higher), keeps what fits and archives the rest (out of the search
-  index). First it promotes on its own (D-045, bar `ZEN_PROMOTE_BAR` 0.9): lasting and about the
-  owner → `USER.md`, lasting guidance on how the agent acts → `IDENTITY.md` (each under
-  `## Learned`, backup in `~/.zenbot/backups/prompt-files/`, kept 90 days; lowest of three samples,
-  only unmarked `owner`/`verified` entries; the entry leaves memory), lasting knowledge → copied into the wiki
-  (labelled `web` when the entry is marked). A prompt file over its cap is then
-  compacted: `turns::run_kernel_session` starts a parentless subagent session on the default model
-  that answers with the rewritten file; the kernel checks it (markers, a heading, within the cap,
-  not under a quarter of the 80% target), backs up and writes it. Every entry's fate
-  is a `decisions` row; the run is a `sleep_runs` row; the next sessions get a one-line note (with
-  what the nightly upkeep jobs found, "Scheduled jobs"). The sleep tidies memory only. System
-  One judges up to 4 entries at once and names what already covers an entry (another entry, the
-  profile or the identity); an entry covered by another goes only while that one stays, so of
-  entries that say the same thing one always survives. Fates apply in one transaction with the
-  entries locked: an entry changed by `remember` since the sleep read it is left as it is, and
-  isn't promoted. A promotion already in its file isn't written twice. System
-  One sees memories unless `ZEN_S1_PRIVATE=0` (D-032).
+Three curated stores (D-069): memory (what matters from lived work), knowledge (understanding of a
+subject and how we know it) and skills (how to do a task well). People, organizations and projects
+are records shared by all three. Session history is a searchable archive, not memory: nothing
+reaches a turn on its own; the brain looks things up with `search`. Contract and formats:
+[docs/second-brain.md](docs/second-brain.md).
+
+- **Short-term memory** (`memory.rs`, table `memories`): one capped file, `global/MEMORY.md`,
+  rendered into the instructions at a session's start (frozen for the session; writes show from the
+  next one). `remember` adds, replaces or removes an entry with its kind and source (`owner` only
+  for the owner's exact words). After each turn with the owner, System One picks sentences of the
+  owner's message worth keeping (`memory_capture`). The owner may edit the file; the kernel reads
+  the edits back. Writes are never refused: past `ZEN_MEMORY_CHARS` (4000) a sleep starts at once.
+  An entry at risk 4 or above, or with a contaminated writer (any session that wrote or replaced
+  it), is withheld from instructions by text (only its id is listed); ratings 2–3 enter labelled.
+- **Long-term memory, knowledge and entities** (`brain/`): one Markdown file per record with a
+  JSON frontmatter: tags, aliases, subjects, evidence with its basis (proof, empirical,
+  interpretation, tradition…) and typed links (supports, contradicts, supersedes, about…). Long-term
+  memory in `global/memory/`, people/organizations/projects in `global/entities/`, knowledge in
+  folders by kind under the wiki. The files are the source of truth; the database indexes them and
+  is rebuilt from them. The agent writes through `brain` put (revision-checked, the old version
+  backed up) and never edits these files directly; a file's rating is its bytes' (D-067).
+- **Sleep** (`brain/sleep.rs`, the kernel's `sleep` job nightly at 03:00 UTC, at once when memory
+  passes its size, `zen memory sleep`): System One judges each short-term memory: lasting ones move
+  to long-term memory as records citing them (`memory_durable`), finished ones are archived
+  (`memory_disposition`), the rest stay. `remember` with `long: true` writes a long-term memory on the
+  spot only past a high bar (`memory_long`). A memory changed while the sleep runs is left alone; one
+  whose writer was denied is archived without a model. Nothing is deleted and no prompt file is
+  touched. The run is a `sleep_runs` row; the next sessions get a one-line note.
 - **Search** (`search.rs`, D-035): an indexer keeps `search_docs` current: one document per turn of
-  every session (the owner's words, the answers, the tools called; no tool output) and one per
-  short-term memory (and each `long` row from before D-045) and wiki page. Memories come through a
+  every session (the owner's words, the answers, the tools called; no tool output), one per
+  short-term memory (and each `long` row from before D-045), wiki page and record file. Memories come through a
   queue their changes fill in the same transaction (no time watermark, so a long transaction such as
   the sleep is never skipped). Embeddings are made outside the indexing lock, so a search never waits
   on the provider; a turn is embedded once it has ended (or has been still for 2 minutes), and a
   document the provider refuses is isolated by halving its batch and left to text search after 3
   tries. `search` runs exact names and paths first (trigram over identifiers),
-  then full text (`simple`) and meaning (pgvector; `ZEN_EMBED_MODEL`, default
+  then full text (`simple`, plus English and Portuguese stemming) and meaning (pgvector; `ZEN_EMBED_MODEL`, default
   `openai/text-embedding-3-small` through OpenRouter, filled in the background; off with
   `ZEN_EMBED=0` or `ZEN_S1_PRIVATE=0`) merged by reciprocal
   rank fusion, each arm filtering the table through its own index (trigram, GIN, HNSW), and System
-  One reranks. A memory found
+  One reranks (`search_rerank`). From the records it keeps, search follows typed links: linked
+  records join when System One keeps them too, two hops at most; a `contradicts` link is always
+  followed one hop and a superseded record gives way to the newer one. Each result says how it was
+  reached and lists its links. A memory found
   counts as used. Every search is a `searches` row. `history` reads any session's messages by
   number. Results from a tainted session's turns, a marked memory or a wiki page with an entry
   labelled `web` come back as untrusted content and taint the searching session; so does `history`
@@ -222,21 +226,23 @@ One scheduler in the kernel (`jobs.rs`, D-046), backed by `jobs` and `job_runs`:
 - **Wiki** (`wiki.rs`, D-036): pages in `~/.zenbot/global/wiki/` (git) with a summary over an append-only
   dated timeline; `capture` finds candidate pages with search, System One picks the page (or a new
   one) and catches duplicates and sensitive notes, the kernel appends, masks, labels notes from a
-  tainted session (and the sleep's copies of marked memories) `web`, keeps `index.md` and `log.md`,
+  tainted session `web`, keeps `index.md` and `log.md`,
   and commits; the agent writes the summary. A page with a `web` entry is untrusted content wherever
   it's read (`search`, `read`). Indexed for `search`; linted and committed by the nightly `wiki`
   job (whose report doesn't name a page with `web` entries).
 - **Workshop** (`workshop.rs`, D-037): `save_skill` (reason required, format and size checked,
-  near-duplicates refused, drafts in `skills/_proposed` until the owner or an accepted session
-  vouches, new domains the owner's call, commits; the nightly `skills` job flags and archives unused skills) and
-  `save_tool` (made tools in `~/.zenbot/global/tools/`, called as `made_<name>`, sandboxed without network
+  near-duplicates refused; new skills and revisions of active ones are drafts in `skills/_proposed`
+  until the owner accepts them by fingerprint (D-069), new domains the owner's call, commits; the
+  nightly `skills` job flags and archives unused skills) and `save_tool` (offered only with
+  `ZEN_LEGACY_TOOL_AUTHORING=1`; made tools in `~/.zenbot/global/tools/`, called as `made_<name>`, sandboxed without network
   until approved in `made_tools`; each run uses a private copy of the tool's folder, which is what
   is checked against the approval). The owner accepts or rejects a draft or a tool by the
   fingerprint `zen skills` showed, refused when the content changed since (D-051). A draft a
   tainted session wrote (`save_skill`, or `edit`/`write` into it) is marked in `draft_taint`
   before it's written and in its commit; `find_skills`, `load_skill` and `read` give it as
   untrusted content that taints the reader, `zen skills` shows it `untrusted`, and only the owner's
-  own accept activates it, never an accepted session that loaded it (D-053).
+  own accept activates it (D-053). Each `load_skill` records the version loaded
+  (`brain_skill_uses`) and the owner's verdict on the session.
 - **Delegation** (`delegate.rs`, D-038): subagents (kind `subagent`, no `ask`, `delegate` or
   `schedule`; they inherit the parent's taint), several
   tasks per call in parallel; a child (subagent or verifier) is stopped with the turn that waits
@@ -258,7 +264,8 @@ the evidence facts, a policy (what each mistake costs, ordered levels, or explic
 fixes each caller's facts, exposure and outcomes, so a decision on outside content can only lead
 toward caution. Decisions today: `job_approval`, `owner_url`, `source_risk`, `content_risk`,
 `task_check`, `web_focus`, `web_rerank`, `search_rerank`, `wiki_capture`, `skill_duplicate`,
-`sleep_judge`, `sleep_recheck`, and `judge` (the brain's tool). Every call is recorded with its
+`memory_capture`, `memory_durable`, `memory_disposition`, `memory_long`, and `judge` (the brain's
+tool). Every call is recorded with its
 model, latency and cost; the owner's answers to held actions and paused jobs label decisions, and
 the nightly sleep fits calibration curves (applied where a file opts in) and proposes changes.
 Private content is allowed unless `ZEN_S1_PRIVATE=0` (D-032). Configured by
@@ -455,48 +462,30 @@ rules (D-037); wiki pages through `capture` (timeline) and `edit` (the summary).
 
 | Kind | In zenbot | Where |
 |---|---|---|
-| Working | `MEMORY.md`, fixed size | `memories` table, rendered into the prompt and exported as a file |
-| Episodic (what happened) | sessions, the tape | Postgres (built) |
-| Semantic (what's true) | the wiki | markdown in git |
-| Identity (who acts, for whom) | `SOUL.md`, `IDENTITY.md`, `USER.md` | prompt files the agent keeps compact, backed up on every change (D-045) |
-| Procedural (how to do things) | skills, tools | markdown and scripts in git |
+| Working | `MEMORY.md`, fixed size | `global/MEMORY.md` with its entries' ratings in `memories`, rendered into the prompt |
+| Experience (what mattered) | long-term memory | one Markdown record per memory in `global/memory/` |
+| Episodic (what happened) | sessions, the tape | Postgres, searchable; an archive, not memory |
+| Semantic (what's true, how we know) | knowledge records, the wiki | Markdown with evidence and typed links |
+| Identity (who acts, for whom) | `SOUL.md`, `IDENTITY.md`, `USER.md`; people and organizations | prompt files (D-045); entity records |
+| Procedural (how to do things) | skills | markdown and scripts in git |
 | External | `web_search`, `web_fetch` | web content is untrusted input (taint rule, SPEC.md §5.18) |
 
-**Short-term memory.** Anything can be saved with `remember`; each entry keeps its text, source (the
-owner's words, a verified result, or the agent's inference), when it was made and when it was last
-used. `MEMORY.md` is rendered at session start and frozen for the session; writes show from the next
-one. Entries may exceed the size during the day up to a hard ceiling (about 2×), which triggers an
-immediate tidy-up.
+**Short-term memory.** Saved with `remember`, or picked from the owner's own words after a turn;
+each entry keeps its text, kind, source and every session that wrote it. Fixed size; past it the
+sleep runs at once.
 
-**Sleep hygiene (nightly).** The space is fixed, so entries compete for it. A nightly job (fixed token
-budget, cost recorded) asks System One about every entry:
+**Sleep.** System One asks of every short-term memory whether it lasts (it moves to long-term
+memory as a record citing it) and whether it is finished (archived, never deleted); costs in the
+decision files set the bars. Long-term memory made on the spot is rare (a higher bar).
 
-| Question | Type |
-|---|---|
-| Will this be needed in the coming days? | score |
-| Will it still be true in months? | probability |
-| Is it guidance on how the agent should act (a trait, a preference)? | probability |
-| Is it about the owner as a person? | probability |
-| Is it lasting knowledge (a decision and why, how something works, a lesson)? | probability |
-| Is it already covered (another memory, a skill, `USER.md`)? | probability |
+**Records.** Knowledge, people/organizations/projects and long-term memory are files; their
+metadata says how we know (evidence and its basis) and how they relate (typed links). Subjects and
+tags classify across folders; aliases name the same record.
 
-- **Keep:** rank by likely need, adjusted for recent use; fill the fixed size from the top.
-- **Promote (automatic, D-045):** about the owner → `USER.md`; guidance → `IDENTITY.md` (both with
-  a backup, only from the owner's words or verified results); knowledge → the wiki. No long-term
-  tier.
-- **Drop:** everything else leaves short-term memory, archived, never deleted.
-- Every decision goes to `decisions`; a short morning note says what was kept, dropped and promoted, and where;
-  anything can be undone.
-
-**Knowledge.** The wiki holds structured notes: each page an append-only timeline plus a summary
-rewritten from it (SPEC.md §5.9). `capture` takes a concept and its source; `search` finds candidate
-pages; System One picks the page (existing, new, or a duplicate) and flags unclear or sensitive
-content; a model writes the clean text.
-
-**Search.** One index over sessions, memories, the wiki and skills: Postgres full-text first, then
-pgvector, merged by rank (reciprocal rank fusion), exact names and paths first. A tool, not injected
-every turn. Every search logged. Built (D-035, D-036) except skills, which `find_skills` searches
-instead.
+**Search.** One index over sessions, memories, the wiki and records: exact names and paths first,
+full text (also English and Portuguese stemming), then pgvector, merged by rank, reranked by System
+One, which also guides how far search follows records' links. A tool the brain uses, taught by the
+`work/search` skill; nothing is injected every turn. Every search logged.
 
 **Web.** `web_search` behind one provider contract (swappable providers); `web_fetch` with
 readable-text extraction and link following; a browser later.

@@ -1,7 +1,0 @@
-[
-  {"when": "change memories mid-sleep", "tool": "remember", "args": {"action": "replace", "id": "m901", "text": "the build machine is now called kestrel", "source": "owner"}},
-  {"when": "change memories mid-sleep", "tool": "remember", "args": {"action": "remove", "id": "m902"}},
-  {"when": "change memories mid-sleep", "text": "Done."},
-  {"when": "find the staging day", "tool": "search", "args": {"query": "staging Fridays", "scope": "memories"}},
-  {"when": "find the staging day", "text": "Done."}
-]

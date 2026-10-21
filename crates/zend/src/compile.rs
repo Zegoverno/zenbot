@@ -155,7 +155,7 @@ pub fn compose(parts: &[&str], workspace: &Path, repo: &str, memory: &str, sleep
     }
     if has("memory") {
         s.push_str(&format!(
-            "\n<memory size=\"{}/{}\">\nYour short-term memory as of this session's start (entries by id; change them with the remember tool).\n{}{}</memory>\n",
+            "\n<memory size=\"{}/{}\">\nYour short-term memory as of this session's start (entries by id; change them with the remember tool). Long-term memories, knowledge and people/projects records are found with search.\n{}{}</memory>\n",
             memory.chars().count(),
             crate::memory::cap(),
             if memory.is_empty() { "(empty)\n".to_string() } else { memory.to_string() },

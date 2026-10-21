@@ -719,3 +719,8 @@ pub(crate) async fn list_job_runs(State(app): State<AppState>, Query(q): Query<R
     let runs = jobs::runs(&app.db, q.job.as_deref(), q.limit.unwrap_or(20)).await.map_err(bad_request)?;
     Ok(Json(Value::Array(runs)))
 }
+
+/// The owner's `brain` actions (`zen brain`): get, list, put, schema, lint, index.
+pub(crate) async fn brain_action(State(app): State<AppState>, Json(args): Json<Value>) -> ApiResult<Json<Value>> {
+    Ok(Json(crate::brain::manage(&app.db, None, &args).await.map_err(bad_request)?.0))
+}
