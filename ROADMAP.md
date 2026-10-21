@@ -41,8 +41,11 @@ changes. Candidate follow-ups, each only when use calls for it:
   Full read-only limits begin at 4; budgets remain out of scope.
 - **Phase 4 (D-069), merged in PR #86:** short-term `MEMORY.md`, long-term memory, knowledge
   and entities as Markdown records, search over typed links. D-070 adds owner-run flat wiki migration
-  and retires `capture` and made-tool execution. Release validation and retrieval on real work
-  precede Phase 5 planning; no new Phase 5 scope has been agreed.
+  and retires `capture` and made-tool execution.
+- **Phase 5, tools (D-071), on its branch:** images and PDF pages through `read`, batch `edit` with
+  diffs, bounded saved output, a fuller MCP client (per-server calls, streaming, resources, prompts,
+  refresh-token OAuth, owner-answered forms) and shorter tool descriptions. Eval and owner review
+  precede merge. Not planned yet: browser OAuth login, MCP sampling, roots and subscriptions.
 - **Phase 2b + Phase 3 (D-068), merged:** approved job authority, contextual source
   ratings, aligned high-risk edits, held-run continuation, contained MCP, trust suggestions,
   worker hang recovery, durable prompts, permission snapshots and JSONL histories were merged in PR #85. The advisory model comparison lacked a usable local Docker environment.

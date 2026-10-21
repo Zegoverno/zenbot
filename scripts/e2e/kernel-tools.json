@@ -2,5 +2,8 @@
   {"tool":"read","args":{"path":"ZENHOME/AGENTS.md"}},
   {"tool":"read","args":{"path":"ZENALIAS/AGENTS.md"}},
   {"tool":"write","args":{"path":"ZENALIAS/mcp.json","content":"{\"planted-by-owner-session\": 1}"}},
+  {"tool":"read","args":{"path":"pixel.png"}},
+  {"tool":"edit","args":{"path":"notes.txt","edits":[{"old_text":"alpha","new_text":"one"},{"old_text":"beta","new_text":"two"}]}},
+  {"tool":"edit","args":{"path":"notes.txt","edits":[{"old_text":"one","new_text":"uno"},{"old_text":"missing","new_text":"x"}]}},
   {"text":"done"}
 ]

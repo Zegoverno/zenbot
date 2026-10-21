@@ -6,6 +6,36 @@
 
 ---
 
+## D-071 — Phase 5 tools: rich results, batch edits, bounded output, a fuller MCP client
+
+**Date:** 2026-10-21 · **Status:** accepted (owner agreed the Phase 5 scope, 2026-10-21)
+
+**Decision:** Tools get more capable and cheaper in context, with every result still rated,
+masked and recorded by the kernel.
+
+- A tool result may carry MCP-shaped text/image blocks beside its text (worker protocol
+  `content_blocks`); the kernel hashes the text and the images it hands over, so a worker can't
+  swap either. Both engines receive images; a replayed history resends only the latest 4.
+- `read` shows PNG, JPEG, GIF and WebP images, and up to 4 PDF pages at a time as text plus a
+  rendered page, converted by poppler in a contained, resource-limited process. A downloaded PDF
+  keeps its download's rating.
+- `edit` takes up to 100 replacements; all must match before one atomic write, and it returns a
+  bounded, masked diff.
+- Output: shell and MCP results past 12 KB show head and tail, the full masked text saved (at most
+  16 MB each, 30 days and 256 MB in all, oldest first); a `read` page stays 50 KB and any other
+  result is cut past 64 KB. A saved capture carries the rating of everything in it.
+- MCP: calls connect only their server and discovery waits at most 3 s per server; HTTP answers are
+  read as SSE events arrive; structured content and images are kept; resources and prompts are
+  reserved `zen_` operations; refresh-token OAuth with owner-provisioned credentials; form
+  elicitation waits for the owner's own answer (`zen mcp-respond`, 5 minutes), never the model's,
+  and the server's timeout doesn't run while it waits. Accepted revisions: 2025-06-18, 2025-03-26,
+  2024-11-05. Sampling, roots, subscriptions and browser OAuth login are not supported.
+- Tool descriptions are shorter (about 19 KB to 16 KB of JSON for the owner's full list); a test
+  keeps them under 16,000 bytes.
+
+**Why:** The model couldn't see images or PDFs, needed a call per edit, and one slow MCP server
+delayed every other; large outputs cost context without being recoverable in a bounded way.
+
 ## D-070 — Migrate legacy knowledge as sources; retire old writers and made tools
 
 **Date:** 2026-10-21 · **Status:** accepted (owner's Phase 4 cleanup before Phase 5 planning)
