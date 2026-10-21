@@ -6,14 +6,18 @@
 
 ---
 
-## 2026-10-21 — Phase 4: curated memory, knowledge, skills and relationships
+## 2026-10-21 — Phase 4: memory, knowledge and skills in Markdown; search follows links (D-069)
 
-- Added bounded short-term capture, durable pending work, long-term experience and revision-safe
-  consolidation without automatic prompt-file promotion; projections preserve evidence and history.
-- Added canonical knowledge/entity files, typed links, identity resolution, relationship briefs and
-  owner import/lint/history. Added skill version evidence and explicit activation for revisions.
-- Added per-turn context receipts, multilingual retrieval and source-aware graph expansion. Session
-  archives remain distinct from curated memory. Validation and limitations are recorded in the PR.
+Short-term memory is one capped `MEMORY.md` in the instructions: `remember` never refuses (the sleep
+runs when it's full), System One keeps lasting sentences of the owner's words, and the owner's edits
+are read back. Long-term memory, knowledge (with how we know it) and people/organizations/projects are
+Markdown records with tags, aliases and typed links; the database only indexes them. The sleep
+promotes lasting memories and archives finished ones, never touching prompt files; `long: true`
+needs a higher bar. Nothing is injected per turn: `search` (new `work/search` skill) follows links
+System One keeps, shows contradictions and replaces superseded records. Reworked after the PR #86
+review: per-turn recall, database-authoritative memory, undo, work queues, synthesis and shadow mode
+removed; replacing a memory keeps every writer. Tests: unit, e2e `memory`, `system-one`,
+`taint-on-data`, `phase4`, `phase4-upgrade` (a migration-34 database shaped like the live one).
 
 ## 2026-10-19 — Phase 2b and Phase 3: approved jobs and kernel recovery (D-068)
 

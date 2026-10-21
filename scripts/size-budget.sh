@@ -9,13 +9,11 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIR=${1:-$REPO/target/release}
 case "$(basename "$DIR")" in
-  dist) BUDGET=(zend 17400 zen 5800 zen-engine 1800) ;; # KiB; measured 12871, 4894, 1519
-  *) BUDGET=(zend 22500 zen 7900 zen-engine 2500) ;;    # KiB; measured 16928, 6736, 2109
+  dist) BUDGET=(zend 16600 zen 5800 zen-engine 1800) ;; # KiB; measured 12871, 4894, 1519
+  *) BUDGET=(zend 21400 zen 7900 zen-engine 2500) ;;    # KiB; measured 16928, 6736, 2109
 esac
 # D-068 adds durable queues/exports, MCP containment and a vendored public suffix list.
 # Raise only zend's budget for the combined feature set; the client/worker budgets stay fixed.
-# D-069 adds canonical records, durable consolidation, graph retrieval and owner views.
-# CI measured 21409 KiB before the final coverage refinements; allow modest growth in zend only.
 over=0
 for ((i = 0; i < ${#BUDGET[@]}; i += 2)); do
   name=${BUDGET[i]} max=${BUDGET[i + 1]}

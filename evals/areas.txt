@@ -31,6 +31,9 @@ crates/zend/src/secrets.rs        tools
 crates/zend/src/agent.rs          tools memory skills history
 crates/zend/src/taint.rs          history web mcp delegation
 crates/zend/src/memory.rs         memory
+crates/zend/src/brain/            memory search
+crates/zend/s1/memory_            memory
+crates/zend/s1/search_rerank      search
 crates/zend/src/search.rs         search
 crates/zend/src/compact.rs        compaction history
 crates/zend/src/jobs.rs           jobs

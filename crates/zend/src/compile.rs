@@ -155,7 +155,7 @@ pub fn compose(parts: &[&str], workspace: &Path, repo: &str, memory: &str, sleep
     }
     if has("memory") {
         s.push_str(&format!(
-            "\n<memory size=\"{}/{}\">\nMemory is selected experience; current evidence arrives in per-turn context. Knowledge records and skills are separate; session history is an archive. Use brain schema for formats, and never promote an inference into a user preference.\n{}{}</memory>\n",
+            "\n<memory size=\"{}/{}\">\nYour short-term memory as of this session's start (entries by id; change them with the remember tool). Long-term memories, knowledge and people/projects records are found with search.\n{}{}</memory>\n",
             memory.chars().count(),
             crate::memory::cap(),
             if memory.is_empty() { "(empty)\n".to_string() } else { memory.to_string() },
@@ -207,7 +207,7 @@ pub async fn base_prompt(db: &PgPool, session: Uuid, blocks: &[Block], workspace
             return Ok(env.system);
         }
     }
-    let memory = if crate::config::get().brain_mode=="on" {String::new()} else {crate::memory::render(db,session).await?}; // Shadow/off preserve the baseline snapshot.
+    let memory = crate::memory::render(db, session).await?;
     // The morning note: what the last sleep did, and what the nightly upkeep jobs found.
     let note: Vec<String> = [crate::memory::morning_note(db).await?, crate::jobs::upkeep_note(db).await?].into_iter().flatten().collect();
     let note = (!note.is_empty()).then(|| note.join("\n"));

@@ -3,8 +3,12 @@
 
 Usage: systemone_stub.py <port> [release-file]. A sleep question about an entry marked HOLD waits
 until the release file exists (at most 30 s), so a scenario can change memory mid-sleep. GET /stats
-reports how many calls are held now and the most sleep questions (a state with a `memory`) that
+reports how many calls are held now and the most sleep questions (a state with memories) that
 were in flight at once; other calls (a `remember` turn's) aren't counted.
+
+Memory markers: PROMOTE (the sleep promotes it), ARCHIVE (finished), LONG (clearly lasting, for
+`remember` with long), CAPTURE (an owner sentence worth keeping). Search: a result marked OFFTOPIC
+is judged irrelevant, anything else relevant.
 """
 import json
 import os
@@ -58,7 +62,7 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        sleep = isinstance(request.get("state"), dict) and "memory" in request["state"]
+        sleep = isinstance(request.get("state"), dict) and any(k.startswith("memory_") for k in request["state"])
         if sleep:
             with LOCK:
                 self.counted = True
@@ -103,15 +107,19 @@ class H(BaseHTTPRequestHandler):
             for name, question in request["questions"].items():
                 kind = question["type"]
                 instructions = question.get("instructions", "")
-                item = state.get("record_" + name.removeprefix("q"), {})
-                if "long-term preservation" in instructions:
-                    yes = "PROMOTE" in json.dumps(item)
-                    answers[name] = {"type":"noul", "noul":0.99 if yes else 0.01}
-                elif "clearly expired transient" in instructions:
-                    choice = "archive" if "ARCHIVE" in json.dumps(item) else "keep"
-                    answers[name] = {"type":"choice", "choice":choice, "probabilities":{choice:1.0}}
-                elif "exact owner statement" in instructions:
-                    answers[name] = {"type":"noul", "noul":0.01}
+                i = name.removeprefix("q")
+                item = json.dumps(next((state[k] for k in (f"memory_{i}", f"statement_{i}", f"result_{i}") if k in state), {}))
+                if "clearly lasting" in instructions:
+                    answers[name] = {"type": "noul", "noul": 0.99 if "LONG" in item else 0.5}
+                elif "months from now" in instructions:
+                    answers[name] = {"type": "noul", "noul": 0.99 if "PROMOTE" in item else 0.01}
+                elif "clearly finished or obsolete" in instructions:
+                    choice = "archive" if "ARCHIVE" in item else "keep"
+                    answers[name] = {"type": "choice", "choice": choice, "probabilities": {choice: 1.0}}
+                elif "the owner's own words" in instructions:
+                    answers[name] = {"type": "noul", "noul": 0.99 if "CAPTURE" in item else 0.01}
+                elif "help answer" in instructions:
+                    answers[name] = {"type": "noul", "noul": 0.1 if "OFFTOPIC" in item else 0.82}
                 elif source_batch:
                     entry = state if "host" in state else state[name.split("_", 1)[0]]
                     field = name.rsplit("_", 1)[-1]

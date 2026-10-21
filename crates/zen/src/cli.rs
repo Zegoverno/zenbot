@@ -36,12 +36,14 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Cmd {
-    /// Inspect or update the second brain; JSON arguments from --args or stdin (-).
+    /// Records (knowledge, people/projects, long-term memory): get, list, put, schema, lint, index.
+    /// Arguments as JSON with --args (or - for stdin).
     Brain {
         action: String,
-        #[arg(long)] id: Option<String>,
-        #[arg(long)] query: Option<String>,
-        #[arg(long)] args: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        args: Option<String>,
     },
     /// Run one task and print the answer. Reads the prompt from stdin when omitted or "-".
     Ask {

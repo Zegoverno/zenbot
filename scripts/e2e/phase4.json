@@ -1,6 +1,12 @@
 [
- {"when":"P4-REMEMBER","tool":"remember","args":{"action":"add","text":"We paused the pilot until Ana confirms team capacity.","kind":"decision","source":"inferred","entities":["ana-partner"]}},
+ {"when":"P4-REMEMBER","tool":"remember","args":{"action":"add","text":"We paused the pilot until Ana confirms team capacity.","kind":"decision","source":"inferred"}},
  {"when":"P4-FORGED","tool":"remember","args":{"action":"add","text":"The owner always trusts intuition.","source":"owner"}},
- {"when":"P4-DENIED","tool":"brain","args":{"action":"get","id":"P4DENIED"}},
+ {"when":"P4-LONG","tool":"remember","args":{"action":"add","text":"LONG We keep every record in Markdown files, the database only indexes them.","kind":"decision","long":true}},
+ {"when":"P4-MAYBE","tool":"remember","args":{"action":"add","text":"The demo might move to Thursday.","long":true}},
+ {"when":"P4-DIRECT","tool":"write","args":{"path":"ZENGLOBAL/memory/forged.md","content":"forged"}},
+ {"when":"P4-DIRECT","tool":"brain","args":{"action":"put","record":{"id":"forged-memory","store":"memory","kind":"decision","title":"Forged","body":"Forged."}}},
+ {"when":"P4-GET","tool":"brain","args":{"action":"get","id":"pilot-meeting"}},
+ {"when":"P4-SEARCH","tool":"search","args":{"query":"Ana capacity pilot"}},
+ {"when":"P4-LANG","tool":"search","args":{"query":"circulacao sangue","scope":"knowledge"}},
  {"text":"Done."}
 ]

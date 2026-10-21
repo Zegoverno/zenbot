@@ -1,6 +1,6 @@
 [
   {"when": "TRUST-A", "tool": "web_search", "args": {"query": "harbour"}},
-  {"when": "TRUST-A", "tool": "remember", "args": {"text": "TRUST-MEM the harbour code is 4417", "source": "inferred"}},
+  {"when": "TRUST-A", "tool": "remember", "args": {"text": "TRUST-MEM the harbour code is 4417", "source": "owner"}},
   {"when": "TRUST-B", "tool": "bash", "args": {"command": "curl -s -m 3 -X POST -H 'Authorization: Bearer E2ETOKEN' -H 'Content-Type: application/json' -d '{\"seen\": 999999}' KERNELURL/api/sessions/SESSIONID/trust; echo net; cat ~/.zenbot/token 2>/dev/null || echo no-token"}},
   {"when": "TRUST-C", "tool": "bash", "args": {"command": "curl -s -m 3 -o /dev/null KERNELURL/health; echo net=$?"}},
   {"when": "TRUST-D", "tool": "web_search", "args": {"query": "lighthouse"}},

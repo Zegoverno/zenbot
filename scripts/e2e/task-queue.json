@@ -45,7 +45,7 @@
   "tool": "remember",
   "args": {
    "text": "The integration job uses a disposable workspace.",
-   "source": "inferred"
+   "source": "verified"
   }
  },
  {

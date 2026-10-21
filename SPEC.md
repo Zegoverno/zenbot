@@ -133,7 +133,7 @@ Each module lists what it does, its contract, the default implementation and pos
 - Records `{id, scope, text, kind: preference|fact|lesson|directive, sensitivity, source, created_by, revision}`; rendered to markdown for humans.
 - Written explicitly (`memory.remember`) or by post-session extraction. Only the owner's own statements and verified outcomes count; directives are quoted verbatim.
 - Loaded as a capped index per session; the rest via search.
-- Refined (D-028, DESIGN.md "Memory and knowledge"): a fixed-size short-term `MEMORY.md`; a nightly sleep keeps or drops. Superseded in part by D-045: traits, guidance and preferences live in `IDENTITY.md` / `USER.md`, written there by the agent or promoted by the sleep (backed up first), not in memory.
+- Refined (D-028, DESIGN.md "Memory and knowledge"): a fixed-size short-term `MEMORY.md`; a nightly sleep keeps or drops. Superseded in part by D-045 and D-069: traits and standing guidance live in `IDENTITY.md` / `USER.md`, written there by the agent (backed up first); the sleep moves lasting memories into long-term memory records, found with search.
 
 #### 5.11 Taste
 The core of the moat: learning the owner's judgment and applying it everywhere.

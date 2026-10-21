@@ -1,13 +1,36 @@
+# After each turn with the owner: which sentences of the owner's own message are worth keeping in
+# short-term memory. Only the owner's exact words are judged; nothing is paraphrased.
 name = "memory_capture"
-version = 1
-description = "Phase 4 memory_capture"
+version = 2
+description = "Is this sentence of the owner's message worth remembering across sessions?"
 exposure = "private"
 evidence = []
-item = "record"
-timeout = "2s"
+item = "statement"
+timeout = "10s"
+unavailable = "skip"
 
 [question.remember]
 type = "yes/no"
-text = "Does this exact owner statement express a durable decision, commitment, preference, project development or unresolved question worth recalling across sessions? Exclude requests to perform a one-off task, speculation, credentials and incidental trivia. Record: {item}"
-yes = "Relevant"
-no = "Not relevant"
+text = "Does {item}, the owner's own words, state a decision, commitment, preference, project development or open question worth recalling in later sessions? A request to do a one-off task, small talk, speculation, credentials and trivia are not."
+yes = "A lasting decision, commitment, preference, development or open question"
+no = "A one-off request, small talk, speculation, a secret or trivia"
+
+# Saving noise costs 9 times missing a statement the owner can still repeat: save from p ≥ 0.9.
+[policy]
+kind = "costs"
+question = "remember"
+false_yes = 9
+false_no = 1
+yes = "save"
+no = "skip"
+
+[[test]]
+answers = { remember = 0.95 }
+expect = "save"
+
+[[test]]
+answers = { remember = 0.7 }
+expect = "skip"
+
+[[test]]
+expect = "skip"

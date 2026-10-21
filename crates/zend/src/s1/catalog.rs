@@ -43,11 +43,10 @@ pub struct Kind {
 use Effect::*;
 
 pub const KINDS: &[Kind] = &[
-    Kind { name: "context_needs", exposure: Exposure::Private, mode: Mode::Single, facts: &["query"], outcomes: None, unavailable: None, owner_rung: false },
-    Kind { name: "memory_disposition", exposure: Exposure::Private, mode: Mode::Items, facts: &[], outcomes: None, unavailable: None, owner_rung: false },
-    Kind { name: "memory_capture", exposure: Exposure::Private, mode: Mode::Items, facts: &[], outcomes: None, unavailable: None, owner_rung: false },
-    Kind { name: "memory_durable", exposure: Exposure::Private, mode: Mode::Items, facts: &[], outcomes: None, unavailable: None, owner_rung: false },
-    Kind { name: "context_curator", exposure: Exposure::Private, mode: Mode::Items, facts: &["query"], outcomes: None, unavailable: None, owner_rung: false },
+    Kind { name: "memory_capture", exposure: Exposure::Private, mode: Mode::Items, facts: &[], outcomes: Some(&[("save", Neutral), ("skip", Cautious)]), unavailable: Some("skip"), owner_rung: false },
+    Kind { name: "memory_durable", exposure: Exposure::Private, mode: Mode::Items, facts: &[], outcomes: Some(&[("promote", Neutral), ("keep", Cautious)]), unavailable: Some("keep"), owner_rung: false },
+    Kind { name: "memory_disposition", exposure: Exposure::Private, mode: Mode::Items, facts: &[], outcomes: Some(&[("archive", Neutral), ("keep", Cautious)]), unavailable: Some("keep"), owner_rung: false },
+    Kind { name: "memory_long", exposure: Exposure::Private, mode: Mode::Items, facts: &[], outcomes: Some(&[("long", Neutral), ("short", Cautious)]), unavailable: Some("short"), owner_rung: false },
     Kind {
         name: "job_approval", exposure: Exposure::Owner, mode: Mode::Single,
         facts: &["owner_messages", "job"],
@@ -84,7 +83,7 @@ pub const KINDS: &[Kind] = &[
         outcomes: Some(&[("allow", Grant), ("hold", Cautious)]), unavailable: Some("hold"), owner_rung: false,
     },
     Kind { name: "web_rerank", exposure: Exposure::Outside, mode: Mode::Items, facts: &["query"], outcomes: None, unavailable: None, owner_rung: false },
-    Kind { name: "search_rerank", exposure: Exposure::Private, mode: Mode::Items, facts: &["query"], outcomes: None, unavailable: None, owner_rung: false },
+    Kind { name: "search_rerank", exposure: Exposure::Private, mode: Mode::Items, facts: &["query"], outcomes: Some(&[("keep", Neutral), ("drop", Cautious)]), unavailable: Some("drop"), owner_rung: false },
     Kind {
         name: "wiki_capture", exposure: Exposure::Private, mode: Mode::Single,
         facts: &["note", "pages", "candidates"],
@@ -94,16 +93,6 @@ pub const KINDS: &[Kind] = &[
         name: "skill_duplicate", exposure: Exposure::Private, mode: Mode::Single,
         facts: &["new_skill", "skills"],
         outcomes: Some(&[("duplicate", Cautious), ("new", Neutral)]), unavailable: None, owner_rung: false,
-    },
-    Kind {
-        name: "sleep_judge", exposure: Exposure::Private, mode: Mode::Single,
-        facts: &["memory", "source", "age_days", "days_since_used", "other_memories", "user_profile", "agent_identity", "covers"],
-        outcomes: None, unavailable: None, owner_rung: false,
-    },
-    Kind {
-        name: "sleep_recheck", exposure: Exposure::Private, mode: Mode::Single,
-        facts: &["memory", "source", "age_days", "days_since_used", "other_memories", "user_profile", "agent_identity"],
-        outcomes: None, unavailable: None, owner_rung: false,
     },
     Kind { name: "judge", exposure: Exposure::Information, mode: Mode::Items, facts: &["context"], outcomes: None, unavailable: None, owner_rung: false },
 ];

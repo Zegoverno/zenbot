@@ -48,11 +48,10 @@ use spec::Spec;
 
 /// The default decision files, built into the binary.
 pub const DEFAULTS: &[(&str, &str)] = &[
-    ("context_needs", include_str!("../../s1/context_needs.toml")),
-    ("memory_disposition", include_str!("../../s1/memory_disposition.toml")),
     ("memory_capture", include_str!("../../s1/memory_capture.toml")),
     ("memory_durable", include_str!("../../s1/memory_durable.toml")),
-    ("context_curator", include_str!("../../s1/context_curator.toml")),
+    ("memory_disposition", include_str!("../../s1/memory_disposition.toml")),
+    ("memory_long", include_str!("../../s1/memory_long.toml")),
     ("job_approval", include_str!("../../s1/job_approval.toml")),
     ("owner_url", include_str!("../../s1/owner_url.toml")),
     ("source_risk", include_str!("../../s1/source_risk.toml")),
@@ -63,8 +62,6 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("search_rerank", include_str!("../../s1/search_rerank.toml")),
     ("wiki_capture", include_str!("../../s1/wiki_capture.toml")),
     ("skill_duplicate", include_str!("../../s1/skill_duplicate.toml")),
-    ("sleep_judge", include_str!("../../s1/sleep_judge.toml")),
-    ("sleep_recheck", include_str!("../../s1/sleep_recheck.toml")),
     ("judge", include_str!("../../s1/judge.toml")),
     ("egress", include_str!("../../s1/egress.toml")),
 ];

@@ -1,7 +1,16 @@
-//! Canonical entities and knowledge: validated metadata, typed links and recoverable publishing.
+//! Record files: knowledge, entities (people, organizations, projects) and long-term memory.
+//!
+//! One Markdown file per record, its metadata a JSON frontmatter (a valid YAML subset). The files
+//! are the source of truth: `brain_records`, `brain_aliases`, `brain_links` and the search index
+//! are rebuilt from them (`index`), so the owner edits a file in any editor and the next index
+//! pass picks it up. A file's rating is the rating of its bytes (item_ratings, D-067): bytes the
+//! agent writes carry its session's rating and every cited writer's; bytes nobody registered (the
+//! owner's edit) take the highest rating the path's writers had. Reading hands a record over at
+//! that rating; a record whose writer was denied is withheld.
 use super::*;
-use std::path::PathBuf;
-const KINDS: &[&str] = &[
+use std::path::{Path, PathBuf};
+
+pub const KNOWLEDGE: &[&str] = &[
     "concept",
     "claim",
     "argument",
@@ -10,11 +19,10 @@ const KINDS: &[&str] = &[
     "source",
     "event",
     "subject",
-    "person",
-    "organization",
-    "project",
 ];
-const RELATIONS: &[&str] = &[
+pub const ENTITIES: &[&str] = &["person", "organization", "project"];
+pub const MEMORY: &[&str] = &["experience", "decision", "preference", "commitment", "question"];
+pub const RELATIONS: &[&str] = &[
     "part_of",
     "depends_on",
     "supports",
@@ -31,73 +39,118 @@ const RELATIONS: &[&str] = &[
     "distinguishes",
     "mentions",
 ];
-const SCHEMA: &str = "# Second-brain schema v1\n\nOne canonical ID per record; aliases are case-insensitive. Search before creating.\nKnowledge lives under wiki/{concepts,claims,arguments,questions,syntheses,sources,events,subjects}/.\nEntities live under entities/{people,organizations,projects}/. Folders are primary homes; subjects\nand typed links are multiple classifications. Frontmatter is a JSON object (valid YAML), followed\nby the readable body. Preserve IDs when renaming. Evidence items cite source and locator; inferential\nlinks are tentative. Status: active, provisional, superseded, archived. Never treat mentions as proof.\nSources describe precisely what was inspected. Memory is curated experience, sessions are archives.\nGenerated memory projections are edited through brain actions, not silently overwritten.\n";
-fn valid_id(s: &str) -> bool {
+const BASES: &[&str] = &[
+    "owner_statement",
+    "observed",
+    "external_claim",
+    "inference",
+    "proof",
+    "empirical",
+    "hypothesis",
+    "interpretation",
+    "tradition",
+];
+pub const SCHEMA: &str = "Records are Markdown files with a JSON frontmatter between `---` lines: \
+{\"id\",\"store\",\"kind\",\"title\",\"status\",\"revision\",\"metadata\":{\"tags\",\"aliases\",\"subjects\",\"evidence\",\"links\"}}, then the body. \
+Stores and kinds: knowledge (concept, claim, argument, question, synthesis, source, event, subject) under wiki/<kind folder>/; \
+entity (person, organization, project) under entities/<people|organizations|projects>/; memory (experience, decision, preference, \
+commitment, question) under memory/. One canonical id per record (lowercase letters, digits, hyphens); aliases are other names. \
+Evidence items: {source, locator, basis}; basis is owner_statement, observed, external_claim, inference, proof, empirical, hypothesis, \
+interpretation or tradition: it says how we know, not that it is true. Links: {relation, target, evidence}; supports, contradicts and \
+derived_from need evidence. Status: active, provisional, superseded, archived. Keep qualifications and competing claims in the body.";
+
+pub fn valid_id(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 96
         && s.bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
-fn target_parts(value: &str) -> (&str, Option<&str>) {
-    match value.split_once('#') {
-        Some((id, anchor)) => (id, Some(anchor)),
-        None => (value, None),
-    }
-}
-fn has_anchor(body: &str, anchor: &str) -> bool {
-    body.contains(&format!("{{#{anchor}}}")) || body.contains(&format!("id=\"{anchor}\""))
-}
+
 fn folder(kind: &str) -> &str {
     match kind {
         "person" => "people",
         "organization" => "organizations",
-        "synthesis" => "syntheses",
-        "subject" => "subjects",
+        "project" => "projects",
+        "concept" => "concepts",
         "claim" => "claims",
         "argument" => "arguments",
         "question" => "questions",
+        "synthesis" => "syntheses",
         "source" => "sources",
         "event" => "events",
-        "project" => "projects",
-        _ => "concepts",
+        _ => "subjects",
     }
 }
-fn path(store: &str, kind: &str, id: &str) -> PathBuf {
-    (if store == "entity" {
-        root().join("entities")
-    } else {
-        crate::wiki::root()
-    })
-    .join(folder(kind))
+
+/// Where a record lives. Long-term memory is one flat folder; the others have a folder per kind.
+pub fn path(store: &str, kind: &str, id: &str) -> PathBuf {
+    match store {
+        "memory" => root().join("memory"),
+        "entity" => root().join("entities").join(folder(kind)),
+        _ => crate::wiki::root().join(folder(kind)),
+    }
     .join(format!("{id}.md"))
 }
-fn validate(r: &Value) -> Result<()> {
+
+/// Every folder that holds records, with its store.
+fn folders() -> Vec<(PathBuf, &'static str)> {
+    let mut out = vec![(root().join("memory"), "memory")];
+    out.extend(
+        ENTITIES
+            .iter()
+            .map(|k| (root().join("entities").join(folder(k)), "entity")),
+    );
+    let mut seen = vec![];
+    for k in KNOWLEDGE {
+        if !seen.contains(&folder(k)) {
+            seen.push(folder(k));
+            out.push((crate::wiki::root().join(folder(k)), "knowledge"));
+        }
+    }
+    out
+}
+
+fn kinds(store: &str) -> &'static [&'static str] {
+    match store {
+        "memory" => MEMORY,
+        "entity" => ENTITIES,
+        _ => KNOWLEDGE,
+    }
+}
+
+fn slugs(v: &Value, what: &str) -> Result<()> {
+    ensure!(
+        v.is_null()
+            || v.as_array()
+                .is_some_and(|a| a.iter().all(|s| s.as_str().is_some_and(valid_id))),
+        "{what} must be an array of slugs (lowercase letters, digits, hyphens)"
+    );
+    Ok(())
+}
+
+pub fn validate(r: &Value) -> Result<()> {
+    let store = string(r, "store");
     ensure!(
         valid_id(&string(r, "id")),
         "id: lowercase letters, digits and hyphens, 1..96 characters"
     );
     ensure!(
-        matches!(r["store"].as_str(), Some("knowledge" | "entity")),
-        "store must be knowledge or entity"
+        matches!(store.as_str(), "knowledge" | "entity" | "memory"),
+        "store must be knowledge, entity or memory"
     );
     ensure!(
-        KINDS.contains(&string(r, "kind").as_str()),
-        "unknown record kind"
+        kinds(&store).contains(&string(r, "kind").as_str()),
+        "kind must be one of {:?} for {store}",
+        kinds(&store)
     );
+    let title = string(r, "title");
     ensure!(
-        (r["store"] == "entity")
-            == matches!(
-                r["kind"].as_str(),
-                Some("person" | "organization" | "project")
-            ),
-        "entity kind/store mismatch"
-    );
-    ensure!(
-        !string(r, "title").trim().is_empty() && string(r, "title").len() <= 240,
+        !title.trim().is_empty() && title.len() <= 240,
         "title required, at most 240 bytes"
     );
+    let body = string(r, "body");
     ensure!(
-        !string(r, "body").trim().is_empty() && string(r, "body").len() <= 64 * 1024,
+        !body.trim().is_empty() && body.len() <= 64 * 1024,
         "body required, at most 64 KiB"
     );
     ensure!(
@@ -105,845 +158,547 @@ fn validate(r: &Value) -> Result<()> {
             r["status"].as_str().unwrap_or("active"),
             "active" | "provisional" | "superseded" | "archived"
         ),
-        "invalid status"
-    );
-    ensure!(
-        r["schema_version"].is_null() || r["schema_version"] == 1,
-        "unsupported schema version"
-    );
-    let id = string(r, "id");
-    ensure!(
-        !(id.starts_with('m') && id[1..].parse::<i64>().is_ok()),
-        "numeric m IDs are reserved for memory"
+        "status must be active, provisional, superseded or archived"
     );
     let m = &r["metadata"];
-    ensure!(m.to_string().len() <= 24000, "metadata exceeds 24k bytes");
-    for subject in m["subjects"].as_array().into_iter().flatten() {
-        ensure!(
-            subject.as_str().is_some_and(valid_id),
-            "subject IDs must be canonical slugs"
-        );
-    }
     ensure!(m.is_null() || m.is_object(), "metadata must be an object");
-    for key in ["aliases", "subjects", "evidence", "links"] {
-        ensure!(
-            m[key].is_null() || m[key].is_array(),
-            "{key} must be an array"
-        );
-    }
+    ensure!(m.to_string().len() <= 24000, "metadata exceeds 24k bytes");
+    slugs(&m["tags"], "tags")?;
+    slugs(&m["subjects"], "subjects")?;
+    ensure!(
+        m["aliases"].is_null()
+            || m["aliases"]
+                .as_array()
+                .is_some_and(|a| a.iter().all(|s| s.as_str().is_some_and(|s| !s.trim().is_empty()))),
+        "aliases must be an array of names"
+    );
     for e in m["evidence"].as_array().into_iter().flatten() {
         ensure!(
             !string(e, "source").is_empty() && !string(e, "locator").is_empty(),
             "evidence needs source and locator"
         );
         ensure!(
-            matches!(
-                e["basis"].as_str().unwrap_or("external_claim"),
-                "owner_statement"
-                    | "observed"
-                    | "external_claim"
-                    | "inference"
-                    | "proof"
-                    | "empirical"
-                    | "hypothesis"
-                    | "interpretation"
-                    | "tradition"
-            ),
-            "invalid evidence basis"
+            BASES.contains(&e["basis"].as_str().unwrap_or("external_claim")),
+            "evidence basis must be one of {BASES:?}"
         );
     }
+    ensure!(
+        m["evidence"].is_null() || m["evidence"].is_array(),
+        "evidence must be an array"
+    );
+    ensure!(m["links"].is_null() || m["links"].is_array(), "links must be an array");
     for l in m["links"].as_array().into_iter().flatten() {
         ensure!(
-            RELATIONS.contains(&string(l, "relation").as_str()) && {
-                let target = string(l, "target");
-                let (id, anchor) = target_parts(&target);
-                valid_id(id) && anchor.is_none_or(valid_id)
-            },
-            "invalid relationship"
+            RELATIONS.contains(&string(l, "relation").as_str()),
+            "link relation must be one of {RELATIONS:?}"
+        );
+        ensure!(
+            valid_id(&string(l, "target")) && string(l, "target") != string(r, "id"),
+            "link target must be another record's id"
         );
         ensure!(
             !matches!(
                 l["relation"].as_str(),
                 Some("supports" | "contradicts" | "derived_from")
             ) || l["evidence"].as_array().is_some_and(|a| !a.is_empty()),
-            "evidential links need evidence"
+            "supports, contradicts and derived_from links need evidence"
         );
     }
     Ok(())
 }
-fn render(r: &Value) -> Result<String> {
+
+pub fn render(r: &Value) -> Result<String> {
     let mut meta = r.clone();
-    let body = meta
-        .as_object_mut()
-        .unwrap()
-        .remove("body")
-        .unwrap_or(json!(""));
+    let body = meta.as_object_mut().and_then(|m| m.remove("body")).unwrap_or(json!(""));
     Ok(format!(
         "---\n{}\n---\n\n{}\n",
         serde_json::to_string_pretty(&meta)?,
-        body.as_str().unwrap_or_default()
+        body.as_str().unwrap_or_default().trim()
     ))
 }
-fn parse(text: &str) -> Result<Value> {
+
+pub fn parse(text: &str) -> Result<Value> {
     let rest = text
         .strip_prefix("---\n")
-        .ok_or_else(|| anyhow::anyhow!("missing schema frontmatter"))?;
+        .ok_or_else(|| anyhow::anyhow!("missing frontmatter"))?;
     let (meta, body) = rest
         .split_once("\n---\n")
         .ok_or_else(|| anyhow::anyhow!("unclosed frontmatter"))?;
     let mut r: Value = serde_json::from_str(meta)?;
+    ensure!(r.is_object(), "frontmatter must be a JSON object");
     r["body"] = json!(body.trim());
     validate(&r)?;
     Ok(r)
 }
-async fn read(db: &PgPool, id: &str, session: Option<Uuid>) -> Result<Value> {
-    let row = sqlx::query(
-        "SELECT *,zen_brain_contaminated(id) AS contaminated FROM brain_records WHERE id=$1",
-    )
-    .bind(id)
-    .fetch_one(db)
-    .await?;
-    ensure!(
-        row.get::<bool, _>("published"),
-        "record publication pending"
-    );
-    let p = PathBuf::from(row.get::<String, _>("path"));
+
+/// The file behind a record id, from the index.
+async fn located(db: &PgPool, id: &str) -> Result<PathBuf> {
+    let p: Option<String> = sqlx::query_scalar("SELECT path FROM brain_records WHERE id=$1")
+        .bind(id)
+        .fetch_optional(db)
+        .await?;
+    Ok(PathBuf::from(p.ok_or_else(|| anyhow::anyhow!("no record `{id}`"))?))
+}
+
+/// A record's current file, parsed, with its rating (5: a writer was denied).
+pub async fn read(db: &PgPool, id: &str) -> Result<(Value, String, i16)> {
+    let p = located(db, id).await?;
     let text = tokio::fs::read_to_string(&p).await?;
-    ensure!(
-        Some(hash(&text)) == row.get::<Option<String>, _>("digest"),
-        "file changed; run lint/import before using this revision"
-    );
     let mut r = parse(&text)?;
-    r["revision"] = json!(row.get::<i64, _>("revision"));
-    r["risk"] = json!(row.get::<i16, _>("risk"));
-    if let Some(s) = session {
-        ensure!(!row.get::<bool, _>("contaminated"), "record writer denied");
-        let risk = crate::sources::file_rating(db, &p, &text)
-            .await?
-            .max(row.get("risk"));
-        let writers: Vec<Uuid> =
-            sqlx::query_scalar("SELECT writer FROM brain_record_inputs WHERE record_id=$1")
+    let risk = crate::sources::file_rating(db, &p, &text).await?;
+    r["path"] = json!(p.display().to_string());
+    Ok((r, text, risk))
+}
+
+/// Hand a record's bytes to `reader`: record its writers as the reader's inputs. A record whose
+/// writer was denied is never handed over.
+pub async fn hand(db: &PgPool, reader: Option<Uuid>, text: &str, risk: i16) -> Result<()> {
+    ensure!(risk < 5, "record withheld: a session that wrote it was denied");
+    if let Some(s) = reader {
+        crate::sources::depend_file(db, s, text).await?;
+    }
+    Ok(())
+}
+
+/// Evidence that cites a memory (`m12`) or a record takes on its rating and writers.
+async fn bind_evidence(db: &PgPool, evidence: &[Value], risk: &mut i16, writers: &mut Vec<(Uuid, i16)>) -> Result<()> {
+    for e in evidence {
+        let source = string(e, "source");
+        let source = source.strip_prefix("record:").unwrap_or(&source);
+        if let Some(id) = source.strip_prefix('m').and_then(|n| n.parse::<i64>().ok()) {
+            let row: Option<(i16, bool)> =
+                sqlx::query_as("SELECT risk, zen_memory_contaminated(id) FROM memories WHERE id=$1")
+                    .bind(id)
+                    .fetch_optional(db)
+                    .await?;
+            let Some((r, contaminated)) = row else { continue };
+            ensure!(!contaminated, "cited memory m{id} was written by a denied session");
+            *risk = (*risk).max(r);
+            let inputs: Vec<Uuid> = sqlx::query_scalar("SELECT writer FROM brain_memory_inputs WHERE memory_id=$1")
                 .bind(id)
                 .fetch_all(db)
                 .await?;
-        crate::sources::depend(db, s, &writers).await?;
-        admit(db, s, risk, row.get("session_id")).await?;
-        crate::sources::depend_file(db, s, &text).await?;
-    }
-    Ok(r)
-}
-async fn bind_evidence(
-    db: &PgPool,
-    evidence: &mut [Value],
-    risk: &mut i16,
-    writers: &mut Vec<Uuid>,
-) -> Result<()> {
-    for e in evidence {
-        ensure!(
-            !string(e, "source").is_empty() && !string(e, "locator").is_empty(),
-            "evidence needs source and locator"
-        );
-        let reference = string(e, "source");
-        let source = reference.strip_prefix("record:").unwrap_or(&reference);
-        if let Some(memory_id) = source
-            .strip_prefix('m')
-            .and_then(|id| id.parse::<i64>().ok())
-        {
-            let memory = memory_json(db, memory_id).await?;
-            let current = memory["revision"].as_i64().unwrap_or(0);
-            let revision = e["revision"].as_i64().unwrap_or(current);
-            if revision != current {
-                let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM brain_revisions WHERE record_id=$1 AND revision=$2)").bind(source).bind(revision).fetch_one(db).await?;
-                ensure!(exists, "unknown memory evidence revision");
+            writers.extend(inputs.into_iter().map(|w| (w, r)));
+        } else if valid_id(source) {
+            if let Ok((_, text, r)) = read(db, source).await {
+                ensure!(r < 5, "cited record {source} was written by a denied session");
+                *risk = (*risk).max(r);
+                writers.extend(crate::sources::writers_of(db, &text).await?);
             }
-            e["revision"] = json!(revision);
-            let stopped: bool = sqlx::query_scalar("SELECT zen_memory_contaminated($1)")
-                .bind(memory_id)
-                .fetch_one(db)
-                .await?;
-            *risk = (*risk).max(if stopped {
-                5
-            } else {
-                memory["risk"].as_i64().unwrap_or(4) as i16
-            });
-            let inputs: Vec<Uuid> =
-                sqlx::query_scalar("SELECT writer FROM brain_memory_inputs WHERE memory_id=$1")
-                    .bind(memory_id)
-                    .fetch_all(db)
-                    .await?;
-            writers.extend(inputs);
-            continue;
-        }
-        if let Some(row) = sqlx::query("SELECT revision,digest,CASE WHEN zen_brain_contaminated(id) THEN 5::smallint ELSE risk END AS risk,session_id FROM brain_records WHERE id=$1 AND published").bind(source).fetch_optional(db).await? {
-            let current: i64 = row.get("revision");
-            let revision = e["revision"].as_i64().unwrap_or(current);
-            if revision == current {
-                read(db, source, None).await?;
-                e["digest"] = json!(row.get::<Option<String>,_>("digest"));
-            } else {
-                let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM brain_revisions WHERE record_id=$1 AND revision=$2)").bind(source).bind(revision).fetch_one(db).await?;
-                ensure!(exists, "unknown evidence revision");
-                e.as_object_mut().ok_or_else(||anyhow::anyhow!("evidence must be an object"))?.remove("digest");
-            }
-            e["revision"] = json!(revision);
-            *risk = (*risk).max(row.get("risk"));
-            let inputs: Vec<Uuid> = sqlx::query_scalar("SELECT writer FROM brain_record_inputs WHERE record_id=$1").bind(source).fetch_all(db).await?;
-            writers.extend(inputs);
-            if let Some(writer) = row.get::<Option<Uuid>,_>("session_id") {writers.push(writer);}
-        } else {
-            e["verification"] = json!("reference_only; original bytes not registered");
         }
     }
     Ok(())
 }
-async fn put(
-    app: &crate::AppState,
-    session: Option<Uuid>,
-    r: &Value,
-    expected: Option<i64>,
-    import: bool,
-) -> Result<Value> {
-    validate(r)?;
-    let (id, store, kind) = (string(r, "id"), string(r, "store"), string(r, "kind"));
-    let mut risk = guard(&app.db, session).await?;
-    let body = crate::secrets::mask(&string(r, "body"));
-    let mut r: Value = serde_json::from_str(&crate::secrets::mask(&r.to_string()))?;
-    r["body"] = json!(body);
-    if r["metadata"].is_null() {
-        r["metadata"] = json!({});
-    }
-    // Outside claims or inferences never masquerade as verified personal intent.
-    if session.is_some()
-        && r["metadata"]["evidence"]
-            .as_array()
-            .is_none_or(|e| e.is_empty())
-    {
-        r["status"] = json!("provisional");
-    }
-    let mut input_writers = vec![];
-    if let Some(s) = session {
-        input_writers.push(s);
-    }
-    let mut evidence_groups = vec![];
-    if let Some(evidence) = r["metadata"]["evidence"].as_array_mut() {
-        evidence_groups.push(evidence);
-    }
-    for evidence in evidence_groups {
-        bind_evidence(&app.db, evidence, &mut risk, &mut input_writers).await?;
-    }
-    if let Some(links) = r["metadata"]["links"].as_array_mut() {
-        for link in links {
-            if let Some(evidence) = link["evidence"].as_array_mut() {
-                bind_evidence(&app.db, evidence, &mut risk, &mut input_writers).await?;
-            }
-        }
-    }
-    if let Some(s) = session {
-        crate::sources::depend(&app.db, s, &input_writers).await?;
-    }
-    let p = path(&store, &kind, &id);
-    let mut tx = app.db.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(704,4)")
-        .execute(&mut *tx)
-        .await?;
-    let prior = sqlx::query("SELECT * FROM brain_records WHERE id=$1 FOR UPDATE")
-        .bind(&id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    if let Some(old) = &prior {
-        ensure!(
-            expected == Some(old.get("revision")),
-            "expected_revision required; record changed"
-        );
-        ensure!(
-            old.get::<String, _>("path") == p.to_string_lossy(),
-            "kind/store cannot change during update"
-        );
-        let old_text = tokio::fs::read_to_string(&p).await?;
-        ensure!(
-            import || Some(hash(&old_text)) == old.get::<Option<String>, _>("digest"),
-            "manual file edit pending; import it first"
-        );
-        risk = risk.max(old.get("risk"));
-        sqlx::query("INSERT INTO brain_revisions(record_id,revision,snapshot) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
-            .bind(&id).bind(old.get::<i64,_>("revision")).bind(parse(&old_text)?).execute(&mut *tx).await?;
-    } else {
-        ensure!(expected.is_none(), "record not found");
-    }
-    if r["status"].is_null() {
-        r["status"] = json!("active");
-    }
-    let now = chrono::Utc::now().to_rfc3339();
-    r["updated"] = json!(now);
-    if let Some(old) = &prior {
-        let old_text = tokio::fs::read_to_string(old.get::<String, _>("path")).await?;
-        r["created"] = parse(&old_text)?
-            .get("created")
-            .cloned()
-            .unwrap_or(json!(now));
-    } else {
-        r["created"] = json!(now);
-    }
-    let rev = prior
-        .as_ref()
-        .map(|o| o.get::<i64, _>("revision") + 1)
-        .unwrap_or(1);
-    let mut aliases = vec![string(&r, "title").to_lowercase()];
-    for a in r["metadata"]["aliases"].as_array().into_iter().flatten() {
-        ensure!(
-            a.as_str().is_some_and(|s| !s.trim().is_empty()),
-            "alias must be text"
-        );
-        aliases.push(a.as_str().unwrap().trim().to_lowercase());
-    }
-    for a in &aliases {
-        let matches: Vec<String> = sqlx::query_scalar(
-            "SELECT record_id FROM brain_aliases WHERE alias=$1 AND record_id!=$2",
-        )
-        .bind(a)
-        .bind(&id)
-        .fetch_all(&mut *tx)
-        .await?;
-        ensure!(
-            matches.is_empty(),
-            "ambiguous name/alias {a}; resolve existing identities: {matches:?}"
-        );
-    }
-    for l in r["metadata"]["links"].as_array().into_iter().flatten() {
-        let target_ref = string(l, "target");
-        let (target, anchor) = target_parts(&target_ref);
-        ensure!(
-            target != id || anchor.is_some(),
-            "self-link needs an explicit claim anchor"
-        );
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM brain_records WHERE id=$1 AND published)",
-        )
-        .bind(target)
-        .fetch_one(&mut *tx)
-        .await?;
-        ensure!(exists, "unknown or pending link target {target}");
-        if let Some(anchor) = anchor {
-            let body: String = sqlx::query_scalar("SELECT body FROM brain_records WHERE id=$1")
-                .bind(target)
-                .fetch_one(&mut *tx)
-                .await?;
-            ensure!(has_anchor(&body, anchor), "target claim anchor missing");
-        }
-        if let Some(anchor) = l["source_anchor"].as_str() {
-            ensure!(
-                valid_id(anchor) && has_anchor(&string(&r, "body"), anchor),
-                "source claim anchor missing"
-            );
-        }
-    }
-    r["revision"] = json!(rev);
-    r["schema_version"] = json!(1);
-    let text = render(&r)?;
-    sqlx::query("INSERT INTO brain_records(id,store,kind,title,body,metadata,revision,session_id,risk,status,path) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(id) DO UPDATE SET title=$4,body=$5,metadata=$6,revision=$7,session_id=COALESCE($8,brain_records.session_id),risk=$9,status=$10,published=false,updated_at=now()")
-        .bind(&id).bind(&store).bind(&kind).bind(string(&r,"title")).bind(string(&r,"body")).bind(&r["metadata"]).bind(rev).bind(session).bind(risk).bind(r["status"].as_str().unwrap_or("active")).bind(p.to_string_lossy().as_ref()).execute(&mut *tx).await?;
-    sqlx::query("DELETE FROM brain_aliases WHERE record_id=$1")
-        .bind(&id)
-        .execute(&mut *tx)
-        .await?;
-    for alias in aliases {
-        sqlx::query(
-            "INSERT INTO brain_aliases(alias,record_id) VALUES($1,$2) ON CONFLICT DO NOTHING",
-        )
-        .bind(alias)
-        .bind(&id)
-        .execute(&mut *tx)
-        .await?;
-    }
-    for writer in input_writers {
-        sqlx::query("INSERT INTO brain_record_inputs(record_id,writer) VALUES($1,$2) ON CONFLICT DO NOTHING").bind(&id).bind(writer).execute(&mut *tx).await?;
-    }
-    let payload = json!({"id":id,"revision":rev,"text":text,"prior":if import {tokio::fs::read_to_string(&p).await.ok().map(|t|hash(&t))}else{prior.as_ref().and_then(|o|o.get::<Option<String>,_>("digest"))}});
-    sqlx::query("INSERT INTO brain_work(kind,work_key,payload) VALUES('publish',$1,$2)")
-        .bind(format!("publish:{id}:{rev}"))
-        .bind(&payload)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    match publish(app, &payload).await {
-        Ok(()) => {
-            sqlx::query("UPDATE brain_work SET state='done',error=NULL WHERE work_key=$1")
-                .bind(format!("publish:{id}:{rev}"))
-                .execute(&app.db)
-                .await?;
-        }
-        Err(e) => {
-            return Ok(
-                json!({"id":id,"revision":rev,"publication":"pending","error":e.to_string()}),
-            );
-        }
-    }
-    Ok(json!({"id":id,"revision":rev,"publication":"published"}))
-}
-async fn publish(app: &crate::AppState, p: &Value) -> Result<()> {
-    let id = string(p, "id");
-    let revision = p["revision"].as_i64().unwrap_or(0);
-    let text = string(p, "text");
-    let r = parse(&text)?;
-    let mut tx = app.db.begin().await?;
-    let row = sqlx::query("SELECT * FROM brain_records WHERE id=$1 FOR UPDATE")
-        .bind(&id)
-        .fetch_one(&mut *tx)
-        .await?;
-    ensure!(
-        row.get::<i64, _>("revision") == revision,
-        "publish superseded"
-    );
-    let path = PathBuf::from(row.get::<String, _>("path"));
-    ensure!(
-        path == self::path(&string(&r, "store"), &string(&r, "kind"), &id),
-        "unexpected file path"
-    );
-    if let Ok(existing) = tokio::fs::read_to_string(&path).await {
-        ensure!(
-            hash(&existing) == hash(&text)
-                || Some(hash(&existing)) == p["prior"].as_str().map(str::to_string),
-            "manual edit conflict; publication held"
-        );
-    }
-    if let Some(s) = row.get::<Option<Uuid>, _>("session_id") {
-        let prior = tokio::fs::read_to_string(&path).await.ok();
-        crate::sources::record_bytes(&app.db, s, &path, &text, prior.as_deref()).await?;
-    }
-    let writers: Vec<Uuid> =
-        sqlx::query_scalar("SELECT writer FROM brain_record_inputs WHERE record_id=$1")
-            .bind(&id)
-            .fetch_all(&mut *tx)
-            .await?;
-    for writer in writers {
-        sqlx::query("INSERT INTO item_ratings(path,sha256,session_id,risk) VALUES($1,$2,$3,$4) ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=GREATEST(item_ratings.risk,EXCLUDED.risk)").bind(path.to_string_lossy().as_ref()).bind(hash(&text)).bind(writer).bind(row.get::<i16,_>("risk")).execute(&mut *tx).await?;
-    }
-    private_write(&path, &text).await?;
-    sqlx::query("DELETE FROM brain_aliases WHERE record_id=$1")
-        .bind(&id)
-        .execute(&mut *tx)
-        .await?;
-    let mut aliases = vec![string(&r, "title").to_lowercase()];
-    aliases.extend(
-        r["metadata"]["aliases"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|a| a.as_str().map(|s| s.trim().to_lowercase())),
-    );
-    for a in aliases {
-        sqlx::query(
-            "INSERT INTO brain_aliases(alias,record_id) VALUES($1,$2) ON CONFLICT DO NOTHING",
-        )
-        .bind(a)
-        .bind(&id)
-        .execute(&mut *tx)
-        .await?;
-    }
-    sqlx::query("DELETE FROM brain_links WHERE source=$1")
-        .bind(&id)
-        .execute(&mut *tx)
-        .await?;
-    for l in r["metadata"]["links"].as_array().into_iter().flatten() {
-        let reference = string(l, "target");
-        let (target, anchor) = target_parts(&reference);
-        sqlx::query("INSERT INTO brain_links(source,source_anchor,relation,target,target_anchor,evidence,tentative) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING")
-            .bind(&id).bind(l["source_anchor"].as_str().unwrap_or("")).bind(string(l,"relation")).bind(target).bind(anchor.unwrap_or("")).bind(l.get("evidence").cloned().unwrap_or(json!([]))).bind(l["tentative"].as_bool().unwrap_or(false)).execute(&mut *tx).await?;
-    }
-    sqlx::query("UPDATE brain_records SET digest=$2,published=true WHERE id=$1")
-        .bind(&id)
-        .bind(hash(&text))
-        .execute(&mut *tx)
-        .await?;
-    // Search index is a projection. Current bytes are always revalidated at read time.
-    sqlx::query("INSERT INTO search_docs(kind,ref,ident,title,body,at) VALUES('brain',$1,$2,$3,$4,now()) ON CONFLICT(kind,ref) DO UPDATE SET ident=$2,title=$3,body=$4,embedding=NULL,embed_attempts=0,updated_at=now(),at=now()")
-        .bind(&id).bind(format!("{} {} {}",id,r["title"],r["metadata"]["aliases"])).bind(string(&r,"title")).bind(&text).execute(&mut *tx).await?;
-    tx.commit().await?;
-    Ok(())
-}
-pub(crate) async fn private_write(path: &std::path::Path, text: &str) -> Result<()> {
+
+pub(crate) async fn private_write(path: &Path, text: &str) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("missing parent"))?;
-    let mut cursor = Some(parent);
-    while let Some(p) = cursor {
-        if let Ok(m) = tokio::fs::symlink_metadata(p).await {
-            ensure!(!m.file_type().is_symlink(), "symlinked storage ancestor");
-        }
-        if p == root() || p == crate::wiki::root() {
-            break;
-        }
-        cursor = p.parent();
-    }
+    use tokio::io::AsyncWriteExt;
+    let parent = path.parent().ok_or_else(|| anyhow::anyhow!("missing parent"))?;
     tokio::fs::create_dir_all(parent).await?;
-    // Refuse symlinked final directories/files; only canonical roots are selected by callers.
-    ensure!(
-        !tokio::fs::symlink_metadata(parent)
-            .await?
-            .file_type()
-            .is_symlink(),
-        "symlinked storage directory"
-    );
-    if let Ok(m) = tokio::fs::symlink_metadata(path).await {
-        ensure!(!m.file_type().is_symlink(), "symlinked record");
+    for p in [parent, path] {
+        if let Ok(m) = tokio::fs::symlink_metadata(p).await {
+            ensure!(
+                !m.file_type().is_symlink(),
+                "refusing to write through a symlink: {}",
+                p.display()
+            );
+        }
     }
     let tmp = parent.join(format!(".{}.tmp", Uuid::new_v4()));
-    let mut options = tokio::fs::OpenOptions::new();
-    options.write(true).create_new(true).mode(0o600);
-    let mut f = options.open(&tmp).await?;
-    use tokio::io::AsyncWriteExt;
+    let mut f = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .await?;
     f.write_all(text.as_bytes()).await?;
     f.sync_all().await?;
     tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).await?;
     tokio::fs::rename(&tmp, path).await?;
-    std::fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
-pub async fn recover(app: &crate::AppState) -> Result<()> {
-    let schema_path = root().join("brain-schema.md");
-    if !schema_path.exists() {
-        private_write(&schema_path, SCHEMA).await?;
+
+/// Create or update a record file: written by the agent's `session`, or by the kernel (none) for
+/// the owner or the sleep. An update names the revision it read (`expected_revision`). A new
+/// long-term memory needs `new_memory` (the sleep, or `remember` past its high bar). The previous
+/// version is backed up in `backups/brain/`.
+pub async fn put(
+    db: &PgPool,
+    session: Option<Uuid>,
+    record: &Value,
+    expected: Option<i64>,
+    new_memory: bool,
+) -> Result<Value> {
+    let mut r: Value = serde_json::from_str(&crate::secrets::mask(&record.to_string()))?;
+    ensure!(r.is_object(), "record must be an object");
+    if r["metadata"].is_null() {
+        r["metadata"] = json!({});
     }
-    // Close interrupted receipts only while no consolidation holds its snapshot lock.
-    let mut sleep_lease = app.db.begin().await?;
-    let idle: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(704,6)")
-        .fetch_one(&mut *sleep_lease)
+    for k in ["path", "risk"] {
+        r.as_object_mut().unwrap().remove(k);
+    }
+    validate(&r)?;
+    let (id, store, kind) = (string(&r, "id"), string(&r, "store"), string(&r, "kind"));
+    let p = path(&store, &kind, &id);
+    let mut tx = db.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(704,4)")
+        .execute(&mut *tx)
         .await?;
-    if idle {
-        sqlx::query("UPDATE sleep_runs SET ended_at=now(),error='interrupted; retained inputs will be re-snapshotted' WHERE ended_at IS NULL").execute(&mut *sleep_lease).await?;
+    let indexed: Option<String> = sqlx::query_scalar("SELECT path FROM brain_records WHERE id=$1")
+        .bind(&id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if let Some(other) = indexed.filter(|o| Path::new(o) != p && Path::new(o).exists()) {
+        anyhow::bail!("`{id}` is already {other}: an id is one record (a kind or store can't change)");
     }
-    sleep_lease.commit().await?;
-    sqlx::query("UPDATE brain_work SET state='pending' WHERE kind='capture' AND state='failed' AND attempts<8 AND updated_at < now()-interval '1 minute'*attempts").execute(&app.db).await?;
-    let rows=sqlx::query("UPDATE brain_work SET state='running',lease_until=now()+interval '2 minutes',attempts=attempts+1 WHERE id IN (SELECT id FROM brain_work WHERE (state='pending' OR (state='running' AND lease_until<now())) AND (kind!='capture' OR $1) ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 8) RETURNING id,kind,payload,attempts")
-        .bind(crate::config::get().brain_mode=="on").fetch_all(&app.db).await?;
-    for row in rows {
-        let kind: String = row.get("kind");
-        let payload: Value = row.get("payload");
-        let res = match kind.as_str() {
-            "publish" => publish(app, &payload).await,
-            "capture" => super::sleep::process_capture(app, &payload).await,
-            "memory_export" => super::sleep::export(&app.db).await,
-            "synthesis" => match super::synthesis::process(app, &payload).await {
-                Ok(result) => {
-                    sqlx::query("UPDATE brain_work SET result=$2 WHERE id=$1 AND attempts=$3")
-                        .bind(row.get::<i64, _>("id"))
-                        .bind(result)
-                        .bind(row.get::<i32, _>("attempts"))
-                        .execute(&app.db)
-                        .await?;
-                    Ok(())
-                }
-                Err(e) => Err(e),
-            },
-            _ => Err(anyhow::anyhow!("unknown work kind")),
-        };
-        sqlx::query("UPDATE brain_work SET state=$2,error=$3,lease_until=NULL,updated_at=now() WHERE id=$1 AND attempts=$4")
-            .bind(row.get::<i64,_>("id")).bind(if res.is_ok(){"done"}else{"failed"}).bind(res.err().map(|e|format!("{e:#}"))).bind(row.get::<i32,_>("attempts")).execute(&app.db).await?;
+    let prior = tokio::fs::read_to_string(&p).await.ok();
+    let old = prior.as_deref().map(parse).transpose()?;
+    match &old {
+        Some(o) => ensure!(
+            expected == o["revision"].as_i64(),
+            "`{id}` is at revision {}: read it again and pass expected_revision",
+            o["revision"]
+        ),
+        None => ensure!(expected.is_none(), "no record `{id}` to update"),
     }
-    Ok(())
-}
-pub async fn search_rating(db: &PgPool, reader: Uuid, f: &crate::search::Found) -> Result<i16> {
-    let row=sqlx::query("SELECT path,risk,session_id,published,digest,zen_brain_contaminated(id) AS contaminated FROM brain_records WHERE id=$1").bind(&f.reference).fetch_one(db).await?;
-    ensure!(row.get::<bool, _>("published"), "publication pending");
-    let path = PathBuf::from(row.get::<String, _>("path"));
-    let text = tokio::fs::read_to_string(&path).await?;
-    ensure!(
-        text == f.body && Some(hash(&text)) == row.get::<Option<String>, _>("digest"),
-        "stale indexed content"
+    if store == "memory" && old.is_none() && !new_memory {
+        anyhow::bail!("new long-term memories come from `remember` (long: true) or the sleep, not put");
+    }
+    let mut names = vec![string(&r, "title").to_lowercase()];
+    names.extend(
+        r["metadata"]["aliases"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|a| a.as_str())
+            .map(|a| a.trim().to_lowercase()),
     );
-    let risk = if row.get::<bool, _>("contaminated") {
-        5
-    } else {
-        crate::sources::file_rating(db, &path, &text)
-            .await?
-            .max(row.get("risk"))
-    };
-    if risk < 4 || f.exact {
-        crate::sources::depend_file(db, reader, &text).await?;
-        let writers: Vec<Uuid> =
-            sqlx::query_scalar("SELECT writer FROM brain_record_inputs WHERE record_id=$1")
-                .bind(&f.reference)
-                .fetch_all(db)
-                .await?;
-        crate::sources::depend(db, reader, &writers).await?;
-        crate::sources::depend(
-            db,
-            reader,
-            &row.get::<Option<Uuid>, _>("session_id")
-                .into_iter()
-                .collect::<Vec<_>>(),
-        )
-        .await?;
+    // A name is one person, organization, project or concept within its store; memories may repeat.
+    let taken: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT a.record_id FROM brain_aliases a JOIN brain_records r ON r.id=a.record_id
+         WHERE a.alias=ANY($1) AND a.record_id<>$2 AND r.store=$3 AND r.store<>'memory'",
+    )
+    .bind(&names)
+    .bind(&id)
+    .bind(&store)
+    .fetch_all(&mut *tx)
+    .await?;
+    ensure!(
+        taken.is_empty(),
+        "a name or alias already belongs to {taken:?}: update that record, or resolve who is who with the owner"
+    );
+    for l in r["metadata"]["links"].as_array().into_iter().flatten() {
+        let target = string(l, "target");
+        let known: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM brain_records WHERE id=$1)")
+            .bind(&target)
+            .fetch_one(&mut *tx)
+            .await?;
+        ensure!(known, "link target `{target}` doesn't exist: create it first");
     }
-    Ok(risk)
-}
-pub(crate) async fn get_record(db: &PgPool, id: &str, s: Option<Uuid>) -> Result<Value> {
-    read(db, id, s).await
-}
-pub async fn manage(app: &crate::AppState, session: Option<Uuid>, a: &Value) -> Result<Value> {
-    guard(&app.db, session).await?;
-    let action = string(a, "action");
-    let id = string(a, "id");
-    match action.as_str() {
-        "put" => {
-            put(
-                app,
-                session,
-                &a["record"],
-                a["expected_revision"].as_i64(),
-                false,
-            )
-            .await
+    // The new bytes' rating: the writer's, every cited source's, and the old bytes' writers'.
+    let mut floor: i16 = 1;
+    let mut cited = vec![];
+    let mut evidence: Vec<Value> = r["metadata"]["evidence"].as_array().cloned().unwrap_or_default();
+    for l in r["metadata"]["links"].as_array().into_iter().flatten() {
+        evidence.extend(l["evidence"].as_array().cloned().unwrap_or_default());
+    }
+    bind_evidence(db, &evidence, &mut floor, &mut cited).await?;
+    let now = chrono::Utc::now().to_rfc3339();
+    r["schema_version"] = json!(1);
+    r["revision"] = json!(old.as_ref().and_then(|o| o["revision"].as_i64()).unwrap_or(0) + 1);
+    r["created"] = old
+        .as_ref()
+        .map(|o| o["created"].clone())
+        .filter(|c| !c.is_null())
+        .unwrap_or(json!(now));
+    r["updated"] = json!(now);
+    if r["status"].is_null() {
+        r["status"] = json!("active");
+    }
+    let text = render(&r)?;
+    if let Some(prior) = &prior {
+        let backup = crate::zen_home()
+            .join("backups/brain")
+            .join(format!("{id}-r{}.md", r["revision"].as_i64().unwrap_or(1) - 1));
+        private_write(&backup, prior).await?;
+    }
+    match session {
+        Some(s) => crate::sources::record_bytes(db, s, &p, &text, prior.as_deref()).await?,
+        None => {
+            if let Some(prior) = &prior {
+                floor = floor.max(crate::sources::file_rating(db, &p, prior).await?);
+                cited.extend(crate::sources::writers_of(db, prior).await?);
+            }
         }
-        "import" => {
-            ensure!(session.is_none(), "manual file import is owner-only");
-            let row = sqlx::query("SELECT path,revision FROM brain_records WHERE id=$1")
-                .bind(&id)
-                .fetch_optional(&app.db)
-                .await?;
-            let (file, revision) = if let Some(row) = row {
-                (
-                    PathBuf::from(row.get::<String, _>("path")),
-                    Some(row.get::<i64, _>("revision")),
-                )
-            } else {
-                let kind = a["kind"].as_str().unwrap_or("concept");
-                let store = a["store"].as_str().unwrap_or("knowledge");
-                ensure!(
-                    valid_id(&id) && KINDS.contains(&kind),
-                    "canonical ID and kind required"
-                );
-                (path(store, kind, &id), None)
+    }
+    for (w, r) in &cited {
+        crate::sources::register_bytes(db, &p, &text, Some(*w), *r).await?;
+    }
+    crate::sources::register_bytes(db, &p, &text, None, floor).await?;
+    private_write(&p, &text).await?;
+    index_file(&mut tx, &p, &store, &text).await?;
+    tx.commit().await?;
+    Ok(json!({"id": id, "revision": r["revision"], "path": p.display().to_string()}))
+}
+
+/// Index one record file: its row, names, links and search document.
+async fn index_file(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, p: &Path, store: &str, text: &str) -> Result<()> {
+    let r = parse(text)?;
+    ensure!(
+        r["store"] == store,
+        "{} says store {} but lives in the {store} folder",
+        p.display(),
+        r["store"]
+    );
+    let id = string(&r, "id");
+    let modified = chrono::DateTime::<chrono::Utc>::from(std::fs::metadata(p)?.modified()?);
+    let m = &r["metadata"];
+    let path = p.display().to_string();
+    let other: Option<String> = sqlx::query_scalar("SELECT path FROM brain_records WHERE id=$1 AND path<>$2")
+        .bind(&id)
+        .bind(&path)
+        .fetch_optional(&mut **tx)
+        .await?;
+    if let Some(other) = other.filter(|o| Path::new(o).exists()) {
+        anyhow::bail!("same id `{id}` as {other}");
+    }
+    sqlx::query("DELETE FROM brain_records WHERE path=$1 AND id<>$2")
+        .bind(&path)
+        .bind(&id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO brain_records(id,store,kind,title,path,digest,modified,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+        ON CONFLICT(id) DO UPDATE SET store=$2,kind=$3,title=$4,path=$5,digest=$6,modified=$7,metadata=$8",
+    )
+    .bind(&id)
+    .bind(store)
+    .bind(string(&r, "kind"))
+    .bind(string(&r, "title"))
+    .bind(&path)
+    .bind(hash(text))
+    .bind(modified)
+    .bind(m)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query("DELETE FROM brain_aliases WHERE record_id=$1")
+        .bind(&id)
+        .execute(&mut **tx)
+        .await?;
+    let mut names = vec![string(&r, "title").to_lowercase()];
+    names.extend(
+        m["aliases"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|a| a.as_str())
+            .map(|a| a.trim().to_lowercase()),
+    );
+    sqlx::query("INSERT INTO brain_aliases SELECT DISTINCT unnest($1::text[]),$2 ON CONFLICT DO NOTHING")
+        .bind(&names)
+        .bind(&id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM brain_links WHERE source=$1")
+        .bind(&id)
+        .execute(&mut **tx)
+        .await?;
+    for l in m["links"].as_array().into_iter().flatten() {
+        sqlx::query("INSERT INTO brain_links VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
+            .bind(&id)
+            .bind(string(l, "relation"))
+            .bind(string(l, "target"))
+            .execute(&mut **tx)
+            .await?;
+    }
+    let words = |k: &str| {
+        m[k].as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let ident = format!("{id} {} {} {}", words("aliases"), words("tags"), words("subjects"));
+    let title = format!("{} {}: {}", store, string(&r, "kind"), string(&r, "title"));
+    sqlx::query(
+        "INSERT INTO search_docs(kind,ref,ident,title,body,at) VALUES($1,$2,$3,$4,$5,$6)
+        ON CONFLICT(kind,ref) DO UPDATE SET ident=$3,title=$4,body=$5,at=$6,updated_at=now(),
+            embedding=CASE WHEN search_docs.body=EXCLUDED.body THEN search_docs.embedding END,
+            embed_attempts=CASE WHEN search_docs.body=EXCLUDED.body THEN search_docs.embed_attempts ELSE 0 END",
+    )
+    .bind(format!("record:{store}"))
+    .bind(&id)
+    .bind(ident)
+    .bind(title)
+    .bind(string(&r, "body"))
+    .bind(modified)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query("DELETE FROM search_docs WHERE ref=$1 AND kind LIKE 'record:%' AND kind<>$2")
+        .bind(&id)
+        .bind(format!("record:{store}"))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Bring the index up to the files: changed files are read again, removed ones are dropped. A
+/// file that doesn't parse is left out (and listed by `lint`).
+pub async fn index(db: &PgPool) -> Result<usize> {
+    let known: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>> =
+        sqlx::query_as("SELECT path, modified FROM brain_records")
+            .fetch_all(db)
+            .await?
+            .into_iter()
+            .collect();
+    let mut seen = vec![];
+    let mut changed = 0;
+    for (dir, store) in folders() {
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.extension().is_none_or(|x| x != "md") {
+                continue;
+            }
+            let path = p.display().to_string();
+            let modified = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .map(chrono::DateTime::<chrono::Utc>::from)
+                .ok();
+            if known
+                .get(&path)
+                .is_some_and(|at| Some(at.timestamp_micros()) == modified.map(|m| m.timestamp_micros()))
+            {
+                seen.push(path);
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else {
+                continue;
             };
-            let text = tokio::fs::read_to_string(&file).await?;
-            let record = parse(&text)?;
-            ensure!(
-                record["id"] == id
-                    && path(&string(&record, "store"), &string(&record, "kind"), &id) == file,
-                "file identity/path mismatch"
-            );
-            put(app, None, &record, revision, true).await
-        }
-        "get" => {
-            if let Some(revision) = a["revision"].as_i64() {
-                let current = if id.starts_with('m') && id[1..].parse::<i64>().is_ok() {
-                    super::sleep::get(&app.db, &id, session).await?
-                } else {
-                    read(&app.db, &id, session).await?
-                };
-                if current["revision"].as_i64() == Some(revision) {
-                    return Ok(current);
-                }
-                let mut prior: Value = sqlx::query_scalar(
-                    "SELECT snapshot FROM brain_revisions WHERE record_id=$1 AND revision=$2",
-                )
-                .bind(&id)
-                .bind(revision)
-                .fetch_one(&app.db)
+            let mut tx = db.begin().await?;
+            sqlx::query("SELECT pg_advisory_xact_lock(704,4)")
+                .execute(&mut *tx)
                 .await?;
-                if let Some(s) = session {
-                    admit(
-                        &app.db,
-                        s,
-                        prior["risk"]
-                            .as_i64()
-                            .unwrap_or(current["risk"].as_i64().unwrap_or(4))
-                            as i16,
-                        None,
-                    )
-                    .await?;
+            match index_file(&mut tx, &p, store, &text).await {
+                Ok(()) => {
+                    tx.commit().await?;
+                    seen.push(path);
+                    changed += 1;
                 }
-                prior["historical"] = json!(true);
-                prior["notice"] =
-                    json!("Historical evidence; current content may supersede this version.");
-                return Ok(prior);
-            }
-            if id.starts_with('m') && id[1..].parse::<i64>().is_ok() {
-                super::sleep::get(&app.db, &id, session).await
-            } else {
-                read(&app.db, &id, session).await
+                Err(e) => tracing::warn!("record {}: {e:#}", p.display()),
             }
         }
-        "list" | "search" => {
-            let q = string(a, "query");
-            let offset = a["offset"].as_i64().unwrap_or(0).max(0);
-            if a["store"] == "memory" {
-                let tier = string(a, "tier");
-                ensure!(
-                    matches!(
-                        tier.as_str(),
-                        "" | "short" | "long" | "archived" | "pending"
-                    ),
-                    "invalid memory tier"
-                );
-                let ids:Vec<i64>=sqlx::query_scalar("SELECT id FROM memories WHERE ($1='' AND tier!='archived' OR tier=$1) AND ($2='' OR record_type=$2) AND (text ILIKE '%'||$3||'%' OR details::text ILIKE '%'||$3||'%') ORDER BY id LIMIT 50 OFFSET $4").bind(tier).bind(string(a,"kind")).bind(&q).bind(offset).fetch_all(&app.db).await?;
-                let mut out = vec![];
-                for id in ids {
-                    match super::sleep::get(&app.db, &format!("m{id}"), session).await {
-                        Ok(r) => out.push(r),
-                        Err(e) => out.push(json!({"id":format!("m{id}"),"withheld":e.to_string()})),
+    }
+    let gone: Vec<String> = sqlx::query_scalar("DELETE FROM brain_records WHERE NOT (path = ANY($1)) RETURNING id")
+        .bind(&seen)
+        .fetch_all(db)
+        .await?;
+    if !gone.is_empty() {
+        sqlx::query("DELETE FROM brain_aliases WHERE record_id=ANY($1)")
+            .bind(&gone)
+            .execute(db)
+            .await?;
+        sqlx::query("DELETE FROM brain_links WHERE source=ANY($1)")
+            .bind(&gone)
+            .execute(db)
+            .await?;
+        sqlx::query("DELETE FROM search_docs WHERE kind LIKE 'record:%' AND ref=ANY($1)")
+            .bind(&gone)
+            .execute(db)
+            .await?;
+    }
+    Ok(changed + gone.len())
+}
+
+/// Problems in the record files: ones that don't parse, duplicate ids, links to nothing.
+pub async fn lint(db: &PgPool) -> Result<Vec<Value>> {
+    let mut issues = vec![];
+    let mut ids: std::collections::HashMap<String, String> = Default::default();
+    for (dir, store) in folders() {
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.extension().is_none_or(|x| x != "md") {
+                continue;
+            }
+            match std::fs::read_to_string(&p)
+                .map_err(anyhow::Error::from)
+                .and_then(|t| parse(&t))
+            {
+                Ok(r) if r["store"] != store => {
+                    issues.push(json!({"path": p, "issue": format!("store {} in the {store} folder", r["store"])}))
+                }
+                Ok(r) => {
+                    if let Some(other) = ids.insert(string(&r, "id"), p.display().to_string()) {
+                        issues.push(json!({"path": p, "issue": format!("same id as {other}")}));
                     }
                 }
-                return Ok(
-                    json!({"records":out,"offset":offset,"next_offset":if out.len()==50{Some(offset+50)}else{None},"complete":out.len()<50}),
-                );
+                Err(e) => issues.push(json!({"path": p, "issue": format!("{e:#}")})),
             }
-            let ids:Vec<String>=sqlx::query_scalar("SELECT id FROM brain_records WHERE published AND ($1='' OR store=$1) AND ($2='' OR kind=$2) AND ($3='' OR status=$3) AND (title ILIKE '%'||$4||'%' OR body ILIKE '%'||$4||'%' OR metadata::text ILIKE '%'||$4||'%') ORDER BY id LIMIT 50 OFFSET $5")
-                .bind(string(a,"store")).bind(string(a,"kind")).bind(string(a,"status")).bind(q).bind(offset).fetch_all(&app.db).await?;
-            let mut out = vec![];
-            for id in ids {
-                match read(&app.db, &id, session).await {
-                    Ok(r) => out.push(r),
-                    Err(e) => out.push(json!({"id":id,"withheld":e.to_string()})),
-                };
-            }
-            Ok(
-                json!({"records":out,"offset":offset,"next_offset":if out.len()==50{Some(offset+50)}else{None},"complete":out.len()<50}),
-            )
         }
-        "neighbors" => {
-            read(&app.db, &id, session).await?;
-            let rows=sqlx::query("SELECT source,source_anchor,relation,target,target_anchor,evidence,tentative FROM brain_links WHERE source=$1 OR target=$1 ORDER BY source,relation,target LIMIT 100").bind(&id).fetch_all(&app.db).await?;
-            let mut edges = vec![];
-            for r in rows {
-                let other = if r.get::<String, _>("source") == id {
-                    r.get::<String, _>("target")
-                } else {
-                    r.get::<String, _>("source")
-                };
-                if read(&app.db, &other, session).await.is_ok() {
-                    edges.push(json!({"source":r.get::<String,_>("source"),"source_anchor":r.get::<String,_>("source_anchor"),"target_anchor":r.get::<String,_>("target_anchor"),"relation":r.get::<String,_>("relation"),"target":r.get::<String,_>("target"),"evidence":r.get::<Value,_>("evidence"),"tentative":r.get::<bool,_>("tentative")}));
-                }
-            }
-            Ok(json!({"links":edges,"truncated":edges.len()==100}))
-        }
-        "brief" => {
-            let entity = read(&app.db, &id, session).await?;
-            let rows:Vec<i64>=sqlx::query_scalar("SELECT id FROM memories WHERE entities ? $1 AND tier IN ('short','long') ORDER BY COALESCE(event_at,created_at) DESC LIMIT 30").bind(&id).fetch_all(&app.db).await?;
-            let mut memories = vec![];
-            for m in rows {
-                if let Ok(v) = super::sleep::get(&app.db, &format!("m{m}"), session).await {
-                    memories.push(v);
-                }
-            }
-            let related_ids:Vec<String>=sqlx::query_scalar("SELECT DISTINCT CASE WHEN source=$1 THEN target ELSE source END FROM brain_links WHERE source=$1 OR target=$1 LIMIT 30").bind(&id).fetch_all(&app.db).await?;
-            let mut related = vec![];
-            for linked in related_ids {
-                if let Ok(record) = read(&app.db, &linked, session).await {
-                    related.push(record);
-                }
-            }
-            Ok(
-                json!({"entity":entity,"memories":memories,"related":related,"notice":"Attributed records, not a complete relationship history. Check dates and unresolved commitments."}),
-            )
-        }
-        "history" => {
-            ensure!(
-                session.is_none(),
-                "revision history is owner-only; use source-aware get for agent reads"
-            );
-            let rows:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('revision',revision,'snapshot',snapshot,'at',at) FROM brain_revisions WHERE record_id=$1 ORDER BY revision DESC LIMIT 100").bind(&id).fetch_all(&app.db).await?;
-            Ok(json!({"revisions":rows}))
-        }
-        "skill_evidence" => {
-            ensure!(session.is_none(), "skill evidence is owner-only");
-            let rows: Vec<Value> = sqlx::query_scalar(
-                "SELECT to_jsonb(u) FROM brain_skill_uses u ORDER BY id DESC LIMIT 100",
-            )
-            .fetch_all(&app.db)
-            .await?;
-            Ok(json!({"uses":rows}))
-        }
-        "lint" => {
-            let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM brain_records ORDER BY id")
-                .fetch_all(&app.db)
-                .await?;
-            let mut issues = vec![];
-            for id in ids {
-                if let Err(e) = read(&app.db, &id, session).await {
-                    issues.push(json!({"id":id,"issue":e.to_string()}));
-                }
-            }
-            Ok(json!({"issues":issues}))
-        }
-        "pin" | "promote" | "archive" | "correct" | "undo" | "merge" | "annotate" => {
-            super::sleep::edit(&app.db, session, a).await
-        }
-        "sleep" => consolidate(app, "owner").await,
-        "synthesize" => {
-            let s = session
-                .or_else(|| a["session"].as_str().and_then(|s| s.parse().ok()))
-                .ok_or_else(|| anyhow::anyhow!("session required for attributed synthesis"))?;
-            super::synthesis::propose(app, s, a).await
-        }
-        "dream" => super::sleep::dream(app, session).await,
-        "retrieve" => {
-            let s = session
-                .or_else(|| a["session"].as_str().and_then(|s| s.parse().ok()))
-                .ok_or_else(|| anyhow::anyhow!("session required"))?;
-            let pack = super::context(app, s, &string(a, "query")).await?;
-            Ok(json!({"context":pack,"receipt":super::explain(&app.db,s).await?}))
-        }
-        "context" => {
-            let s = session
-                .or_else(|| a["session"].as_str().and_then(|s| s.parse().ok()))
-                .ok_or_else(|| anyhow::anyhow!("session required"))?;
-            super::recall::explain(&app.db, s).await
-        }
-        "work" => {
-            let rows: Vec<Value> = sqlx::query_scalar(
-                "SELECT to_jsonb(w) FROM brain_work w WHERE $1::text IS NULL OR payload->>'session'=$1 ORDER BY id DESC LIMIT 100",
-            ).bind(session.map(|s|s.to_string()))
-            .fetch_all(&app.db)
-            .await?;
-            Ok(json!(rows))
-        }
-        "repair_projection" => {
-            ensure!(session.is_none(), "projection repair is owner-only");
-            super::sleep::repair_projection(&app.db, a).await
-        }
-        "repair" => {
-            ensure!(session.is_none(), "repair is owner-only");
-            let count=sqlx::query("UPDATE brain_work w SET state='pending',error=NULL WHERE kind='publish' AND payload->>'id'=$1 AND (payload->>'revision')::bigint=(SELECT revision FROM brain_records WHERE id=$1)").bind(&id).execute(&app.db).await?.rows_affected();
-            ensure!(count > 0, "no publication receipt for this record");
-            recover(app).await?;
-            Ok(json!({"queued":count}))
-        }
-        "retry" => {
-            ensure!(session.is_none(), "retry is owner-only");
-            sqlx::query("UPDATE brain_work SET state='pending',error=NULL WHERE state='failed'")
-                .execute(&app.db)
-                .await?;
-            recover(app).await?;
-            Ok(json!({"ok":true}))
-        }
-        "subjects" => {
-            ensure!(session.is_none(), "subject inventory is owner-only");
-            let subjects:Vec<String>=sqlx::query_scalar("SELECT DISTINCT jsonb_array_elements_text(metadata->'subjects') FROM brain_records WHERE published AND metadata->'subjects' IS NOT NULL ORDER BY 1").fetch_all(&app.db).await?;
-            Ok(
-                json!({"subjects":subjects,"notice":"Derived subject inventory; use list/search to inspect source records."}),
-            )
-        }
-        "schema" => Ok(json!({"schema":SCHEMA,"kinds":KINDS,"relations":RELATIONS})),
-        _ => anyhow::bail!("unknown brain action"),
     }
+    let dangling: Vec<(String, String)> = sqlx::query_as(
+        "SELECT source, target FROM brain_links l WHERE NOT EXISTS (SELECT 1 FROM brain_records r WHERE r.id=l.target)",
+    )
+    .fetch_all(db)
+    .await?;
+    issues.extend(
+        dangling
+            .into_iter()
+            .map(|(s, t)| json!({"id": s, "issue": format!("links to missing record `{t}`")})),
+    );
+    Ok(issues)
 }
+
+/// Typed links touching these records, both ways: (from, relation, to).
+pub async fn links(db: &PgPool, ids: &[String]) -> Result<Vec<(String, String, String)>> {
+    Ok(sqlx::query_as("SELECT source, relation, target FROM brain_links WHERE source=ANY($1) OR target=ANY($1) ORDER BY source, relation, target LIMIT 200")
+        .bind(ids)
+        .fetch_all(db)
+        .await?)
+}
+
+/// Records listed by store, kind, tag or words in the title, as (id, store, kind, title, path).
+pub async fn list(db: &PgPool, a: &Value) -> Result<Vec<(String, String, String, String, String)>> {
+    Ok(sqlx::query_as(
+        "SELECT id, store, kind, title, path FROM brain_records
+         WHERE ($1='' OR store=$1) AND ($2='' OR kind=$2) AND ($3='' OR metadata->'tags' ? $3) AND ($4='' OR title ILIKE '%'||$4||'%')
+         ORDER BY store, kind, id LIMIT 50 OFFSET $5",
+    )
+    .bind(string(a, "store"))
+    .bind(string(a, "kind"))
+    .bind(string(a, "tag"))
+    .bind(string(a, "query"))
+    .bind(a["offset"].as_i64().unwrap_or(0).max(0))
+    .fetch_all(db)
+    .await?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn schema_roundtrip_and_path_constraints() {
-        let r = json!({"id":"conditional-probability","store":"knowledge","kind":"concept","title":"Conditional probability","body":"A definition.","metadata":{"evidence":[{"source":"book","locator":"chapter 2","basis":"proof"}]}});
+    fn a_record_round_trips_and_ids_stay_inside_their_folder() {
+        let r = json!({"id":"conditional-probability","store":"knowledge","kind":"concept","title":"Conditional probability","body":"A definition.",
+            "metadata":{"tags":["math"],"evidence":[{"source":"book","locator":"chapter 2","basis":"proof"}]}});
         validate(&r).unwrap();
         assert_eq!(parse(&render(&r).unwrap()).unwrap()["body"], r["body"]);
-        let mut bad = r;
+        let mut bad = r.clone();
         bad["id"] = json!("../../token");
         assert!(validate(&bad).is_err());
+        assert!(path("knowledge", "concept", "x").ends_with("wiki/concepts/x.md"));
+        assert!(path("memory", "decision", "x").ends_with("global/memory/x.md"));
+        assert!(path("entity", "person", "ana").ends_with("entities/people/ana.md"));
     }
+
     #[test]
-    fn evidential_edges_require_evidence() {
-        let r = json!({"id":"test","store":"knowledge","kind":"claim","title":"Claim","body":"Text","metadata":{"links":[{"relation":"supports","target":"other"}]}});
+    fn evidential_links_need_evidence_and_kinds_belong_to_their_store() {
+        let r = json!({"id":"t","store":"knowledge","kind":"claim","title":"Claim","body":"Text","metadata":{"links":[{"relation":"supports","target":"other"}]}});
+        assert!(validate(&r).is_err());
+        let r = json!({"id":"t","store":"memory","kind":"concept","title":"T","body":"Text"});
+        assert!(validate(&r).is_err());
+        let r = json!({"id":"t","store":"memory","kind":"decision","title":"T","body":"Text","metadata":{"tags":["Not A Slug"]}});
         assert!(validate(&r).is_err());
     }
 }

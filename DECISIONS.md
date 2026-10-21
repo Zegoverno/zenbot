@@ -745,6 +745,9 @@ if job costs call for it). Patterns from Hermes (`cron/`) and OpenClaw (`src/cro
 
 ## D-045 — IDENTITY.md; the agent keeps its prompt files; memory is promoted into them and the wiki
 
+> The sleep's promotion into prompt files and the wiki superseded by D-069 (2026-10-21); the agent
+> still writes traits and guidance into them itself.
+
 **Date:** 2026-10-08 · **Status:** accepted (owner) · **Supersedes:** D-035's promotion to
 long-term memory and D-028's long-term tier (search over memories stays)
 
@@ -1125,9 +1128,7 @@ specialized.
 
 ---
 
-## D-028 — Memory: fixed-size short-term, nightly sleep, a very high bar for long-term
-
-Superseded by D-069. [Original decision](docs/archive/D-028-memory.md).
+## D-028 — Memory: fixed-size short-term, nightly sleep, a very high bar for long-term · superseded, [archived](docs/archive/DECISIONS-superseded.md)
 
 ## D-027 — Prompt files, system tools, and loading only what's needed
 
@@ -1429,29 +1430,40 @@ switchable.
 
 **Date:** 2026-09-30
 
-## D-069 — Three curated stores and evidence-based per-turn recall
+## D-069 — Three curated stores in Markdown; search is a tool, guided by System One
 
-**Date:** 2026-10-21 · **Status:** accepted design (owner requested Phase 4 in one PR)
-**Supersedes in part:** D-028/D-045 memory lifecycle, D-036 knowledge organization, D-037 skill activation.
+**Date:** 2026-10-21 · **Status:** accepted (owner, 2026-10-19 to 2026-10-21; reworked after the PR #86
+review) · **Supersedes:** D-028's long-term tier, D-045's promotion by the sleep into prompt files and
+the wiki, D-037's activation of a draft by an accepted session
 
-Memory is selected experience with short and long tiers; sessions remain a searchable evidence archive.
-Knowledge comprises sourced concepts, claims, events and arguments, with typed relationships. People,
-organizations and projects are canonical identities shared by records; relationship briefs assemble
-meetings and commitments without inventing personal profiles. Skills preserve procedures with explicit
-owner activation and versioned use evidence.
+**Decision:** Three curated stores. Memory keeps what matters from lived work; knowledge is
+understanding of a subject and how we know it (proof, evidence, argument, teaching), keeping
+disagreement and uncertainty; skills say how to do a task well. People, organizations and projects
+are records the three share (the owner's "inner CRM"). Session history is a searchable archive, not
+memory.
 
-Keep Postgres for state and memory, with private Markdown/JSON projections and durable export jobs.
-Knowledge/entity Markdown is validated on import and hash-checked against derived indexes. Stable IDs,
-alias checks, revision preconditions and a publication queue prevent duplicate identities and lost edits.
-Sleep promotes durable experience into long-term records, retains uncertain entries, archives only
-explicitly classified expired detail, and never changes behavior files. Full buffers queue captures.
-Corrections/merges keep history and dependencies.
+- Markdown is the source of truth; the database is an index rebuilt from the files. Short-term
+  memory is one capped `MEMORY.md` in every session's instructions, saved to freely with `remember`
+  (and from the owner's own words after a turn, `memory_capture`); the owner may edit it. Long-term
+  memory, knowledge and entities are one file per record with tags, aliases, subjects, evidence (its
+  basis) and typed links, in a shallow folder per store (knowledge by kind under the wiki).
+- Long-term memory is earned: mostly through the sleep (`memory_durable`), rarely on the spot
+  (`remember` with `long: true`, a higher bar, `memory_long`), like people. The sleep archives what
+  is finished (`memory_disposition`) and never touches prompt files; the agent still writes really
+  important traits into `IDENTITY.md`/`USER.md` itself (D-045).
+- Nothing is pushed into a turn. Retrieval is the `search` tool, taught by the `work/search` skill:
+  System One ranks results by usefulness to the session and decides which records' links to follow
+  (a linked record joins when kept too; two hops at most; `contradicts` always followed one hop; a
+  superseded record replaced). The fixed prefix and the prompt cache are untouched.
+- Ratings follow bytes (D-067): a record carries its writer's and every cited source's; replacing
+  a short-term memory adds the replacing session as a writer and never lowers it; the agent changes
+  memory and record files only through `remember` and `brain`.
+- Thresholds are costs in decision files. New made tools are retired; skill drafts and revisions
+  activate only on the owner's fingerprint review.
 
-Dynamic context is appended as evidence on each turn, preserving the fixed instruction prefix. Existing
-exact/lexical/vector search is extended with English/Portuguese indexes and typed neighbors. Selection
-receipts expose references, omissions, degraded providers and unverified coverage. No top-K result set
-proves completeness. Inference, factual support and security origin remain separate.
+**Why:** The owner's model: short-term holds what matters now; long-term is earned, as in sleep.
+Files the owner can read and edit keep the data the owner's. Per-turn recall (the first PR #86
+design) added seconds and model calls to every turn and marked sessions for content they never saw;
+a tool costs nothing until needed, and System One judges usefulness better than fixed depths.
 
-Sources: QM's scratch-promote/capture/consolidation implementations (yc-software/qm), Karpathy's LLM
-Wiki, GBrain's resolver/typed-link schema and QMD's search-read-cite discipline. These inspire mechanisms,
-not a claim of universally superior recall. Interface and limits: [second brain](docs/second-brain.md).
+**Date:** 2026-10-21

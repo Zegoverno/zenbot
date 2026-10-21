@@ -79,11 +79,3 @@ every client uses; `zen-client` (`crates/zen-client`) opens the stream and makes
 
 A client that predates an event can ignore it. The old workflow's events (`brief`, `report`,
 `state`, `idle` with `waiting`) and `POST /api/sessions/{id}/flow` were removed on 2026-10-07.
-
-### Second-brain operations
-
-`POST /api/brain` accepts an action and structured arguments (see docs/second-brain.md). This is an
-owner-authenticated interface; agent calls use the `brain` tool with session provenance.
-`GET /api/sessions/{id}/context` returns recent context receipts with selected IDs/revisions,
-omissions, fallback state and unverified coverage. Per-turn evidence stays in the existing prompt
-context field; no worker or WebSocket message shape changes.

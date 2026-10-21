@@ -31,7 +31,7 @@ the Matrix channel (D-049) followed, then a weekend of hardening (D-050 to D-053
 ## What's next
 
 Keep dogfooding zenbot on real work and let sessions, verdicts and what the owner reviews (the
-sleep's promotions into `IDENTITY.md` and `USER.md`, skill drafts, tools, routes) drive what
+sleep's promotions into long-term memory, skill drafts, tools, routes) drive what
 changes. Candidate follow-ups, each only when use calls for it:
 
 - **D-062 taint redesign:** source ratings, origin-rated stored items, reversible denial and
@@ -39,8 +39,9 @@ changes. Candidate follow-ups, each only when use calls for it:
   authenticated task checks and a combined owner queue on the branch; release validation and
   owner review/merge/install remain before these changes are live.
   Full read-only limits begin at 4; budgets remain out of scope.
-- **Phase 4 (D-069), implementation branch:** short/long memory, knowledge graph, skills and
-  relationship context; validation, evaluation and owner merge review precede release.
+- **Phase 4 (D-069), PR #86:** short-term `MEMORY.md`, long-term memory, knowledge and entities as
+  Markdown records, search over typed links; eval and owner review before merge. Next: move the flat
+  wiki pages into knowledge records and retire `capture`; retire running made tools.
 - **Phase 2b + Phase 3 (D-068), merged:** approved job authority, contextual source
   ratings, aligned high-risk edits, held-run continuation, contained MCP, trust suggestions,
   worker hang recovery, durable prompts, permission snapshots and JSONL histories were merged in PR #85. The advisory model comparison lacked a usable local Docker environment.

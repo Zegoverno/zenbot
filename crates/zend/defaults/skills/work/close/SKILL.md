@@ -1,6 +1,6 @@
 ---
 name: close
-description: Close a job well - keep what it taught for next time (memory, wiki, skills, tools) and leave things clean. Use when a job is done or the owner gives a verdict, before the final report; skip it for a quick question.
+description: Close a job well - keep what it taught for next time (memory, records, skills) and leave things clean. Use when a job is done or the owner gives a verdict, before the final report; skip it for a quick question.
 ---
 
 # Close: keep what the job taught
@@ -12,12 +12,15 @@ not an hour; most jobs teach little, and that's fine. Save nothing just to have 
 
 Decisions, corrections, open questions, the state of their projects → `remember` (source `owner`
 for their words). Replace an entry rather than adding a near-duplicate. A correction of something
-you believed wins: fix the old entry. Preferences are sourced memory too; behavioral configuration changes require an explicit owner request.
+you believed wins: fix the old entry. A preference or standing guidance that is really important
+and lasting, and changes how you work across jobs: write it into `USER.md` (about the owner) or
+`IDENTITY.md` (about you).
 
 ## 2. What did you learn about the world?
 
-How a library, system or service actually behaves, why a decision was made, the state of a
-project → `capture` to the wiki, with its source. Then make sure the page's summary is current.
+How a library, system or service actually behaves, why a decision was made, who someone is → a
+record with `brain` put (search first; update rather than duplicate), with its evidence: what you
+observed, what a source claims, what you inferred.
 
 ## 3. What did you learn about doing this kind of work?
 
@@ -26,7 +29,7 @@ that caught a mistake.
 - `find_skills` first. If a skill covers this work, improve it (`save_skill` with its name).
 - Only if none does, and the work will come back, save a new skill: short, steps that end in
   something checkable, the reason being what happened here.
-- A repeated chore can become a reviewed skill with a supporting script; retain verification steps.
+- A chore you did by hand twice, or a fragile command sequence → a skill with the script in its folder.
 
 ## 4. Leave things clean
 

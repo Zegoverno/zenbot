@@ -1,0 +1,38 @@
+# `remember` with long: true: may this go straight to long-term memory, without waiting for the
+# sleep? Long-term memory made on the spot should be rare, so the bar is high; below it the entry
+# is saved short-term and the sleep reconsiders it.
+name = "memory_long"
+version = 1
+description = "Is this memory lasting enough to go straight to long-term memory?"
+exposure = "private"
+evidence = []
+item = "memory"
+timeout = "10s"
+unavailable = "short"
+
+[question.durable]
+type = "yes/no"
+text = "Is {item} clearly lasting: a decision and its reason, a commitment, a preference or a lesson that will still matter months from now, and not a passing state or task?"
+yes = "Clearly lasting"
+no = "Passing, uncertain or still in progress"
+
+# A passing detail in long-term memory costs 19 times one more night in short-term memory: long
+# from p ≥ 0.95.
+[policy]
+kind = "costs"
+question = "durable"
+false_yes = 19
+false_no = 1
+yes = "long"
+no = "short"
+
+[[test]]
+answers = { durable = 0.97 }
+expect = "long"
+
+[[test]]
+answers = { durable = 0.9 }
+expect = "short"
+
+[[test]]
+expect = "short"

@@ -545,29 +545,51 @@ delegation() {
   kill "$s1srv"; wait "$s1srv" 2>/dev/null || true
 }
 
-# remember: a memory saved in one session is in the next session's instructions, not the current one's.
+# remember: a memory saved in one session is in the next session's instructions, not the current
+# one's; MEMORY.md shows it, and the owner's edits of the file are read back.
 memory_across_sessions() {
   local ws; ws=$(new_workspace memory)
   start_kernel "$ws" "$(script agent.json)"
   local s1; s1=$(zen ask --json -m faux/smoke "remember this" | jq -r .session_id)
-  check "agent attribution remains an inference" eq "$(q "SELECT source || '/' || tier FROM memories LIMIT 1")" inferred/short
-  check "exported short memory is readable" grep -q "The owner prefers tabs" "$TMP/home/.zenbot/global/MEMORY.md"
+  check "saved with its source" eq "$(q "SELECT source || '/' || tier FROM memories")" inferred/short
+  local file="$TMP/home/.zenbot/global/MEMORY.md"
+  check "exported to MEMORY.md" grep -q "\[m1\] The owner prefers tabs" "$file"
   zen ask --json -s "$s1" "and now" >/dev/null
-  check "fixed instructions are not rewritten" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$s1' AND kind='base' AND payload->>'text' LIKE '%prefers tabs%'")" 0
-  check "the next turn receives current evidence" test "$(q "SELECT count(*) FROM brain_contexts WHERE session_id='$s1' AND receipt->'selected' IS NOT NULL")" -ge 1
+  check "frozen for the session that wrote it" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$s1' AND kind='base' AND payload->>'text' LIKE '%prefers tabs%'")" 0
+  local s2; s2=$(zen ask --json -m faux/smoke "hello" | jq -r .session_id)
+  check "in the next session's instructions" grep -q "\[m1\] The owner prefers tabs" <<<"$(q "SELECT payload->>'text' FROM tape_events WHERE session_id='$s2' AND kind='base'")"
+  # The owner edits the file: a changed line, a new line, the old entry kept.
+  sed -i 's/prefers tabs over spaces/prefers tabs, width 4/' "$file"
+  echo "- The owner's new laptop is called heron." >>"$file"
+  local s3; s3=$(zen ask --json -m faux/smoke "hello" | jq -r .session_id)
+  local base; base=$(q "SELECT payload->>'text' FROM tape_events WHERE session_id='$s3' AND kind='base'")
+  check "the owner's edits of MEMORY.md are read back" bash -c 'grep -q "\[m1\] The owner prefers tabs, width 4" <<<"$1" && grep -q "\[m2\] The owner.s new laptop is called heron" <<<"$1"' _ "$base"
+  check "and keep their ratings" eq "$(q "SELECT string_agg(id || ':' || risk, ',' ORDER BY id) FROM memories")" 1:1,2:1
+  sed -i '/heron/d' "$file"
+  zen ask --json -m faux/smoke "hello" >/dev/null
+  check "a removed line archives its entry" eq "$(q "SELECT tier || '/' || reason FROM memories WHERE id = 2")" "archived/removed from MEMORY.md"
 }
 
-# Without S1 uncertain experience remains durable; export is bounded rather than destructive.
+# Writes are never refused: past the size a sleep starts at once. Without System One the sleep keeps
+# everything, deletes nothing and records what it did; the instructions show the newest entries
+# that fit, and the next session gets the morning note.
 memory_sleep() {
   local ws; ws=$(new_workspace sleep)
   start_kernel "$ws" "$(script agent.json)" ZEN_MEMORY_CHARS=1000
-  q "DELETE FROM memories; INSERT INTO memories(text,source) SELECT 'legacy experience '||i||repeat('x',80),'inferred' FROM generate_series(1,30) i" >/dev/null
-  local r; r=$(zen memory sleep --json)
-  check "model outage never deletes experience" eq "$(q 'SELECT count(*) FROM memories')" 30
-  check "uncertain entries stay pending review" eq "$(echo "$r"|jq -r .promoted)" 0
-  check "short-term view has a hard bound" test "$(wc -m < "$TMP/home/.zenbot/global/MEMORY.md")" -le 2000
-  check "complete export preserves excluded content" test -s "$TMP/home/.zenbot/global/memory/export.json"
-  check "sleep is observable" eq "$(q 'SELECT count(*) FROM sleep_runs WHERE ended_at IS NOT NULL')" 1
+  q "DELETE FROM decisions; DELETE FROM sleep_runs; DELETE FROM memories" >/dev/null
+  q "INSERT INTO memories (text, source, created_at) SELECT 'memory number ' || i || ' ' || repeat('x', 80), 'inferred', now() - ((31 - i) || ' hours')::interval FROM generate_series(1, 30) i; UPDATE memories SET risk=1" >/dev/null
+  local r; r=$(zen ask --json -m faux/smoke "remember this")
+  check "past the size, add still saves" eq "$(echo "$r" | jq -r '.tools[0].is_error')" false
+  check "and starts a sleep" poll "SELECT trigger FROM sleep_runs WHERE ended_at IS NOT NULL ORDER BY id LIMIT 1" size
+  r=$(zen memory sleep --json)
+  check "a sleep by hand reports what it did" eq "$(echo "$r" | jq -r '.entries == .kept + .promoted + .archived + .changed')" true
+  check "without System One nothing is promoted or archived" eq "$(echo "$r" | jq -r '.promoted + .archived')" 0
+  check "nothing deleted" eq "$(q "SELECT count(*) FROM memories")" 31
+  local s2; s2=$(zen ask --json -m faux/smoke "hello" | jq -r .session_id)
+  local base; base=$(q "SELECT payload->>'text' FROM tape_events WHERE session_id='$s2' AND kind='base'")
+  check "the instructions show the newest that fit" bash -c 'grep -q "prefers tabs" <<<"$1" && ! grep -q "memory number 1 " <<<"$1" && grep -q "older entries are left out" <<<"$1"' _ "$base"
+  check "the next session hears about the sleep" grep -q "Last sleep" <<<"$base"
+  check "zen memory lists it" grep -q "last sleep" <<<"$(zen memory)"
 }
 
 # ask ends the turn; tools that are gone are refused.
@@ -642,7 +664,7 @@ system_one_direct() {
   # The decision files: the built-in ones pass the checker; an owner file with a typo is reported with
   # its line and a suggestion, and never takes effect.
   local zs="$TMP/home/.zenbot/s1"; mkdir -p "$zs"
-  check "the built-in decision files pass the checker" grep -q "19 decisions in force (0 from your files), 0 error" <<<"$(zen s1 check)"
+  check "the built-in decision files pass the checker" grep -q "16 decisions in force (0 from your files), 0 error" <<<"$(zen s1 check)"
   sed 's/^false_no = 1$/false_noo = 1/' "$REPO/crates/zend/s1/job_approval.toml" >"$zs/job_approval.toml"
   sleep 2.5
   local report; report=$(zen s1 check 2>&1 || true)
@@ -653,8 +675,9 @@ system_one_direct() {
   local zh="$TMP/home/.zenbot"; printf '# USER.md\n\nE2E Owner.\n' >"$zh/USER.md"
   q "INSERT INTO memories(text,source) VALUES('PROMOTE durable owner decision','owner'); UPDATE memories SET risk=1" >/dev/null
   local r; r=$(zen memory sleep --json)
-  check "durable experience becomes long-term" eq "$(echo "$r"|jq -r .promoted)" 1
-  check "sleep leaves prompt configuration alone" bash -c '! grep -q PROMOTE "$1"' _ "$zh/USER.md"
+  check "a lasting memory moves to long-term memory" eq "$(echo "$r"|jq -r .promoted)" 1
+  check "as a record file of its own, citing it" bash -c 'grep -l "PROMOTE durable owner decision" "$1"/memory/*.md | xargs grep -q "\"source\": \"m1\""' _ "$zh/global"
+  check "the sleep leaves prompt files alone" bash -c '! grep -q PROMOTE "$1"' _ "$zh/USER.md"
   check "the decision is recorded" test "$(q "SELECT count(*) FROM decisions WHERE point='memory_durable' AND source='model'")" -ge 1
   # System One down: a decision fails fast and says so; nothing waits for it.
   kill "$srv" 2>/dev/null || true; wait "$srv" 2>/dev/null || true
@@ -665,27 +688,37 @@ system_one_direct() {
   check "the failure is in the ledger" eq "$(q "SELECT source FROM decisions WHERE session_id='$sid' AND point='judge'")" unavailable
 }
 
-# Sleep with deterministic dispositions: durable/expired/unresolved experience keeps its evidence.
+# The sleep with System One (stub): a lasting memory moves to long-term memory, a finished one is
+# archived, an open one stays; a memory changed while the sleep runs is left as it is now; a memory
+# whose writer was denied is archived without a model. The stub holds the questions about a HOLD
+# entry until the scenario has changed it.
 memory_sleep_judged() {
   local ws; ws=$(new_workspace sleep-judged)
   local port=$((PORT + 5)) release="$TMP/sleep-release"
   python3 "$REPO/scripts/e2e/systemone_stub.py" "$port" "$release" & local srv=$!
   start_kernel "$ws" "$(script agent.json)" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone"
-  q "DELETE FROM memories; INSERT INTO memories(text,source) VALUES('PROMOTE preserve this decision','owner'),('ARCHIVE completed transient state','inferred'),('KEEP unresolved capacity question','inferred'); UPDATE memories SET risk=1" >/dev/null
-  zen memory sleep --json >/dev/null
-  check "sleep separates durable, expired and unresolved experience" eq "$(q "SELECT string_agg(tier,',' ORDER BY id) FROM memories")" long,archived,short
-  check "consolidation retains revision history" test "$(q 'SELECT count(*) FROM brain_revisions')" -ge 2
-  check "repeat sleep does not duplicate promotion" eq "$(zen memory sleep --json|jq -r .promoted)" 0
-  local mid; mid=$(q "INSERT INTO memories(text,source) VALUES('HOLD PROMOTE pending decision','inferred') RETURNING id")
+  local zh="$TMP/home/.zenbot"
+  q "DELETE FROM memories; INSERT INTO memories(text,source) VALUES('PROMOTE we chose Postgres for its vectors','owner'),('ARCHIVE the deploy finished','inferred'),('KEEP is the pilot still open','inferred'); UPDATE memories SET risk=1" >/dev/null
+  touch "$release"
+  local r; r=$(zen memory sleep --json)
+  check "lasting, finished and open memories each go their way" eq "$(q "SELECT string_agg(tier || ':' || coalesce(reason, ''), ',' ORDER BY id) FROM memories")" "archived:promoted to long-term memory $(date -u +%F)-promote-we-chose-postgres-for-its-vectors,archived:the sleep: finished,short:"
+  check "the long-term memory is a file, found by search" bash -c 'test -s "$1" && grep -q "we chose Postgres" "$1"' _ "$zh/global/memory/$(date -u +%F)-promote-we-chose-postgres-for-its-vectors.md"
+  check "a second sleep promotes nothing again" eq "$(zen memory sleep --json | jq -r .promoted)" 0
+  rm -f "$release"
+  local mid; mid=$(q "INSERT INTO memories(text,source) VALUES('HOLD PROMOTE a pending decision','inferred') RETURNING id")
   q "UPDATE memories SET risk=1 WHERE id=$mid" >/dev/null
   zen memory sleep --json >"$TMP/sleep-concurrent.json" & local sleeper=$!
-  sleep_held() { curl -sf "http://127.0.0.1:$port/stats"|jq -e '.held>0' >/dev/null; }
-  check "sleep releases row locks while classifying its snapshot" until_ok sleep_held
-  zen brain correct --id "m$mid" --args '{"expected_revision":1,"text":"Concurrent correction remains active."}' >/dev/null
-  touch "$release"
-  wait "$sleeper"
-  check "sleep leaves concurrently corrected content alone" eq "$(q "SELECT text || '/' || tier FROM memories WHERE id=$mid")" 'Concurrent correction remains active./short'
-  check "sleep reports the changed snapshot" eq "$(jq -r .changed "$TMP/sleep-concurrent.json")" 1
+  sleep_held() { curl -sf "http://127.0.0.1:$port/stats" | jq -e '.held>0' >/dev/null; }
+  check "the sleep asks System One without holding memory" until_ok sleep_held
+  q "UPDATE memories SET text='a corrected pending decision', updated_at=now() WHERE id=$mid" >/dev/null
+  touch "$release"; wait "$sleeper"
+  check "a memory changed during the sleep is left as it is now" eq "$(q "SELECT text || '/' || tier FROM memories WHERE id=$mid")" 'a corrected pending decision/short'
+  check "and the sleep says so" eq "$(jq -r .changed "$TMP/sleep-concurrent.json")" 1
+  local writer; writer=$(zen sessions new --json -m faux/smoke | jq -r .id)
+  local denied; denied=$(q "INSERT INTO memories(text,source,session_id) VALUES('PROMOTE from a denied writer','inferred','$writer') RETURNING id")
+  curl -sf -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{}' "$URL/api/sessions/$writer/deny" >/dev/null
+  zen memory sleep --json >/dev/null
+  check "a memory whose writer was denied is archived, not promoted" eq "$(q "SELECT tier || '/' || reason FROM memories WHERE id=$denied")" "archived/a session that wrote it was denied"
   kill "$srv"; wait "$srv" 2>/dev/null || true
 }
 
@@ -1011,7 +1044,7 @@ taint_on_data() {
   check "the draft's commit says so" grep -q "web-notes (session ${sid:0:8}; it read untrusted content)" <<<"$(git -C "$sk" log --format=%s)"
   r=$(zen ask --json -m faux/smoke "TAINT-B"); sid=$(echo "$r" | jq -r .session_id)
   local base; base=$(q "SELECT payload->>'text' FROM tape_events WHERE session_id='$sid' AND kind='base'")
-  check "the fixed prefix never contains outside memory" bash -c '! grep -q 4417 <<<"$1"' _ "$base"
+  check "the next session's instructions leave the memory out, by id" bash -c '! grep -q 4417 <<<"$1" && grep -q "(m1 saved by sessions that read untrusted content" <<<"$1"' _ "$base"
   check "a search that comes across it lists it without its text, and doesn't mark the reader (D-056)" bash -c '! grep -q 4417 <<<"$1" && ! grep -q "<untrusted" <<<"$1" && grep -q "memory m1 (.*): search \"\`m1\`\" to read it" <<<"$1" && [ "$2" = f ]' _ "$(res_of "$sid")" "$(tainted "$sid")"
   r=$(zen ask --json -m faux/smoke "TAINT-EXACT"); sid=$(echo "$r" | jq -r .session_id)
   check "searching it by name returns it wrapped, and marks the reader" bash -c 'grep -q "<untrusted source=\"search\"" <<<"$1" && grep -q "PROMOTE-WIKI the" <<<"$1" && [ "$2" = t ]' _ "$(res_of "$sid")" "$(tainted "$sid")"
@@ -1032,8 +1065,10 @@ taint_on_data() {
   printf '# USER.md\n\nE2E Owner.\n' >"$zh/USER.md"
   q "INSERT INTO memories (text, source, tainted) VALUES ('PROMOTE-USER the owner loves web pages', 'owner', true)" >/dev/null
   local note; note=$(zen memory sleep --json | jq -r .note)
-  check "sleep never writes tainted material into behavior configuration" bash -c '! grep -q "loves web pages" "$1"' _ "$zh/USER.md"
-  check "sleep receipts do not expose withheld source text" bash -c '! grep -q 4417 <<<"$1"' _ "$note"
+  check "the sleep never writes into USER.md" bash -c '! grep -q "loves web pages" "$1"' _ "$zh/USER.md"
+  check "its note leaves the tainted text out" bash -c '! grep -q 4417 <<<"$1" && ! grep -q "loves web" <<<"$1"' _ "$note"
+  local promoted; promoted=$(grep -l "loves web pages" "$zh"/global/memory/*.md | head -1)
+  check "a tainted memory promoted to long-term memory keeps its rating" eq "$(q "SELECT max(risk) FROM item_ratings WHERE sha256='$(sha256sum "$promoted" | cut -d' ' -f1)'")" 4
   local runs="SELECT string_agg(r.status || '/' || r.tainted, ',' ORDER BY r.id) FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name = 'tjob'"
   zen jobs add tjob --schedule "every 1h" --prompt "JOBTASK-T" >/dev/null
   zen jobs run tjob >/dev/null
@@ -1478,88 +1513,102 @@ phase3_kernel() {
   kill "$search_srv" "$model_srv" "$www_srv"; wait "$search_srv" "$model_srv" "$www_srv" 2>/dev/null || true
 }
 
-# Phase 4: knowledge/entity publishing, identity resolution, memory revisions and context.
+# Phase 4: record files (knowledge, people/projects, long-term memory) through the owner's actions;
+# the agent's remember (long-term past System One's high bar), refused direct writes, and search that
+# follows typed links: kept links are followed, irrelevant ones dropped, a contradiction always shown,
+# a superseded record replaced; meaning across English and Portuguese through vectors.
 phase4_brain() {
   local ws; ws=$(new_workspace phase4)
-  local embed_port=$((PORT + 7))
-  python3 "$REPO/scripts/e2e/embed_stub.py" "$embed_port" & local embed_server=$!
-  start_kernel "$ws" "$(script phase4.json)" ZEN_DEFAULT_MODEL=faux/smoke ZEN_LEGACY_TOOL_AUTHORING=0 OPENROUTER_API_KEY=e2e-key ZEN_EMBED_URL="http://127.0.0.1:$embed_port" ZEN_INDEX_SECS=1
-  local sid; sid=$(zen ask --json -m faux/smoke 'P4-HELLO'|jq -r .session_id)
-  check "knowledge and relationship owner workflows" python3 "$REPO/scripts/e2e/phase4.py" "$URL" "$TOKEN" "$TMP/home" "$sid"
+  local s1port=$((PORT + 5)) embed_port=$((PORT + 7)) zh="$TMP/home/.zenbot"
+  python3 "$REPO/scripts/e2e/systemone_stub.py" "$s1port" & local s1srv=$!
+  local s1=(ZEN_DEFAULT_MODEL=faux/smoke ZEN_LEGACY_TOOL_AUTHORING=0 ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$s1port/systemone")
+  # Words only first (no vectors), so which records links bring in is deterministic.
+  start_kernel "$ws" "$(script phase4.json "s|ZENGLOBAL|$zh/global|")" "${s1[@]}" ZEN_EMBED=0
+  out() { q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$(jq -r .session_id <<<"$1")' AND payload->>'role'='toolResult'"; }
+  check "records through the owner's brain actions" python3 "$REPO/scripts/e2e/phase4.py" "$URL" "$TOKEN" "$TMP/home"
   local r; r=$(zen ask --json -m faux/smoke 'P4-REMEMBER')
-  sid=$(echo "$r"|jq -r .session_id)
-  check "selected meeting experience is saved" eq "$(q "SELECT count(*) FROM memories WHERE entities ? 'ana-partner'")" 1
-  check "relationship brief draws from linked memory" grep -q 'paused the pilot' <<<"$(zen brain brief --id ana-partner)"
-  local id rev; id=$(q 'SELECT id FROM memories ORDER BY id DESC LIMIT 1'); rev=$(q "SELECT revision FROM memories WHERE id=$id")
-  zen brain correct --id "m$id" --args "{\"expected_revision\":$rev,\"text\":\"Ana confirmed capacity; pilot decision needs revisiting.\"}" >/dev/null
-  check "correction history retains the original" grep -q 'paused the pilot' <<<"$(zen brain history --id "m$id")"
-  zen ask --json -s "$sid" 'What did Ana confirm about the pilot?' >/dev/null
-  check "per-turn context uses the corrected record" test "$(q "SELECT count(*) FROM brain_contexts WHERE session_id='$sid' AND receipt->'selected' @> '[{\"id\":\"m$id\"}]'::jsonb")" -ge 1
-  check "fixed prompt stays independent of memory updates" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND kind='base' AND payload->>'text' LIKE '%Ana confirmed%'")" 0
-  check "fabricated owner preference is refused" eq "$(zen ask --json -m faux/smoke 'P4-FORGED'|jq -r '.tools[0].is_error')" true
-  check "complete source exports exist" test -s "$TMP/home/.zenbot/global/memory/export.json"
-  check "memory lifecycle and projection recovery" python3 "$REPO/scripts/e2e/phase4-memory.py" "$URL" "$TOKEN" "$TMP/home" "$sid" "m$id"
-  zen brain put --args '{"record":{"id":"fluxo","store":"knowledge","kind":"concept","title":"Blood circulation","body":"Blood circulation.","metadata":{}}}' >/dev/null
-  zen brain put --args '{"record":{"id":"axioma","store":"knowledge","kind":"concept","title":"Demonstração e continuidade","body":"Demonstração continuidade.","metadata":{}}}' >/dev/null
-  check "controlled multilingual vectors are indexed" poll "SELECT count(*) FROM search_docs WHERE kind='brain' AND ref IN('fluxo','axioma') AND embedding IS NOT NULL" 2
-  local reader; reader=$(zen sessions new --json -m faux/smoke|jq -r .id)
-  check "Portuguese query retrieves English evidence through vectors" grep -q '\"id\": \"fluxo\"' <<<"$(zen brain retrieve --args "{\"session\":\"$reader\",\"query\":\"circulacao sangue\"}")"
-  check "English query retrieves Portuguese evidence through vectors" grep -q '\"id\": \"axioma\"' <<<"$(zen brain retrieve --args "{\"session\":\"$reader\",\"query\":\"proof continuity\"}")"
-  kill "$embed_server"; wait "$embed_server" 2>/dev/null || true
+  check "remember saves a kind" eq "$(q "SELECT record_type || '/' || tier FROM memories WHERE text LIKE 'We paused%'")" decision/short
+  r=$(zen ask --json -m faux/smoke 'P4-FORGED')
+  check "owner words that aren't the owner's are saved as an inference" bash -c '[ "$(jq -r ".tools[0].is_error" <<<"$1")" = false ] && [ "$2" = inferred ]' _ "$r" "$(q "SELECT source FROM memories WHERE text LIKE 'The owner always%'")"
+  r=$(zen ask --json -m faux/smoke 'P4-LONG')
+  local long; long=$(ls "$zh"/global/memory/*-long-we-keep-every-record*.md 2>/dev/null | head -1)
+  check "a clearly lasting memory goes straight to long-term memory" bash -c 'test -s "$1" && grep -q "only indexes them" "$1"' _ "$long"
+  check "and not to short-term memory" eq "$(q "SELECT count(*) FROM memories WHERE text LIKE 'LONG%'")" 0
+  check "the decision is recorded" eq "$(q "SELECT split_part(chosen, ' ', 1) FROM decisions WHERE point='memory_long' ORDER BY id DESC LIMIT 1")" long
+  r=$(zen ask --json -m faux/smoke 'P4-MAYBE')
+  check "below the high bar it is saved short-term" bash -c 'grep -q "not clearly lasting" <<<"$1" && [ "$2" = short ]' _ "$(out "$r")" "$(q "SELECT tier FROM memories WHERE text LIKE 'The demo might%'")"
+  r=$(zen ask --json -m faux/smoke 'P4-DIRECT')
+  check "the agent can't write memory files directly, nor put a new long-term memory" bash -c '[ "$(jq -r "[.tools[].is_error] | join(\",\")" <<<"$1")" = true,true ] && test ! -e "$2/global/memory/forged.md"' _ "$r" "$zh"
+  r=$(zen ask --json -m faux/smoke 'P4-GET')
+  check "brain get hands over a record with its links" grep -q '"to": "ana-partner"' <<<"$(out "$r")"
+  # The graph: an irrelevant linked note, a contradicting claim, a superseded plan.
+  local put='zen brain put --args'
+  $put '{"record":{"id":"garden-notes","store":"knowledge","kind":"concept","title":"Garden notes","body":"OFFTOPIC tomatoes and basil.","metadata":{"links":[{"relation":"mentions","target":"ana-partner"}]}}}' >/dev/null
+  $put '{"record":{"id":"pilot-doubt","store":"knowledge","kind":"claim","title":"A doubt","body":"OFFTOPIC the meeting notes may be wrong.","metadata":{"links":[{"relation":"contradicts","target":"pilot-meeting","evidence":[{"source":"meeting-source","locator":"line 3","basis":"interpretation"}]}]}}}' >/dev/null
+  $put '{"record":{"id":"pilot-plan-v1","store":"knowledge","kind":"synthesis","title":"Pilot capacity plan, first draft","body":"Ana pilot capacity draft."}}' >/dev/null
+  $put '{"record":{"id":"pilot-plan-v2","store":"knowledge","kind":"synthesis","title":"Revised plan","body":"The revised plan.","metadata":{"links":[{"relation":"supersedes","target":"pilot-plan-v1"}]}}}' >/dev/null
+  r=$(zen ask --json -m faux/smoke 'P4-SEARCH'); local res; res=$(out "$r")
+  check "search finds records and shows their links" bash -c 'grep -q "\`pilot-meeting\`" <<<"$1" && grep -q "links: .*about → ana-partner" <<<"$1"' _ "$res"
+  check "it follows links System One keeps, and says how it got there" grep -q "reached by: pilot-meeting about ana-partner\|reached by: pilot-meeting about pilot-project" <<<"$res"
+  check "an irrelevant linked record stays out" bash -c '! grep -q "garden-notes" <<<"$1"' _ "$res"
+  check "a contradiction is always shown" grep -q "reached by: pilot-doubt contradicts pilot-meeting" <<<"$res"
+  check "a superseded record is replaced by the newer one" bash -c 'grep -q "\`pilot-plan-v2\`" <<<"$1" && ! grep -q "\`pilot-plan-v1\`" <<<"$1"' _ "$res"
+  $put '{"record":{"id":"fluxo","store":"knowledge","kind":"concept","title":"Blood circulation","body":"Blood circulation through the heart."}}' >/dev/null
+  stop_kernel
+  python3 "$REPO/scripts/e2e/embed_stub.py" "$embed_port" & local embed_server=$!
+  start_kernel "$ws" "$(script phase4.json "s|ZENGLOBAL|$zh/global|")" "${s1[@]}" ZEN_EMBED_URL="http://127.0.0.1:$embed_port" ZEN_INDEX_SECS=1
+  check "records are embedded for meaning" poll "SELECT count(*) FROM search_docs WHERE kind='record:knowledge' AND ref='fluxo' AND embedding IS NOT NULL" 1
+  r=$(zen ask --json -m faux/smoke 'P4-LANG')
+  check "a Portuguese query finds an English record through vectors" grep -q '`fluxo`' <<<"$(out "$r")"
+  kill "$s1srv" "$embed_server"; wait "$s1srv" "$embed_server" 2>/dev/null || true
 }
 
-# Crash/replay, capacity outages and multi-writer denial use the same disposable Phase 4 corpus.
-phase4_recovery() {
-  local ws; ws=$(new_workspace phase4-recovery)
-  start_kernel "$ws" "$(script phase4.json)" ZEN_MEMORY_CHARS=200 ZEN_DEFAULT_MODEL=faux/smoke ZEN_LEGACY_TOOL_AUTHORING=0
-  zen brain put --args '{"record":{"id":"replay-proof","store":"knowledge","kind":"concept","title":"Publication replay","body":"Retained publication bytes.","metadata":{}}}' >/dev/null
-  local proof="$TMP/home/.zenbot/global/wiki/concepts/replay-proof.md"
-  rm "$proof"
-  q "UPDATE brain_work SET state='running',lease_until=now()-interval '1 minute' WHERE work_key='publish:replay-proof:1'" >/dev/null
-  stop_kernel
-  start_kernel "$ws" "$(script phase4.json)" ZEN_MEMORY_CHARS=200 ZEN_DEFAULT_MODEL=faux/smoke ZEN_LEGACY_TOOL_AUTHORING=0
-  check "expired publication lease replays after restart" until_ok test -s "$proof"
-  check "replay does not create another revision" eq "$(zen brain get --id replay-proof|jq -r .revision)" 1
-  q "INSERT INTO memories(text,source) VALUES(repeat('a',180),'inferred'),(repeat('b',180),'inferred'); UPDATE memories SET risk=1 WHERE text IN(repeat('a',180),repeat('b',180))" >/dev/null
-  local r sid mid count; r=$(zen ask --json -m faux/smoke P4-REMEMBER); sid=$(echo "$r"|jq -r .session_id)
-  mid=$(q "SELECT id FROM memories WHERE session_id='$sid' AND text LIKE 'We paused%'")
-  check "a full buffer saves the explicit request pending" eq "$(q "SELECT tier FROM memories WHERE id=$mid")" pending
-  zen ask --json -s "$sid" P4-REMEMBER >/dev/null
-  check "retrying capture does not duplicate the experience" eq "$(q "SELECT count(*) FROM memories WHERE session_id='$sid' AND text LIKE 'We paused%'")" 1
-  zen memory sleep --json >/dev/null
-  check "a model outage retains pending captures" eq "$(q "SELECT tier FROM memories WHERE id=$mid")" pending
-  check "the hard view bound holds with oversized legacy rows" test "$(wc -m < "$TMP/home/.zenbot/global/MEMORY.md")" -le 400
-  stop_kernel
-  start_kernel "$ws" "$(script phase4.json)" ZEN_MEMORY_CHARS=200 ZEN_DEFAULT_MODEL=faux/smoke ZEN_LEGACY_TOOL_AUTHORING=0
-  check "pending capture survives restart" eq "$(q "SELECT tier FROM memories WHERE id=$mid")" pending
-  local writer other rev; writer=$(zen sessions new --json -m faux/smoke|jq -r .id)
-  other=$(q "INSERT INTO memories(text,source,session_id) VALUES('Other writer contribution','inferred','$writer') RETURNING id")
-  rev=$(q "SELECT revision FROM memories WHERE id=$mid")
-  zen brain merge --id "m$mid" --args "{\"expected_revision\":$rev,\"merge_id\":\"m$other\",\"merge_revision\":1,\"text\":\"Merged capacity evidence from two writers.\"}" >/dev/null
-  check "merge retains every contributing writer" eq "$(q "SELECT count(*) FROM brain_memory_inputs WHERE memory_id=$mid")" 2
-  local duplicate; duplicate=$(q "INSERT INTO memories(text,source,record_type,entities,details,event_at,evidence,session_id) SELECT text,source,record_type,entities,details,event_at,evidence,session_id FROM memories WHERE id=$mid RETURNING id")
-  zen memory sleep --json >"$TMP/sleep-deduplicated.json"
-  check "sleep folds exact repeats into existing long-term experience" eq "$(q "SELECT tier FROM memories WHERE id=$duplicate")/$(jq -r .merged "$TMP/sleep-deduplicated.json")" archived/1
-  curl -sf -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{}' "$URL/api/sessions/$writer/deny" >/dev/null
-  check "denial reaches a merged memory through its second writer" eq "$(q "SELECT zen_memory_contaminated($mid)")" t
-  zen brain put --args "{\"record\":{\"id\":\"derived-denied\",\"store\":\"knowledge\",\"kind\":\"claim\",\"title\":\"Derived capacity account\",\"body\":\"A derived account requires its original evidence.\",\"metadata\":{\"evidence\":[{\"source\":\"m$mid\",\"locator\":\"merged account\",\"basis\":\"interpretation\"}]}}}" >/dev/null
-  check "knowledge derived from denied memory stays blocked" eq "$(q "SELECT risk FROM brain_records WHERE id='derived-denied'")" 5
-  stop_kernel
-  start_kernel "$ws" "$(script phase4.json "s|P4DENIED|m$mid|g")" ZEN_MEMORY_CHARS=200 ZEN_DEFAULT_MODEL=faux/smoke ZEN_LEGACY_TOOL_AUTHORING=0
-  check "direct agent reads cannot expose a denied merged memory" eq "$(zen ask --json -m faux/smoke P4-DENIED|jq -r '.tools[0].is_error')" true
-  stop_kernel
-  q "INSERT INTO brain_work(kind,work_key,payload) SELECT 'capture','phase4-shadow-held',payload FROM brain_work WHERE kind='capture' ORDER BY id LIMIT 1" >/dev/null
-  start_kernel "$ws" "$(script phase4.json)" ZEN_BRAIN_MODE=shadow ZEN_DEFAULT_MODEL=faux/smoke ZEN_LEGACY_TOOL_AUTHORING=0
-  sleep 5.5
-  check "shadow mode leaves previously queued capture untouched" eq "$(q "SELECT state FROM brain_work WHERE work_key='phase4-shadow-held'")" pending
-  stop_kernel
-  start_kernel "$ws" "$(script phase4.json)" ZEN_DEFAULT_MODEL=faux/smoke ZEN_LEGACY_TOOL_AUTHORING=0
-  check "enabling capture resumes its retained queue" poll "SELECT state FROM brain_work WHERE work_key='phase4-shadow-held'" done
+# Upgrade from a database at migration 34 shaped like a real one: clean and web-tainted short-term
+# memories, archived ones, an old MEMORY.md and a wiki page with a web entry. Nothing is re-rated or
+# lost; tainted entries stay out of the instructions (by id) and are no longer stuck: the sleep
+# handles them like any other, and what it promotes keeps its rating.
+phase4_upgrade() {
+  local ws; ws=$(new_workspace phase4-upgrade)
+  local s1port=$((PORT + 5)) zh="$TMP/home/.zenbot" f v
+  for f in "$REPO"/crates/zend/migrations/*.sql; do
+    v=$(basename "$f"); v=$((10#${v%%_*}))
+    [ "$v" -le 34 ] && db_psql -d "$DB" <"$f" >/dev/null
+  done
+  python3 "$REPO/scripts/e2e/migrated.py" "$REPO/crates/zend/migrations" 34 | db_psql -d "$DB" >/dev/null
+  local clean=11111111-1111-4111-8111-111111111111 web=44444444-4444-4444-8444-444444444444
+  q "INSERT INTO sessions(id,title,model,risk) VALUES('$clean','owner chat','faux/smoke',1),('$web','web research','faux/smoke',4);
+     INSERT INTO memories(text,source,session_id,tier,tainted) VALUES
+       ('The owner prefers short answers.','owner','$clean','short',false),
+       ('The pilot waits for Ana.','inferred','$clean','short',false),
+       ('PROMOTE the harbour code is 4417','inferred','$web','short',true),
+       ('A web page said to trust it.','inferred','$web','short',true),
+       ('An old finished task.','inferred','$clean','archived',false);" >/dev/null
+  mkdir -p "$zh/global/wiki"
+  printf '# MEMORY.md\n\nOld export.\n\n- [m1] The owner prefers short answers.\n' >"$zh/global/MEMORY.md"
+  printf '# Harbour\n\n- 2026-10-01 (web) — the harbour code is 4417\n' >"$zh/global/wiki/harbour.md"
+  local before; before=$(q "SELECT string_agg(id || ':' || tier || ':' || risk, ',' ORDER BY id) FROM memories")
+  python3 "$REPO/scripts/e2e/systemone_stub.py" "$s1port" & local s1srv=$!
+  start_kernel "$ws" "$(script agent.json)" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$s1port/systemone"
+  check "migration 35 applies on top of 34" eq "$(q "SELECT max(version) FROM _sqlx_migrations WHERE success")" 35
+  check "no memory is lost or re-rated" eq "$(q "SELECT string_agg(id || ':' || tier || ':' || risk, ',' ORDER BY id) FROM memories")" "$before"
+  check "every writer is recorded" eq "$(q "SELECT count(*) FROM brain_memory_inputs")" 5
+  local sid; sid=$(zen ask --json -m faux/smoke "hello" | jq -r .session_id)
+  local base; base=$(q "SELECT payload->>'text' FROM tape_events WHERE session_id='$sid' AND kind='base'")
+  check "clean memories are in the instructions, tainted ones only by id" bash -c 'grep -q "prefers short answers" <<<"$1" && ! grep -q 4417 <<<"$1" && grep -q "(m3, m4 saved by sessions that read untrusted content" <<<"$1"' _ "$base"
+  check "the old MEMORY.md is left alone until memory changes" grep -q "Old export" "$zh/global/MEMORY.md"
+  zen ask --json -m faux/smoke "remember this" >/dev/null
+  check "then rewritten, without the tainted text" bash -c 'grep -q "\[m2\] The pilot waits for Ana" "$1" && ! grep -q 4417 "$1" && ! grep -q "Old export" "$1"' _ "$zh/global/MEMORY.md"
+  local r; r=$(zen memory sleep --json)
+  check "the sleep handles tainted memories too" eq "$(q "SELECT tier FROM memories WHERE id=3")" archived
+  local promoted; promoted=$(grep -l "harbour code is 4417" "$zh"/global/memory/*.md | head -1)
+  check "and what it promotes keeps its rating" eq "$(q "SELECT max(risk) FROM item_ratings WHERE sha256='$(sha256sum "$promoted" | cut -d' ' -f1)'")" 4
+  kill "$s1srv"; wait "$s1srv" 2>/dev/null || true
 }
 
 # Scenarios that share a setup run as parts of one; `scripts/e2e.sh <filter>` matches the scenario's
 # name or a part's function name. Slowest first, so the parallel run ends sooner.
-run phase4 phase4_brain phase4_recovery
+run phase4 phase4_brain
+run phase4-upgrade phase4_upgrade
 run phase3 phase3_kernel
 run turns abort_tool stale_turn
 run jobs scheduled_jobs job_report_file job_post_to

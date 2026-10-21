@@ -720,10 +720,7 @@ pub(crate) async fn list_job_runs(State(app): State<AppState>, Query(q): Query<R
     Ok(Json(Value::Array(runs)))
 }
 
-/// Owner interface to curated memory, knowledge and relationship context.
+/// The owner's `brain` actions (`zen brain`): get, list, put, schema, lint, index.
 pub(crate) async fn brain_action(State(app): State<AppState>, Json(args): Json<Value>) -> ApiResult<Json<Value>> {
-    Ok(Json(crate::brain::manage(&app,None,&args).await.map_err(bad_request)?))
-}
-pub(crate) async fn brain_context(State(app): State<AppState>, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
-    Ok(Json(crate::brain::explain(&app.db,id).await?))
+    Ok(Json(crate::brain::manage(&app.db, None, &args).await.map_err(bad_request)?.0))
 }

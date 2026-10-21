@@ -1,11 +1,34 @@
+# The sleep, for each short-term memory it doesn't promote: still active, or finished and safe to
+# archive (archived entries are kept, never deleted)?
 name = "memory_disposition"
-version = 1
-description = "Keep active experience or archive it without losing history"
+version = 2
+description = "Is this memory still active, or finished?"
 exposure = "private"
 evidence = []
-item = "record"
-timeout = "2s"
+item = "memory"
+timeout = "30s"
+unavailable = "keep"
+
 [question.disposition]
 type = "choice"
-text = "For {item}, is this still active, or clearly expired transient detail? Never archive an unresolved commitment, explicit standing directive, or uncertain case."
-options = { keep = "Still useful, unresolved, or uncertain", archive = "Clearly finished or obsolete transient experience" }
+text = "Is {item} still active, or clearly finished or obsolete? An unresolved commitment, a standing instruction or an uncertain case is active."
+options = { keep = "Still useful, unresolved or uncertain", archive = "Clearly finished or obsolete" }
+
+[policy]
+kind = "rules"
+else = "keep"
+
+[[policy.rule]]
+when = "disposition = archive and disposition.p >= 0.95"
+decide = "archive"
+
+[[test]]
+answers = { disposition = { choice = "archive", p = 0.97 } }
+expect = "archive"
+
+[[test]]
+answers = { disposition = { choice = "archive", p = 0.8 } }
+expect = "keep"
+
+[[test]]
+expect = "keep"

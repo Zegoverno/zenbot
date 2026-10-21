@@ -73,6 +73,9 @@ pub enum Protected {
     Steering(PathBuf),
     /// The owner's configuration and secrets (`OWNER_FILES`, and mcp.json wherever ZEN_MCP_CONFIG puts it).
     OwnerOnly(PathBuf),
+    /// Short-term memory and record files (long-term memory, knowledge, entities): the agent
+    /// changes them through `remember` and `brain`, which keep their ratings, names and links.
+    Record(PathBuf),
 }
 
 /// Where the protected files are: the zen home, and the skills, tools and MCP config (each can be
@@ -82,11 +85,12 @@ pub struct Guarded {
     pub skills: PathBuf,
     pub tools: PathBuf,
     pub mcp: PathBuf,
+    pub wiki: PathBuf,
 }
 
 impl Guarded {
     pub fn current() -> Self {
-        Guarded { home: crate::zen_home(), skills: crate::skills::root(), tools: crate::workshop::tools_root(), mcp: crate::mcp::config_path() }
+        Guarded { home: crate::zen_home(), skills: crate::skills::root(), tools: crate::workshop::tools_root(), mcp: crate::mcp::config_path(), wiki: crate::wiki::root() }
     }
 }
 
@@ -136,6 +140,11 @@ pub fn protected_target(g: &Guarded, workspace: &Path, name: &str, args: &Value)
     if under(g.tools.clone()) {
         return Some(Protected::Steering(target));
     }
+    let global = g.home.join("global");
+    let knowledge = ["concepts", "claims", "arguments", "questions", "syntheses", "sources", "events", "subjects"];
+    if is(global.join("MEMORY.md")) || under(global.join("memory")) || under(global.join("entities")) || knowledge.iter().any(|k| under(g.wiki.join(k))) {
+        return Some(Protected::Record(target));
+    }
     None
 }
 
@@ -173,6 +182,12 @@ pub async fn protected_refusal(db: &PgPool, session: Uuid, kind: Option<&str>, w
         Protected::OwnerOnly(p) => {
             return Some(format!(
                 "{} is the owner's own configuration (secrets, MCP servers, the kernel's files): only the owner changes it, by hand. Give the exact change in your answer instead.",
+                p.display()
+            ))
+        }
+        Protected::Record(p) => {
+            return Some(format!(
+                "{} is a memory or record file: change it with `remember` (short-term memory) or `brain` put (records), which keep its ratings, names and links.",
                 p.display()
             ))
         }
@@ -702,7 +717,7 @@ mod tests {
         std::fs::write(home.join("USER.md"), "user").unwrap();
         std::os::unix::fs::symlink("agents/zenbot/SOUL.md", home.join("SOUL.md")).unwrap();
         std::os::unix::fs::symlink("global/skills", home.join("skills")).unwrap();
-        let g = Guarded { home: home.to_path_buf(), skills: home.join("global/skills"), tools: home.join("global/tools"), mcp: home.join("mcp.json") };
+        let g = Guarded { home: home.to_path_buf(), skills: home.join("global/skills"), tools: home.join("global/tools"), mcp: home.join("mcp.json"), wiki: home.join("global/wiki") };
         let ws = home.join("agents");
         let at = |name: &str, path: &str| protected_target(&g, &ws, name, &json!({ "path": path }));
         let prompt = |name: &str, path: &str| matches!(at(name, path), Some(Protected::PromptFile(_)));
@@ -724,6 +739,10 @@ mod tests {
         assert!(steering("../global/tools/word-count/run.py"), "a made tool");
         assert!(at("write", "../global/skills/_proposed/work/new/SKILL.md").is_none(), "drafts go through review");
         assert!(at("write", "../global/wiki/page.md").is_none());
+        let record = |path: &str| matches!(at("write", path), Some(Protected::Record(_)));
+        for p in ["../global/MEMORY.md", "../global/memory/2026-10-21-pilot.md", "../global/entities/people/ana.md", "../global/wiki/concepts/x.md"] {
+            assert!(record(p), "{p}");
+        }
     }
 
     #[test]
