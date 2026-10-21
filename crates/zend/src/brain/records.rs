@@ -615,8 +615,8 @@ pub async fn recover(app: &crate::AppState) -> Result<()> {
     }
     sleep_lease.commit().await?;
     sqlx::query("UPDATE brain_work SET state='pending' WHERE kind='capture' AND state='failed' AND attempts<8 AND updated_at < now()-interval '1 minute'*attempts").execute(&app.db).await?;
-    let rows=sqlx::query("UPDATE brain_work SET state='running',lease_until=now()+interval '2 minutes',attempts=attempts+1 WHERE id IN (SELECT id FROM brain_work WHERE state='pending' OR (state='running' AND lease_until<now()) ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 8) RETURNING id,kind,payload,attempts")
-        .fetch_all(&app.db).await?;
+    let rows=sqlx::query("UPDATE brain_work SET state='running',lease_until=now()+interval '2 minutes',attempts=attempts+1 WHERE id IN (SELECT id FROM brain_work WHERE (state='pending' OR (state='running' AND lease_until<now())) AND (kind!='capture' OR $1) ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 8) RETURNING id,kind,payload,attempts")
+        .bind(crate::config::get().brain_mode=="on").fetch_all(&app.db).await?;
     for row in rows {
         let kind: String = row.get("kind");
         let payload: Value = row.get("payload");
