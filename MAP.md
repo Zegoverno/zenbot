@@ -592,7 +592,7 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
   `file-trust`, `reach`, `basics`, `memory`, `delegation`, `names-suggestions`, `trust`,
   `workshop`, `verifier`, `agent-tools`, `search`, `wiki`, `engine-boundary`, `failover-model`, `phase3`,
   `phase4` (records, `remember` long, search over links, vectors across languages), `phase4-upgrade` (from a migration-34 database), `mcp-login` (browser sign-in against `oauth_server.py`), `routing` (the learning router with the System One stub).
-- **Evals:** `evals/tasks/<name>/{task.json,files/,hidden/}` (24 tasks: 14 on how zenbot works,
+- **Evals:** `evals/tasks/<name>/{task.json,files/,hidden/}` (28 tasks: 18 on how zenbot works,
   9 `coding-*` with hidden tests, and the runner self-test `smoke`), run by `scripts/eval.sh` on the
   tasks a change affects (`evals/areas.txt`, plus the `core` tasks); see `evals/README.md`. Harness
   changes (system prompt, history, tools, workers, model or effort handling) get an eval before

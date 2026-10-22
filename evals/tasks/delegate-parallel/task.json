@@ -1,0 +1,12 @@
+{
+  "description": "Hand two independent side tasks to subagents at once, then combine their answers.",
+  "areas": ["delegation"],
+  "work": "build",
+  "steps": [
+    { "prompt": "Use the delegate tool with two tasks in one call, run in parallel: one subagent counts the lines of a.txt, the other the lines of b.txt. Then answer only with `a=<count> b=<count>`." }
+  ],
+  "checks": [
+    { "name": "both counts", "answer_contains": "a=17 b=42" },
+    { "name": "delegated, in one call", "run": "jq -e '[.tools[]? | select(.name == \"delegate\")] | length == 1' \"$TURNS\" >/dev/null" }
+  ]
+}

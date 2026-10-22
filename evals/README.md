@@ -40,8 +40,15 @@ are `core` (`repo-question`, `clear-request`, `recall-across-turns`) and run for
 a path no line names (docs, the `zen` client, zen-matrix, scripts, the tasks themselves) isn't
 harness, and a change to only those needs no eval. `--plan` prints the selection with its reasons
 and stops; the report ends with the same. `--full` runs every task, `--tasks` the ones named. Some
-areas (jobs, wiki, skills, delegation, web, mcp) have no task of their own yet: a change there runs
-the core tasks, so add a task when one of them changes in a way the owner would notice.
+areas (wiki, skills, web, mcp) have no task of their own yet: a change there runs the core tasks, so
+add a task when one of them changes in a way the owner would notice. `jobs` and `delegation` have
+theirs (`job-*`, `delegate-parallel`).
+
+A step is a `prompt` (through `zen ask`), a `shell` command (setup), or a `job`: a scheduled job
+the owner creates (`{name, prompt | command, report_file?, post_to?}`; `"post_to": "this"` is the
+task's session; an agent job runs on the model under test), runs once and waits for. The job's report
+is the step's answer, its run's turns count in cost, tokens and time, and checks read the run records
+in `$JOBS` (JSON lines: status, output, error, command, exit_code).
 
 Runs go `--jobs` at a time (default 3, `ZEN_EVAL_JOBS`), the base and new runs of each task side by
 side, so both sides meet the same load. A base run that completed (whether or not its checks passed)

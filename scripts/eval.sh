@@ -306,7 +306,7 @@ start_kernel() { # bin workspace db label log port [task-env…]
 run_task() { # name bin label model effort db task repeat port
   local name=$1 bin=$2 label=$3 model=$4 effort=$5 db=$6 task=$7 r=$8 port=$9
   local tdir="$REPO/evals/tasks/$task" ws="$WORK/$name/$task-$r" turns="$WORK/$name/$task-$r.turns.jsonl"
-  mkdir -p "$ws"; : > "$turns"
+  mkdir -p "$ws"; : > "$turns"; : > "$WORK/$name/$task-$r.jobs.jsonl"
   [ -d "$tdir/files" ] && cp -a "$tdir/files/." "$ws/"
   local started; started=$(date +%s%3N)
   local error="" sid=""
@@ -318,6 +318,30 @@ run_task() { # name bin label model effort db task repeat port
       local step; step=$(jq -c ".steps[$i]" "$tdir/task.json")
       if echo "$step" | jq -e 'has("shell")' >/dev/null; then
         (cd "$ws" && TASK_DIR="$tdir" bash -c "$(echo "$step" | jq -r .shell)") >>"$WORK/$name/$task-$r.shell.log" 2>&1 || { error="setup step $((i + 1)) failed"; break; }
+        continue
+      fi
+      if echo "$step" | jq -e 'has("job")' >/dev/null; then
+        # A scheduled job: created by the owner (on the model under test unless it's a script job),
+        # run once, waited for; its report is the step's answer and its run's turns its record, so
+        # cost, tokens and time compare as for a prompt. `post_to: "this"` is the task's session.
+        if [ -n "$native" ]; then error="job steps need zenbot"; break; fi
+        local job; job=$(echo "$step" | jq -c --arg m "$model" --arg s "$sid" '.job | .schedule //= "every 1h" | (if .command then . else .model = $m end) | (if .post_to == "this" then .post_to = $s else . end)')
+        local api=(curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json')
+        local jname; jname=$(echo "$job" | jq -r .name)
+        "${api[@]}" -d "$job" "http://127.0.0.1:$port/api/jobs" | jq -e .name >/dev/null 2>&1 || { error="job step $((i + 1)): the job wasn't created"; break; }
+        "${api[@]}" -X POST -d '{}' "http://127.0.0.1:$port/api/jobs/$jname/run" >/dev/null
+        local jt0 run="" status=""; jt0=$(date +%s%3N)
+        for _ in $(seq 1 450); do
+          run=$("${api[@]}" "http://127.0.0.1:$port/api/jobs/runs?job=$jname&limit=1" | jq -c '.[0] // empty' 2>/dev/null)
+          status=$(jq -r '.status // empty' <<<"$run" 2>/dev/null)
+          [ -n "$status" ] && [ "$status" != running ] && break
+          sleep 2
+        done
+        if [ -z "$status" ] || [ "$status" = running ]; then error="job step $((i + 1)): the run didn't finish"; break; fi
+        local js rec='{}'; js=$(jq -r '.session // empty' <<<"$run")
+        [ -n "$js" ] && rec=$(db_psql -d "$db" -c "SELECT json_build_object('cost_usd', coalesce(sum(cost_usd), 0), 'input_tokens', coalesce(sum(input_tokens), 0), 'output_tokens', coalesce(sum(output_tokens), 0), 'cache_read', coalesce(sum(cache_read), 0), 'cache_write', coalesce(sum(cache_write), 0), 'tool_errors', 0) FROM turns WHERE session_id = '$js'")
+        echo "$run" | jq -c --argjson rec "$rec" --argjson ms $(( $(date +%s%3N) - jt0 )) '{job: ., text: (.output // .error // ""), turn: $rec, client_ms: $ms}' >>"$turns"
+        echo "$run" >>"$WORK/$name/$task-$r.jobs.jsonl"
         continue
       fi
       local prompt; prompt=$(echo "$step" | jq -r .prompt)
@@ -348,7 +372,7 @@ run_task() { # name bin label model effort db task repeat port
     if [ -n "$error" ]; then
       out="not run: $error"
     elif echo "$check" | jq -e 'has("run")' >/dev/null; then
-      if out=$(cd "$ws" && TASK_DIR="$tdir" ANSWER="$answer" TURNS="$turns" timeout 300 bash -c "$(echo "$check" | jq -r .run)" 2>&1); then ok=true; fi
+      if out=$(cd "$ws" && TASK_DIR="$tdir" ANSWER="$answer" TURNS="$turns" JOBS="$WORK/$name/$task-$r.jobs.jsonl" timeout 300 bash -c "$(echo "$check" | jq -r .run)" 2>&1); then ok=true; fi
     elif echo "$check" | jq -e 'has("answer_contains") or has("answer_lacks")' >/dev/null; then
       # The answer to one prompt (`step`: 1 = the first prompt), else the last one.
       local text="$answer" step; step=$(echo "$check" | jq -r '.step // empty')
