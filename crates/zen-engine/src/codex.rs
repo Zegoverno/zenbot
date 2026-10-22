@@ -33,6 +33,9 @@ const DISABLED: &[&str] = &[
     "in_app_updates", "multi_agent", "request_permissions_tool", "tool_suggest", "tool_call_mcp_elicitation", "hooks", "goals",
     "code_mode_host", "sleep_tool", "skill_search", "skill_mcp_dependency_install", "worktrees", "workspace_dependencies",
     "realtime_conversation",
+    // 0.163.0 (D-075): Daybreak and API-key access programs change what an account may use; zen
+    // picks models itself and signs in with the subscription, so they stay off.
+    "cli_daybreak", "api_key_cyber_access_programs",
 ];
 
 /// Features on by default that were reviewed and give the model nothing to act with (transport,
@@ -42,14 +45,27 @@ const REVIEWED: &[&str] = &[
     "api_key_model_discovery", "auth_elicitation", "compaction_image_budget", "content_item_kinds", "daemon_auto_start",
     "enable_request_compression", "fast_mode", "ultrafast_mode", "guardian_approval", "guardian_reuse_parent_compaction",
     "instant_interrupt", "mentions_v2", "system_proxy_fallback", "unbounded_connection_retries",
+    // 0.163.0: interrupting a turn also stops code-mode cells and their tool calls.
+    "code_mode_interrupt",
 ];
 
 /// Codex's settings for every zen thread: the features in `DISABLED` off, no web search, no MCP
-/// servers and no project instruction files from the owner's Codex setup. Every action goes
-/// through the kernel's dynamic tools.
-fn config() -> Value {
+/// servers, no project instruction files from the owner's Codex setup, and none of the skills
+/// Codex bundles into its private home (`skills/.system`, reinstalled at every start): their
+/// instructions name files and tools a zen turn doesn't have (D-075). Every action goes through
+/// the kernel's dynamic tools.
+fn config(home: &std::path::Path) -> Value {
     let features: serde_json::Map<String, Value> = DISABLED.iter().map(|f| (f.to_string(), json!(false))).collect();
-    json!({ "web_search": "disabled", "mcp_servers": {}, "project_doc_max_bytes": 0, "agents": { "enabled": false }, "features": features })
+    let skills: Vec<Value> = std::fs::read_dir(home.join("skills").join(".system"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path().join("SKILL.md"))
+        .filter(|p| p.is_file())
+        .map(|p| json!({ "path": p, "enabled": false }))
+        .collect();
+    json!({ "web_search": "disabled", "mcp_servers": {}, "project_doc_max_bytes": 0, "agents": { "enabled": false }, "features": features,
+            "skills": { "config": skills } })
 }
 
 /// The thread items a zen turn may contain: messages, reasoning, plans, compactions and zenbot's
@@ -389,7 +405,7 @@ async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bo
             .iter()
             .map(|t| json!({ "type": "function", "name": t["name"], "description": t["description"], "inputSchema": t["parameters"] }))
             .collect();
-        let config = config();
+        let config = config(&jail.join("home"));
         let developer = "Use the supplied dynamic tools for all commands and file operations. Your own working directory is an empty, read-only placeholder, not the user's workspace.";
         let mut early = Vec::new();
         // Continue the thread the kernel says is in sync with the tape; if Codex no longer has it,
@@ -589,7 +605,7 @@ async fn complete_now(model: &str, system: &str, prompt: &str) -> Result<Complet
     let mut s = AppServer::start(&dir).await?;
     let thread = s
         .call("thread/start", json!({ "model": model, "cwd": dir, "approvalPolicy": "never", "sandbox": "read-only", "ephemeral": true,
-            "baseInstructions": system, "config": config() }), None)
+            "baseInstructions": system, "config": config(&dir.join("home")) }), None)
         .await?;
     let thread_id = thread["thread"]["id"].as_str().context("codex thread id")?.to_string();
     let mut pending = Vec::new();
@@ -701,6 +717,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn codex_bundled_skills_are_turned_off() {
+        let home = std::env::temp_dir().join(format!("zen-codex-skills-{}", std::process::id()));
+        for name in ["imagegen", "openai-docs"] {
+            std::fs::create_dir_all(home.join("skills/.system").join(name)).unwrap();
+            std::fs::write(home.join("skills/.system").join(name).join("SKILL.md"), "x").unwrap();
+        }
+        let skills = config(&home)["skills"]["config"].as_array().unwrap().clone();
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(skills.len(), 2);
+        assert!(skills.iter().all(|s| s["enabled"] == false && s["path"].as_str().unwrap().ends_with("/SKILL.md")));
+        assert!(config(std::path::Path::new("/nonexistent"))["skills"]["config"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
     fn each_message_carries_the_calls_since_the_last_one_once() {
         let mut calls = json!({ "input": 40, "output": 5, "cacheRead": 1000 });
         let u = message_usage(&mut calls);
@@ -756,9 +786,9 @@ mod tests {
         assert_eq!(unknown_features(list), Some(vec!["new_magic_tool".to_string()]));
         assert_eq!(unknown_features("apps stable false\n"), Some(vec![]));
         assert_eq!(unknown_features("Usage: codex features …"), None);
-        assert_eq!(config()["agents"]["enabled"], false, "native agents must stay disabled");
+        assert_eq!(config(std::path::Path::new("/nonexistent"))["agents"]["enabled"], false, "native agents must stay disabled");
         assert!(foreign_item(&json!({"method":"item/started","params":{"item":{"type":"subAgentActivity"}}})).is_some());
-        let disabled = config()["features"].as_object().unwrap().len();
+        let disabled = config(std::path::Path::new("/nonexistent"))["features"].as_object().unwrap().len();
         assert_eq!(disabled, DISABLED.len());
         assert!(DISABLED.iter().all(|f| !REVIEWED.contains(f)));
     }

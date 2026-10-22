@@ -21,7 +21,8 @@
 # Results go to ~/.zenbot/upgrade.log ("engines: …", one line per change) and the latest state
 # to ~/.zenbot/engines.json (shown by `zen status`). The Codex feature check also runs every day on
 # its own, whatever the update did: when it fails the script exits 1, so the `engines` job fails.
-# ZEN_ENGINES=claude,codex limits which engines are looked at. ZEN_ENGINES_FAIL=<engine> makes
+# A rolled-back update deletes the version it rejected and makes the script exit 1, so the job
+# reports the reason. ZEN_ENGINES=claude,codex limits which engines are looked at. ZEN_ENGINES_FAIL=<engine> makes
 # that engine's post-update check fail, to test the rollback.
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -147,6 +148,7 @@ claude_install() {
     relink "$path" "$dir/$new" || return 1
     ROLLBACK="relink $(q "$path") $(q "$old")"
     CLEANUP="claude_prune $(q "$dir") $(q "$new") $(q "$(basename "$real")")"
+    DISCARD="as_owner $(q "$dir") rm -f $(q "$dir/$new")"
   else
     # A plain binary: keep the old one as .prev; rename over it so running sessions keep theirs.
     as_owner "$dir" cp -f "$real" "$real.prev" || return 1
@@ -216,6 +218,7 @@ codex_install() {
   done
   [ ${#links[@]} -gt 0 ] || { echo "found no links to $rel to switch"; return 1; }
   CLEANUP="codex_prune $(q "$releases") $(q "$newrel") $(q "$rel")"
+  DISCARD="as_owner $(q "$releases") rm -rf $(q "$newrel")"
 }
 # Keep only the current and previous release.
 codex_prune() { local d; for d in "$1"/*/; do d=${d%/}; [ "$d" = "$2" ] || [ "$d" = "$3" ] || as_owner "$1" rm -rf "$d"; done; }
@@ -236,8 +239,9 @@ update_cli() {
     log "$engine $have → $latest skipped: the check already fails on $have ($why)"
     return 0
   fi
-  # Runs in this shell (not a subshell) so it can set ROLLBACK and CLEANUP.
-  ROLLBACK=: CLEANUP=:
+  # Runs in this shell (not a subshell) so it can set ROLLBACK, CLEANUP and DISCARD (what removes
+  # a version the check rejected, so it doesn't stay on disk).
+  ROLLBACK=: CLEANUP=: DISCARD=:
   if ! "${engine}_install" "$latest" "$have" >"$TMP/install.out" 2>&1; then
     # It stopped partway: undo what it had switched already (ROLLBACK grows with each step).
     eval "$ROLLBACK"
@@ -251,7 +255,9 @@ update_cli() {
     log "$engine $have → $latest OK"
   else
     eval "$ROLLBACK"
+    eval "$DISCARD" || true
     rolled_back "$engine" "$("${engine}_installed")" "$have" "$latest" "$why"
+    ROLLED_BACK+="$engine $latest: $why; "
   fi
 }
 
@@ -280,3 +286,5 @@ behind=0
 for e in "${!STATUS[@]}"; do [ "${STATUS[$e]}" = "up to date" ] || [[ "${STATUS[$e]}" == updated* ]] || behind=1; done
 if [ $behind = 0 ]; then say "engines: all up to date"; else say "engines: not all up to date (see above)"; fi
 [ -z "$FEATURES_FAILED" ] || exit 1
+# A rejected update is the job's error, with its reason, not a quiet "ok" every night (D-075).
+[ -z "${ROLLED_BACK:-}" ] || { echo "engines: update rolled back: $ROLLED_BACK" >&2; exit 1; }
