@@ -23,6 +23,22 @@ pub fn text_of(content: &Value) -> String {
     }
 }
 
+/// Whether `c` is an invisible format character that can hide or reorder what the owner reads
+/// (D-077): bidirectional controls (U+061C, U+200E/F, U+202A–E, U+2066–9), zero-width space,
+/// word joiner and invisible operators (U+200B, U+2060–4), the byte-order mark (U+FEFF), the
+/// Mongolian vowel separator (U+180E), tag characters (U+E0000–E007F) and the supplementary
+/// variation selectors (U+E0100–E01EF). Zero-width (non-)joiners (U+200C/D: Persian, Indic,
+/// emoji sequences) and the emoji variation selectors (U+FE0E/F) stay.
+pub fn invisible(c: char) -> bool {
+    matches!(c, '\u{061C}' | '\u{180E}' | '\u{200B}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}'
+        | '\u{2066}'..='\u{2069}' | '\u{FEFF}' | '\u{E0000}'..='\u{E007F}' | '\u{E0100}'..='\u{E01EF}')
+}
+
+/// `s` without its `invisible` characters, borrowed when there are none.
+pub fn visible(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.contains(invisible) { std::borrow::Cow::Owned(s.chars().filter(|c| !invisible(*c)).collect()) } else { std::borrow::Cow::Borrowed(s) }
+}
+
 /// Tools that only read (D-075): the kernel lets calls to these overlap within a turn, and the
 /// Claude bridge marks them `readOnlyHint` so Claude Code sends them together. Every other tool
 /// (writes, the shell, outward actions, MCP calls) runs alone, in the order the calls came.
@@ -65,6 +81,17 @@ pub fn tail(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn invisible_characters_go_and_joiners_stay() {
+        for c in ['\u{202E}', '\u{2066}', '\u{200B}', '\u{200E}', '\u{FEFF}', '\u{E0041}', '\u{E0100}', '\u{061C}', '\u{2060}'] {
+            assert_eq!(visible(&format!("a{c}b")), "ab", "U+{:04X}", c as u32);
+        }
+        let family = "👨\u{200D}👩\u{200D}👧";
+        assert!(matches!(visible(family), std::borrow::Cow::Borrowed(_)), "emoji ZWJ sequences stay whole");
+        assert_eq!(visible("می\u{200C}خواهم"), "می\u{200C}خواهم", "Persian ZWNJ stays");
+        assert_eq!(visible("❤\u{FE0F}"), "❤\u{FE0F}", "emoji presentation stays");
+    }
 
     #[test]
     fn only_reading_tools_may_overlap() {

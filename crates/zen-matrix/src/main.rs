@@ -420,8 +420,10 @@ fn short(id: &str) -> String {
 }
 
 /// A message's content: the Markdown as the plain body, its HTML as the formatted one, or the
-/// plain body alone when both together would be too large for one event.
+/// plain body alone when both together would be too large for one event. Invisible format
+/// characters (bidi controls, zero-width spaces, tags) are dropped first (D-077).
 fn content(md: &str, notice: bool) -> RoomMessageEventContent {
+    let md = &*zen_proto::visible(md);
     let html = relay::html(md);
     let c = if notice { RoomMessageEventContent::notice_html(md, html) } else { RoomMessageEventContent::text_html(md, html) };
     if serde_json::to_vec(&c).is_ok_and(|j| j.len() <= relay::MAX_CONTENT_JSON) {
@@ -864,5 +866,17 @@ impl Bridge {
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn messages_carry_no_invisible_reordering_characters() {
+        let c = serde_json::to_string(&content("run file\u{202E}exe.live now", false)).unwrap();
+        assert!(!c.contains('\u{202E}') && !c.contains("\\u202e") && !c.contains("\\u202E"), "{c}");
+        assert!(c.contains("fileexe.live"));
     }
 }
