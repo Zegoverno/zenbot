@@ -6,6 +6,12 @@
 
 ---
 
+## 2026-10-22 — Retain the PostgreSQL project during staged cutover
+
+Staged upgrades select the original Compose project when exporting PostgreSQL, so moving the
+Compose file beside tested binaries still reaches the retained source. Cutover regression coverage
+checks the exact exporter command; storage and CI instructions match the SQLite implementation.
+
 ## 2026-10-22 — Phase 8: SQLite state and portable archives (D-076)
 
 The kernel uses a private SQLite database with bundled sqlite-vec and FTS5, without a Docker

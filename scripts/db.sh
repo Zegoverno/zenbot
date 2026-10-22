@@ -24,9 +24,12 @@ db_pg_export() {
     [[ $name =~ ^[A-Za-z0-9_]+$ ]] || { echo 'Unsupported PostgreSQL database name.' >&2; return 1; }
     # Bundled PostgreSQL accepts its owner through the container-local socket. No URL/password
     # is passed to a process argument or log. Compose is only a retained migration source.
-    local docker_command=docker
-    docker info >/dev/null 2>&1 || docker_command='sudo -n docker'
-    python3 "$ZEN_STORAGE_TOOL" export-postgres "$1" --psql-command "$docker_command compose -f ${ZEN_PG_COMPOSE:-$DB_REPO/deploy/compose.yaml} exec -T postgres psql -U zen -d $name"
+    local docker_command=(docker) psql_command
+    docker info >/dev/null 2>&1 || docker_command=(sudo -n docker)
+    # A staged compose file lives under upgrades/<id>, but the retained container
+    # belongs to the original deploy project. Keep that project directory explicit.
+    printf -v psql_command '%q ' "${docker_command[@]}" compose --project-directory "$DB_REPO/deploy" -f "${ZEN_PG_COMPOSE:-$DB_REPO/deploy/compose.yaml}" exec -T postgres psql -U zen -d "$name"
+    python3 "$ZEN_STORAGE_TOOL" export-postgres "$1" --psql-command "$psql_command"
   else
     ZEN_MIGRATION_PG_URL="$url" python3 "$ZEN_STORAGE_TOOL" export-postgres "$1" --pg-url-env ZEN_MIGRATION_PG_URL
   fi

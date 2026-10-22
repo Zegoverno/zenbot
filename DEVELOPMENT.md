@@ -67,6 +67,10 @@ CI (`.github/workflows/ci.yml`, job `check`, on `ubuntu-22.04` with stable Rust)
 |---|---|
 | `docs` | `scripts/check-docs.py --base origin/<base branch>` (a second; first, so a missing PROGRESS.md entry fails fast) |
 | `build` | `cargo build --release --locked` |
+| `py-sqlite` | `ensure_test_sqlite` from `scripts/test-sqlite.sh`: pinned SQLite for Python test helpers when needed |
+| `storage` | `python3 scripts/test_storage.py` |
+| `pg-archive` | `python3 scripts/test_postgres_archive.py` |
+| `cutover` | `python3 scripts/test_cutover.py` |
 | `tests` | `cargo test --release --locked` |
 | `clippy` | `cargo clippy --release --locked --all-targets -- -D warnings` |
 | `sizes` | `scripts/size-budget.sh`: `zend`, `zen` and `zen-engine` within their size budgets (measured size + ~15%; raise one on purpose, saying why) |
@@ -334,11 +338,12 @@ Code that depends on a CLI's flags or output should fail loudly, so the post-upd
 
 ## CI and releases
 
-`.github/workflows/ci.yml` has three jobs (there is no separate release workflow). Third-party actions are pinned by commit SHA, the tag in a comment beside it; bump them deliberately.
+`.github/workflows/ci.yml` has four jobs (there is no separate release workflow). Third-party actions are pinned by commit SHA, the tag in a comment beside it; bump them deliberately.
 
 - **`check`**: on every pull request and every push to `main`: `scripts/check.sh` (above). A newer push to a pull request cancels its running check.
+- **`postgres-migration`**: exports a disposable PostgreSQL/pgvector fixture through the historical schema and verifies every durable table in the SQLite import. Docker is a CI fixture only.
 - **`matrix`**: on the same events as `check`, beside it. Build, unit tests and clippy of `crates/zen-matrix` (its own workspace); not in the release tarball, and `release` doesn't wait for it.
-- **`release`**: only on a push to `main` that passed `check`. Builds the `dist` profile (fat LTO), checks `zen-engine` answers `ping`, `zen --version` runs and the binaries fit their `dist` size budgets (`scripts/size-budget.sh target/dist`), runs the e2e scenarios on those `dist` binaries (`ZEN_E2E_BIN=target/dist`), and uploads `zenbot-x86_64-linux-<sha12>.tar.gz` plus `.sha256` to the rolling `edge` prerelease (newest 20 builds kept).
+- **`release`**: only on a push to `main` that passed `check` and `postgres-migration`. Builds the `dist` profile (fat LTO), checks `zen-engine` answers `ping`, `zen --version` runs and the binaries fit their `dist` size budgets (`scripts/size-budget.sh target/dist`), runs the e2e scenarios on those `dist` binaries (`ZEN_E2E_BIN=target/dist`), and uploads `zenbot-x86_64-linux-<sha12>.tar.gz` plus `.sha256` to the rolling `edge` prerelease (newest 20 builds kept).
 
 So binaries exist only for commits on `main` that passed. `install.sh`, `upgrade.sh` and `eval.sh` use them via `scripts/fetch-release.sh`; when there are none (yet), they compile locally. Right after a merge, CI needs a few minutes.
 

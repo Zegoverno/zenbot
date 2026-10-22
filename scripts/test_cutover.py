@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise detached cutover decisions with fake service/network/tool commands, no live changes."""
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import tempfile
@@ -42,7 +43,8 @@ class CutoverTest(unittest.TestCase):
             'systemctl':'''echo "$*" >> "$TEST_ROOT/service.log"
 case "$1" in restart) touch "$TEST_ROOT/started";; esac
 exit 0''',
-            'python3':'''case "$2" in
+            'python3':'''printf '%s\n' "$@" >> "$TEST_ROOT/storage-args"
+case "$2" in
  export-postgres) echo private-archive > "$3";;
  restore) [ "$TEST_FAIL_IMPORT" = 0 ] || exit 1; echo verified-sqlite > "$4";;
 esac''',
@@ -58,6 +60,15 @@ if [ "$TEST_BUSY" = 1 ]; then echo '{"ok":true,"busy":1}'; else echo '{"ok":true
         # mock date is unnecessary here: test health-unavailable failure separately below.
         result=subprocess.run(['bash',str(ROOT/'scripts/apply-upgrade.sh'),str(stage)],env=env,capture_output=True,text=True,timeout=15)
         return root,live,service,result
+
+    def test_staged_export_keeps_the_retained_compose_project(self):
+        root,live,service,result=self.run_cutover()
+        self.assertEqual(result.returncode,0,result.stderr)
+        args=(root/'storage-args').read_text().splitlines()
+        command=shlex.split(args[args.index('--psql-command')+1])
+        self.assertEqual(command[:4],['docker','compose','--project-directory',str(ROOT/'deploy')])
+        self.assertEqual(command[4:6],['-f',str(live/'upgrades/100/compose.yaml')])
+        self.assertEqual(command[6:],['exec','-T','postgres','psql','-U','zen','-d','zen'])
 
     def test_import_failure_restarts_unchanged_postgres_before_sqlite_start(self):
         root,live,service,result=self.run_cutover(fail_import=True)
