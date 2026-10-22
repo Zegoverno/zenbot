@@ -6,6 +6,11 @@
 
 ---
 
+## 2026-10-22 — Account for the bundled SQLite binary
+
+The kernel release size budget includes SQLite, FTS5 and sqlite-vec: measured at 22,974 KiB
+locally and 22,965 KiB in CI, with about 15% headroom. Client and worker budgets stay fixed.
+
 ## 2026-10-22 — Retain the PostgreSQL project during staged cutover
 
 Staged upgrades select the original Compose project when exporting PostgreSQL, so moving the
