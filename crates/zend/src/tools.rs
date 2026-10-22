@@ -1,6 +1,7 @@
 //! Built-in tools. The kernel is the only place side effects happen.
-//! Commands run on the host in the workspace (a verifier's in a read-only bubblewrap sandbox, and its
-//! `read` confined to the work it checks); per-project sandboxes come with M2.
+//! Every session's commands run in a contained bubblewrap shell in its workspace (D-067; a
+//! verifier's read-only, its `read` confined to the work it checks); `host: true` runs a command on
+//! the host only once the action gate or the owner allows it.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -631,7 +632,7 @@ fn is_binary(bytes: &[u8]) -> bool {
 async fn read(workspace: &Path, args: &Value, origin: Option<Origin<'_>>) -> Result<ToolOutput, ToolOutput> {
     const MAX_READ_FILE: u64 = crate::media::MAX_FILE_BYTES as u64;
     let path = resolve(workspace, str_arg(args, "path")?);
-    let file = tokio::fs::OpenOptions::new().read(true).custom_flags(0x800).open(&path).await
+    let file = tokio::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&path).await
         .map_err(|e| err(format!("cannot read {}: {e}", path.display())))?;
     let meta = file.metadata().await.map_err(|e| err(format!("cannot stat {}: {e}", path.display())))?;
     // Check the opened object, not just its name, to defeat symlink swaps and hardlink aliases.
@@ -764,7 +765,7 @@ fn anchored(workspace: &Path, path: &Path) -> std::io::Result<(std::fs::File, Pa
     if components.is_empty() || components.iter().any(|c| !matches!(c, std::path::Component::Normal(_))) {
         return Err(std::io::Error::other("non-normal file path"));
     }
-    let open_dir = |p: &Path| std::fs::OpenOptions::new().read(true).custom_flags(0x10000 | 0x20000).open(p);
+    let open_dir = |p: &Path| std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(p);
     let mut dir = open_dir(&root)?;
     for component in &components[..components.len() - 1] {
         let next = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd())).join(component.as_os_str());
@@ -909,7 +910,7 @@ async fn edit(workspace: &Path, args: &Value, gated: bool, origin: Option<Origin
     let anchor = if gated { Some(anchored(workspace, &path).map_err(|e| err(format!("cannot confine edit: {e}")))?) } else { None };
     let target = anchor.as_ref().map(|(_, p)| p.as_path()).unwrap_or(&path);
     let bytes = if gated {
-        let file = tokio::fs::OpenOptions::new().read(true).custom_flags(0x20000).open(target).await
+        let file = tokio::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(target).await
             .map_err(|e| err(format!("cannot open confined edit: {e}")))?;
         let meta = file.metadata().await.map_err(|e| err(format!("cannot stat confined edit: {e}")))?;
         use std::os::unix::fs::MetadataExt;

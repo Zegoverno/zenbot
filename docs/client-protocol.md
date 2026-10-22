@@ -1,81 +1,81 @@
 # Client protocol
 
-How a client (the `zen` terminal app and CLI, `zen-matrix`, scripts) talks to the kernel. Workers use
-a different protocol (docs/worker-protocol.md).
-
-Every request, the WebSocket upgrade included, carries the owner's token in
-`Authorization: Bearer <token>`; a token in the URL is refused. The token is in `~/.zenbot/token`. The server listens on
-`127.0.0.1:8100` by default; `ZEN_BIND` and `ZEN_PORT` change the address and port.
+How clients (`zen`, `zen-matrix`, scripts) talk to the kernel; workers use
+[worker-protocol.md](worker-protocol.md). Every request, the WebSocket upgrade included, carries
+`Authorization: Bearer <token>` (`~/.zenbot/token`; never in the URL) on
+`127.0.0.1:8100` (`ZEN_BIND`, `ZEN_PORT`). `crates/zen-client` makes these calls for Rust clients.
 
 ## HTTP
 
-| Method and path | Body | Returns |
-|---|---|---|
-| `GET /health` (no token) | | `{ ok, db, mind, workers, ignored_workers, busy, version, commit }`; `busy` counts running turns and kernel work outside them; `ignored_workers` lists names in `ZEN_WORKERS` that aren't known workers (not a failure) |
-| `GET /api/models` | | `{ models, authenticated, default, scorer }` |
-| `GET /api/sessions?archived=` | | the owner's and job sessions (no subagents or verifiers): `{ id, title, model, effort, archived, kind, parent, cost, created_at, updated_at }`; `kind` is null for the owner's, `job` for a scheduled job's |
-| `GET /api/board?archived=` | | `{ sessions, archived }`: the latest 200 top-level sessions (archived ones only with `archived=true`; otherwise `archived` counts them) and under each its latest 20 child sessions plus any running (`kind` `subagent`, `verifier`, `job`; `parent`), each with `busy`, `waiting` (its latest `ask` questions came after the owner's latest message), for a top-level one `children` (how many it has in all) and for a child `task` (its first prompt, 200 characters); no `cost`. `zen`'s home screen polls it |
-| `POST /api/sessions` | `{ title?, model?, effort? }` | the session |
-| `GET /api/sessions/{id}?last=&after=` | | the session with `messages` (each with its `seq`; all of them, or the `last` N, or those with a `seq` after `after`), `message_count` (all its messages), `tokens` (the whole session's) and `busy` |
-| `PATCH /api/sessions/{id}` | `{ title?, model?, effort? ("default" clears), archived? }` | the session. A title set here is the owner's: the kernel no longer renames the session |
-| `GET /api/sessions/{id}/taint` | | what marked the session as having read untrusted content since the owner last trusted it: `{ risky_at, tainted_at, taints: [{ seq, source, about, at }], sources: [{ source, about, first, count }], checked, busy }`; `checked` is the tape's last block, sent back as `seen` |
-| `POST /api/sessions/{id}/trust` | `{ seen }` | `{ trusted: true, seq }` (the `trust` block), or `{ trusted: false, result }` when the session is clean; 409 while a turn runs or when it read untrusted content after `seen` (look again). D-054 |
-| `GET /api/sessions/{id}/allow` | | latest pending actions: `{ actions: [{ id, action, reason }], busy }`; action is the masked exact workspace/tool/arguments |
-| `POST /api/sessions/{id}/allow` | `{ id }` | `{ allowed }`; approval and audit commit together, refused during a turn. One exact retry within ten minutes; does not trust the session |
-| `POST /api/sessions/{id}/decision` | `{ decision: accept\|more\|reshape\|drop, note? }` | the recorded verdict `{ id, session_id, turn_id, decision, note, created_at }` |
-| `GET /api/suggestions` | | suggested next prompts: outcomes by prompt version and model, and the latest 20 |
-| `GET /api/memory?tier=` | | `{ memories, last_sleep, size }`: memories of a tier (`short`, the default; `archived`, `all`; `long` holds only rows from before D-045), each `{ id: "m12", text, source, tier, proposed, reason, created_at, updated_at }`; the latest `sleep_runs` row; short-term memory's cap in characters (`ZEN_MEMORY_CHARS`) |
-| `POST /api/memory/sleep?trigger=` | | tidy short-term memory now (recorded as `nightly` with `trigger=nightly`, else as the owner's; the scheduled `sleep` job runs it without this route): `{ run, entries, kept, dropped, promoted, scorer, note }` |
-| `GET /api/skills` | | skills (active and drafts) with their use, and the tools the agent made; each draft and tool has its `sha` (fingerprint of its content) |
-| `POST /api/skills/review` | `{ name, decision: accept\|reject, sha }` | `{ result }`: activates or archives a draft skill; `sha` is the fingerprint the owner reviewed (8 characters or more), 400 when the draft changed since |
-| `POST /api/tools/{name}/review` | `{ decision: accept\|reject, sha }` | `{ result }`: approves (network allowed) or rejects a tool the agent made; `sha` as above |
-| `GET /api/mcp` | | `{ config, servers, problems }`: MCP servers from `~/.zenbot/mcp.json` and cached tool counts; never starts connections |
-| `GET /api/policy`, `POST /api/policy` | `{ policy: { routes }, reason? }` | the routing policy, evidence and suggestions / set a new version `{ version }` |
-| `POST /api/policy/undo` | | `{ version }`: the policy before the latest change, as a new version |
-| `GET /api/jobs` | | `{ jobs, scheduler }`: scheduled jobs with schedule, next run and last result |
-| `POST /api/jobs` | `{ name, prompt, schedule, tz?, context?, skills?, model?, workspace? }` | the job (an agent job, created by the owner) |
-| `PATCH /api/jobs/{name}`, `DELETE /api/jobs/{name}` | `{ enabled?, prompt?, schedule?, … }` | the job (`enabled` pauses or resumes it) / `{ removed }` |
-| `POST /api/jobs/{name}/run` | | `{ run, job }`: runs it now, in the background |
-| `GET /api/jobs/runs?job=&limit=` | | recent runs, newest first (limit 20 by default, at most 200): `{ id, job, trigger, status, session, started_at, ended_at, output, error }` |
-| `GET /api/version?refresh=` | | the running commit and whether `main` is ahead |
-| `GET /api/upgrade`, `POST /api/upgrade` | | upgrade progress / start one |
+Paths under `/api` but `/health`. Owner decisions (allow, trust, queue, reviews) are never model tools.
 
-Busy prompts persist until dispatched after the current turn. `"mode":"steer"` stops at the next tool boundary, leaves that action unexecuted and dispatches the correction first. Existing `status`/`error` events report queueing/start failures. Pending prompts survive restarts and are consumed atomically with their owner tape message. Failed starts retain an error row for inspection.
+| Route | Body | Returns |
+|---|---|---|
+| `GET /health` (no token) | | `{ ok, db, mind, workers, ignored_workers, busy, version, commit }` |
+| `GET /models` | | `{ models, authenticated, default, scorer }` |
+| `GET /sessions?archived=` | | owner and job sessions `{ id, title, model, effort, archived, kind, parent, cost, created_at, updated_at }` |
+| `GET /board?archived=` | | `{ sessions, archived }`: 200 top-level sessions, their latest 20 and running children, `busy`, `waiting`, `children`/`task` |
+| `POST /sessions` | `{ title?, model?, effort? }` | the session |
+| `GET /sessions/{id}?last=&after=` | | the session with `messages` (each with `seq`), `message_count`, `tokens`, `busy` |
+| `PATCH /sessions/{id}` | `{ title?, model?, effort? ("default" clears), archived? }` | the session; a title set here stops auto-naming |
+| `GET /sessions/{id}/taint` | | `{ risky_at, tainted_at, taints, sources, checked, busy }` |
+| `POST /sessions/{id}/trust` | `{ seen }` (`checked` above) | `{ trusted: true, seq }` or `{ trusted: false, result }`; 409 while busy or if it read more after `seen` (D-054) |
+| `POST /sessions/{id}/deny` | | `{ stopped: true }`: stops the session, marks its products contaminated |
+| `GET`/`POST /sessions/{id}/allow` | `{ id }` | held actions `{ actions: [{ id, action, reason }], busy }` / `{ allowed }`: that exact action once, within ten minutes; refused during a turn |
+| `POST /sessions/{id}/decision` | `{ decision: accept\|more\|reshape\|drop, note? }` | `{ id, session_id, turn_id, decision, note, created_at }` |
+| `GET /queue` | | pending held actions and source proposals: `{ kind: action\|source, id, summary, reason, risk, created_at, … }` |
+| `POST /queue/{kind}/{id}` | `{ decision: approve\|reject\|deny }` | the result; compare-and-set (409 if stale or busy); `deny` only for actions |
+| `GET`/`POST /sources` | `{ source, risk?: 2\|3, note?, remove? }` | the source allowlist `[{ source, risk, note }]` / the change |
+| `POST /sources/rerate` | | re-rates them |
+| `GET /trust?suggest=`, `POST /trust` | `{ kind, match, level?, note?, remove? }` | `~/.zenbot/trust.toml` entries (with `suggest`: hosts seen clean, for review) / the change |
+| `GET /s1`, `/s1/check`, `/s1/models` | | System One stats (30 days), decision files, models |
+| `POST /s1/replay` | `{ decision, file?, last? }` | recorded answers under changed rules: `{ replayed, same, changed, … }` |
+| `POST /s1/compare` | `{ decision, models, last? }` | recorded states asked again per model |
+| `GET /s1/proposals`, `POST /s1/proposals/{id}` | `{ decision: approve\|reject }` | the learner's proposals / applied or rejected |
+| `GET /suggestions` | | suggestion outcomes by prompt version and model, latest 20 |
+| `GET /memory?tier=` | | `{ memories, last_sleep, size }` (`short` default, `archived`, `all`, `long`) |
+| `POST /memory/sleep?trigger=` | | tidies short-term memory now: `{ run, entries, kept, dropped, promoted, scorer, note }` |
+| `POST /brain` | `{ action, … }` | the owner's `brain` actions (get, list, put, schema, lint, index) |
+| `GET /skills` | | skills, drafts, made tools, with use and `sha` |
+| `POST /skills/review` | `{ name, decision: accept\|reject, sha }` | `{ result }`; 400 if the draft changed since `sha` |
+| `POST /tools/{name}/review` | `{ decision, sha }` | `{ result }`: approves (network allowed) or rejects a made tool |
+| `GET /mcp` | | `{ config, servers, problems }` (no connecting) |
+| `POST /mcp/login`, `/mcp/login/{flow}` | `{ server }` / `{ callback }` | the link to open / the finished sign-in (D-072) |
+| `GET /mcp/pending`, `POST /mcp/pending/{id}` | the answer | MCP forms waiting for the owner / the response |
+| `GET`/`POST /policy`, `POST /policy/undo` | `{ policy: { routes }, reason? }` | routing policy, evidence, suggestions / `{ version }` |
+| `GET`/`POST /jobs` | `{ name, prompt, schedule, tz?, context?, skills?, model?, workspace? }` | `{ jobs, scheduler }` / the job |
+| `PATCH`/`DELETE /jobs/{name}` | `{ enabled?, prompt?, schedule?, … }` | the job / `{ removed }` |
+| `POST /jobs/{name}/run` | | `{ run, job }` (runs in background) |
+| `GET /jobs/runs?job=&limit=` | | newest first (20, max 200): `{ id, job, trigger, status, session, started_at, ended_at, output, error }` |
+| `GET /version?refresh=` | | running commit; is `main` ahead |
+| `GET`/`POST /upgrade` | | upgrade progress / start one |
 
 ## WebSocket: `/api/sessions/{id}/ws`
 
-When it has sent nothing for 30 seconds, the kernel sends a WebSocket ping (clients answer with a
-pong on their own), so proxies don't close a connection that's quiet during a long tool call.
-
-The client sends:
+The kernel pings after 30 s of silence. The client sends:
 
 | Message | Effect |
 |---|---|
-| `{ "type": "prompt", "text": "…", "suggestion"?: { "id", "taken" } }` | the owner's message: starts a turn. `suggestion` reports the suggested next prompt the client showed: `taken` when the owner took it into the input (tab); the kernel records `accepted` (sent unchanged), `edited` or `declined`. A suggestion the client didn't report is recorded `unseen` |
+| `{ "type": "prompt", "text", "mode"?: "queue"\|"steer", "suggestion"?: { "id", "taken" } }` | the owner's message; during a turn it waits (across restarts) for the turn's end, or with `steer` stops it at the next tool boundary (that action unrun) and goes first. `suggestion`: the one shown, `taken` if tab took it; recorded `accepted`, `edited`, `declined` or `unseen` |
 | `{ "type": "abort" }` | stops the running turn |
 
-The kernel sends events, in order. `zen_proto::client::Event` (`crates/zen-proto/src/client.rs`)
-types them for Rust clients, with the end-of-turn rule (`Event::ends_turn`) and echo matching
-every client uses; `zen-client` (`crates/zen-client`) opens the stream and makes the HTTP calls.
+Events, in order, typed as `zen_proto::client::Event` (`crates/zen-proto/src/client.rs`) with `Event::ends_turn` and echo matching. Unknown events are ignored.
 
 | Event | Fields | Meaning |
 |---|---|---|
-| `message` | `message` | a message added to the session (Pi's format; the event carries no `seq`: `GET /api/sessions/{id}?after=` returns messages with theirs, which is how `zen-matrix` catches up). A user message with `kernel: true` is the kernel talking to the model (the prompt of a verifier, subagent, job or sleep session), not the owner |
-| `busy` | `busy: true, turn_id, harness, model, effort` | a turn started (also turns the kernel started itself) |
-| `delta`, `thinking` | `delta` | streamed answer text / reasoning |
-| `tool_start` | `call_id, name, args` | a tool call began (`args` with secrets masked and each string cut at 4 KB) |
+| `message` | `message` | a message added (Pi's format, no `seq`: catch up with `?after=`). `kernel: true` on a user message: the kernel prompting the model, not the owner |
+| `busy` | `busy: true, turn_id, harness, model, effort` | a turn started (kernel's too) |
+| `delta`, `thinking` | `delta` | streamed answer / reasoning |
+| `tool_start` | `call_id, name, args` | a tool call began (secrets masked, strings cut at 4 KB) |
 | `tool_end` | `call_id, is_error, ms` | it finished |
-| `end` | `error, cost, turn, next` | the turn ended. `turn` is the kernel's record (tokens, cost, time, `cache_break`, `context_tokens`, `render`); `cost` is the session's total (absent when the turn failed to start). `next` is always false today; with `next: true` a client keeps waiting for `idle` |
-| `child_end` | `turn` | a child session's turn ended (a verifier); count its cost with the job |
-| `idle` | | reserved: the kernel's own turns are over (after `end` with `next: true`); nothing sends it today |
-| `title` | `title` | the kernel named the session (after one of the owner's first turns, unless the owner set the title; not in job, subagent or verifier sessions) |
-| `suggestion` | `id, text` | after an owner's turn: the owner's likely next prompt. Show it until the next prompt is sent (zen: grey in the empty input, tab takes it); send its `id` back with that prompt |
-| `model` | `model, effort` | the session's model changed without the owner choosing it: a usage-limit failover moved it to the model it continued on, which it keeps until the owner picks another (D-058). `effort` is its thinking level there (`null`: the model's default) |
-| `status` | `text` | progress the kernel reports: a long tool ("verifying: running 3 check(s)"), a delegation, a summary being made, a usage-limit failover |
-| `questions` | `questions: [{ question, options }]` | the `ask` tool's questions for the owner, recommended option first; the answers are the owner's next prompt |
-| `taint` | `risky, tainted, source?, about?` | an outside read sets `risky`; owner denial or level-5 content sets `tainted` and stops work; trusting clears both |
+| `end` | `error, cost, turn, next` | the turn ended; `turn`: the kernel's record (tokens, cost, time, `cache_break`, `context_tokens`, `render`); `cost`: session total (absent on a failed start); `next: true` (not sent today): wait for `idle` |
+| `child_end` | `turn` | a verifier's turn ended; count its cost |
+| `idle` | | reserved, not sent |
+| `title` | `title` | the kernel named it |
+| `suggestion` | `id, text` | the owner's likely next prompt; send `id` back with the next prompt |
+| `model` | `model, effort` | a usage-limit failover moved the session's model (D-058); `effort` null: the default |
+| `status` | `text` | progress: a long tool, a delegation, a summary, a failover, a queued prompt |
+| `questions` | `questions: [{ question, options }]` | the `ask` tool's questions, recommended first |
+| `taint` | `risky, tainted, source?, about?` | outside content read (`risky`) or a stop (`tainted`); trust clears both |
 | `error` | `error` | a request failed |
 | `resync` | `skipped, busy` | the client fell behind and missed events |
-
-A client that predates an event can ignore it. The old workflow's events (`brief`, `report`,
-`state`, `idle` with `waiting`) and `POST /api/sessions/{id}/flow` were removed on 2026-10-07.

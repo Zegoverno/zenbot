@@ -1,4 +1,4 @@
-//! Masking secrets in tool output before the model or the tape sees it (SPEC 5.18, docs/context.md).
+//! Masking secrets in tool output before the model or the tape sees it (DESIGN.md, docs/context.md).
 //!
 //! Two kinds are masked: the values of the kernel's own secrets (environment variables named like a
 //! token, key, secret or password, zenbot's API token, the database password and the Claude Code and

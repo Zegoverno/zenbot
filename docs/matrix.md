@@ -1,146 +1,71 @@
 # The Matrix channel (`zen-matrix`)
 
-The owner talks to zen from any Matrix client (Beeper, Element), on the phone or the desktop, as
-well as from the terminal (D-049). `zen-matrix` is a separate process and a client of the kernel's
-client protocol (docs/client-protocol.md), like `zen`: the kernel doesn't know Matrix exists.
-
-```
- Beeper / Element ──(E2EE)── matrix.org ── zen-matrix ──HTTP+WS, localhost── zend
-```
-
-## What it does
-
-- **Each room is one zen session.** `zen-matrix login` makes two encrypted rooms and invites the
-  owner: **zen** (a direct chat on a session titled "Matrix") and **zen jobs**. `!new [title]` starts a
-  session in a new room. A room the owner creates and invites the bot to (encrypted, with no one
-  else in it) gets a session on its first message.
-- **Turns.** The owner's message is the prompt. While zen works the room shows it typing; each
-  assistant message with text is posted as Markdown (tool calls aren't). A failed turn, a kernel
-  error or a prompt typed in the terminal in the same session (while the room's link is open)
-  shows as a notice. An answer longer than about 20 KB goes in several messages (split at a
-  paragraph or line, a code block closed and reopened across the split); past 8 messages the rest
-  is cut, with a pointer to `zen -r`. When a message can't be sent, a short notice says so.
-- **Nothing is lost on a reconnect or a restart.** The bridge keeps, per room, the `seq` of the last
-  session message the room has had (`state.json`). On every connection to the kernel, on `resync`
-  and on each new message it reads what came after it (`GET /api/sessions/{id}?after=`) and posts
-  it, so answers that came while the WebSocket, the kernel or the bridge was down are posted when
-  it is back, and none twice. At start it links every mapped room, not only those written to since.
-  A room seen for the first time starts at the session's latest message.
-- **Questions.** An `ask` is posted numbered, recommended option first. Replying with one number
-  per question (`1 2`) sends the chosen options' text as the answer; anything else goes as is.
-- **Commands:** `!new [title]`, `!stop` (abort the turn), `!session` (the session id, for `zen -r`, and whether it's untrusted),
-  `!help`, and the owner commands `!jobs [run|resume|pause <name> | runs [name]]`,
-  `!skills [accept|reject <domain/name> <sha>]`, `!tools accept|reject <name> <sha>` and
-  `!allow [yes]` (review and approve the exact latest held action once) and
-  `!trust [yes]` (what made the room's session untrusted; `yes` trusts it again, D-054)
-  (`zen_client::owner`, the same as zen's `/jobs`, `/skills`, `/tools`, `/allow`, `/trust`). They work in every room,
-  **zen jobs** included; the bridge runs them against the kernel with the owner's token and posts
-  the answer as a notice, so they never reach the agent and nothing it read can approve a job, a
-  skill or a tool. Removing or creating a job stays in the terminal.
-- **Approval queue.** Every five seconds the bridge reads `GET /api/queue` and posts new held
-  actions/source proposals to the existing main room (jobs room fallback), checked encrypted and
-  owner-only. `!queue` lists; `!queue approve|reject|deny action|source <id>` decides.
-  Approve grants once; reject forbids retries; deny contaminates an action's session.
-  The durable room/event → exact kind/id mapping survives restarts; kernel compare-and-set
-  decisions reject replays and stale source snapshots. No approvals room is provisioned.
-  **One-tap limitation:** ordinary Matrix SDK/client reactions are plaintext even in E2EE rooms.
-  They cannot attest the sending device and are ignored, never an approval exception.
-  Use an encrypted `!queue approve action <id>` (or source/reject/deny) command from a
-  cross-signed device. Encrypted reactions, if a client supplies them, require that same device
-  authentication and a mapped queue notice; ordinary client one-tap approval is not supported.
-- **Job reports.** Every minute it reads `GET /api/jobs/runs` and posts each finished run (`ok` with
-  its report, `error`, `missed`, `interrupted`; not `silent`) once to **zen jobs**. A run posted
-  into a session (`posted_to`, a job's `post_to`, D-060) is left out: its report arrives in that
-  session's room as zen's message, where the owner can answer it. Runs from before
-  the bridge first started aren't replayed.
-
-## Security
-
-The rules are pure functions in `src/trust.rs`, unit-tested; the bridge only gathers the facts.
-
-- **One owner, through end-to-end encryption, from verified devices.** It acts only on a message
-  that is from `MATRIX_OWNER` (never from itself: `MATRIX_OWNER` can't be `MATRIX_USER`), was
-  end-to-end encrypted, and was sent from a device the owner's cross-signing identity signed, i.e. a
-  session the owner verified in their client. matrix-sdk refuses to decrypt anything else (sender
-  device trust requirement `CrossSigned`), and the bridge checks it again on the decrypted event.
-  Plaintext messages and messages from the owner's unverified sessions are refused and logged
-  (`REFUSED …`, or "wasn't decrypted" for the latter); someone else's are ignored.
-- **The owner's identity is pinned.** The first message accepted pins the owner's cross-signing
-  master key in `state.json` (`zen-matrix status` shows it). If it changes (the owner reset their
-  identity, or someone took the account over and made a new one), every message is refused, with a
-  loud log and a notice in the room, until the owner resets the pin on the machine:
-  `sudo systemctl stop zen-matrix`, `~/.zenbot/bin/zen-matrix repin-owner`,
-  `sudo systemctl start zen-matrix`; the next message pins the new identity. Compare the key it
-  logs with the one your client shows before you do.
-- **Rooms hold only the owner and the bot, and are encrypted.** Every room it creates is encrypted
-  (Megolm, recommended defaults). It joins a room only at the owner's invite, and only if the room
-  isn't known to be unencrypted; once joined it checks the whole room and leaves if it isn't
-  encrypted or anyone else is in it (joined or invited). Before every post it checks again, and it
-  leaves a room as soon as anyone else joins or is invited (logged `LEAVING …`). At start it leaves
-  rooms that break these rules.
-- **Formatting is not markup from the model.** Answers are Markdown turned into the message's HTML
-  with raw HTML in them shown as text, so model output (or a web page it quotes) can't inject tags.
-- **Keys.** `login` sets up cross-signing, so the bot's device is verified by its own identity, and
-  server-side key backup with a recovery key saved to `~/.zenbot/matrix/recovery-key`. Room keys
-  are shared with all the owner's devices (matrix-sdk's default), verified or not: an unverified
-  session of the owner's can read the bot's answers, but can't drive zen.
-- **Secrets stay local.** `~/.zenbot/matrix/` is mode 700 and its files 600: `session.json` (the
-  access token), `store.key` (the passphrase that encrypts the SQLite store of keys and sync state),
-  `recovery-key`. `matrix.env` holds the password only until the first sign-in; remove it after.
-- **The kernel token** never leaves the machine: the bridge talks to `127.0.0.1` (the port from
-  `~/.zenbot/env`; `ZEN_URL` overrides it) with it in a header.
-- **The service is confined** (`deploy/zen-matrix.service`): the home folder is an empty tmpfs with
-  only its binary, `~/.zenbot/token`, `~/.zenbot/env` and `~/.zenbot/matrix.env` bound in read-only
-  and `~/.zenbot/matrix` read-write; `ProtectSystem=strict`, `PrivateTmp`, `PrivateDevices`, no
-  capabilities, `NoNewPrivileges`, only Unix and IP sockets, the `@system-service` system calls,
-  kernel tunables, modules and logs protected. It stays inert until `session.json` exists. It runs
-  no tools itself; everything zen does still goes through the kernel. `scripts/matrix.sh` installs
-  a changed unit.
-- **Message content** reaches the bot decrypted on this machine, and is then a prompt like one typed
-  in the terminal. Anyone holding the owner's Matrix account *and* a verified session of it can
-  drive zen: protect that account (2FA at the provider) and verify only your own sessions.
+Talk to zen from any Matrix client (Beeper, Element) as well as the terminal (D-049). `zen-matrix`
+is a separate process, a client of [client-protocol.md](client-protocol.md) like `zen`; the kernel
+doesn't know Matrix exists. Owner → E2EE → matrix.org → `zen-matrix` → localhost → `zend`.
 
 ## Setup
 
-1. Create the bot's account on matrix.org (in a browser: it has a captcha). Pick a neutral name.
-   If the client offers to set up a recovery key, save it. Sign out.
+1. Create the bot's account on matrix.org in a browser (captcha); save any recovery key; sign out.
 2. Write `~/.zenbot/matrix.env` (mode 600):
    ```
    MATRIX_USER=@your-bot:matrix.org
    MATRIX_PASSWORD=…               # only for the first sign-in
    MATRIX_OWNER=@you:beeper.com     # the only account it answers
    # MATRIX_RECOVERY_KEY=…          # only if the account already has encryption set up
-   # MATRIX_HOMESERVER=https://…    # only if discovery from the user id doesn't work
+   # MATRIX_HOMESERVER=https://…    # only if discovery from the user id fails
    ```
-3. `scripts/matrix.sh`: builds and tests `crates/zen-matrix`, installs `~/.zenbot/bin/zen-matrix`, signs in
-   (`zen-matrix login`), installs and starts the `zen-matrix` service.
-4. Accept the two invites in your client. Remove `MATRIX_PASSWORD` from `matrix.env`.
-5. Make sure the client you write from is a verified session of your account (Element and Beeper
-   ask you to verify each new sign-in): messages from unverified sessions are refused.
+3. Run `scripts/matrix.sh`: builds and tests `crates/zen-matrix`, installs `~/.zenbot/bin/zen-matrix`,
+   signs in (`zen-matrix login`: cross-signing, key backup with the recovery key in
+   `~/.zenbot/matrix/recovery-key`, two encrypted rooms), installs and starts the `zen-matrix` service.
+4. Accept the two invites (**zen** and **zen jobs**). Remove `MATRIX_PASSWORD` from `matrix.env`.
+5. Write only from sessions of your account that you verified: others are refused.
 
-`zen-matrix status` shows the configuration, the sign-in, encryption and rooms;
-`journalctl -u zen-matrix -f` the log. After pulling a new version, run `scripts/matrix.sh` again.
+After that, `scripts/upgrade.sh` rebuilds and restarts an enabled bridge whenever its sources
+changed, with rollback (D-077). `zen-matrix status` shows config, sign-in, encryption, rooms and the
+pinned owner key; `journalctl -u zen-matrix -f` the log.
 
-## Code
+## Use
 
-`crates/zen-matrix` is its own Cargo workspace: matrix-sdk's SQLite (`libsqlite3-sys` 0.38) clashes
-with sqlx's `links = "sqlite3"` in the kernel's graph, and its few hundred dependencies stay out of
-the kernel's build and lockfile. CI builds, tests and lints it in its own job; it isn't in the
-release tarball.
+- **Each room is a session.** **zen** is a direct chat on a session titled "Matrix"; `!new [title]`
+  opens a new room and session; a room you create and invite the bot to (encrypted, only you) gets a
+  session on its first message.
+- **Turns.** A message is the prompt; during a turn it queues, `!steer <text>` redirects at the
+  next tool boundary, `!stop` aborts. The room shows typing; answers post as Markdown (tool calls
+  don't), split past ~20 KB, cut after 8 parts (the rest via `zen -r`). Failures and prompts typed
+  in the terminal show as notices.
+- **Questions** from `ask` post numbered; reply `1 2` to pick options, or answer in words.
+- **Nothing lost.** Per room the bridge keeps the last session `seq` it posted (`state.json`) and
+  catches up (`?after=`) on every reconnect, so answers arriving while anything was down post once.
+- **Owner commands** (`zen_client::owner`, as in zen; run against the kernel, never seen by the
+  agent): `!session`, `!help`, `!jobs [run|resume|pause <name> | runs [name]]`,
+  `!skills [accept|reject <domain/name> <sha>]`, `!tools accept|reject <name> <sha>`,
+  `!sources [add <host/path> [2|3] [note] | rm <host/path>]`, `!allow [yes]`, `!trust [yes]` (D-054),
+  `!deny` (stop the session, mark its products contaminated), `!queue [approve|reject|deny
+  action|source <id>]`. Creating or removing jobs stays in the terminal.
+- **Approval queue.** Every 5 s new held actions and source proposals post to **zen**. Decide with an
+  encrypted `!queue …` command; plaintext reactions never approve (they carry no device identity).
+- **Job reports.** Each finished run (`ok`, `error`, `missed`, `interrupted`; not `silent`) posts
+  once to **zen jobs**, except runs posted into a session (`post_to`, D-060).
 
-| File | What |
-|---|---|
-| `src/main.rs` | Commands (`login`, `run`, `status`, `repin-owner`); the Matrix client (SQLite store, sign-in, cross-signing and backup, decryption trust), rooms, invites, membership watch, the message handler, posting (room check, parts, failure notice), the per-room link task (session WebSocket, catch-up, reconnects, typing) and the job reporter |
-| `src/trust.rs` | Pure: who and where it answers (sender, device trust, room members and encryption, invites, the pinned owner identity). Unit-tested |
-| `src/relay.rs` | Pure: commands, kernel events (`zen_proto::client::Event`, its end-of-turn rule and echo matching) and session messages → room posts, numbered answers, job reports, splitting long answers, Markdown → HTML without raw HTML. Unit-tested |
-| `src/kernel.rs` | The client-protocol calls it uses, over the client `zen` uses too (`crates/zen-client`, a path dependency) |
-| `src/state.rs` | `matrix.env` and `~/.zenbot/env` (an owner that is the bot is refused), `state.json` (rooms ↔ sessions, per-room `seen` seq, the pinned owner key, job cursor; bad ids dropped on load), private files |
+## Security
 
-## Limits and next steps
+The rules are pure, unit-tested functions in `crates/zen-matrix/src/trust.rs`.
 
-- No interactive verification (emoji/SAS) of the bot yet: the owner's client may show the bot as
-  unverified until the owner verifies it by hand.
-- Only text messages; attachments and images are ignored.
-- Questions an `ask` posts while the room's link is down are not caught up (they aren't session
-  messages); the turn's answer is.
-- Messages the owner sends while the bridge is down are not taken as prompts when it starts.
+- It acts only on end-to-end encrypted messages from `MATRIX_OWNER` (never the bot itself), sent
+  from a device the owner's cross-signing identity signed. Others are refused and logged.
+- The owner's master key is pinned on first contact. If it changes, everything is refused until you
+  compare keys and reset: `sudo systemctl stop zen-matrix`, `~/.zenbot/bin/zen-matrix repin-owner`,
+  `sudo systemctl start zen-matrix`.
+- Rooms must be encrypted with only the owner and the bot; the bot leaves any room that isn't,
+  checking before each post. Raw HTML in answers is shown as text.
+- `~/.zenbot/matrix/` (mode 700) holds the access token, the store passphrase and the recovery key.
+  The kernel token stays local (`ZEN_URL` overrides the address). The service
+  (`deploy/zen-matrix.service`) is confined and runs no tools. Protect the Matrix account with 2FA.
+
+## Limits
+
+No emoji (SAS) verification of the bot; text only (attachments ignored); `ask` questions posted
+while the link is down aren't caught up; messages sent while the bridge is down aren't prompts.
+`crates/zen-matrix` is its own Cargo workspace (matrix-sdk's SQLite clashes with sqlx), built in its
+own CI job and tested end to end by `scripts/matrix-e2e.sh`.

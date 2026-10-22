@@ -1,1599 +1,307 @@
 # zenbot — Decision Log
 
-> Key choices with their reasons. When you're tempted to revisit something, check here first.
-> Newest first. Format: decision, why, what was considered (when recorded), date. A decision changes
-> only with the owner's OK; a new entry supersedes an old one and says so, and the old one is marked.
+> The rules that hold today, newest first; check here before revisiting a choice. Full text and
+> reasoning: [docs/archive/DECISIONS-full.md](docs/archive/DECISIONS-full.md) (frozen 2026-10-22) and
+> [docs/archive/DECISIONS-superseded.md](docs/archive/DECISIONS-superseded.md). A decision changes only
+> with the owner's OK. Add new ones at the top in this short form (≤ ~8 lines: status, date, the rule,
+> what it supersedes); the full reasoning goes in the pull request and PROGRESS.md.
 
----
+## D-077 — Clients show only visible text; Matrix upgrades itself; aarch64 releases
+Status: accepted · 2026-10-22
+The terminal and Matrix drop `zen_proto::invisible` characters. `upgrade.sh` rebuilds a changed zen-matrix and `apply-upgrade.sh` swaps it in, restoring the old one on failure. CI publishes x86_64 and aarch64 builds.
 
 ## D-076 — Local SQLite state with verified PostgreSQL migration
-
-**Date:** 2026-10-22 · **Status:** accepted (owner: migrate existing data and ship Phase 8).
-**Supersedes:** D-006's backend and D-035's PostgreSQL search implementation.
-
-**Decision:** SQLx SQLite in private `ZEN_HOME/zen.sqlite3`, WAL/full synchronization, foreign keys,
-bounded busy waits and short `BEGIN IMMEDIATE` writes. UUID blobs, JSON text and copied float32
-vectors; statically bundled MIT sqlite-vec (no arbitrary extension loading), Unicode/accent-folded
-FTS5 and separate exact identifier matching. PostgreSQL language stemming is not retained.
-A versioned JSONL snapshot preserves all durable state, validates counts/relations/tape hashes,
-and publishes only a complete import. Historical hash bytes/version stay intact. Database,
-sidecars, backups and exports are kernel-only. Keep PostgreSQL for recovery; once SQLite starts,
-never silently roll back to stale PostgreSQL. Native SQLite backups include committed WAL.
-Docker is optional; web search uses configured external SearXNG or Brave/Tavily.
-
-**Why:** Remove the database/container footprint while retaining history, security evidence and
-vectors. Explicit query/transaction ports preserve authority; verified migration preserves data.
+Status: accepted · 2026-10-22 · supersedes D-006, D-035's PostgreSQL implementation
+State lives in a private, kernel-only SQLite file (WAL, short `BEGIN IMMEDIATE` writes, bundled sqlite-vec and FTS5). PostgreSQL data moves only by a verified, complete snapshot import; never silently roll back to it. Docker is optional; web search uses external SearXNG, Brave or Tavily.
 
 ## D-075 — Engines: one cost basis, a concurrency cap, parallel reads, bounded state
-
-**Date:** 2026-10-22 · **Status:** accepted (owner: "go ahead with those defaults and ship it")
-
-**Decision:** Phase 7, engines; one CLI process per turn stays.
-- **Costs on one basis.** A worker reports uncached input as `input` and cached input as
-  `cache_read`; Codex marks its totals per turn (`totals: "turn"`) and puts each model call's
-  usage on its message. Without a reported cost the kernel estimates an API-equivalent one from
-  `prices.rs` (OpenAI list prices, `~/.zenbot/prices.toml` overrides). Earlier Codex turns are
-  rebuilt from their stored reports once.
-- **A concurrency cap.** Background turns take an engine slot (`ZEN_ENGINE_CONCURRENCY`, 3) and
-  wait for one: job runs and kernel sessions from one pool, subagents and verifiers from another,
-  so a parent never blocks its children. The owner's turns and completions take a free slot and
-  never wait.
-- **Parallel reads.** `zen_proto::READ_ONLY_TOOLS` may overlap within a turn; any other call runs
-  alone, in order (a per-session lock in dispatch). Claude gets `readOnlyHint` on those; the Codex
-  worker runs calls as they come.
-- **Bounded engine state.** Codex runs without its bundled skills; engine session state is pruned
-  after 14 days; a rolled-back CLI update deletes the rejected version and fails the `engines` job.
-  Codex 0.163.0: `code_mode_interrupt` reviewed; `cli_daybreak`, `api_key_cyber_access_programs` off.
-
-**Why:** Codex looked free to the router (D-074); up to 9 engines ran at once on a 7.7 GB VM; no
-read-only calls overlapped; engine state grew unbounded; a failed update read "ok" for a week.
+Status: accepted · 2026-10-22
+One CLI process per turn; costs on one basis (estimated from `prices.rs` when unreported). Background turns wait for an engine slot (`ZEN_ENGINE_CONCURRENCY`, two pools); the owner's never wait. Read-only tools may overlap in a turn. Engine state is pruned after 14 days; a rolled-back CLI update fails the `engines` job.
 
 ## D-074 — A learning router picks the model for each piece of work
-
-**Date:** 2026-10-22 · **Status:** accepted (owner, 2026-10-21/22: route by task, learn by A/B tests
-and a multidimensional grade; the rules below were left to Claude). **Supersedes:** D-066's
-`unknown` kind for every subtask.
-
-**Decision:** Every owner session whose model nobody chose (no `-m`, no `/model`: `model_source`),
-every agent job run without a model the owner set, and every subtask `delegate` hands out without
-one is routed: System One's `task_kind` names its kind among the policy's kinds from the owner's
-words (or the job's or subtask's text); confident (p ≥ 0.7), the kind's route picks the model;
-otherwise the work keeps the model it would have had. The policy starts with nine kinds (chat,
-recall and routine on Sonnet; writing, research, small coding and ops on the default model with
-Sonnet a candidate; large builds and planning on the default, never explored), written once as a
-policy version the owner can change; `zen policy set --describe` adds a kind. 5% of routed work
-tries a candidate, each choice logged with its probability. A routed session keeps its model; the
-owner's choice always wins. The nightly `routes` job grades each kind and model: quality (the owner's
-verdict on the session or its parent, else the job run's status) is a gate (a challenger's lower
-bound within 0.05 of the champion's rate, at least 20 judged outcomes each), then a challenger wins
-on clearly better quality or on cost and time together (cost weighted 2:1) at least 15% better. It
-switches on its own, as a new policy version that `zen policy undo` reverts, except to another
-provider or a model over twice the cost, which it reports for the owner to decide.
-
-**Why:** Easy work shouldn't pay for the most capable model, and which model is best per kind of
-task should come from outcomes, not a fixed table. Starting light kinds on Sonnet and the rest on the
-default keeps quality where mistakes cost most while the evidence builds.
+Status: accepted · 2026-10-22 · supersedes D-066's `unknown` route
+Work with no chosen model (owner sessions, agent job runs, subtasks) is routed by System One's `task_kind` through a versioned policy; 5% explores, logged. The owner's choice wins. The nightly `routes` job switches routes on quality-gated evidence (undoable), but only reports a switch to another provider or a model over twice the cost.
 
 ## D-073 — Script jobs: a command on a schedule, with no model
-
-**Date:** 2026-10-22 · **Status:** accepted (owner, 2026-10-21: the agent may create them, but they
-wait for the owner's approval, and every run is logged)
-
-**Decision:** A job may be `script`: a shell `command` instead of a prompt. A run makes a `job`
-session (model `script`) and runs the command as the agent's `bash` would, in the contained shell
-with the egress proxy and the masked files, for at most 600 s; its output is masked and rated by
-what it shows and the hosts it reached. Its output (head and tail past 60 KB), or its `report_file`
-checked as for D-055, is the report; exit 0 with no output is `silent`, any other exit or a timeout
-an error. Retries, pausing after failures and `post_to` are as for agent jobs. Each run records the
-exact command and its exit code. The owner's script jobs are live at once; one the agent creates,
-or changes, is paused until the owner resumes it, which approves its command: the agent can't resume
-one, no System One judgment makes it live, and the kernel refuses to run one without the owner's
-approval.
-
-**Why:** Three of the five live jobs only ran a fixed command through a model (two model calls and
-their context per run, and failures that weren't the script's). D-055 considered command jobs and
-left them out because the readings job needs judgment; that one stays an agent job.
+Status: accepted · 2026-10-22
+A `script` job runs a command in the contained shell (≤ 600 s); its output is the rated, masked report, with command and exit code recorded. One the agent creates or changes stays paused until the owner resumes it; the kernel won't run it unapproved.
 
 ## D-072 — MCP sign-in from the terminal: the owner pastes back the redirect address
-
-**Date:** 2026-10-22 · **Status:** accepted (owner: a TUI-only solution, shipped with Phase 6)
-
-**Decision:** `zen mcp-login <server>` and `/mcp login <server>` sign in to a remote MCP server
-through the owner's browser, following the MCP authorization spec: the server's 401 or well-known
-path names its protected resource metadata (RFC 9728), whose authorization server must publish
-metadata (RFC 8414 or OpenID discovery) matching its issuer and offering PKCE S256. The client is
-the one the owner set under `oauth` in mcp.json, the one an earlier login registered, or a new one
-registered dynamically (RFC 7591) as a native app with the fixed redirect
-`http://127.0.0.1:33418/callback`. The kernel builds the link (PKCE, state, resource indicator RFC
-8707); the owner opens it on any machine, approves, and pastes back the address the browser ended
-on, whose state and issuer (RFC 9207) are checked before the code is exchanged. Credentials go to
-`mcp-auth/<server>.json`, bound to the server's URL, and refresh by themselves; a 401 that refresh
-can't fix says how to sign in. Only the owner's token starts or finishes a login; the TUI sends the
-pasted line to the kernel, never to the agent; Matrix doesn't take it (codes would stay in room
-history). A flow lives 10 minutes in memory.
-
-**Why:** zend runs on a VM and the owner's browser elsewhere, so a redirect to a local listener
-never arrives; pasting the address needs no port forward or public endpoint (Claude Code's fallback
-does the same). Device flow, Client ID Metadata Documents and a redirect through the exe.dev proxy
-were left out until a server needs them.
+Status: accepted · 2026-10-22
+`zen mcp-login` / `/mcp login` run the MCP authorization flow (PKCE, state and issuer checked); the owner approves in any browser and pastes back the final address. Only the owner's token drives it, never the agent or Matrix; credentials are bound to the server URL.
 
 ## D-071 — Phase 5 tools: rich results, batch edits, bounded output, a fuller MCP client
-
-**Date:** 2026-10-21 · **Status:** accepted (owner agreed the Phase 5 scope, 2026-10-21)
-
-**Decision:** Tools get more capable and cheaper in context, with every result still rated,
-masked and recorded by the kernel.
-
-- A tool result may carry MCP-shaped text/image blocks beside its text (worker protocol
-  `content_blocks`); the kernel hashes the text and the images it hands over, so a worker can't
-  swap either. Both engines receive images; a replayed history resends only the latest 4.
-- `read` shows PNG, JPEG, GIF and WebP images, and up to 4 PDF pages at a time as text plus a
-  rendered page, converted by poppler in a contained, resource-limited process. A downloaded PDF
-  keeps its download's rating.
-- `edit` takes up to 100 replacements; all must match before one atomic write, and it returns a
-  bounded, masked diff.
-- Output: shell and MCP results past 12 KB show head and tail, the full masked text saved (at most
-  16 MB each, 30 days and 256 MB in all, oldest first); a `read` page stays 50 KB and any other
-  result is cut past 64 KB. A saved capture carries the rating of everything in it.
-- MCP: calls connect only their server and discovery waits at most 3 s per server; HTTP answers are
-  read as SSE events arrive; structured content and images are kept; resources and prompts are
-  reserved `zen_` operations; refresh-token OAuth with owner-provisioned credentials; form
-  elicitation waits for the owner's own answer (`zen mcp-respond`, 5 minutes), never the model's,
-  and the server's timeout doesn't run while it waits. Accepted revisions: 2025-06-18, 2025-03-26,
-  2024-11-05. Sampling, roots, subscriptions and browser OAuth login are not supported.
-- Tool descriptions are shorter (about 19 KB to 16 KB of JSON for the owner's full list); a test
-  keeps them under 16,000 bytes.
-
-**Why:** The model couldn't see images or PDFs, needed a call per edit, and one slow MCP server
-delayed every other; large outputs cost context without being recoverable in a bounded way.
+Status: accepted; browser sign-in added by D-072 · 2026-10-21
+Results may carry kernel-hashed images; `read` shows images and PDF pages; `edit` applies up to 100 replacements atomically. Output past 12 KB shows head and tail, the full masked text saved with its rating. MCP calls connect only their server; elicitation waits for the owner's answer. Tool descriptions stay under 16,000 bytes.
 
 ## D-070 — Migrate legacy knowledge as sources; retire old writers and made tools
-
-**Date:** 2026-10-21 · **Status:** accepted (owner's Phase 4 cleanup before Phase 5 planning)
-**Supersedes:** D-036's flat wiki writer and D-037's made-tool authoring/execution.
-
-**Decision:** Owner-run preview/apply converts each legacy flat wiki page to a provisional source
-record, retaining original prose, types, aliases, links and exact private originals. Preserve every
-writer and rating; hold conflicts and oversized pages; retry without overwriting owner edits.
-`capture`, made-tool authoring, execution and approval are retired. Old tool files remain inspectable;
-repeatable procedures belong in reviewed skill folders with scripts. The nightly `wiki` compatibility
-job indexes and lints records and reports counts, never untrusted record titles or paths.
-
-**Why:** Complete D-069 while preserving uncertainty. Retrieval on real work remains the release check.
-
-## D-068 — Approved job authority and recoverable kernel work
-
-**Decision:** ship the Phase 2 leftovers and kernel Phase 3 together. Explicit owner approval belongs to an unchanged job definition; agent edits revoke it. Named source domains use private public-suffix boundaries and defer to owner trust entries, including blocks. The explicit workspace wins over an inferred prompt/report folder. Held runs wait up to two hours for owner decisions and their recorded continuations.
-
-Identifiable publishers with uncertain writers rate 3. Aligned high-risk file edits run while shells remain read-only. MCP stdio servers are contained and use their own egress trust level. Trust suggestions require explicit owner action.
-
-Busy prompts persist until atomically consumed with their authenticated tape message. Steering stops at a tool boundary and starts a correction turn using the existing worker protocol. Permission snapshots are shared within one tool call, invalidated by relevant mutations, and discarded at its end; live handover checks remain. This deliberately keeps authority shorter-lived than a whole model turn. Worker requests have deadlines and task exit clears summary/start/finish reservations. A durable dirty queue drives atomic private JSONL history exports. SQLite replacement is deferred; legacy schema remains for rollback.
-
-**Basis:** D-067 containment, D-065 authenticated provenance/queue, D-050 worker cleanup and principle 11's plain-file ownership. A vendored Mozilla public suffix list supplies reproducible shared-hosting boundaries without a runtime dependency.
-
-**Date:** 2026-10-19 (owner approved the combined scope before implementation)
-
----
-
-## D-067 — Security: context risk, action alignment, contained sessions
-
-**Date:** 2026-10-16 · **Status:** accepted (owner) · **Supersedes:** D-056's three-way shell grammar,
-D-063's offline sandbox as a policy (now the high-risk shell mode), D-062's "derived content takes the
-session max" and script-only source rating where replaced below, D-065's task class table (now
-effects in the gate) and the 2–3 classifier route
-
-**Decision:** At low risk the agent runs automatically; as risk rises actions are held; when it turns
-dangerous the session locks and asks the owner. Three inputs decide every effect through one S1
-decision file (`action_gate.toml`, the owner's to tune):
-- **Context risk** (low, medium, high): the highest rating of what the session actually read. The
-  owner's trust list (`~/.zenbot/trust.toml`: URLs, APIs, MCP servers, repos by git remote) first,
-  else System One's source rating, then a raise-only content scan. A local repository with no
-  remote is the owner's own (low); built-in package registries keep builds low. Products carry
-  their writer's level only from a high session; engine-written errors don't raise anything.
-- **Action risk** from facts: local (reads, workspace edits, every shell: contained), persistent
-  (memory, the wiki, skills, jobs, prompt files, the zen home), outward (a `host: true` command,
-  an unseen URL, an untrusted or approved tool), irreversible (secrets, destructive tools). After
-  high-risk content, file edits count as persistent (the workspace is read-only).
-- **Alignment**, only when the rules need it: System One reads the owner's authenticated goal and
-  the action, never tool output; without System One a clean session still runs outward actions.
-- Outcomes: run; hold (one queue item); lock (no outward or persistent effects, shell read-only and
-  offline, one queue item; approving it unlocks; `/trust` too). An unrelated or contradicting
-  action above local after outside content locks.
-- **Containment is the boundary:** every shell, verify command and unapproved made tool runs in one
-  bubblewrap sandbox (secrets and the zen home's config hidden or read-only, no sudo, no host
-  sockets), its network only through the kernel's egress proxy (`zend bridge` inside, S1's
-  `egress` decision per host, recorded). Acting as the owner needs credentials that exist only
-  outside the sandbox, so it is always a gated `host: true` command.
-
-**Why:** Classifiers get bypassed (60–80% reported against Claude Code's auto mode), so the OS
-contains and the classifier decides friction (sandbox-runtime, Codex). Task Shield and MELON: judge
-whether an action serves the owner's goal, with a judge the content can't talk to. The previous
-model rated nearly every session 4 (legacy marks, clones of zenbot, engine errors, inherited
-products) and still had root paths (shell-fetched content unrated, made tools reaching Docker,
-classifier-only host shells at 2–3). Replay over 14 days: 97% of low-risk actions run with no model
-call and none are held by rule.
-
-**Considered:** a separate Unix user (later hardening: the sandbox already removes sudo, Docker and
-the token); narrowing writes to the session's project at medium (the kernel can't know the project);
-sandboxing MCP stdio servers in this change (follow-up); keeping the shell grammar (unnecessary for
-safety once every shell is contained).
-
-## D-066 — S1: every System One decision is a file, decided by its costs, recorded and learned from
-
-**Date:** 2026-10-16 · **Status:** accepted (owner) · **Supersedes:** D-038's System One kind
-classifier (subtasks take the `unknown` route), session scoring (`session_scores` is no longer
-written), the `decide` tool (replaced by `judge`), `ZEN_JOB_BAR` (deprecated for one release)
-
-**Decision:** One engine (`crates/zend/src/s1/`) makes every System One decision; nothing else
-calls OpenRouter's `/systemone` (a check in `scripts/check.sh` enforces it).
-- **Three layers, like a person's:** reflexes (fixed kernel rules) below; System One (S1: cheap,
-  calibrated classifiers the owner approves, on OpenRouter) for fast judgments at every step; the
-  brain (the session's reasoning model, any provider) deliberates. S1 feeds rules or the brain as
-  evidence; it never defers to the brain for a better opinion (reasoning models are overconfident).
-- **A decision is a TOML file:** typed questions (yes/no, choice, score), the evidence facts, a
-  policy, an `unavailable` outcome, a ladder of approved models, test cases. Defaults ship in the
-  binary (`crates/zend/s1/`); the owner's `~/.zenbot/s1/<name>.toml` replaces one. A checker
-  reports every problem with line, column and a suggestion; a failing file never takes effect.
-- **The owner states what mistakes cost, not thresholds:** a yes/no decision takes the outcome
-  with the lower expected cost (9 : 1 is "yes from 0.9"); ordered levels take the cheapest level
-  given under- and over-rating costs; explicit rules remain for the rest. Escalation is one more
-  option with a cost: the next approved model, then (where the caller supports it) the owner.
-- **The catalog in code fixes what each caller sends and accepts:** a file can tune a decision but
-  can't change its exposure, add outcomes, or let a decision on outside content allow anything;
-  security decisions must fail toward caution.
-- **Recorded and learned from:** every call is a `decisions` row (file fingerprint, model, rung,
-  answers, outcome, latency, cost); masked states are kept 30 days for `zen s1 compare`. The owner's
-  answers to held actions and paused jobs label decisions; nightly, a calibration curve is fitted
-  per decision and model once 30 outcomes exist, applied only where a file says `calibrate = true`;
-  the learner proposes changes the owner approves (`zen s1 proposals`).
-- **The brain asks S1 directly** through `judge`: one question over up to 200 items, an answer and
-  probability each; information, never approval.
-
-**Why:** System One calls had grown in 11 modules with their own thresholds, timeouts, fallbacks,
-privacy checks and logging (three wrote nothing at all); nothing could be tuned without code,
-compared across models or measured. Two uses never changed anything (session scores no one read;
-a kind classifier for a routing policy that never left version 0). The owner wants S1 used
-heavily as switchable building blocks. State of the art separates judgment from policy (policy
-engines), declares model functions in files with fallbacks and tests (BAML), escalates through
-cascades (FrugalGPT) and sets thresholds from known outcomes rather than self-reported confidence
-(conformal abstention).
-
-**Considered:** decisions as Rust code per job (logic stays in code, needs a release to tune);
-prose rules sent to the model as the main control (its effect on outcomes is fuzzy); escalating
-to the brain when S1 is unsure (the worse judge); a generic cache (only source ratings cache,
-and they keep their own table).
-
-## D-065 — Metadata source judgments, authenticated job checks and owner queue
-
-**Date:** 2026-10-16 · **Status:** accepted (owner brief) · **Builds:** D-062 steps 4–5.
-A–B: System One sees host, path (no query), scope, depth and reach method, never page/title/snippet,
-when lowering. Code maps publisher/reputation answers to 2–4; unavailable stays 4 without caching.
-A separate content check only raises and honors private-classification opt-out. Kernel-derived
-host/account/surface/page scopes are model-assessed; GitHub maintained-code prefixes cannot include
-public issues/comments. Page-only assessments never propose a broader owner prefix. Only owner allowlist entries authorize
-unseen egress. Source proposals retain immutable cached scope/risk snapshots; approval and audit
-are atomic and stale snapshots reject. Rejection suppresses later proposals.
-Instruction text through 3 is labelled by source/risk and records writer dependencies; limits begin
-at 4, while web egress still checks at 2. Historical provenance is never invented by re-rating.
-C–D: at 2–3 risky/persistent, outward and arbitrary-code actions require a follows judgment;
-at 4 this check only adds holds after fixed rules. Safe reads/local data writes skip the model.
-Authenticated root-owner tape and pre-first-exposure plain assistant plans define the job; scheduled
-jobs use their unchanged stored definition, never runtime prompts with old reports. Proposed actions
-are untrusted data. Unavailable/malformed answers hold; no hold itself contaminates. Static secret,
-destructive and unseen-egress guards remain independent of alignment. Owner grants bypass once.
-The combined owner-only queue merges held effects and immutable source proposals. Atomic terminal
-decisions approve once and resume an idle kernel-origin turn, reject without retry/requeue, or deny
-and contaminate. Legacy allow cannot resurrect rejection. Terminal and encrypted verified-owner
-Matrix commands use the same API; plaintext reactions never authorize. At risks 2–3 project code
-retains sandbox/hold boundaries regardless of relevance; exact grants alone broaden capabilities.
-Owner authority is uncut up to a cap, beyond which risky actions fail closed.
-Budgets remain outside this change; arbitrary-code checks are deliberately stricter
-than treating local-looking commands as safe, because project hooks may have outward effects.
-
-## D-064 — Items rated by origin; deny and trust by cause; shells see contaminated files masked
-
-**Date:** 2026-10-16 · **Status:** accepted (owner) · **Builds:** D-062 step 3 · **Supersedes:**
-D-053's session-written marks as the rule for stored items, D-054's "stored marks stay".
-
-**Decision:**
-- **Stored items keep their exact-byte origin.** Files (`item_ratings`, by path and SHA-256 of the
-  bytes written), memories, job reports, skills, made tools and wiki pages carry the writing
-  session's numeric risk; a reader records the writer as an input (`session_inputs`). Only items
-  rated 0–1 enter instructions; everything else reaches a session through `hand_over_rating`
-  (wrapped and raising the reader); metadata failures withhold.
-- **The owner's `/deny` (Matrix `!deny`) contaminates by cause.** It stops the session, its children
-  and every session that read what it produced; level-5 content does the same. `/trust` lifts only
-  the causes the owner reviewed, and stored ratings stay. No agent tool can deny or trust.
-- **Shells see contaminated files masked**, like Anthropic's sandbox-runtime deny-read paths:
-  bubblewrap binds a nodev `/dev/null` over the canonical path of every file whose current bytes
-  match, by digest wherever registered, those of a contaminated or level-5 session (copies too;
-  other hard links in the workspace; a shell refuses to run when some are elsewhere; an
-  unreadable product is masked whatever it holds, a directory with an empty tmpfs). With masks,
-  a host shell gets its own pid namespace, no_new_privs, no Unix sockets (seccomp, as
-  sandbox-runtime does by default) and no kernel API token. With none, shells run as before.
-  A `bash` result is rated by the rated files whose text it shows; `verify` rates its whole view
-  up front. What a host shell writes in the workspace is registered by its exact bytes at the
-  session's risk; a scan it can't complete, a non-UTF-8 name, or a deny that lands while a
-  command runs withholds its result.
-
-**Why:** A taint that only the writing session carried hid the owner's own words and couldn't be
-undone per cause; blocking the shell globally whenever anything was contaminated would stop
-unrelated work. Masking denied bytes keeps the rest of the machine usable at no cost when nothing
-is contaminated.
-
-**Considered:** a shell view built only from admitted file snapshots (the whole OS copied and
-rated: weeks of work, builds break; no reference harness does it); blocking every shell while any
-item is contaminated; rating every shell by the whole workspace (would push most home-workspace
-sessions to 4).
-
-**Limits:** root-equivalent tools used outside these shells, processes outside zenbot, and products
-outside the workspace or in build/cache folders (`target`, `node_modules`, `.cache`, `.cargo`,
-`.rustup`, `.git/objects`), and other local TCP services a host shell can reach, are out of reach.
-A workspace of over a million entries withholds every host shell's result (fail closed).
-
-## D-063 — Project code defaults to offline and read-only
-
-**Date:** 2026-10-15 · **Status:** accepted (owner), production trial · **Amends:** D-062's
-network-preserving local commands at risk 2–3; D-053/D-056's writable build sandbox.
-
-**Decision:** For risky/tainted sessions today, and at risk ≥2 when D-062 step 3 replaces those
-marks, programmable commands execute
-offline with a read-only workspace and host; only private `/tmp` is writable. The kernel's
-constrained file tools keep their policy. A sandboxed project-code attempt offers its exact
-workspace/tool/arguments for one-use owner `/allow`, without tainting simply for that attempt.
-Seccomp also denies connect/datagram syscalls and io_uring to close pathname Unix-socket escapes;
-foreign syscall ABIs are refused. An explicit grant supplies broader capabilities, including for
-verification criteria. Unknown
-and outward commands remain held under the current grammar; this does not ship D-062 step 3.
-
-**Why:** A local-looking build/test can execute scripts that send data out or plant persistent
-steering. Parsing the outer command cannot approve those hidden effects individually. Prefer
-explicit grants and measure the interruption cost in real use before relaxing this boundary.
-
-## D-062 — Risk is rated per block by its source; a reversible taint stops the session
-
-**Date:** 2026-10-15 · **Status:** accepted (owner); steps 1–3 built (step 3: D-064) · **Supersedes, as its steps
-ship:** D-053's marks by the writing session and `taint::limited`, D-054's "stored marks stay",
-D-056's risky/tainted pair and "a hold taints"
-
-**Decision:** Read freely, rate what enters the context by where it came from, check what acts; only
-the owner raises trust.
-- **Every block and stored item carries `risk` 0–5 and `tainted`.** A script sets the risk from the
-  source: 0 the owner, 1 internal and clean, 2 an owner-allowlisted source, 3 one the owner rated 3,
-  4 open or unknown (web, search, MCP), 5 flagged. Derived content takes the max of its sources,
-  approximated by the session's risk when written; text found verbatim in an owner turn is 0. A
-  content check may only raise a risk. A URL the owner gives is rated by its source, then System
-  One, reading only the owner's message, may lower that exact page one level (never below 2) or
-  raise it to 4; a failure leaves it.
-- **The allowlist is the owner's** (`host` or `host/path` by whole segments, https, the final URL
-  after redirects), changed only by the owner's own commands.
-- **A session's risk is the max in its window:** 0–1 as a clean session; 2–3 outward commands,
-  steering writes and model-built URLs are held, local commands keep the network, unparseable
-  ones run offline; 4 the full gate; 5 stop. At ≥2 prompt files, skills and tools change only
-  through the owner, a job waits for the owner, and only memories rated 0–1 enter the instructions.
-- **Egress:** at ≥2, `web_fetch` runs for an allowlisted host or a URL found in the owner's
-  messages or earlier web results; a URL the model built is held.
-- **Holds ask; refusal taints.** The owner's refusal, a level-5 block or (later) a task check marks
-  the session `tainted`: it stops and everything it produced is marked; `/trust` clears that,
-  restores the ratings and vouches for the window, while stored items keep their risk.
-- **Steps:** (1) the gate's shell grammar and the egress stopgap; (2) ratings and the allowlist;
-  (3) items rated by origin, levels replace the session marks, after injection evals; (4) a task
-  check by System One on the owner's request and budgets; (5) a one-tap accept queue.
-
-**Why:** The mark sat on the session that wrote an item, not on where its text came from, and one
-bit mixed "may steer" with "has seen outside text": 5 of 12 memories were hidden (one the owner's
-own words), 3 of 7 wiki pages tainted their readers, 42 of 63 subagents started marked, all 16
-holds were false and each took the shell away, while `web_fetch` could still carry data out.
-CaMeL, FIDES and qm label data by origin and enforce at the action.
-
-**Considered:** a classifier rating content both ways (the attacker talks to it); rotating its
-questions (breaks calibration, no real secrecy); tainting only what came after the risky block
-(the steering may come from any step); per-value dataflow (too big now).
-
-## D-061 — Lighter docs and checks
-
-**Date:** 2026-10-14 · **Status:** accepted (owner); built
-
-**Decision:** a change updates five things (PROGRESS.md, DECISIONS.md when a decision changes,
-MAP.md, README.md when user-facing, the module's header comment); every other doc is fixed when it
-becomes wrong. Old progress, superseded decisions and research move to `docs/archive/` (history,
-not required reading). `scripts/check-docs.py` keeps only the cheap drift checks and adds line
-budgets. The e2e suite runs 21 scenarios (34 merged by shared setup), four at once. CI runs
-`scripts/check.sh` itself, which also enforces size budgets on the binaries.
-
-**Why:** the owner found zenbot heavy and slow to change: ~6.7k lines of docs, up to ten docs per
-change, hand-kept lists, a 4-minute e2e run. From vercel-labs/fx: budgets enforced by CI, focused
-tests locally and the full suite in CI. Coverage of the security invariants (taint, trust, action
-gate, engine boundary) is unchanged; checks moved, not dropped, except duplicates of unit tests.
-
----
-
-## D-060 — A job's report can be posted into one of the owner's sessions
-
-**Date:** 2026-10-14 · **Status:** accepted (owner asked for it: a daily check-in in the main
-Matrix room that he answers right there); built
-
-**Decision:** An agent job may name `post_to`, one of the owner's own sessions (kind none: not a
-job's, a subagent's or a verifier's session), given as its id, an 8+ character prefix, or `this`
-for the agent's session; stored whole. When a run ends `ok` with a report, and its session read no
-untrusted content, the kernel appends the report to that session as one assistant message
-(`⏰ *job*` above the report; the payload names `job` and `job_run`) and emits it to the session's
-clients, so the Matrix bridge posts it in that session's room and the terminal shows it. The run
-records delivery intent in `job_runs.pending_to` with its status. The scheduler retries it after
-a restart; the tape append and `posted_to` marker commit atomically, preventing loss or duplicate
-session messages. The bridge leaves queued and posted runs out of the **zen jobs** room. Errors, missed and interrupted runs still go to **zen jobs**. A
-run that read untrusted content keeps its report in the jobs feed: in the session it would be text
-from a marked run that the next turn reads as zen's own. The report waits for a running turn to
-end (appended under the turns lock, so no turn starts in between; given up after 2 hours, saying
-so in the run's `error`). A new message on the tape means the next turn doesn't resume the
-engine's session, so the model sees the report. `zen jobs add/set --post-to`, `POST/PATCH
-/api/jobs` `{post_to}` (`""` clears it), the `schedule` tool's `post_to`; an agent's change passes
-the same gate.
-
-**Why:** A report that asks for an answer ("up for a session today?") belongs where the owner
-answers it, in a session that then has both the question and the answer. The jobs room takes no
-replies, and a job session can't converse.
-
-**Considered:** the bridge posting the report into another room (the session behind it wouldn't
-have it, so the agent answering wouldn't know what was asked); a kernel-origin user message (it
-would read as the owner's words); posting a marked run's report as untrusted content (it would mark
-the owner's main session and cut its shell off the network for a check-in).
-
-## D-059 — Bounded disk use: prune our own leftovers, warn at 80%
-
-**Date:** 2026-10-14 · **Status:** accepted (owner); built
-
-**Decision:** zen cleans up what it leaves on the disk, by fixed rules that only touch names it
-makes: database dumps beyond the newest 3 and eval runs older than 7 days (the nightly `prune`
-job), cargo target directories over 2 GiB and dangling Docker images and week-old build cache
-(after a healthy install, `apply-upgrade.sh`). `zen status` warns when the root filesystem is over
-80% full.
-
-**Why:** the VM's 25 GB disk filled up once; dumps (one per migrating upgrade), eval runs, build
-directories and Docker cache grew without bound. A rollback needs only the newest dump, so 3 is
-enough. Build directories are trimmed by the scripts rather than the kernel: the scripts own the
-checkout and the builds, and they run when no session is working.
-
-## D-058 — After a usage-limit failover, the session keeps the new model
-
-**Date:** 2026-10-14 · **Status:** accepted (owner) · **Amends:** D-044 (the switch lasted one turn)
-
-**Decision:** When a turn fails over at a hard usage limit (D-044), the session switches to the
-model it continued on and keeps it until the owner picks another with `/model`. The kernel sets
-`sessions.model` (the thinking level kept only if the new model takes it, as for `/model`) and the
-running turn's model, and sends clients a `model` event, so the status line shows the model the
-session is on. The kernel's own small calls retry once on the session's model at a hard usage
-limit: the summarizer already tried the session's model on any failure, and the assist model
-(names, next-prompt suggestions) now does too.
-
-**Why:** Before, nothing changed the session's model, so every next prompt went back to the
-exhausted model, failed, and failed over again (or failed outright when failover couldn't run),
-while the terminal kept showing the old model. A limit that has been hit stays hit for hours: the
-working model is the right default until the owner chooses otherwise.
-
-**Considered:** going back to the original model after each turn or after a delay (an extra failed
-call per turn, and the owner doesn't see which model runs); asking the owner (a question at a
-moment the owner is often away, for a choice with an obvious default).
-
-## D-057 — A job run's session is archived when the run ends
-
-**Date:** 2026-10-14 · **Status:** accepted (owner) · **Amends:** D-048 (the board's Jobs section)
-
-**Decision:** When an agent job's run ends, however it ends (`ok`, `silent`, `error`, or
-`interrupted` by a restart), the kernel archives its session (`jobs::finish`, and the interrupted
-sweep in `run_loop`). The board's Jobs section so shows only running job sessions; finished ones sit
-under Archived, one key away, and can be restored. Migration 0025 archives the job sessions from
-before.
-
-**Why:** The owner asked for it: every run left a session on the board, and the report already
-reaches the owner through the Matrix jobs room and `zen jobs runs` (errors included), so the session
-is only needed to dig into a run. Before, only silent runs were archived.
-
-**Considered:** keeping errored runs visible (no: the failure is posted to the jobs room and the
-job pauses after 5 in a row); deleting job sessions (no: archived, never deleted).
-
----
-
-## D-056 — Judge the action, not the reading; first step: search doesn't spread the mark
-
-**Date:** 2026-10-13 · **Status:** accepted (owner); built in part; holds and risky/tainted superseded in part by D-062 · **Amends:** D-053 (every read
-path taints the reader), D-051 (only listed repositories are trusted)
-
-**Decision:** Reading outside content should cost little; acting on it is what's checked.
-- **Target (not built yet):** a session that reads outside content is marked *risky*, which limits
-  nothing. Before any action with effect runs (shell, writes, saves, jobs), the kernel parses it
-  into facts and fixed rules decide: run, run in the offline sandbox (code the session may have
-  written: builds, tests, scripts), or ask the owner (outward, persistent, secret, destructive), who
-  allows it with one tap. System One then reads only the owner's own request for the turn, never the
-  outside content, to grant the outward actions it asks for ("push and open a PR").
-- **Built: search lists, doesn't hand over.** A marked result `search` merely comes across (a turn
-  of a tainted session, a memory a tainted session saved, a wiki page with `web` entries) is listed
-  by reference with none of its text (a wiki page without its name either, which is made from its
-  content); asked for by name (an exact match, e.g. `` `m12` ``) it's
-  handed over wrapped and taints the reader, as `history` and `read` still do.
-- **Built: worktrees are trusted.** A git worktree of a trusted repository is as trusted as the
-  repository (its `.git` file and the repository's worktree entry must name each other).
-
-**Implementation note (2026-10-13, PR B):** the three-way gate uses a deliberately narrow grammar;
-unsupported syntax is held, not guessed. Automatic read utilities use fixed binaries, a cleared
-environment and a read-only view with known credentials hidden; this is distinct from the writable
-offline build route. Git is programmable (even status can execute fsmonitor), so it stays in the
-build route. Plain source/data edits are descriptor-confined; dotfiles, executable configuration
-and unknown effects wait for approval. Unapproved made tools retain their existing read-only
-runner. Draft/provenance writes keep their D-053 marks and require separate owner activation.
-Approval covers exact arguments/workspace once for ten minutes, not immutable snapshots of all
-referenced files; the owner must inspect those too. Unsupported syntax and opaque interpreters are
-held conservatively, so the prototype's 71% figure is not a production promise.
-Offline builds can still change their project workspace; programmable commands in a workspace
-containing the owner's home are held for exact approval to protect persistent steering. Strong
-copy-on-write isolation and a separate Unix user are not supplied by this change.
-System One grants from the owner's request remain the next step.
-2026-10-15 (D-062 step 1): the grammar allows read programs by flag, pipes and lists, `cd`, globs
-expanded by the kernel and `/dev/null` redirects; a hold that's only "can't classify" no longer
-taints.
-
-**Why:** 5 of the 11 tainted main sessions were tainted by `search` recalling a marked memory, not
-by reading the web; a worktree of zenbot's own checkout tainted the session that made it. A replay
-of 2,396 recorded commands and 36 attacks: fixed rules over parsed facts run 71% unchecked, sandbox
-10%, ask 18%, and no attack escapes; System One scoring the action's facts separates poorly (routine
-median 0.39, attacks 0.43 to 0.89), so it would have to flag half of what it judges to miss none.
-
-**Considered:** a classifier on the content read (it reads the attacker's text, so the attacker can
-talk to it); System One scoring each action as the gate (too weak, above); tainting only on a
-flagged action without the gate (unsafe until the gate exists, so the target ships with it).
-
----
-
-## D-055 — A job's report can come from a file the run wrote, not the final answer
-
-**Date:** 2026-10-13 · **Status:** accepted (owner asked for the feature; design confirmed in the
-pull request)
-
-**Decision:** An agent job may name a `report_file`. When a run ends `ok` (not `[SILENT]`,
-`[FAILED]` or a turn error), the kernel reads that file and records it as the run's report; the
-final answer stays in the session. Everything fails closed, so the run becomes `error` with the
-reason and the answer is never posted instead:
-- the file must lie inside the job's workspace, judged on the file actually opened (opened without
-  following a final symlink, its real path read back from `/proc/self/fd`), and must be a regular
-  file, not a secret file (`secrets::secret_files`, the guard a verifier's `read` has);
-- modified after the run started (yesterday's message is never posted again);
-- UTF-8, at most 60 KB; an empty file (whitespace only) makes the run `silent`.
-The path is checked when it's set too (where it would really be, inside the workspace) and stored
-absolute. It's a job field like the others: `zen jobs add/set --report-file`, `POST/PATCH
-/api/jobs` `{report_file}` (`""` clears it), the `schedule` tool's `report_file`; an agent's change
-passes the same gate (its judgment sees the file), and in a tainted session waits for the owner.
-Taint is unchanged: a tainted run's report is marked (`job_runs.tainted`). The report is masked
-like tool output.
-
-**Why:** Some reports must reach the owner exactly as a script built and checked them (the daily
-Mass readings, checked word for word against the source). As the final answer, the model retypes
-that text and can change it; from a file, the kernel posts what the script wrote. The workspace,
-not `/tmp`: a tainted session's shell has a private `/tmp` the kernel can't see.
-
-**Considered:** a job whose task is a command, with no model (fits only when nothing needs
-judgment; the readings job still decides what to do when the source fails); having the model
-quote the file (still retyped); falling back to the answer when the file is wrong (a stale or
-missing message would go out unnoticed).
-
----
-
-## D-054 — The owner can trust a session again (`/trust`), forward only
-
-**Date:** 2026-10-13 · **Status:** accepted (owner); to be superseded in part by D-062 (step 3) · **Amends:** D-053 ("continue in a fresh
-session" was the only way out of a tainted session's limits)
-
-**Decision:** Only the owner lifts a session's taint, after looking at what set it.
-- **Look, then trust.** `GET /api/sessions/{id}/taint` lists what marked the session since the last
-  trust: its `taint` blocks and the untrusted envelopes in its messages (by source and about, with
-  the first block), and `checked`, the tape's last block. `POST /api/sessions/{id}/trust` with
-  `seen` (that block) sets `tainted_at` back to null and records a `trust` block (by whom, when the
-  taint was set, where it came from). It's refused while a turn runs (content can be read but not
-  yet on the tape) and when the session was marked or handed untrusted content after `seen`: the
-  owner trusts what they saw, as the fingerprint does for a skill review.
-- **Forward only.** The next untrusted read marks the session again. What it stored while marked
-  keeps its marks (memories, job reports, drafts, wiki `web` entries): trusting a session doesn't
-  launder its data. What it read stays in its context: trusting means vouching for that.
-- **The owner's own command.** zen's `/trust` and Matrix's `!trust` (`zen_client::owner`) show the
-  report; `trust yes` confirms what the client last showed. The client runs them with the owner's
-  token; they never reach the agent. A tainted session can't call the route: its shell has no
-  network and the token file is hidden (e2e `trust`).
-- **Shown.** Sessions carry `tainted_at` (the board marks `untrusted`, zen's footer `untrusted
-  (/trust)`, Matrix's `!session` says so), and the stream sends `taint` when the mark is set or
-  lifted.
-
-**Why:** Half of the sessions read something from outside (a web search, a subagent's answer), and
-then can't push, install or change a skill until the owner starts over in a fresh session, losing
-the work's context. The owner can judge what was read; the limits exist because the agent can't.
-
-**Considered:** trusting with no look (one tap, but a page read after the owner looked would be
-trusted unseen); clearing the stored marks too (launders web text into the owner's words); a
-trusted session per source (more state, and the owner trusts a session, not a site).
-
----
-
-## D-053 — Taint is a property of stored content; a tainted session's shell has no network
-
-**Date:** 2026-10-11 · **Status:** accepted (owner, taint review); to be superseded in part by D-062 (step 3) · **Supersedes:** D-034's "what a
-tainted session saves to memory counts as inference" as the whole rule for stored content, and
-D-051's trade-off that `bash` in a tainted session runs as the owner with the network
-
-**Decision:** Taint belongs to the data as well as the session. What a session that read untrusted
-content stores carries the mark: memories (`memories.tainted`), job reports (`job_runs.tainted`),
-draft skills (`draft_taint`, kept out of the agent's reach, and in the draft's commit) and wiki
-entries (labelled `web`, including the sleep's copy of a marked memory).
-- **One read path.** Every way stored content reaches a session goes through `taint::hand_over`:
-  marked content is wrapped as untrusted and taints the reader (search results for memories, wiki
-  pages and turns; `history`; `find_skills`/`load_skill` and `read` of a marked draft or a page with
-  `web` entries; a job's `<last_report>`, which taints the next run from its start; `schedule
-  runs`).
-- **Memory in the instructions.** A marked memory is left out of the instructions, listed by id
-  only; `search` returns it as untrusted. Putting it in as an untrusted block would taint every
-  session from then on (sandboxed shells, prompt files locked) because of one web page. The sleep
-  never moves a marked memory into `USER.md` or `IDENTITY.md`, its wiki copy is labelled `web`, a
-  marked entry never stands in for a clean one it "covers", and the sleep's note (in the next
-  sessions' instructions) never shows its text or names a page with `web` entries.
-- **Drafts.** A draft a tainted session writes (`save_skill`, or `edit`/`write` into it) is
-  marked before it's written; an accepted session that loaded it never activates it, only the
-  owner's own `zen skills accept`, which clears the mark. `zen skills` shows `untrusted`.
-- **One set of limits.** What a tainted session may not do is decided in `taint::limited`: change
-  what steers every session, vouch for a memory, start a job without the owner, or run a shell
-  with the network.
-- **Tainted shells run offline.** Once a session is tainted, its `bash` and `verify`'s commands run
-  in bubblewrap with no network, their own processes and terminal session, a private `/tmp`, `/run`
-  emptied (Docker's and the user's agent sockets), the workspace writable (its git repository
-  included) and the rest of the filesystem read-only (the zen home read-only again when the
-  workspace holds it), the secret files hidden. The result says why.
-
-**Why:** A review found web text laundered into durable stores and back into clean sessions as
-trusted: a tainted session's memory rendered unlabelled into every later session, a draft it wrote
-served as a trusted `<skill>` and activated when the owner accepted any session that loaded it, a
-job's report fed to the next run as kernel text, and the shell of a tainted session free to send
-data out or fetch more instructions. Checking the session's taint in each tool can't see content
-that outlives the session.
-
-**Considered:** rendering marked memories as an untrusted block in the instructions (taints every
-session; rejected); keeping drafts' marks in a sidecar file or frontmatter (the agent's file tools
-and a clean shell can edit the draft's folder; the table can't be); an empty home for the tainted
-shell, as for the verifier (breaks `cargo`, `git` config and tools under the home; read-only keeps
-offline builds working).
-
-**Trade-off:** A tainted session's shell can't install packages, `git push`, reach a local service
-or write outside its workspace; the owner continues such work in a fresh session. A marked memory
-is out of sight until searched for. `cat` of a marked page in `bash` isn't caught (only `read`), and
-a tainted session's `edit`/`write` still reach unguarded files outside the workspace (ROADMAP.md,
-debt).
-
----
-
-## D-052 — Every MCP server is untrusted until the owner says otherwise
-
-**Date:** 2026-10-11 · **Status:** accepted (owner, taint review) · **Supersedes:** the part of
-D-034 that wraps and taints only remote MCP servers' output
-
-**Decision:** An MCP server's output, tool descriptions and schemas are wrapped as untrusted and
-taint the session for every server, local (stdio) or remote, unless the owner sets
-`"untrusted": false` for it in `mcp.json`. Before, local servers defaulted to trusted.
-
-**Why:** A local server is mostly a bridge to content from outside (mail, documents, a browser, a
-package fetched by `npx`): where it runs says nothing about whether what it returns can steer the
-agent. Trust is the owner's explicit call per server, the same rule as project instructions
-(D-051).
-
-**Trade-off:** A session that uses a local server's tools is tainted, so it can't change the prompt
-files or an active skill, and a job it schedules waits for the owner, until the owner marks that
-server trusted.
-
----
-
-## D-051 — Trust gates: what steers every session, project instructions, the verifier, reviews
-
-*Superseded in part by D-053: a tainted session's `bash` runs offline in a sandbox, and what it
-stores is marked.*
-
-**Date:** 2026-10-10 · **Status:** proposed (pending the owner's OK in the pull request) ·
-**Extends:** D-045 (who may change the prompt files), D-034 (untrusted content), D-037 (the workshop)
-
-**Decision:** Text from outside (a web page, an MCP server, a cloned repository) must not be able to
-change what steers every session or reach the kernel's credentials through the kernel's own tools.
-- `edit`/`write` keep D-045's rule for the prompt files and apply it to active (and archived)
-  skills and the agent's made tools too: refused to child and kernel sessions and to tainted
-  sessions; drafts in `skills/_proposed` stay free, since they go through the owner's review. The
-  owner's configuration and secrets (`mcp.json`, `env`, `token`, `matrix.env`, `matrix/`, `bin/`)
-  are refused to every session: the owner edits them by hand. An MCP server's `command` runs as the
-  kernel, so no session may write it.
-- `mcp.json` fills a secret-named `${VAR}` only for a server that lists it in `allow_env`.
-- A project's AGENTS.md or CLAUDE.md found by a tool is attached as instructions only from a
-  trusted repository: zenbot's checkout (`ZEN_REPO`) and the paths in `ZEN_TRUSTED_REPOS`. Any
-  other is attached as untrusted content and taints the session. The files from `/` down to the
-  workspace stay in the system prompt as before.
-- The verifier's shell gets its own processes, no network and an empty home with only the work
-  bound back; its `read` stays inside the work.
-- Taint fails closed: a session whose taint can't be read counts as tainted, and content whose
-  taint can't be recorded is withheld.
-- Session kinds are allow-listed: a kind the kernel doesn't know gets no tools.
-- The owner's accept or reject of a draft skill or a made tool names the fingerprint they
-  reviewed (`zen skills` shows it) and is refused when the content changed; a made tool runs from a
-  private copy of its folder, the copy being what is checked against the approval.
-
-**Why:** A review found each of these reachable from a session that had only read a web page (or
-cloned a repository): an active skill rewritten past the draft review, an `mcp.json` that made the
-kernel start any command with its token, planted instructions the agent was told to follow, the
-kernel's environment readable from the verifier through `/proc`, and approvals that covered content
-the owner never saw.
-
-**Trade-off:** The owner's own projects under the workspace now taint a session whose tools touch
-them until they are listed in `ZEN_TRUSTED_REPOS`. A made tool can't keep state in its own folder
-(it runs from a copy); one that needs to must write elsewhere. A verifier's shell has no network.
-`bash` still runs as the owner's Unix user and can write any of these files (ROADMAP.md, debt): the
-gates close the kernel's own tools, not the shell.
-
-## D-050 — Evals run only the affected tasks, in parallel, against a cached base
-
-**Date:** 2026-10-10 · **Status:** accepted (owner)
-
-**Decision:** `scripts/eval.sh` runs, by default, only the tasks a change can affect: the files that
-differ between the base and the checkout are mapped to areas (prompt, history, tools, memory,
-search, compaction, …) by `evals/areas.txt`, and the tasks whose `areas` meet them run, plus a few
-cheap `core` tasks that run for any harness change. A change to the engine worker or the worker
-protocol runs every task; a change outside the harness needs no eval. Runs go `--jobs` at a time (3
-by default), each on its own kernel, port and database, base and new interleaved. A base result
-that completed is cached for a week and reused while its base commit, model, effort, task files and
-engine versions are unchanged. `--plan` shows the selection and its reasons before anything runs;
-`--full` runs every task, `--fresh` reruns the base. `scripts/check.sh` runs CI's checks in one
-command.
-
-**Why:** The owner found that shipping a feature took about four times as long as building it, mostly
-the eval: 23 tasks × 2 harnesses, one kernel at a time, the unchanged base run again on every pull
-request, and heavy coding tasks run for a one-line memory change. Most of that bought no
-information.
-
-**Trade-off:** A change can affect a task its area doesn't name, and that regression would be missed.
-The `core` tasks always run, the mapping errs toward including (an unknown kernel file gets `core`,
-a worker change gets everything), and `--full` remains for large harness changes or whenever the
-owner asks. Cached base results ran under other conditions (another day's load and rate limits);
-the report says which came from the cache and when. Runs at the same time share the machine, so
-times are noisier than one at a time; base and new interleave so both sides see the same load.
-
-**Considered:** fewer tasks for everyone (loses coverage where a change does land); one database for
-all parallel runs (kernels would index each other's sessions into search and spoil recall tasks).
-
----
-
-## D-049 — A Matrix channel: zen-matrix, a separate bridge process
-
-**Date:** 2026-10-09 · **Status:** accepted (owner)
-
-**Decision:** The owner can talk to zen from Matrix (from Beeper, which he already uses) as well as
-from the terminal. `zen-matrix` (`crates/zen-matrix`, its own Cargo workspace) is a separate process
-and service (`zen-matrix.service`) and a client of the kernel's client protocol, like `zen`; the
-kernel is unchanged. The bot is an account on matrix.org; it answers only `MATRIX_OWNER` and joins
-only rooms that account invites it to. Every room is end-to-end encrypted (owner: required; Beeper
-requires it), and the bot sets up cross-signing and key backup at sign-in. Scope of the first
-version (owner): one room per session (a main "zen" room, `!new` for more, any room the owner
-invites it to), `ask` questions as numbered options answered by number, and a "zen jobs" room where
-every finished job run is reported. How it works: docs/matrix.md.
-
-**Why:** The owner wants to reach zen away from the terminal, and job reports had no way to reach
-his phone (the roadmap's next step for reach, D-046). D-008 had planned Matrix as a channel. A
-separate process keeps matrix-sdk (a few hundred crates, its own SQLite) out of the kernel: a crash
-or a bad update there can't take sessions down, and the client protocol already carries everything
-needed. Its own workspace because matrix-sdk's `libsqlite3-sys` clashes with sqlx's `links` in the
-kernel's dependency graph. matrix.org rather than a self-hosted homeserver: no public domain or
-upkeep; with end-to-end encryption the server sees metadata, not content.
-
-**Considered:** a channel driver inside the kernel (tidier for pushing reports, but couples the core
-to a heavy SDK); Telegram or WhatsApp (the roadmap's earlier idea; no end-to-end encryption for bots
-on Telegram, WhatsApp's API is costly and gated); a self-hosted homeserver (owner: matrix.org);
-unencrypted rooms (owner: no); streaming text by editing a message (later, if waiting for the whole
-answer feels slow).
-
----
-
-## D-048 — The sessions board is zen's home screen
-
-**Date:** 2026-10-09 · **Status:** accepted (owner)
-
-**Decision:** In full screen, plain `zen` opens on the sessions board (`tui/board.rs`), not a new
-session. It lists every session in sections, Main, Jobs and Archived (the owner: jobs set apart from
-mains; archived hidden until `a`), with running ones first. Each session shows whether it's running
-or idle, and its subagents and verifiers sit under it with the task each was given: running ones
-always, plus the 3 newest finished ones. Enter dives into the chosen session in the usual chat view.
-`n` starts a new session, `/` filters by title or task, `/board` (or Esc on an empty input) comes
-back, and a running turn keeps going in the kernel meanwhile. Subagent and verifier sessions open
-read-only (owner): nothing can be sent, and Esc and Ctrl+C never interrupt them, since the parent
-session drives them. The board polls `GET /api/board` every 2 s while it's shown. That endpoint
-returns every session with `kind`, `parent`, `busy` (from the kernel's running turns) and, for child
-sessions, `task` (their first message), with no costs. `zen -r/-c/-m/-e`, `zen chat` and `--inline`
-start as before; inline has no board.
-
-**Why:** The owner asked for one place to see every open session, which ones have subagents working,
-and to dive into any of them. Before this, zen showed one session at a time, and subagents not at
-all. Polling a localhost endpoint is about 25 ms a call on today's data and needs no new protocol.
-A kernel-wide event stream would update faster, but it's a new WebSocket and fan-out for a screen
-that's only shown sometimes. Read-only subagents keep the delegation coherent: the parent waits for
-the child's answer.
-
-**Considered:** the board as a view toggled from the chat, or as a side-panel tab (owner chose the
-home screen); typing into or stopping subagents (owner: read-only); a global events WebSocket
-(later, if 2 s feels slow); hiding job and archived sessions (owner: show everything, with sections
-and a filter).
-
----
-
-## D-047 — Session names and suggested next prompts from a cheap side model
-
-**Date:** 2026-10-09 · **Status:** accepted (owner)
-
-**Decision:** After each owner's turn that ends cleanly, the kernel (`assist.rs`) makes one call to
-the assist model (`ZEN_ASSIST_MODEL`, default `claude/claude-haiku-5-5`: the cheapest model on the
-owner's plans, owner 2026-10-09) through the worker's tool-less `complete`. It returns JSON with a
-session name (2 to 5 words; asked for while the title isn't the owner's, after each of the first
-3 turns) and the owner's likely next prompt (or nothing). A title the owner sets (`PATCH`,
-`/rename`, `title` at creation) is marked `title_source = 'owner'` and never renamed. No suggestion
-after `ask` (the answers are the next prompt), in jobs or child sessions, or once the owner has sent
-something. In zen the suggestion is grey text in the empty input: **Tab** takes it into the input,
-then Enter sends it or the owner edits it first; typing replaces it. Moving the keys between the
-chat and the side panel moves from Tab to **Shift+Tab** (owner: one key keeps Tab; completion, of
-the `/` menu and of the suggestion, keeps it, as in shells and Claude Code). Enter on an empty
-input does not send the suggestion (Claude Code's choice), so nothing is sent by accident. The next
-prompt reports the suggestion and whether it was taken; the kernel records `accepted`, `edited`
-(with what was sent), `declined` (with what was sent) or `unseen` in `prompt_suggestions`, with the
-prompt version, model, latency and cost (`zen suggestions`).
-
-**Why:** The owner asked for both (2026-10-09): titles cut from the first prompt name sessions
-badly, and most next prompts are the obvious step ("go ahead", "run it"). A side call after the turn
-keeps the main model's turn, history and cache untouched (a tool or a trailing block in the answer
-would cost the main model's tokens and bias its answers). Measured on the VM: Haiku 5.5 answers in
-about 2.3 s for about $0.0006 a call (Haiku 4.5: 4 s, $0.014). Recording outcomes per prompt version
-gives the evidence to improve the prompt later.
-
-**Considered:** a `rename_session` tool for the main model (names only sessions where it remembers
-to, and costs a main-model call); System One (typed answers only, it can't write text); the
-session's own model (better guesses, slower, more plan usage); Enter on an empty input sending the
-suggestion (fewer keys, but sends by accident).
-
----
-
-## D-046 — Scheduled jobs in the kernel; the sleep and engine updates move off systemd timers
-
-**Date:** 2026-10-09 · **Status:** accepted (owner) · **Supersedes:** D-022's daily timer for engine
-updates and the nightly `zen-sleep.timer` (the jobs themselves are unchanged)
-
-**Decision:** One scheduler in `zend` (`jobs.rs`), backed by Postgres (`jobs`, `job_runs`), runs
-the kernel's own maintenance as **system** jobs (`sleep` at 03:00 UTC, `engines` at 04:00 UTC,
-seeded at start; they can be paused and run, never removed) and **agent** jobs: a prompt run in a
-fresh session of kind `job`. An agent job picks its instructions (`context`: the soul always, plus
-any of identity, agents, user, memory, skills, project; default user and memory, owner 2026-10-09)
-and names skills loaded into them; the run can't ask, delegate or schedule, takes no outward action
-(prompt rule, as everywhere) and answers with a report (`[SILENT]` when there's nothing new, kept
-out of sight). Both the owner (`zen jobs`, `/api/jobs`) and the agent (`schedule` tool) create jobs
-(owner, 2026-10-09). An agent's job goes live only if System One, reading only the owner's own
-messages in that session, judges that the owner asked for it or clearly wants it (≥ `ZEN_JOB_BAR`,
-0.9); otherwise, or in a session that read untrusted content, it's saved paused until the owner
-resumes it. The agent can't set a job's model. Schedules: 5-field cron in an IANA zone per job
-(default America/Sao_Paulo), `every <duration>`, `at <time>`, `in <duration>`; agent jobs at most
-every 5 minutes. Due jobs are claimed with `FOR UPDATE SKIP LOCKED` and their next run set in the
-same transaction (a crash loses at most one run, never repeats one); the database allows one
-running run per job; a restart marks unfinished runs `interrupted`; a run missed while the kernel
-was down catches up once within its grace (half its period, 2 minutes to 2 hours), else it's
-recorded as missed. A failing agent job waits 1, 5, 15, then 60 minutes at least before its next
-run (never more often than scheduled) and is paused after 5 failures in a row. The upgrade removes
-the old timers once the new kernel is healthy; throwaway kernels (smoke test, e2e, eval, dev) run
-with `ZEN_JOBS=0`.
-
-**Why:** The owner wants an agent that works on a schedule without them in the conversation; the
-two timers were fixed, single-purpose and invisible to the kernel. One engine makes maintenance and
-agent work visible in the same place (`zen jobs`, `zen status`) with the same guarantees. The gate
-lets the agent act when it's clearly asked, without letting it, or text it read, create unattended
-work on its own initiative; the owner's resume is the approval otherwise.
-
-**Considered:** pg_cron (only runs SQL inside Postgres, isn't in the pgvector image, needs
-`shared_preload_libraries`; the kernel would still need the trigger listener, catch-up, overlap
-guards and delivery, so it adds a part without removing one); keeping the systemd timers next to
-the scheduler (two places to look); Hermes' JSON-file store and OpenClaw's SQLite store (we have
-Postgres); making the sleep an agent session (it's checked kernel code; a model would make it
-costlier and less predictable); pre-run scripts that skip the model when nothing changed (later,
-if job costs call for it). Patterns from Hermes (`cron/`) and OpenClaw (`src/cron/`), read in code
-2026-10-09.
-
----
-
-## D-045 — IDENTITY.md; the agent keeps its prompt files; memory is promoted into them and the wiki
-
-> The sleep's promotion into prompt files and the wiki superseded by D-069 (2026-10-21); the agent
-> still writes traits and guidance into them itself.
-
-**Date:** 2026-10-08 · **Status:** accepted (owner) · **Supersedes:** D-035's promotion to
-long-term memory and D-028's long-term tier (search over memories stays)
-
-**Decision:** The agent's prompt files have separate jobs. `SOUL.md` is the deep layer: what the
-agent is for, what it holds to and the lines it doesn't cross; only the owner edits it.
-`agents/<name>/IDENTITY.md` (new, loaded right after the soul) is the agent's character in practice
-and how it works. `USER.md` is the owner; `AGENTS.md` the environment; `MEMORY.md` where things
-stand. Traits, standing guidance and preferences are not memory: when one is really important and lasting,
-the agent writes it straight into `IDENTITY.md` (about itself) or `USER.md` (about the owner) and
-says so in one line (owner, 2026-10-08: no approval round, no detour through memory). Both files
-keep their size caps and are kept compact, never trimmed by hand: an edit that takes one over its
-cap tells the agent to compact it, and the sleep compacts any that is still over (a session of the
-kernel's own rewrites it; the kernel checks the answer and writes it). Every change by the agent or
-the sleep is backed up first in `~/.zenbot/backups/prompt-files/` (90 days). The separate long-term tier is gone; the nightly sleep promotes on its own
-(owner, 2026-10-08) into the places lasting things really live: a lasting entry about the owner
-moves to `USER.md`, lasting guidance on how the agent acts to `IDENTITY.md` (a dated line under
-`## Learned`, after a backup; compacted afterwards if that takes it over its cap), and lasting knowledge is copied into the wiki (a capture by "the sleep"; the entry stays in
-short-term memory while it's needed). The bar is 0.9 (`ZEN_PROMOTE_BAR`), on the lowest of three
-samples for a prompt file; only the owner's words and verified results reach the prompt files (an
-inference, which may come from the web, is flagged for the agent to propose instead). The morning
-note lists every promotion.
-Archived memories leave the search index (as before). The kernel refuses `edit`/`write` on the four
-prompt files from subagents and from sessions that have read untrusted content.
-
-**Why:** A promoted memory left the always-loaded instructions for search, so the most lasting,
-high-impact guidance became the hardest to reach; and "how to act" is identity, not recollection.
-A long-term tier of loose sentences duplicated the wiki, which has pages, timelines and git. The
-owner wants promotion automatic; backups and the morning note keep it reviewable and undoable.
-Approval in the conversation is faster and clearer than a review queue. The guard keeps text from
-the web or an MCP server from rewriting the agent's instructions. OpenClaw loads the same files in
-the same order (`SOUL`, `IDENTITY`, `USER`; `docs/research/hermes-openclaw.md`), with a much
-smaller `IDENTITY.md` (name, vibe, emoji).
-
-**Considered:** keeping the long-term tier for durable facts (the wiki already holds lasting
-knowledge); promotion into prompt files only after the owner's yes in the chat (the agent's
-recommendation; the owner chose automatic with backups); refusing a promotion when the file is full
-(the owner wants compaction instead); adding identity to `SOUL.md` (the owner wants the soul as a stable guiding layer); a
-review queue for proposed edits (`zen memory accept`), slower than approving in the conversation.
-
-**Known limit:** `bash` runs as the owner's Unix user and can still write the files (ROADMAP.md,
-technical debt).
-
----
-
-## D-044 — One safe cross-provider continuation on hard usage limits
-
-**Date:** 2026-10-08 · **Status:** accepted (owner); amended by D-058 (the session keeps the model it failed over to) · **Exception to:** D-030's no-per-turn-switch rule
-
-**Decision:** List every worker-reported model by default; `ZEN_MODELS` remains an optional visible allowlist. On an explicitly recognized hard subscription usage limit, `zen-engine` may continue once on the other provider: Claude → Codex GPT-6.1 Sol; Codex → Claude Sonnet 5.5. It first checks subscription sign-ins and refuses API-key environments, carries forward the original prompt and completed current-turn transcript, never repeats a tool call with an unknown result, emits a visible switch event, and stops if safe continuation is not possible. Temporary throttles and generic 429s do not trigger it. The switch is configurable or disabled by environment variable.
-
-**Why:** A subscription cap should not discard completed work or force the owner to restart the job. A hard cap is an exceptional boundary, not D-030's routine model selection; limiting it to one cross-provider attempt avoids loops and unplanned API charges.
-
----
-
-## D-043 — Retire Pi; call System One directly from the kernel
-
-**Date:** 2026-10-08 · **Status:** accepted (owner) · **Supersedes in part:** D-005, D-012,
-D-018 and D-022 (their Pi worker and classifier transport choices)
-
-**Decision:** Remove the optional Node/Pi worker and direct ChatGPT sign-in. Claude Code and Codex
-remain the model engines. `zend` calls OpenRouter's `/api/v1/systemone` directly with
-`OPENROUTER_API_KEY` when `ZEN_S1_MODEL` is configured, mapping public `bool` to wire `noul` and
-back. OpenRouter's reported usage and cost are recorded. An existing `ZEN_WORKERS=engine,pi`
-setting is tolerated during upgrade: `pi` is ignored, then `install.sh` removes it.
-
-**Why:** Pi was an extra runtime and package tree for one fast-classifier call. The direct call
-keeps System One available without another process, the Node dependencies or a second ChatGPT
-sign-in. `zen chat` and both TUI modes remain unchanged. A local HTTP stub tests the transport;
-a GPT harness eval checks that model-work behavior remains sound.
-
----
-
-## D-042 — Keep the dev kernel home outside the live home
-
-**Date:** 2026-10-08 · **Status:** accepted (owner) · **Refines:** D-040
-
-**Decision:** `scripts/dev.sh` defaults `ZEN_HOME` to `~/.zenbot-dev`, not `~/.zenbot/dev`.
-On its first run it moves an existing dev home there if the destination is absent; when both
-exist it stops rather than guessing which data to keep. `ZEN_DEV_HOME` still overrides the path.
-
-**Why:** The dev kernel's prompt files, skills and memory should not appear inside the live
-kernel's file tree or be mistaken for live data. The move preserves the existing dev home.
-
----
-
-## D-041 — Loopback listener and one boundary for untrusted tool results
-
-**Date:** 2026-10-08 · **Status:** accepted (owner)
-
-**Decision:** `zend` listens on `127.0.0.1` by default (`ZEN_BIND` can opt into another address).
-Only WebSocket upgrades accept a token in the URL (since 2026-10-10, with the web UI gone, no request does: header only). Every tool result, including attached project
-instructions, is secret-masked at the dispatcher. Web pages, untrusted MCP tools and approved made
-tools are wrapped and taint their session; web-tainted sessions cannot rewrite an active skill.
-Codex turns and completions use a private `CODEX_HOME` (linking only the owner's ChatGPT sign-in)
-and disable its built-in tools, MCP servers and project docs. Worker shell
-subprocesses do not inherit the kernel's secret variables, and the verifier hides token files.
-
-**Why:** The bearer token grants command execution. A local-only listener and a single output
-boundary reduce accidental exposure and prompt-injection paths without changing the owner's tool
-workflow. These changes do **not** isolate the agent from the owner's files: a separate Unix user
-and an out-of-band owner credential are still required for that. See `DESIGN.md` “Security today”
-and the remaining debt in `ROADMAP.md`.
-
----
-
-## D-040 — zenbot's home is laid out by scope; agents are thin definitions
-
-**Date:** 2026-10-07 · **Status:** accepted (owner) · **Supersedes:** the flat `~/.zenbot` layout (paths in D-027, D-028, D-036, D-037)
-
-**Decision:** Under the zen home, system-wide files stay at the top (`USER.md`, `AGENTS.md`,
-`mcp.json`, runtime), each agent's own files go in `agents/<name>/` (only `SOUL.md` today; one agent,
-`zenbot`; `IDENTITY.md` joined it with D-045), and knowledge every agent shares goes in `global/` (`MEMORY.md`, `wiki/`, `skills/`,
-`tools/`). Projects get `projects/<id>/` with the same folders when the first one exists. The kernel
-moves an old flat layout once at startup (before writing defaults, never overwriting) and leaves a
-relative symlink at each old path; a later release removes them. Runtime files (`bin`, `env`,
-`token`, `engine`, …) stay where they are for now; moving them into `system/` is a separate step.
-
-**Why:** The owner wants the layout ready for more agents now, while it's cheap. Knowledge belongs
-to a scope, not to an agent: most of it is about the owner and their projects, so per-agent copies
-would drift and every agent would relearn it (Claude Code subagents, the OpenAI Agents SDK and CrewAI
-share project context and memory across agents; Letta, which keeps memory per agent, adds shared
-blocks for this). The symlinks make a rollback safe: an older build reads the old paths, and without
-them it would write a fresh default `SOUL.md` and ignore the owner's.
-
-**Rejected:** a folder per agent holding its own memory, skills and wiki (drift, duplicated
-learning); moving runtime files in the same change (the systemd unit, the `zen` link, upgrade and
-rollback scripts and the installer all point at them).
-
-## D-039 — Full screen owns the screen: diffed frames, scrolling, a side panel
-
-**Decision:** The full-screen terminal app runs on the alternate screen and keeps the conversation
-as entries it re-renders at the current width, in a viewport it scrolls itself (PgUp/PgDn, mouse
-wheel). Each frame is composed whole, and only rows that changed are written, overwritten in place.
-`/open <path>` shows a file in a side panel next to the chat, reloaded when it changes. `--inline`
-keeps the scrollback layout. Supersedes the full-screen part of D-014.
-
-**Why:** The owner saw heavy flicker in the browser terminal: every update erased the live region
-and repainted it, and that terminal shows the erase. Diffed rows never blank the screen, the
-technique ratatui (Codex) uses. The owner asked for a file beside the chat, which needs the app to
-own the whole screen, at the cost of the terminal's native scrollback and selection (`/mouse` gives
-selection back).
-
-**Considered:** tmux splits with an `/open` that starts `less` in a pane (no rewrite, but needs tmux
-and splits outside zen's layout); ratatui (a new dependency and a rewrite of every renderer; the
-diffing is about 100 lines); cell-level diffing (row-level is enough to stop the flicker).
-
-**Date:** 2026-10-07
-
----
-
-## D-038 — Subagents, and model choice that learns from verdicts
-
-**Decision:** `delegate` runs subagents as child sessions (kind `subagent`) with the parent's
-instructions, memory and tools except `ask` and `delegate`; several tasks in one call run at the same
-time in the kernel. Without a named model, System One classifies the task's kind of work and the
-latest policy version maps it to a model; a small share (ZEN_EXPLORE, 0.1) tries the route's other
-candidates, each choice logged in `decisions` with its probability. The evidence is the owner's
-verdict on the parent session and cost per subtask. The nightly sleep changes a route only when a
-model's Wilson lower bound of acceptance beats the current model's upper bound with at least 20
-judged subtasks each; every change is a new version with its reason, and `zen policy undo` reverts.
-
-**Why:** D-030's design, made concrete. Engines run separate tool calls one at a time (measured:
-Claude Code ran two `delegate` calls back to back), so parallelism is the kernel's. Logging the
-probability of each choice keeps the comparison unbiased (a contextual bandit); bounds on both
-sides keep a handful of verdicts from flipping a route.
-
-**Considered:** separate `delegate` calls for parallel work (serialized by the engine), System One
-choosing the model directly (it can classify, not judge frontier models), switching on point
-estimates (too noisy at this volume).
-
-**Date:** 2026-10-07
-
----
-
-## D-037 — The workshop: rules the kernel enforces for skills and tools the agent makes
-
-**Superseded in part by D-070** (legacy wiki writer and made-tool paths).
-
-> Skills and tools moved to `~/.zenbot/global/` (D-040).
-
-**Decision:** The agent changes skills only through `save_skill` and makes tools only through
-`save_tool`. A skill needs a reason (the evidence), fits the agentskills.io format and 10,000
-characters, and isn't a near-duplicate of one in its domain (refused with "extend X instead"). New
-skills are drafts until the owner accepts them or a session that used them is accepted; a new
-domain always needs the owner; changes to active skills apply at once, each a commit. Unused skills
-are flagged at 30 days and archived (never deleted) at 90. A made tool is found and called like an
-MCP tool, never gets the kernel's environment, and runs with no network and read-only files until
-the owner approves it; the approval is in the database, out of the agent's reach.
-
-**Why:** Hermes sprawled because creating a skill was cheaper than improving one, a background fork
-was told to save something, and nothing was retired (`docs/research/hermes-openclaw.md`). Voyager
-adds a skill only after a critic confirms success; here that's a verified use or the owner. The agent
-has a shell, so rules that matter for safety (a tool reaching the network) live where it can't
-write.
-
-**Considered:** a background "reflect" fork after busy turns (Hermes; rejected: that's the sprawl), the
-owner approving every skill change (too much of the owner's attention), tools as MCP servers (more
-moving parts for the same result).
-
-**Date:** 2026-10-07
-
----
-
-## D-036 — The wiki: pages over timelines; System One routes, the agent writes — Superseded by D-070; [archived](docs/archive/DECISIONS-superseded.md).
-
-## D-035 — Search: three arms in one query; promotion earns its trust
-
-> Promotion to long-term memory superseded by D-045 (2026-10-08); the search design stands.
-
-**Decision:** One `search_docs` table over session turns and memories (later the wiki and skills),
-indexed in the background. A search runs exact names and paths first (trigram over identifiers),
-then full text (`simple` configuration: no stemming, identifiers survive) and meaning (pgvector,
-1536-dimension `openai/text-embedding-3-small` through OpenRouter, filled in afterwards) merged by
-reciprocal rank fusion (k = 60); System One reranks, an exact hit stays on top. Tool output is not
-indexed. Long-term memory is reached only through search. A sleep's promotions are proposals the
-owner reviews; promotion acts on its own once the one-sided 95% Wilson lower bound of the owner's
-agreement with them reaches 0.95.
-
-**Why:** Full text alone can't find `compile.rs` (Postgres keeps a path as one token) and misses
-meaning; vectors alone miss exact names (gbrain's recipe, checked on zenbot's own Postgres,
-`docs/research/memory-search-web.md`). A raw System One probability is not a confidence: trust comes
-from its track record against the owner's calls, which also makes "shadow until it matches often
-enough" one formula.
-
-**Considered:** a separate vector store (another service), stemming (`english` mangles identifiers
-and the owner writes in more than one language), promoting on System One's probability alone.
-
-**Date:** 2026-10-07
-
----
-
-## D-034 — Web access: keyless search by default, untrusted content taints
-
-*Superseded in part by D-052: every MCP server, not only remote ones, is untrusted by default; and
-by D-053: what a tainted session stores is marked and untrusted wherever it's read.*
-
-**Decision:** `web_search` uses Brave or Tavily when their key is set, else a self-hosted SearXNG
-started with the service (deploy/compose.yaml, bound to 127.0.0.1), which also rescues one failed
-keyed call. `web_fetch` reaches only public addresses: the kernel resolves names itself and keeps
-public addresses only, checks IP literals and every redirect, and uses no proxy. Web content (and
-the output of remote MCP servers) is wrapped in an envelope a page can't close, and taints the
-session; what a tainted session saves to memory counts as inference, so it can never be promoted.
-
-**Why:** Web access must work on a fresh install without buying an API, and web pages are the main
-prompt-injection and SSRF risk an agent with a shell faces. Sources: Hermes (url_safety, keyless
-rescue), OpenClaw (re-wrap once, redirect checks), Claude Code's WebFetch (`docs/research/`).
-
-**Considered:** DuckDuckGo (unofficial scraping; rejected), OpenRouter's web plugin (paid per call,
-answers not results), following redirects freely (SSRF through a public redirector; rejected).
-
-**Date:** 2026-10-07
-
----
-
-## D-033 — MCP behind three fixed tools; a small client of our own
-
-**Decision:** MCP servers' tools are not added to the model's tool list. The list stays fixed per
-session and the model uses `find_tools`, `load_tool` (the schema as a tool result) and `call_tool`.
-The client (stdio and streamable HTTP; initialize, tools/list, tools/call) is written in the
-kernel against the MCP spec instead of using `rmcp`. Servers are configured in
-`~/.zenbot/mcp.json`, the `mcpServers` shape, with `${VAR}` from the environment.
-
-**Why:** The Phase 0 spike showed a changed tool list reaches Claude Code mid-turn but rewrites the
-whole cached prefix, and Codex and Pi can't take new tools mid-session at all; a fixed list keeps
-the cache on every engine (FastMCP's tool-search transform does the same). `rmcp` would add a
-second `reqwest` and a C crypto build for three methods.
-
-**Considered:** Claude Code's own ToolSearch with deferred tools (engine-specific; keeps the cache
-only there); `rmcp` (weight); adding MCP tools to the list at session start (every server's tools
-in every prompt).
-
-**Date:** 2026-10-07
-
----
-
-## D-032 — System One may see private content
-
-**Decision:** System One (Jev on OpenRouter) may see private content: file contents, tool output,
-memories, search results, not only the owner's messages and final answers. `ZEN_S1_PRIVATE=0`
-turns it off, and the tools that would send it more then do without System One.
-
-**Why:** Heavy use of System One inside tools (ranking, filtering, the memory sleep) needs the
-material it judges. The main model's provider already sees the same content, and secrets are
-masked before anything leaves the kernel. Proposed to the owner with the redesign; they went ahead
-with it.
-
-**Considered:** Only web and public content (limits the memory sleep and search ranking); waiting
-for a local System One model (delays every System One use in tools).
-
-**Date:** 2026-10-07
-
----
-
-## D-031 — Docs: one file per kind of fact
-
-**Decision:** The repo's docs are split like this: `CONTEXT.md` (what zenbot is for, success,
-principles, constraints), `SPEC.md` (what zenbot is meant to have: modules and their contracts),
-`DESIGN.md` (how the system is built and works, and the agreed target design), `MAP.md` (the code:
-files, routes, tables, settings), `DEVELOPMENT.md` (how to build, test and ship), `ROADMAP.md`
-(phases, the active one, debt, open questions), `PROGRESS.md` (append-only log of what shipped),
-`DECISIONS.md` (this file), `AGENTS.md` (rules for agents working on the repo), `README.md` (entry
-point, install and use). Deep dives stay in `docs/`.
-
-**Why:** A new session (human or agent) must be able to pick up the work without the conversation
-that produced it. One large `SPEC.md` mixed vision, design, status and history, so it went stale in
-parts and was expensive to read. The structure follows the one used in the owner's zenfinance repo.
-
-**Considered:** Retiring `SPEC.md` entirely (rejected: it keeps the target modules and their
-contracts); renaming `SPEC.md` to `DESIGN.md` (rejected: "what it should be" and "how it is built"
-change at different speeds).
-
-**Date:** 2026-10-06
-
----
-
-## D-030 — Model choice learned from real usage (replaces Phase 2b)
-
-> Built for subagents by D-038 (2026-10-07).
-
-**Decision:** Which model does which work is learned from real sessions, not from sweeps over fixed
-eval tasks. System One classifies the situation (did the job or step change, what kind of work, how
-big); a versioned policy maps it to a model; a small share of subtasks explore another model, with
-the choice probability logged (a contextual bandit); outcomes are the owner's verdicts, corrections,
-verification and cost. Switches happen at natural boundaries (new session or subtask), never on an
-arbitrary turn. Fixed evals stay as a regression and cost check. Scheduled as Phase 6.
-
-**Why:** Models do best at benchmark-shaped tasks, so fixed tasks say little about real work; real
-usage is the only honest signal. A model switch re-sends the whole context, so it must be rare.
-System One is good at classifying, not at knowing which frontier model is best: outcomes pick the
-model.
-
-**Considered:** Phase 2b's sweeps, improver session and simulated usage (replaced); System One
-choosing the model directly (rejected); per-turn switching (rejected: cache cost).
-
-**Date:** 2026-10-06
-
----
-
-## D-029 — Skills improve in a closed loop, without sprawl
-
-> Made concrete by D-037: near-duplicates are refused at save and unused skills archived; a pass
-> that merges existing near-duplicates is not built.
-
-**Decision:** The agent creates and improves its own skills (agentskills.io format, in git) under
-rules: skills live under a small set of domains (a new domain needs the owner's OK); edit before
-create (search first, a new skill only when none covers the work, with the reason recorded); skills
-change at session close from outcomes, never from one task; small and composable (`references/`,
-`scripts/`); each skill's loads and the verdicts of sessions that used it are measured; a periodic
-pass merges near-duplicates and retires unused skills. The agent can also create and improve tools
-(a script plus a manifest, sandboxed; no network or secrets until the owner approves).
-
-**Why:** The goal is to get better within a domain. Hermes is the counter-example: almost every
-slightly different task created a new skill, with no categories or composition, so nothing
-specialized.
-
-**Date:** 2026-10-06
-
----
-
-## D-028 — Memory: fixed-size short-term, nightly sleep, a very high bar for long-term · superseded, [archived](docs/archive/DECISIONS-superseded.md)
-
-## D-027 — Prompt files, system tools, and loading only what's needed
-
-> Paths moved by D-040; `IDENTITY.md` added and the agent's ownership of prompt files changed by
-> D-045; the open question below decided by D-032.
-
-**Decision:** The system prompt comes from `~/.zenbot/SOUL.md` (who the agent is), `AGENTS.md` (its
-environment: the VM, its body), `USER.md` (the owner) and `MEMORY.md` (short-term), loaded at session
-start. The owner owns SOUL, AGENTS and USER (the agent proposes changes); the agent owns MEMORY. The
-system tools load with them: `bash`, `read`, `write`, `edit`, `ask`, `search`, `remember`,
-`web_search`, `web_fetch`, `find_skills`, `load_skill`, `find_tools`, `load_tool`, `decide`, `verify`,
-`capture`, `delegate`. Skills, MCP servers' tools and agent-made tools load on demand, appended as tool
-results so the prefix and the cache hold. Who teaches what: `AGENTS.md` the environment; each tool's
-description how and when to use that tool; skills how to do a kind of work. System One is used
-heavily: by the model through `decide`, and inside `search`, `web_search`, `find_*`, `web_fetch`,
-`remember` and `capture`.
-
-**Why:** Unused tool descriptions and skills cost tokens on every turn and distract the model. Tool
-descriptions are the main lever for how well tools are used. Patterns from OpenClaw and Hermes
-(workspace files), Anthropic and Claude Code (deferred tools, skills).
-
-**Open:** whether System One may see private content (file contents, search results) on OpenRouter;
-recommended: yes, except content marked sensitive. See ROADMAP.md.
-
-**Date:** 2026-10-06
-
----
-
-## D-026 — Tools and skills instead of a kernel-enforced workflow
-
-**Decision:** Briefs and verification stop being kernel gates and become a `brief` skill and a
-`verify` tool the agent uses when they help. The kernel keeps only rules for authority (the owner
-starts jobs and sets the budget), safety (every action through the kernel) and measurement (the
-tape). A rule comes back only where measurement shows the agent needs it. Supersedes the gates of
-D-020.
-
-**Why:** Fixed steps cap quality on open-ended jobs. Measured: briefs on every job gave the same pass
-rate (12/12 → 12/12) at 2.1× the cost.
-
-**Date:** 2026-10-06
-
----
-
-## D-025 — zenbot reframed: a maker tool that works like a chief of staff
-
-**Decision:** zenbot carries the owner's jobs end to end (operational work and building software,
-across their job, projects and companies) and offloads tasks, memory and thinking. The owner drives:
-they start every job and decide where tokens go; zenbot never starts a job on its own (for now), but
-may split a job into subtasks and delegate them. Success is how well it does a job end to end: the
-real job identified, the context researched, what to build decided, only the owner's questions
-raised, a state-of-the-art result (CONTEXT.md).
-
-**Why:** Stepping back from Engine work (model routing) to what zenbot is for. Most work so far was in
-the layer the strategy called commodity; the success measure now points at job quality.
-
-**Considered:** A builder's tool for side-project companies (the earlier vision, kept as the thesis);
-an autonomous chief of staff that starts work itself (rejected for now: the owner drives spend).
-
-**Date:** 2026-10-06
-
----
-
-## D-024 — Branch, pull request, green CI
-
-**Decision:** Every change goes on its own branch and through a pull request; it merges into `main`
-only when CI (build, tests, clippy as errors, e2e) passes. CI publishes binaries only for commits that
-pass. Harness changes also show the owner an eval before merging.
-
-**Why:** A professional, check-gated flow instead of committing on `main`.
-
-**Date:** 2026-10-06
-
----
-
-## D-023 — Expand-only migrations, tested and backed up
-
-**Decision:** Migrations only add (tables, columns, indexes); anything dropped, renamed or retyped
-goes in a later release than the one that stops using it. `scripts/upgrade.sh` tries new migrations
-on a throwaway copy of the live database, and the install backs the live database up first (last 10
-kept).
-
-**Why:** A rollback swaps the binaries back but not the schema, so the previous build must keep
-working on the newer schema.
-
-**Date:** 2026-10-06
-
----
-
-## D-022 — Vendor CLIs on their latest versions; Pi pinned
-
-> Runs as the kernel's `engines` job since D-046 (2026-10-09), no longer a systemd timer. The Pi
-> part is void: Pi was retired by D-043.
-
-**Decision:** `scripts/update-engines.sh`, daily via `zen-engines.timer`, updates Claude Code and
-Codex (vendor release, checksum-verified, installed next to the old one). Each update must pass a
-tool-free completion through zen-engine or it is rolled back; no restart, and the job never commits,
-builds or restarts zenbot. Pi stays pinned: it is harness code running in our process with the
-ChatGPT sign-in, so a bump is a commit with an eval; the job only reports a newer Pi. Results go to
-`upgrade.log` and `zen status`; every turn records `engine_version`.
-
-**Why:** Always the latest models and fixes, without an update silently breaking zenbot.
-
-**Date:** 2026-10-06
-
----
-
-## D-021 — A session is one job; briefs opt-in · superseded, [archived](docs/archive/DECISIONS-superseded.md)
-
----
-
-## D-020 — Briefed work with kernel-enforced gates · superseded, [archived](docs/archive/DECISIONS-superseded.md)
-
----
-
-## D-019 — Context v2
-
-**Decision:** Instructions fixed per session and stored once (`envelopes`); per-turn context at the end
-of the user's message; append-only history; the tape is a hash-linked chain of numbered blocks;
-summaries cite block addresses and a `history` tool reads any block back; every turn records what was
-sent and any cache break. Engines may take over a step when that measurably gives better results,
-behind the worker protocol with a zenbot-owned fallback: Claude Code keeps its own session per zenbot
-session (`--resume`) as a cache rebuilt from the tape when needed; Codex gets native history items.
-Supersedes "no engine-side sessions" of D-012. See `docs/context.md`.
-
-**Why:** Measured: a fresh Claude Code session per turn never caches earlier turns. With v2, same
-model, 11 tasks: 8/8 → 8/8 passed (two long-session tasks newly passing), cost −78%, cache hit
-60% → 95%.
-
-**Date:** 2026-10-05
-
----
-
-## D-018 — Live scoring with System One
-
-**Decision:** The owner's `/done` decision (accept, more, reshape, drop) is the ground-truth label. A
-System One model (Jev via OpenRouter, through Pi's classifier API `s1.decide`) answers a versioned
-question set per session, from the user's messages and final answers only, never tool output;
-answers are stored, not acted on. Open models (Laya, CLM) can take over through the same API once
-there are enough labels to calibrate them.
-
-**Superseded in part by D-032** (System One may see private content) **and D-043** (the kernel
-calls OpenRouter directly; no Pi).
-
-**Date:** 2026-10-02
-
----
-
-## D-017 — Evals compare harness versions; the owner decides
-
-**Decision:** Fixed tasks in `evals/`; `scripts/eval.sh` runs the previous and the new harness with the
-same model on isolated kernels and databases. Before a harness change is merged, the owner sees the
-comparison and decides; it is never an automatic gate.
-
-**Date:** 2026-10-02
-
----
-
-## D-016 — Every turn traced
-
-**Decision:** One `turns` row per turn with what produced it (harness = zenbot build, engine and its
-version, model requested and resolved, effort) and its tokens, cost, time and tool errors. Workers
-send one message per model call and a turn report.
-
-**Date:** 2026-10-02
-
----
-
-## D-015 — Full model ids; explicit thinking level
-
-**Decision:** Models are named by their full id, never by an engine's alias. The thinking level
-(effort) is a session setting, and the kernel always sends an explicit level, so what ran is known.
-
-**Why:** `opus` moved from Opus 5 to 5.5 with a Claude Code update.
-
-**Date:** 2026-10-02
-
----
-
-## D-014 — Terminal app layout; instruction files on demand; commit trailers
-
-**Decision:** The terminal app is full screen by default (input pinned to the bottom); `--inline` keeps
-the scrollback-following layout. The first time a tool touches a project below the workspace, its
-`AGENTS.md`/`CLAUDE.md` is attached to the result and kept in the session's system prompt. Commits
-made in a zen session carry `Zen-Session` and `Co-Authored-By` trailers (`scripts/git-hooks`), so each
-change links to its transcript.
-
-**Superseded in part by D-039** (how full screen draws).
-
-**Date:** 2026-10-01
-
----
-
-## D-013 — Robustness pass informed by Pi
-
-**Decision:** The kernel supervises and restarts workers, ends their orphaned turns, cancels its own
-tools on abort (process-group kill), stops stalled turns (watchdog) and serializes edits per file.
-Tools: partial output on timeout, full output saved when truncated, line-based paging in `read`,
-CRLF/BOM-safe edit with a normalized-match fallback. `upgrade.sh` runs a scripted end-to-end turn
-(`faux/smoke`) before installing.
-
-**Date:** 2026-10-01
-
----
-
-## D-012 — Engines: zen-engine drives the official CLIs
-
-**Decision:** The worker is swappable behind `docs/worker-protocol.md`. The default worker `zen-engine`
-(Rust) drives the official Claude Code and Codex CLIs on the owner's subscriptions the way qm does:
-built-in tools off, zenbot's tools over MCP / dynamic tools, zenbot's system prompt. Pi stays available
-as the optional `pi` worker. The kernel routes models to workers. (Its "no engine-side sessions" part
-is superseded by D-019; the `pi` worker was retired by D-043.)
-
-**Date:** 2026-10-01
-
----
-
-## D-011 — Interface: the `zen` terminal app
-
-**Decision:** `zen` is a single Rust binary with a Claude Code/Codex/Pi-style terminal app plus script
-commands; the web UI is frozen (removed on 2026-10-10). zen is used directly, not called from other agents. Supersedes the
-"web UI first" part of D-008.
-
-**Date:** 2026-10-01
-
----
-
-## D-010 — SPEC v0.2: three layers, services first
-
-**Decision:** Three layers (Engine, Mind, Work); Mind and Work built first as services exposed over
-MCP; taste as its own module; zen-bench; inbox; taint-based trust model; roadmap reordered (SPEC.md
-§3).
-
-**Date:** 2026-09-30
-
----
-
-## D-009 — Knowledge: our own take
-
-**Decision:** Knowledge is our own design, borrowing from Karpathy's LLM Wiki; an open-source capture
-module replaces Readwise later.
-
-**Date:** 2026-09-30
-
----
-
-## D-008 — Channels · superseded, [archived](docs/archive/DECISIONS-superseded.md)
-
----
-
-## D-007 — Subscriptions through supported paths
-
-**Decision:** Use the existing Claude and ChatGPT subscriptions through officially supported paths; a
-small capped API budget for System One and embeddings.
-
-**Date:** 2026-09-30
-
----
-
-## D-006 — Postgres + pgvector · Superseded by D-076; [archived](docs/archive/DECISIONS-superseded.md).
-
----
-
-## D-005 — Rust kernel, TypeScript model worker · superseded, [archived](docs/archive/DECISIONS-superseded.md)
-
----
-
-## D-004 — Host-agnostic
-
-**Decision:** zenbot runs on any Linux box; exe.dev is only the current VM.
-
-**Date:** 2026-09-30
-
----
-
-## D-003 — Composable, open source first
-
-**Decision:** Composable modules with open contracts; adopt existing open source first; every part
-switchable.
-
-**Date:** 2026-09-30
-
----
-
-## D-002 — Developed in public
-
-**Decision:** The repository is public.
-
-**Date:** 2026-09-30
-
----
-
-## D-001 — A personal tool, not a product
-
-**Decision:** zenbot is a personal tool for getting work done, not a product.
-
-**Date:** 2026-09-30
+Status: accepted · 2026-10-21 · supersedes D-036, D-037's made tools
+Legacy wiki pages become provisional source records, nothing lost. `capture` and made tools are retired; repeatable procedures go in reviewed skill folders with scripts.
 
 ## D-069 — Three curated stores in Markdown; search is a tool, guided by System One
+Status: accepted · 2026-10-21 · supersedes D-028, D-045's sleep promotion, D-037's activation by session
+Memory, knowledge and skills are Markdown files (the database is a rebuilt index). Short-term memory is a capped `MEMORY.md`; long-term is earned, mostly via the sleep, which never touches prompt files. Nothing is pushed into a turn: `search` retrieves, System One ranks. Records carry their writers' ratings; skill changes activate only on the owner's review.
 
-**Date:** 2026-10-21 · **Status:** accepted (owner, 2026-10-19 to 2026-10-21; reworked after the PR #86
-review) · **Supersedes:** D-028's long-term tier, D-045's promotion by the sleep into prompt files and
-the wiki, D-037's activation of a draft by an accepted session
+## D-068 — Approved job authority and recoverable kernel work
+Status: accepted · 2026-10-19
+Owner approval of a job holds only for its unchanged definition; an agent edit revokes it. Held runs wait up to two hours. MCP stdio servers are contained. Busy prompts persist until consumed; steering stops at a tool boundary.
 
-**Decision:** Three curated stores. Memory keeps what matters from lived work; knowledge is
-understanding of a subject and how we know it (proof, evidence, argument, teaching), keeping
-disagreement and uncertainty; skills say how to do a task well. People, organizations and projects
-are records the three share (the owner's "inner CRM"). Session history is a searchable archive, not
-memory.
+## D-067 — Security: context risk, action alignment, contained sessions
+Status: accepted · 2026-10-16 · supersedes D-063, parts of D-056, D-062, D-065
+One S1 decision file (`action_gate.toml`) decides every effect from context risk (owner's trust list, else System One's source rating, raise-only scan), action risk (local, persistent, outward, irreversible) and, when needed, alignment with the owner's goal (never reading tool output): run, hold or lock. Every shell is sandboxed with network only via the kernel's egress proxy; acting as the owner is a gated `host: true` command.
 
-- Markdown is the source of truth; the database is an index rebuilt from the files. Short-term
-  memory is one capped `MEMORY.md` in every session's instructions, saved to freely with `remember`
-  (and from the owner's own words after a turn, `memory_capture`); the owner may edit it. Long-term
-  memory, knowledge and entities are one file per record with tags, aliases, subjects, evidence (its
-  basis) and typed links, in a shallow folder per store (knowledge by kind under the wiki).
-- Long-term memory is earned: mostly through the sleep (`memory_durable`), rarely on the spot
-  (`remember` with `long: true`, a higher bar, `memory_long`), like people. The sleep archives what
-  is finished (`memory_disposition`) and never touches prompt files; the agent still writes really
-  important traits into `IDENTITY.md`/`USER.md` itself (D-045).
-- Nothing is pushed into a turn. Retrieval is the `search` tool, taught by the `work/search` skill:
-  System One ranks results by usefulness to the session and decides which records' links to follow
-  (a linked record joins when kept too; two hops at most; `contradicts` always followed one hop; a
-  superseded record replaced). The fixed prefix and the prompt cache are untouched.
-- Ratings follow bytes (D-067): a record carries its writer's and every cited source's; replacing
-  a short-term memory adds the replacing session as a writer and never lowers it; the agent changes
-  memory and record files only through `remember` and `brain`.
-- Thresholds are costs in decision files. New made tools are retired; skill drafts and revisions
-  activate only on the owner's fingerprint review.
+## D-066 — S1: every System One decision is a file, decided by its costs, recorded and learned from
+Status: accepted; `unknown` route superseded by D-074 · 2026-10-16 · supersedes D-038's classifier, session scoring, `decide`
+One engine (`crates/zend/src/s1/`) makes every System One call. Decisions are TOML files (owner overrides in `~/.zenbot/s1/`) stating mistake costs, not thresholds; code fixes what each sees and allows; security decisions fail toward caution. Every call is recorded. The brain asks via `judge`: information, never approval.
 
-**Why:** The owner's model: short-term holds what matters now; long-term is earned, as in sleep.
-Files the owner can read and edit keep the data the owner's. Per-turn recall (the first PR #86
-design) added seconds and model calls to every turn and marked sessions for content they never saw;
-a tool costs nothing until needed, and System One judges usefulness better than fixed depths.
+## D-065 — Metadata source judgments, authenticated job checks and owner queue
+Status: partly superseded by D-067 · 2026-10-16
+System One lowers a source rating only from metadata, never page text; content checks only raise. Only owner allowlist entries authorize unseen egress. One owner-only queue decides held effects and source proposals (approve once, reject, deny); Matrix reactions never authorize.
 
-**Date:** 2026-10-21
+## D-064 — Items rated by origin; deny and trust by cause; shells see contaminated files masked
+Status: accepted · 2026-10-16 · supersedes parts of D-053, D-054
+Stored items carry their writer's risk by exact bytes; only 0–1 enter instructions, others are handed over wrapped and raise the reader. The owner's `/deny` contaminates by cause, `/trust` lifts reviewed causes; no agent tool can. Shells see contaminated files masked.
+
+## D-063 — Project code defaults to offline and read-only
+Status: superseded by D-067 (now its high-risk shell mode) · 2026-10-15
+
+## D-062 — Risk is rated per block by its source; a reversible taint stops the session
+Status: partly superseded by D-064, D-067 · 2026-10-15
+Every block and stored item has a risk 0–5 by source (0 owner, 1 internal, 2 owner-allowlisted, 3 owner-rated, 4 open/unknown, 5 flagged); content checks only raise it. The allowlist changes only by the owner's commands.
+
+## D-061 — Lighter docs and checks
+Status: accepted · 2026-10-14
+A change updates PROGRESS.md, DECISIONS.md, MAP.md, README.md and the module header as needed; other docs are fixed when wrong; old history moves to `docs/archive/`. `scripts/check-docs.py` checks drift and line budgets.
+
+## D-060 — A job's report can be posted into one of the owner's sessions
+Status: accepted · 2026-10-14
+A job's `post_to` appends an `ok` run's report to one of the owner's sessions, once, unless the run read untrusted content; everything else goes to the **zen jobs** room.
+
+## D-059 — Bounded disk use: prune our own leftovers, warn at 80%
+Status: accepted · 2026-10-14
+zen prunes only what it makes (dumps beyond 3, eval runs over 7 days, large build dirs, Docker leftovers); `zen status` warns over 80% disk.
+
+## D-058 — After a usage-limit failover, the session keeps the new model
+Status: accepted · 2026-10-14 · amends D-044
+After a usage-limit failover the session keeps the new model until the owner's `/model`.
+
+## D-057 — A job run's session is archived when the run ends
+Status: accepted · 2026-10-14 · amends D-048
+A job run's session is archived when the run ends, however it ends.
+
+## D-056 — Judge the action, not the reading; first step: search doesn't spread the mark
+Status: partly superseded by D-062, D-067 · 2026-10-13
+Reading costs little; actions are checked. `search` lists marked results without their text until asked by name. A worktree of a trusted repository is trusted.
+
+## D-055 — A job's report can come from a file the run wrote, not the final answer
+Status: accepted · 2026-10-13
+A `report_file` must be a regular, non-secret workspace file written during the run, UTF-8, ≤ 60 KB; otherwise the run errors, never falling back to the answer.
+
+## D-054 — The owner can trust a session again (`/trust`), forward only
+Status: partly superseded by D-064 · 2026-10-13
+Only the owner lifts a session's mark (`/trust`), after seeing what set it, forward only.
+
+## D-053 — Taint is a property of stored content; a tainted session's shell has no network
+Status: partly superseded by D-062, D-064, D-067 · 2026-10-11
+Stored content carries its writer's mark (now rating) and reaches sessions only through the kernel's hand-over path, never as trusted instructions.
+
+## D-052 — Every MCP server is untrusted until the owner says otherwise
+Status: accepted · 2026-10-11
+Every MCP server, local or remote, is outside content unless the owner trusts it.
+
+## D-051 — Trust gates: what steers every session, project instructions, the verifier, reviews
+Status: recorded as proposed; partly superseded by D-053, D-064, D-067 · 2026-10-10
+Child and risky sessions can't change prompt files or active skills; no session writes the owner's config or secrets. Project AGENTS.md/CLAUDE.md steer only from trusted repositories. Unknown ratings fail closed; approvals name the reviewed fingerprint.
+
+## D-050 — Evals run only the affected tasks, in parallel, against a cached base
+Status: accepted · 2026-10-10
+`scripts/eval.sh` runs the tasks a change's areas touch plus `core`, in parallel, reusing a cached base; `--plan` explains, `--full` runs all.
+
+## D-049 — A Matrix channel: zen-matrix, a separate bridge process
+Status: accepted · 2026-10-09
+`zen-matrix` is a separate kernel client answering only `MATRIX_OWNER` in end-to-end encrypted rooms: one per session, plus **zen jobs**.
+
+## D-048 — The sessions board is zen's home screen
+Status: accepted; amended by D-057 · 2026-10-09
+Full-screen `zen` opens on the sessions board; subagent and verifier sessions open read-only.
+
+## D-047 — Session names and suggested next prompts from a cheap side model
+Status: accepted · 2026-10-09
+After each owner turn an assist model names the session (never an owner-titled one) and suggests a next prompt Tab accepts; outcomes recorded.
+
+## D-046 — Scheduled jobs in the kernel; the sleep and engine updates move off systemd timers
+Status: partly superseded by D-066, D-068, D-076 · 2026-10-09
+One kernel scheduler runs system jobs and agent jobs in fresh `job` sessions, never repeating a run. An agent-created job goes live only if System One finds the owner asked for it, else it waits for the owner. Failing jobs back off and pause after 5.
+
+## D-045 — IDENTITY.md; the agent keeps its prompt files; memory is promoted into them and the wiki
+Status: partly superseded by D-069 · 2026-10-08
+`SOUL.md` is owner-only; the agent writes lasting traits into `IDENTITY.md`/`USER.md` itself and says so; capped, backed up first.
+
+## D-044 — One safe cross-provider continuation on hard usage limits
+Status: accepted; amended by D-058 · 2026-10-08
+On a hard subscription usage limit, `zen-engine` continues once on the other provider, visibly, never repeating an uncertain tool call.
+
+## D-043 — Retire Pi; call System One directly from the kernel
+Status: accepted · 2026-10-08
+No Pi; `zend` calls OpenRouter's System One directly.
+
+## D-042 — Keep the dev kernel home outside the live home
+Status: accepted · 2026-10-08
+The dev kernel's home is `~/.zenbot-dev`.
+
+## D-041 — Loopback listener and one boundary for untrusted tool results
+Status: accepted · 2026-10-08
+`zend` listens on loopback by default; tokens go in headers; every tool result is secret-masked; workers don't inherit secrets.
+
+## D-040 — zenbot's home is laid out by scope; agents are thin definitions
+Status: accepted; refined by D-042 · 2026-10-07
+Home layout: system files at the top, `agents/<name>/`, shared `global/`, `projects/<id>/`.
+
+## D-039 — Full screen owns the screen: diffed frames, scrolling, a side panel
+Status: accepted · 2026-10-07 · supersedes part of D-014
+Full screen redraws only changed rows and can show a file beside the chat (`/open`).
+
+## D-038 — Subagents, and model choice that learns from verdicts
+Status: partly superseded by D-066, D-074 · 2026-10-07
+`delegate` runs child sessions with the parent's tools but `ask`/`delegate`, in parallel.
+
+## D-037 — The workshop: rules the kernel enforces for skills and tools the agent makes
+Status: partly superseded by D-069, D-070 · 2026-10-07
+Skills change only via `save_skill` (reason, format, ≤ 10,000 chars, no near-duplicate); unused ones archive at 90 days.
+
+## D-036 — The wiki: pages over timelines; System One routes, the agent writes
+Status: superseded by D-070 · 2026-10-07
+
+## D-035 — Search: three arms in one query; promotion earns its trust
+Status: partly superseded by D-045, D-069, D-076 · 2026-10-07
+Search merges exact identifiers, full text and vectors (exact hits on top); tool output isn't indexed.
+
+## D-034 — Web access: keyless search by default, untrusted content taints
+Status: partly superseded by D-052, D-053, D-076 · 2026-10-07
+`web_fetch` reaches only public addresses, checking every redirect; web content is enveloped as outside content.
+
+## D-033 — MCP behind three fixed tools; a small client of our own
+Status: accepted; extended by D-071 · 2026-10-07
+MCP tools stay behind `find_tools`/`load_tool`/`call_tool`, via the kernel's own client.
+
+## D-032 — System One may see private content
+Status: accepted · 2026-10-07
+System One may see private content, secrets masked; `ZEN_S1_PRIVATE=0` stops it.
+
+## D-031 — Docs: one file per kind of fact
+Status: accepted · 2026-10-06
+Each kind of fact lives in one doc.
+
+## D-030 — Model choice learned from real usage (replaces Phase 2b)
+Status: accepted; built by D-038, D-074 · 2026-10-06
+Models are chosen from real outcomes, switching only at session or subtask boundaries (except D-044).
+
+## D-029 — Skills improve in a closed loop, without sprawl
+Status: accepted; made concrete by D-037 · 2026-10-06
+The agent improves its own skills: few domains, edit before create, small and composable.
+
+## D-028 — Memory: fixed-size short-term, nightly sleep, a very high bar for long-term
+Status: superseded by D-045, D-069 · 2026-10-06
+
+## D-027 — Prompt files, system tools, and loading only what's needed
+Status: partly superseded by D-040, D-045, D-066, D-070 · 2026-10-06
+A fixed prompt and tool list per session; skills and MCP tools load as tool results, keeping the cache.
+
+## D-026 — Tools and skills instead of a kernel-enforced workflow
+Status: accepted · 2026-10-06 · supersedes D-020
+Briefs are a skill, `verify` a tool; the kernel enforces only authority, safety and measurement.
+
+## D-025 — zenbot reframed: a maker tool that works like a chief of staff
+Status: accepted · 2026-10-06
+zenbot carries the owner's jobs end to end; the owner drives and decides spend.
+
+## D-024 — Branch, pull request, green CI
+Status: accepted · 2026-10-06
+Every change merges through a pull request on green CI; harness changes show the owner an eval.
+
+## D-023 — Expand-only migrations, tested and backed up
+Status: accepted · 2026-10-06
+Migrations only add; the upgrade tests them on a copy and backs up first.
+
+## D-022 — Vendor CLIs on their latest versions; Pi pinned
+Status: partly superseded by D-043, D-046 · 2026-10-06
+The `engines` job keeps Claude Code and Codex on the vendor's latest, rolling back an update that fails a test turn.
+
+## D-021 — A session is one job; briefs opt-in
+Status: superseded by D-026 · 2026-10-06
+
+## D-020 — Briefed work with kernel-enforced gates
+Status: superseded by D-026, D-030 · 2026-10-05
+
+## D-019 — Context v2
+Status: accepted · 2026-10-05 · supersedes part of D-012
+Fixed instructions, an append-only hash-linked tape, engine sessions as caches (`docs/context.md`).
+
+## D-018 — Live scoring with System One
+Status: partly superseded by D-032, D-043, D-066 · 2026-10-02
+The owner's verdict (`/done`) is the ground-truth label.
+
+## D-017 — Evals compare harness versions; the owner decides
+Status: accepted; refined by D-050 · 2026-10-02
+Evals compare old and new harness; the owner decides, never an automatic gate.
+
+## D-016 — Every turn traced
+Status: accepted · 2026-10-02
+Every turn records harness, engine, model, effort, tokens, cost and time.
+
+## D-015 — Full model ids; explicit thinking level
+Status: accepted · 2026-10-02
+Full model ids, never aliases; always an explicit thinking level.
+
+## D-014 — Terminal app layout; instruction files on demand; commit trailers
+Status: partly superseded by D-039 · 2026-10-01
+Project instruction files attach on first touch; zen commits carry `Zen-Session` trailers.
+
+## D-013 — Robustness pass informed by Pi
+Status: accepted · 2026-10-01
+The kernel supervises workers and tools; upgrades run a scripted turn first.
+
+## D-012 — Engines: zen-engine drives the official CLIs
+Status: partly superseded by D-019, D-043 · 2026-10-01
+`zen-engine` drives the official CLIs on subscriptions, their own tools off.
+
+## D-011 — Interface: the `zen` terminal app
+Status: accepted · 2026-10-01
+`zen` is a terminal app plus script commands; no web UI.
+
+## D-010 — SPEC v0.2: three layers, services first
+Status: accepted · 2026-09-30
+Three layers: Engine, Mind, Work.
+
+## D-009 — Knowledge: our own take
+Status: accepted · 2026-09-30
+Knowledge is our own design, after Karpathy's LLM Wiki.
+
+## D-008 — Channels
+Status: superseded by D-011, D-049 · 2026-09-30
+
+## D-007 — Subscriptions through supported paths
+Status: accepted · 2026-09-30
+Subscriptions through supported paths; a small API budget for System One and embeddings.
+
+## D-006 — Postgres + pgvector
+Status: superseded by D-076 · 2026-09-30
+
+## D-005 — Rust kernel, TypeScript model worker
+Status: superseded by D-011, D-012, D-043 · 2026-09-30
+
+## D-004 — Host-agnostic
+Status: accepted · 2026-09-30
+zenbot runs on any Linux box.
+
+## D-003 — Composable, open source first
+Status: accepted · 2026-09-30
+Composable modules, open source first, every part switchable.
+
+## D-002 — Developed in public
+Status: accepted · 2026-09-30
+The repository is public.
+
+## D-001 — A personal tool, not a product
+Status: accepted · 2026-09-30
+zenbot is a personal tool, not a product.

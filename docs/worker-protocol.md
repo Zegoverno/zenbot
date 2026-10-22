@@ -1,59 +1,67 @@
 # Worker protocol
 
-The kernel (`zend`) owns sessions, history and tools. A **worker** runs the model side of a turn. Any program that speaks this protocol can be a worker, so engines are swappable: zenbot ships `zen-engine` (Claude Code + Codex), and you can add your own.
-
-System One typed decisions are not part of this protocol: `zend/src/score.rs` calls
-OpenRouter directly (`POST /api/v1/systemone`, `ZEN_S1_URL` overrides it), mapping public `bool`
-questions to `noul` on the wire. `ZEN_S1_MODEL` chooses the classifier (off when unset) and
-`OPENROUTER_API_KEY` authenticates it.
+The kernel (`zend`) owns sessions, history and tools; a **worker** runs the model side of a turn.
+zenbot ships `zen-engine` (Claude Code + Codex). System One isn't part of this protocol
+(`crates/zend/src/s1/wire.rs` calls OpenRouter).
 
 ## Transport
 
-JSON-RPC 2.0 over the worker's stdin/stdout, one JSON object per line. The kernel starts each worker as a child process (see "Configuration"). Workers write logs to stderr.
-
-The messages below are typed in `zen_proto::worker` (`crates/zen-proto/src/worker.rs`): `Request`
-(kernel → worker), the answers, `ToolCall`/`ToolResult` and `TurnEvent` (the turn notifications),
-with a round-trip test for each against samples shaped as below. `zend` and `zen-engine` build and
-read them through these types; a worker in another language follows this page. Readers ignore
-unknown fields and default missing or `null` ones; messages (below) and `turn.usage`'s report stay
-open JSON. A change to the protocol changes this page, those types and their tests together.
+JSON-RPC 2.0 over stdin/stdout, one object per line; logs to stderr. Typed in
+`crates/zen-proto/src/worker.rs` (`Request`, answers, `ToolCall`/`ToolResult`, `TurnEvent`, each
+round-trip tested). Readers ignore unknown fields and default missing or `null` ones; messages and
+the usage report stay open JSON. A change updates this page, those types and every worker.
 
 ## Kernel → worker
 
 | Method | Params | Result |
 |---|---|---|
 | `ping` | `{}` | `{ "pong": true }` |
-| `models.list` | `{}` | `{ "authenticated": { "<engine>": bool, … }, "models": [{ "id": "<engine>/<model>", "name": "…", "engine": "…", "efforts": ["low", …], "default_effort": "medium", "context"?: tokens }] }` |
-| `turn.start` | `{ session_id, turn_id, model, effort, system_prompt, history, prompt, prompt_context, tools, resume, kind }` | `{ "ok": true }` immediately; the turn then runs asynchronously |
-| `turn.abort` | `{ session_id, turn_id? }` | `{ "ok": true }`; the worker stops the turn (`turn_id`), or every turn it runs for the session, and sends `turn.end`. The kernel always names the turn; an abort for a turn the worker doesn't run yet must stop that turn when its `turn.start` comes (see "Abort") |
-| `complete` | `{ model, system, prompt }` | `{ text, usage, model }` or `{ error }`: one completion without tools (the kernel uses it for summaries, session names and suggested next prompts; may take minutes) |
+| `models.list` | `{}` | `{ "authenticated": { "<engine>": bool, … }, "models": [{ "id": "<engine>/<model>", "name", "engine", "efforts"?: ["low", …], "default_effort"?, "context"?: tokens, … }] }` |
+| `turn.start` | `{ session_id, turn_id, model, effort, system_prompt, history, prompt, prompt_context, tools, resume, kind }` | `{ "ok": true }` at once; the turn then runs asynchronously |
+| `turn.abort` | `{ session_id, turn_id? }` | `{ "ok": true }`; stop that turn (or every turn of the session) and send `turn.end` |
+| `complete` | `{ model, system, prompt }` | `{ text, usage, model }` or `{ error }`: one completion without tools (summaries, session names, suggestions; may take minutes) |
 
-- `model` is one of the ids from `models.list`, always the model's full id (e.g. `claude/claude-opus-5-5`), never an alias that can move to another model. The kernel routes each model to the worker that listed it.
-- `efforts` are the thinking levels a model accepts, in order, and `default_effort` the one used when a session picks none. Both are optional: a model without them has no level to choose. `context` (optional) is the model's context window in tokens; the kernel summarizes against the smaller of it and its own budget (docs/context.md).
-- `effort` is the level for this turn: the session's choice, or the model's `default_effort`. The kernel always sends one for a model that has levels, so the level that ran is known; it is `null` only for models without levels. The worker must apply it, not substitute its own default.
-- `system_prompt` and `tools` are fixed for the session (docs/context.md): send them as they are, so the provider's cache keeps hitting.
-- `turn_id` is the kernel's id for this turn. The worker sends it back on every `tool.call` and notification of the turn (see "Late messages"). Messages without one are matched by session only, as from workers older than it.
-- `history` is the session so far as the kernel compiled it, in the format below. Each message carries `seq`, its number on the tape (`#12`). A user message may carry `context`, the turn context that was sent after it; send it as a second text block after the message's content, as it was sent. When older turns were summarized, the first message is the summary: a user message with `"summary": true`. Don't drop or rewrite earlier messages: each turn's history starts with the previous turn's.
-- `prompt_context` (string or null) is this turn's context (the date when it changed, …); send it as a text block after `prompt`.
-- `kind` (string or null) is the kind of session: `verifier` for a child session the kernel runs to check work (the `verify` tool, docs/brief.md), `subagent` for a delegated task, `job` for a scheduled job's run; null for the owner's sessions.
-- `resume` (`{ id }` or null) names an engine session of the worker's own that the kernel considers in sync with the tape up to this turn; the worker may continue it and send only the new prompt instead of the history (see "Engine sessions").
-- `tools` is a list of `{ name, description, parameters }` with JSON Schema parameters. These are the only tools the model may use; the worker must not give the model tools of its own that touch the machine, and must check at run time that the engine has none: `zen-engine` refuses a Claude Code run whose `system/init` event doesn't come first or lists any tool but zenbot's, and stops a Codex turn in which Codex starts any item but a message, reasoning, a plan, a compaction or a zenbot dynamic tool call (its own shell, file changes, MCP, web search, …).
+- `authenticated`: per engine, installed and answering (sign-in is checked per turn). Extra model
+  fields (Codex's `default`) pass through.
+- `model`: always a full id from `models.list`, never a moving alias; the kernel routes it to the
+  worker that listed it.
+- `efforts` (in order), `default_effort` (when the session picks none), `context` (window in tokens;
+  the kernel summarizes against the smaller of it and its budget): all optional.
+- `effort`: the session's level or the model's default; `null` only for a model without levels. The
+  worker applies it, never its own default.
+- `system_prompt`, `tools`: fixed for the session; send unchanged so the provider cache hits.
+- `turn_id`: sent back on every `tool.call` and notification of the turn (without one, matched by
+  session only).
+- `history`: the compiled session, messages below, each with its tape `seq`. A user message's
+  `context` (its turn context) goes as a second text block after its content. After a summary, the
+  first message is a user message with `"summary": true`. Never drop or rewrite messages: each
+  turn's history starts with the previous turn's.
+- `prompt_context` (string or null): this turn's context (the date when it changed), a text block
+  after `prompt`.
+- `kind` (string or null): `verifier` (a child session checking work, the `verify` tool),
+  `subagent` (a delegated task), `job` (a scheduled job's run); null for the owner's sessions.
+- `resume` (`{ id }` or null): an engine session of the worker's own that is in sync with the tape
+  up to this turn ("Engine sessions").
+- `tools`: `{ name, description, parameters }` (JSON Schema), the only tools the model may use. The
+  worker checks at run time that the engine has none of its own: `zen-engine` refuses a Claude Code
+  run whose `system/init` isn't first or lists another tool, and stops a Codex turn that starts any
+  item but a message, reasoning, a plan, a compaction or a zenbot dynamic tool call.
 
 ## Worker → kernel
 
 | Message | Kind | Params |
 |---|---|---|
-| `tool.call` | request | `{ session_id, turn_id, call_id, name, args }` → result `{ content: string, is_error: bool, content_blocks?: [...] }`. The kernel executes the tool. Optional MCP-shaped text/image blocks carry rich results; workers preserve these in tape messages and map images to their provider interface. The text includes source labels. |
+| `tool.call` | request | `{ session_id, turn_id, call_id, name, args }` → `{ content: string, is_error: bool, content_blocks?: [...] }`. The kernel runs it. `content` has source labels; optional MCP-shaped text/image `content_blocks` go in the tape message after the text, mapped to the provider |
 | `turn.delta` | notification | `{ session_id, turn_id, delta }`: streamed answer text |
 | `turn.thinking` | notification | `{ session_id, turn_id, delta }`: streamed reasoning (optional) |
-| `turn.message` | notification | `{ session_id, turn_id, message }`: a finished message, appended to the session's tape |
-| `turn.usage` | notification | `{ session_id, turn_id, engine, engine_version, input?, output?, cache_read?, cache_write?, cost_usd?, totals?, render?, engine_session?, fallback_reason?, … }`: the worker's report for the whole turn, sent before `turn.end` |
-| `turn.fallback` | notification | `{ session_id, turn_id, from, to, reason }`: a hard subscription limit caused one cross-provider continuation; the kernel records it and notifies clients |
-| `turn.end` | notification | `{ session_id, turn_id, error }`: the turn is over; `error` is null on success, `"interrupted"` after an abort |
+| `turn.message` | notification | `{ session_id, turn_id, message }`: a finished message, appended to the tape |
+| `turn.usage` | notification | `{ session_id, turn_id, engine, engine_version, provider?, model?, input?, output?, cache_read?, cache_write?, cost_usd?, totals?, render?, engine_session?, fallback_reason?, provider_reports?, … }`: the report for the whole turn, before `turn.end` |
+| `turn.fallback` | notification | `{ session_id, turn_id, from, to, reason }`: a hard subscription limit caused one cross-provider continuation |
+| `turn.end` | notification | `{ session_id, turn_id, error }`: the turn is over; `error` null on success, `"interrupted"` after an abort |
 
 ## Messages
 
-Messages use these shapes (the same as Pi's message format):
+Pi's message format:
 
 ```json
 { "role": "user", "content": "text", "timestamp": 1790000000000 }
@@ -65,65 +73,76 @@ Messages use these shapes (the same as Pi's message format):
   "isError": false, "timestamp": 0 }
 ```
 
-A worker emits one assistant message per model call, with that call's final usage and, when it can measure it, `durationMs`. It emits the assistant message announcing a tool call before calling `tool.call`, and a `toolResult` message after the kernel answers.
+One assistant message per model call, with its final usage and, when known, `durationMs`; the
+message announcing a tool call precedes its `tool.call`, a `toolResult` follows the answer. The tape
+holds what the model read: a result the engine gave without the kernel (Claude Code refusing a bad
+call) is sent too; every call gets a result before `turn.end` (one still running is waited for,
+`zen-engine` 10 s, then gets an `isError` "interrupted, effect unknown" result; a later real one is
+dropped); a call that can't be matched to its announcement is logged and fails the turn.
 
-The tape must hold what the model read (DESIGN.md, invariant 2), so:
+## Usage
 
-- A result the engine gave the model without the kernel (Claude Code refusing an unknown tool or invalid arguments) is sent as a `toolResult` message too.
-- Every tool call on the tape gets a result before `turn.end`. A turn that ends while a call is still running waits a little for it (`zen-engine`: 10 s), then sends a `toolResult` with `isError: true` saying the call was interrupted and its effect is unknown; a real result that comes later is dropped.
-- A tool call the worker can't match to the model's announcement (the engine's stream stopped announcing them) is logged and fails the turn, since its result can't be paired with a call.
-
-`turn.usage` names the engine that ran the turn and its version (e.g. `claude-code` `2.1.287`), so an engine update shows up in the traces. Totals it gives (tokens, `cost_usd`) are taken for the turn as they are; for the ones it leaves out, the kernel sums the turn's messages. Give totals when the engine knows more than the messages show (Claude Code reports side calls only in its result; Codex reports tokens only per turn). `input` is uncached input only; cached input is `cache_read` (D-075). A resumed engine session's totals are taken as the whole session's, less the previous turn's, unless the report says `totals: "turn"` (Codex). Without `cost_usd`, the kernel estimates an API-equivalent cost from its price table (`prices.rs`) when it has the model's price. Send `turn.usage` on every path, a failed start included.
-
-A turn that ran on more than one provider (the quota continuation below) sends one report with `provider: "mixed"` and each provider's own report in `provider_reports`; the kernel makes each one per turn (see "Engine sessions") and adds them up.
+`engine`, `engine_version` name what ran. Totals given (tokens, `cost_usd`) are taken as is; the
+kernel sums the turn's messages for the rest (give totals when the engine knows more, e.g. Claude
+Code side calls). `input` is uncached only; cached is `cache_read` (D-075). A resumed engine
+session's totals count as cumulative (the kernel subtracts the previous turn's) unless `totals:
+"turn"`. Without `cost_usd`, `crates/zend/src/prices.rs` estimates one. Send it on every path, a
+failed start included. After a failover: `provider: "mixed"` and each report in `provider_reports`.
 
 ## Engine sessions
 
-Some engines cache earlier turns only inside their own sessions (measured for Claude Code and Codex, see docs/context.md). A worker may keep one engine session per kernel session, as a cache of the tape:
+Engines cache earlier turns only inside their own sessions, so a worker may keep one per kernel
+session as a cache of the tape. It reports `engine_session: { id, resumable }` (`resumable` only
+after a clean finish); if nothing was written since and the model is on the same engine, the next
+turn gets `resume: { id }` and the worker sends only the new prompt and context; otherwise (or if
+the engine lost it) it starts from `history`. `fallback_reason` says why a turn couldn't run as
+asked; `render` how history reached the engine: `resume`, `seed`, `inject` (native items), `native`,
+`transcript`.
 
-- It reports `engine_session: { id, resumable }` in `turn.usage`; `resumable` is true only when the turn finished cleanly, so the engine's session holds exactly what the tape holds.
-- The kernel records it on the tape. On the next turn, if nothing was written since (no other turn, summary or new instructions) and the model is on the same engine, it sends `resume: { id }`.
-- With `resume`, the worker continues that session and sends only the new prompt and its context. If the engine no longer has the session, or `resume` is null, it starts a new one from `history`.
-- `fallback_reason` (string) says why the turn couldn't run as asked and fell back: the engine no longer had the session to `resume`, or refused the history as native items (so it went as a transcript). The worker also logs it.
-- `render` says how the history reached the engine: `resume`, `seed` (new engine session from the history), `inject` (native items), `native` (messages), `transcript` (quoted text, no engine session).
-- An engine that continues its own session may report totals for the whole session; the kernel makes them per turn by subtracting the previous turn's report for the same engine session.
+`ZEN_CLAUDE_RESUME=0` and `ZEN_CODEX_RESUME=0` run every turn without an engine session;
+`ZEN_CODEX_INJECT=0` replays Codex history as a transcript.
 
-Switches: `ZEN_CLAUDE_RESUME=0` and `ZEN_CODEX_RESUME=0` run every turn without an engine session; `ZEN_CODEX_INJECT=0` replays Codex history as a transcript.
-
-`zen-engine` makes at most one cross-provider continuation after an **explicit hard subscription usage-limit** error (not a temporary throttle or generic 429): Claude → `codex/gpt-6.1-sol`, Codex → `claude/claude-sonnet-5-5`. It confirms both CLIs use subscription sign-in, refuses an API-key environment, includes the original prompt and every completed message/tool result in the new engine's history, and does not resume either engine session. If a tool call has no result or the captured transcript is too large, it stops with the original error rather than risking a duplicate action. `ZEN_QUOTA_FAILOVER=0` disables it; `ZEN_FAILOVER_CLAUDE_TO_CODEX` and `ZEN_FAILOVER_CODEX_TO_CLAUDE` override targets (full ids). The kernel records the switch in the tape, shows a status line, and moves the session to the target model, which its next turns use until the owner picks another (D-058; a `model` event tells clients). The final usage report keeps each provider's report in `provider_reports`; the kernel makes each one per turn (a resumed Claude session's totals are cumulative) and adds them up.
+**Failover.** After an explicit hard subscription usage limit (not a throttle), `zen-engine` makes
+one cross-provider continuation: Claude → `codex/gpt-6.1-sol`, Codex → `claude/claude-sonnet-5-5`
+(`ZEN_FAILOVER_CLAUDE_TO_CODEX`, `ZEN_FAILOVER_CODEX_TO_CLAUDE`; `ZEN_QUOTA_FAILOVER=0` off). Both
+CLIs must use subscription sign-in. The new engine gets the prompt and every completed message, no
+session is resumed; an unanswered tool call or an oversized transcript keeps the original error. The
+kernel records it, and the session keeps the target model until the owner picks another (D-058).
 
 ## What the kernel guarantees
 
-- **Crashes.** The kernel restarts a worker that exits, with backoff. Turns it was running end with an error (`turn.end` is sent to clients by the kernel), and requests waiting on it fail at once.
-- **Abort.** On `turn.abort` the kernel also stops its own tool calls for that session: a running command is killed (its whole process group), and the pending `tool.call` returns an `is_error` result saying it was interrupted. The kernel names the turn (`turn_id`), and if the turn was aborted while its `turn.start` was on the way, it sends `turn.abort` again once `turn.start` is answered. A worker must handle `turn.start` and `turn.abort` in the order they arrive, and remember turn ids aborted before their `turn.start` (`zen-engine` keeps the last 256) so such a turn ends at once with `"interrupted"`.
-- **Stalled turns.** If a turn sends nothing and runs no tool for `ZEN_TURN_IDLE_SECS` (default 600), the kernel sends `turn.abort`. Any turn still running `ZEN_TURN_ABORT_GRACE_SECS` (default 30) after an abort is ended by the kernel.
-- **Late messages.** Messages from a turn that has already ended (another `turn_id`, a session with no turn, or one running on another worker) are dropped; a late `tool.call` gets an `is_error` result. The kernel may end a turn the worker is still running (after an abort, see above), so the worker must key its running turns by `turn_id`, not by session: the session's next turn can start while the old one is still stopping.
+- **Crashes.** A worker that exits restarts with backoff; its turns end with an error.
+- **Abort.** The kernel kills the session's running command (process group) and answers the pending
+  `tool.call` "interrupted". An abort sent while `turn.start` was in flight is sent again once it is
+  answered; workers handle both in arrival order and remember ids aborted before their start
+  (`zen-engine`: 256), ending such a turn at once with `"interrupted"`.
+- **Stalled turns.** Silent for `ZEN_TURN_IDLE_SECS` (600): `turn.abort`; still running
+  `ZEN_TURN_ABORT_GRACE_SECS` (30) later: ended by the kernel.
+- **Late messages** for an ended turn are dropped (a late `tool.call` gets `is_error`). Key turns
+  by `turn_id`: the next can start while the old one stops. Always end a turn with `turn.end`.
 
-So a worker never has to clean up after the kernel, but it must answer `turn.abort` promptly and always finish a turn with `turn.end`.
+## `zen-engine`
 
-## Engines in `zen-engine`
+Engines (`claude`, `codex`, `faux` with `ZEN_FAUX=1`) implement the `Engine` trait in
+`crates/zen-engine/src/engine.rs`; `engine::all()` lists them. Codex's models are asked with a 15 s
+limit and cached an hour (or until `codex` changes).
 
-`zen-engine` runs each model on an engine (`crates/zen-engine/src/engine.rs`): `claude`, `codex`
-and, with `ZEN_FAUX=1`, `faux`. Each implements the `Engine` trait (its name, the model id prefix;
-its CLI's version; its models; `run_turn`; `complete`; its failover target and subscription
-sign-in check), and `engine::all()` lists them. The protocol loop and failover go through that
-list, so adding an engine is one module implementing the trait and its line in `all`.
-
-## Testing without a model
-
-With `ZEN_FAUX=1`, `zen-engine` also lists `faux/smoke`, a scripted model that drives a real turn through the kernel: by default one `bash` call, then an answer. `ZEN_FAUX_SCRIPT` can point to a JSON list of steps (or an object of lists keyed by kind of session: `verify` for a verifier, `default` otherwise) (`{"tool": name, "args": {…}}`, `{"text": "…"}`, `{"sleep": secs}`, `{"exit": code}`; a step with `"when": "<text>"` runs only in turns whose prompt contains the text, and one with `"ignore_abort": true` keeps running through an abort) to test tools, abort, the watchdog, late messages and crash recovery. `scripts/upgrade.sh` runs one such turn against the new build before installing it.
+**Without a model.** `faux/smoke` (`ZEN_FAUX=1`) scripts real turns: by default a `bash` call, then
+an answer. `ZEN_FAUX_SCRIPT`: a JSON list of steps (or lists keyed
+`verify`/`default`): `{"tool", "args"}`, `{"text"}`, `{"sleep": secs}`, `{"exit": code}`, optionally
+`"when": "<prompt text>"`, `"ignore_abort": true`. `scripts/upgrade.sh` smoke-tests builds this way.
 
 ## Configuration
 
 `ZEN_WORKERS` lists the workers to start (comma-separated, default `engine`):
 
-| Name | Command | What it serves |
+| Name | Command | Serves |
 |---|---|---|
-| `engine` | `zen-engine` next to `zend` (override with `ZEN_ENGINE_CMD`) | `claude/*` via the Claude Code CLI, `codex/*` via `codex app-server`, on the owner's subscriptions; keeps engine sessions (see above) |
-| any other `name` | `ZEN_WORKER_<NAME>_CMD` | whatever its `models.list` returns |
+| `engine` | `zen-engine` next to `zend` (`ZEN_ENGINE_CMD` overrides) | `claude/*` via the Claude Code CLI, `codex/*` via `codex app-server`, on the owner's subscriptions |
+| any other | `ZEN_WORKER_<NAME>_CMD` | whatever its `models.list` returns |
 
-A name without its `ZEN_WORKER_<NAME>_CMD` (a retired worker such as `pi`, a typo) is ignored: the kernel logs a warning and reports it in `/health` (`ignored_workers`) and `zen status`, and runs without it. If no name is left, it starts `engine`.
-
-The kernel starts each worker with `bash -c <command>` (not a login shell), without its own secrets: every variable named like a secret (`secrets::is_secret_var`: its token, `DATABASE_URL`, the OpenRouter and web search keys, …) is removed, except the engines' sign-ins (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`).
-
-If a worker doesn't answer `models.list` when the kernel refreshes its models, the kernel keeps routing the models it listed before. `zen-engine` asks Codex for its models with a 15 s limit and keeps the list for an hour, or until the `codex` binary changes; a failed lookup returns the previous list.
+An unknown name (e.g. retired `pi`) is ignored and shown in `/health` (`ignored_workers`) and
+`zen status`. Each worker runs under `bash -c <command>` (not a login shell) without the kernel's secrets: every
+secret-named variable (`secrets::is_secret_var`) is removed except the engines' sign-ins
+(`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`,
+`CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`). A worker that misses a `models.list` refresh keeps its models.

@@ -36,8 +36,13 @@ NODE_DIR="$HOME/.local/node"
 # Pinned, and checked against the SHA-256 nodejs.org publishes for it (SHASUMS256.txt for the
 # version), so a tampered or truncated download is never unpacked. Bump both together.
 NODE_VERSION=v22.20.0
-NODE_TAR=node-$NODE_VERSION-linux-x64.tar.xz
-NODE_SHA256=00bbd05e306ea68b6e13e17360d0e2f680b493ef95f2fea1c4296ff7437530bc
+# 64-bit Linux on x86_64 or ARM (a Raspberry Pi with 64-bit Pi OS, D-077).
+case "$(uname -m)" in
+  x86_64|amd64) NODE_ARCH=x64 NODE_SHA256=00bbd05e306ea68b6e13e17360d0e2f680b493ef95f2fea1c4296ff7437530bc ;;
+  aarch64|arm64) NODE_ARCH=arm64 NODE_SHA256=06907b9c088ce62305bc1530e5c1ae1510245114645768f7750c349c5b6fe667 ;;
+  *) echo "zenbot runs on 64-bit Linux (x86_64 or aarch64); this is $(uname -m)" >&2; exit 1 ;;
+esac
+NODE_TAR=node-$NODE_VERSION-linux-$NODE_ARCH.tar.xz
 if ! "$NODE_DIR/bin/node" --version 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])\.'; then
   mkdir -p "$NODE_DIR"
   NODE_DL=$(mktemp -d)

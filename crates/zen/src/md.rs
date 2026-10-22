@@ -36,12 +36,14 @@ pub fn line(text: impl Into<String>, sty: Sty) -> Line {
     vec![(text.into(), sty)]
 }
 
-/// Text made safe for the terminal: control characters (C0 except newline, DEL, C1) are dropped
-/// and tabs become four spaces. Model replies, tool output, files and kernel messages can carry
-/// escape sequences that would otherwise set the window title, move the cursor, clear the screen
-/// or write to the clipboard; they would also throw off width-based layout.
+/// Text made safe for the terminal: control characters (C0 except newline, DEL, C1) and invisible
+/// format characters (`zen_proto::invisible`: bidi controls, zero-width spaces, tags; D-077) are
+/// dropped and tabs become four spaces. Model replies, tool output, files and kernel messages can
+/// carry escape sequences that would otherwise set the window title, move the cursor, clear the
+/// screen or write to the clipboard, and invisible characters that hide or reorder what is shown;
+/// both would also throw off width-based layout.
 pub fn sanitize(s: &str) -> std::borrow::Cow<'_, str> {
-    let unsafe_char = |c: char| c.is_control() && c != '\n'; // C0, DEL and C1
+    let unsafe_char = |c: char| (c.is_control() && c != '\n') || zen_proto::invisible(c); // C0, DEL, C1, invisible
     if !s.contains(unsafe_char) {
         return std::borrow::Cow::Borrowed(s);
     }
@@ -277,6 +279,15 @@ impl Md {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_drops_invisible_reordering_and_tag_characters() {
+        // "evil.exe" shown as "exe.live" by a right-to-left override, and an invisible tag message.
+        assert_eq!(sanitize("file\u{202E}exe.live"), "fileexe.live");
+        assert_eq!(sanitize("ok\u{E0041}\u{E0042}"), "ok");
+        assert_eq!(sanitize("a\u{200B}b\u{FEFF}"), "ab");
+        assert_eq!(sanitize("👨\u{200D}👩"), "👨\u{200D}👩", "emoji joiners stay");
+    }
 
     #[test]
     fn escape_sequences_never_reach_the_terminal() {

@@ -182,7 +182,22 @@ if wait_healthy "$HEALTH" 45; then
     TRIMMED=$(trim_target "$t" 2>>"$LOG") || true
     [ -z "$TRIMMED" ] || log "$TRIMMED"
   done
-
+  # zen-matrix, when upgrade.sh rebuilt it (D-077): swap it in, keep the old one, and put that
+  # back if the bridge isn't running 10 seconds after its restart.
+  if [ -f "$STAGE/zen-matrix" ]; then
+    MV=$(cat "$STAGE/matrix-version" 2>/dev/null)
+    { [ ! -f "$BIN/zen-matrix" ] || cp -f "$BIN/zen-matrix" "$BIN/zen-matrix.prev"; } \
+      && install -m 755 "$STAGE/zen-matrix" "$BIN/zen-matrix.new" && mv -f "$BIN/zen-matrix.new" "$BIN/zen-matrix"
+    sudo systemctl restart zen-matrix 2>>"$LOG"; sleep 10
+    if systemctl is-active --quiet zen-matrix; then
+      echo "$MV" > "$HOME/.zenbot/matrix.version"
+      log "zen-matrix updated (sources at $MV)"
+    else
+      [ -f "$BIN/zen-matrix.prev" ] && mv -f "$BIN/zen-matrix.prev" "$BIN/zen-matrix"
+      sudo systemctl restart zen-matrix 2>>"$LOG"
+      log "zen-matrix update FAILED to start; the previous bridge is back (journalctl -u zen-matrix)"
+    fi
+  fi
   exit 0
 fi
 

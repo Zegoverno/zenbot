@@ -23,9 +23,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
 
 HISTORY = ("PROGRESS.md", "DECISIONS.md", "docs/archive/")
-# Line budgets (D-061): when one is exceeded, move old history to docs/archive/ (AGENTS.md) or
-# tighten the doc; raise a budget only on purpose.
-BUDGETS = {"PROGRESS.md": 500, "docs": 4700}
+# Budgets (D-061, D-077's docs rewrite): when one is exceeded, move old history to docs/archive/
+# (AGENTS.md) or tighten the doc; raise a budget only on purpose. "docs" is the root and docs/*.md.
+BUDGETS = {"PROGRESS.md": 500, "docs": 2300}
+DOCS_BYTES = 140_000
 problems = []
 
 
@@ -130,6 +131,9 @@ for name, budget in BUDGETS.items():
     if n > budget:
         problems.append(f"{name}: {n} lines, over its budget of {budget} (move old history to "
                         "docs/archive/, tighten the doc, or raise the budget in check-docs.py on purpose)")
+docs_bytes = sum(len(read(d).encode()) for d in tracked("*.md") if os.path.dirname(d) in ("", "docs"))
+if docs_bytes > DOCS_BYTES:
+    problems.append(f"docs: {docs_bytes} bytes, over the {DOCS_BYTES}-byte budget (tighten a doc or move history to docs/archive/)")
 
 # --- A change to the code says what shipped ---------------------------------------------------------
 

@@ -2,8 +2,8 @@
 
 > Read this first. It says what zenbot is for, how success is measured and what constrains it.
 > Everything else follows from here: [ROADMAP.md](ROADMAP.md) for what's being built now,
-> [DESIGN.md](DESIGN.md) for how the system works, [SPEC.md](SPEC.md) for the modules it is meant
-> to have, [DECISIONS.md](DECISIONS.md) for why things are the way they are.
+> [DESIGN.md](DESIGN.md) for how the system works and its target design, [DECISIONS.md](DECISIONS.md)
+> for the rules in force.
 
 ## What zenbot is
 
@@ -45,8 +45,8 @@ tools does better on open-ended jobs than a fixed sequence of steps. zenbot owns
 tools, skills, memory and knowledge; any model can do the work. Fixed rules exist only for:
 
 - **authority:** the owner starts jobs and sets the budget; the agent never decides the owner's calls;
-- **safety:** every action runs through the kernel, secrets masked, audited, and sandboxed where it
-  matters most (a verifier's shell and a tainted session's shell); an ordinary session's shell is not sandboxed (DESIGN.md, "Security today");
+- **safety:** every action runs through the kernel, secrets masked, audited, and every shell
+  contained (DESIGN.md);
 - **measurement:** the tape records everything, so work can be judged and improved.
 
 ## Principles
@@ -82,7 +82,6 @@ tools, skills, memory and knowledge; any model can do the work. Fixed rules exis
   (github.com/Zegoverno/zenbot).
 - **Subscriptions first.** Models run on the owner's existing Claude and ChatGPT plans through
   officially supported paths; a small, capped API budget covers System One and embeddings.
-
 - **zenbot improves zenbot.** Its own development is the first real workload (dogfooding).
 
 ## Thesis
