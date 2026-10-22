@@ -308,7 +308,7 @@ engine_cap() {
   local ws; ws=$(new_workspace engine-cap)
   start_kernel "$ws" "$(script delegate.json)" ZEN_ENGINE_CONCURRENCY=2 ZEN_DEFAULT_MODEL=faux/smoke
   local sid; sid=$(zen ask --json -m faux/smoke "fan out" | jq -r .session_id)
-  local kids="SELECT t.* FROM turns t JOIN sessions s ON s.id = t.session_id WHERE s.parent = '$sid' AND s.kind = 'subagent'"
+  local kids="SELECT t.* FROM turns t JOIN sessions s ON s.id = t.session_id WHERE s.parent = X'${sid//-/}' AND s.kind = 'subagent'"
   check "every subtask finished" eq "$(q "SELECT count(*) FROM ($kids) k WHERE outcome = 'ok'")" 8
   check "never more than two subagent turns at once" eq "$(q "SELECT max(n) FROM (SELECT count(b.id) AS n FROM ($kids) a JOIN ($kids) b ON b.started_at < a.ended_at AND b.ended_at > a.started_at GROUP BY a.id) x")" 2
 }
@@ -329,17 +329,17 @@ routing() {
   local chosen="SELECT input->>'kind' || '|' || chosen || '|' || probability FROM decisions WHERE point = 'model' AND session_id ="
   local chat; chat=$(new)
   zen ask --json -s "$chat" "ROUTE-CHAT what does this error mean" >/dev/null
-  check "a confident chat goes to its route" eq "$(q "$model '$chat'")" "faux/backup|router"
-  check "the choice is logged with its kind and probability" eq "$(q "$chosen '$chat'")" "chat|faux/backup|1"
+  check "a confident chat goes to its route" eq "$(q "$model X'${chat//-/}'")" "faux/backup|router"
+  check "the choice is logged with its kind and probability" eq "$(q "$chosen X'${chat//-/}'")" "chat|faux/backup|1"
   zen ask --json -s "$chat" "ROUTE-PLAN now design the whole system" >/dev/null
-  check "a later prompt keeps the session's model" eq "$(q "$model '$chat'")" "faux/backup|router"
+  check "a later prompt keeps the session's model" eq "$(q "$model X'${chat//-/}'")" "faux/backup|router"
   local vague; vague=$(new)
   zen ask --json -s "$vague" "ROUTE-VAGUE hmm" >/dev/null
   check "an unsure kind keeps the default" eq "$(q "$model X'${vague//-/}'")/$(q "SELECT input->>'kind' FROM decisions WHERE point = 'model' AND session_id = X'${vague//-/}'")" "faux/smoke|router/unsure"
   local pinned; pinned=$(zen ask --json -m faux/smoke "ROUTE-CHAT hello" | jq -r .session_id)
   check "a model the owner named is never rerouted" eq "$(q "$model X'${pinned//-/}'")/$(q "SELECT count(*) FROM decisions WHERE point = 'model' AND session_id = X'${pinned//-/}'")" "faux/smoke|owner/0"
   curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"model":"faux/smoke"}' "$URL/api/sessions/$chat" >/dev/null
-  check "/model makes it the owner's choice" eq "$(q "$model '$chat'")" "faux/smoke|owner"
+  check "/model makes it the owner's choice" eq "$(q "$model X'${chat//-/}'")" "faux/smoke|owner"
   local policy; policy=$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/policy" | jq -c .policy)
   check "the policy holds the starting kinds; planning never explores" eq "$(jq -r '[(.kinds | length >= 9), .kinds.planning.explore, .routes.planning.model, .explore] | join("|")' <<<"$policy")" "true|false|faux/smoke|0.05"
   zen jobs add routed --schedule "every 1h" --prompt "ROUTE-CHAT a quick daily check" >/dev/null
@@ -802,7 +802,7 @@ memory_sleep_judged() {
   check "a memory changed during the sleep is left as it is now" eq "$(q "SELECT text || '/' || tier FROM memories WHERE id=$mid")" 'a corrected pending decision/short'
   check "and the sleep says so" eq "$(jq -r .changed "$TMP/sleep-concurrent.json")" 1
   local writer; writer=$(zen sessions new --json -m faux/smoke | jq -r .id)
-  local denied; denied=$(q "INSERT INTO memories(text,source,session_id) VALUES('PROMOTE from a denied writer','inferred','$writer') RETURNING id")
+  local denied; denied=$(q "INSERT INTO memories(text,source,session_id) VALUES('PROMOTE from a denied writer','inferred',X'${writer//-/}') RETURNING id")
   curl -sf -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{}' "$URL/api/sessions/$writer/deny" >/dev/null
   zen memory sleep --json >/dev/null
   check "a memory whose writer was denied is archived, not promoted" eq "$(q "SELECT tier || '/' || reason FROM memories WHERE id=$denied")" "archived/a session that wrote it was denied"
@@ -1019,7 +1019,7 @@ scheduled_jobs() {
   for job in wiki skills routes prune; do zen jobs run "$job" >/dev/null; done
   check "each upkeep job runs by hand and records its run" poll \
     "SELECT group_concat(j.name || ':' || (r.status IN ('ok', 'silent')), ',' ORDER BY j.name) FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name IN ('wiki', 'skills', 'routes', 'prune') AND r.id > $before AND r.status <> 'running'" \
-    prune:true,routes:true,skills:true,wiki:true
+    prune:1,routes:1,skills:1,wiki:1
   check "zen status shows the jobs" grep -q "^jobs .*jobs (" <<<"$(zen status)"
   kill "$srv" 2>/dev/null || true
 }
@@ -1101,15 +1101,15 @@ job_post_to() {
   # A report that can't be delivered (here a trigger refuses its target's tape) never holds up the
   # schedule: a due job still runs, and the report waits for its next try.
   local stuck; stuck=$(zen ask --json -m faux/smoke "OWNER-HELLO" | jq -r .session_id)
-  q "CREATE FUNCTION e2e_refuse() RETURNS trigger LANGUAGE plpgsql AS \$\$ BEGIN IF NEW.session_id = X'${stuck//-/}' THEN RAISE EXCEPTION 'e2e: refused'; END IF; RETURN NEW; END \$\$;
-     CREATE TRIGGER e2e_refuse BEFORE INSERT ON tape_events FOR EACH ROW EXECUTE FUNCTION e2e_refuse();
+  q "CREATE TRIGGER e2e_refuse BEFORE INSERT ON tape_events
+     WHEN NEW.session_id = X'${stuck//-/}' BEGIN SELECT RAISE(ABORT,'e2e: refused'); END;
      INSERT INTO job_runs (job_id, trigger, status, output, ended_at, pending_to) SELECT id, 'owner', 'ok', 'STUCK', strftime('%Y-%m-%dT%H:%M:%f+00:00','now'), X'${stuck//-/}' FROM jobs WHERE name = 'ppost';
      UPDATE job_runs SET risk = 1 WHERE output = 'STUCK'" >/dev/null
   zen jobs add pdue --schedule "every 1h" --prompt "JOBTASK-A" >/dev/null
   q "UPDATE jobs SET next_run_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE name = 'pdue'" >/dev/null
   check "a failing delivery doesn't stop a due job" poll "$runs 'pdue'" ok
   check "and that report stays queued for its next try" eq "$(q "SELECT count(*) FROM job_runs WHERE output = 'STUCK' AND pending_to = X'${stuck//-/}'")" 1
-  q "DROP TRIGGER e2e_refuse ON tape_events; DROP FUNCTION e2e_refuse()" >/dev/null
+  q "DROP TRIGGER e2e_refuse" >/dev/null
 }
 
 # Taint on data (taint.rs, D-053): what a session that read untrusted content stored carries the
@@ -1364,20 +1364,20 @@ action_gate() {
   # The provenance tests need SQL, but not a kernel or a subscription; use a separate database.
   local native_db="${DB}_sources"
   db_create "$native_db" >/dev/null
-  check "native source, redirect eligibility and forged-provenance checks" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend source_database -- --ignored
-  check "legacy wiki migration retains every writer and later denial" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend legacy_migration_database -- --ignored
-  check "editing copied bytes preserves per-writer maximum provenance" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend copied_bytes_edit_database -- --ignored
-  check "source proposals bind cached snapshots and reject stale approvals" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend source_cache_proposals_database -- --ignored
-  check "System One learns from labelled outcomes: a calibration curve, a proposal, queue labels" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend s1_learn_database -- --ignored
+  check "native source, redirect eligibility and forged-provenance checks" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q source_database -- --include-ignored
+  check "legacy wiki migration retains every writer and later denial" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q legacy_migration_database -- --include-ignored
+  check "editing copied bytes preserves per-writer maximum provenance" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q copied_bytes_edit_database -- --include-ignored
+  check "source proposals bind cached snapshots and reject stale approvals" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q source_cache_proposals_database -- --include-ignored
+  check "System One learns from labelled outcomes: a calibration curve, a proposal, queue labels" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q s1_learn_database -- --include-ignored
   local source_port=$((PORT + 13))
   python3 "$REPO/scripts/e2e/systemone_stub.py" "$source_port" & local source_srv=$!
   sleep 0.3
-  check "metadata scoring, public surfaces, poisoned text, unavailable and labelled 2–3 admission" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" ZEN_S1_URL="http://127.0.0.1:$source_port/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key cargo test --release -q -p zend source_system_one_database -- --ignored
-  check "authenticated root, pre-exposure plans and stored job definitions" env TASK_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend task_database -- --ignored
-  check "queue decisions are atomic, terminal and contamination-safe" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend queue_decisions_database -- --ignored
-  check "permission snapshots refresh on risk, lock and denial" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend permission_snapshot_database -- --ignored
-  check "MCP forms require explicit validated owner responses and cancel on expiry, interruption or restart" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend owner_response_lifecycle_database -- --ignored
-  check "job source authority is owner-only and revoked by agent edits" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend owner_job_authority_database -- --ignored
+  check "metadata scoring, public surfaces, poisoned text, unavailable and labelled 2–3 admission" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" ZEN_S1_URL="http://127.0.0.1:$source_port/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key cargo test --release --locked -q source_system_one_database -- --include-ignored
+  check "authenticated root, pre-exposure plans and stored job definitions" env TASK_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q task_database -- --include-ignored
+  check "queue decisions are atomic, terminal and contamination-safe" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q queue_decisions_database -- --include-ignored
+  check "permission snapshots refresh on risk, lock and denial" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q permission_snapshot_database -- --include-ignored
+  check "MCP forms require explicit validated owner responses and cancel on expiry, interruption or restart" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q owner_response_lifecycle_database -- --include-ignored
+  check "job source authority is owner-only and revoked by agent edits" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q owner_job_authority_database -- --include-ignored
   db_drop "$native_db"
   local ws; ws=$(new_workspace action-gate)
   local port=$((PORT + 12))
@@ -1395,7 +1395,7 @@ action_gate() {
   zen sources add example.org --risk 3 >/dev/null
   check "owner CLI lists exact normalized sources" eq "$(zen --json sources list | jq -r 'map(.source) | join(",")')" example.com,example.org
   local rated; rated=$(zen ask --json -m faux/smoke "GATE-READ" | jq -r .session_id)
-  check "search takes max source rating; level 3 does not set the full-gate marker" eq "$(q "SELECT risk || '/' || (risky_at IS NOT NULL) FROM sessions WHERE id=X'${rated//-/}'")" 3/false
+  check "search takes max source rating; level 3 does not set the full-gate marker" eq "$(q "SELECT risk || '/' || (risky_at IS NOT NULL) FROM sessions WHERE id=X'${rated//-/}'")" 3/0
   check "web result provenance is kernel-recorded" eq "$(q "SELECT risk || '/' || origin FROM tape_events WHERE session_id=X'${rated//-/}' AND payload->>'toolName'='web_search'")" 3/web_search
   zen sources rm example.org >/dev/null
   zen ask --json -s "$rated" "GATE-READ" >/dev/null

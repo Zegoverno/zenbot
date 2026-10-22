@@ -6,6 +6,12 @@
 
 ---
 
+## 2026-10-22 — Preserve all-word search and exercise SQLite fixtures
+
+Full-text search requires every literal query word, preserving PostgreSQL’s ordinary multiword
+behavior so typed-link expansion still brings in related records. A partial-word regression guards
+this behavior. End-to-end fixtures use SQLite UUID blobs, booleans and failure-injection triggers.
+
 ## 2026-10-22 — Account for the bundled SQLite binary
 
 The kernel release size budget includes SQLite, FTS5 and sqlite-vec: measured at 22,974 KiB

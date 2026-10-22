@@ -509,7 +509,7 @@ fn fts_query(query: &str) -> String {
     let words: Vec<String> = query.split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|w| !w.is_empty()).take(64)
         .map(|w| format!("\"{}\"", w.replace('"', "\"\""))).collect();
-    if words.is_empty() { "\"\"".into() } else { words.join(" OR ") }
+    if words.is_empty() { "\"\"".into() } else { words.join(" AND ") }
 }
 
 pub async fn query(db: &SqlitePool, q: &str, kinds: &[&str], session: Option<Uuid>, limit: i64) -> Result<Vec<Found>> {
@@ -961,6 +961,7 @@ mod tests {
         for (kind,reference,ident,body) in [
             ("memory","m1","crates/first_file.rs","Decisão: ação e memória de São Paulo"),
             ("memory","m2","crates/firstXfile.rs","Different identifier"),
+            ("memory","m3","unrelated","Ação without the other query word"),
             ("turn","s1","crates/first_file.rs","Only the selected scope may appear"),
         ] {
             sqlx::query("INSERT INTO search_docs(kind,ref,ident,body,session_id) VALUES($1,$2,$3,$4,$5)")
@@ -972,7 +973,7 @@ mod tests {
         assert!(!found.iter().any(|f|f.reference=="s1"));
         assert!(!found.iter().any(|f|f.reference=="m2" && f.exact));
         let found=query_candidates(&db,"acao memoria",&["memory"],None,8,None).await?;
-        assert_eq!(found[0].reference,"m1");
+        assert_eq!(found.iter().map(|f| f.reference.as_str()).collect::<Vec<_>>(),vec!["m1"]);
         for q in ["\"", "***", "foo:bar NOT (", "", "\"unclosed"] {
             query_candidates(&db,q,&["memory"],None,8,None).await?;
         }

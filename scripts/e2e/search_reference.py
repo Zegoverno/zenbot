@@ -13,7 +13,7 @@ with sqlite3.connect(path) as db:
     db.row_factory=sqlite3.Row
     docs={r['id']:r for r in db.execute('SELECT * FROM search_docs') if r['kind'] in allowed}
     exact_ids=sorted(i for i,r in docs.items() if exact and exact.lower() in (r['ident'] or '').lower())[:10]
-    terms=' OR '.join('"'+w+'"' for w in re.findall(r'\w+',query)[:64]) or '""'
+    terms=' AND '.join('"'+w+'"' for w in re.findall(r'\w+',query)[:64]) or '""'
     text=[r[0] for r in db.execute('SELECT rowid,bm25(search_docs_fts,5.0,3.0,1.0) AS score FROM search_docs_fts WHERE search_docs_fts MATCH ? ORDER BY score,rowid',(terms,)) if r[0] in docs][:50]
     def distance(row):
         v=struct.unpack('<1536f',row['embedding'])
