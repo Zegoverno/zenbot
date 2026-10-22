@@ -475,9 +475,8 @@ pub(crate) async fn engine_slot(app: &AppState, id: Uuid, kind: Option<&str>) ->
     if let Ok(p) = pool.clone().try_acquire_owned() {
         return Some(p);
     }
-    if kind.is_none() {
-        return None;
-    }
+    // No slot free: the owner's turn (no kind) runs without one; background work waits.
+    kind?;
     let limit = crate::config::get().engine_concurrency;
     app.emit(id, json!({ "type": "status", "text": format!("waiting for an engine ({limit} busy)") })).await;
     tracing::info!("session {id} waits for one of {limit} engine slots");
