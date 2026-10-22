@@ -14,7 +14,13 @@ CHECK=
 if [ "${1:-}" = "--check" ]; then CHECK="${2:-HEAD}"; fi
 
 [ "${ZEN_BUILD_FROM_SOURCE:-}" = "1" ] && exit 1
-[ "$(uname -s)" = "Linux" ] && [ "$(uname -m)" = "x86_64" ] || exit 1
+# CI publishes x86_64 and aarch64 builds (glibc; D-077); anything else builds from source.
+[ "$(uname -s)" = "Linux" ] || exit 1
+case "$(uname -m)" in
+  x86_64|amd64) ARCH=x86_64 ;;
+  aarch64|arm64) ARCH=aarch64 ;;
+  *) exit 1 ;;
+esac
 if [ -z "$CHECK" ]; then
   # Local edits to anything compiled must be built locally.
   git diff --quiet HEAD -- crates Cargo.toml Cargo.lock 2>/dev/null || exit 1
@@ -31,7 +37,7 @@ SLUG=$(echo "$ORIGIN" | sed -nE 's#^(https://github.com/|git@github.com:)([^/]+/
 BASE="${ZEN_RELEASE_BASE:-${SLUG:+https://github.com/$SLUG/releases/download/edge}}"
 [ -n "$BASE" ] || exit 1
 
-NAME="zenbot-x86_64-linux-$SHA.tar.gz"
+NAME="zenbot-$ARCH-linux-$SHA.tar.gz"
 if [ -n "$CHECK" ]; then
   curl --connect-timeout 10 --max-time 20 -fsSIL -o /dev/null "$BASE/$NAME.sha256" 2>/dev/null
   exit $?

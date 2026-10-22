@@ -66,11 +66,33 @@ jobs:
       - name: Clippy
         run: cargo clippy --release --locked --all-targets -- -D warnings
 
+  arm64:
+    # The aarch64 build (D-077, Raspberry Pi): it must compile and pass its unit tests on every pull
+    # request, so main never breaks the release of that architecture.
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch, 2026-10-09
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: arm64
+      - name: Build
+        run: cargo build --release --locked
+      - name: Unit tests
+        run: cargo test --release --locked
+
   release:
     needs: [check]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    # Oldest supported Ubuntu runner: binaries built against its glibc run on newer distros too.
-    runs-on: ubuntu-22.04
+    # One build per architecture (D-077), each on the oldest supported Ubuntu runner: binaries built
+    # against its glibc (2.35) run on newer distros too, Raspberry Pi OS Bookworm included.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-22.04, arch: x86_64 }
+          - { runner: ubuntu-22.04-arm, arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
     steps:
@@ -78,7 +100,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch, 2026-10-09
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: dist
+          key: dist-${{ matrix.arch }}
       - name: Build
         # The `dist` profile (Cargo.toml): the release build with whole-program optimization, smaller.
         run: cargo build --profile dist --locked
@@ -102,16 +124,17 @@ jobs:
           mkdir -p dist/zenbot
           cp target/dist/zend target/dist/zen target/dist/zen-engine dist/zenbot/
           echo "$SHA" > dist/zenbot/VERSION
-          tar -C dist/zenbot -czf "dist/zenbot-x86_64-linux-$SHA.tar.gz" .
-          (cd dist && sha256sum "zenbot-x86_64-linux-$SHA.tar.gz" > "zenbot-x86_64-linux-$SHA.tar.gz.sha256")
+          tar -C dist/zenbot -czf "dist/zenbot-${{ matrix.arch }}-linux-$SHA.tar.gz" .
+          (cd dist && sha256sum "zenbot-${{ matrix.arch }}-linux-$SHA.tar.gz" > "zenbot-${{ matrix.arch }}-linux-$SHA.tar.gz.sha256")
       - name: Publish to the edge release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Both architectures publish at once: whichever comes second finds the release made.
           gh release view edge >/dev/null 2>&1 || \
             gh release create edge --prerelease --title "edge (latest main)" \
-              --notes "Binaries for recent commits on main, used by install.sh and scripts/upgrade.sh."
-          gh release upload edge dist/zenbot-x86_64-linux-*.tar.gz dist/zenbot-x86_64-linux-*.sha256 --clobber
-          # Keep the 20 newest builds.
-          gh release view edge --json assets --jq '.assets | sort_by(.createdAt) | reverse | .[40:] | .[].name' |
+              --notes "Binaries for recent commits on main, used by install.sh and scripts/upgrade.sh." || true
+          gh release upload edge dist/zenbot-${{ matrix.arch }}-linux-*.tar.gz dist/zenbot-${{ matrix.arch }}-linux-*.sha256 --clobber
+          # Keep the 20 newest builds of this architecture (a tarball and its checksum each).
+          gh release view edge --json assets --jq '[.assets[] | select(.name | startswith("zenbot-${{ matrix.arch }}-"))] | sort_by(.createdAt) | reverse | .[40:] | .[].name' |
             while read -r name; do gh release delete-asset edge "$name" --yes; done
