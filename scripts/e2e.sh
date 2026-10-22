@@ -310,7 +310,7 @@ engine_cap() {
   local sid; sid=$(zen ask --json -m faux/smoke "fan out" | jq -r .session_id)
   local kids="SELECT t.* FROM turns t JOIN sessions s ON s.id = t.session_id WHERE s.parent = X'${sid//-/}' AND s.kind = 'subagent'"
   check "every subtask finished" eq "$(q "SELECT count(*) FROM ($kids) k WHERE outcome = 'ok'")" 8
-  check "never more than two subagent turns at once" eq "$(q "SELECT max(n) FROM (SELECT count(b.id) AS n FROM ($kids) a JOIN ($kids) b ON b.started_at < a.ended_at AND b.ended_at > a.started_at GROUP BY a.id) x")" 2
+  check "never more than two subagent turns at once" eq "$(q "SELECT max(n) FROM (SELECT count(b.id) AS n FROM ($kids) a JOIN ($kids) b ON b.started_at <= a.started_at AND b.ended_at > a.started_at GROUP BY a.id) x")" 2
 }
 
 # The learning router (D-074): a session whose model nobody chose gets one at its first prompt from
