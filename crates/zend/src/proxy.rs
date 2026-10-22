@@ -19,7 +19,7 @@ use std::sync::{LazyLock, Mutex};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixListener, UnixStream};
 use uuid::Uuid;
@@ -50,16 +50,16 @@ type Contact = (String, i16, Instant);
 static CONTACTED: LazyLock<Mutex<HashMap<Uuid, Vec<Contact>>>> = LazyLock::new(Default::default);
 
 /// Start the session's proxy socket if it isn't listening yet; returns its path.
-pub async fn ensure(db: &PgPool, session: Uuid) -> Result<PathBuf> {
+pub async fn ensure(db: &SqlitePool, session: Uuid) -> Result<PathBuf> {
     listen(db, socket_path(session), Client::Session(session)).await
 }
 
 /// The proxy socket of an MCP stdio server (`<zen home>/proxy/mcp-<name>.sock`).
-pub async fn ensure_mcp(db: &PgPool, server: &str, risk: i16) -> Result<PathBuf> {
+pub async fn ensure_mcp(db: &SqlitePool, server: &str, risk: i16) -> Result<PathBuf> {
     listen(db, dir().join(format!("mcp-{server}-{risk}.sock")), Client::Mcp(server.to_string(), risk)).await
 }
 
-async fn listen(db: &PgPool, path: PathBuf, client: Client) -> Result<PathBuf> {
+async fn listen(db: &SqlitePool, path: PathBuf, client: Client) -> Result<PathBuf> {
     let key = path.display().to_string();
     if LISTENING.lock().unwrap_or_else(|e| e.into_inner()).contains(&key) && path.exists() {
         return Ok(path);
@@ -150,7 +150,7 @@ async fn deny(stream: &mut UnixStream, status: &str, why: &str) -> Result<()> {
     Ok(())
 }
 
-async fn handle(db: &PgPool, who: &Client, mut client: UnixStream) -> Result<()> {
+async fn handle(db: &SqlitePool, who: &Client, mut client: UnixStream) -> Result<()> {
     // The head, up to 16 KiB; anything read past it is forwarded.
     let mut buf = Vec::with_capacity(4096);
     let mut chunk = [0u8; 4096];

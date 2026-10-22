@@ -398,7 +398,7 @@ async fn refresh() {
 
 impl Server {
     /// The live connection and the tools, connecting (or listing the tools again) when needed.
-    async fn ensure(&self, db: &sqlx::PgPool) -> Result<(Arc<Conn>, Vec<ToolEntry>)> {
+    async fn ensure(&self, db: &sqlx::SqlitePool) -> Result<(Arc<Conn>, Vec<ToolEntry>)> {
         let mut st = self.state.lock().await;
         if let Some(conn) = st.conn.clone().filter(|c| c.usable()) {
             if !conn.stale() {
@@ -435,7 +435,7 @@ impl Server {
         }
     }
 
-    async fn connect(&self, db: &sqlx::PgPool) -> Result<(Arc<Conn>, Vec<ToolEntry>)> {
+    async fn connect(&self, db: &sqlx::SqlitePool) -> Result<(Arc<Conn>, Vec<ToolEntry>)> {
         let conn = match (&self.cfg.command, &self.cfg.url) {
             (Some(cmd), _) => {
                 // A clean environment: the kernel's own (its token, API keys) never reaches a
@@ -791,7 +791,7 @@ pub fn sse_messages(text: &str) -> Vec<Value> {
 
 /// Every server's tools (connecting the ones not yet connected, all at once), and what went wrong.
 /// A connected server's tools come from its last listing: no call is waited for.
-async fn catalog(db: &sqlx::PgPool) -> (Vec<ToolEntry>, Vec<String>) {
+async fn catalog(db: &sqlx::SqlitePool) -> (Vec<ToolEntry>, Vec<String>) {
     refresh().await;
     let (mut servers, mut problems) = {
         let reg = REGISTRY.lock().await;
@@ -825,7 +825,7 @@ async fn catalog(db: &sqlx::PgPool) -> (Vec<ToolEntry>, Vec<String>) {
 
 /// A catalog entry's origin rating and the writers it depends on (D-062): a server marked
 /// untrusted is 4, one the owner trusts 1; a made tool takes its manifest's exact-byte rating.
-async fn entry_rating(db: &sqlx::PgPool, t: &ToolEntry) -> Result<(i16, Vec<Uuid>)> {
+async fn entry_rating(db: &sqlx::SqlitePool, t: &ToolEntry) -> Result<(i16, Vec<Uuid>)> {
     Ok(match &t.manifest {
         Some(text) => crate::context::rate(db, text, 1).await?,
         None => (crate::trust::mcp_level(&t.server).unwrap_or(if t.untrusted {4} else {1}), Vec::new()),
@@ -835,7 +835,7 @@ async fn entry_rating(db: &sqlx::PgPool, t: &ToolEntry) -> Result<(i16, Vec<Uuid
 /// The catalog with each entry's rating, as the model may see it: made tools whose manifest a
 /// stopped session wrote are left out, and the reader depends on the writers of every entry
 /// ranked (ranking reads their descriptions). A rating that can't be read fails the catalog.
-async fn rated_catalog(db: &sqlx::PgPool, session: Uuid) -> Result<(Vec<(ToolEntry, i16)>, Vec<String>)> {
+async fn rated_catalog(db: &sqlx::SqlitePool, session: Uuid) -> Result<(Vec<(ToolEntry, i16)>, Vec<String>)> {
     let (tools, problems) = catalog(db).await;
     let mut out = Vec::new();
     for t in tools {
@@ -933,7 +933,7 @@ async fn find(app: &App, session: Uuid, query: &str) -> (String, bool) {
     (out, false)
 }
 
-async fn lookup(db: &sqlx::PgPool, full: &str) -> Result<ToolEntry> {
+async fn lookup(db: &sqlx::SqlitePool, full: &str) -> Result<ToolEntry> {
     anyhow::ensure!(!full.starts_with("made_"), "Made tools are retired; use a reviewed skill with supporting scripts.");
     refresh().await;
     // Match the longest configured prefix: server names may themselves contain underscores.
@@ -964,7 +964,7 @@ async fn lookup(db: &sqlx::PgPool, full: &str) -> Result<ToolEntry> {
 /// The required arguments a call is missing, by the tool's input schema.
 /// What the action gate needs to know about a tool the model calls by its full name: whether its
 /// server is untrusted, and its read-only and destructive hints (D-067).
-pub async fn hints(db: &sqlx::PgPool, full: &str) -> Option<(bool, bool, bool)> {
+pub async fn hints(db: &sqlx::SqlitePool, full: &str) -> Option<(bool, bool, bool)> {
     let t = lookup(db, full).await.ok()?;
     let hint = |k: &str| t.annotations[k].as_bool().unwrap_or(false);
     Some((t.untrusted, hint("readOnlyHint"), hint("destructiveHint")))
@@ -1324,12 +1324,10 @@ mod tests {
     }
 
     /// Made tools keep their origin (D-062) in the catalog, load_tool and their run's rating.
-    /// SOURCE_TEST_DB_URL must name a throwaway database.
+    /// Uses an isolated SQLite fixture.
     #[tokio::test]
-    #[ignore]
-    async fn made_tool_provenance_database() {
-        let db = sqlx::PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
-        sqlx::migrate!().run(&db).await.unwrap();
+        async fn made_tool_provenance_database() {
+        let (_db_dir, db) = crate::test_util::database().await;
         let app = crate::test_util::app(db.clone());
         let session = |risk: i16| {
             let db = db.clone();
@@ -1386,7 +1384,7 @@ mod tests {
         assert_eq!(entry_rating(&db, &server).await.unwrap().0, 4);
         assert_eq!(entry_rating(&db, &ToolEntry { untrusted: false, ..server }).await.unwrap().0, 1);
         // Metadata errors fail closed.
-        let closed = sqlx::PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
+        let (_closed_dir, closed) = crate::test_util::database().await;
         closed.close().await;
         assert!(entry_rating(&closed, &entry).await.is_err());
         assert!(crate::workshop::folder_rating(&closed, &clean_tool).await.is_err());

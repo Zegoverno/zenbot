@@ -326,7 +326,7 @@ pub fn drafts() -> Vec<Skill> {
 
 /// Snapshots admitted to instruction context. Only clean origins may steer the agent;
 /// record dependencies even for an index, so a later denial invalidates its cached envelope.
-pub async fn instruction_index(db: &sqlx::PgPool, session: uuid::Uuid) -> anyhow::Result<String> {
+pub async fn instruction_index(db: &sqlx::SqlitePool, session: uuid::Uuid) -> anyhow::Result<String> {
     let mut admitted = Vec::new();
     for skill in scan(&root()) {
         // Same exact-byte, maximum-origin admission as prompt files (context::admit).
@@ -341,7 +341,7 @@ pub async fn instruction_index(db: &sqlx::PgPool, session: uuid::Uuid) -> anyhow
 
 /// Catalog and loads rate the same snapshots they render, never a later reread. A denied
 /// skill is absent from discovery; loading one explicitly returns its level-5 rating.
-pub async fn run_tool(db: &sqlx::PgPool, session: uuid::Uuid, name: &str, args: &Value) -> anyhow::Result<(String, bool, i16)> {
+pub async fn run_tool(db: &sqlx::SqlitePool, session: uuid::Uuid, name: &str, args: &Value) -> anyhow::Result<(String, bool, i16)> {
     let mut all = scan(&root());
     all.extend(drafts());
     if name == "find_skills" {

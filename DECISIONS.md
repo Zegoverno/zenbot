@@ -6,6 +6,48 @@
 
 ---
 
+## D-076 — Local SQLite state with verified PostgreSQL migration
+
+**Date:** 2026-10-22 · **Status:** accepted (owner: migrate existing data and ship Phase 8).
+**Supersedes:** D-006's backend and D-035's PostgreSQL search implementation.
+
+**Decision:** SQLx SQLite in private `ZEN_HOME/zen.sqlite3`, WAL/full synchronization, foreign keys,
+bounded busy waits and short `BEGIN IMMEDIATE` writes. UUID blobs, JSON text and copied float32
+vectors; statically bundled MIT sqlite-vec (no arbitrary extension loading), Unicode/accent-folded
+FTS5 and separate exact identifier matching. PostgreSQL language stemming is not retained.
+A versioned JSONL snapshot preserves all durable state, validates counts/relations/tape hashes,
+and publishes only a complete import. Historical hash bytes/version stay intact. Database,
+sidecars, backups and exports are kernel-only. Keep PostgreSQL for recovery; once SQLite starts,
+never silently roll back to stale PostgreSQL. Native SQLite backups include committed WAL.
+Docker is optional; web search uses configured external SearXNG or Brave/Tavily.
+
+**Why:** Remove the database/container footprint while retaining history, security evidence and
+vectors. Explicit query/transaction ports preserve authority; verified migration preserves data.
+
+## D-075 — Engines: one cost basis, a concurrency cap, parallel reads, bounded state
+
+**Date:** 2026-10-22 · **Status:** accepted (owner: "go ahead with those defaults and ship it")
+
+**Decision:** Phase 7, engines; one CLI process per turn stays.
+- **Costs on one basis.** A worker reports uncached input as `input` and cached input as
+  `cache_read`; Codex marks its totals per turn (`totals: "turn"`) and puts each model call's
+  usage on its message. Without a reported cost the kernel estimates an API-equivalent one from
+  `prices.rs` (OpenAI list prices, `~/.zenbot/prices.toml` overrides). Earlier Codex turns are
+  rebuilt from their stored reports once.
+- **A concurrency cap.** Background turns take an engine slot (`ZEN_ENGINE_CONCURRENCY`, 3) and
+  wait for one: job runs and kernel sessions from one pool, subagents and verifiers from another,
+  so a parent never blocks its children. The owner's turns and completions take a free slot and
+  never wait.
+- **Parallel reads.** `zen_proto::READ_ONLY_TOOLS` may overlap within a turn; any other call runs
+  alone, in order (a per-session lock in dispatch). Claude gets `readOnlyHint` on those; the Codex
+  worker runs calls as they come.
+- **Bounded engine state.** Codex runs without its bundled skills; engine session state is pruned
+  after 14 days; a rolled-back CLI update deletes the rejected version and fails the `engines` job.
+  Codex 0.163.0: `code_mode_interrupt` reviewed; `cli_daybreak`, `api_key_cyber_access_programs` off.
+
+**Why:** Codex looked free to the router (D-074); up to 9 engines ran at once on a 7.7 GB VM; no
+read-only calls overlapped; engine state grew unbounded; a failed update read "ok" for a week.
+
 ## D-074 — A learning router picks the model for each piece of work
 
 **Date:** 2026-10-22 · **Status:** accepted (owner, 2026-10-21/22: route by task, learn by A/B tests
@@ -1479,11 +1521,7 @@ small capped API budget for System One and embeddings.
 
 ---
 
-## D-006 — Postgres + pgvector
-
-**Decision:** Local Postgres with pgvector via `DATABASE_URL`, movable off the VM later.
-
-**Date:** 2026-09-30
+## D-006 — Postgres + pgvector · Superseded by D-076; [archived](docs/archive/DECISIONS-superseded.md).
 
 ---
 

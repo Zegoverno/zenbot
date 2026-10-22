@@ -88,7 +88,7 @@ pub struct Config {
     pub index_secs: u64,
     /// `ZEN_SEARCH_PROVIDER` (unset: Brave or Tavily when their key is set, else SearXNG).
     pub search_provider: Option<String>,
-    /// `ZEN_SEARXNG_URL` (`http://127.0.0.1:8888`).
+    /// `ZEN_SEARXNG_URL` (unset): an optional external SearXNG server.
     pub searxng_url: String,
     /// `ZEN_SEARCH_RERANK` (on): off means System One doesn't rerank web results.
     pub search_rerank: bool,
@@ -106,6 +106,9 @@ pub struct Config {
     pub explore: f64,
     /// `ZEN_POLICY_MIN_JUDGED` (20): judged subtasks each model needs before a route may switch.
     pub policy_min_judged: u64,
+    /// `ZEN_ENGINE_CONCURRENCY` (3, at least 1): engine processes background work (job runs,
+    /// subagents, verifiers, kernel sessions) may run at once; the owner's never wait (D-075).
+    pub engine_concurrency: usize,
     /// `ZEN_TURN_IDLE_SECS` (600): the watchdog aborts a turn quiet this long.
     pub turn_idle_secs: u64,
     /// `ZEN_TURN_ABORT_GRACE_SECS` (30): then ends it in the kernel this long after the abort.
@@ -165,7 +168,7 @@ impl Config {
             memory_chars: num("ZEN_MEMORY_CHARS", 4000.0).max(200.0) as usize,
             index_secs: num("ZEN_INDEX_SECS", 20.0).max(1.0) as u64,
             search_provider: set("ZEN_SEARCH_PROVIDER"),
-            searxng_url: text("ZEN_SEARXNG_URL", "http://127.0.0.1:8888"),
+            searxng_url: text("ZEN_SEARXNG_URL", ""),
             search_rerank: on("ZEN_SEARCH_RERANK"),
             tz: text("ZEN_TZ", "America/Sao_Paulo"),
             jobs: on("ZEN_JOBS"),
@@ -173,6 +176,7 @@ impl Config {
             jobs_tick: num("ZEN_JOBS_TICK", 60.0).clamp(0.2, 60.0),
             explore: num("ZEN_EXPLORE", 0.1),
             policy_min_judged: num("ZEN_POLICY_MIN_JUDGED", 20.0) as u64,
+            engine_concurrency: (num("ZEN_ENGINE_CONCURRENCY", 3.0) as usize).max(1),
             turn_idle_secs: num("ZEN_TURN_IDLE_SECS", 600.0) as u64,
             turn_abort_grace_secs: num("ZEN_TURN_ABORT_GRACE_SECS", 30.0) as u64,
             update_check_secs: num("ZEN_UPDATE_CHECK_SECS", 3600.0) as u64,

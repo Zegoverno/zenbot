@@ -20,7 +20,7 @@
 //! and the entry's rating never drops.
 use anyhow::{Result, ensure};
 use serde_json::{Value, json};
-use sqlx::{PgPool, Row};
+use sqlx::{SqlitePool, Row};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -58,10 +58,10 @@ fn line(e: &Entry) -> String {
     )
 }
 
-async fn short_entries(db: &PgPool) -> Result<Vec<Entry>, sqlx::Error> {
+async fn short_entries(db: &SqlitePool) -> Result<Vec<Entry>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, text, source, risk, (risk >= 4 OR zen_memory_contaminated(id)) AS tainted,
-                ARRAY(SELECT writer FROM brain_memory_inputs WHERE memory_id = m.id) AS writers
+        "SELECT id, text, source, risk, (risk >= 4 OR (id IN (SELECT id FROM zen_contaminated_memories))) AS tainted,
+                (SELECT json_group_array(lower(hex(writer))) FROM brain_memory_inputs WHERE memory_id=m.id) AS writers
          FROM memories m WHERE tier = 'short' ORDER BY created_at, id",
     )
     .fetch_all(db)
@@ -73,7 +73,7 @@ async fn short_entries(db: &PgPool) -> Result<Vec<Entry>, sqlx::Error> {
             text: r.get("text"),
             source: r.get("source"),
             tainted: r.get("tainted"),
-            writers: r.get("writers"),
+            writers: r.get::<sqlx::types::Json<Vec<Uuid>>,_>("writers").0,
             risk: r.get("risk"),
         })
         .collect())
@@ -81,7 +81,7 @@ async fn short_entries(db: &PgPool) -> Result<Vec<Entry>, sqlx::Error> {
 
 /// Short-term memory as it goes into `reader`'s instructions: every entry rated 0–3, newest first
 /// past the hard limit; entries rated 4 or more, or with a denied writer, only by id (D-062).
-pub async fn render(db: &PgPool, reader: Uuid) -> Result<String> {
+pub async fn render(db: &SqlitePool, reader: Uuid) -> Result<String> {
     import(db).await?;
     let entries = short_entries(db).await?;
     let (marked, clean): (Vec<Entry>, Vec<Entry>) = entries.into_iter().partition(|e| e.tainted);
@@ -142,12 +142,12 @@ const HEADER: &str = "# MEMORY.md\n\nzenbot's short-term memory. Edit, add (`- t
 
 /// Write `MEMORY.md` from the entries (marked ones by id only) and rate its bytes with every
 /// writer of what it shows, so reading the file is reading them.
-pub async fn export(db: &PgPool) -> Result<()> {
+pub async fn export(db: &SqlitePool) -> Result<()> {
     let _one = WRITING.lock().await;
     write_file(db).await
 }
 
-async fn write_file(db: &PgPool) -> Result<()> {
+async fn write_file(db: &SqlitePool) -> Result<()> {
     let entries = short_entries(db).await?;
     let (marked, clean): (Vec<Entry>, Vec<Entry>) = entries.into_iter().partition(|e| e.tainted);
     let text = format!(
@@ -188,7 +188,7 @@ fn parse_line(l: &str) -> Option<(i64, String)> {
 /// wrote take the highest rating its writers had), a removed line archives its entry. Entries the
 /// file doesn't show (marked ones) are left alone. Nothing happens until the kernel has written the
 /// file once.
-pub async fn import(db: &PgPool) -> Result<()> {
+pub async fn import(db: &SqlitePool) -> Result<()> {
     let _one = WRITING.lock().await;
     let path = file();
     let Ok(text) = tokio::fs::read_to_string(&path).await else {
@@ -214,12 +214,12 @@ pub async fn import(db: &PgPool) -> Result<()> {
             };
             seen.push(id);
             if new != e.text && !new.is_empty() {
-                sqlx::query("UPDATE memories SET text=$2,updated_at=now() WHERE id=$1")
+                sqlx::query("UPDATE memories SET text=$2,updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id=$1")
                     .bind(id)
                     .bind(crate::secrets::mask(&new))
                     .execute(db)
                     .await?;
-                sqlx::query("UPDATE memories SET risk=GREATEST($2,$3) WHERE id=$1")
+                sqlx::query("UPDATE memories SET risk=MAX($2,$3) WHERE id=$1")
                     .bind(id)
                     .bind(e.risk)
                     .bind(rating)
@@ -243,7 +243,7 @@ pub async fn import(db: &PgPool) -> Result<()> {
         }
     }
     for e in entries.iter().filter(|e| shown.contains(&e.id) && !e.tainted && !seen.contains(&e.id)) {
-        sqlx::query("UPDATE memories SET tier='archived',reason='removed from MEMORY.md',updated_at=now() WHERE id=$1 AND tier='short'").bind(e.id).execute(db).await?;
+        sqlx::query("UPDATE memories SET tier='archived',reason='removed from MEMORY.md',updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id=$1 AND tier='short'").bind(e.id).execute(db).await?;
     }
     write_file(db).await
 }
@@ -273,8 +273,8 @@ fn parse_id(v: &Value) -> Option<i64> {
         .or_else(|| v.as_i64())
 }
 
-async fn used_chars(db: &PgPool) -> usize {
-    sqlx::query_scalar::<_, Option<i64>>("SELECT SUM(length(text) + 10)::bigint FROM memories WHERE tier = 'short'")
+async fn used_chars(db: &SqlitePool) -> usize {
+    sqlx::query_scalar::<_, Option<i64>>("SELECT SUM(length(text) + 10) FROM memories WHERE tier = 'short'")
         .fetch_one(db)
         .await
         .ok()
@@ -310,7 +310,7 @@ async fn remember(app: &AppState, session: Uuid, args: &Value) -> Result<String>
         source = "inferred";
     }
     if source == "owner" && !text.is_empty() {
-        let said: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tape_events WHERE session_id=$1 AND origin='owner' AND kind='message' AND payload->>'role'='user' AND strpos(payload->>'content',$2)>0)")
+        let said: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tape_events WHERE session_id=$1 AND origin='owner' AND kind='message' AND payload->>'role'='user' AND instr(payload->>'content',$2)>0)")
             .bind(session)
             .bind(&text)
             .fetch_one(db)
@@ -370,7 +370,7 @@ async fn remember(app: &AppState, session: Uuid, args: &Value) -> Result<String>
             let old = old.ok_or_else(|| anyhow::anyhow!("no short-term memory m{id}"))?;
             // The new text is the replacing session's too: it becomes a writer, and the rating
             // keeps the highest of the old entry's and the new writer's.
-            sqlx::query("UPDATE memories SET text = $2, source = $3, session_id = $4, tainted = tainted OR $5, updated_at = now(), used_at = now(), uses = uses + 1 WHERE id = $1")
+            sqlx::query("UPDATE memories SET text = $2, source = $3, session_id = $4, tainted = tainted OR $5, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'), used_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'), uses = uses + 1 WHERE id = $1")
                 .bind(id)
                 .bind(&text)
                 .bind(source)
@@ -378,7 +378,7 @@ async fn remember(app: &AppState, session: Uuid, args: &Value) -> Result<String>
                 .bind(tainted)
                 .execute(db)
                 .await?;
-            sqlx::query("UPDATE memories SET risk = GREATEST(risk, $2) WHERE id = $1")
+            sqlx::query("UPDATE memories SET risk = MAX(risk, $2) WHERE id = $1")
                 .bind(id)
                 .bind(old)
                 .execute(db)
@@ -388,7 +388,7 @@ async fn remember(app: &AppState, session: Uuid, args: &Value) -> Result<String>
         "remove" => {
             let id = parse_id(&args["id"]).ok_or_else(|| anyhow::anyhow!("remove needs the entry's `id`, e.g. m12"))?;
             let _one = WRITING.lock().await;
-            let n = sqlx::query("UPDATE memories SET tier = 'archived', reason = 'removed by the agent', updated_at = now() WHERE id = $1 AND tier = 'short'")
+            let n = sqlx::query("UPDATE memories SET tier = 'archived', reason = 'removed by the agent', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = $1 AND tier = 'short'")
                 .bind(id)
                 .execute(db)
                 .await?
@@ -505,8 +505,8 @@ pub(crate) fn backup_file(home: &std::path::Path, path: &std::path::Path) -> Res
 pub(crate) const BACKUPS: &str = "backups/prompt-files";
 
 /// A line about the last sleep for a session's instructions, when it ran in the last day.
-pub async fn morning_note(db: &PgPool) -> Result<Option<String>, sqlx::Error> {
-    let r = sqlx::query("SELECT ended_at, note FROM sleep_runs WHERE ended_at > now() - interval '1 day' AND error IS NULL ORDER BY id DESC LIMIT 1")
+pub async fn morning_note(db: &SqlitePool) -> Result<Option<String>, sqlx::Error> {
+    let r = sqlx::query("SELECT ended_at, note FROM sleep_runs WHERE ended_at > strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-1 day') AND error IS NULL ORDER BY id DESC LIMIT 1")
         .fetch_optional(db)
         .await?;
     Ok(r.map(|r| {
@@ -521,7 +521,7 @@ pub async fn morning_note(db: &PgPool) -> Result<Option<String>, sqlx::Error> {
 }
 
 /// The latest sleep, for `zen status` and `zen memory`.
-pub async fn last_run(db: &PgPool) -> Result<Value, sqlx::Error> {
+pub async fn last_run(db: &SqlitePool) -> Result<Value, sqlx::Error> {
     let r = sqlx::query("SELECT id, started_at, ended_at, trigger, scorer, entries, kept, dropped, promoted, note, error FROM sleep_runs ORDER BY id DESC LIMIT 1")
         .fetch_optional(db)
         .await?;
@@ -538,9 +538,9 @@ pub async fn last_run(db: &PgPool) -> Result<Value, sqlx::Error> {
 }
 
 /// Memories by tier, newest first, for `zen memory`.
-pub async fn list(db: &PgPool, tier: &str) -> Result<Value, sqlx::Error> {
+pub async fn list(db: &SqlitePool, tier: &str) -> Result<Value, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, text, source, tier, reason, created_at, updated_at, (risk>=4 OR zen_memory_contaminated(id)) AS tainted FROM memories
+        "SELECT id, text, source, tier, reason, created_at, updated_at, (risk>=4 OR (id IN (SELECT id FROM zen_contaminated_memories))) AS tainted FROM memories
          WHERE $1 = 'all' OR tier = $1 ORDER BY id DESC LIMIT 500",
     )
     .bind(tier)

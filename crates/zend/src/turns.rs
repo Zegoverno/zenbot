@@ -7,6 +7,8 @@ use zen_proto::worker;
 
 /// A turn in progress. A session has at most one.
 pub(crate) struct Turn {
+    /// The engine slot it holds (D-075); freed when the turn is removed.
+    pub(crate) _slot: Option<tokio::sync::OwnedSemaphorePermit>,
     pub(crate) worker: usize,
     /// Set to true to stop the kernel's tool calls for this turn (abort, crash, end).
     pub(crate) cancel: watch::Sender<bool>,
@@ -82,6 +84,8 @@ pub(crate) async fn finish_turn(app: &AppState, id: Uuid, error: Value) -> bool 
     let mut finishing = app.finishing.lock().await;
     let Some(turn) = app.turns.lock().await.remove(&id) else { return false };
     finishing.insert(id);
+    // A call still in flight keeps its own handle; the next turn starts a fresh order.
+    app.tool_order.lock().await.remove(&id);
     drop(finishing);
     let _finishing = SessionFlag { app: app.clone(), id, finishing: true };
     let _ = turn.cancel.send(true);
@@ -156,8 +160,8 @@ impl Drop for Compacting {
 /// A session's cost: its turns, plus calls recorded before turns were (they have no turn_id).
 pub(crate) fn session_cost(session: &str) -> String {
     format!(
-        "(COALESCE((SELECT SUM(cost_usd) FROM turns t WHERE t.session_id = {session}), 0)
-          + COALESCE((SELECT SUM(cost_usd) FROM model_calls m WHERE m.session_id = {session} AND m.turn_id IS NULL), 0))"
+        "(COALESCE((SELECT SUM(cost_usd) FROM turns t WHERE t.session_id = {session}), 0.0)
+          + COALESCE((SELECT SUM(cost_usd) FROM model_calls m WHERE m.session_id = {session} AND m.turn_id IS NULL), 0.0))"
     )
 }
 
@@ -190,10 +194,10 @@ pub(crate) async fn record_turn(app: &App, turn: &Turn, error: &Value) -> Result
         sent["first_cache_read"] = json!(first_read);
     }
     let row = sqlx::query(
-        "WITH calls AS (SELECT COUNT(*)::int AS n, SUM(input_tokens) AS i, SUM(output_tokens) AS o, SUM(cache_read) AS cr,
+        "WITH calls AS (SELECT COUNT(*) AS n, SUM(input_tokens) AS i, SUM(output_tokens) AS o, SUM(cache_read) AS cr,
                                SUM(cache_write) AS cw, SUM(cost_usd) AS c FROM model_calls WHERE turn_id = $1),
-              tools AS (SELECT COUNT(*)::int AS n, (COUNT(*) FILTER (WHERE is_error))::int AS e FROM tool_calls WHERE turn_id = $1)
-         UPDATE turns SET ended_at = now(), duration_ms = $2, outcome = $3, error = $4,
+              tools AS (SELECT COUNT(*) AS n, (COUNT(*) FILTER (WHERE is_error)) AS e FROM tool_calls WHERE turn_id = $1)
+         UPDATE turns SET ended_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'), duration_ms = $2, outcome = $3, error = $4,
                 engine = $5, engine_version = $6, model_resolved = $7,
                 model_calls = (SELECT n FROM calls), tool_calls = (SELECT n FROM tools), tool_errors = (SELECT e FROM tools),
                 input_tokens = COALESCE($8, (SELECT i FROM calls), 0), output_tokens = COALESCE($9, (SELECT o FROM calls), 0),
@@ -255,8 +259,24 @@ pub(crate) async fn per_turn_report(app: &App, turn: &Turn) -> Result<Value> {
 }
 
 /// One provider's report made per turn (see `per_turn_report`).
-async fn per_turn(app: &App, turn_id: Uuid, mut r: Value) -> Result<Value> {
-    if r["render"] != "resume" {
+async fn per_turn(app: &App, turn_id: Uuid, r: Value) -> Result<Value> {
+    let mut r = since_previous(app, turn_id, r).await?;
+    // An engine that reports no cost (Codex on a subscription) gets an API-equivalent estimate,
+    // so costs compare across engines (D-075).
+    if r["cost_usd"].is_null() {
+        let n = |k: &str| r[k].as_i64().unwrap_or(0);
+        if let Some(c) = crate::prices::estimate(r["model"].as_str().unwrap_or(""), n("input"), n("cache_read"), n("output")) {
+            r["cost_usd"] = json!(c);
+            r["cost_estimated"] = json!(true);
+        }
+    }
+    Ok(r)
+}
+
+/// A report of whole-session totals (Claude Code resuming its own session) less the previous
+/// turn's; a report of the turn's own usage (`totals: "turn"`, Codex) as it is.
+async fn since_previous(app: &App, turn_id: Uuid, mut r: Value) -> Result<Value> {
+    if r["render"] != "resume" || r["totals"] == "turn" {
         return Ok(r);
     }
     let previous: Option<Value> = sqlx::query_scalar(
@@ -294,7 +314,7 @@ fn sum_reports(reports: &[Value]) -> Value {
     total
 }
 
-pub(crate) fn turn_json(r: &sqlx::postgres::PgRow) -> Value {
+pub(crate) fn turn_json(r: &sqlx::sqlite::SqliteRow) -> Value {
     json!({
         "turn_id": r.get::<Uuid, _>("id"),
         "harness": r.get::<String, _>("harness"),
@@ -351,7 +371,7 @@ pub(crate) async fn submit_prompt(app: &AppState, id: Uuid, text: String, steer:
 pub(crate) async fn prompt_loop(app: AppState) {
     loop {
         tokio::time::sleep(Duration::from_millis(250)).await;
-        let rows = match sqlx::query("SELECT DISTINCT ON(session_id) id,session_id,text FROM pending_prompts WHERE error IS NULL ORDER BY session_id,steer DESC,id")
+        let rows = match sqlx::query("SELECT id,session_id,text FROM (SELECT id,session_id,text,row_number() OVER(PARTITION BY session_id ORDER BY steer DESC,id) AS rn FROM pending_prompts WHERE error IS NULL) WHERE rn=1 ORDER BY session_id")
             .fetch_all(&app.db).await {
                 Ok(rows) => rows,
                 Err(e) => { tracing::warn!("loading pending prompts: {e:#}"); continue; }
@@ -443,6 +463,27 @@ impl Drop for StopOnDrop {
     }
 }
 
+/// An engine slot for a turn (D-075). Background work (a session with a kind) waits for one,
+/// saying so in its session: subagents and verifiers from the child pool, job runs and kernel
+/// sessions from the main one. The owner's turns take a main slot when free and otherwise run
+/// without, so they never wait behind background work.
+pub(crate) async fn engine_slot(app: &AppState, id: Uuid, kind: Option<&str>) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    let pool = match kind {
+        Some(crate::delegate::SUBAGENT | crate::agent::VERIFIER) => app.child_slots.clone(),
+        _ => app.engine_slots.clone(),
+    };
+    if let Ok(p) = pool.clone().try_acquire_owned() {
+        return Some(p);
+    }
+    if kind.is_none() {
+        return None;
+    }
+    let limit = crate::config::get().engine_concurrency;
+    app.emit(id, json!({ "type": "status", "text": format!("waiting for an engine ({limit} busy)") })).await;
+    tracing::info!("session {id} waits for one of {limit} engine slots");
+    pool.acquire_owned().await.ok()
+}
+
 pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: Origin) -> Result<()> {
     begin_queued(app, id, text, origin, None).await
 }
@@ -473,6 +514,7 @@ async fn begin_queued(app: &AppState, id: Uuid, text: String, origin: Origin, qu
             anyhow::bail!("model `{model}` doesn't take effort `{e}`; pick another with /effort");
         }
     }
+    let slot = engine_slot(app, id, kind.as_deref()).await;
     let turn_id = Uuid::new_v4();
     let (cancel, mut stopped) = watch::channel(false);
     {
@@ -483,6 +525,7 @@ async fn begin_queued(app: &AppState, id: Uuid, text: String, origin: Origin, qu
         turns.insert(
             id,
             Turn {
+                _slot: slot,
                 worker: widx,
                 cancel,
                 last_activity: Instant::now(),
@@ -743,7 +786,7 @@ mod reservation_tests {
     use super::*;
     #[tokio::test]
     async fn summary_panic_releases_its_reservation() {
-        let db = PgPoolOptions::new().connect_lazy("postgres://unused:unused@localhost/unused").unwrap();
+        let db = sqlx::sqlite::SqlitePoolOptions::new().connect_lazy("sqlite::memory:").unwrap();
         let app = crate::test_util::app(db);
         let id = Uuid::new_v4();
         app.compacting.lock().await.insert(id);

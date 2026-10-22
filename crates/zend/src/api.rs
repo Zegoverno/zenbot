@@ -131,7 +131,7 @@ pub(crate) async fn board(State(app): State<AppState>, Query(q): Query<BoardQuer
            SELECT id FROM (
              SELECT c.id, row_number() OVER (PARTITION BY c.parent ORDER BY c.updated_at DESC) AS n
              FROM sessions c JOIN top ON c.parent = top.id) k
-           WHERE n <= $4 OR id = ANY($2)
+           WHERE n <= $4 OR id IN (SELECT uuid_blob(value) FROM json_each($2))
          )
          SELECT {SESSION_COLUMNS},
            CASE WHEN s.parent IS NOT NULL THEN
@@ -142,14 +142,14 @@ pub(crate) async fn board(State(app): State<AppState>, Query(q): Query<BoardQuer
            (q.last IS NOT NULL AND NOT EXISTS (
              SELECT 1 FROM tape_events m
              WHERE m.session_id = s.id AND m.kind = 'message' AND m.seq > q.last
-               AND m.payload->>'role' = 'user' AND m.payload->>'kernel' IS NULL)) OR EXISTS (SELECT 1 FROM mcp_interactions i WHERE i.session_id=s.id AND i.status='pending' AND i.expires_at>now()) AS waiting
+               AND m.payload->>'role' = 'user' AND m.payload->>'kernel' IS NULL)) OR EXISTS (SELECT 1 FROM mcp_interactions i WHERE i.session_id=s.id AND i.status='pending' AND i.expires_at>strftime('%Y-%m-%dT%H:%M:%f+00:00','now')) AS waiting
          FROM sessions s
-         LEFT JOIN LATERAL (SELECT max(e.seq) AS last FROM tape_events e WHERE e.session_id = s.id AND e.kind = 'questions' AND e.payload->>'mcp_request' IS NULL) q ON true
+         LEFT JOIN (SELECT session_id,max(seq) AS last FROM tape_events WHERE kind='questions' AND payload->>'mcp_request' IS NULL GROUP BY session_id) q ON q.session_id=s.id
          WHERE s.id IN (SELECT id FROM top UNION ALL SELECT id FROM kids)
          ORDER BY s.updated_at DESC"
     ))
     .bind(archived)
-    .bind(&running)
+    .bind(serde_json::json!(running))
     .bind(BOARD_SESSIONS)
     .bind(BOARD_CHILDREN)
     .fetch_all(&app.db)
@@ -183,7 +183,7 @@ pub(crate) async fn board(State(app): State<AppState>, Query(q): Query<BoardQuer
 /// The columns `session_json` reads, without the cost (each query computes it its own way).
 const SESSION_COLUMNS: &str = "id, title, model, effort, archived, created_at, updated_at, kind, parent, tainted_at, risky_at, risk";
 
-pub(crate) fn session_json(r: &sqlx::postgres::PgRow) -> Value {
+pub(crate) fn session_json(r: &sqlx::sqlite::SqliteRow) -> Value {
     json!({
         "id": r.get::<Uuid, _>("id"),
         "title": r.get::<String, _>("title"),
@@ -219,7 +219,7 @@ pub(crate) async fn create_session(State(app): State<AppState>, Json(body): Json
     check_effort(&app, &model, body.effort.as_deref()).await?;
     let row = sqlx::query(&format!(
         "INSERT INTO sessions (id, title, model, effort, title_source, model_source) VALUES ($1, $2, $3, $4, CASE WHEN $2 = '' THEN 'auto' ELSE 'owner' END, $5)
-         RETURNING {SESSION_COLUMNS}, 0::float8 AS cost"
+         RETURNING {SESSION_COLUMNS}, 0.0 AS cost"
     ))
     .bind(id)
     .bind(body.title.map(|t| t.trim().to_string()).unwrap_or_default())
@@ -260,7 +260,7 @@ pub(crate) async fn update_session(State(app): State<AppState>, Path(id): Path<U
     let row = sqlx::query(&format!(
         "UPDATE sessions SET title = COALESCE($2, title), title_source = CASE WHEN $2 IS NULL THEN title_source ELSE 'owner' END, model = COALESCE($3, model), effort = $5,
                 model_source = CASE WHEN $3 IS NULL THEN model_source ELSE 'owner' END,
-                archived = COALESCE($4, archived), updated_at = now()
+                archived = COALESCE($4, archived), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
          WHERE id = $1
          RETURNING {SESSION_COLUMNS}, {} AS cost",
         session_cost("$1")
@@ -324,9 +324,9 @@ pub(crate) async fn get_session(State(app): State<AppState>, Path(id): Path<Uuid
     let totals = sqlx::query(
         "SELECT (SELECT count(*) FROM tape_events WHERE session_id = $1 AND kind = 'message') AS messages,
                 COALESCE((SELECT SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) + COALESCE(cache_read, 0) + COALESCE(cache_write, 0))
-                          FROM turns WHERE session_id = $1), 0)::int8
+                          FROM turns WHERE session_id = $1), 0)
               + COALESCE((SELECT SUM(input_tokens + output_tokens + cache_read + cache_write)
-                          FROM model_calls WHERE session_id = $1 AND turn_id IS NULL), 0)::int8 AS tokens",
+                          FROM model_calls WHERE session_id = $1 AND turn_id IS NULL), 0) AS tokens",
     )
     .bind(id)
     .fetch_one(&app.db)

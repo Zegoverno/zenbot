@@ -28,6 +28,7 @@ mod secrets;
 mod session_state;
 mod skills;
 mod tape;
+mod storage;
 mod task;
 mod taint;
 #[cfg(test)]
@@ -36,6 +37,7 @@ mod sources;
 mod proxy;
 mod tools;
 mod output;
+mod prices;
 mod route;
 mod media;
 mod trust;
@@ -62,8 +64,7 @@ use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, Row};
+use sqlx::{SqlitePool, Row};
 use tokio::sync::{broadcast, mpsc, watch, Mutex};
 use uuid::Uuid;
 
@@ -75,7 +76,7 @@ use turns::*;
 use workers::*;
 
 struct App {
-    db: PgPool,
+    db: SqlitePool,
     workers: Vec<Worker>,
     /// Names in ZEN_WORKERS that aren't known workers, ignored (shown by /health and `zen status`).
     ignored_workers: Vec<String>,
@@ -99,6 +100,15 @@ struct App {
     starting_prompts: Mutex<HashSet<Uuid>>,
     /// Kernel-started turns being waited for (verifier sessions), by session.
     waiters: Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<()>>>,
+    /// Engine slots (D-075, `ZEN_ENGINE_CONCURRENCY` each): top-level background turns (job runs,
+    /// kernel sessions) wait for one; the owner's turns and completions take one when free and never
+    /// wait. Child turns (subagents, verifiers) have their own pool, so a parent holding a slot
+    /// never blocks its children.
+    engine_slots: Arc<tokio::sync::Semaphore>,
+    child_slots: Arc<tokio::sync::Semaphore>,
+    /// Per session, the order of its tool calls (D-075): read-only ones share it, any other holds it
+    /// alone.
+    tool_order: Mutex<HashMap<Uuid, Arc<tokio::sync::RwLock<()>>>>,
     /// Kernel tasks running outside a turn (after a verdict: skill activation, scoring), counted as
     /// busy so an upgrade waits for them. Held through `Background` guards.
     pub(crate) background: Arc<std::sync::atomic::AtomicUsize>,
@@ -185,7 +195,7 @@ async fn serve() -> Result<()> {
         tracing::warn!("setting {bad} isn't a number: using its default");
     }
 
-    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://zen:zen@127.0.0.1:5432/zen".into());
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| format!("sqlite://{}", zen_home().join("zen.sqlite3").display()));
     let token = std::env::var("ZEN_TOKEN").map_err(|_| anyhow::anyhow!("ZEN_TOKEN must be set"))?;
     let port: u16 = std::env::var("ZEN_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8100);
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
@@ -202,12 +212,14 @@ async fn serve() -> Result<()> {
     for f in defaults::install(&zen_home()) {
         tracing::info!("installed default {}", zen_home().join(f).display());
     }
-    let db = PgPoolOptions::new().max_connections(10).connect(&database_url).await?;
-    // A rolled-back build must still start on a database a newer build already migrated.
-    let mut migrator = sqlx::migrate!("./migrations");
-    migrator.set_ignore_missing(true);
-    migrator.run(&db).await?;
+    let db = storage::connect(&database_url).await?;
     mcp_interaction::recover(&db).await?;
+    // Codex turns recorded before D-075: tokens counted once, an estimated cost.
+    match prices::backfill(&db).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("repriced {n} earlier Codex turns"),
+        Err(e) => tracing::warn!("repricing earlier Codex turns: {e:#}"),
+    }
     let rerate_db = db.clone();
     tokio::spawn(async move {
         if let Err(e) = sources::rerate_once(&rerate_db).await { tracing::warn!("source rerating: {e:#}"); }
@@ -261,6 +273,9 @@ async fn serve() -> Result<()> {
         finishing: Mutex::new(HashSet::new()),
         starting_prompts: Mutex::new(HashSet::new()),
         waiters: Mutex::new(HashMap::new()),
+        engine_slots: Arc::new(tokio::sync::Semaphore::new(config::get().engine_concurrency)),
+        child_slots: Arc::new(tokio::sync::Semaphore::new(config::get().engine_concurrency)),
+        tool_order: Mutex::new(HashMap::new()),
         background: Arc::default(),
     });
     tokio::spawn(app.updater.clone().check_periodically());
@@ -333,7 +348,7 @@ async fn serve() -> Result<()> {
 }
 
 /// A session's messages in order, each with its block number (`seq`).
-async fn load_messages(db: &PgPool, id: Uuid) -> Result<Vec<Value>, sqlx::Error> {
+async fn load_messages(db: &SqlitePool, id: Uuid) -> Result<Vec<Value>, sqlx::Error> {
     Ok(tape::load(db, id, &["message"])
         .await?
         .into_iter()

@@ -20,11 +20,11 @@ pub(crate) async fn stats(State(app): State<AppState>) -> ApiResult<Json<Value>>
                 count(*) FILTER (WHERE source = 'model') AS answered,
                 count(*) FILTER (WHERE source = 'unavailable') AS unavailable,
                 count(*) FILTER (WHERE source = 'blocked') AS blocked,
-                percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms) AS p50,
-                percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95,
-                COALESCE(sum(cost_usd), 0)::float8 AS cost,
+                NULL AS p50,
+                NULL AS p95,
+                COALESCE(sum(cost_usd), 0.0) AS cost,
                 max(created_at) AS last
-         FROM decisions WHERE source IS NOT NULL AND created_at > now() - interval '30 days'
+         FROM decisions WHERE source IS NOT NULL AND created_at > strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-30 days')
          GROUP BY point ORDER BY point",
     )
     .fetch_all(&app.db)
@@ -32,8 +32,18 @@ pub(crate) async fn stats(State(app): State<AppState>) -> ApiResult<Json<Value>>
     let mut out = Vec::new();
     for r in rows {
         let point: String = r.get("point");
+        let mut latencies: Vec<f64> = sqlx::query_scalar("SELECT CAST(latency_ms AS REAL) FROM decisions WHERE point=$1 AND source IS NOT NULL AND latency_ms IS NOT NULL AND created_at>strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-30 days') ORDER BY latency_ms")
+            .bind(&point).fetch_all(&app.db).await?;
+        latencies.sort_by(f64::total_cmp);
+        let percentile = |p:f64| -> Option<f64> {
+            if latencies.is_empty() {return None;}
+            let index=(latencies.len()-1) as f64*p;
+            let lo=index.floor() as usize;
+            let hi=index.ceil() as usize;
+            Some(latencies[lo]+(latencies[hi]-latencies[lo])*(index-lo as f64))
+        };
         let outcomes: Vec<(Option<String>, i64)> = sqlx::query_as(
-            "SELECT chosen, count(*) FROM decisions WHERE point = $1 AND source = 'model' AND created_at > now() - interval '30 days' GROUP BY chosen ORDER BY count(*) DESC LIMIT 8",
+            "SELECT chosen, count(*) FROM decisions WHERE point = $1 AND source = 'model' AND created_at > strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-30 days') GROUP BY chosen ORDER BY count(*) DESC LIMIT 8",
         )
         .bind(&point)
         .fetch_all(&app.db)
@@ -50,7 +60,7 @@ pub(crate) async fn stats(State(app): State<AppState>) -> ApiResult<Json<Value>>
             "answered": r.get::<i64, _>("answered"),
             "unavailable": r.get::<i64, _>("unavailable"),
             "blocked": r.get::<i64, _>("blocked"),
-            "latency_ms": { "p50": r.get::<Option<f64>, _>("p50"), "p95": r.get::<Option<f64>, _>("p95") },
+            "latency_ms": { "p50": percentile(0.5), "p95": percentile(0.95) },
             "cost_usd": r.get::<f64, _>("cost"),
             "outcomes": outcomes.into_iter().map(|(o, n)| json!({ "outcome": o, "count": n })).collect::<Vec<_>>(),
             "labelled": labelled.0,

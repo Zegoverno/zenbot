@@ -36,7 +36,7 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
+use sqlx::{SqlitePool, Row};
 use uuid::Uuid;
 
 const MAX_FILE: u64 = 16 * 1024 * 1024;
@@ -113,7 +113,7 @@ impl View {
     }
 
     /// Raise the session to the whole view's rating and record every writer as its input.
-    pub async fn rate_all(&self, db: &PgPool, session: Uuid) -> Result<()> {
+    pub async fn rate_all(&self, db: &SqlitePool, session: Uuid) -> Result<()> {
         let (risk, writers) = fold(self.seen.iter());
         record(db, session, risk, &writers).await
     }
@@ -130,14 +130,14 @@ fn fold<'a>(files: impl Iterator<Item = &'a Seen>) -> (i16, Vec<Uuid>) {
     (risk, writers)
 }
 
-pub async fn record(db: &PgPool, session: Uuid, risk: i16, writers: &[Uuid]) -> Result<()> {
+pub async fn record(db: &SqlitePool, session: Uuid, risk: i16, writers: &[Uuid]) -> Result<()> {
     crate::sources::depend(db, session, writers).await?;
     crate::sources::raise(db, session, risk).await
 }
 
 /// Find the masks and rated files of the view a shell in `workspace` will have. Errors mean the
 /// shell must not run (fail closed).
-pub async fn prepare(db: &PgPool, workspace: &Path) -> Result<View> {
+pub async fn prepare(db: &SqlitePool, workspace: &Path) -> Result<View> {
     let ws = workspace.canonicalize().context("workspace")?;
     let prefix = format!("{}/", ws.to_string_lossy().trim_end_matches('/'));
     // Sessions a deny reaches: the contaminated ones and, through parents and inputs, their
@@ -147,9 +147,9 @@ pub async fn prepare(db: &PgPool, workspace: &Path) -> Result<View> {
              UNION ALL SELECT reader, writer FROM session_inputs),
            bad(id) AS (SELECT affected FROM contamination WHERE cleared_at IS NULL
              UNION SELECT e.reader FROM edges e JOIN bad b ON e.writer = b.id),
-           rated AS (SELECT r.path, r.sha256, r.session_id, CASE WHEN b.id IS NOT NULL THEN 5::smallint ELSE r.risk END AS risk
+           rated AS (SELECT r.path, r.sha256, r.session_id, CASE WHEN b.id IS NOT NULL THEN 5 ELSE r.risk END AS risk
              FROM item_ratings r LEFT JOIN bad b ON b.id = r.session_id)
-         SELECT * FROM rated WHERE starts_with(path, $1) OR risk = 5
+         SELECT * FROM rated WHERE substr(path,1,length($1))=$1 OR risk = 5
            OR sha256 IN (SELECT sha256 FROM rated WHERE risk = 5 AND sha256 != '*')")
         .bind(&prefix).fetch_all(db).await?;
     let rows: Vec<Row3> = rows.iter().map(|r| (r.get("path"), r.get("sha256"), r.get("session_id"), r.get("risk"))).collect();
@@ -216,7 +216,7 @@ fn view(ws: &Path, rows: Vec<Row3>) -> Result<View> {
 
 /// After a shell: register what a host-capable one (`host`) wrote in `workspace` since `start`,
 /// then refuse the result if that can't be done or the session was stopped meanwhile.
-pub async fn finish(db: &PgPool, session: Uuid, workspace: &Path, start: SystemTime, host: bool) -> Result<()> {
+pub async fn finish(db: &SqlitePool, session: Uuid, workspace: &Path, start: SystemTime, host: bool) -> Result<()> {
     if host {
         let ws = workspace.canonicalize().context("workspace")?;
         let since = start.duration_since(SystemTime::UNIX_EPOCH)?.as_secs() as i64 - 1;
@@ -239,9 +239,9 @@ pub async fn finish(db: &PgPool, session: Uuid, workspace: &Path, start: SystemT
         if !products.is_empty() {
             let (paths, digests): (Vec<String>, Vec<String>) = products.into_iter().unzip();
             sqlx::query("INSERT INTO item_ratings(path,sha256,session_id,risk)
-                SELECT p, d, s.id, CASE WHEN s.risk>=4 THEN s.risk ELSE 1 END FROM unnest($1::text[], $2::text[]) AS t(p,d), sessions s WHERE s.id=$3
-                ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=GREATEST(item_ratings.risk,EXCLUDED.risk)")
-                .bind(&paths).bind(&digests).bind(session).execute(db).await?;
+                SELECT p.value, d.value, s.id, CASE WHEN s.risk>=4 THEN s.risk ELSE 1 END FROM json_each($1) p JOIN json_each($2) d ON p.key=d.key JOIN sessions s ON s.id=$3
+                ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=MAX(item_ratings.risk,EXCLUDED.risk)")
+                .bind(serde_json::json!(paths)).bind(serde_json::json!(digests)).bind(session).execute(db).await?;
         }
     }
     anyhow::ensure!(!crate::taint::stopped(db, session).await?, "withheld: the session was stopped by contamination while the command ran; owner review required");

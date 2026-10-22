@@ -37,7 +37,7 @@ pub fn system_for(base: &str) -> String {
 }
 
 /// The routing policy in force: `{ "routes": { "<kind>": { "model", "candidates": [..] } }, "explore": 0.1 }`.
-pub async fn policy(db: &sqlx::PgPool) -> (i32, Value) {
+pub async fn policy(db: &sqlx::SqlitePool) -> (i32, Value) {
     match sqlx::query("SELECT version, data FROM policies ORDER BY version DESC LIMIT 1").fetch_optional(db).await {
         Ok(Some(r)) => (r.get("version"), r.get("data")),
         _ => (0, json!({ "routes": {} })),
@@ -45,7 +45,7 @@ pub async fn policy(db: &sqlx::PgPool) -> (i32, Value) {
 }
 
 /// Save a new policy version (the old ones stay; the latest is in force).
-pub async fn set_policy(db: &sqlx::PgPool, data: &Value, reason: &str, by: &str) -> Result<i32> {
+pub async fn set_policy(db: &sqlx::SqlitePool, data: &Value, reason: &str, by: &str) -> Result<i32> {
     Ok(sqlx::query_scalar("INSERT INTO policies (data, reason, created_by) VALUES ($1, $2, $3) RETURNING version").bind(data).bind(reason).bind(by).fetch_one(db).await?)
 }
 
@@ -75,7 +75,7 @@ pub fn pick(policy: &Value, kind: &str, fallback: &str, served: &[String], r: f6
 }
 
 /// The last thing a session's agent said.
-pub(crate) async fn final_answer(db: &sqlx::PgPool, session: Uuid) -> String {
+pub(crate) async fn final_answer(db: &sqlx::SqlitePool, session: Uuid) -> String {
     let rows = crate::tape::load(db, session, &["message"]).await.unwrap_or_default();
     rows.iter()
         .rev()
@@ -136,10 +136,10 @@ async fn delegate(app: &AppState, session: Uuid, workspace: &std::path::Path, ar
     let started = std::time::Instant::now();
     let child = tokio::time::timeout(Duration::from_secs(1900), crate::run_child(app, session, SUBAGENT, task, &dir, Some(&model))).await.context("the subagent took too long")??;
     let answer = final_answer(&app.db, child).await;
-    let cost: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(cost_usd), 0) FROM turns WHERE session_id = $1").bind(child).fetch_one(&app.db).await.unwrap_or(0.0);
+    let cost: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(cost_usd), 0.0) FROM turns WHERE session_id = $1").bind(child).fetch_one(&app.db).await.unwrap_or(0.0);
     let error: Option<String> = sqlx::query_scalar("SELECT error FROM turns WHERE session_id = $1 ORDER BY started_at DESC LIMIT 1").bind(child).fetch_optional(&app.db).await?.flatten();
     crate::agent::log_decision(&app.db, Some(child), "model", &json!({ "kind": kind, "task": zen_proto::head(task, 300), "parent": session, "how": how }), &json!({ "model": model }), Some(&model), Some(propensity), true, error.as_deref()).await;
-    let risk: i16 = sqlx::query_scalar("SELECT CASE WHEN zen_session_contaminated(id) THEN 5::smallint ELSE risk END FROM sessions WHERE id=$1")
+    let risk: i16 = sqlx::query_scalar("SELECT CASE WHEN COALESCE(id IN (SELECT id FROM zen_contaminated_sessions),false) THEN 5 ELSE risk END FROM sessions WHERE id=$1")
         .bind(child).fetch_one(&app.db).await?;
     let head = format!(
         "Subagent {} on {model} ({kind}, {how}) finished in {}s, ${cost:.3}{}:\n",
@@ -187,15 +187,15 @@ pub async fn run_tool(app: &AppState, session: Uuid, workspace: &std::path::Path
 
 /// Per kind of work and model: subtasks, judged ones (the parent got a verdict), accepted ones and
 /// mean cost.
-pub async fn stats(db: &sqlx::PgPool) -> Result<Vec<Value>> {
+pub async fn stats(db: &sqlx::SqlitePool) -> Result<Vec<Value>> {
     // A routed piece of work's outcome (D-074): the owner's verdict on its session, else on its
     // parent (a subtask), else how its job run ended (ok or silent is a success, error a failure).
     let rows = sqlx::query(
-        "WITH picks AS (SELECT d.session_id AS s, d.input->>'kind' AS kind, d.chosen AS model, (d.input->>'parent')::uuid AS parent
+        "WITH picks AS (SELECT d.session_id AS s, d.input->>'kind' AS kind, d.chosen AS model, uuid_blob(d.input->>'parent') AS parent
                         FROM decisions d WHERE d.point = 'model' AND d.session_id IS NOT NULL),
-              verdicts AS (SELECT DISTINCT ON (session_id) session_id, decision FROM session_decisions ORDER BY session_id, created_at DESC),
+              verdicts AS (SELECT session_id,decision FROM (SELECT session_id,decision,row_number() OVER(PARTITION BY session_id ORDER BY created_at DESC,id DESC) AS rn FROM session_decisions) WHERE rn=1),
               runs AS (SELECT session_id, status FROM job_runs WHERE session_id IS NOT NULL AND status IN ('ok', 'silent', 'error')),
-              costs AS (SELECT session_id, SUM(cost_usd) AS cost, SUM(EXTRACT(EPOCH FROM (ended_at - started_at)))::float8 AS secs FROM turns GROUP BY session_id),
+              costs AS (SELECT session_id, SUM(cost_usd) AS cost, SUM((julianday(ended_at)-julianday(started_at))*86400.0) AS secs FROM turns GROUP BY session_id),
               outcomes AS (SELECT p.kind, p.model, c.cost, c.secs,
                                   CASE WHEN COALESCE(vs.decision, vp.decision) IS NOT NULL THEN COALESCE(vs.decision, vp.decision) = 'accept'
                                        WHEN r.status IS NOT NULL THEN r.status <> 'error' END AS good
@@ -299,7 +299,7 @@ pub fn suggest(policy: &Value, stats: &[Value], min: u64) -> Vec<Change> {
 }
 
 /// The nightly `routes` job (jobs.rs): apply what the evidence clearly says (a new policy version per change).
-pub async fn tune(db: &sqlx::PgPool) -> Vec<String> {
+pub async fn tune(db: &sqlx::SqlitePool) -> Vec<String> {
     let (version, mut p) = policy(db).await;
     let Ok(st) = stats(db).await else { return Vec::new() };
     let mut notes = Vec::new();
@@ -322,7 +322,7 @@ pub async fn tune(db: &sqlx::PgPool) -> Vec<String> {
         }
     }
     // Work no kind fitted, to grow the list: the owner adds a kind to the policy (`zen policy`).
-    if let Ok(n) = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM decisions WHERE point = 'model' AND input->>'kind' = 'unsure' AND created_at > now() - interval '7 days'").fetch_one(db).await {
+    if let Ok(n) = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM decisions WHERE point = 'model' AND input->>'kind' = 'unsure' AND created_at > strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-7 days')").fetch_one(db).await {
         if n >= 10 {
             notes.push(format!("routes: {n} pieces of work in the last week fitted no kind of task (the default model ran them); `zen policy` shows the kinds"));
         }

@@ -7,6 +7,9 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO"
 . "$REPO/scripts/db.sh" # and scripts/lib.sh
+case $(db_live_url) in
+  postgres:*|postgresql:*) echo "Existing PostgreSQL installation: use the quiescent storage migration before installing." >&2; exit 1 ;;
+esac
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 ENV_FILE="$HOME/.zenbot/env"
 # Add KEY=VALUE to ~/.zenbot/env unless KEY is set there already, so a re-run keeps the owner's settings.
@@ -21,17 +24,11 @@ say "System packages"
 NEED=()
 # bubblewrap: the read-only shell a verifier gets (crates/zend/src/tools.rs); poppler-utils:
 # pdftotext, for PDFs web_fetch saves (crates/zend/src/web.rs).
-for p in git curl ca-certificates jq bubblewrap poppler-utils; do dpkg -s "$p" >/dev/null 2>&1 || NEED+=("$p"); done
-if ! command -v docker >/dev/null; then NEED+=(docker.io); fi
-if ! docker compose version >/dev/null 2>&1 && ! sudo docker compose version >/dev/null 2>&1; then NEED+=(docker-compose-v2); fi
+for p in git curl ca-certificates jq bubblewrap poppler-utils python3; do dpkg -s "$p" >/dev/null 2>&1 || NEED+=("$p"); done
 if [ ${#NEED[@]} -gt 0 ]; then
   sudo apt-get update -qq
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${NEED[@]}"
 fi
-sudo systemctl enable --now docker >/dev/null 2>&1 || true
-# Pull the database image in the background while the rest installs.
-sudo docker compose -f deploy/compose.yaml pull -q >/tmp/zen-install-pull.log 2>&1 &
-PULL_PID=$!
 export PATH="$HOME/.cargo/bin:$PATH"
 
 say "Node.js"
@@ -73,12 +70,12 @@ fi
 for pid in "${ENGINE_PIDS[@]}"; do
   wait "$pid" || echo "warning: installing a model engine failed; see /tmp/zen-install-claude.log and /tmp/zen-install-codex.log"
 done
-wait "$PULL_PID" || true
 
 say "Installing"
 mkdir -p "$HOME/.zenbot/bin" "$HOME/.local/bin"
 chmod 700 "$HOME/.zenbot"
 install -m 755 target/release/zend target/release/zen target/release/zen-engine "$HOME/.zenbot/bin/"
+touch "$HOME/.zenbot/bin/.sqlite-storage"
 ln -sf "$HOME/.zenbot/bin/zen" "$HOME/.local/bin/zen"
 new_token
 touch "$ENV_FILE"
@@ -96,10 +93,7 @@ PORT=$(zen_env ZEN_PORT)
 git rev-parse --short HEAD > "$HOME/.zenbot/version" 2>/dev/null || true
 
 say "Database"
-# Postgres starts with the public bootstrap password in deploy/compose.yaml; replace it with a
-# private one before zend first connects (db_secure, scripts/db.sh).
-sudo docker compose -f deploy/compose.yaml up -d --wait postgres >/dev/null
-db_secure
+
 
 say "Service"
 sed -e "s#__USER__#$USER#g" -e "s#__REPO__#$REPO#g" -e "s#__HOME__#$HOME#g" deploy/zenbot.service \

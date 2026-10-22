@@ -1,6 +1,6 @@
 # Installing zenbot
 
-These steps are written so a coding agent (or a person) can follow them on a fresh Linux VM: Ubuntu or Debian, with systemd and passwordless `sudo`. `sudo` is needed because `install.sh` installs packages, Docker and the systemd service, and `scripts/upgrade.sh` restarts the service and runs Docker later without asking; it also means the agent's shell, which runs as that user, can do anything on the VM (DESIGN.md, "Security today").
+These steps are written so a coding agent (or a person) can follow them on a fresh Linux VM: Ubuntu or Debian, with systemd and passwordless `sudo`. `sudo` is needed because `install.sh` installs packages and the systemd service, and `scripts/upgrade.sh` schedules service upgrades; it also means the agent's shell, which runs as that user, can do anything on the VM (DESIGN.md, "Security today").
 
 1. Clone the repository into the home directory and run the installer:
 
@@ -9,7 +9,7 @@ These steps are written so a coding agent (or a person) can follow them on a fre
    ~/zenbot/install.sh
    ```
 
-   The installer is safe to re-run. It installs Docker, Node.js 22, `git`, `curl`, `jq`, bubblewrap (for the sandboxed shells and tools), `pdftotext`, and the Claude Code and Codex CLIs if they're missing, downloads zenbot's prebuilt binaries for the checked-out commit, writes `~/.zenbot/env` and the API token, installs the `zenbot` systemd service (starts on boot, restarts on failure; it brings up Postgres and the SearXNG search container in Docker before the kernel), and links the `zen` command into `~/.local/bin`.
+   The installer is safe to re-run. It installs Node.js 22, `git`, `curl`, `jq`, bubblewrap (for the sandboxed shells and tools), `pdftotext`, and the Claude Code and Codex CLIs if they're missing, downloads zenbot's prebuilt binaries for the checked-out commit, writes `~/.zenbot/env` and the API token, installs the `zenbot` systemd service (starts on boot, restarts on failure; the kernel embeds its SQLite database and needs no Docker), and links the `zen` command into `~/.local/bin`.
 
    Prebuilt binaries exist for every commit on `main` that passed CI's checks (built for x86_64 Linux after the tests, clippy and end-to-end scenarios pass). On other platforms, for commits CI hasn't published yet, or with `ZEN_BUILD_FROM_SOURCE=1`, the installer installs Rust and compiles instead, which takes several minutes on a small VM.
 
@@ -43,7 +43,7 @@ zenbot checks GitHub for a newer `main` about once an hour. `zen` mentions it wh
 zen upgrade            # or /upgrade inside zen; `zen upgrade --check` only checks
 ```
 
-It pulls `main` (refusing local changes or another branch) and runs `scripts/upgrade.sh`, which tests the new version, restarts zenbot once no session is working and rolls back if it isn't healthy; the result is in `~/.zenbot/upgrade.log`. After a healthy install it also trims oversized cargo build directories and old Docker leftovers, and `zen status` warns when the root filesystem is over 80% full. Every step: [DEVELOPMENT.md, "Applying a change"](DEVELOPMENT.md#applying-a-change-scriptsupgradesh).
+It pulls `main` (refusing local changes or another branch) and runs `scripts/upgrade.sh`, which tests the new version, restarts zenbot once no session is working and rolls back compatible SQLite binaries if it is not healthy; a PostgreSQL-to-SQLite cutover cannot roll back to stale PostgreSQL; the result is in `~/.zenbot/upgrade.log`. After a healthy install it also trims oversized cargo build directories , and `zen status` warns when the root filesystem is over 80% full. Every step: [DEVELOPMENT.md, "Applying a change"](DEVELOPMENT.md#applying-a-change-scriptsupgradesh).
 
 ### Engines
 
@@ -56,3 +56,10 @@ zen jobs                                     # next run of every scheduled job
 ```
 
 Troubleshooting: `journalctl -u zenbot -n 50` shows the service logs. The service listens on port 8100 (change it by re-running the installer with `ZEN_PORT=…`; a re-run keeps your other settings in `~/.zenbot/env`).
+
+## Existing PostgreSQL installations
+
+Follow [DEVELOPMENT.md](DEVELOPMENT.md#database-changes-and-existing-data-migration) to export
+and validate existing state before the SQLite cutover. The PostgreSQL database and recovery
+backups are retained. Do not point the new kernel at an empty SQLite file to bypass migration.
+For web search, configure an external `ZEN_SEARXNG_URL`, `BRAVE_API_KEY` or `TAVILY_API_KEY`.

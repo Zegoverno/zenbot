@@ -1,20 +1,18 @@
 #!/usr/bin/env bash
-# Runs detached (via systemd-run) from upgrade.sh with the stage it made (~/.zenbot/upgrades/<id>:
-# the tested binaries, `commit`, and `note` if the tree had uncommitted changes): waits for idle,
-# swaps in the staged binaries, brings ~/.zenbot/env up to date (a private database password,
-# db_secure in scripts/db.sh; retired worker names out of ZEN_WORKERS; env.prev keeps the file as
-# it was), restarts, health-checks, and rolls back on failure. Installs are
-# serialized by a lock, and a request superseded by a newer one steps aside instead of installing
-# over it, so the log and ~/.zenbot/version always name the commit actually running. If the new build brings migrations the
-# live database hasn't applied, the database is backed up first (scripts/db.sh); a rollback
-# doesn't restore it (migrations are expand-only, see AGENTS.md) but logs how to. After a healthy
-# install it trims the checkout's cargo target directories over 2 GiB and prunes dangling Docker
-# images and old build cache (trim_target, docker_prune in scripts/lib.sh).
+# Detached, serialized install from immutable staged binaries/schema/tooling. Waits for idle,
+# tests expand-only SQLite migrations on backed-up state, installs and health checks. A first
+# PostgreSQL cutover requires positive idleness, stops the old writer, takes a final consistent
+# archive and verifies the SQLite import before switching settings/service. Before SQLite startup,
+# preparation failures may restore the old installation. After SQLite startup is attempted,
+# PostgreSQL rollback is forbidden: retained data and new binaries stay for forward recovery.
+# Later SQLite-only upgrades may restore the previous SQLite-capable binaries without restoring
+# an older database. trim_target limits build disk usage after successful installs.
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$REPO/scripts/db.sh"
 BIN="$HOME/.zenbot/bin"
 LOG="$HOME/.zenbot/upgrade.log"
+SERVICE_FILE=${ZEN_UPGRADE_SERVICE_FILE:-/etc/systemd/system/zenbot.service}
 PORT=$(zen_env ZEN_PORT); PORT=${PORT:-8100}
 HEALTH="http://127.0.0.1:$PORT/health"
 log() { echo "$(date -u +%FT%TZ) $*" >> "$LOG"; }
@@ -24,7 +22,26 @@ STAGES=$(dirname "$STAGE")
 COMMIT=$(cat "$STAGE/commit" 2>/dev/null)
 NOTE=$([ -f "$STAGE/note" ] && echo ", $(cat "$STAGE/note")")
 if [ -z "$COMMIT" ]; then log "upgrade ABORTED: no staged build in $STAGE; nothing changed"; exit 1; fi
-trap 'rm -rf "$STAGE"' EXIT
+ZEN_STORAGE_TOOL="$STAGE/storage-tool/scripts/storage.py"
+[ -f "$ZEN_STORAGE_TOOL" ] || { log "upgrade ABORTED: staged storage tooling missing"; exit 1; }
+ZEN_PG_COMPOSE="$STAGE/compose.yaml"
+CUTOVER= PG_STOPPED= NEW_STARTED= ENV_CHANGED= SERVICE_CHANGED=
+db_is_postgres && CUTOVER=1
+cleanup_stage() {
+  # Only failures BEFORE the SQLite kernel starts can safely return to the retained PG writer.
+  if [ -n "$PG_STOPPED" ] && [ -z "$NEW_STARTED" ]; then
+    declare -F restore_bins >/dev/null && restore_bins
+    [ -z "$ENV_CHANGED" ] || cp -p "$HOME/.zenbot/env.prev" "$HOME/.zenbot/env"
+    if [ -n "$SERVICE_CHANGED" ] && [ -f "$STAGE/service.prev" ]; then
+      sudo install -m 644 "$STAGE/service.prev" "$SERVICE_FILE"
+      sudo systemctl daemon-reload
+    fi
+    sudo systemctl start zenbot
+    log "cutover preparation failed before SQLite startup; previous PostgreSQL installation restarted"
+  fi
+  rm -rf "$STAGE"
+}
+trap cleanup_stage EXIT
 
 log "upgrade requested ($COMMIT$NOTE)"
 # Wait until no session is working. A kernel that doesn't answer at all (down, or crash-looping)
@@ -38,17 +55,25 @@ wait_idle() {
       fails=0
       grep -q '"busy":0' <<<"$h" && return 0
     elif ((++fails >= 5)); then
+      if [ -n "$CUTOVER" ]; then
+        log "cutover ABORTED: kernel health unavailable; cannot prove idleness"
+        return 1
+      fi
       log "zenbot isn't answering $HEALTH; going ahead without waiting"
       return 0
     fi
     if ((SECONDS >= DEADLINE)); then
+      if [ -n "$CUTOVER" ]; then
+        log "cutover ABORTED: kernel remained busy; refusing to interrupt turns for data migration"
+        return 1
+      fi
       log "zenbot still busy after 30 minutes; restarting anyway, which ends the running turns"
       return 0
     fi
     sleep 2
   done
 }
-wait_idle
+wait_idle || exit 1
 
 # One install at a time; the newest request wins (stage ids are nanosecond timestamps, so they sort).
 exec 9>"$STAGES/.lock"
@@ -68,6 +93,9 @@ echo "$ID" > "$STAGES/.installed"
 
 PREV_VERSION=$(cat "$HOME/.zenbot/version" 2>/dev/null || true)
 BACKUP=
+if [ -n "$CUTOVER" ]; then
+  PENDING=1 # PostgreSQL history is archived separately; never replay it as SQLite migrations.
+else
 if ! PENDING=$(db_pending 2>>"$LOG" | tr '\n' ' '); then
   log "upgrade ABORTED: can't ask the database which migrations are pending (see above); nothing changed"
   exit 1
@@ -80,9 +108,27 @@ if [ -n "$PENDING" ]; then
   log "migrations ${PENDING}pending; database backed up to $BACKUP"
 fi
 
+fi
+
 # A session may have started during the backup: wait again, right before anything changes, so the
 # restart doesn't end it (and a running kernel never starts workers from the new binaries).
-wait_idle
+wait_idle || exit 1
+
+if [ -n "$CUTOVER" ]; then
+  # Stop the old writer only from the detached upgrade, after a second positive idle check.
+  # A final quiescent snapshot replaces the live smoke snapshot; PostgreSQL stays untouched.
+  if ! sudo systemctl stop zenbot; then log "cutover ABORTED: cannot stop old writer"; exit 1; fi
+  PG_STOPPED=1
+  mkdir -p "$DB_BACKUPS" && chmod 700 "$DB_BACKUPS" || { log "cutover ABORTED: cannot create private archive directory"; exit 1; }
+  BACKUP="$DB_BACKUPS/$(date -u +%Y%m%dT%H%M%S%N)-postgres-cutover.jsonl"
+  SQLITE_PATH="${ZEN_HOME:-$HOME/.zenbot}/zen.sqlite3"
+  [ ! -e "$SQLITE_PATH" ] || { log "cutover ABORTED: destination already exists; inspect it before retrying"; exit 1; }
+  if ! db_pg_export "$BACKUP" 2>>"$LOG" || ! python3 "$ZEN_STORAGE_TOOL" restore "$BACKUP" "$SQLITE_PATH" 2>>"$LOG"; then
+    log "cutover ABORTED: final archive/import validation failed; PostgreSQL and archive retained"
+    exit 1
+  fi
+  log "quiescent PostgreSQL archive verified and imported; retained at $BACKUP"
+fi
 
 BINS="zend zen zen-engine"
 # Put back the binaries replaced so far (all of them on a rollback).
@@ -100,7 +146,15 @@ done
 
 # Settings the new version needs, written right before the restart (old binaries read the same
 # file, so a rollback keeps working): env.prev keeps env as it was.
-env_backup
+env_backup || { log "upgrade ABORTED: retaining environment failed"; exit 1; }
+if [ -n "$CUTOVER" ]; then
+  ENV_CHANGED=1
+  env_set DATABASE_URL "sqlite://$SQLITE_PATH" || { log "cutover ABORTED: setting SQLite URL failed"; exit 1; }
+  cp "$SERVICE_FILE" "$STAGE/service.prev" || { log "cutover ABORTED: cannot retain service configuration"; exit 1; }
+  sed -e "s#__USER__#$(id -un)#g" -e "s#__REPO__#$REPO#g" -e "s#__HOME__#$HOME#g" "$STAGE/zenbot.service" > "$STAGE/service.new"
+  SERVICE_CHANGED=1
+  sudo install -m 644 "$STAGE/service.new" "$SERVICE_FILE" && sudo systemctl daemon-reload || { log "cutover ABORTED: installing Docker-free service failed"; exit 1; }
+fi
 DB_SECURED=$(db_secure 2>>"$LOG") || log "making the database password private failed (see above); it stays as it was"
 [ -z "$DB_SECURED" ] || log "$DB_SECURED"
 # Pi was retired (D-043): an older kernel refused to start with it in ZEN_WORKERS.
@@ -113,27 +167,33 @@ fi
 
 # The kernel reads the version at start and records it with every turn, so write it first.
 echo "$COMMIT" > "$HOME/.zenbot/version"
+# From this point the new kernel may write SQLite: returning to PostgreSQL would lose history.
+NEW_STARTED=1
 sudo systemctl restart zenbot
 
 if wait_healthy "$HEALTH" 45; then
+  touch "$BIN/.sqlite-storage"
   log "upgrade OK: now running $COMMIT$NOTE"
   # The kernel's scheduler runs the sleep and engine updates now (D-046): the old timers go.
   remove_old_timers 2>>"$LOG" || log "removing the old zen-sleep/zen-engines timers failed; remove them by hand"
-  # Services a new version brings in deploy/compose.yaml (e.g. SearXNG for web search).
-  sudo docker compose -f "$REPO/deploy/compose.yaml" up -d >>"$LOG" 2>&1 || log "starting the compose services failed; see the log above"
-  # Disk hygiene (the VM's disk once filled up): build directories over 2 GiB and old Docker
-  # leftovers. The installed binaries are in ~/.zenbot/bin, so nothing here can break the install.
+  # Disk hygiene: trim build directories over 2 GiB. The installed binaries are in ~/.zenbot/bin, so nothing here can break the install.
   SRC=$(zen_env ZEN_REPO); SRC=${SRC:-$HOME/zenbot}
   for t in "$SRC/target" "$SRC/crates/zen-matrix/target"; do
     TRIMMED=$(trim_target "$t" 2>>"$LOG") || true
     [ -z "$TRIMMED" ] || log "$TRIMMED"
   done
-  docker_prune >>"$LOG" 2>&1 || true
+
   exit 0
 fi
 
-log "upgrade FAILED health check; rolling back. Last service logs:"
+log "upgrade FAILED health check; checking rollback compatibility. Last service logs:"
 journalctl -u zenbot -n 30 --no-pager >> "$LOG" 2>&1
+# A backend cutover cannot roll back binaries to a PostgreSQL writer: that would fork history.
+# Every future SQLite stage carries this marker; old (PostgreSQL) installed versions do not.
+if [ -n "$CUTOVER" ] || [ ! -f "$BIN/.sqlite-storage" ]; then
+  log "upgrade failed after SQLite startup; automatic rollback to PostgreSQL is forbidden. SQLite retained; recover using a SQLite-capable build."
+  exit 1
+fi
 restore_bins
 echo "$PREV_VERSION" > "$HOME/.zenbot/version"
 sudo systemctl restart zenbot

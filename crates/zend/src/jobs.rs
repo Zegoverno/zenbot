@@ -20,7 +20,7 @@
 //!   60 KB (`read_report`); anything else makes the run an error, never the answer posted instead.
 //!
 //! How it runs (patterns from Hermes and OpenClaw, read in code): the loop sleeps until the
-//! earliest due job, at most a minute; due jobs are claimed with `FOR UPDATE SKIP LOCKED` and their
+//! earliest due job, at most a minute; due jobs are claimed in a short immediate write transaction and their
 //! next run is set in the same transaction, so a crash loses at most one run and never repeats one;
 //! the database allows one running run per job; runs left running by a restart are marked
 //! `interrupted`. A run missed while the kernel was down runs once if it's within its grace (half
@@ -49,7 +49,7 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde_json::{json, Value};
-use sqlx::{PgPool, Row};
+use sqlx::{SqlitePool, Row};
 use uuid::Uuid;
 
 use crate::{tape, tools, AppState};
@@ -241,7 +241,7 @@ pub struct Job {
 const COLUMNS: &str = "id, name, kind, action, prompt, command, context, skills, schedule, tz, model, workspace, report_file, post_to, enabled, paused_reason, created_by, \
 next_run_at, last_run_at, last_status, last_error, failures";
 
-fn job_of(r: &sqlx::postgres::PgRow) -> Job {
+fn job_of(r: &sqlx::sqlite::SqliteRow) -> Job {
     Job {
         id: r.get("id"),
         name: r.get("name"),
@@ -249,8 +249,8 @@ fn job_of(r: &sqlx::postgres::PgRow) -> Job {
         action: r.get("action"),
         prompt: r.get("prompt"),
         command: r.get("command"),
-        context: r.get("context"),
-        skills: r.get("skills"),
+        context: r.get::<sqlx::types::Json<Vec<String>>,_>("context").0,
+        skills: r.get::<sqlx::types::Json<Vec<String>>,_>("skills").0,
         schedule: r.get("schedule"),
         tz: r.get("tz"),
         model: r.get("model"),
@@ -277,7 +277,7 @@ pub fn job_json(j: &Job) -> Value {
     })
 }
 
-pub async fn get(db: &PgPool, name: &str) -> Result<Job> {
+pub async fn get(db: &SqlitePool, name: &str) -> Result<Job> {
     let row = sqlx::query(&format!("SELECT {COLUMNS} FROM jobs WHERE name = $1 AND removed_at IS NULL"))
         .bind(name.trim())
         .fetch_optional(db)
@@ -286,17 +286,17 @@ pub async fn get(db: &PgPool, name: &str) -> Result<Job> {
     Ok(job_of(&row))
 }
 
-pub async fn list(db: &PgPool) -> Result<Vec<Job>> {
+pub async fn list(db: &SqlitePool) -> Result<Vec<Job>> {
     let rows = sqlx::query(&format!("SELECT {COLUMNS} FROM jobs WHERE removed_at IS NULL ORDER BY kind DESC, name")).fetch_all(db).await?;
     Ok(rows.iter().map(job_of).collect())
 }
 
 /// Recent runs, newest first: of one job, or of all.
-pub async fn runs(db: &PgPool, name: Option<&str>, limit: i64) -> Result<Vec<Value>> {
+pub async fn runs(db: &SqlitePool, name: Option<&str>, limit: i64) -> Result<Vec<Value>> {
     let rows = sqlx::query(
-        "SELECT r.id, j.name, r.trigger, r.status, r.session_id, r.started_at, r.ended_at, r.output, r.error, (r.risk>=4 OR zen_session_contaminated(r.session_id)) AS tainted, (CASE WHEN zen_session_contaminated(r.session_id) THEN 5::smallint ELSE r.risk END) AS risk, r.posted_to, r.pending_to, r.command, r.exit_code
+        "SELECT r.id, j.name, r.trigger, r.status, r.session_id, r.started_at, r.ended_at, r.output, r.error, (r.risk>=4 OR COALESCE(r.session_id IN (SELECT id FROM zen_contaminated_sessions),false)) AS tainted, (CASE WHEN COALESCE(r.session_id IN (SELECT id FROM zen_contaminated_sessions),false) THEN 5 ELSE r.risk END) AS risk, r.posted_to, r.pending_to, r.command, r.exit_code
          FROM job_runs r JOIN jobs j ON j.id = r.job_id
-         WHERE ($1::text IS NULL OR (j.name = $1 AND j.removed_at IS NULL)) ORDER BY r.started_at DESC, r.id DESC LIMIT $2",
+         WHERE ($1 IS NULL OR (j.name = $1 AND j.removed_at IS NULL)) ORDER BY r.started_at DESC, r.id DESC LIMIT $2",
     )
     .bind(name.map(str::trim))
     .bind(limit.clamp(1, 200))
@@ -413,7 +413,7 @@ pub enum By {
 /// The session a job posts its reports into (D-060): one of the owner's own sessions (not a job's,
 /// a subagent's or a verifier's), named by its id, an 8+ character prefix of it, or `this` (the
 /// agent's session). Empty clears it (None).
-async fn post_target(db: &PgPool, text: &str, by: &By) -> Result<Option<Uuid>> {
+async fn post_target(db: &SqlitePool, text: &str, by: &By) -> Result<Option<Uuid>> {
     let text = text.trim();
     if text.is_empty() {
         return Ok(None);
@@ -429,7 +429,7 @@ async fn post_target(db: &PgPool, text: &str, by: &By) -> Result<Option<Uuid>> {
             text.to_ascii_lowercase()
         }
     };
-    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM sessions WHERE id::text LIKE $1 || '%' AND kind IS NULL LIMIT 2")
+    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM sessions WHERE lower(hex(id)) LIKE replace($1,'-','') || '%' AND kind IS NULL LIMIT 2")
         .bind(&prefix)
         .fetch_all(db)
         .await?;
@@ -492,8 +492,8 @@ pub async fn create(app: &AppState, spec: Spec, by: By) -> Result<(Job, Option<S
     ))
     .bind(&name)
     .bind(&prompt)
-    .bind(&context)
-    .bind(&skills)
+    .bind(sqlx::types::Json(&context))
+    .bind(sqlx::types::Json(&skills))
     .bind(&schedule)
     .bind(tz.name())
     .bind(&model)
@@ -573,13 +573,13 @@ pub async fn update(app: &AppState, name: &str, spec: Spec, by: By) -> Result<(J
     let paused = if enabled { None } else { paused.or(job.paused_reason.clone()) };
     let row = sqlx::query(&format!(
         "UPDATE jobs SET prompt = $2, context = $3, skills = $4, schedule = $5, tz = $6, model = $7, workspace = COALESCE($8, workspace),
-                enabled = $9, paused_reason = $10, approval = COALESCE($11, approval), next_run_at = $12, report_file = $13, post_to = $14, owner_approved = $15, failures = 0, updated_at = now(), command = $16
+                enabled = $9, paused_reason = $10, approval = COALESCE($11, approval), next_run_at = $12, report_file = $13, post_to = $14, owner_approved = $15, failures = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'), command = $16
          WHERE id = $1 RETURNING {COLUMNS}"
     ))
     .bind(job.id)
     .bind(&prompt)
-    .bind(&context)
-    .bind(&skills)
+    .bind(sqlx::types::Json(&context))
+    .bind(sqlx::types::Json(&skills))
     .bind(&schedule)
     .bind(tz.name())
     .bind(&model)
@@ -632,7 +632,7 @@ pub async fn set_enabled(app: &AppState, name: &str, on: bool, by: By) -> Result
             }
         }
     }
-    let row = sqlx::query(&format!("UPDATE jobs SET enabled = $2, paused_reason = $3, next_run_at = $4, owner_approved = CASE WHEN $5 THEN true ELSE owner_approved END, failures = CASE WHEN $2 THEN 0 ELSE failures END, updated_at = now() WHERE id = $1 RETURNING {COLUMNS}"))
+    let row = sqlx::query(&format!("UPDATE jobs SET enabled = $2, paused_reason = $3, next_run_at = $4, owner_approved = CASE WHEN $5 THEN true ELSE owner_approved END, failures = CASE WHEN $2 THEN 0 ELSE failures END, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = $1 RETURNING {COLUMNS}"))
         .bind(job.id)
         .bind(on)
         .bind(&reason)
@@ -655,7 +655,7 @@ async fn wait_for_owner(app: &AppState, session: Uuid) -> Result<()> {
     let deadline = std::time::Instant::now() + HOLD_WAIT;
     loop {
         let pending: Option<i64> = sqlx::query_scalar(
-            "SELECT g.id FROM action_gates g WHERE g.session_id=$1 AND g.created_at>now()-interval '1 day'
+            "SELECT g.id FROM action_gates g WHERE g.session_id=$1 AND g.created_at>strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-1 day')
               AND ((g.decision IS NULL AND g.allowed_at IS NULL) OR (g.decision IN ('approved','rejected') AND NOT EXISTS
                 (SELECT 1 FROM turns t WHERE t.session_id=g.session_id AND t.started_at>=g.resolved_at AND t.ended_at IS NOT NULL)))
               ORDER BY g.id DESC LIMIT 1",
@@ -711,7 +711,7 @@ pub fn registrable(host: &str) -> String {
 
 /// Domains named by an explicitly owner-created/approved job's unchanged prompt (D-068).
 /// A job S1 alone let go live gets no owner source authority. Empty for other sessions.
-pub async fn owner_job_domains(db: &PgPool, session: Uuid) -> Vec<String> {
+pub async fn owner_job_domains(db: &SqlitePool, session: Uuid) -> Vec<String> {
     let row = sqlx::query(
         "SELECT j.prompt FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE r.session_id = $1 AND j.kind = 'agent' AND j.owner_approved AND j.updated_at <= r.started_at
          LIMIT 1",
@@ -739,18 +739,18 @@ pub async fn owner_job_domains(db: &PgPool, session: Uuid) -> Vec<String> {
 }
 
 /// Whether `host` is under a domain the session's owner-approved job names.
-pub async fn names_host(db: &PgPool, session: Uuid, host: &str) -> bool {
+pub async fn names_host(db: &SqlitePool, session: Uuid, host: &str) -> bool {
     let domain = registrable(host);
     owner_job_domains(db, session).await.contains(&domain)
 }
 
 /// The S1 judgment a job was created or changed with (`jobs.approval`), if any.
-pub async fn approval_of(db: &PgPool, id: i64) -> Option<Value> {
+pub async fn approval_of(db: &SqlitePool, id: i64) -> Option<Value> {
     sqlx::query_scalar::<_, Option<Value>>("SELECT approval FROM jobs WHERE id = $1").bind(id).fetch_optional(db).await.ok().flatten().flatten()
 }
 
 /// The owner removing a job S1 kept paused, never run live: the pause was right.
-pub async fn label_removed(db: &PgPool, name: &str) {
+pub async fn label_removed(db: &SqlitePool, name: &str) {
     if let Ok(job) = get(db, name).await {
         if !job.enabled {
             if let Some(approval) = approval_of(db, job.id).await {
@@ -761,10 +761,10 @@ pub async fn label_removed(db: &PgPool, name: &str) {
 }
 
 /// Remove an agent job (its runs stay).
-pub async fn remove(db: &PgPool, name: &str) -> Result<()> {
+pub async fn remove(db: &SqlitePool, name: &str) -> Result<()> {
     let job = get(db, name).await?;
     anyhow::ensure!(job.kind == "agent", "`{}` is a system job: pause it instead", job.name);
-    sqlx::query("UPDATE jobs SET removed_at = now(), enabled = false, updated_at = now() WHERE id = $1").bind(job.id).execute(db).await?;
+    sqlx::query("UPDATE jobs SET removed_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'), enabled = false, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = $1").bind(job.id).execute(db).await?;
     Ok(())
 }
 
@@ -829,7 +829,7 @@ async fn gate(app: &AppState, session: Uuid, name: &str, prompt: &str, schedule:
 }
 
 /// The owner's own messages in a session, newest last (not kernel prompts), about 6,000 characters.
-async fn owner_words(db: &PgPool, session: Uuid) -> Vec<String> {
+async fn owner_words(db: &SqlitePool, session: Uuid) -> Vec<String> {
     let blocks = tape::load(db, session, &["message"]).await.unwrap_or_default();
     let mut out: Vec<String> = Vec::new();
     let mut size = 0;
@@ -853,7 +853,7 @@ async fn owner_words(db: &PgPool, session: Uuid) -> Vec<String> {
 
 /// Create the kernel's own jobs if they aren't there (an install from before a job existed gets it
 /// here). One whose name an agent job already has isn't created: logged, so the owner can rename theirs.
-pub async fn seed(db: &PgPool) -> Result<()> {
+pub async fn seed(db: &SqlitePool) -> Result<()> {
     for (name, action, schedule, _) in SYSTEM {
         let (s, canon) = parse_schedule(schedule, Tz::UTC, Utc::now())?;
         let next = next_after(&s, Tz::UTC, Utc::now());
@@ -894,17 +894,17 @@ pub async fn run_loop(app: AppState) {
         return;
     }
     // Runs this kernel didn't finish: the previous kernel stopped during them.
-    match sqlx::query(
-        "WITH r AS (UPDATE job_runs SET status = 'interrupted', ended_at = now(), error = 'the kernel stopped during the run'
-                    WHERE status = 'running' RETURNING job_id, session_id),
-              s AS (UPDATE sessions SET archived = true WHERE id IN (SELECT session_id FROM r))
-         UPDATE jobs SET last_status = 'interrupted', updated_at = now() WHERE id IN (SELECT job_id FROM r)",
-    )
-    .execute(&app.db)
-    .await
-    {
-        Ok(r) if r.rows_affected() > 0 => tracing::warn!("{} job run(s) interrupted by a restart", r.rows_affected()),
-        Ok(_) => {}
+    let interrupted: Result<u64> = async {
+        let mut tx=crate::storage::begin(&app.db).await?;
+        sqlx::query("UPDATE sessions SET archived=true WHERE id IN (SELECT session_id FROM job_runs WHERE status='running')").execute(&mut *tx).await?;
+        sqlx::query("UPDATE jobs SET last_status='interrupted',updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id IN (SELECT job_id FROM job_runs WHERE status='running')").execute(&mut *tx).await?;
+        let count=sqlx::query("UPDATE job_runs SET status='interrupted',ended_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),error='the kernel stopped during the run' WHERE status='running'").execute(&mut *tx).await?.rows_affected();
+        tx.commit().await?;
+        Ok(count)
+    }.await;
+    match interrupted {
+        Ok(n) if n>0 => tracing::warn!("{n} job run(s) interrupted by a restart"),
+        Ok(_) => {},
         Err(e) => tracing::error!("marking interrupted job runs: {e:#}"),
     }
     loop {
@@ -935,9 +935,9 @@ async fn tick(app: &AppState) -> Result<()> {
         Err(_) => tracing::error!("delivering pending job reports took over {}s; the schedule goes on", DELIVERY_TIMEOUT.as_secs()),
     }
     let now = Utc::now();
-    let mut tx = app.db.begin().await?;
+    let mut tx = crate::storage::begin(&app.db).await?;
     let rows = sqlx::query(&format!(
-        "SELECT {COLUMNS} FROM jobs WHERE enabled AND removed_at IS NULL AND next_run_at <= now() ORDER BY next_run_at LIMIT 8 FOR UPDATE SKIP LOCKED"
+        "SELECT {COLUMNS} FROM jobs WHERE enabled AND removed_at IS NULL AND next_run_at <= strftime('%Y-%m-%dT%H:%M:%f+00:00','now') ORDER BY next_run_at LIMIT 8"
     ))
     .fetch_all(&mut *tx)
     .await?;
@@ -948,7 +948,7 @@ async fn tick(app: &AppState) -> Result<()> {
             Ok(x) => x,
             Err(e) => {
                 // Never silently: the job stops with the reason shown.
-                sqlx::query("UPDATE jobs SET enabled = false, paused_reason = $2, last_status = 'error', last_error = $2, updated_at = now() WHERE id = $1")
+                sqlx::query("UPDATE jobs SET enabled = false, paused_reason = $2, last_status = 'error', last_error = $2, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = $1")
                     .bind(job.id)
                     .bind(format!("paused: its schedule can't be read ({e:#})"))
                     .execute(&mut *tx)
@@ -959,15 +959,15 @@ async fn tick(app: &AppState) -> Result<()> {
         let next = next_from(&sched, tz, due, now);
         let late = now - due;
         if late > grace(period(&sched, tz, due)) {
-            sqlx::query("UPDATE jobs SET next_run_at = $2, last_status = 'missed', updated_at = now() WHERE id = $1").bind(job.id).bind(next).execute(&mut *tx).await?;
-            sqlx::query("INSERT INTO job_runs (job_id, trigger, status, ended_at, error) VALUES ($1, 'schedule', 'missed', now(), $2)")
+            sqlx::query("UPDATE jobs SET next_run_at = $2, last_status = 'missed', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = $1").bind(job.id).bind(next).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO job_runs (job_id, trigger, status, ended_at, error) VALUES ($1, 'schedule', 'missed', strftime('%Y-%m-%dT%H:%M:%f+00:00','now'), $2)")
                 .bind(job.id)
                 .bind(format!("due at {due}, {} minutes late (the kernel was down); skipped", late.num_minutes()))
                 .execute(&mut *tx)
                 .await?;
             continue;
         }
-        sqlx::query("UPDATE jobs SET next_run_at = $2, updated_at = now() WHERE id = $1").bind(job.id).bind(next).execute(&mut *tx).await?;
+        sqlx::query("UPDATE jobs SET next_run_at = $2, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = $1").bind(job.id).bind(next).execute(&mut *tx).await?;
         let trigger = if late > chrono::Duration::minutes(2) { "catchup" } else { "schedule" };
         // The database allows one running run per job: one still running (or started by the owner
         // just now) means this one is skipped, the next stays scheduled, and the tick goes on.
@@ -989,13 +989,13 @@ async fn tick(app: &AppState) -> Result<()> {
 
 /// Archive a finished run's session (a system job's run has none): the report reaches the owner
 /// through the jobs room and `zen jobs runs`, and the session stays in the board's Archived section.
-async fn archive_session(db: &PgPool, run: i64) -> Result<()> {
+async fn archive_session(db: &SqlitePool, run: i64) -> Result<()> {
     sqlx::query("UPDATE sessions SET archived = true WHERE id = (SELECT session_id FROM job_runs WHERE id = $1)").bind(run).execute(db).await?;
     Ok(())
 }
 
 /// A `running` row for a run of this job, unless one is running (None).
-async fn start_run(db: &PgPool, job: i64, trigger: &str) -> Result<Option<i64>> {
+async fn start_run(db: &SqlitePool, job: i64, trigger: &str) -> Result<Option<i64>> {
     let r = sqlx::query_scalar("INSERT INTO job_runs (job_id, trigger, status) VALUES ($1, $2, 'running') ON CONFLICT DO NOTHING RETURNING id")
         .bind(job)
         .bind(trigger)
@@ -1045,11 +1045,11 @@ fn spawn_run(app: &AppState, job: Job, run: i64) {
 /// `ok` run with a report. The intent is recorded (`pending_to`) together with the status, so the Matrix
 /// bridge never posts a queued report in the jobs room too; `deliver_pending` records delivery. A marked run's report
 /// stays in the jobs feed: posted into a session it would mark that session (D-053).
-async fn finish(db: &PgPool, job: &Job, run: i64, o: &Outcome) -> Result<Option<Uuid>> {
+async fn finish(db: &SqlitePool, job: &Job, run: i64, o: &Outcome) -> Result<Option<Uuid>> {
     archive_session(db, run).await?;
     // By origin rating (D-065): rated 4 or more, or stopped (a source of it denied).
     let tainted: bool = sqlx::query_scalar(
-        "SELECT COALESCE((SELECT s.risk >= 4 OR s.tainted_at IS NOT NULL OR zen_session_contaminated(s.id) FROM job_runs r JOIN sessions s ON s.id = r.session_id WHERE r.id = $1), false)",
+        "SELECT COALESCE((SELECT s.risk >= 4 OR s.tainted_at IS NOT NULL OR COALESCE(s.id IN (SELECT id FROM zen_contaminated_sessions),false) FROM job_runs r JOIN sessions s ON s.id = r.session_id WHERE r.id = $1), false)",
     )
     .bind(run)
     .fetch_one(db)
@@ -1059,7 +1059,7 @@ async fn finish(db: &PgPool, job: &Job, run: i64, o: &Outcome) -> Result<Option<
     if job.post_to.is_some() && has_report && tainted {
         tracing::warn!("job `{}` run {run} read untrusted content: its report stays in the jobs feed, not posted into a session", job.name);
     }
-    sqlx::query("UPDATE job_runs SET status = $2, ended_at = now(), output = $3, error = $4, tainted = $5, pending_to = $6 WHERE id = $1")
+    sqlx::query("UPDATE job_runs SET status = $2, ended_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'), output = $3, error = $4, tainted = $5, pending_to = $6 WHERE id = $1")
         .bind(run)
         .bind(o.status)
         .bind(&o.output)
@@ -1070,7 +1070,7 @@ async fn finish(db: &PgPool, job: &Job, run: i64, o: &Outcome) -> Result<Option<
         .await?;
     let failed = o.status == "error";
     let failures: i32 = sqlx::query_scalar(
-        "UPDATE jobs SET last_run_at = now(), last_status = $2, last_error = $3, failures = CASE WHEN $4 THEN failures + 1 ELSE 0 END, updated_at = now()
+        "UPDATE jobs SET last_run_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'), last_status = $2, last_error = $3, failures = CASE WHEN $4 THEN failures + 1 ELSE 0 END, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
          WHERE id = $1 RETURNING failures",
     )
     .bind(job.id)
@@ -1083,7 +1083,7 @@ async fn finish(db: &PgPool, job: &Job, run: i64, o: &Outcome) -> Result<Option<
         return Ok(target);
     }
     if failures >= MAX_FAILURES {
-        sqlx::query("UPDATE jobs SET enabled = false, paused_reason = $2, updated_at = now() WHERE id = $1")
+        sqlx::query("UPDATE jobs SET enabled = false, paused_reason = $2, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = $1")
             .bind(job.id)
             .bind(format!("paused after {failures} failed runs in a row; last: {}", zen_proto::head(o.error.as_deref().unwrap_or("?"), 300)))
             .execute(db)
@@ -1091,7 +1091,7 @@ async fn finish(db: &PgPool, job: &Job, run: i64, o: &Outcome) -> Result<Option<
     } else {
         // Never more often than scheduled: the next run waits at least the backoff.
         let wait = BACKOFF_SECS[(failures as usize - 1).min(BACKOFF_SECS.len() - 1)];
-        sqlx::query("UPDATE jobs SET next_run_at = GREATEST(next_run_at, now() + make_interval(secs => $2)) WHERE id = $1 AND next_run_at IS NOT NULL")
+        sqlx::query("UPDATE jobs SET next_run_at = MAX(next_run_at, strftime('%Y-%m-%dT%H:%M:%f+00:00','now','+' || $2 || ' seconds')) WHERE id = $1 AND next_run_at IS NOT NULL")
             .bind(job.id)
             .bind(wait as f64)
             .execute(db)
@@ -1115,7 +1115,7 @@ async fn deliver_pending(app: &AppState) -> Result<()> {
         // ends, then given up (it stays in the jobs feed), and never stops the others.
         if let Err(e) = deliver_one(app, run, target).await {
             tracing::error!("delivering job run {run} into session {target}: {e:#}");
-            let _ = sqlx::query("UPDATE job_runs SET pending_to = NULL, error = $2 WHERE id = $1 AND pending_to IS NOT NULL AND ended_at < now() - interval '2 hours'")
+            let _ = sqlx::query("UPDATE job_runs SET pending_to = NULL, error = $2 WHERE id = $1 AND pending_to IS NOT NULL AND ended_at < strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-2 hours')")
                 .bind(run)
                 .bind(format!("session delivery failed: {}; report retained in the jobs feed", zen_proto::head(&format!("{e:#}"), 300)))
                 .execute(&app.db)
@@ -1133,7 +1133,7 @@ const DELIVERY_TIMEOUT: Duration = Duration::from_secs(30);
 async fn deliver_one(app: &AppState, run: i64, target: Uuid) -> Result<()> {
     {
         let turns = app.turns.lock().await;
-        let mut tx = app.db.begin().await?;
+        let mut tx = crate::storage::begin(&app.db).await?;
         crate::sources::lock_provenance(&mut tx).await?;
         // Serialize with a denial of the run's session or any source of it (taint::deny takes
         // its cause's chain lock first): a deny either commits before the check below, so the
@@ -1155,23 +1155,20 @@ async fn deliver_one(app: &AppState, run: i64, target: Uuid) -> Result<()> {
         sources.push(target);
         sources.sort();
         sources.dedup();
-        for s in &sources {
-            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 7))").bind(s).execute(&mut *tx).await?;
-        }
         let row = sqlx::query(
-            "SELECT r.output, r.session_id, r.risk, (r.risk>=4 OR zen_session_contaminated(r.session_id)) AS tainted, j.name FROM job_runs r JOIN jobs j ON j.id = r.job_id
-             WHERE r.id = $1 AND r.pending_to = $2 AND r.status = 'ok' FOR UPDATE OF r",
+            "SELECT r.output, r.session_id, r.risk, (r.risk>=4 OR COALESCE(r.session_id IN (SELECT id FROM zen_contaminated_sessions),false)) AS tainted, j.name FROM job_runs r JOIN jobs j ON j.id = r.job_id
+             WHERE r.id = $1 AND r.pending_to = $2 AND r.status = 'ok'",
         )
         .bind(run)
         .bind(target)
         .fetch_optional(&mut *tx)
         .await?;
         let Some(row) = row else { return Ok(()) };
-        let eligible: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sessions WHERE id = $1 AND kind IS NULL AND risk < 5 AND NOT zen_session_contaminated(id))")
+        let eligible: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sessions WHERE id = $1 AND kind IS NULL AND risk < 5 AND NOT COALESCE(id IN (SELECT id FROM zen_contaminated_sessions),false))")
             .bind(target)
             .fetch_one(&mut *tx)
             .await?;
-        let too_late: bool = sqlx::query_scalar("SELECT ended_at < now() - interval '2 hours' FROM job_runs WHERE id = $1")
+        let too_late: bool = sqlx::query_scalar("SELECT ended_at < strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-2 hours') FROM job_runs WHERE id = $1")
             .bind(run)
             .fetch_one(&mut *tx)
             .await?;
@@ -1190,7 +1187,7 @@ async fn deliver_one(app: &AppState, run: i64, target: Uuid) -> Result<()> {
         let job: String = row.get("name");
         let risk: i16 = row.get("risk");
         let report = crate::context::label(&format!("job {job} run {run}"), risk, &row.get::<Option<String>, _>("output").unwrap_or_default());
-        sqlx::query("UPDATE sessions SET risk=GREATEST(risk,$2) WHERE id=$1").bind(target).bind(risk).execute(&mut *tx).await?;
+        sqlx::query("UPDATE sessions SET risk=MAX(risk,$2) WHERE id=$1").bind(target).bind(risk).execute(&mut *tx).await?;
         let message = json!({
             "role": "assistant",
             "content": [{ "type": "text", "text": format!("⏰ *{job}*\n\n{}", report.trim()) }],
@@ -1268,14 +1265,14 @@ const UPKEEP: [&str; 4] = ["wiki", "skills", "routes", "prune"];
 
 /// What the nightly upkeep jobs found in the last day (each one's latest run that found something),
 /// for a session's instructions next to the sleep's morning note. None when they found nothing.
-pub async fn upkeep_note(db: &PgPool) -> Result<Option<String>, sqlx::Error> {
+pub async fn upkeep_note(db: &SqlitePool) -> Result<Option<String>, sqlx::Error> {
     let found: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT ON (j.action) r.output FROM job_runs r JOIN jobs j ON j.id = r.job_id
-         WHERE j.kind = 'system' AND j.action = ANY($1) AND r.status = 'ok' AND r.output IS NOT NULL
-           AND r.ended_at > now() - interval '1 day'
-         ORDER BY j.action, r.id DESC",
+        "SELECT output FROM (SELECT r.output,j.action,row_number() OVER(PARTITION BY j.action ORDER BY r.id DESC) AS rn FROM job_runs r JOIN jobs j ON j.id = r.job_id
+         WHERE j.kind = 'system' AND j.action IN (SELECT value FROM json_each($1)) AND r.status = 'ok' AND r.output IS NOT NULL
+           AND r.ended_at > strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-1 day')
+          ) WHERE rn=1 ORDER BY action",
     )
-    .bind(UPKEEP.as_slice())
+    .bind(serde_json::json!(UPKEEP))
     .fetch_all(db)
     .await?;
     Ok((!found.is_empty()).then(|| format!("Last night's upkeep:\n{}", zen_proto::head(&found.join("\n"), 1500))))
@@ -1311,7 +1308,61 @@ fn prune_files(home: &std::path::Path) -> Vec<String> {
     if tmps > 0 {
         notes.push(format!("sandbox: removed {tmps} session /tmp folder(s) unused for 7 days"));
     }
+    let user = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let engines = prune_engine_sessions(home, &user.join(".claude/projects"), ENGINE_DAYS, EVAL_DAYS as u64);
+    if engines > 0 {
+        notes.push(format!("engines: removed {engines} engine session file(s) or folder(s) unused for {ENGINE_DAYS} days"));
+    }
     notes
+}
+
+/// Days an engine's own session state is kept (D-075): Codex rollouts in zenbot's private Codex
+/// home and Claude Code's session files for zenbot's engine folder. A turn whose session is gone
+/// starts it again from the kernel's history.
+const ENGINE_DAYS: u64 = 14;
+
+/// Claude Code's folder name for a working directory: every `/` and `.` a `-`.
+fn claude_project(dir: &std::path::Path) -> String {
+    dir.to_string_lossy().replace(['/', '.'], "-")
+}
+
+/// Remove what's directly in `dir` (with `deep`, files anywhere below it, then emptied folders) whose
+/// modification time is over `days` old; returns how many. Symlinks are never followed.
+fn remove_older(dir: &std::path::Path, days: u64, deep: bool, keep: &dyn Fn(&std::path::Path) -> bool) -> usize {
+    let limit = std::time::Duration::from_secs(days * 86_400);
+    let old = |m: &std::fs::Metadata| m.modified().ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > limit);
+    let Ok(read) = std::fs::read_dir(dir) else { return 0 };
+    let mut n = 0;
+    for entry in read.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+        if keep(&path) || meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() && deep {
+            n += remove_older(&path, days, true, keep);
+            if std::fs::read_dir(&path).is_ok_and(|mut d| d.next().is_none()) && std::fs::remove_dir(&path).is_ok() {
+                n += 1;
+            }
+        } else if old(&meta) && (if meta.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) }).is_ok() {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// zenbot's engine session state (D-075): Codex rollouts (`engine/codex/home/sessions`), Claude
+/// Code's files for the engine's folder (`projects`, only zenbot's own, never the owner's) after
+/// `days`; eval kernels' Claude folders after `eval_days`; turn socket folders after a day.
+fn prune_engine_sessions(home: &std::path::Path, projects: &std::path::Path, days: u64, eval_days: u64) -> usize {
+    let none = |_: &std::path::Path| false;
+    let mut n = remove_older(&home.join("engine/codex/home/sessions"), days, true, &none);
+    n += remove_older(&projects.join(claude_project(&home.join("engine/claude"))), days, false, &none);
+    n += remove_older(&home.join("engine/sockets"), 1, false, &none);
+    // Eval kernels run with their own zen home under an eval run's folder (scripts/eval.sh).
+    let not_eval = |p: &std::path::Path| !p.file_name().is_some_and(|f| f.to_string_lossy().contains("-zenbot-evals-"));
+    n += remove_older(projects, eval_days, false, &not_eval);
+    n
 }
 
 /// Database dumps (`<zen home>/backups/<UTC time>-<label>.dump`, scripts/db.sh `db_backup`) kept.
@@ -1442,7 +1493,7 @@ async fn job_instructions(app: &AppState, job: &Job, workspace: &std::path::Path
 /// this one (an error). The run depends on the session that wrote it, recorded before the report
 /// is handed over.
 async fn last_report(app: &AppState, job: &Job, run: i64, id: Uuid) -> Result<Option<String>> {
-    let last: Option<(Option<String>, i16, Option<Uuid>)> = sqlx::query_as("SELECT output, CASE WHEN zen_session_contaminated(session_id) THEN 5::smallint ELSE risk END, session_id FROM job_runs WHERE job_id = $1 AND id <> $2 AND status = 'ok' ORDER BY started_at DESC LIMIT 1")
+    let last: Option<(Option<String>, i16, Option<Uuid>)> = sqlx::query_as("SELECT output, CASE WHEN COALESCE(session_id IN (SELECT id FROM zen_contaminated_sessions),false) THEN 5 ELSE risk END, session_id FROM job_runs WHERE job_id = $1 AND id <> $2 AND status = 'ok' ORDER BY started_at DESC LIMIT 1")
         .bind(job.id)
         .bind(run)
         .fetch_optional(&app.db)
@@ -1499,7 +1550,7 @@ async fn run_script(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
     let (risk, writers) = view.exposure(&text);
     let risk = risk.max(crate::proxy::contacted_since(id, proxy_since).unwrap_or(1));
     crate::sources::depend(&app.db, id, &writers).await?;
-    sqlx::query("UPDATE sessions SET risk = GREATEST(risk, $2) WHERE id = $1").bind(id).bind(risk).execute(&app.db).await?;
+    sqlx::query("UPDATE sessions SET risk = MAX(risk, $2) WHERE id = $1").bind(id).bind(risk).execute(&app.db).await?;
     let exit = match &status {
         Some(Ok(s)) => s.code(),
         _ => None,
@@ -1851,11 +1902,39 @@ pub async fn run_tool(app: &AppState, session: Uuid, name: &str, args: &Value, o
 mod tests {
     use super::*;
 
+    #[test]
+    fn engine_sessions_are_pruned_and_the_owners_claude_projects_kept() {
+        let root = crate::test_util::TestDir::new("engine-prune");
+        let (home, projects) = (root.join("zh"), root.join("projects"));
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(20 * 86_400);
+        let touch = |p: &std::path::Path, aged: bool| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "x").unwrap();
+            if aged { std::fs::File::options().write(true).open(p).unwrap().set_modified(old).unwrap(); }
+        };
+        let rollout = home.join("engine/codex/home/sessions/2026/10/01/rollout-a.jsonl");
+        touch(&rollout, true);
+        touch(&home.join("engine/codex/home/sessions/2026/10/21/rollout-b.jsonl"), false);
+        let engine = projects.join(claude_project(&home.join("engine/claude")));
+        touch(&engine.join("old.jsonl"), true);
+        touch(&engine.join("new.jsonl"), false);
+        let owners = projects.join("-home-me-work");
+        touch(&owners.join("old.jsonl"), true);
+        let eval = projects.join("-home-me--zenbot-evals-20261001T000000Z-work-x--zenbot-engine-claude");
+        touch(&eval.join("s.jsonl"), true);
+        std::fs::File::open(&eval).unwrap().set_modified(old).unwrap();
+        let n = prune_engine_sessions(&home, &projects, 14, 7);
+        assert!(!rollout.exists() && !rollout.parent().unwrap().exists(), "an old rollout and its emptied day folder go");
+        assert!(home.join("engine/codex/home/sessions/2026/10/21/rollout-b.jsonl").exists(), "a recent one stays");
+        assert!(!engine.join("old.jsonl").exists() && engine.join("new.jsonl").exists());
+        assert!(owners.join("old.jsonl").exists(), "the owner's own Claude projects are never touched");
+        assert!(!eval.exists(), "an old eval kernel's Claude folder goes");
+        assert!(n >= 4, "{n}");
+    }
+
     #[tokio::test]
-    #[ignore = "SOURCE_TEST_DB_URL must name a disposable database"]
     async fn owner_job_authority_database() {
-        let db = PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
-        sqlx::migrate!("./migrations").run(&db).await.unwrap();
+        let (_db_dir, db) = crate::test_util::database().await;
         let app = crate::test_util::app(db.clone());
         let session = Uuid::new_v4();
         sqlx::query("INSERT INTO sessions(id,model,kind) VALUES($1,'faux/smoke','job')").bind(session).execute(&db).await.unwrap();
@@ -2088,12 +2167,10 @@ mod tests {
     }
 
     /// Job reports keep their origin (D-062): `<last_report>`, `schedule runs`, report files and
-    /// delivery into the owner's session. SOURCE_TEST_DB_URL must name a throwaway database.
+    /// delivery into the owner's session, using a fresh private SQLite fixture.
     #[tokio::test]
-    #[ignore]
-    async fn job_report_provenance_database() {
-        let db = PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
-        sqlx::migrate!().run(&db).await.unwrap();
+        async fn job_report_provenance_database() {
+        let (_db_dir, db) = crate::test_util::database().await;
         let app = crate::test_util::app(db.clone());
         let session = |risk: i16, kind: Option<&'static str>| {
             let db = db.clone();
@@ -2118,7 +2195,7 @@ mod tests {
         let run_row = |writer: Uuid, output: &'static str| {
             let db = db.clone();
             async move {
-                sqlx::query_scalar::<_, i64>("INSERT INTO job_runs(job_id,trigger,status,session_id,output,ended_at) VALUES($1,'owner','ok',$2,$3,now()) RETURNING id")
+                sqlx::query_scalar::<_, i64>("INSERT INTO job_runs(job_id,trigger,status,session_id,output,ended_at) VALUES($1,'owner','ok',$2,$3,strftime('%Y-%m-%dT%H:%M:%f+00:00','now')) RETURNING id")
                     .bind(job.id).bind(writer).bind(output).fetch_one(&db).await.unwrap()
             }
         };
@@ -2224,7 +2301,7 @@ mod tests {
         let blocked_target = session(1, None).await;
         let blocked_run = run_row(blocked_writer, "BLOCKED REPORT").await;
         sqlx::query("UPDATE job_runs SET pending_to=$2 WHERE id=$1").bind(blocked_run).bind(blocked_target).execute(&db).await.unwrap();
-        let mut barrier = db.begin().await.unwrap();
+        let mut barrier = crate::storage::begin(&db).await.unwrap();
         crate::sources::lock_provenance(&mut barrier).await.unwrap();
         let delivery = deliver_pending(&app);
         tokio::pin!(delivery);
@@ -2266,7 +2343,7 @@ mod tests {
         for tier in 0..=4i16 {
             let writer = session(tier, None).await;
             let raw = format!("tier {tier} {}", Uuid::new_v4());
-            crate::sources::record_bytes(&db, writer, &dir.join("tier.md"), &raw, None).await.unwrap();
+            crate::sources::register_bytes(&db, &dir.join("tier.md"), &raw, Some(writer), tier.max(1)).await.unwrap();
             let reader = session(0, Some(JOB)).await;
             report_rating(&app, reader, &raw).await.unwrap();
             assert_eq!(risk_of(reader).await, tier.max(1));
@@ -2274,7 +2351,7 @@ mod tests {
         }
 
         // Metadata errors fail closed.
-        let closed = PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
+        let (_closed_dir, closed) = crate::test_util::database().await;
         closed.close().await;
         let broken = crate::test_util::app(closed);
         assert!(report_rating(&broken, run3, &unknown).await.is_err());

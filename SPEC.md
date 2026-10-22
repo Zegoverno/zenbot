@@ -144,7 +144,7 @@ The core of the moat: learning the owner's judgment and applying it everywhere.
 - **Measure:** track the approval rate without edits per domain over time; it should rise.
 
 #### 5.12 Search
-- Chunks + full-text (tsvector) + embeddings (pgvector) in Postgres, per scope; hybrid ranking; optional S1 rerank.
+- Chunks + Unicode full-text (FTS5) + embeddings (sqlite-vec) in SQLite, per scope; hybrid ranking; optional S1 rerank.
 - FTS works on day one; embeddings arrive with the router (M4).
 
 ### WORK
@@ -183,7 +183,7 @@ The core of the moat: learning the owner's judgment and applying it everywhere.
 #### 5.16 Scheduler & workflows
 - First step built (D-046): the kernel's scheduler, DESIGN.md "Scheduled jobs".
 - Cron entries trigger a script, workflow or agent task, each with its own model and budget; explicit statuses (`ok | failed | skipped | delivery_failed`); silent unless an S1 check says the owner should know.
-- Workflows v1: ordered steps with approvals, retries and waits; state in Postgres. Adopt Windmill if we outgrow this.
+- Workflows v1: ordered steps with approvals, retries and waits; state in SQLite. Adopt Windmill if we outgrow this.
 - First crons: nightly backup; nightly `zen-bench`; daily digest to the inbox.
 
 #### 5.17 Inbox
@@ -204,7 +204,7 @@ As built: DESIGN.md, "Security today". Threats: prompt injection via web/email/d
 - **Public repo hygiene:** no secrets in git (pre-commit scanning); the zen home's data is never in the code repo.
 
 #### 5.19 Observability
-- Every model call (provider, model, class, tokens, cost, latency, cache hits) and every tool call (args, duration, size, status) is stored in Postgres and viewable per session, task, project and day. OpenTelemetry/Langfuse export later.
+- Every model call (provider, model, class, tokens, cost, latency, cache hits) and every tool call (args, duration, size, status) is stored in SQLite and viewable per session, task, project and day. OpenTelemetry/Langfuse export later.
 
 ## 6. Architecture
 As built: [DESIGN.md](DESIGN.md) and [MAP.md](MAP.md). Target layout, not built yet: crates `zen-exec`, `zen-store`, `zen-mcp`; `packages/web`; `bench/`; `deploy/Caddyfile` and a

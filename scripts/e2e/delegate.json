@@ -1,11 +1,123 @@
 [
-  {"when": "split", "tool": "delegate", "args": {"tasks": [{"task": "subtask one: say which files are here", "model": "faux/smoke"}]}},
-  {"when": "split", "tool": "delegate", "args": {"task": "subtask two: say which files are here"}},
-  {"when": "subtask", "tool": "bash", "args": {"command": "echo child-ran; ls"}},
-  {"when": "subtask", "tool": "write", "args": {"path": "~/.zenbot/agents/zenbot/IDENTITY.md", "content": "rewritten by a subagent"}},
-  {"when": "waitless", "tool": "ask", "args": {"questions": [{"question": "Which name?", "options": ["a", "b"]}], "wait": false}},
-  {"when": "waitless", "tool": "bash", "args": {"command": "echo still-working"}},
-  {"when": "hand off a doze", "tool": "delegate", "args": {"task": "doze for a bit"}},
-  {"when": "doze for a bit", "tool": "bash", "args": {"command": "sleep 4; echo awake"}},
-  {"text": "Done."}
+  {
+    "when": "fan out",
+    "tool": "delegate",
+    "args": {
+      "tasks": [
+        {
+          "task": "nap 0",
+          "model": "faux/smoke"
+        },
+        {
+          "task": "nap 1",
+          "model": "faux/smoke"
+        },
+        {
+          "task": "nap 2",
+          "model": "faux/smoke"
+        },
+        {
+          "task": "nap 3",
+          "model": "faux/smoke"
+        },
+        {
+          "task": "nap 4",
+          "model": "faux/smoke"
+        },
+        {
+          "task": "nap 5",
+          "model": "faux/smoke"
+        },
+        {
+          "task": "nap 6",
+          "model": "faux/smoke"
+        },
+        {
+          "task": "nap 7",
+          "model": "faux/smoke"
+        }
+      ]
+    }
+  },
+  {
+    "when": "nap ",
+    "tool": "bash",
+    "args": {
+      "command": "sleep 1.5; echo rested"
+    }
+  },
+  {
+    "when": "split",
+    "tool": "delegate",
+    "args": {
+      "tasks": [
+        {
+          "task": "subtask one: say which files are here",
+          "model": "faux/smoke"
+        }
+      ]
+    }
+  },
+  {
+    "when": "split",
+    "tool": "delegate",
+    "args": {
+      "task": "subtask two: say which files are here"
+    }
+  },
+  {
+    "when": "subtask",
+    "tool": "bash",
+    "args": {
+      "command": "echo child-ran; ls"
+    }
+  },
+  {
+    "when": "subtask",
+    "tool": "write",
+    "args": {
+      "path": "~/.zenbot/agents/zenbot/IDENTITY.md",
+      "content": "rewritten by a subagent"
+    }
+  },
+  {
+    "when": "waitless",
+    "tool": "ask",
+    "args": {
+      "questions": [
+        {
+          "question": "Which name?",
+          "options": [
+            "a",
+            "b"
+          ]
+        }
+      ],
+      "wait": false
+    }
+  },
+  {
+    "when": "waitless",
+    "tool": "bash",
+    "args": {
+      "command": "echo still-working"
+    }
+  },
+  {
+    "when": "hand off a doze",
+    "tool": "delegate",
+    "args": {
+      "task": "doze for a bit"
+    }
+  },
+  {
+    "when": "doze for a bit",
+    "tool": "bash",
+    "args": {
+      "command": "sleep 4; echo awake"
+    }
+  },
+  {
+    "text": "Done."
+  }
 ]

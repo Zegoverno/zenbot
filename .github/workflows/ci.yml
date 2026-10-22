@@ -38,9 +38,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Tools for the end-to-end scenarios
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends bubblewrap jq poppler-utils
-      - name: Postgres
-        run: docker compose -f deploy/compose.yaml up -d --wait postgres
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends bubblewrap jq poppler-utils python3
       - name: Docs, build, tests, clippy, sizes, end-to-end (scripts/check.sh)
         run: CARGO_BUILD_JOBS=4 scripts/check.sh
 
@@ -90,9 +88,7 @@ jobs:
       - name: Size budgets of the binaries to publish
         run: scripts/size-budget.sh target/dist
       - name: Tools for the end-to-end scenarios
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends bubblewrap jq poppler-utils
-      - name: Postgres
-        run: docker compose -f deploy/compose.yaml up -d --wait postgres
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends bubblewrap jq poppler-utils python3
       - name: End-to-end scenarios on the binaries to publish
         run: ZEN_E2E_NO_BUILD=1 ZEN_E2E_BIN=target/dist scripts/e2e.sh
       - name: Package

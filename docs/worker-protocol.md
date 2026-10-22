@@ -47,7 +47,7 @@ open JSON. A change to the protocol changes this page, those types and their tes
 | `turn.delta` | notification | `{ session_id, turn_id, delta }`: streamed answer text |
 | `turn.thinking` | notification | `{ session_id, turn_id, delta }`: streamed reasoning (optional) |
 | `turn.message` | notification | `{ session_id, turn_id, message }`: a finished message, appended to the session's tape |
-| `turn.usage` | notification | `{ session_id, turn_id, engine, engine_version, input?, output?, cache_read?, cache_write?, cost_usd?, render?, engine_session?, fallback_reason?, … }`: the worker's report for the whole turn, sent before `turn.end` |
+| `turn.usage` | notification | `{ session_id, turn_id, engine, engine_version, input?, output?, cache_read?, cache_write?, cost_usd?, totals?, render?, engine_session?, fallback_reason?, … }`: the worker's report for the whole turn, sent before `turn.end` |
 | `turn.fallback` | notification | `{ session_id, turn_id, from, to, reason }`: a hard subscription limit caused one cross-provider continuation; the kernel records it and notifies clients |
 | `turn.end` | notification | `{ session_id, turn_id, error }`: the turn is over; `error` is null on success, `"interrupted"` after an abort |
 
@@ -73,7 +73,7 @@ The tape must hold what the model read (DESIGN.md, invariant 2), so:
 - Every tool call on the tape gets a result before `turn.end`. A turn that ends while a call is still running waits a little for it (`zen-engine`: 10 s), then sends a `toolResult` with `isError: true` saying the call was interrupted and its effect is unknown; a real result that comes later is dropped.
 - A tool call the worker can't match to the model's announcement (the engine's stream stopped announcing them) is logged and fails the turn, since its result can't be paired with a call.
 
-`turn.usage` names the engine that ran the turn and its version (e.g. `claude-code` `2.1.287`), so an engine update shows up in the traces. Totals it gives (tokens, `cost_usd`) are taken for the turn as they are; for the ones it leaves out, the kernel sums the turn's messages. Give totals when the engine knows more than the messages show (Claude Code reports side calls only in its result; Codex reports tokens only per turn). Send `turn.usage` on every path, a failed start included.
+`turn.usage` names the engine that ran the turn and its version (e.g. `claude-code` `2.1.287`), so an engine update shows up in the traces. Totals it gives (tokens, `cost_usd`) are taken for the turn as they are; for the ones it leaves out, the kernel sums the turn's messages. Give totals when the engine knows more than the messages show (Claude Code reports side calls only in its result; Codex reports tokens only per turn). `input` is uncached input only; cached input is `cache_read` (D-075). A resumed engine session's totals are taken as the whole session's, less the previous turn's, unless the report says `totals: "turn"` (Codex). Without `cost_usd`, the kernel estimates an API-equivalent cost from its price table (`prices.rs`) when it has the model's price. Send `turn.usage` on every path, a failed start included.
 
 A turn that ran on more than one provider (the quota continuation below) sends one report with `provider: "mixed"` and each provider's own report in `provider_reports`; the kernel makes each one per turn (see "Engine sessions") and adds them up.
 
