@@ -890,7 +890,12 @@ pub async fn run_loop(app: AppState) {
 
 /// Start the runs that are due.
 async fn tick(app: &AppState) -> Result<()> {
-    deliver_pending(app).await?;
+    // Delivering reports never holds up the schedule: a failure is logged, a hang cut off.
+    match tokio::time::timeout(DELIVERY_TIMEOUT, deliver_pending(app)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::error!("delivering pending job reports: {e:#}"),
+        Err(_) => tracing::error!("delivering pending job reports took over {}s; the schedule goes on", DELIVERY_TIMEOUT.as_secs()),
+    }
     let now = Utc::now();
     let mut tx = app.db.begin().await?;
     let rows = sqlx::query(&format!(
@@ -1067,6 +1072,27 @@ async fn deliver_pending(app: &AppState) -> Result<()> {
     .fetch_all(&app.db)
     .await?;
     for (run, target) in rows {
+        // Each report on its own: one that can't be delivered is retried until its 2-hour window
+        // ends, then given up (it stays in the jobs feed), and never stops the others.
+        if let Err(e) = deliver_one(app, run, target).await {
+            tracing::error!("delivering job run {run} into session {target}: {e:#}");
+            let _ = sqlx::query("UPDATE job_runs SET pending_to = NULL, error = $2 WHERE id = $1 AND pending_to IS NOT NULL AND ended_at < now() - interval '2 hours'")
+                .bind(run)
+                .bind(format!("session delivery failed: {}; report retained in the jobs feed", zen_proto::head(&format!("{e:#}"), 300)))
+                .execute(&app.db)
+                .await;
+        }
+    }
+    Ok(())
+}
+
+/// The longest one pass of `deliver_pending` may hold up the scheduler's tick.
+const DELIVERY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Post one run's report into its target session, unless the target is busy (then it waits for
+/// the next pass) or the delivery is no longer allowed (then it's dropped with the reason).
+async fn deliver_one(app: &AppState, run: i64, target: Uuid) -> Result<()> {
+    {
         let turns = app.turns.lock().await;
         let mut tx = app.db.begin().await?;
         crate::sources::lock_provenance(&mut tx).await?;
@@ -1101,7 +1127,7 @@ async fn deliver_pending(app: &AppState) -> Result<()> {
         .bind(target)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some(row) = row else { continue };
+        let Some(row) = row else { return Ok(()) };
         let eligible: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sessions WHERE id = $1 AND kind IS NULL AND risk < 5 AND NOT zen_session_contaminated(id))")
             .bind(target)
             .fetch_one(&mut *tx)
@@ -1117,10 +1143,10 @@ async fn deliver_pending(app: &AppState) -> Result<()> {
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
-            continue;
+            return Ok(());
         }
         if turns.contains_key(&target) {
-            continue;
+            return Ok(());
         }
         let job: String = row.get("name");
         let risk: i16 = row.get("risk");

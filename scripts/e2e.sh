@@ -1022,6 +1022,18 @@ job_post_to() {
   check "an unknown one too" grep -q "no session of the owner's" <<<"$(zen jobs add pnone --schedule "every 1h" --prompt "JOBTASK-A" --post-to deadbeef 2>&1)"
   zen jobs set ppost --post-to "" >/dev/null
   check "an empty --post-to clears it" eq "$(zen jobs --json | jq -r '.jobs[] | select(.name == "ppost") | .post_to')" null
+  # A report that can't be delivered (here a trigger refuses its target's tape) never holds up the
+  # schedule: a due job still runs, and the report waits for its next try.
+  local stuck; stuck=$(zen ask --json -m faux/smoke "OWNER-HELLO" | jq -r .session_id)
+  q "CREATE FUNCTION e2e_refuse() RETURNS trigger LANGUAGE plpgsql AS \$\$ BEGIN IF NEW.session_id = '$stuck' THEN RAISE EXCEPTION 'e2e: refused'; END IF; RETURN NEW; END \$\$;
+     CREATE TRIGGER e2e_refuse BEFORE INSERT ON tape_events FOR EACH ROW EXECUTE FUNCTION e2e_refuse();
+     INSERT INTO job_runs (job_id, trigger, status, output, ended_at, pending_to) SELECT id, 'owner', 'ok', 'STUCK', now(), '$stuck' FROM jobs WHERE name = 'ppost';
+     UPDATE job_runs SET risk = 1 WHERE output = 'STUCK'" >/dev/null
+  zen jobs add pdue --schedule "every 1h" --prompt "JOBTASK-A" >/dev/null
+  q "UPDATE jobs SET next_run_at = now() WHERE name = 'pdue'" >/dev/null
+  check "a failing delivery doesn't stop a due job" poll "$runs 'pdue'" ok
+  check "and that report stays queued for its next try" eq "$(q "SELECT count(*) FROM job_runs WHERE output = 'STUCK' AND pending_to = '$stuck'")" 1
+  q "DROP TRIGGER e2e_refuse ON tape_events; DROP FUNCTION e2e_refuse()" >/dev/null
 }
 
 # Taint on data (taint.rs, D-053): what a session that read untrusted content stored carries the
