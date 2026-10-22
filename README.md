@@ -86,6 +86,7 @@ zen jobs add <name> -s "0 7 * * 1-5" -p "…"       # run a prompt on a schedule
 zen skills                                        # skills, drafts and retired tool files, with use and fingerprints
 zen skills accept|reject <domain/name> <fingerprint>
 zen tools accept|reject <name> <fingerprint>
+zen mcp-login <server>                            # sign in to a remote MCP server through your browser (also /mcp login)
 zen mcp-pending                                   # forms an MCP server is waiting on you to answer
 zen mcp-respond <id> --action accept --data '{…}' # answer one (or --action decline|cancel)
 zen policy                                        # which model gets delegated work, and the evidence
@@ -123,7 +124,7 @@ How each of these works is in [DESIGN.md](DESIGN.md) ("As built"); here is what 
       "files": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/docs"] },
       "issues": { "url": "https://mcp.example.com/mcp", "headers": { "Authorization": "Bearer ${ISSUES_TOKEN}" }, "allow_env": ["ISSUES_TOKEN"] } } }
   ```
-  Per server: `enabled`, `timeout_s`, `include` / `exclude` (tool names), `allow_env`, `untrusted` (default true: its output is untrusted and taints the session; set `"untrusted": false` for a server you trust)., `oauth` (`token_url`, `client_id`, `refresh_token`, optional `client_secret`: zenbot refreshes the access token itself and keeps rotated tokens in `~/.zenbot/mcp-auth/`; you sign in once elsewhere to get the refresh token). A server's resources and prompts show up in `find_tools` as `<server>_zen_resources_read`, `<server>_zen_prompts_get` and so on. When a server asks you something mid-call (a form), the session shows it as waiting: answer with `zen mcp-respond` within 5 minutes; zenbot never answers for you. Only you edit `mcp.json`. `curl -H "Authorization: Bearer $(cat ~/.zenbot/token)" localhost:8100/api/mcp` shows what loaded.
+  Per server: `enabled`, `timeout_s`, `include` / `exclude` (tool names), `allow_env`, `untrusted` (default true: its output is untrusted and taints the session; set `"untrusted": false` for a server you trust)., `oauth` (only when a server needs it: `client_id` and `client_secret` of an app you registered there with the redirect `http://127.0.0.1:33418/callback`, or `token_url`, `client_id` and `refresh_token` you got elsewhere). A server that asks for sign-in: run `zen mcp-login <server>` (or `/mcp login <server>` in zen), open the link on any machine, approve, and paste back the address your browser ended on (its "can't connect" page is expected); zenbot keeps the tokens in `~/.zenbot/mcp-auth/` and renews them. `/mcp` shows each server's tools and sign-in. A server's resources and prompts show up in `find_tools` as `<server>_zen_resources_read`, `<server>_zen_prompts_get` and so on. When a server asks you something mid-call (a form), the session shows it as waiting: answer with `zen mcp-respond` within 5 minutes; zenbot never answers for you. Only you edit `mcp.json`. `curl -H "Authorization: Bearer $(cat ~/.zenbot/token)" localhost:8100/api/mcp` shows what loaded.
 
 ### Safety: let it run at low risk, stop when it's dangerous
 

@@ -6,6 +6,13 @@
 
 ---
 
+## 2026-10-22 — Sign in to MCP servers from the terminal (D-072)
+
+`zen mcp-login <server>` and `/mcp login <server>` run the MCP authorization flow: discovery,
+dynamic client registration, PKCE; the owner opens the link anywhere and pastes back the address
+the browser ended on. Tokens refresh by themselves; an expired sign-in says how to renew it. `/mcp`
+lists servers with their sign-in state. An e2e scenario signs in against a mock OAuth server.
+
 ## 2026-10-21 — Phase 5: tools see images and PDFs, batch edits, bounded output, fuller MCP (D-071)
 
 `read` shows images and selected PDF pages (text and a rendered page) to both engines; `edit`

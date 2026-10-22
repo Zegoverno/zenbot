@@ -33,6 +33,7 @@ pub(super) const COMMANDS: &[Command] = &[
     cmd("/allow", "the action held last; /allow yes runs that exact action once", false),
     cmd("/deny", "stop this session and mark what it produced as contaminated", false),
     cmd("/trust", "what made this session untrusted; /trust yes trusts it again", false),
+    cmd("/mcp", "MCP servers and their sign-in; /mcp login <server> signs in through your browser", false),
     cmd("/upgrade", "update zenbot to the latest version and restart it", false),
     cmd("/restart", "restart zen on the installed version, back in this session", false),
     cmd("/steer", "change direction at the next tool boundary: /steer <message>", true),
@@ -341,6 +342,15 @@ impl App {
         if text.is_empty() {
             return Ok(());
         }
+        if let Some((server, flow)) = self.mcp_login.take() {
+            self.editor.take();
+            if text.starts_with('/') {
+                self.note(format!("sign-in to {server} cancelled"), Sty::Dim);
+                return self.command(&text).await;
+            }
+            self.finish_mcp_login(&flow, &text).await;
+            return Ok(());
+        }
         if text.starts_with('/') && !steer {
             self.editor.take();
             return self.command(&text).await;
@@ -468,6 +478,7 @@ impl App {
             Some("/mouse") => self.note("inline mode leaves the mouse to the terminal", Sty::Dim),
             // Read here and sent to the kernel with the owner's token, never to the agent.
             Some(c @ ("/jobs" | "/skills" | "/tools" | "/trust" | "/allow" | "/deny")) => self.owner_command(&format!("{} {arg}", &c[1..])).await,
+            Some("/mcp") => self.mcp_command(arg).await,
             Some("/upgrade") => self.start_upgrade(),
             Some("/restart") => {
                 self.restart = true;
@@ -481,6 +492,38 @@ impl App {
 
     /// `/jobs`, `/skills`, `/tools`, `/trust`, `/allow`, `/deny` (`zen_client::owner`): the kernel's answer, or why
     /// not, in the transcript. A failed call is shown like any other, as an error note.
+    /// `/mcp`: the servers, their tool counts and sign-in; `/mcp login <server>` starts a sign-in
+    /// whose answer the next typed line carries (D-072). Both go to the kernel with the owner's token.
+    async fn mcp_command(&mut self, arg: &str) {
+        let mut words = arg.split_whitespace();
+        let result = match (words.next(), words.next()) {
+            (None, _) => self.c.get("/api/mcp").await.map(|r| mcp_status(&r)),
+            (Some("login"), Some(server)) => match self.c.post("/api/mcp/login", json!({ "server": server })).await {
+                Ok(r) => {
+                    self.mcp_login = Some((server.to_string(), r["flow"].as_str().unwrap_or("").to_string()));
+                    Ok(format!("{}\n(or type a /command to cancel)", zen_client::owner::login_instructions(&r)))
+                }
+                Err(e) => Err(e),
+            },
+            _ => return self.note("usage: /mcp [login <server>]", Sty::Warn),
+        };
+        match result {
+            Ok(text) => {
+                let mut lines: Vec<Line> = text.lines().map(|l| line(clean(l), Sty::Plain)).collect();
+                lines.push(Vec::new());
+                self.commit(lines);
+            }
+            Err(e) => self.note(format!("{e:#}"), Sty::Err),
+        }
+    }
+
+    async fn finish_mcp_login(&mut self, flow: &str, pasted: &str) {
+        match self.c.post(&format!("/api/mcp/login/{}", zen_client::enc(flow)), json!({ "callback": pasted })).await {
+            Ok(done) => self.note(zen_client::owner::login_done(&done), Sty::Plain),
+            Err(e) => self.note(format!("{e:#}"), Sty::Err),
+        }
+    }
+
     async fn owner_command(&mut self, text: &str) {
         let out = match zen_client::owner::parse(text) {
             Some(Ok(cmd)) => match zen_client::owner::run(&self.c, &cmd, self.session.as_deref(), &mut self.chat).await {
@@ -494,6 +537,19 @@ impl App {
         lines.push(Vec::new());
         self.commit(lines);
     }
+}
+
+/// `/mcp`'s listing: each server with its tool count and sign-in state, then any problems.
+pub(super) fn mcp_status(r: &Value) -> String {
+    let mut names: Vec<&String> = r["servers"].as_object().map(|m| m.keys().collect()).unwrap_or_default();
+    names.sort();
+    let mut out: Vec<String> = names.iter().map(|n| {
+        let login = r["login"][n.as_str()].as_str().map(|l| format!(" · {l}")).unwrap_or_default();
+        format!("{n}: {} tools{login}", r["servers"][n.as_str()])
+    }).collect();
+    if out.is_empty() { out.push("No MCP servers (add them to ~/.zenbot/mcp.json).".into()); }
+    out.extend(r["problems"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|p| format!("problem: {p}")));
+    out.join("\n")
 }
 
 /// The `prompt` message for the kernel, with what became of the suggested next prompt, if one was shown.
@@ -617,6 +673,23 @@ mod tests {
         assert!(!a.quit);
         assert!(a.notice.as_ref().is_some_and(|(t, s)| t.contains("cannot reach zenbot") && *s == Sty::Err), "{:?}", a.notice);
         assert!(a.screen.rows().join("\n").contains("cannot reach zenbot"), "the note is drawn");
+    }
+
+    #[tokio::test]
+    async fn a_pasted_mcp_sign_in_goes_to_the_kernel_never_to_the_agent() {
+        let mut a = app(80, 20); // its kernel address refuses connections
+        a.mcp_login = Some(("linear".into(), "f1".into()));
+        typed(&mut a, "http://127.0.0.1:33418/callback?code=secret&state=s").await;
+        a.submit().await.unwrap();
+        assert!(a.notice.as_ref().is_some_and(|(t, s)| t.contains("cannot reach zenbot") && *s == Sty::Err), "{:?}", a.notice);
+        assert!(a.mcp_login.is_none() && a.entries.is_empty() && !a.busy && a.pending_prompt.is_none(), "nothing was sent as a prompt");
+        a.mcp_login = Some(("linear".into(), "f2".into()));
+        typed(&mut a, "/mcp nope").await;
+        a.submit().await.unwrap();
+        assert!(a.mcp_login.is_none(), "a /command cancels the sign-in");
+        assert!(a.notice.as_ref().is_some_and(|(t, _)| t.starts_with("usage: /mcp")), "and runs: {:?}", a.notice);
+        let status = mcp_status(&json!({ "servers": { "linear": 12, "files": 3 }, "login": { "linear": "signed in" }, "problems": ["server `x`: down"] }));
+        assert_eq!(status, "files: 3 tools\nlinear: 12 tools · signed in\nproblem: server `x`: down");
     }
 
     #[tokio::test]

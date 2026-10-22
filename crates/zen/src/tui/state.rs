@@ -58,6 +58,9 @@ pub(super) struct App {
     pub(super) turn_effort: Option<String>,
     pub(super) session_tokens: i64,
     pub(super) pending_prompt: Option<String>,
+    /// An MCP sign-in waiting for the address the owner's browser ended on: (server, flow). The
+    /// next line typed goes to the kernel, never to the agent.
+    pub(super) mcp_login: Option<(String, String)>,
     pub(super) aborting: bool,
     pub(super) notice: Option<(String, Sty)>,
     pub(super) ctrl_c_at: Option<Instant>,
@@ -192,6 +195,7 @@ impl App {
             turn_effort: None,
             session_tokens: 0,
             pending_prompt: None,
+            mcp_login: None,
             aborting: false,
             notice: None,
             ctrl_c_at: None,

@@ -316,6 +316,15 @@ async fn run(cli: Cli) -> Result<()> {
             let res = c.post(&format!("/api/tools/{}/review", enc(name.trim_start_matches("made_"))), json!({ "decision": decision, "sha": sha })).await?;
             emit(json, &res, || res["result"].as_str().unwrap_or("").to_string());
         }
+        Cmd::McpLogin { server } => {
+            let r = c.post("/api/mcp/login", json!({ "server": server })).await?;
+            println!("{}", zen_client::owner::login_instructions(&r));
+            eprint!("address> ");
+            let mut pasted = String::new();
+            std::io::stdin().read_line(&mut pasted)?;
+            let done = c.post(&format!("/api/mcp/login/{}", enc(r["flow"].as_str().unwrap_or(""))), json!({ "callback": pasted.trim() })).await?;
+            println!("{}", zen_client::owner::login_done(&done));
+        }
         Cmd::McpPending => out(&c.get("/api/mcp/pending").await?),
         Cmd::McpRespond { id, action, data } => {
             let mut body = json!({"action": action});

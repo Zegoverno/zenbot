@@ -275,6 +275,43 @@ JSON
   kill "$srv" 2>/dev/null || true
 }
 
+# MCP sign-in (D-072): a server behind OAuth (oauth_server.py on the e2e port + 16) asks for a
+# login; the owner's login discovers the authorization server, registers zenbot, and finishes with
+# the address the browser ended on; calls then carry a token that refreshes and rotates by itself.
+mcp_login() {
+  local ws; ws=$(new_workspace mcp-login)
+  local port=$((PORT + 16))
+  python3 "$REPO/scripts/e2e/oauth_server.py" "$port" & local srv=$!
+  mkdir -p "$TMP/home/.zenbot"
+  cat >"$TMP/home/.zenbot/mcp.json" <<JSON
+{ "mcpServers": { "linear": { "url": "http://127.0.0.1:$port/mcp", "untrusted": false } } }
+JSON
+  start_kernel "$ws" "$(script mcp-login.json)"
+  until_ok curl -sf "http://127.0.0.1:$port/stats" -o /dev/null
+  api() { curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
+  local results="SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE payload->>'role'='toolResult' AND session_id="
+  local r; r=$(zen ask --json -m faux/smoke "call linear")
+  check "before signing in, a call says how to sign in" grep -q 'zen mcp-login linear' <<<"$(q "$results'$(jq -r .session_id <<<"$r")'")"
+  local start back
+  start=$(api -d '{"server":"linear"}' "$URL/api/mcp/login")
+  check "a login starts with the sign-in host and a PKCE link for this server" bash -c 'jq -e ".auth_server==\"127.0.0.1\" and (.authorize_url|test(\"code_challenge_method=S256\")) and (.authorize_url|test(\"resource=\"))" <<<"$1" >/dev/null' _ "$start"
+  back=$(curl -s -o /dev/null -w '%{redirect_url}' "$(jq -r .authorize_url <<<"$start")")
+  check "an answer for another sign-in is refused" grep -q 'another sign-in' <<<"$(api -d "{\"callback\":\"${back/state=/state=x}\"}" "$URL/api/mcp/login/$(jq -r .flow <<<"$start")")"
+  start=$(api -d '{"server":"linear"}' "$URL/api/mcp/login")
+  back=$(curl -s -o /dev/null -w '%{redirect_url}' "$(jq -r .authorize_url <<<"$start")")
+  check "the browser is sent back to the loopback redirect, with the issuer" grep -q '^http://127.0.0.1:33418/callback?code=.*iss=' <<<"$back"
+  check "pasting that address signs in, renewable" eq "$(api -d "{\"callback\":\"$back\"}" "$URL/api/mcp/login/$(jq -r .flow <<<"$start")" | jq -r '.renews')" true
+  check "the credentials are private" eq "$(stat -c %a "$TMP/home/.zenbot/mcp-auth/linear.json")" 600
+  check "status shows the server signed in" eq "$(api "$URL/api/mcp" | jq -r '.login.linear')" "signed in"
+  r=$(zen ask --json -m faux/smoke "call linear")
+  check "calls carry a token that refreshes and rotates" bash -c 'grep -qE "token [0-9]+\|token [0-9]+" <<<"$1" && [ "$(jq .refreshes <<<"$2")" -ge 2 ]' _ \
+    "$(q "$results'$(jq -r .session_id <<<"$r")'")" "$(curl -s "http://127.0.0.1:$port/stats")"
+  api -d '{"server":"linear"}' "$URL/api/mcp/login" >/dev/null
+  check "a new login reuses the registered client" eq "$(curl -s "http://127.0.0.1:$port/stats" | jq .registrations)" 2
+  check "an unknown server can't sign in" grep -q 'no MCP server named' <<<"$(api -d '{"server":"nope"}' "$URL/api/mcp/login")"
+  kill "$srv" 2>/dev/null || true
+}
+
 # Web: private addresses are refused; search results come back numbered and wrapped as untrusted,
 # with markers inside them defused; what a tainted session saves to memory counts as inference, and
 # its writes to USER.md, an active skill and mcp.json are refused. Search goes through
@@ -1604,6 +1641,7 @@ run action-gate action_gate source_task_queue
 run security egress_proxy
 run file-trust kernel_tools project_files secrets_masked
 run reach mcp_tools web_tools
+run mcp-login mcp_login
 run basics prompt_files open_loop restart_recovery layout_move
 run memory memory_across_sessions memory_sleep
 run delegation delegation

@@ -57,6 +57,9 @@ use uuid::Uuid;
 use crate::{tools, App};
 
 mod auth;
+mod login;
+
+pub(crate) use login::{finish as login_finish, start as login_start};
 
 const PROTOCOL: &str = "2025-06-18";
 
@@ -644,19 +647,16 @@ impl Server {
             }
             req
         };
-        let token = match &self.cfg.oauth {
-            Some(config) => Some(auth::access_token(config, &self.cfg.name, &self.auth).await?),
-            None => None,
-        };
+        let token = auth::bearer(self.cfg.oauth.as_ref(), &self.cfg.name, url, &self.auth).await?;
         let send = |req: reqwest::RequestBuilder| tokio::time::timeout_at(deadline, req.send());
         let mut resp = send(build(token)).await.context("the server didn't answer in time")?.context("contacting the server")?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            if let Some(config) = &self.cfg.oauth {
-                // A fresh request: appending to the first would send both bearer tokens.
-                auth::expire(&self.auth).await;
-                let token = auth::access_token(config, &self.cfg.name, &self.auth).await?;
+            // Refresh once and retry with a fresh request (appending would send both tokens).
+            auth::expire(&self.auth).await;
+            if let Some(token) = auth::bearer(self.cfg.oauth.as_ref(), &self.cfg.name, url, &self.auth).await? {
                 resp = send(build(Some(token))).await.context("the server didn't answer in time")?.context("contacting the server after OAuth refresh")?;
             }
+            anyhow::ensure!(resp.status() != reqwest::StatusCode::UNAUTHORIZED, "the server needs sign-in: {}", auth::login_hint(&self.cfg.name));
         }
         let status = resp.status();
         let new_session = resp.headers().get("mcp-session-id").and_then(|v| v.to_str().ok()).map(String::from);
@@ -1114,7 +1114,11 @@ pub async fn status() -> Value {
         (reg.servers.values().cloned().collect::<Vec<_>>(), reg.problems.clone())
     };
     let mut counts = HashMap::new();
+    let mut logins = HashMap::new();
     for server in servers {
+        if let Some(state) = server.cfg.url.as_deref().and_then(|u| auth::login_state(&server.cfg.name, u)) {
+            logins.insert(server.cfg.name.clone(), state);
+        }
         if let Ok(state) = server.state.try_lock() {
             counts.insert(server.cfg.name.clone(), state.tools.len());
             if let Some(error) = &state.error { problems.push(format!("server `{}`: {error}", server.cfg.name)); }
@@ -1122,7 +1126,22 @@ pub async fn status() -> Value {
             counts.insert(server.cfg.name.clone(), 0);
         }
     }
-    json!({ "config": config_path(), "servers": counts, "problems": problems })
+    json!({ "config": config_path(), "servers": counts, "login": logins, "problems": problems })
+}
+
+/// A server's configuration, as mcp.json has it now.
+async fn server_config(name: &str) -> Option<ServerConfig> {
+    refresh().await;
+    REGISTRY.lock().await.servers.get(name).map(|s| s.cfg.clone())
+}
+
+/// After a login: drop the server's cached token and connection, and retry it at once.
+async fn signed_in(name: &str) {
+    let server = REGISTRY.lock().await.servers.get(name).cloned();
+    if let Some(server) = server {
+        auth::reset(&server.auth).await;
+        *server.state.lock().await = State::default();
+    }
 }
 
 #[cfg(test)]

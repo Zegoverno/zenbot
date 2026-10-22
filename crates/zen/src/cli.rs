@@ -139,6 +139,11 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: Option<JobsCmd>,
     },
+    /// Sign in to a remote MCP server: open the link, then paste the address your browser ended on
+    McpLogin {
+        /// The server's name in mcp.json
+        server: String,
+    },
     /// List MCP forms awaiting an explicit owner response
     McpPending,
     /// Answer a pending MCP form (owner only)

@@ -15,6 +15,27 @@ use serde_json::{json, Value};
 
 use crate::{enc, Client};
 
+/// What to do with an MCP sign-in the kernel started (`POST /api/mcp/login`): the sign-in
+/// server's host first (check it's the service you expect), then the link, then what to paste.
+pub fn login_instructions(start: &Value) -> String {
+    format!(
+        "Sign-in at {host}\n\n{url}\n\nOpen the link in your browser and approve. Your browser then fails to load {redirect}: that's expected.\nCopy that page's whole address and paste it here.",
+        host = start["auth_server"].as_str().unwrap_or("?"),
+        url = start["authorize_url"].as_str().unwrap_or(""),
+        redirect = start["redirect"].as_str().unwrap_or("127.0.0.1"),
+    )
+}
+
+/// The kernel's answer to a finished sign-in.
+pub fn login_done(done: &Value) -> String {
+    let server = done["server"].as_str().unwrap_or("");
+    if done["renews"] == true {
+        format!("Signed in to `{server}`; zenbot renews the sign-in itself.")
+    } else {
+        format!("Signed in to `{server}`. The server gave no way to renew it: sign in again when it expires (/mcp login {server}).")
+    }
+}
+
 /// One owner command.
 #[derive(Debug, PartialEq)]
 pub enum OwnerCmd {

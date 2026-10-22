@@ -734,3 +734,15 @@ pub(crate) async fn mcp_pending(State(app): State<AppState>) -> ApiResult<Json<V
 pub(crate) async fn mcp_respond(State(app): State<AppState>, Path(id): Path<Uuid>, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
     Ok(Json(crate::mcp_interaction::respond(&app.db, id, &body).await.map_err(bad_request)?))
 }
+
+/// Start the owner's browser sign-in to a remote MCP server (`{server}`): the link to open.
+pub(crate) async fn mcp_login(Json(body): Json<Value>) -> ApiResult<Json<Value>> {
+    let server = body["server"].as_str().unwrap_or("");
+    Ok(Json(crate::mcp::login_start(server).await.map_err(bad_request)?))
+}
+
+/// Finish it with the address the owner's browser ended on (`{callback}`).
+pub(crate) async fn mcp_login_finish(Path(flow): Path<String>, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
+    let pasted = body["callback"].as_str().unwrap_or("");
+    Ok(Json(crate::mcp::login_finish(&flow, pasted).await.map_err(bad_request)?))
+}
