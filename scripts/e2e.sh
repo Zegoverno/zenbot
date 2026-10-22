@@ -192,7 +192,7 @@ skills_on_demand() {
   local ws; ws=$(new_workspace skills)
   start_kernel "$ws" "$(script agent.json)"
   local r sid; r=$(zen ask --json -m faux/smoke "use a skill"); sid=$(echo "$r" | jq -r .session_id)
-  check "find, load, load a file, refused outside" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" find_skills:false,load_skill:false,load_skill:false,load_skill:1
+  check "find, load, load a file, refused outside" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" find_skills:false,load_skill:false,load_skill:false,load_skill:true
   local res; res=$(q "SELECT group_concat(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id=X'${sid//-/}' AND payload->>'role'='toolResult'")
   check "find_skills names it" grep -q "work/verify:" <<<"$res"
   check "load_skill returns SKILL.md" grep -q "Decide whether a fresh verifier adds something" <<<"$res"
@@ -248,7 +248,7 @@ JSON
   wait "$slow"
   check "and the slow one finishes" grep -q "slow: done" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id=X'$(jq -r .session_id "$TMP/mcp-slow.json" | tr -d -)' AND payload->>'role'='toolResult'")"
   r=$(zen ask --json -m faux/smoke "tool huge")
-  check "an answer over 8 MB is an error, stdio and HTTP" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" call_tool:1,call_tool:1
+  check "an answer over 8 MB is an error, stdio and HTTP" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" call_tool:true,call_tool:true
   check "the first oversized result is refused, and the next outside call is held" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id=X'$(echo "$r" | jq -r .session_id | tr -d -)' AND payload->>'role'='toolResult' AND (payload LIKE '%over 8 MB%' OR payload LIKE '%not run:%')")" 2
   # A server's own children go with it: changing mcp.json restarts the servers.
   local marker="$TMP/home/.cache/zenbot/mcp/local/mcp-child.pid"
@@ -326,7 +326,7 @@ routing() {
   zen policy set chat faux/backup >/dev/null
   new() { curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{}' "$URL/api/sessions" | jq -r .id; }
   local model="SELECT model || '|' || coalesce(model_source, '-') FROM sessions WHERE id ="
-  local chosen="SELECT input->>'kind' || '|' || chosen || '|' || probability FROM decisions WHERE point = 'model' AND session_id ="
+  local chosen="SELECT input->>'kind' || '|' || chosen || '|' || printf('%g',probability) FROM decisions WHERE point = 'model' AND session_id ="
   local chat; chat=$(new)
   zen ask --json -s "$chat" "ROUTE-CHAT what does this error mean" >/dev/null
   check "a confident chat goes to its route" eq "$(q "$model X'${chat//-/}'")" "faux/backup|router"
@@ -367,7 +367,7 @@ JSON
   api() { curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
   local results="SELECT group_concat(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE payload->>'role'='toolResult' AND session_id="
   local r; r=$(zen ask --json -m faux/smoke "call linear")
-  check "before signing in, a call says how to sign in" grep -q 'zen mcp-login linear' <<<"$(q "$results'$(jq -r .session_id <<<"$r")'")"
+  check "before signing in, a call says how to sign in" grep -q 'zen mcp-login linear' <<<"$(q "${results}X'$(jq -r .session_id <<<"$r" | tr -d -)'")"
   local start back
   start=$(api -d '{"server":"linear"}' "$URL/api/mcp/login")
   check "a login starts with the sign-in host and a PKCE link for this server" bash -c 'jq -e ".auth_server==\"127.0.0.1\" and (.authorize_url|test(\"code_challenge_method=S256\")) and (.authorize_url|test(\"resource=\"))" <<<"$1" >/dev/null' _ "$start"
@@ -381,7 +381,7 @@ JSON
   check "status shows the server signed in" eq "$(api "$URL/api/mcp" | jq -r '.login.linear')" "signed in"
   r=$(zen ask --json -m faux/smoke "call linear")
   check "calls carry a token that refreshes and rotates" bash -c 'grep -qE "token [0-9]+\|token [0-9]+" <<<"$1" && [ "$(jq .refreshes <<<"$2")" -ge 2 ]' _ \
-    "$(q "$results'$(jq -r .session_id <<<"$r")'")" "$(curl -s "http://127.0.0.1:$port/stats")"
+    "$(q "${results}X'$(jq -r .session_id <<<"$r" | tr -d -)'")" "$(curl -s "http://127.0.0.1:$port/stats")"
   api -d '{"server":"linear"}' "$URL/api/mcp/login" >/dev/null
   check "a new login reuses the registered client" eq "$(curl -s "http://127.0.0.1:$port/stats" | jq .registrations)" 2
   check "an unknown server can't sign in" grep -q 'no MCP server named' <<<"$(api -d '{"server":"nope"}' "$URL/api/mcp/login")"
@@ -515,7 +515,7 @@ wiki_capture() {
   start_kernel "$ws" "$(script retired.json)" ZEN_LEGACY_TOOL_AUTHORING=1
   check "legacy pages migrate without losing provenance or content" python3 "$REPO/scripts/e2e/legacy_wiki.py" "$URL" "$TOKEN" "$TMP/home"
   local r; r=$(zen ask --json -m faux/smoke "retired tools")
-  check "stale capture and save_tool calls are refused even with the old flag" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" capture:1,save_tool:1,search:false,brain:false
+  check "stale capture and save_tool calls are refused even with the old flag" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" capture:true,save_tool:true,search:false,brain:false
   local sid; sid=$(jq -r .session_id <<<"$r")
   local legacy_id; legacy_id=$(jq -r '.[] | select(.tool=="brain") | .args.id' scripts/e2e/retired.json)
   check "search retrieves the migrated knowledge record" eq "$(q "SELECT count(*) FROM searches s CROSS JOIN json_each(s.results) f WHERE s.session_id=X'${sid//-/}' AND f.value->>'ref'='$legacy_id'")" 1
@@ -539,7 +539,7 @@ workshop() {
   check "a new domain needs the owner" grep -q "finance\` is a new domain" <<<"$res"
   check "drafts live under _proposed" test -s "$sk/_proposed/work/release-notes/SKILL.md" -a -s "$sk/_proposed/finance/budget-review/SKILL.md"
   r=$(zen ask --json -m faux/smoke "use"); sid=$(echo "$r" | jq -r .session_id)
-  check "find and load a draft; stale made-tool execution refused" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" find_skills:false,load_skill:false,find_tools:false,call_tool:1
+  check "find and load a draft; stale made-tool execution refused" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" find_skills:false,load_skill:false,find_tools:false,call_tool:true
   res=$(q "SELECT group_concat(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id=X'${sid//-/}' AND payload->>'role'='toolResult'")
   check "the draft is marked" grep -q "work/release-notes: (draft)" <<<"$res"
   check "retired tools are absent from the catalog" bash -c '! grep -q "made_word-count: Count" <<<"$1"' _ "$res"
@@ -595,7 +595,7 @@ delegation() {
   check "a subagent can't change IDENTITY.md" bash -c 'grep -q "A subagent can.t change" <<<"$1" && ! grep -q "rewritten by a subagent" "$2"' _ \
     "$(q "SELECT group_concat(payload->'content'->0->>'text', '|') FROM tape_events WHERE session_id IN (SELECT id FROM sessions WHERE parent=X'${sid//-/}') AND payload->>'toolName'='write'")" "$TMP/home/.zenbot/agents/zenbot/IDENTITY.md"
   check "a subagent can't ask or delegate" bash -c '! grep -qE "(^|,)(ask|delegate)(,|$)" <<<"$1" && grep -q "save_skill" <<<"$1"' _ "$tools"
-  check "choices logged with their probability" eq "$(q "SELECT group_concat(chosen || '@' || probability, ',' ORDER BY id) FROM decisions WHERE point='model'")" faux/smoke@1,faux/smoke@1
+  check "choices logged with their probability" eq "$(q "SELECT group_concat(chosen || '@' || printf('%g',probability), ',' ORDER BY id) FROM decisions WHERE point='model'")" faux/smoke@1,faux/smoke@1
   zen sessions decide "$sid" accept >/dev/null
   check "the owner's verdict is the evidence" grep -q '"accepted": 2' <<<"$(zen policy --json | jq '{accepted: ([.stats[].accepted] | add)}')"
   zen policy undo >/dev/null
@@ -843,7 +843,7 @@ project_files() {
   res=$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id=X'${sid//-/}' AND payload->>'toolName'='read'")
   check "an unlisted repository's instructions come as untrusted content" bash -c 'grep -qF "<untrusted source=\"project file\" about=\"$2/cloned/AGENTS.md\">" <<<"$1" && grep -q PLANTED-cloned <<<"$1" && ! grep -q "Follow them" <<<"$1"' _ "$res" "$ws"
   check "and mark it risky without taint" eq "$(q "SELECT (risky_at IS NOT NULL) || '/' || (tainted_at IS NULL) FROM sessions WHERE id=X'${sid//-/}'")" 1/1
-  check "recorded as untrusted" eq "$(q "SELECT payload->>'trusted' FROM tape_events WHERE session_id=X'${sid//-/}' AND kind='context'")" false
+  check "recorded as untrusted" eq "$(q "SELECT payload->>'trusted' FROM tape_events WHERE session_id=X'${sid//-/}' AND kind='context'")" 0
   sid=$(zen ask --json -m faux/smoke "read mine" | jq -r .session_id)
   res=$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id=X'${sid//-/}' AND payload->>'toolName'='read'")
   check "a listed repository's instructions are followed" bash -c 'grep -qF "Instructions for work under $2/mine. Follow them." <<<"$1" && grep -q PLANTED-mine <<<"$1"' _ "$res" "$ws"
@@ -1003,7 +1003,7 @@ scheduled_jobs() {
   check "a run cut by a restart is marked interrupted" poll "$runs 'quiet'" silent/owner,interrupted/schedule
   local r; r=$(zen ask --json -m faux/smoke "please schedule a report")
   check "a job the agent creates waits for the owner below the bar" grep -q "paused, awaiting the owner's approval: System One gave 0.82 (needs 0.90)" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id = X'$(echo "$r" | jq -r .session_id | tr -d -)' AND payload->>'toolName' = 'schedule'")"
-  check "with the judgment on record" eq "$(q "SELECT chosen || '@' || probability FROM decisions WHERE point = 'job_approval'")" paused@0.82
+  check "with the judgment on record" eq "$(q "SELECT chosen || '@' || printf('%g',probability) FROM decisions WHERE point = 'job_approval'")" paused@0.82
   zen jobs resume agent-made >/dev/null
   check "the owner's resume approves it" eq "$(q "SELECT enabled || '/' || created_by FROM jobs WHERE name = 'agent-made'")" 1/agent
   stop_kernel
