@@ -11,7 +11,7 @@ These steps are written so a coding agent (or a person) can follow them on a fre
 
    The installer is safe to re-run. It installs Docker, Node.js 22, `git`, `curl`, `jq`, bubblewrap (for the sandboxed shells and tools), `pdftotext`, and the Claude Code and Codex CLIs if they're missing, downloads zenbot's prebuilt binaries for the checked-out commit, writes `~/.zenbot/env` and the API token, installs the `zenbot` systemd service (starts on boot, restarts on failure; it brings up Postgres and the SearXNG search container in Docker before the kernel), and links the `zen` command into `~/.local/bin`.
 
-   Prebuilt binaries exist for every commit on `main` that passed CI's checks (built for x86_64 Linux after the tests, clippy and end-to-end scenarios pass). On other platforms, for commits CI hasn't published yet, or with `ZEN_BUILD_FROM_SOURCE=1`, the installer installs Rust and compiles instead, which takes several minutes on a small VM.
+   Prebuilt binaries exist for every commit on `main` that passed CI's checks (built for x86_64 and aarch64 Linux, e.g. a Raspberry Pi with 64-bit Pi OS, after the tests, clippy and end-to-end scenarios pass). On other platforms, for commits CI hasn't published yet, or with `ZEN_BUILD_FROM_SOURCE=1`, the installer installs Rust and compiles instead, which takes several minutes on a small VM.
 
 2. Check that it's healthy:
 

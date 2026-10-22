@@ -34,11 +34,9 @@ Keep dogfooding zenbot on real work and let sessions, verdicts and what the owne
 sleep's promotions into long-term memory, skill drafts, tools, routes) drive what
 changes. Candidate follow-ups, each only when use calls for it:
 
-- **Redesign phases 1–6** are merged and installed (D-066 to D-074; PROGRESS.md has each). Phase 7,
-  engines (D-075), is on its branch; next, Phase 8 (storage: SQLite), 9 (clients), 10 (operations).
-  Not planned yet: MCP sampling, roots and subscriptions; device-flow MCP sign-in.
-- **Matrix:** interactive (emoji) verification of the bot; streaming answers by editing a message,
-  if waiting for the whole answer feels slow.
+- **Redesign:** phases 1–7 merged (D-066 to D-075); 9 and most of 10 on a branch (D-077); Phase 8
+  (SQLite) separately; then Phase 10's docs rewrite (~120 KB). Later: MCP sampling, roots,
+  subscriptions; Matrix emoji verification and streamed answers, if waiting feels slow.
 - **Jobs:** pre-run checks that skip the model when nothing changed, if job costs call for it.
 - **Board:** a kernel-wide event stream instead of the 2 s poll, if that feels slow.
 - **Suggestions:** improve the suggestion prompt from `zen suggestions` data after a few weeks.
@@ -53,18 +51,11 @@ changes. Candidate follow-ups, each only when use calls for it:
 
 - Web page/search caches cap at 32 entries each; a page's text caps at 2 MB (5 MB downloaded) and
   entries expire after 15 minutes. The untrusted-content boundary and SSRF filtering remain security-critical.
-- The kernel `read` tool refuses files over 16 MiB before loading them; it should eventually stream
-  bounded lines so large text files can be paged without `bash`.
-- The kernel's tunable settings go through `config.rs` (read once, typed, defaults in one place),
-  but these are still read from the environment where they're used: the boot settings in
-  `main.rs` (`ZEN_TOKEN`, `ZEN_PORT`, `ZEN_BIND`, `ZEN_WORKSPACE`, `ZEN_REPO`, `ZEN_DEFAULT_MODEL`,
-  `ZEN_HARNESS`), the paths (`ZEN_HOME`, `ZEN_SKILLS_DIR`, `ZEN_WIKI_DIR`, `ZEN_TOOLS_DIR`,
-  `ZEN_MCP_CONFIG`, read by `layout.rs` and their modules), the workers' (`ZEN_WORKERS`,
-  `ZEN_ENGINE_CMD`, `ZEN_WORKER_<NAME>_CMD`, `ZEN_MODELS`) and `ZEN_FAUX`. `zen-engine`, `zen`
-  and `zen-matrix` read their own settings directly. Moving the rest into `config.rs` needs the
-  tests that set `ZEN_WORKERS` to pass values instead.
-- The kernel still builds its client events with `json!` rather than from `zen_proto::client`'s
-  types. Messages (Pi's format) and usage reports are untyped JSON in both protocols.
+- `read` refuses files over 20 MiB before loading them; it should stream bounded lines instead.
+- Not yet in `config.rs`: the boot settings (`main.rs`), paths (`ZEN_HOME`, `ZEN_*_DIR`,
+  `ZEN_MCP_CONFIG`), workers (`ZEN_WORKERS`, `ZEN_ENGINE_CMD`, `ZEN_WORKER_<NAME>_CMD`, `ZEN_MODELS`)
+  and `ZEN_FAUX`; tests that set `ZEN_WORKERS` must pass values first. The other binaries read their own.
+- Client events are built with `json!`, not `zen_proto::client`'s types; messages and usage are untyped.
 - The old workflow's schema stays (expand-only): `sessions.state` and old tape block kinds.
   Drop them in a later release; `policies` is in use by model routing.
 - Unused since migration 0021 (expand-only): the index `search_docs_unembedded` (replaced by
@@ -96,9 +87,8 @@ changes. Candidate follow-ups, each only when use calls for it:
 - Reading record files through `bash` is outside the curated `brain` handover path. The
   kernel's structured tools preserve provenance and enforce owner review of skill revisions;
   shell permissions remain the broader boundary described above.
-- MCP over HTTP doesn't open the server's event stream, so only stdio servers' `tools/list_changed`
-  is seen; an HTTP server's tools are listed again only when it reconnects or `mcp.json` changes. A
-  stdio server that times out is started again only when no other call to it is running.
+- MCP over HTTP doesn't open the server's event stream: its `tools/list_changed` is missed until it
+  reconnects or `mcp.json` changes. A timed-out stdio server restarts only when no call to it runs.
 - Paths never run with real models: the new tools (`remember`, `load_skill`, `verify`, `ask`) on
   Codex, a model switch mid-session, a failed verification followed by a real fix.
 

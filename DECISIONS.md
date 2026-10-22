@@ -6,6 +6,21 @@
 
 ---
 
+## D-077 — Clients show only visible text; Matrix upgrades itself; aarch64 releases
+
+**Date:** 2026-10-22 · **Status:** accepted (owner: "ship 9 and 10 into a single PR")
+
+**Decision:** Phases 9 and 10, but the docs rewrite (after Phase 8 merges, to avoid conflicts).
+`zen_proto::invisible` (bidi controls, zero-width space, word joiner, BOM, tags, supplementary
+variation selectors; joiners and emoji selectors stay) is dropped by the terminal and every Matrix
+message. `upgrade.sh` rebuilds an enabled zen-matrix whose sources changed; `apply-upgrade.sh`
+swaps it in, restoring the old one if it doesn't start. CI publishes x86_64 and aarch64 builds;
+`fetch-release.sh` and `install.sh` pick the architecture. The outbox finding is closed (the
+kernel queues prompts, D-068); Matrix streaming and emoji verification stay on the roadmap.
+
+**Why:** A right-to-left override shows `evil.exe` as `exe.live`; the bridge ran a 6-day-old build;
+zenbot is meant to run on a Raspberry Pi.
+
 ## D-075 — Engines: one cost basis, a concurrency cap, parallel reads, bounded state
 
 **Date:** 2026-10-22 · **Status:** accepted (owner: "go ahead with those defaults and ship it")

@@ -119,7 +119,8 @@ The rules are pure functions in `src/trust.rs`, unit-tested; the bridge only gat
    ask you to verify each new sign-in): messages from unverified sessions are refused.
 
 `zen-matrix status` shows the configuration, the sign-in, encryption and rooms;
-`journalctl -u zen-matrix -f` the log. After pulling a new version, run `scripts/matrix.sh` again.
+`journalctl -u zen-matrix -f` the log. `scripts/upgrade.sh` rebuilds and restarts the bridge when its sources changed (D-077); `scripts/matrix.sh`
+does it by hand.
 
 ## Code
 

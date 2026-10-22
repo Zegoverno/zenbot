@@ -305,8 +305,10 @@ Used by `zen` (`client`, `setup`) and `zen-matrix` (`kernel`, `state`, through a
 ## Channel: `zen-matrix` (`crates/zen-matrix`, its own Cargo workspace)
 
 A separate process, a client of the client protocol (D-049; docs/matrix.md has the file table).
-Not in the root workspace or CI's release tarball: `scripts/matrix.sh` builds and installs it, and
-`apply-upgrade.sh` doesn't upgrade it. Settings come from `~/.zenbot/matrix.env` (the process
+Not in the root workspace or CI's release tarball: `scripts/matrix.sh` installs it; when its service
+is enabled, `upgrade.sh` rebuilds it if `crates/zen-matrix`, `zen-proto` or `zen-client` changed
+since `~/.zenbot/matrix.version`, and `apply-upgrade.sh` swaps it in once zenbot is healthy, putting
+the old one back if the bridge isn't running 10 s later (D-077). Settings come from `~/.zenbot/matrix.env` (the process
 environment wins; see Environment variables).
 `main.rs` (commands `login`/`run`/`status`/`repin-owner`, the Matrix client, rooms, invites,
 membership watch, posting, per-room link tasks with catch-up, job reporter), `trust.rs` (pure: who
@@ -520,6 +522,7 @@ Read from the process environment, else `~/.zenbot/matrix.env` (`state.rs::Confi
 | `history` | `zen` TUI | `zen` TUI | Prompt history (JSON lines, mode 600) |
 | `backups/` | `db.sh backup` (before pending migrations; last 3 dumps kept, also by the nightly `prune` job) | owner | Database dumps (`<UTC time>-<label>.dump`) |
 | `backups/prompt-files/` | `memory::backup_file`: before an agent's `edit`/`write` to a prompt file (`dispatch`) | owner | Copies of `SOUL`/`IDENTITY`/`AGENTS`/`USER` (D-045); the nightly `prune` job removes those older than 90 days |
+| `matrix.version` | `apply-upgrade.sh` | `upgrade.sh` | The commit of the zen-matrix sources (with zen-proto, zen-client) the installed bridge was built from |
 | `bin/` | `install.sh`, `apply-upgrade.sh`; `scripts/matrix.sh` (`zen-matrix`) | systemd, `~/.local/bin/zen` link | `zend`, `zen`, `zen-engine` (+ `.prev` for rollback), `zen-matrix` |
 | `outputs/` | `tools.rs`, `web.rs`, `mcp.rs`, `dispatch.rs` (`output::save_text`) | the model (`read`, `bash`); removed after 30 days, and oldest first past 256 MB, when one is saved and by the nightly `prune` job | Full masked text of cut tool results (`*.log`, at most 16 MB each); PDFs from `web_fetch` (`web-*.pdf`). All use `outputs_dir()` (`<zen home>/outputs`, mode 700) |
 | `engine/claude/`, `engine/complete/`, `engine/codex/`, `engine/sockets/` | `zen-engine` (`turn::engine_dir`, mode 700) | Claude Code, Codex | Fixed directories for Claude Code sessions and completions, Codex's empty working dir and private `CODEX_HOME`, per-turn tool sockets |
@@ -557,7 +560,7 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 | `scripts/upgrade.sh` | Build (or fetch) and check, smoke-test on a second kernel (`:18199`, a throwaway copy of the live DB), stage the tested binaries in `~/.zenbot/upgrades/<id>` and schedule `apply-upgrade.sh` via `systemd-run`; `--check` stops before staging. Every step: DEVELOPMENT.md, "Applying a change" | `target/`, temp DB `zen_smoke_*`, `~/.zenbot/upgrades` |
 | `scripts/apply-upgrade.sh` | Detached: waits for idle, backs up the DB if migrations are pending, swaps in the staged `zend`, `zen`, `zen-engine` (keeps `.prev`), brings `env` up to date (`db_secure`, retired `pi` out of `ZEN_WORKERS`), restarts, rolls back if unhealthy; when healthy, `remove_old_timers`, `docker compose … up -d`, then `trim_target` on the `ZEN_REPO` checkout's top-level `target/` and the one under `crates/zen-matrix`, and `docker_prune`. Every step: DEVELOPMENT.md | `~/.zenbot/{bin,version,upgrade.log,backups,upgrades}`, service |
 | `scripts/self-update.sh` | `git pull` main then `upgrade.sh`; refuses a dirty checkout or another branch. Used by `zen upgrade`, `/upgrade`, `POST /api/upgrade` | checkout |
-| `scripts/fetch-release.sh` | Download CI's binaries for HEAD into `target/release` (checksum verified); fails (changing nothing) on local changes under `crates/`, `Cargo.*`, non-x86_64-Linux, or no build. `--check REF` only checks | `target/release` |
+| `scripts/fetch-release.sh` | Download CI's binaries for HEAD into `target/release` (checksum verified); fails (changing nothing) on local changes under `crates/`, `Cargo.*`, Linux other than x86_64/aarch64, or no build. `--check REF` only checks | `target/release` |
 | `scripts/update-engines.sh` | Daily (the kernel's `engines` job): update Claude Code / Codex CLIs, test with a real `complete` through `zen-engine` (and `zen-engine codex-features` for Codex), roll back on failure; the Codex feature check also runs daily on its own (exit 1 on failure); `--check` reports only | CLI installs, `upgrade.log`, `engines.json` |
 | `scripts/db.sh` | DB helpers run inside the Postgres container (`docker`, else `sudo -n docker`): `pending` (fails when it can't ask), `backup`, `secure` (`db_secure`: the private password), copy/drop/restore helpers | live DB, `~/.zenbot/backups` |
 | `scripts/lib.sh` | `zen_env`, `env_set`, `env_backup`, `wait_healthy`, `ensure_rust`, `new_token`, `remove_old_timers` (stops and deletes the `zen-sleep`/`zen-engines` timers older versions installed; `install.sh` and, after a healthy upgrade, `apply-upgrade.sh`), `trim_target` (a cargo target dir over 2 GiB loses its incremental caches and `debug/`, then all of it if still over; skipped while cargo runs) and `docker_prune` (dangling images, build cache unused for 168h), both after a healthy upgrade | `/etc/systemd/system`, `target/` dirs, Docker |
@@ -578,7 +581,7 @@ Claude Code and Codex keep their own sign-ins in `~/.claude` and `~/.codex`.
 | `scripts/matrix-e2e.sh` | The Matrix channel end to end: a throwaway continuwuity homeserver in Docker, a faux kernel (temp DB, own port and home), the bridge and the scripted owner (`examples/owner.rs`, cross-signed) through E2EE; also refusals (plaintext, an unverified session, an owner that is the bot), an answer posted after a bridge restart, a stranger's invite and an unencrypted room declined, a room left when a stranger is invited, and a job report delivered | Docker container, temp DB |
 | `deploy/zen-matrix.service` | Runs `~/.zenbot/bin/zen-matrix run` once `~/.zenbot/matrix/session.json` exists; home is an empty tmpfs with only its binary, `token`, `env`, `matrix.env` (read-only) and `matrix/` (read-write) bound in; `ProtectSystem=strict`, no devices, capabilities or new privileges, IP and Unix sockets only, `@system-service` system calls | — |
 | `deploy/zenbot.service` | Runs `~/.zenbot/bin/zend` with `EnvironmentFile=~/.zenbot/env`; `ExecStartPre` brings Postgres up (must succeed) and SearXNG (a failure is ignored); `Restart=always` | — |
-| `.github/workflows/ci.yml` | On PRs and pushes to main: job `check` runs `scripts/check.sh`; job `matrix` builds, tests and lints `crates/zen-matrix`. Actions pinned by commit SHA. On main, if `check` is green: build `dist` profile, check its size budgets, run the e2e scenarios on it, publish `zenbot-x86_64-linux-<sha12>.tar.gz` to the rolling `edge` release (20 newest kept) | GitHub releases |
+| `.github/workflows/ci.yml` | On PRs and pushes to main: job `check` runs `scripts/check.sh`; job `matrix` builds, tests and lints `crates/zen-matrix`. Actions pinned by commit SHA. On main, if `check` is green: build `dist` profile, check its size budgets, run the e2e scenarios on it, publish `zenbot-<arch>-linux-<sha12>.tar.gz` for x86_64 and aarch64 to the rolling `edge` release (20 newest per architecture kept); job `arm64` builds and unit-tests aarch64 on pull requests (D-077) | GitHub releases |
 
 ---
 

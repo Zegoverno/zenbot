@@ -50,8 +50,8 @@ Config lives in `~/.zenbot/` (MAP.md lists every file). `token`, `db-password`, 
    not a follow-up task. Before you merge, reread what your docs say against the branch's final
    diff: later commits often change what an earlier commit's docs describe.
 6. **Apply it** with `scripts/upgrade.sh` (safe from inside your own session; what it does:
-   DEVELOPMENT.md, "Applying a change"), then check `~/.zenbot/upgrade.log`. `zen-matrix` is
-   applied by `scripts/matrix.sh` instead.
+   DEVELOPMENT.md, "Applying a change"), then check `~/.zenbot/upgrade.log`. It also rebuilds an
+   installed `zen-matrix` when its sources changed; `scripts/matrix.sh` installs it the first time.
 7. **Ship.** Commit (one concern per commit), push the branch, open a pull request, merge when CI is
    green. Harness changes (system prompt, history, tools, workers, model or effort handling) also get
    an eval first: `scripts/eval.sh --plan` shows which tasks the change affects and why, then
