@@ -42,6 +42,36 @@ jobs:
       - name: Docs, build, tests, clippy, sizes, end-to-end (scripts/check.sh)
         run: CARGO_BUILD_JOBS=4 scripts/check.sh
 
+  # Docker is only a disposable historical database fixture here; the kernel runtime uses SQLite.
+  postgres-migration:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: zen
+          POSTGRES_PASSWORD: migration-test-only
+          POSTGRES_DB: zen_migration_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U zen -d zen_migration_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: PostgreSQL client and SQLite archive tooling
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends postgresql-client python3
+      - name: Migrate all historical PostgreSQL state into verified SQLite
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: 5432
+          PGUSER: zen
+          PGPASSWORD: migration-test-only
+          PGDATABASE: zen_migration_test
+        run: python3 scripts/test_postgres_integration.py
+
   # The Matrix channel is its own Cargo workspace (crates/zen-matrix): built, tested and linted apart,
   # and not part of the release tarball (scripts/matrix.sh builds it where it's used).
   matrix:
@@ -65,7 +95,7 @@ jobs:
         run: cargo clippy --release --locked --all-targets -- -D warnings
 
   release:
-    needs: [check]
+    needs: [check, postgres-migration]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     # Oldest supported Ubuntu runner: binaries built against its glibc run on newer distros too.
     runs-on: ubuntu-22.04

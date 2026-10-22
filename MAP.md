@@ -670,7 +670,7 @@ Storage implementation: `src/storage.rs` (connection/transaction/extension contr
 `crates/zend/build.rs` and MIT `vendor/sqlite-vec/` (pinned static extension),
 `scripts/storage.py` (snapshot export, strict restore, WAL-aware backup), `scripts/test_storage.py`
 (archive regressions), `scripts/sqlite-query.py` (test/development SQL),
-`scripts/test-sqlite.sh` (pinned SQLite for older test Python), `scripts/test_cutover.py` and `scripts/test_postgres_archive.py` (recovery/migration checks), `scripts/e2e/tape.py` (chain oracle), `scripts/e2e/search_reference.py` (independent rank oracle),
+`scripts/test-sqlite.sh` (pinned SQLite for older test Python), `scripts/test_cutover.py` and `scripts/test_postgres_archive.py` (recovery/migration checks), `scripts/test_postgres_integration.py` (real disposable PostgreSQL migration), `scripts/e2e/tape.py` (chain oracle), `scripts/e2e/search_reference.py` (independent rank oracle),
 `scripts/migrate-storage.sh` (quiescent migration preparation). Session mirrors remain `tape.rs`.
 Migration settings: `ZEN_STORAGE_TOOL` selects the staged archive tool; `ZEN_MIGRATION_PG_URL`
 is a private environment-only source URL passed to psql during migration, never logged.
