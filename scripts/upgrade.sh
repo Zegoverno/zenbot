@@ -96,8 +96,12 @@ if [ -n "$SMOKE_FAILED" ]; then
   exit 1
 fi
 rm -f "$SMOKE_LOG"
-PENDING=$(db_pending | tr '\n' ' ')
-[ -n "$PENDING" ] && echo "migrations pending on the live database: $PENDING(tested on a copy; the install backs it up first)"
+if db_is_postgres; then
+  echo "PostgreSQL snapshot migration tested on a copy; installation takes a final quiescent archive before SQLite cutover."
+else
+  PENDING=$(db_pending | tr '\n' ' ')
+  [ -n "$PENDING" ] && echo "migrations pending on the live database: $PENDING(tested on a copy; the install backs it up first)"
+fi
 
 if [ -n "$CHECK_ONLY" ]; then
   echo "Check OK ($(git rev-parse --short HEAD 2>/dev/null)$(git diff --quiet 2>/dev/null || echo ', uncommitted changes')); nothing installed."

@@ -6,6 +6,12 @@
 
 ---
 
+## 2026-10-22 — Complete PostgreSQL upgrade preparation
+
+After a copied PostgreSQL snapshot passes the smoke turn, upgrade preparation reports the pending
+backend cutover instead of asking the retained PostgreSQL source for SQLite migration versions.
+The detached installer still takes the final quiescent archive before changing the backend.
+
 ## 2026-10-22 — Preserve all-word search and exercise SQLite fixtures
 
 Full-text search requires every literal query word, preserving PostgreSQL’s ordinary multiword
