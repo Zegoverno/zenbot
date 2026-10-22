@@ -526,14 +526,14 @@ async fn search_with(provider: &str, query: &str, count: usize) -> Result<Vec<Hi
         "searxng" => {
             let base = &crate::config::get().searxng_url;
             if base.trim().is_empty() {
-                return Err("web search is not configured: set ZEN_SEARXNG_URL to an external SearXNG server, or set BRAVE_API_KEY or TAVILY_API_KEY".into());
+                return Err("web search is off: ZEN_SEARXNG_URL is empty and no BRAVE_API_KEY or TAVILY_API_KEY is set".into());
             }
             let v: Value = PROVIDERS
                 .get(format!("{}/search", base.trim_end_matches('/')))
                 .query(&[("q", query), ("format", "json")])
                 .send()
                 .await
-                .map_err(|e| format!("searxng at {base}: {} (check the external server configured by ZEN_SEARXNG_URL)", error_chain(&e)))?
+                .map_err(|e| format!("searxng at {base}: {} (is SearXNG running? `systemctl status zen-searxng`; scripts/searxng.sh install sets it up)", error_chain(&e)))?
                 .error_for_status()
                 .map_err(fail)?
                 .json()

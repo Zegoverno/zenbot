@@ -24,7 +24,8 @@ say "System packages"
 NEED=()
 # bubblewrap: the read-only shell a verifier gets (crates/zend/src/tools.rs); poppler-utils:
 # pdftotext, for PDFs web_fetch saves (crates/zend/src/web.rs).
-for p in git curl ca-certificates jq bubblewrap poppler-utils python3; do dpkg -s "$p" >/dev/null 2>&1 || NEED+=("$p"); done
+# python3-venv: the Python environment SearXNG, the web search, runs in (scripts/searxng.sh).
+for p in git curl ca-certificates jq bubblewrap poppler-utils python3 python3-venv; do dpkg -s "$p" >/dev/null 2>&1 || NEED+=("$p"); done
 if [ ${#NEED[@]} -gt 0 ]; then
   sudo apt-get update -qq
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${NEED[@]}"
@@ -99,6 +100,9 @@ git rev-parse --short HEAD > "$HOME/.zenbot/version" 2>/dev/null || true
 
 say "Database"
 
+
+say "Web search (SearXNG, natively)"
+scripts/searxng.sh install || echo "SearXNG didn't start: web search stays off until scripts/searxng.sh install works (see above)"
 
 say "Service"
 sed -e "s#__USER__#$USER#g" -e "s#__REPO__#$REPO#g" -e "s#__HOME__#$HOME#g" deploy/zenbot.service \

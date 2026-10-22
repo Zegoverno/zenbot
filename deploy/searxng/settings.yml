@@ -1,12 +1,10 @@
 # SearXNG for zenbot's web_search when no search API key is set (crates/zend/src/web.rs).
-# Bound to 127.0.0.1 only (deploy/compose.yaml); JSON output is what the kernel reads.
+# Bound to 127.0.0.1 only (SearXNG's default; scripts/searxng.sh runs it); JSON output is what the kernel reads.
 use_default_settings: true
 general:
   instance_name: zenbot-search
 server:
-  # A fixed key, public in this repo. That's acceptable here: SearXNG listens on 127.0.0.1 only
-  # (deploy/compose.yaml), has no accounts, and the image proxy the key signs for is off. compose
-  # doesn't pass SEARXNG_SECRET; adding it to the searxng service's environment would override this.
+  # A placeholder: scripts/searxng.sh writes a key made on the machine into ~/.zenbot/searxng.
   secret_key: "zenbot-local-only-change-me"
   limiter: false
   image_proxy: false
@@ -16,3 +14,16 @@ search:
   formats:
     - html
     - json
+# More web engines than SearXNG's defaults (D-078): free engines block a busy address now and then
+# (CAPTCHAs, "too many requests"), and SearXNG answers with what the others found.
+engines:
+  - name: bing
+    disabled: false
+  - name: mojeek
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: qwant
+    disabled: false
+  - name: yahoo
+    disabled: false

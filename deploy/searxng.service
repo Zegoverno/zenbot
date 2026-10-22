@@ -1,0 +1,19 @@
+# zenbot's web search (D-078): SearXNG from ~/.zenbot/searxng/current, on 127.0.0.1:8888 only.
+# Installed by scripts/searxng.sh, which fills in __USER__ and __HOME__.
+[Unit]
+Description=SearXNG for zenbot's web search
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=__USER__
+WorkingDirectory=__HOME__/.zenbot/searxng/current
+Environment=SEARXNG_SETTINGS_PATH=__HOME__/.zenbot/searxng/settings.yml
+ExecStart=__HOME__/.zenbot/searxng/current/venv/bin/python -m searx.webapp
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -287,4 +287,10 @@ for e in "${!STATUS[@]}"; do [ "${STATUS[$e]}" = "up to date" ] || [[ "${STATUS[
 if [ $behind = 0 ]; then say "engines: all up to date"; else say "engines: not all up to date (see above)"; fi
 [ -z "$FEATURES_FAILED" ] || exit 1
 # A rejected update is the job's error, with its reason, not a quiet "ok" every night (D-075).
+# SearXNG, the web search (D-078): upstream's latest commit, tested with a real search, or kept.
+if [ -z "$CHECK_ONLY" ] && wanted searxng && [ -L "$HOME/.zenbot/searxng/current" ]; then
+  if out=$("$REPO/scripts/searxng.sh" update 2>&1); then
+    case "$out" in *"up to date"*|*skipped*) say "$(tail -1 <<<"$out")" ;; *) log "$(tail -1 <<<"$out")" ;; esac
+  else log "$(tail -1 <<<"$out")"; ROLLED_BACK+="searxng: $(tail -1 <<<"$out"); "; fi
+fi
 [ -z "${ROLLED_BACK:-}" ] || { echo "engines: update rolled back: $ROLLED_BACK" >&2; exit 1; }

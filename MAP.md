@@ -254,7 +254,7 @@ agent's shells get none of them.
 | ZEN_JUDGE_TOOL | on | `0` hides `judge` |
 | ZEN_JOB_BAR | 0.9 | Deprecated; overrides built-in `job_approval` costs when set |
 | ZEN_SEARCH_PROVIDER | by key: brave, tavily, else searxng | Web search provider |
-| ZEN_SEARXNG_URL | unset | External SearXNG |
+| ZEN_SEARXNG_URL | `http://127.0.0.1:8888` | SearXNG (native, scripts/searxng.sh); empty turns search off |
 | ZEN_SEARCH_RERANK | on | System One reranks web results |
 | ZEN_MCP_CONFIG | `<zen home>/mcp.json` | MCP servers file |
 | ZEN_CONTEXT_TOKENS | 200000 | Context budget |
@@ -339,6 +339,7 @@ Secret files (AGENTS.md lists them): never print them.
 | `trust.toml` | owner, `zen trust` | Trust list |
 | `prices.toml` | owner | Price overrides |
 | `mcp.json`, `mcp-auth/` | owner; `mcp/auth.rs`, `mcp/login.rs` | MCP servers; OAuth credentials |
+| `searxng/` | `scripts/searxng.sh` | SearXNG releases (one venv per commit), `current` link, `settings.yml` with this machine's secret key |
 | `matrix.env`, `matrix/`, `matrix.version` | owner; `zen-matrix`; `apply-upgrade.sh` | Matrix settings, session and state; built commit |
 | `evals/` | `eval.sh` | Eval runs, cache, base builds |
 
@@ -364,7 +365,8 @@ Secret files (AGENTS.md lists them): never print them.
 | `scripts/matrix.sh`, `scripts/matrix-e2e.sh` | Install / test `zen-matrix` end to end (not in CI) |
 | `scripts/git-hooks/prepare-commit-msg` | `Zen-Session` / `Co-Authored-By` trailers |
 | `deploy/zenbot.service`, `deploy/zen-matrix.service` | systemd units |
-| `deploy/compose.yaml`, `deploy/searxng/` | Optional PostgreSQL source for migration, local SearXNG |
+| `deploy/compose.yaml` | Legacy PostgreSQL, read once by the storage migration |
+| `scripts/searxng.sh`, `deploy/searxng.service`, `deploy/searxng/settings.yml` | Native SearXNG (D-078): `install` (pinned commit, own venv per commit, `zen-searxng` service on 127.0.0.1:8888), `update` (upstream's latest after a test search on a spare port, else rollback; run by the `engines` job), `check` |
 | `.github/workflows/ci.yml` | `check`, `matrix`, `arm64` jobs; `edge` release on `main` |
 
 ## Tests
