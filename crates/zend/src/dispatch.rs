@@ -232,7 +232,14 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             app.emit(id, json!({ "type": "tool_start", "call_id": call_id, "name": name, "args": shown })).await;
             let started = Instant::now();
             // Abort (or the turn ending) drops the tool future, which kills a running command.
+            let order = app.tool_order.lock().await.entry(id).or_default().clone();
             let run = async {
+                // Read-only calls may overlap; any other runs alone, after those before it (D-075).
+                let _order: Box<dyn std::any::Any + Send> = if zen_proto::read_only_tool(&name) {
+                    Box::new(order.read_owned().await)
+                } else {
+                    Box::new(order.write_owned().await)
+                };
                 if *cancel.borrow() {
                     return tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content: "not run: the turn was interrupted".into(), is_error: true };
                 }

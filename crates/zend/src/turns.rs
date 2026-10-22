@@ -84,6 +84,8 @@ pub(crate) async fn finish_turn(app: &AppState, id: Uuid, error: Value) -> bool 
     let mut finishing = app.finishing.lock().await;
     let Some(turn) = app.turns.lock().await.remove(&id) else { return false };
     finishing.insert(id);
+    // A call still in flight keeps its own handle; the next turn starts a fresh order.
+    app.tool_order.lock().await.remove(&id);
     drop(finishing);
     let _finishing = SessionFlag { app: app.clone(), id, finishing: true };
     let _ = turn.cancel.send(true);

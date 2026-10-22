@@ -469,6 +469,9 @@ async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bo
         // Messages sent to the tape: a turn that completes without any means the stream has changed.
         let mut sent = 0;
         let mut pending = early.into_iter();
+        // Tool calls in flight, answered by request id as each finishes (D-075): Codex may ask for
+        // several at once; the kernel decides which may overlap (read-only ones) and orders the rest.
+        let mut in_flight: tokio::task::JoinSet<(Value, zen_proto::worker::ToolResult)> = tokio::task::JoinSet::new();
         loop {
             let msg = match pending.next() {
                 Some(m) => m,
@@ -477,6 +480,10 @@ async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bo
                         Ok(v) => v,
                         Err(e) => { error.get_or_insert_with(|| e.to_string()); break; }
                     },
+                    Some(Ok((id, result))) = in_flight.join_next() => {
+                        s.send(json!({ "id": id, "result": { "contentItems": dynamic_content(&result), "success": !result.is_error } })).await?;
+                        continue;
+                    }
                     // Stop, but still report what the turn used (its tokens count toward cost).
                     _ = abort.changed() => { interrupted = true; break; }
                 },
@@ -491,9 +498,9 @@ async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bo
             match msg["method"].as_str().unwrap_or("") {
                 "item/tool/call" => {
                     let call_id = p["callId"].as_str().unwrap_or("").to_string();
-                    let result = ctx.call_tool(p["tool"].as_str().unwrap_or(""), p["arguments"].clone(), Some(call_id)).await;
-                    let id = msg["id"].clone();
-                    s.send(json!({ "id": id, "result": { "contentItems": dynamic_content(&result), "success": !result.is_error } })).await?;
+                    let (tool, args, id) = (p["tool"].as_str().unwrap_or("").to_string(), p["arguments"].clone(), msg["id"].clone());
+                    let ctx = ctx.clone();
+                    in_flight.spawn(async move { (id, ctx.call_tool(&tool, args, Some(call_id)).await) });
                 }
                 "item/started" if p["item"]["type"] == "dynamicToolCall" => {
                     let it = &p["item"];

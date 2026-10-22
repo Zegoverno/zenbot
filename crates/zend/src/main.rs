@@ -106,6 +106,9 @@ struct App {
     /// never blocks its children.
     engine_slots: Arc<tokio::sync::Semaphore>,
     child_slots: Arc<tokio::sync::Semaphore>,
+    /// Per session, the order of its tool calls (D-075): read-only ones share it, any other holds it
+    /// alone.
+    tool_order: Mutex<HashMap<Uuid, Arc<tokio::sync::RwLock<()>>>>,
     /// Kernel tasks running outside a turn (after a verdict: skill activation, scoring), counted as
     /// busy so an upgrade waits for them. Held through `Background` guards.
     pub(crate) background: Arc<std::sync::atomic::AtomicUsize>,
@@ -276,6 +279,7 @@ async fn serve() -> Result<()> {
         waiters: Mutex::new(HashMap::new()),
         engine_slots: Arc::new(tokio::sync::Semaphore::new(config::get().engine_concurrency)),
         child_slots: Arc::new(tokio::sync::Semaphore::new(config::get().engine_concurrency)),
+        tool_order: Mutex::new(HashMap::new()),
         background: Arc::default(),
     });
     tokio::spawn(app.updater.clone().check_periodically());
