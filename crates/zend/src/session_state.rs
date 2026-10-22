@@ -3,7 +3,7 @@
 //! contamination live. This avoids retaining authority across a turn's arbitrary outside reads.
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
-use sqlx::{PgPool, Row};
+use sqlx::{SqlitePool, Row};
 use uuid::Uuid;
 
 #[derive(Clone, Debug)]
@@ -16,12 +16,12 @@ pub async fn scope<F: std::future::Future>(future: F) -> F::Output {
 }
 pub fn invalidate() { EPOCH.fetch_add(1, Ordering::SeqCst); }
 
-pub async fn get(db: &PgPool, session: Uuid) -> anyhow::Result<Snapshot> {
+pub async fn get(db: &SqlitePool, session: Uuid) -> anyhow::Result<Snapshot> {
     let epoch = EPOCH.load(Ordering::SeqCst);
     if let Ok(Some(state)) = STATE.try_with(|state| state.borrow().clone()) {
         if state.session == session && state.epoch == epoch { return Ok(state); }
     }
-    let row = sqlx::query("SELECT risk,lock_reason, risk>=5 OR zen_session_contaminated(id) AS stopped FROM sessions WHERE id=$1")
+    let row = sqlx::query("SELECT risk,lock_reason, risk>=5 OR COALESCE(id IN (SELECT id FROM zen_contaminated_sessions),false) AS stopped FROM sessions WHERE id=$1")
         .bind(session).fetch_one(db).await?;
     let state = Snapshot { session, risk: row.get("risk"), lock: row.get("lock_reason"), stopped: row.get("stopped"), epoch };
     let _ = STATE.try_with(|cached| *cached.borrow_mut() = Some(state.clone()));
@@ -32,10 +32,8 @@ pub async fn get(db: &PgPool, session: Uuid) -> anyhow::Result<Snapshot> {
 mod tests {
     use super::*;
     #[tokio::test]
-    #[ignore = "SOURCE_TEST_DB_URL must name a disposable database"]
     async fn permission_snapshot_database() {
-        let db = PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
-        sqlx::migrate!("./migrations").run(&db).await.unwrap();
+        let (_db_dir, db) = crate::test_util::database().await;
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO sessions(id,model) VALUES($1,'faux/smoke')").bind(id).execute(&db).await.unwrap();
         scope(async {

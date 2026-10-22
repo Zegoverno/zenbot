@@ -22,14 +22,15 @@ fully before making changes.
 | Shared `zen-proto`: message helpers, the client protocol's events and the worker protocol's messages, typed | `crates/zen-proto` (Rust library) | linked into `zend`, `zen-engine`, `zen` and `zen-matrix` |
 | Client `zen-client`: the kernel client (token, HTTP calls, session stream, `zen_home`, env files) | `crates/zen-client` (Rust library) | linked into `zen` and `zen-matrix` |
 | Channel `zen-matrix`: the owner's Matrix rooms ↔ sessions | `crates/zen-matrix` (Rust, its own Cargo workspace) | systemd service `zen-matrix`, binary `~/.zenbot/bin/zen-matrix` |
-| Database and web search | `deploy/compose.yaml` | Postgres + pgvector, and SearXNG, in Docker |
+| Database | `crates/zend/sqlite-migrations/` | Private SQLite file, bundled sqlite-vec and FTS5 |
+| Web search | `web.rs` | Configured external SearXNG, Brave or Tavily |
 
 The kernel owns all state and executes every tool call. Workers hold no state: they get the context
 for a turn and ask the kernel to run tools. Engines run with their own tools switched off (Claude
 Code `--tools ""`, Codex shell disabled) so every action goes through the kernel. Keep it that way.
 
 Config lives in `~/.zenbot/` (MAP.md lists every file). `token`, `db-password`, `env`, `env.prev`,
-`matrix.env` and `matrix/` are secret: never print them.
+`matrix.env`, `matrix/`, the SQLite database, its WAL/SHM and recovery artifacts are private: never print them.
 
 ## Making a change
 
@@ -117,7 +118,8 @@ Refer to the owner as "the owner".
 
 - **Never** run `systemctl restart zenbot` or kill `zend` yourself: that kills the session you're
   running in. Always use `scripts/upgrade.sh`.
-- Database changes go in a new file in `crates/zend/migrations/`; never edit an applied migration.
+- SQLite changes go in a new file in `crates/zend/sqlite-migrations/`; historical PostgreSQL
+  migrations in `crates/zend/migrations/` remain immutable. Never edit an applied migration.
   Migrations are **expand-only**: add tables, columns and indexes; drop, rename or retype only in a
   later release than the one that stops using it. A rollback swaps the binaries back but not the
   schema.

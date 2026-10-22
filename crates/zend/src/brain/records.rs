@@ -10,6 +10,9 @@
 use super::*;
 use std::path::{Path, PathBuf};
 
+// Serialize record filenames/revisions without holding SQLite writes during provenance work.
+pub(super) static WRITING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub const KNOWLEDGE: &[&str] = &[
     "concept",
     "claim",
@@ -232,7 +235,7 @@ pub fn parse(text: &str) -> Result<Value> {
 }
 
 /// The file behind a record id, from the index.
-async fn located(db: &PgPool, id: &str) -> Result<PathBuf> {
+async fn located(db: &SqlitePool, id: &str) -> Result<PathBuf> {
     let p: Option<String> = sqlx::query_scalar("SELECT path FROM brain_records WHERE id=$1")
         .bind(id)
         .fetch_optional(db)
@@ -241,7 +244,7 @@ async fn located(db: &PgPool, id: &str) -> Result<PathBuf> {
 }
 
 /// A record's current file, parsed, with its rating (5: a writer was denied).
-pub async fn read(db: &PgPool, id: &str) -> Result<(Value, String, i16)> {
+pub async fn read(db: &SqlitePool, id: &str) -> Result<(Value, String, i16)> {
     let p = located(db, id).await?;
     let text = tokio::fs::read_to_string(&p).await?;
     let mut r = parse(&text)?;
@@ -252,7 +255,7 @@ pub async fn read(db: &PgPool, id: &str) -> Result<(Value, String, i16)> {
 
 /// Hand a record's bytes to `reader`: record its writers as the reader's inputs. A record whose
 /// writer was denied is never handed over.
-pub async fn hand(db: &PgPool, reader: Option<Uuid>, text: &str, risk: i16) -> Result<()> {
+pub async fn hand(db: &SqlitePool, reader: Option<Uuid>, text: &str, risk: i16) -> Result<()> {
     ensure!(risk < 5, "record withheld: a session that wrote it was denied");
     if let Some(s) = reader {
         crate::sources::depend_file(db, s, text).await?;
@@ -261,13 +264,13 @@ pub async fn hand(db: &PgPool, reader: Option<Uuid>, text: &str, risk: i16) -> R
 }
 
 /// Evidence that cites a memory (`m12`) or a record takes on its rating and writers.
-async fn bind_evidence(db: &PgPool, evidence: &[Value], risk: &mut i16, writers: &mut Vec<(Uuid, i16)>) -> Result<()> {
+async fn bind_evidence(db: &SqlitePool, evidence: &[Value], risk: &mut i16, writers: &mut Vec<(Uuid, i16)>) -> Result<()> {
     for e in evidence {
         let source = string(e, "source");
         let source = source.strip_prefix("record:").unwrap_or(&source);
         if let Some(id) = source.strip_prefix('m').and_then(|n| n.parse::<i64>().ok()) {
             let row: Option<(i16, bool)> =
-                sqlx::query_as("SELECT risk, zen_memory_contaminated(id) FROM memories WHERE id=$1")
+                sqlx::query_as("SELECT risk, (id IN (SELECT id FROM zen_contaminated_memories)) FROM memories WHERE id=$1")
                     .bind(id)
                     .fetch_optional(db)
                     .await?;
@@ -323,7 +326,7 @@ pub(crate) async fn private_write(path: &Path, text: &str) -> Result<()> {
 /// long-term memory needs `new_memory` (the sleep, or `remember` past its high bar). The previous
 /// version is backed up in `backups/brain/`.
 pub async fn put(
-    db: &PgPool,
+    db: &SqlitePool,
     session: Option<Uuid>,
     record: &Value,
     expected: Option<i64>,
@@ -340,13 +343,10 @@ pub async fn put(
     validate(&r)?;
     let (id, store, kind) = (string(&r, "id"), string(&r, "store"), string(&r, "kind"));
     let p = path(&store, &kind, &id);
-    let mut tx = db.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(704,4)")
-        .execute(&mut *tx)
-        .await?;
+    let _writing = WRITING.lock().await;
     let indexed: Option<String> = sqlx::query_scalar("SELECT path FROM brain_records WHERE id=$1")
         .bind(&id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(db)
         .await?;
     if let Some(other) = indexed.filter(|o| Path::new(o) != p && Path::new(o).exists()) {
         anyhow::bail!("`{id}` is already {other}: an id is one record (a kind or store can't change)");
@@ -376,12 +376,12 @@ pub async fn put(
     // A name is one person, organization, project or concept within its store; memories may repeat.
     let taken: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT a.record_id FROM brain_aliases a JOIN brain_records r ON r.id=a.record_id
-         WHERE a.alias=ANY($1) AND a.record_id<>$2 AND r.store=$3 AND r.store<>'memory'",
+         WHERE a.alias IN (SELECT value FROM json_each($1)) AND a.record_id<>$2 AND r.store=$3 AND r.store<>'memory'",
     )
-    .bind(&names)
+    .bind(serde_json::json!(names))
     .bind(&id)
     .bind(&store)
-    .fetch_all(&mut *tx)
+    .fetch_all(db)
     .await?;
     ensure!(
         taken.is_empty(),
@@ -391,7 +391,7 @@ pub async fn put(
         let target = string(l, "target");
         let known: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM brain_records WHERE id=$1)")
             .bind(&target)
-            .fetch_one(&mut *tx)
+            .fetch_one(db)
             .await?;
         ensure!(known, "link target `{target}` doesn't exist: create it first");
     }
@@ -436,13 +436,14 @@ pub async fn put(
     }
     crate::sources::register_bytes(db, &p, &text, None, floor).await?;
     private_write(&p, &text).await?;
+    let mut tx = crate::storage::begin(db).await?;
     index_file(&mut tx, &p, &store, &text).await?;
     tx.commit().await?;
     Ok(json!({"id": id, "revision": r["revision"], "path": p.display().to_string()}))
 }
 
 /// Index one record file: its row, names, links and search document.
-pub(super) async fn index_file(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, p: &Path, store: &str, text: &str) -> Result<()> {
+pub(super) async fn index_file(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, p: &Path, store: &str, text: &str) -> Result<()> {
     let r = parse(text)?;
     ensure!(
         r["store"] == store,
@@ -494,8 +495,8 @@ pub(super) async fn index_file(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, p
             .filter_map(|a| a.as_str())
             .map(|a| a.trim().to_lowercase()),
     );
-    sqlx::query("INSERT INTO brain_aliases SELECT DISTINCT unnest($1::text[]),$2 ON CONFLICT DO NOTHING")
-        .bind(&names)
+    sqlx::query("INSERT INTO brain_aliases SELECT DISTINCT value,$2 FROM json_each($1) WHERE true ON CONFLICT DO NOTHING")
+        .bind(serde_json::json!(names))
         .bind(&id)
         .execute(&mut **tx)
         .await?;
@@ -523,7 +524,7 @@ pub(super) async fn index_file(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, p
     let title = format!("{} {}: {}", store, string(&r, "kind"), string(&r, "title"));
     sqlx::query(
         "INSERT INTO search_docs(kind,ref,ident,title,body,at) VALUES($1,$2,$3,$4,$5,$6)
-        ON CONFLICT(kind,ref) DO UPDATE SET ident=$3,title=$4,body=$5,at=$6,updated_at=now(),
+        ON CONFLICT(kind,ref) DO UPDATE SET ident=$3,title=$4,body=$5,at=$6,updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),
             embedding=CASE WHEN search_docs.body=EXCLUDED.body THEN search_docs.embedding END,
             embed_attempts=CASE WHEN search_docs.body=EXCLUDED.body THEN search_docs.embed_attempts ELSE 0 END",
     )
@@ -545,7 +546,7 @@ pub(super) async fn index_file(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, p
 
 /// Bring the index up to the files: changed files are read again, removed ones are dropped. A
 /// file that doesn't parse is left out (and listed by `lint`).
-pub async fn index(db: &PgPool) -> Result<usize> {
+pub async fn index(db: &SqlitePool) -> Result<usize> {
     let known: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>> =
         sqlx::query_as("SELECT path, modified FROM brain_records")
             .fetch_all(db)
@@ -576,10 +577,8 @@ pub async fn index(db: &PgPool) -> Result<usize> {
             let Ok(text) = std::fs::read_to_string(&p) else {
                 continue;
             };
-            let mut tx = db.begin().await?;
-            sqlx::query("SELECT pg_advisory_xact_lock(704,4)")
-                .execute(&mut *tx)
-                .await?;
+            let _writing = WRITING.lock().await;
+            let mut tx = crate::storage::begin(db).await?;
             match index_file(&mut tx, &p, store, &text).await {
                 Ok(()) => {
                     tx.commit().await?;
@@ -590,21 +589,21 @@ pub async fn index(db: &PgPool) -> Result<usize> {
             }
         }
     }
-    let gone: Vec<String> = sqlx::query_scalar("DELETE FROM brain_records WHERE NOT (path = ANY($1)) RETURNING id")
-        .bind(&seen)
+    let gone: Vec<String> = sqlx::query_scalar("DELETE FROM brain_records WHERE NOT (path IN (SELECT value FROM json_each($1))) RETURNING id")
+        .bind(serde_json::json!(seen))
         .fetch_all(db)
         .await?;
     if !gone.is_empty() {
-        sqlx::query("DELETE FROM brain_aliases WHERE record_id=ANY($1)")
-            .bind(&gone)
+        sqlx::query("DELETE FROM brain_aliases WHERE record_id IN (SELECT value FROM json_each($1))")
+            .bind(serde_json::json!(gone))
             .execute(db)
             .await?;
-        sqlx::query("DELETE FROM brain_links WHERE source=ANY($1)")
-            .bind(&gone)
+        sqlx::query("DELETE FROM brain_links WHERE source IN (SELECT value FROM json_each($1))")
+            .bind(serde_json::json!(gone))
             .execute(db)
             .await?;
-        sqlx::query("DELETE FROM search_docs WHERE kind LIKE 'record:%' AND ref=ANY($1)")
-            .bind(&gone)
+        sqlx::query("DELETE FROM search_docs WHERE kind LIKE 'record:%' AND ref IN (SELECT value FROM json_each($1))")
+            .bind(serde_json::json!(gone))
             .execute(db)
             .await?;
     }
@@ -612,7 +611,7 @@ pub async fn index(db: &PgPool) -> Result<usize> {
 }
 
 /// Problems in the record files: ones that don't parse, duplicate ids, links to nothing.
-pub async fn lint(db: &PgPool) -> Result<Vec<Value>> {
+pub async fn lint(db: &SqlitePool) -> Result<Vec<Value>> {
     let mut issues = vec![];
     let mut ids: std::collections::HashMap<String, String> = Default::default();
     for (dir, store) in folders() {
@@ -651,18 +650,18 @@ pub async fn lint(db: &PgPool) -> Result<Vec<Value>> {
 }
 
 /// Typed links touching these records, both ways: (from, relation, to).
-pub async fn links(db: &PgPool, ids: &[String]) -> Result<Vec<(String, String, String)>> {
-    Ok(sqlx::query_as("SELECT source, relation, target FROM brain_links WHERE source=ANY($1) OR target=ANY($1) ORDER BY source, relation, target LIMIT 200")
-        .bind(ids)
+pub async fn links(db: &SqlitePool, ids: &[String]) -> Result<Vec<(String, String, String)>> {
+    Ok(sqlx::query_as("SELECT source, relation, target FROM brain_links WHERE source IN (SELECT value FROM json_each($1)) OR target IN (SELECT value FROM json_each($1)) ORDER BY source, relation, target LIMIT 200")
+        .bind(serde_json::json!(ids))
         .fetch_all(db)
         .await?)
 }
 
 /// Records listed by store, kind, tag or words in the title, as (id, store, kind, title, path).
-pub async fn list(db: &PgPool, a: &Value) -> Result<Vec<(String, String, String, String, String)>> {
+pub async fn list(db: &SqlitePool, a: &Value) -> Result<Vec<(String, String, String, String, String)>> {
     Ok(sqlx::query_as(
         "SELECT id, store, kind, title, path FROM brain_records
-         WHERE ($1='' OR store=$1) AND ($2='' OR kind=$2) AND ($3='' OR metadata->'tags' ? $3) AND ($4='' OR title ILIKE '%'||$4||'%')
+         WHERE ($1='' OR store=$1) AND ($2='' OR kind=$2) AND ($3='' OR EXISTS(SELECT 1 FROM json_each(metadata,'$.tags') WHERE value=$3)) AND ($4='' OR title LIKE '%'||$4||'%')
          ORDER BY store, kind, id LIMIT 50 OFFSET $5",
     )
     .bind(string(a, "store"))

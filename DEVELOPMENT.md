@@ -6,13 +6,9 @@ How to build, test, verify and ship a change to zenbot from this checkout. Writt
 
 **The rule this enables:** a change is built, unit-tested, linted and run through the end-to-end scenarios locally, exactly as CI runs them, before it goes into a pull request. It is installed only through `scripts/upgrade.sh`, which smoke-tests it and rolls back on failure.
 
----
-
 ## What runs where
 
-The processes, and which files in `~/.zenbot/` are secret, are in `AGENTS.md` ("What runs where");
-every file, route, table and setting in `MAP.md`. The dev kernel has its own home, `~/.zenbot-dev`
-(below).
+Processes and private paths: `AGENTS.md`; file/route/table/setting map: `MAP.md`. Dev uses `~/.zenbot-dev`.
 
 ## Prerequisites
 
@@ -20,7 +16,7 @@ every file, route, table and setting in `MAP.md`. The dev kernel has its own hom
 |---|---|---|
 | Rust (stable) with clippy | `rustup` (`ensure_rust` in `scripts/lib.sh` installs a minimal toolchain; add clippy with `rustup component add clippy`) | building and linting |
 | `build-essential`, `pkg-config` | apt (`ensure_rust` installs them with Rust) | compiling |
-| Docker with `docker compose` | `install.sh` | Postgres and SearXNG (`deploy/compose.yaml`) |
+| SQLite | bundled into `zend`; Python standard library in scripts | kernel state and test databases |
 | `git`, `curl`, `jq` | apt | every script |
 | `python3` | preinstalled on Ubuntu | the e2e test servers (`scripts/e2e/*.py`) |
 | `pdftotext` (`poppler-utils`) | apt (`install.sh` installs it) | reading PDFs that `web_fetch` saves |
@@ -28,24 +24,15 @@ every file, route, table and setting in `MAP.md`. The dev kernel has its own hom
 | Node.js 22+ | `install.sh` puts it in `~/.local/node` | installing and running the Codex CLI (an npm package: Node runs it on every Codex turn) |
 | `gh` | GitHub CLI | pull requests, checking CI |
 
-`install.sh` sets up Docker, `git`, `curl`, `jq`, `bubblewrap`, `poppler-utils` and Node on a fresh VM, and Rust with the C toolchain only when it has to compile (it downloads prebuilt binaries when it can). Clippy and `gh` are yours to add. The scripts add `~/.local/node/bin` and `~/.cargo/bin` to `PATH` themselves.
+`install.sh` sets up `git`, `curl`, `jq`, `bubblewrap`, `poppler-utils` and Node on a fresh VM, and Rust with the C toolchain only when it has to compile (it downloads prebuilt binaries when it can). Clippy and `gh` are yours to add. The scripts add `~/.local/node/bin` and `~/.cargo/bin` to `PATH` themselves.
 
-Postgres must be running for e2e, dev and upgrade:
+The kernel embeds SQLite, FTS5 and sqlite-vec. No database daemon or Docker is needed for
+builds, development, e2e, evals or upgrades. `DATABASE_URL` must name SQLite; the default is
+`sqlite://<ZEN_HOME>/zen.sqlite3`. Scripts use Python's standard SQLite module.
 
-```bash
-docker compose -f deploy/compose.yaml up -d --wait postgres
-```
-
-It listens on `127.0.0.1:5432`, user `zen` (password `zen` until `install.sh` or an upgrade makes it private, below), live database `zen`. The database helpers run `psql`, `pg_dump` and `pg_restore` inside the container, so nothing else is needed on the host.
-
-`web_search` without an API key uses SearXNG, the second compose service (settings in `deploy/searxng/settings.yml`). Start it for keyless web search in a dev or real kernel:
-
-```bash
-docker compose -f deploy/compose.yaml up -d searxng
-curl -s 'http://127.0.0.1:8888/search?q=test&format=json' | jq '.results | length'
-```
-
-It listens on `127.0.0.1:8888` only (`ZEN_SEARXNG_URL` points elsewhere). The service starts it before `zend` (a failure there is ignored: `web_search` then returns an error naming the command above), and `apply-upgrade.sh` runs `docker compose … up -d` after a healthy upgrade. With `BRAVE_API_KEY` or `TAVILY_API_KEY` in `~/.zenbot/env`, that provider is used instead (`ZEN_SEARCH_PROVIDER` forces one) and SearXNG only rescues a failed call. The e2e scenarios and CI don't need it: they use a stub.
+For `web_search`, configure an external `ZEN_SEARXNG_URL` or a Brave/Tavily key. No provider
+is started automatically. The e2e scenarios and CI use local stubs. Matrix's optional encrypted
+channel e2e may still run its throwaway homeserver in Docker.
 
 ## The loop at a glance
 
@@ -74,12 +61,16 @@ tail -20 ~/.zenbot/upgrade.log
 
 ## Build, test, lint (as CI runs them)
 
-CI (`.github/workflows/ci.yml`, job `check`, on `ubuntu-22.04` with stable Rust) runs `scripts/check.sh` on every pull request and every push to `main`, with Postgres up (`docker compose -f deploy/compose.yaml up -d --wait postgres`). Its steps, in order, stopping at the first failure:
+CI (`.github/workflows/ci.yml`, job `check`, on `ubuntu-22.04` with stable Rust) runs `scripts/check.sh` on every pull request and every push to `main`, using isolated SQLite files. Its steps, in order, stopping at the first failure:
 
 | Step | Command |
 |---|---|
 | `docs` | `scripts/check-docs.py --base origin/<base branch>` (a second; first, so a missing PROGRESS.md entry fails fast) |
 | `build` | `cargo build --release --locked` |
+| `py-sqlite` | `ensure_test_sqlite` from `scripts/test-sqlite.sh`: pinned SQLite for Python test helpers when needed |
+| `storage` | `python3 scripts/test_storage.py` |
+| `pg-archive` | `python3 scripts/test_postgres_archive.py` |
+| `cutover` | `python3 scripts/test_cutover.py` |
 | `tests` | `cargo test --release --locked` |
 | `clippy` | `cargo clippy --release --locked --all-targets -- -D warnings` |
 | `sizes` | `scripts/size-budget.sh`: `zend`, `zen` and `zen-engine` within their size budgets (measured size + ~15%; raise one on purpose, saying why) |
@@ -92,7 +83,7 @@ It prints how long each step took (in CI also on the job's summary page). Locall
 
 ## End-to-end scenarios
 
-`scripts/e2e.sh` builds (unless `ZEN_E2E_NO_BUILD=1`), then runs each scenario on a kernel built from this checkout (or the binaries in `ZEN_E2E_BIN`) with the scripted faux model. Each scenario gets its own throwaway database (`zen_e2e_<pid>_<n>`), git workspaces, `HOME` and ports (`ZEN_E2E_PORT` + 20 × n, default 18377, and the next few for its test servers), so `ZEN_E2E_JOBS` of them (default 4) run at once. No subscription is used, nothing reaches the internet and the live service isn't touched. It needs Postgres running, plus `git`, `curl`, `jq`, `bubblewrap` and `python3`.
+`scripts/e2e.sh` builds (unless `ZEN_E2E_NO_BUILD=1`), then runs each scenario on a kernel built from this checkout (or the binaries in `ZEN_E2E_BIN`) with the scripted faux model. Each scenario gets its own throwaway database (`zen_e2e_<pid>_<n>`), git workspaces, `HOME` and ports (`ZEN_E2E_PORT` + 20 × n, default 18377, and the next few for its test servers), so `ZEN_E2E_JOBS` of them (default 4) run at once. No subscription is used, nothing reaches the internet and the live service isn't touched. It needs `git`, `curl`, `jq`, `bubblewrap` and `python3`.
 
 The scenarios are the `run …` lines at the bottom of the script: a name, then the functions run as its parts (each on a fresh kernel); the comment above each function says what it checks. The test servers some parts start (`scripts/e2e/*.py`) are listed in MAP.md ("Scripts").
 
@@ -145,8 +136,7 @@ ZEN_FAUX=1 scripts/dev.sh
 
 It:
 
-- starts Postgres (`docker compose … up -d --wait postgres`);
-- creates the database `zen_dev` if missing (override with `ZEN_DEV_DB`);
+- uses a private SQLite database `zen_dev.sqlite3` (override with `ZEN_DEV_DB`);
 - loads `~/.zenbot/env` (workers, models, budgets) and uses the token in `~/.zenbot/token`, but drops the paid keys (`OPENROUTER_API_KEY`, `ZEN_S1_MODEL`, `BRAVE_API_KEY`, `TAVILY_API_KEY`), the folder settings (`ZEN_WORKSPACE`, `ZEN_WIKI_DIR`, `ZEN_SKILLS_DIR`, `ZEN_TOOLS_DIR`, `ZEN_MCP_CONFIG`) and `ZEN_BIND`, and works in `<dev home>/workspace`; `ZEN_DEV_REAL=1` keeps the service's keys and folders;
 - runs `cargo build --release -q`, then `exec`s `./target/release/zend` on port **18100** (override with `ZEN_DEV_PORT`);
 - sets `ZEN_HARNESS` to this checkout's commit, so its turns record this build;
@@ -165,8 +155,7 @@ Local endpoints:
 | Upgrade smoke kernel (`upgrade.sh`) | `http://127.0.0.1:18199` (`ZEN_SMOKE_PORT`), on a throwaway copy of the live database |
 | e2e kernels | `http://127.0.0.1:18377` (`ZEN_E2E_PORT`) + 20 per scenario, database `zen_e2e_<pid>_<n>` |
 | Eval kernels | `http://127.0.0.1:18301` (`ZEN_EVAL_PORT`) and the next ports, one per run at once (`--jobs`); one database `zen_eval_<run>_<n>` per run |
-| Postgres | `127.0.0.1:5432`, user `zen`, password in `~/.zenbot/db-password` (`zen` before `db_secure`) |
-| SearXNG | `http://127.0.0.1:8888` (`ZEN_SEARXNG_URL`) |
+| SearXNG | external service selected by `ZEN_SEARXNG_URL` |
 | Health | `GET /health` on any kernel: `ok`, `db`, `mind`, `workers`, `busy`, `commit`, `version` |
 
 Talk to the dev kernel with the CLI you just built:
@@ -203,63 +192,52 @@ scripts/upgrade.sh           # build, check, smoke test, then schedule the insta
 scripts/upgrade.sh --check   # build, check and smoke test only; installs nothing
 ```
 
-What it does, in order:
+The script installs hooks, fetches/builds binaries, runs unit checks and a copied-database faux smoke. `--check` installs nothing.
+A normal run stages the tested binaries and schedules `scripts/apply-upgrade.sh` through systemd.
 
-1. **Hooks.** Sets `git config core.hooksPath scripts/git-hooks`.
-2. **Build.** Tries `scripts/fetch-release.sh`: if nothing under `crates/`, `Cargo.toml` or `Cargo.lock` differs from `HEAD` (and no untracked files under `crates/`), on x86_64 Linux, and CI published binaries for this commit, it downloads them (checksum verified) into `target/release`. Otherwise it runs `cargo build --release`, installing Rust first if missing. `ZEN_BUILD_FROM_SOURCE=1` forces a local build.
-3. **Check.** `cargo test --release -q` (skipped for prebuilt binaries: CI already ran it). `zen-engine` must answer a JSON-RPC `ping`; `zen --version` must run. It does **not** run clippy or the e2e scenarios: run those yourself.
-4. **Smoke.** Copies the live database into `zen_smoke_<pid>` and starts the new `zend` on port 18199 with `ZEN_FAUX=1`, the service's settings and its own `ZEN_HOME` in the smoke workspace. Any pending migrations are applied to that copy, not to the live database. It runs one scripted turn on `faux/smoke`, which must answer "Smoke test passed" with a successful tool call. The copy is dropped afterwards. It lists migrations pending on the live database.
-5. **`--check` stops here** and prints `Check OK (<commit>[, uncommitted changes]); nothing installed.`
-6. **Stage and schedule.** Copies the binaries it just tested, with their commit (and a note if the tree had uncommitted changes), into `~/.zenbot/upgrades/<id>/` (the id is a nanosecond timestamp; stages older than 2 hours are removed). Then it starts `scripts/apply-upgrade.sh <stage>` detached via `sudo systemd-run` and returns. The install comes from the stage, so checking out another commit or rebuilding `target/` (worktrees may share one) while it waits changes nothing.
+The installer serializes upgrades, waits for idle, backs up pending schema changes and installs
+staged binaries with compatible `.prev` copies. PostgreSQL cutover requires a final quiescent
+snapshot/import; the retained source remains recovery evidence. A healthy SQLite installation
+records its backend so rollback cannot run a PostgreSQL-only binary against stale state.
+Schema rollback never restores the database. Results/recovery: `~/.zenbot/upgrade.log`. No automatic Docker startup.
 
-`apply-upgrade.sh` then, on its own:
+## Database changes and existing-data migration
 
-1. Waits until the service's `/health` says `"busy":0` (no session working). After 30 minutes it goes ahead anyway and logs that it did; when `/health` doesn't answer at all (five tries in a row: the kernel is down or crash-looping) it goes ahead at once.
-2. Takes a lock (`~/.zenbot/upgrades/.lock`), so two installs never interleave. The newest request wins: if a newer stage is still waiting, or a newer one was already installed (`~/.zenbot/upgrades/.installed`), it logs `upgrade to <commit> skipped` and exits.
-3. If migrations are pending, backs up the live database to `~/.zenbot/backups/<UTC time>-<previous version>.dump` (last 3 kept; the nightly `prune` job keeps the same 3). If the backup fails, or the database can't be asked what's pending, it aborts and changes nothing.
-4. Waits for idle again (as in 1, within the same 30 minutes), so a session that started meanwhile isn't ended. Then keeps the old binaries as `~/.zenbot/bin/<name>.prev` and installs `zend`, `zen` and `zen-engine` from the stage; if any copy fails, it puts back the ones replaced so far and aborts without restarting.
-5. Brings `~/.zenbot/env` up to date, keeping the old file as `~/.zenbot/env.prev`: on an install still using the bootstrap database password it runs `db_secure` (`scripts/db.sh`: a random password in `~/.zenbot/db-password`, `ALTER USER` over the container's socket, `DATABASE_URL` rewritten; never logged), and it removes the retired worker `pi` (D-043) from `ZEN_WORKERS`. Both are logged. Old binaries read the same `env`, so a rollback keeps working.
-6. Writes the stage's commit to `~/.zenbot/version` and runs `sudo systemctl restart zenbot`. The kernel applies migrations at start.
-7. Waits up to 45 seconds for `/health` to say `"ok":true`. The stage is removed either way. If it is healthy, it removes the systemd timers older versions installed (`remove_old_timers`; the kernel schedules that work itself now, D-046) and runs `docker compose -f deploy/compose.yaml up -d`, so a new compose service (such as SearXNG) arrives with the upgrade; a failure there is logged, not rolled back. Then it keeps the disk in check: a cargo target directory of the `ZEN_REPO` checkout (the top-level `target/` and the one under `crates/zen-matrix`) over 2 GiB loses its incremental caches and `debug/` build, and the whole directory if it's still over (`trim_target` in `scripts/lib.sh`; nothing while a cargo process runs, logged when it acts), and `docker_prune` removes dangling images and build cache unused for a week (never volumes or images in use; failures ignored). If it isn't healthy, it logs the last 30 service log lines, puts the `.prev` binaries and the old version back, and restarts again. **A rollback does not restore the database.** When there was a backup, the log prints the exact command to restore it.
+SQLite migrations live in `crates/zend/sqlite-migrations/`; never edit an applied migration.
+Historical PostgreSQL migrations in `crates/zend/migrations/` remain immutable migration evidence.
+Schema changes stay expand-only so an older SQLite binary can run against a newer schema.
+`storage::connect` sets WAL, full synchronization, foreign keys and a bounded busy timeout;
+`storage::begin` reserves the writer before reading state that will change. Keep network/model
+calls outside write transactions. UUIDs are 16-byte blobs, JSON/arrays are text and vectors are
+little-endian float32 blobs.
 
-The restart ends the current turn's connection. In a zen session, the owner reconnects by sending the next message.
-
-Afterwards, always check the result:
+`scripts/storage.py` provides portable, versioned JSONL archives and consistent database backups:
 
 ```bash
-tail -20 ~/.zenbot/upgrade.log    # "upgrade OK: now running <commit>[, uncommitted changes]", skipped, or FAILED / rolled back
-cat ~/.zenbot/version
-zen status
+scripts/storage.py export ~/.zenbot/zen.sqlite3 /private/path/state.jsonl
+scripts/storage.py restore /private/path/state.jsonl /private/path/restored.sqlite3
+scripts/db.sh pending
+scripts/db.sh backup manual
 ```
 
-If it rolled back, read the log, fix, and run `scripts/upgrade.sh` again.
+An archive includes every durable application table, schema metadata, a completion footer,
+counts and digest. Restore verifies the footer, schema, foreign keys, row counts and tape chain,
+rebuilds FTS, then publishes a new database atomically. Existing destinations are never overwritten.
+The private archive also contains embeddings and security evidence: protect it like the database.
+Back up prompt/config files, curated Markdown and retained sources separately.
 
-Note: `upgrade.sh` installs what is in your working tree, uncommitted changes included, but `~/.zenbot/version` records only the commit (the log adds ", uncommitted changes"). Commit first if you want the version to mean something.
+Existing PostgreSQL data is exported from one repeatable-read snapshot. The exporter can call
+`psql` on the host or through the retained container with `--psql-command`; credentials must come
+from its environment, not command text. The final cutover requires all writers to be quiescent.
+It imports into a new file, copies vectors, retains canonical PostgreSQL payload bytes for old
+hashes, and checks integrity before changing the service's database URL. Keep PostgreSQL and its
+backups until recovery is verified. Never return to its stale snapshot after SQLite accepts writes.
+Starting this kernel with a PostgreSQL URL fails explicitly; it never starts on an empty substitute.
 
-To update from GitHub instead (on `main`, clean tree): `zen upgrade` (or `/upgrade`), which runs `scripts/self-update.sh`: `git pull --ff-only origin main`, then `upgrade.sh`. It refuses on another branch or with local changes.
-
-## Database changes
-
-- Add a new file in `crates/zend/migrations/` (`NNNN_name.sql`, next number). **Never** edit an applied migration. Migrations are compiled into `zend` and applied when it starts.
-- **Expand-only.** Add tables, columns and indexes. Don't drop, rename or change the type of anything in the same release that stops using it; do that in a later release. A rollback swaps the binaries back but not the schema, so the previous build must keep working on the new schema.
-- `upgrade.sh` tries new migrations on a copy of the live database first; `--check` stops after that test.
-
-Helpers (`scripts/db.sh`; the live database is `DATABASE_URL` from the environment or `~/.zenbot/env`, else `zen`; Docker runs as `sudo -n docker` when the user can't reach the daemon, as on a standard install, which doesn't add the user to the `docker` group):
-
-```bash
-scripts/db.sh pending          # migrations in this checkout the live database hasn't applied
-scripts/db.sh backup [label]   # dump the live database to ~/.zenbot/backups (keeps the last 3)
-scripts/db.sh secure           # give the database user a private password (install.sh and upgrades do it)
-```
-
-The database password: Postgres starts with the bootstrap password `zen` from `deploy/compose.yaml` (CI, e2e on a fresh machine and other throwaway setups keep it). `install.sh` and the first upgrade replace it with a random one in `~/.zenbot/db-password` and point `DATABASE_URL` in `~/.zenbot/env` at it; every script builds its throwaway databases' URLs from that `DATABASE_URL` (`db_url_for`), so they follow. `psql` through `docker compose exec` uses the container's socket and needs no password.
-
-Restoring a backup stops the service, so the owner does it, outside any zen session:
-
-```bash
-sudo systemctl stop zenbot && docker compose -f deploy/compose.yaml exec -T postgres \
-  pg_restore -U zen --clean --if-exists -d zen < ~/.zenbot/backups/<file>.dump && sudo systemctl start zenbot
-```
+Database backups use SQLite's backup API, including committed WAL contents. Do not copy only a
+live main file or delete its WAL. Restore into a new path, verify it with the application, then
+switch over while the service is stopped. Live service changes use the upgrade mechanism;
+never restart the kernel manually from its own session.
 
 ## Harness evals
 
@@ -304,15 +282,11 @@ change, copy one back.
 
 ## Search index
 
-The kernel indexes every session's turns, every short-term memory (and old `long` rows) and every wiki page into `search_docs` in the background (`search::index_loop`, every `ZEN_INDEX_SECS`, default 20 s), for the `search` tool. Exact-name and full-text search need nothing else. Vector search needs embeddings, which the indexer fetches only when `OPENROUTER_API_KEY` is set and `ZEN_S1_PRIVATE` isn't `0` (`ZEN_EMBED_MODEL`, `ZEN_EMBED_URL`; `ZEN_EMBED=0` turns them off). That sends turn, memory and wiki text to the provider, so leave the key out of a dev kernel's environment unless you mean to test embeddings: `dev.sh` drops it unless `ZEN_DEV_REAL=1`, and the e2e kernels unset `OPENROUTER_API_KEY` (`search-index` sets it with `ZEN_EMBED_URL` pointing at its stub). Memories reach the index through `search_queue`, which triggers on `memories` fill (migration 0021). Migration 0017 needs the `vector` and `pg_trgm` extensions, which the `pgvector/pgvector:pg16` image has.
-
-```bash
-docker compose -f deploy/compose.yaml exec -T postgres psql -U zen -d zen_dev \
-  -c "SELECT kind, count(*), count(embedding) FROM search_docs GROUP BY kind"   # what the dev kernel indexed
-# documents the embeddings provider refused (tried 3 times, then found by text only)
-docker compose -f deploy/compose.yaml exec -T postgres psql -U zen -d zen_dev \
-  -c "SELECT id, kind, ref, embed_attempts, embed_error FROM search_docs WHERE embed_attempts > 0"
-```
+`search::index_loop` indexes sessions, memories, wiki and records every `ZEN_INDEX_SECS` (20 s).
+FTS5 and exact identifier search need no provider. Embeddings require `OPENROUTER_API_KEY` and
+private-content permission (`ZEN_S1_PRIVATE`); `ZEN_EMBED=0` disables them. Dev drops paid keys;
+e2e uses a stub. Inspect `search_docs` and `search_queue` with `scripts/sqlite-query.py` on the
+isolated dev database. sqlite-vec is bundled; no PostgreSQL extensions or daemon are needed.
 
 ## Wiki
 
@@ -364,11 +338,12 @@ Code that depends on a CLI's flags or output should fail loudly, so the post-upd
 
 ## CI and releases
 
-`.github/workflows/ci.yml` has three jobs (there is no separate release workflow). Third-party actions are pinned by commit SHA, the tag in a comment beside it; bump them deliberately.
+`.github/workflows/ci.yml` has four jobs (there is no separate release workflow). Third-party actions are pinned by commit SHA, the tag in a comment beside it; bump them deliberately.
 
 - **`check`**: on every pull request and every push to `main`: `scripts/check.sh` (above). A newer push to a pull request cancels its running check.
+- **`postgres-migration`**: exports a disposable PostgreSQL/pgvector fixture through the historical schema and verifies every durable table in the SQLite import. Docker is a CI fixture only.
 - **`matrix`**: on the same events as `check`, beside it. Build, unit tests and clippy of `crates/zen-matrix` (its own workspace); not in the release tarball, and `release` doesn't wait for it.
-- **`release`**: only on a push to `main` that passed `check`. Builds the `dist` profile (fat LTO), checks `zen-engine` answers `ping`, `zen --version` runs and the binaries fit their `dist` size budgets (`scripts/size-budget.sh target/dist`), runs the e2e scenarios on those `dist` binaries (`ZEN_E2E_BIN=target/dist`), and uploads `zenbot-x86_64-linux-<sha12>.tar.gz` plus `.sha256` to the rolling `edge` prerelease (newest 20 builds kept).
+- **`release`**: only on a push to `main` that passed `check` and `postgres-migration`. Builds the `dist` profile (fat LTO), checks `zen-engine` answers `ping`, `zen --version` runs and the binaries fit their `dist` size budgets (`scripts/size-budget.sh target/dist`), runs the e2e scenarios on those `dist` binaries (`ZEN_E2E_BIN=target/dist`), and uploads `zenbot-x86_64-linux-<sha12>.tar.gz` plus `.sha256` to the rolling `edge` prerelease (newest 20 builds kept).
 
 So binaries exist only for commits on `main` that passed. `install.sh`, `upgrade.sh` and `eval.sh` use them via `scripts/fetch-release.sh`; when there are none (yet), they compile locally. Right after a merge, CI needs a few minutes.
 
@@ -411,15 +386,15 @@ scripts/db.sh pending               # migrations not yet applied
 | `upgrade.sh` says `BUILD FAILED` | the compiler errors it printed; fix and re-run |
 | `CHECK FAILED: zen-engine did not answer ping` | run the ping by hand: `echo '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}' \| ./target/release/zen-engine` |
 | `SMOKE TEST FAILED` | the last 20 kernel log lines it printed; often a migration that fails on the copy of the live database |
-| `could not copy the live database` | Postgres not running: `docker compose -f deploy/compose.yaml up -d --wait postgres` |
+| `could not copy the live database` | Check the configured SQLite path, permissions and available disk space |
 | Upgrade scheduled but nothing changed | `~/.zenbot/upgrade.log`: it waits for `"busy":0`, up to 30 minutes |
 | `upgrade FAILED health check; rolling back` | the service logs copied into `upgrade.log`; fix and re-run. If migrations ran, the log has the restore command |
 | `ROLLBACK ALSO UNHEALTHY` | `journalctl -u zenbot -n 50`; tell the owner |
-| e2e `kernel did not start` | the kernel log path it printed; check the port isn't taken and Postgres is up |
+| e2e `kernel did not start` | the kernel log path it printed; check the port isn't taken and the SQLite path is writable |
 | e2e check fails on the read-only shell | `bubblewrap` missing |
 | e2e `reach` or `wiki` fails to start its server | `python3` missing, or the scenario's port + 1 / + 2 is taken |
 | an e2e check fails only with others running | timing under load: rerun it alone (`ZEN_E2E_JOBS=1 scripts/e2e.sh <name>`) and make the check wait for the state (`poll`, `until_ok`) instead of sleeping |
-| `web_search failed: … searxng at http://127.0.0.1:8888` | SearXNG not running: `docker compose -f deploy/compose.yaml up -d searxng` |
+| `web_search failed: … searxng at http://127.0.0.1:8888` | Configure a reachable external `ZEN_SEARXNG_URL` or a Brave/Tavily key |
 | `find_tools` lists problems | `~/.zenbot/mcp.json` (invalid JSON, a server with both or neither of `command`/`url`, an unset `${VAR}`, or a secret-named one the server doesn't list in `allow_env`); `GET /api/mcp` shows the same |
 | `search` finds nothing recent | the indexer runs every `ZEN_INDEX_SECS`; `search` also indexes before it queries. Warnings `search index:` / `embedding search documents:` in the kernel log |
 | A build is killed with no compiler error | out of memory: `CARGO_BUILD_JOBS=2`, one build at a time |

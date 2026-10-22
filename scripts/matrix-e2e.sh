@@ -13,11 +13,13 @@
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$REPO/scripts/db.sh"
+. "$REPO/scripts/test-sqlite.sh"
 HS_PORT=${ZEN_MATRIX_E2E_HS_PORT:-16167}
 K_PORT=${ZEN_MATRIX_E2E_PORT:-18197}
 HS="http://127.0.0.1:$HS_PORT"
 K="http://127.0.0.1:$K_PORT"
 TMP=$(mktemp -d)
+export ZEN_DB_DIR="$TMP/databases"
 DB=zen_matrix_e2e_$$
 NAME=zen-matrix-e2e-$$
 PIDS=()
@@ -32,6 +34,7 @@ fail() { echo "FAILED: $*"; for f in kernel bridge; do echo "--- $f log"; tail -
 
 echo "== build"
 (cd "$REPO" && cargo build --release -q)
+ensure_test_sqlite
 (cd "$REPO/crates/zen-matrix" && cargo build --release -q --bins --examples)
 BIN="${CARGO_TARGET_DIR:-$REPO/target}/release"
 ZM="${CARGO_TARGET_DIR:-$REPO/crates/zen-matrix/target}/release"
@@ -61,7 +64,7 @@ register zenbot pw-zenbot-1 e2e-token
 register owner pw-owner-1 e2e-token
 
 echo "== kernel (faux model)"
-db_psql -d postgres -c "CREATE DATABASE $DB" >/dev/null
+db_create "$DB" >/dev/null
 SCRIPT="$TMP/faux.json"
 cat > "$SCRIPT" <<'EOF'
 [
@@ -128,7 +131,7 @@ for _ in $(seq 240); do grep -q "rooms checked" "$TMP/owner.log" && break; kill 
 ACTION=$(jq -cnS --arg ws "$TMP/ws" '{workspace:$ws,tool:"bash",args:{command:"echo matrix-once >> matrix-queue.txt"}}')
 for decision in approve reject deny; do
   QS=$(curl -fs -XPOST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' "$K/api/sessions" -d '{"model":"faux/smoke"}' | jq -r .id)
-  db_psql -d "$DB" -c "UPDATE sessions SET risk=4 WHERE id='$QS'; INSERT INTO action_gates(session_id,action,reason) VALUES('$QS', '$ACTION','MATRIX-QUEUE-$decision')" >/dev/null
+  db_query "$DB" "UPDATE sessions SET risk=4 WHERE id=X'${QS//-/}'; INSERT INTO action_gates(session_id,action,reason) VALUES(X'${QS//-/}', '$ACTION','MATRIX-QUEUE-$decision')" >/dev/null
 done
 # A job run now; the bridge reports it within a minute.
 curl -fs -XPOST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' "$K/api/jobs" \
@@ -140,12 +143,12 @@ curl -fs -XPOST -H "Authorization: Bearer $TOKEN" "$K/api/jobs/matrix-e2e-main/r
 wait $OWNER || { cat "$TMP/owner.log"; fail "the owner's conversation"; }
 cat "$TMP/owner.log" | grep '^ok'
 for _ in $(seq 30); do
-  [ "$(db_psql -d "$DB" -c "SELECT count(*) FROM action_gates WHERE reason LIKE 'MATRIX-QUEUE-%' AND decision IS NOT NULL")" = 3 ] && break
+  [ "$(db_query "$DB" "SELECT count(*) FROM action_gates WHERE reason LIKE 'MATRIX-QUEUE-%' AND decision IS NOT NULL")" = 3 ] && break
   sleep 1
 done
-[ "$(db_psql -d "$DB" -c "SELECT string_agg(decision,',' ORDER BY decision) FROM action_gates WHERE reason LIKE 'MATRIX-QUEUE-%'")" = approved,denied,rejected ] || fail "encrypted queue commands did not resolve exactly"
+[ "$(db_query "$DB" "SELECT group_concat(decision,',' ORDER BY decision) FROM action_gates WHERE reason LIKE 'MATRIX-QUEUE-%'")" = approved,denied,rejected ] || fail "encrypted queue commands did not resolve exactly"
 [ "$(wc -l < "$TMP/ws/matrix-queue.txt")" = 1 ] || fail "queue approval did not run exactly once"
-[ "$(db_psql -d "$DB" -c "SELECT zen_session_contaminated(session_id) FROM action_gates WHERE reason='MATRIX-QUEUE-deny'")" = t ] || fail "queue deny did not contaminate"
+[ "$(db_query "$DB" "SELECT EXISTS(SELECT 1 FROM zen_contaminated_sessions WHERE id=action_gates.session_id) FROM action_gates WHERE reason='MATRIX-QUEUE-deny'")" = 1 ] || fail "queue deny did not contaminate"
 echo "ok: encrypted queue commands approved once, rejected and denied with contamination"
 
 MEMBERSHIP=$(curl -s -H "Authorization: Bearer $SAT" "$HS/_matrix/client/v3/rooms/$SRID/members" | jq -r '.chunk[] | select(.state_key == "@zenbot:localhost") | .content.membership')

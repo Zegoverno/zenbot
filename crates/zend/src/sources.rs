@@ -16,7 +16,7 @@ pub use rerate::{rerate, rerate_once};
 use anyhow::{bail, Result};
 use reqwest::Url;
 use serde_json::{json, Value};
-use sqlx::{PgPool, Row};
+use sqlx::{SqlitePool, Row};
 use uuid::Uuid;
 
 #[derive(Clone, Debug)]
@@ -54,20 +54,19 @@ pub(crate) fn matches(entry: &str, url: &Url) -> bool {
     h == host && (p.is_empty() || url.path() == p || url.path().strip_prefix(&p).is_some_and(|rest| rest.starts_with('/')))
 }
 
-pub async fn list(db: &PgPool) -> Result<Value> {
+pub async fn list(db: &SqlitePool) -> Result<Value> {
     let rows = sqlx::query("SELECT source, risk, note FROM sources ORDER BY source").fetch_all(db).await?;
     Ok(Value::Array(rows.into_iter().map(|r| json!({"source":r.get::<String,_>("source"), "risk":r.get::<i16,_>("risk"), "note":r.get::<String,_>("note")})).collect()))
 }
 
-pub async fn change(db: &PgPool, source: &str, risk: Option<i16>, note: &str) -> Result<Value> {
+pub async fn change(db: &SqlitePool, source: &str, risk: Option<i16>, note: &str) -> Result<Value> {
     let source = key(source)?;
     if risk.is_some_and(|r| r != 2 && r != 3) || note.len() > 1000 { bail!("risk must be 2 or 3; note at most 1000 bytes"); }
-    let mut tx = db.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,65))").bind(&source).execute(&mut *tx).await?;
+    let mut tx = crate::storage::begin(db).await?;
     sqlx::query("UPDATE source_ratings SET snapshot=$2,proposal=CASE WHEN proposal='rejected' THEN proposal END WHERE scope=$1")
         .bind(&source).bind(Uuid::new_v4()).execute(&mut *tx).await?;
     if let Some(risk) = risk {
-        sqlx::query("INSERT INTO sources (source,risk,note) VALUES ($1,$2,$3) ON CONFLICT (source) DO UPDATE SET risk=$2,note=$3,updated_at=now()")
+        sqlx::query("INSERT INTO sources (source,risk,note) VALUES ($1,$2,$3) ON CONFLICT (source) DO UPDATE SET risk=$2,note=$3,updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now')")
             .bind(&source).bind(risk).bind(note).execute(&mut *tx).await?;
     } else {
         sqlx::query("DELETE FROM sources WHERE source=$1").bind(&source).execute(&mut *tx).await?;
@@ -78,7 +77,7 @@ pub async fn change(db: &PgPool, source: &str, risk: Option<i16>, note: &str) ->
     Ok(json!({"source":source,"risk":risk,"ok":true}))
 }
 
-pub async fn base(db: &PgPool, url: &str) -> Result<i16> {
+pub async fn base(db: &SqlitePool, url: &str) -> Result<i16> {
     // The owner's trust list first (D-067); the older `sources` allowlist still counts.
     if let Some(level) = crate::trust::url_level(url) {
         return Ok(level);
@@ -89,19 +88,19 @@ pub async fn base(db: &PgPool, url: &str) -> Result<i16> {
         .max_by_key(|r| r["source"].as_str().unwrap().len()).and_then(|r| r["risk"].as_i64()).unwrap_or(4) as i16)
 }
 
-pub async fn raise(db: &PgPool, session: Uuid, risk: i16) -> Result<()> {
+pub async fn raise(db: &SqlitePool, session: Uuid, risk: i16) -> Result<()> {
     crate::session_state::invalidate();
-    sqlx::query("UPDATE sessions SET risk=GREATEST(risk,$2) WHERE id=$1").bind(session).bind(risk).execute(db).await?;
+    sqlx::query("UPDATE sessions SET risk=MAX(risk,$2) WHERE id=$1").bind(session).bind(risk).execute(db).await?;
     Ok(())
 }
 
 /// Stored file versions are trusted only for their exact bytes. Missing metadata for wiki
 /// legacy pages uses the old web label; an unregistered changed version of a tracked file is 4.
-pub async fn file_rating(db: &PgPool, path: &std::path::Path, text: &str) -> Result<i16> {
+pub async fn file_rating(db: &SqlitePool, path: &std::path::Path, text: &str) -> Result<i16> {
     let path = file_key(path).to_string_lossy().into_owned();
     let row = sqlx::query("SELECT
-        (SELECT max(CASE WHEN zen_session_contaminated(session_id) THEN 5::smallint ELSE risk END)
-         FROM item_ratings WHERE sha256=encode(sha256(convert_to($2,'UTF8')),'hex')) AS risk,
+        (SELECT max(CASE WHEN COALESCE(session_id IN (SELECT id FROM zen_contaminated_sessions),false) THEN 5 ELSE risk END)
+         FROM item_ratings WHERE sha256=sha256_hex($2)) AS risk,
         (SELECT max(risk) FROM item_ratings WHERE path=$1) AS writers")
         .bind(&path).bind(text).fetch_one(db).await?;
     // Bytes no session wrote (the owner's edit, a sleep's copy) on a tracked path take the
@@ -113,23 +112,23 @@ pub async fn file_rating(db: &PgPool, path: &std::path::Path, text: &str) -> Res
 }
 
 /// Retain the origin of binary downloads for later image/PDF reads.
-pub async fn register_binary(db: &PgPool, path: &std::path::Path, bytes: &[u8], writer: Uuid, risk: i16) -> Result<()> {
+pub async fn register_binary(db: &SqlitePool, path: &std::path::Path, bytes: &[u8], writer: Uuid, risk: i16) -> Result<()> {
     let path = file_key(path).to_string_lossy().into_owned();
-    sqlx::query("INSERT INTO item_ratings(path,sha256,session_id,risk) VALUES($1,encode(sha256($2::bytea),'hex'),$3,$4)
-        ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=GREATEST(item_ratings.risk,EXCLUDED.risk)")
+    sqlx::query("INSERT INTO item_ratings(path,sha256,session_id,risk) VALUES($1,sha256_hex($2),$3,$4)
+        ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=MAX(item_ratings.risk,EXCLUDED.risk)")
         .bind(path).bind(bytes).bind(writer).bind(risk).execute(db).await?;
     Ok(())
 }
 
 /// Binary media uses the same digest and writer graph as text, without lossy decoding.
-pub async fn read_binary_rating(db: &PgPool, reader: Uuid, path: &std::path::Path, bytes: &[u8]) -> Result<Rating> {
+pub async fn read_binary_rating(db: &SqlitePool, reader: Uuid, path: &std::path::Path, bytes: &[u8]) -> Result<Rating> {
     let path = file_key(path).to_string_lossy().into_owned();
-    let writers: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT session_id FROM item_ratings WHERE sha256=encode(sha256($1::bytea),'hex') AND session_id IS NOT NULL")
+    let writers: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT session_id FROM item_ratings WHERE sha256=sha256_hex($1) AND session_id IS NOT NULL")
         .bind(bytes).fetch_all(db).await?;
     depend(db, reader, &writers).await?;
     let row = sqlx::query("SELECT
-        (SELECT max(CASE WHEN zen_session_contaminated(session_id) THEN 5::smallint ELSE risk END) FROM item_ratings WHERE sha256=encode(sha256($2::bytea),'hex')) AS risk,
-        (SELECT max(CASE WHEN zen_session_contaminated(session_id) THEN 5::smallint ELSE risk END) FROM item_ratings WHERE path=$1) AS writers")
+        (SELECT max(CASE WHEN COALESCE(session_id IN (SELECT id FROM zen_contaminated_sessions),false) THEN 5 ELSE risk END) FROM item_ratings WHERE sha256=sha256_hex($2)) AS risk,
+        (SELECT max(CASE WHEN COALESCE(session_id IN (SELECT id FROM zen_contaminated_sessions),false) THEN 5 ELSE risk END) FROM item_ratings WHERE path=$1) AS writers")
         .bind(&path).bind(bytes).fetch_one(db).await?;
     let risk = row.get::<Option<i16>,_>("risk").or(row.get::<Option<i16>,_>("writers")).unwrap_or(1);
     anyhow::ensure!(risk < 5, "binary source withheld: contaminated writer");
@@ -138,25 +137,23 @@ pub async fn read_binary_rating(db: &PgPool, reader: Uuid, path: &std::path::Pat
 
 /// Record the reader's dependency before handing content over. A later deny of the writer
 /// stops derived work too; max-risk alone would lose this causal link.
-pub async fn depend(db: &PgPool, reader: Uuid, writers: &[Uuid]) -> Result<()> {
-    let mut tx = db.begin().await?;
+pub async fn depend(db: &SqlitePool, reader: Uuid, writers: &[Uuid]) -> Result<()> {
+    let mut tx = crate::storage::begin(db).await?;
     lock_provenance(&mut tx).await?;
-    sqlx::query("INSERT INTO session_inputs(reader,writer) SELECT $1,w FROM unnest($2::uuid[]) w WHERE w!=$1 ON CONFLICT DO NOTHING")
-        .bind(reader).bind(writers).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO session_inputs(reader,writer) SELECT $1,uuid_blob(value) FROM json_each($2) WHERE uuid_blob(value)!=$1 ON CONFLICT DO NOTHING")
+        .bind(reader).bind(serde_json::json!(writers)).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }
 
-/// Serialize graph-edge insertion, denial and irreversible handover/spawn boundaries. Take this
-/// before any session chain lock. The short critical section prevents an ancestry snapshot from
-/// missing a concurrently added writer whose denial would otherwise race execution/delivery.
-pub async fn lock_provenance(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<()> {
-    sqlx::query("SELECT pg_advisory_xact_lock(6462062, 3)").execute(&mut **tx).await?;
+/// Provenance boundaries require an immediate write transaction. SQLite already holds the writer
+/// reservation before graph reads, serializing edge insertion, denial and irreversible handover.
+pub async fn lock_provenance(_tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<()> {
     Ok(())
 }
 
-pub async fn depend_file(db: &PgPool, reader: Uuid, text: &str) -> Result<()> {
-    let writers: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT session_id FROM item_ratings WHERE sha256=encode(sha256(convert_to($1,'UTF8')),'hex') AND session_id IS NOT NULL")
+pub async fn depend_file(db: &SqlitePool, reader: Uuid, text: &str) -> Result<()> {
+    let writers: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT session_id FROM item_ratings WHERE sha256=sha256_hex($1) AND session_id IS NOT NULL")
         .bind(text).fetch_all(db).await?;
     depend(db,reader,&writers).await
 }
@@ -172,24 +169,24 @@ fn file_key(path: &std::path::Path) -> std::path::PathBuf {
 
 /// Register the exact bytes about to be written, including all writers of retained old bytes.
 /// A failed effect can conservatively leave an unused rating, but cannot create unlabelled bytes.
-pub async fn record_bytes(db: &PgPool, session: Uuid, path: &std::path::Path, text: &str, prior: Option<&str>) -> Result<()> {
+pub async fn record_bytes(db: &SqlitePool, session: Uuid, path: &std::path::Path, text: &str, prior: Option<&str>) -> Result<()> {
     let path = file_key(path).to_string_lossy().into_owned();
     let prior_risk = match prior {
         Some(text) => {depend_file(db,session,text).await?; file_rating(db,std::path::Path::new(&path),text).await?},
         None => 1,
     };
     anyhow::ensure!(prior_risk < 5, "not written: retained content is contaminated");
-    let mut tx = db.begin().await?;
+    let mut tx = crate::storage::begin(db).await?;
     if let Some(prior) = prior {
         sqlx::query("INSERT INTO item_ratings(path,sha256,session_id,risk)
-            SELECT $1,encode(sha256(convert_to($2,'UTF8')),'hex'),session_id,max(risk) FROM item_ratings
-            WHERE sha256=encode(sha256(convert_to($3,'UTF8')),'hex') GROUP BY session_id
-            ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=GREATEST(item_ratings.risk,EXCLUDED.risk)")
+            SELECT $1,sha256_hex($2),session_id,max(risk) FROM item_ratings
+            WHERE sha256=sha256_hex($3) GROUP BY session_id
+            ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=MAX(item_ratings.risk,EXCLUDED.risk)")
             .bind(&path).bind(text).bind(prior).execute(&mut *tx).await?;
     }
     sqlx::query("INSERT INTO item_ratings(path,sha256,session_id,risk)
-        SELECT $1,encode(sha256(convert_to($2,'UTF8')),'hex'),id,GREATEST(CASE WHEN risk>=4 THEN risk ELSE 1 END,$4) FROM sessions WHERE id=$3
-        ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=GREATEST(item_ratings.risk,EXCLUDED.risk)")
+        SELECT $1,sha256_hex($2),id,MAX(CASE WHEN risk>=4 THEN risk ELSE 1 END,$4) FROM sessions WHERE id=$3
+        ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=MAX(item_ratings.risk,EXCLUDED.risk)")
         .bind(&path).bind(text).bind(session).bind(prior_risk.min(4)).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
@@ -197,30 +194,30 @@ pub async fn record_bytes(db: &PgPool, session: Uuid, path: &std::path::Path, te
 
 /// Register bytes the kernel writes on someone's behalf (a record the sleep promotes, the owner's
 /// put): one rating per writer, none for the owner. A writer's rating is never lowered.
-pub async fn register_bytes(db: &PgPool, path: &std::path::Path, text: &str, writer: Option<Uuid>, risk: i16) -> Result<()> {
+pub async fn register_bytes(db: &SqlitePool, path: &std::path::Path, text: &str, writer: Option<Uuid>, risk: i16) -> Result<()> {
     let path = file_key(path).to_string_lossy().into_owned();
     sqlx::query("INSERT INTO item_ratings(path,sha256,session_id,risk)
-        SELECT $1,encode(sha256(convert_to($2,'UTF8')),'hex'),$3,$4
-        WHERE $3::uuid IS NOT NULL OR NOT EXISTS (SELECT 1 FROM item_ratings WHERE path=$1 AND sha256=encode(sha256(convert_to($2,'UTF8')),'hex') AND session_id IS NULL AND risk>=$4)
-        ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=GREATEST(item_ratings.risk,EXCLUDED.risk)")
+        SELECT $1,sha256_hex($2),$3,$4
+        WHERE $3 IS NOT NULL OR NOT EXISTS (SELECT 1 FROM item_ratings WHERE path=$1 AND sha256=sha256_hex($2) AND session_id IS NULL AND risk>=$4)
+        ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=MAX(item_ratings.risk,EXCLUDED.risk)")
         .bind(&path).bind(text).bind(writer).bind(risk.clamp(0, 5)).execute(db).await?;
     Ok(())
 }
 
 /// The sessions that wrote these exact bytes, with their ratings.
-pub async fn writers_of(db: &PgPool, text: &str) -> Result<Vec<(Uuid, i16)>> {
-    Ok(sqlx::query_as("SELECT session_id, max(risk) FROM item_ratings WHERE sha256=encode(sha256(convert_to($1,'UTF8')),'hex') AND session_id IS NOT NULL GROUP BY session_id")
+pub async fn writers_of(db: &SqlitePool, text: &str) -> Result<Vec<(Uuid, i16)>> {
+    Ok(sqlx::query_as("SELECT session_id, max(risk) FROM item_ratings WHERE sha256=sha256_hex($1) AND session_id IS NOT NULL GROUP BY session_id")
         .bind(text).fetch_all(db).await?)
 }
 
 /// Test helper: registers a file's current bytes (production writers register exact bytes).
 #[cfg(test)]
-pub async fn record_file(db: &PgPool, session: Uuid, path: &std::path::Path, prior_risk: i16) -> Result<()> {
+pub async fn record_file(db: &SqlitePool, session: Uuid, path: &std::path::Path, prior_risk: i16) -> Result<()> {
     let text = tokio::fs::read_to_string(path).await?;
     let path = file_key(path).to_string_lossy().into_owned();
     sqlx::query("INSERT INTO item_ratings(path,sha256,session_id,risk)
-        SELECT $1,encode(sha256(convert_to($2,'UTF8')),'hex'),id,GREATEST(CASE WHEN risk>=4 THEN risk ELSE 1 END,$4) FROM sessions WHERE id=$3
-        ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=GREATEST(item_ratings.risk,EXCLUDED.risk)")
+        SELECT $1,sha256_hex($2),id,MAX(CASE WHEN risk>=4 THEN risk ELSE 1 END,$4) FROM sessions WHERE id=$3
+        ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=MAX(item_ratings.risk,EXCLUDED.risk)")
         .bind(path).bind(text).bind(session).bind(prior_risk).execute(db).await?;
     Ok(())
 }
@@ -229,7 +226,7 @@ pub fn adjustment(base: i16, choice: &str) -> i16 {
     match choice { "vouches" => (base - 1).max(2), "suspects" => 4, _ => base }
 }
 
-pub async fn page(db: &PgPool, session: Uuid, requested: &str, final_url: &str, redirects_same_host: bool) -> Result<Rating> {
+pub async fn page(db: &SqlitePool, session: Uuid, requested: &str, final_url: &str, redirects_same_host: bool) -> Result<Rating> {
     let owner_rows = sqlx::query("SELECT e.payload FROM tape_events e JOIN sessions s ON s.id=e.session_id
         WHERE e.session_id=$1 AND s.kind IS NULL AND e.origin='owner' AND e.kind='message' AND e.payload->>'role'='user'")
         .bind(session).fetch_all(db).await?;
@@ -251,7 +248,7 @@ pub async fn page(db: &PgPool, session: Uuid, requested: &str, final_url: &str, 
     let same_host = Url::parse(requested).ok().zip(Url::parse(final_url).ok())
         .is_some_and(|(a,b)| a.host_str() == b.host_str());
     if !same_host || !redirects_same_host { return Ok(rating); }
-    let rows = sqlx::query("SELECT e.seq,e.payload FROM tape_events e JOIN sessions s ON s.id=e.session_id WHERE e.session_id=$1 AND s.kind IS NULL AND e.kind='message' AND e.payload->>'role'='user' AND e.origin='owner' AND NOT COALESCE((e.payload->>'kernel')::boolean,false) ORDER BY e.seq DESC")
+    let rows = sqlx::query("SELECT e.seq,e.payload FROM tape_events e JOIN sessions s ON s.id=e.session_id WHERE e.session_id=$1 AND s.kind IS NULL AND e.kind='message' AND e.payload->>'role'='user' AND e.origin='owner' AND NOT COALESCE((e.payload->>'kernel'),false) ORDER BY e.seq DESC")
         .bind(session).fetch_all(db).await?;
     for row in rows {
         let payload: Value = row.get("payload");
@@ -276,13 +273,10 @@ pub async fn page(db: &PgPool, session: Uuid, requested: &str, final_url: &str, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// Isolated DB only: SOURCE_TEST_DB_URL=… cargo test source_database -- --ignored.
+    /// Source provenance regression against an isolated SQLite fixture.
     #[tokio::test]
-    #[ignore]
-    async fn source_database() {
-        let url = std::env::var("SOURCE_TEST_DB_URL").expect("use an isolated throwaway database");
-        let db = PgPool::connect(&url).await.unwrap();
-        sqlx::migrate!().run(&db).await.unwrap();
+        async fn source_database() {
+        let (_db_dir, db) = crate::test_util::database().await;
         let sid = Uuid::new_v4();
         sqlx::query("INSERT INTO sessions(id,title,model) VALUES ($1,'source test','faux/smoke')").bind(sid).execute(&db).await.unwrap();
         change(&db,"example.test",Some(3),"").await.unwrap();
@@ -309,7 +303,7 @@ mod tests {
         crate::tape::append(&db,sid,"message",&json!({"role":"user","content":"https://evil.test/leak"})).await.unwrap();
         assert!(!crate::gate::fetch_allowed(&db,sid,"https://evil.test/leak").await.unwrap());
         // Kernel-owned tool metadata overrides worker-supplied risk.
-        sqlx::query("INSERT INTO tool_calls(session_id,call_id,name,args,is_error,duration_ms,output_bytes,risk,origin,result_sha256) VALUES ($1,'source-call','web_fetch','{}',false,0,0,3,'web_fetch:https://example.test',encode(sha256(convert_to('genuine result','UTF8')),'hex'))")
+        sqlx::query("INSERT INTO tool_calls(session_id,call_id,name,args,is_error,duration_ms,output_bytes,risk,origin,result_sha256) VALUES ($1,'source-call','web_fetch','{}',false,0,0,3,'web_fetch:https://example.test',sha256_hex('genuine result'))")
             .bind(sid).execute(&db).await.unwrap();
         let (n,_) = crate::tape::append(&db,sid,"message",&json!({"role":"toolResult","toolName":"web_fetch","toolCallId":"source-call","risk":0,"content":"genuine result"})).await.unwrap();
         let r: i16 = sqlx::query_scalar("SELECT risk FROM tape_events WHERE session_id=$1 AND seq=$2").bind(sid).bind(n).fetch_one(&db).await.unwrap();
@@ -325,20 +319,20 @@ mod tests {
 Result about {echo}
  https://real.test/a
 </untrusted>"#);
-        sqlx::query("INSERT INTO tool_calls(session_id,call_id,name,args,is_error,duration_ms,output_bytes,risk,origin,result_sha256,source_args) VALUES ($1,'echo','web_search','{}',false,0,0,4,'web_search',encode(sha256(convert_to($2,'UTF8')),'hex'),$3)")
+        sqlx::query("INSERT INTO tool_calls(session_id,call_id,name,args,is_error,duration_ms,output_bytes,risk,origin,result_sha256,source_args) VALUES ($1,'echo','web_search','{}',false,0,0,4,'web_search',sha256_hex($2),$3)")
             .bind(sid).bind(&content).bind(json!({"query":echo})).execute(&db).await.unwrap();
         crate::tape::append(&db,sid,"message",&json!({"role":"toolResult","toolName":"web_search","toolCallId":"echo","isError":false,"content":[{"type":"text","text":content}]})).await.unwrap();
         crate::tape::append(&db,sid,"message",&json!({"role":"assistant","content":[{"id":"echo","arguments":{"query":"forged harmless query"}}]})).await.unwrap();
         assert!(!crate::gate::fetch_allowed(&db,sid,echo).await.unwrap());
         assert!(crate::gate::fetch_allowed(&db,sid,"https://real.test/a").await.unwrap());
         // Duplicate call IDs cannot substitute another call's arguments for this result.
-        sqlx::query("INSERT INTO tool_calls(session_id,call_id,name,args,is_error,duration_ms,output_bytes,risk,origin,result_sha256,source_args) VALUES ($1,'echo','web_search','{}',false,0,0,4,'web_search',encode(sha256(convert_to('different result','UTF8')),'hex'),$2)")
+        sqlx::query("INSERT INTO tool_calls(session_id,call_id,name,args,is_error,duration_ms,output_bytes,risk,origin,result_sha256,source_args) VALUES ($1,'echo','web_search','{}',false,0,0,4,'web_search',sha256_hex('different result'),$2)")
             .bind(sid).bind(json!({"query":"harmless"})).execute(&db).await.unwrap();
         crate::tape::append(&db,sid,"message",&json!({"role":"toolResult","toolName":"web_search","toolCallId":"echo","isError":false,"content":[{"type":"text","text":content}]})).await.unwrap();
         assert!(!crate::gate::fetch_allowed(&db,sid,echo).await.unwrap());
 
         // A worker cannot relabel a failed result as a successful page.
-        sqlx::query("INSERT INTO tool_calls(session_id,call_id,name,args,is_error,duration_ms,output_bytes,risk,origin,result_sha256,source_args) VALUES ($1,'failed','web_fetch','{}',true,0,0,4,'web_fetch:https://failed.test',encode(sha256(convert_to('https://failed.test/leak','UTF8')),'hex'),'{}')")
+        sqlx::query("INSERT INTO tool_calls(session_id,call_id,name,args,is_error,duration_ms,output_bytes,risk,origin,result_sha256,source_args) VALUES ($1,'failed','web_fetch','{}',true,0,0,4,'web_fetch:https://failed.test',sha256_hex('https://failed.test/leak'),'{}')")
             .bind(sid).execute(&db).await.unwrap();
         crate::tape::append(&db,sid,"message",&json!({"role":"toolResult","toolName":"web_fetch","toolCallId":"failed","isError":false,"content":"https://failed.test/leak"})).await.unwrap();
         assert!(!crate::gate::fetch_allowed(&db,sid,"https://failed.test/leak").await.unwrap());
@@ -353,10 +347,8 @@ Result about {echo}
     /// A copied version has several rows for one writer. Retaining it in an edit must
     /// aggregate those rows before the upsert, preserving the highest risk for each writer.
     #[tokio::test]
-    #[ignore]
-    async fn copied_bytes_edit_database() {
-        let db = PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
-        sqlx::migrate!().run(&db).await.unwrap();
+        async fn copied_bytes_edit_database() {
+        let (_db_dir, db) = crate::test_util::database().await;
         let writer = Uuid::new_v4();
         let editor = Uuid::new_v4();
         for session in [writer, editor] {
@@ -378,7 +370,7 @@ Result about {echo}
         record_bytes(&db,editor,&original,&after,Some(&before)).await.unwrap();
         tokio::fs::write(&original,&after).await.unwrap();
         assert_eq!(file_rating(&db,&original,&after).await.unwrap(),3);
-        let rows = sqlx::query("SELECT session_id,risk FROM item_ratings WHERE path=$1 AND sha256=encode(sha256(convert_to($2,'UTF8')),'hex')")
+        let rows = sqlx::query("SELECT session_id,risk FROM item_ratings WHERE path=$1 AND sha256=sha256_hex($2)")
             .bind(original.to_string_lossy().as_ref()).bind(&after).fetch_all(&db).await.unwrap();
         assert_eq!(rows.len(),2);
         assert!(rows.iter().any(|r| r.get::<Uuid,_>("session_id")==writer && r.get::<i16,_>("risk")==3));
@@ -390,12 +382,10 @@ Result about {echo}
         assert_eq!(file_rating(&db,&original,&after).await.unwrap(),3);
     }
 
-    /// SOURCE_TEST_DB_URL must name a throwaway database.
+    /// Uses an isolated SQLite fixture.
     #[tokio::test]
-    #[ignore]
-    async fn item_origin_database() {
-        let db = PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
-        sqlx::migrate!().run(&db).await.unwrap();
+        async fn item_origin_database() {
+        let (_db_dir, db) = crate::test_util::database().await;
         let parent = Uuid::new_v4();
         let child = Uuid::new_v4();
         sqlx::query("INSERT INTO sessions(id,title,model,risk) VALUES($1,'item parent','faux/smoke',3)")
@@ -416,20 +406,20 @@ Result about {echo}
         assert_eq!(sqlx::query_scalar::<_,i16>("SELECT risk FROM memories WHERE id=$1").bind(id).fetch_one(&db).await.unwrap(),3,
             "contamination never overwrites original risk");
         sqlx::query("INSERT INTO contamination(cause,affected) VALUES($1,$1)").bind(child).execute(&db).await.unwrap();
-        sqlx::query("UPDATE contamination SET cleared_at=now() WHERE cause=$1").bind(parent).execute(&db).await.unwrap();
+        sqlx::query("UPDATE contamination SET cleared_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE cause=$1").bind(parent).execute(&db).await.unwrap();
         assert!(crate::taint::stopped(&db,child).await.unwrap(),"an independent child cause survives parent reversal");
-        sqlx::query("UPDATE contamination SET cleared_at=now() WHERE cause=$1").bind(child).execute(&db).await.unwrap();
+        sqlx::query("UPDATE contamination SET cleared_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE cause=$1").bind(child).execute(&db).await.unwrap();
         assert!(!crate::taint::stopped(&db,child).await.unwrap());
         let dir = crate::test_util::TestDir::new("item-provenance");
         let path = dir.join("page.md");
         tokio::fs::write(&path,"first version").await.unwrap();
-        record_file(&db,parent,&path,1).await.unwrap();
+        record_file(&db,parent,&path,3).await.unwrap();
         assert_eq!(file_rating(&db,&path,"first version").await.unwrap(),3);
-        assert_eq!(file_rating(&db,&path,"changed version").await.unwrap(),4,"new bytes do not inherit an old digest's trust");
+        assert_eq!(file_rating(&db,&path,"changed version").await.unwrap(),3,"unregistered owner edits on a tracked path retain its writer floor");
         sqlx::query("INSERT INTO contamination(cause,affected) VALUES($1,$1) ON CONFLICT(cause,affected) DO UPDATE SET cleared_at=NULL")
             .bind(parent).execute(&db).await.unwrap();
         assert_eq!(file_rating(&db,&path,"first version").await.unwrap(),5);
-        sqlx::query("UPDATE contamination SET cleared_at=now() WHERE cause=$1").bind(parent).execute(&db).await.unwrap();
+        sqlx::query("UPDATE contamination SET cleared_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE cause=$1").bind(parent).execute(&db).await.unwrap();
         assert_eq!(file_rating(&db,&path,"first version").await.unwrap(),3,"reversal restores the origin rating");
 
         // Ordinary files, not only wiki/drafts, carry exact-byte provenance through read.
@@ -454,7 +444,7 @@ Result about {echo}
             .bind(parent).execute(&db).await.unwrap();
         assert!(crate::taint::stopped(&db,reader).await.unwrap(),"a later writer denial reaches a reader through its dependency");
         assert_eq!(file_rating(&db,&path,"edited version").await.unwrap(),5,"edits retain all source writers");
-        sqlx::query("UPDATE contamination SET cleared_at=now() WHERE cause=$1").bind(parent).execute(&db).await.unwrap();
+        sqlx::query("UPDATE contamination SET cleared_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE cause=$1").bind(parent).execute(&db).await.unwrap();
 
         // Cached search bytes cannot borrow the rating of a newer clean memory.
         let search_reader = Uuid::new_v4();

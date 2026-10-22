@@ -315,17 +315,17 @@ pub fn decide_early(name: &str, inputs: &Facts) -> Option<String> {
 }
 
 /// One decision.
-pub async fn decide(db: &sqlx::PgPool, name: &str, facts: Facts) -> Decision {
+pub async fn decide(db: &sqlx::SqlitePool, name: &str, facts: Facts) -> Decision {
     run::single(db, name, facts).await
 }
 
 /// One question per item, in one call: each item's decision, in order.
-pub async fn decide_items(db: &sqlx::PgPool, name: &str, facts: Facts, items: Vec<Value>) -> Vec<Decision> {
+pub async fn decide_items(db: &sqlx::SqlitePool, name: &str, facts: Facts, items: Vec<Value>) -> Vec<Decision> {
     run::items(db, name, facts, items).await
 }
 
 /// The same decision for several subjects, in one call.
-pub async fn decide_batch(db: &sqlx::PgPool, name: &str, session: Option<Uuid>, subjects: Vec<Facts>) -> Vec<Decision> {
+pub async fn decide_batch(db: &sqlx::SqlitePool, name: &str, session: Option<Uuid>, subjects: Vec<Facts>) -> Vec<Decision> {
     run::batch(db, name, session, subjects).await
 }
 

@@ -64,7 +64,7 @@ tools, skills, memory and knowledge; any model can do the work. Fixed rules exis
 5. **Composable.** Every building block is a module with a documented contract; switching an
    implementation is a config change, not a rewrite. Adopt good open source before building.
 6. **Open contracts.** MCP for tools · OpenAI/Anthropic-compatible HTTP for models · JSON-RPC between
-   kernel and workers · markdown + git for knowledge · Postgres via `DATABASE_URL` for state.
+   kernel and workers · markdown + git for knowledge · SQLite + sqlite-vec for state (`DATABASE_URL` override).
 7. **The kernel owns state; workers are stateless.** All side effects go through the kernel, under one
    permission model.
 8. **Deterministic where possible.** Repeatable LLM work is distilled into scripts over time.
@@ -74,7 +74,7 @@ tools, skills, memory and knowledge; any model can do the work. Fixed rules exis
     comes with a recommendation and a default.
 11. **Own your data.** Everything is exportable as plain files; nothing important lives only in a
     database.
-12. **Host-agnostic.** Runs on any Linux box with Docker; exe.dev is only where it runs today.
+12. **Host-agnostic.** Runs on any Linux box; exe.dev is only where it runs today.
 
 ## Constraints
 

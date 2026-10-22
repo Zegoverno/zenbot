@@ -8,7 +8,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 /// Raw tape only: never compactions, tool results, child task prompts, or post-exposure plans.
-pub async fn job(db: &sqlx::PgPool, session: Uuid) -> Result<Value> {
+pub async fn job(db: &sqlx::SqlitePool, session: Uuid) -> Result<Value> {
     let root = sqlx::query("WITH RECURSIVE ancestors AS (
         SELECT id,parent,title,kind,0 AS depth FROM sessions WHERE id=$1
         UNION ALL SELECT s.id,s.parent,s.title,s.kind,a.depth+1 FROM sessions s
@@ -24,7 +24,7 @@ pub async fn job(db: &sqlx::PgPool, session: Uuid) -> Result<Value> {
     if kind.is_none() || kind.as_deref() == Some("job") {
         let rows = sqlx::query("SELECT payload,origin FROM tape_events e WHERE session_id=$1 AND kind='message'
             AND ((origin='owner' AND risk=0 AND payload->>'role'='user'
-                  AND NOT COALESCE((payload->>'kernel')::boolean,false))
+                  AND NOT COALESCE((payload->>'kernel'),false))
               OR (origin='derived-session' AND risk<=1 AND NOT tainted AND payload->>'role'='assistant'
                   AND seq < COALESCE((SELECT min(seq) FROM tape_events WHERE session_id=$1 AND (risk>=2 OR tainted)),2147483647)))
             ORDER BY seq DESC").bind(id).fetch_all(db).await?;
@@ -60,14 +60,10 @@ fn plain_text(content: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// Disposable database only:
-    /// TASK_TEST_DB_URL=postgres://... cargo test -p zend task_database -- --ignored
+    /// Task state regression against an isolated SQLite fixture.
     #[tokio::test]
-    #[ignore]
-    async fn task_database() {
-        let url=std::env::var("TASK_TEST_DB_URL").expect("isolated disposable database required");
-        let db=sqlx::PgPool::connect(&url).await.unwrap();
-        sqlx::migrate!().run(&db).await.unwrap();
+        async fn task_database() {
+        let (_db_dir, db) = crate::test_util::database().await;
         let root=Uuid::new_v4();
         let child=Uuid::new_v4();
         sqlx::query("INSERT INTO sessions(id,title,model) VALUES($1,'real job','faux/smoke')")
@@ -119,7 +115,7 @@ mod tests {
         let state=job(&db,run_session).await.unwrap().to_string();
         assert!(state.contains("STORED_JOB_GOAL") && state.contains("JOB_CLEAN_PLAN"),"{state}");
         assert!(!state.contains("RUNTIME_PROMPT_WITH_OLD_REPORT"));
-        sqlx::query("UPDATE jobs SET prompt='MUTATED_JOB_GOAL',updated_at=now() WHERE id=$1")
+        sqlx::query("UPDATE jobs SET prompt='MUTATED_JOB_GOAL',updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id=$1")
             .bind(job_id).execute(&db).await.unwrap();
         let state=job(&db,run_session).await.unwrap();
         assert_eq!(state["authenticated_goal_data"],"");

@@ -119,7 +119,7 @@ How each of these works is in [DESIGN.md](DESIGN.md) ("As built"); here is what 
 
 ## The web and connected services
 
-- **Web**: `web_search` and `web_fetch` work out of the box through a SearXNG container next to Postgres; set `BRAVE_API_KEY` or `TAVILY_API_KEY` in `~/.zenbot/env` to use those instead. Everything read from the web is untrusted, and so is what a session that read it saves (`zen memory` and `zen skills` show `untrusted`). Once a session has read untrusted content project code runs offline with a read-only workspace (only private `/tmp` is writable); builds or commits that need more access require exact `/allow` approval; zen marks it `untrusted` on the board and in the footer. `/trust` (Matrix: `!trust`) shows what it read; if you trust that, `/trust yes` lifts the limits from then on (the next untrusted read sets them again, and what it saved meanwhile stays marked). Or continue in a fresh session.
+- **Web**: `web_fetch` reads public pages directly. For `web_search`, configure `ZEN_SEARXNG_URL` for an external SearXNG service, or set `BRAVE_API_KEY` or `TAVILY_API_KEY` in `~/.zenbot/env`. Everything read from the web is untrusted, and so is what a session that read it saves (`zen memory` and `zen skills` show `untrusted`). Once a session has read untrusted content project code runs offline with a read-only workspace (only private `/tmp` is writable); builds or commits that need more access require exact `/allow` approval; zen marks it `untrusted` on the board and in the footer. `/trust` (Matrix: `!trust`) shows what it read; if you trust that, `/trust yes` lifts the limits from then on (the next untrusted read sets them again, and what it saved meanwhile stays marked). Or continue in a fresh session.
 - **MCP servers** (email, calendar, documents, your own services): list them in `~/.zenbot/mcp.json`, the same shape Claude Code uses. Secrets go in `~/.zenbot/env` and are referenced as `${VAR}`; a variable named like a secret (`…TOKEN`, `…KEY`, `…SECRET`, `…PASSWORD`) is passed only to a server that lists it in `allow_env`:
   ```json
   { "mcpServers": {
@@ -167,3 +167,8 @@ In `~/.zenbot/env` (every setting, with defaults: [MAP.md](MAP.md#environment-va
 - **Trusted repositories:** `ZEN_TRUSTED_REPOS` lists repositories whose `AGENTS.md` zenbot follows (their git worktrees too); any other project's instructions come as untrusted content.
 
 Every turn is recorded with what produced it (build, engine and version, model, thinking level), tokens, cost, time and cache use; evals compare two harness versions on fixed tasks ([evals/README.md](evals/README.md)).
+
+**Storage and recovery.** State lives in private `~/.zenbot/zen.sqlite3` (SQLite `DATABASE_URL` overrides it); Docker is
+optional. Existing installations use the [verified migration](DEVELOPMENT.md#database-changes-and-existing-data-migration), retaining PostgreSQL for recovery.
+`scripts/storage.py` exports/restores versioned JSONL and creates WAL-aware database backups.
+Also back up prompt/config files, curated Markdown and retained sources separately.

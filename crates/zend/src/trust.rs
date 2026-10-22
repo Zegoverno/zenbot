@@ -317,13 +317,13 @@ pub(crate) async fn api_list(axum::extract::State(app): axum::extract::State<cra
     use sqlx::Row;
     // Observations are evidence for review, never automatic authority. Ignore failed calls and
     // sessions with an active denial; the owner still chooses the entry's level explicitly.
-    let rows = sqlx::query("SELECT host,sum(reads)::bigint AS reads FROM (
+    let rows = sqlx::query("SELECT host,sum(reads) AS reads FROM (
         SELECT e.host,e.count AS reads FROM egress e JOIN sessions s ON s.id=e.session_id
-        WHERE e.outcome='allow' AND e.rating<5 AND NOT zen_session_contaminated(s.id)
+        WHERE e.outcome='allow' AND e.rating<5 AND NOT COALESCE(s.id IN (SELECT id FROM zen_contaminated_sessions),false)
         UNION ALL
-        SELECT split_part(split_part(t.args->>'url','://',2),'/',1) AS host,1::bigint AS reads
+        SELECT substr(substr(t.args->>'url',instr(t.args->>'url','://')+3),1,instr(substr(t.args->>'url',instr(t.args->>'url','://')+3)||'/','/')-1) AS host,1 AS reads
         FROM tool_calls t JOIN sessions s ON s.id=t.session_id
-        WHERE t.name='web_fetch' AND NOT t.is_error AND NOT zen_session_contaminated(s.id)
+        WHERE t.name='web_fetch' AND NOT t.is_error AND NOT COALESCE(s.id IN (SELECT id FROM zen_contaminated_sessions),false)
         ) observations GROUP BY host HAVING sum(reads)>=2 ORDER BY reads DESC,host LIMIT 50")
         .fetch_all(&app.db).await?;
     let entries: Vec<_> = rows.iter().filter_map(|row| {

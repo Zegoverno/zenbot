@@ -13,7 +13,7 @@ use std::sync::{LazyLock, RwLock};
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
-use sqlx::{PgPool, Row};
+use sqlx::{SqlitePool, Row};
 
 use super::policy::Compiled;
 
@@ -76,7 +76,7 @@ pub fn isotonic(mut data: Vec<(f64, bool)>) -> Vec<(f64, f64)> {
 }
 
 /// Load every stored curve (at start and after fitting).
-pub async fn load(db: &PgPool) {
+pub async fn load(db: &SqlitePool) {
     let rows = sqlx::query("SELECT point, model, question, curve FROM s1_calibration").fetch_all(db).await.unwrap_or_default();
     let mut map = HashMap::new();
     for r in rows {
@@ -88,10 +88,10 @@ pub async fn load(db: &PgPool) {
 }
 
 /// Record what really happened to a decision. One label per source; a later one replaces it.
-pub async fn label(db: &PgPool, decision: i64, correct: bool, truth: Option<&str>, source: &str) {
+pub async fn label(db: &SqlitePool, decision: i64, correct: bool, truth: Option<&str>, source: &str) {
     let r = sqlx::query(
         "INSERT INTO s1_outcomes (decision_id, correct, truth, source) VALUES ($1, $2, $3, $4)
-         ON CONFLICT (decision_id, source) DO UPDATE SET correct = $2, truth = $3, created_at = now()",
+         ON CONFLICT (decision_id, source) DO UPDATE SET correct = $2, truth = $3, created_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')",
     )
     .bind(decision)
     .bind(correct)
@@ -106,7 +106,7 @@ pub async fn label(db: &PgPool, decision: i64, correct: bool, truth: Option<&str
 
 /// The owner answered an action a task check held: approving it says the hold was wrong (the
 /// action should have run), refusing or denying it says the hold was right.
-pub async fn label_gate(db: &PgPool, gate: i64, approved: bool) {
+pub async fn label_gate(db: &SqlitePool, gate: i64, approved: bool) {
     let decision: Option<i64> = sqlx::query_scalar("SELECT s1_decision FROM action_gates WHERE id = $1").bind(gate).fetch_optional(db).await.ok().flatten().flatten();
     if let Some(d) = decision {
         label(db, d, !approved, Some(if approved { "run" } else { "hold" }), "owner_queue").await;
@@ -114,7 +114,7 @@ pub async fn label_gate(db: &PgPool, gate: i64, approved: bool) {
 }
 
 /// The owner resumed or removed a job S1 kept paused: resuming says it should have gone live.
-pub async fn label_job(db: &PgPool, approval: &serde_json::Value, resumed: bool) {
+pub async fn label_job(db: &SqlitePool, approval: &serde_json::Value, resumed: bool) {
     if approval["outcome"] != "paused" {
         return;
     }
@@ -125,8 +125,8 @@ pub async fn label_job(db: &PgPool, approval: &serde_json::Value, resumed: bool)
 
 /// The nightly pass: fit curves, propose calibration where it would change outcomes, prune old
 /// states. Returns a one-line summary for the sleep's note.
-pub async fn nightly(db: &PgPool) -> Result<String> {
-    let pruned = sqlx::query("DELETE FROM s1_states WHERE created_at < now() - interval '30 days'").execute(db).await?.rows_affected();
+pub async fn nightly(db: &SqlitePool) -> Result<String> {
+    let pruned = sqlx::query("DELETE FROM s1_states WHERE created_at < strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-30 days')").execute(db).await?.rows_affected();
     let specs: Vec<(String, Compiled, bool)> = {
         let r = super::registry();
         r.specs.values().filter_map(|l| l.policy.clone().map(|p| (l.spec.name.clone(), p, l.spec.calibrate))).collect()
@@ -136,7 +136,7 @@ pub async fn nightly(db: &PgPool) -> Result<String> {
         let Compiled::Costs { question, yes, false_yes, false_no, .. } = &policy else { continue };
         // Raw probabilities (answers keep the model's own number) with whether yes was right.
         let rows = sqlx::query(
-            "SELECT d.model, (d.answer -> $2 ->> 'probability')::float8 AS p, d.chosen, o.correct
+            "SELECT d.model, CAST(d.answer -> $2 ->> 'probability' AS REAL) AS p, d.chosen, o.correct
              FROM decisions d JOIN s1_outcomes o ON o.decision_id = d.id
              WHERE d.point = $1 AND d.source = 'model' AND d.answer -> $2 ->> 'probability' IS NOT NULL",
         )
@@ -158,7 +158,7 @@ pub async fn nightly(db: &PgPool) -> Result<String> {
             let curve = isotonic(data.clone());
             sqlx::query(
                 "INSERT INTO s1_calibration (point, model, question, curve, labelled) VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (point, model, question) DO UPDATE SET curve = $4, labelled = $5, fitted_at = now()",
+                 ON CONFLICT (point, model, question) DO UPDATE SET curve = $4, labelled = $5, fitted_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')",
             )
             .bind(&point)
             .bind(&model)
@@ -190,7 +190,7 @@ pub async fn nightly(db: &PgPool) -> Result<String> {
 }
 
 /// Pending proposals, newest first.
-pub async fn proposals(db: &PgPool) -> Result<Value> {
+pub async fn proposals(db: &SqlitePool) -> Result<Value> {
     let rows = sqlx::query("SELECT id, point, kind, summary, change, created_at FROM s1_proposals WHERE status = 'pending' ORDER BY id DESC").fetch_all(db).await?;
     Ok(Value::Array(rows.iter().map(|r| json!({
         "id": r.get::<i64, _>("id"), "decision": r.get::<String, _>("point"), "kind": r.get::<String, _>("kind"),
@@ -202,7 +202,7 @@ pub async fn proposals(db: &PgPool) -> Result<Value> {
 /// The owner's answer to a proposal. Approving writes the change into the owner's decision file
 /// (copied from the built-in default first when they have none), then checks it; a file that
 /// fails is put back as it was and the proposal stays pending.
-pub async fn decide_proposal(db: &PgPool, id: i64, approve: bool) -> Result<Value> {
+pub async fn decide_proposal(db: &SqlitePool, id: i64, approve: bool) -> Result<Value> {
     let row = sqlx::query("SELECT point, change, status FROM s1_proposals WHERE id = $1").bind(id).fetch_optional(db).await?.context("no such proposal")?;
     let status: String = row.get("status");
     if status != "pending" {
@@ -213,7 +213,7 @@ pub async fn decide_proposal(db: &PgPool, id: i64, approve: bool) -> Result<Valu
         let change: Value = row.get("change");
         apply_change(&point, &change)?;
     }
-    sqlx::query("UPDATE s1_proposals SET status = $2, decided_at = now() WHERE id = $1 AND status = 'pending'")
+    sqlx::query("UPDATE s1_proposals SET status = $2, decided_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = $1 AND status = 'pending'")
         .bind(id)
         .bind(if approve { "approved" } else { "rejected" })
         .execute(db)
@@ -298,12 +298,10 @@ mod tests {
         interpolate(c, p)
     }
 
-    /// Isolated DB only: SOURCE_TEST_DB_URL=… cargo test s1_learn_database -- --ignored.
+    /// Learning regression against an isolated SQLite fixture.
     #[tokio::test]
-    #[ignore]
-    async fn s1_learn_database() {
-        let db = PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").expect("a throwaway database")).await.unwrap();
-        sqlx::migrate!().run(&db).await.unwrap();
+        async fn s1_learn_database() {
+        let (_db_dir, db) = crate::test_util::database().await;
         let model = format!("test/{}", uuid::Uuid::new_v4().simple());
         // An overconfident model: it says 0.95 that the owner asked for a job, and is right half the time.
         for i in 0..40 {

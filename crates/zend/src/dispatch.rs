@@ -502,8 +502,8 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
             // Cut arguments keep the sha256 and size of the whole (masked) arguments under `_full`.
             let recorded = sqlx::query(
                 "INSERT INTO tool_calls (session_id, call_id, name, args, is_error, duration_ms, output_bytes, turn_id, risk, origin, result_sha256, source_args)
-                 VALUES ($1, $2, $3, CASE WHEN $9::text IS NULL THEN $4 ELSE $4 || jsonb_build_object('_full', jsonb_build_object(
-                         'sha256', encode(sha256(convert_to($9, 'UTF8')), 'hex'), 'bytes', octet_length($9))) END, $5, $6, $7, $8, $10, $11, encode(sha256(convert_to($12,'UTF8')),'hex'), $13)",
+                 VALUES ($1, $2, $3, CASE WHEN $9 IS NULL THEN $4 ELSE json_patch($4, json_object('_full', json_object(
+                         'sha256', sha256_hex($9), 'bytes', length(CAST($9 AS BLOB))))) END, $5, $6, $7, $8, $10, $11, sha256_hex($12), $13)",
             )
             .bind(id)
             .bind(&call_id)
@@ -584,7 +584,7 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                 }
                 let effort: Option<String> = sqlx::query_scalar("SELECT effort FROM sessions WHERE id = $1").bind(id).fetch_one(&app.db).await?;
                 let effort = effort_on(app, &to, effort).await;
-                sqlx::query("UPDATE sessions SET model = $2, effort = $3, updated_at = now() WHERE id = $1")
+                sqlx::query("UPDATE sessions SET model = $2, effort = $3, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = $1")
                     .bind(id)
                     .bind(&to)
                     .bind(&effort)

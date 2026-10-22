@@ -29,7 +29,7 @@ impl Drop for TestDir {
 
 /// A kernel state with no workers, for database tests of kernel functions that take an `App`
 /// (`taint::deny`, `trust`, `hand_over_rating`). Events go nowhere; aborts reach no worker.
-pub(crate) fn app(db: sqlx::PgPool) -> crate::AppState {
+pub(crate) fn app(db: sqlx::SqlitePool) -> crate::AppState {
     use std::collections::{HashMap, HashSet};
     use tokio::sync::Mutex;
     std::sync::Arc::new(crate::App {
@@ -55,4 +55,12 @@ pub(crate) fn app(db: sqlx::PgPool) -> crate::AppState {
         tool_order: Mutex::new(HashMap::new()),
         background: std::sync::Arc::default(),
     })
+}
+
+/// Isolated, fully configured SQLite fixture, removed when its guard leaves scope.
+pub(crate) async fn database() -> (TestDir, sqlx::SqlitePool) {
+    let dir = TestDir::new("sqlite");
+    let url = format!("sqlite:{}", dir.join("test.sqlite").display());
+    let db = crate::storage::connect(&url).await.unwrap();
+    (dir, db)
 }

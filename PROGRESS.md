@@ -6,6 +6,36 @@
 
 ---
 
+## 2026-10-22 — Complete PostgreSQL upgrade preparation
+
+After a copied PostgreSQL snapshot passes the smoke turn, upgrade preparation reports the pending
+backend cutover instead of asking the retained PostgreSQL source for SQLite migration versions.
+The detached installer still takes the final quiescent archive before changing the backend.
+
+## 2026-10-22 — Preserve all-word search and exercise SQLite fixtures
+
+Full-text search requires every literal query word, preserving PostgreSQL’s ordinary multiword
+behavior so typed-link expansion still brings in related records. A partial-word regression guards
+this behavior. End-to-end fixtures use SQLite UUID blobs, booleans and failure-injection triggers.
+
+## 2026-10-22 — Account for the bundled SQLite binary
+
+The kernel release size budget includes SQLite, FTS5 and sqlite-vec: measured at 22,974 KiB
+locally and 22,965 KiB in CI, with about 15% headroom. Client and worker budgets stay fixed.
+
+## 2026-10-22 — Retain the PostgreSQL project during staged cutover
+
+Staged upgrades select the original Compose project when exporting PostgreSQL, so moving the
+Compose file beside tested binaries still reaches the retained source. Cutover regression coverage
+checks the exact exporter command; storage and CI instructions match the SQLite implementation.
+
+## 2026-10-22 — Phase 8: SQLite state and portable archives (D-076)
+
+The kernel uses a private SQLite database with bundled sqlite-vec and FTS5, without a Docker
+runtime requirement. Existing PostgreSQL state migrates through a versioned JSONL snapshot:
+IDs, vectors, provenance and historical tape hashes survive; validation precedes publication.
+Consistent SQLite backups include WAL. Search can use an external SearXNG or Brave/Tavily.
+
 ## 2026-10-22 — Phase 7: engines (D-075)
 
 Codex counts tokens once with an estimated cost, so the router compares engines fairly. At most 3

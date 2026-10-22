@@ -1,120 +1,117 @@
 #!/usr/bin/env bash
-# Database helpers for the upgrade scripts: Postgres runs in the deploy/compose.yaml container, so
-# psql, pg_dump and pg_restore run inside it and nothing extra is needed on the host.
-# Sourced by the other scripts (it also loads scripts/lib.sh); also usable by hand:
-#
-#   scripts/db.sh pending          migrations in this checkout the live database hasn't applied
-#   scripts/db.sh backup [label]   dump the live database to ~/.zenbot/backups (keeps the last 3)
-#   scripts/db.sh secure           give the database user a private password (db_secure, below)
-#
-# The live database is the one in DATABASE_URL (from ~/.zenbot/env if set there), else zend's
-# default, `zen`. Docker runs without sudo when the user may use it, else with `sudo -n` (the
-# standard install doesn't add the user to the docker group).
+# SQLite helpers shared by install, development and upgrade scripts. Online backups include WAL
+# state using SQLite's backup API. PostgreSQL survives only as an explicit read-only migration source.
 DB_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$DB_REPO/scripts/lib.sh"
-DB_BACKUPS="$HOME/.zenbot/backups"
-DB_KEEP=3 # the nightly `prune` job keeps the same number (jobs::prune_dumps)
+DB_BACKUPS="${ZEN_HOME:-$HOME/.zenbot}/backups"
+DB_KEEP=3
+ZEN_STORAGE_TOOL=${ZEN_STORAGE_TOOL:-$DB_REPO/scripts/storage.py}
 
 db_live_url() {
   local url=${DATABASE_URL:-}
   [ -n "$url" ] || url=$(zen_env DATABASE_URL)
-  echo "${url:-postgres://zen:zen@127.0.0.1:5432/zen}"
-}
-db_live_name() { local n; n=$(db_live_url); n=${n##*/}; echo "${n%%\?*}"; }
-# The live URL with another database name.
-db_url_for() { local u; u=$(db_live_url); echo "${u%/*}/$1"; }
-
-# docker, or `sudo -n docker` when the user can't reach the daemon (decided once).
-DB_DOCKER=()
-db_docker() {
-  if [ ${#DB_DOCKER[@]} -eq 0 ]; then
-    if docker info >/dev/null 2>&1; then DB_DOCKER=(docker); else DB_DOCKER=(sudo -n docker); fi
+  if [ -z "$url" ] && [ -x "$HOME/.zenbot/bin/zend" ] && [ ! -f "$HOME/.zenbot/bin/.sqlite-storage" ]; then
+    url=postgres://zen:zen@127.0.0.1:5432/zen
   fi
-  "${DB_DOCKER[@]}" "$@"
+  echo "${url:-sqlite://${ZEN_HOME:-$HOME/.zenbot}/zen.sqlite3}"
 }
-db_exec() { db_docker compose -f "$DB_REPO/deploy/compose.yaml" exec -T postgres "$@"; }
-db_psql() { db_exec psql -U zen -v ON_ERROR_STOP=1 -qAt "$@"; }
-
-# Versions of the migration files in this checkout that the live database hasn't applied, one per
-# line (all of them for a database zend never started on). Fails, saying why, when it can't ask.
-db_pending() {
-  local applied f v
-  if ! applied=$(db_psql -d "$(db_live_name)" -c "SELECT to_regclass('_sqlx_migrations') IS NOT NULL" 2>&1); then
-    echo "db_pending: can't query the database $(db_live_name): $applied" >&2
-    return 1
-  fi
-  if [ "$applied" = t ]; then
-    applied=$(db_psql -d "$(db_live_name)" -c "SELECT version FROM _sqlx_migrations WHERE success") || return 1
+db_is_postgres() { [[ $(db_live_url) == postgres:* || $(db_live_url) == postgresql:* ]]; }
+db_pg_export() {
+  local url name
+  url=$(db_live_url)
+  if [[ $url =~ ^postgres(ql)?://[^@]*@(127\.0\.0\.1|localhost):5432/ ]]; then
+    name=${url##*/}; name=${name%%\?*}
+    [[ $name =~ ^[A-Za-z0-9_]+$ ]] || { echo 'Unsupported PostgreSQL database name.' >&2; return 1; }
+    # Bundled PostgreSQL accepts its owner through the container-local socket. No URL/password
+    # is passed to a process argument or log. Compose is only a retained migration source.
+    local docker_command=(docker) psql_command
+    docker info >/dev/null 2>&1 || docker_command=(sudo -n docker)
+    # A staged compose file lives under upgrades/<id>, but the retained container
+    # belongs to the original deploy project. Keep that project directory explicit.
+    printf -v psql_command '%q ' "${docker_command[@]}" compose --project-directory "$DB_REPO/deploy" -f "${ZEN_PG_COMPOSE:-$DB_REPO/deploy/compose.yaml}" exec -T postgres psql -U zen -d "$name"
+    python3 "$ZEN_STORAGE_TOOL" export-postgres "$1" --psql-command "$psql_command"
   else
-    applied=""
+    ZEN_MIGRATION_PG_URL="$url" python3 "$ZEN_STORAGE_TOOL" export-postgres "$1" --pg-url-env ZEN_MIGRATION_PG_URL
   fi
-  for f in "$DB_REPO"/crates/zend/migrations/*.sql; do
-    v=$(basename "$f"); v=${v%%_*}; v=$((10#$v))
-    grep -qx "$v" <<<"$applied" || echo "$v"
-  done
+}
+db_live_path() {
+  local url; url=$(db_live_url)
+  case "$url" in
+    sqlite://*) url=${url#sqlite://} ;;
+    sqlite:*) url=${url#sqlite:} ;;
+    *) echo 'PostgreSQL requires an explicit quiescent export/import before SQLite cutover; no data was changed.' >&2; return 1 ;;
+  esac
+  echo "${url%%\?*}"
+}
+db_live_name() { basename "$(db_live_path)"; }
+db_url_for() { echo "sqlite://${ZEN_DB_DIR:-${ZEN_HOME:-$HOME/.zenbot}}/$1.sqlite3"; }
+db_secure() { :; } # SQLite files/directories are private; no database account or daemon.
+
+db_query() {
+  local url; url=$(db_url_for "$1")
+  python3 "$DB_REPO/scripts/sqlite-query.py" "${url#sqlite://}" "$2"
+}
+db_create() {
+  local url; url=$(db_url_for "$1")
+  mkdir -p "$(dirname "${url#sqlite://}")"
+  (umask 077; touch "${url#sqlite://}")
 }
 
-# Dump the live database to $DB_BACKUPS/<UTC time>-<label>.dump; prints the path. Keeps the last $DB_KEEP.
+db_pending() {
+  local path; path=$(db_live_path) || return
+  python3 - "$path" "$DB_REPO/crates/zend/sqlite-migrations" <<'PY'
+import pathlib, sqlite3, sys
+path, directory = sys.argv[1:]
+applied = set()
+if pathlib.Path(path).exists():
+    with sqlite3.connect(f'file:{path}?mode=ro', uri=True) as db:
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='_sqlx_migrations'").fetchone():
+            applied = {r[0] for r in db.execute('SELECT version FROM _sqlx_migrations WHERE success')}
+for migration in sorted(pathlib.Path(directory).glob('*.sql')):
+    version = int(migration.name.split('_')[0])
+    if version not in applied:
+        print(version)
+PY
+}
 db_backup() {
-  local label=${1:-manual} out
+  local path out label=${1:-manual}
+  path=$(db_live_path) || return
   mkdir -p "$DB_BACKUPS"
-  out="$DB_BACKUPS/$(date -u +%Y%m%dT%H%M%SZ)-$label.dump"
-  if ! db_exec pg_dump -U zen -Fc "$(db_live_name)" >"$out" || [ ! -s "$out" ]; then
-    rm -f "$out"; return 1
-  fi
-  ls -1t "$DB_BACKUPS"/*.dump 2>/dev/null | tail -n +$((DB_KEEP + 1)) | xargs -r rm -f
+  chmod 700 "$DB_BACKUPS"
+  out="$DB_BACKUPS/$(date -u +%Y%m%dT%H%M%S%N)-${label//[^A-Za-z0-9_-]/_}.sqlite3"
+  python3 "$ZEN_STORAGE_TOOL" backup "$path" "$out" || return
+  # Retention only applies to SQLite backups, never retained PostgreSQL recovery dumps.
+  find "$DB_BACKUPS" -maxdepth 1 -name '*.sqlite3' -type f -printf '%T@ %p\n' | sort -rn | tail -n +$((DB_KEEP + 1)) | cut -d' ' -f2- | while IFS= read -r old; do rm -f -- "$old"; done
   echo "$out"
 }
-
-# Give the database user a private password, once per install: Postgres starts with the public
-# bootstrap password in deploy/compose.yaml (`zen`), which any process on the VM could use to rewrite
-# zenbot's state. This makes a random one in ~/.zenbot/db-password (private; secret to the kernel's
-# tools), sets it with ALTER USER over the container's local socket (fed on stdin, so it never shows
-# in a process list or a log), then points DATABASE_URL in ~/.zenbot/env at it (callers keep the
-# old file with env_backup first). Done when DATABASE_URL already carries it; leaves a DATABASE_URL
-# for another server or user alone. install.sh runs it, and apply-upgrade.sh right before the restart (old binaries read
-# DATABASE_URL from env too, so a rollback keeps working). Prints what it did, never the password.
-DB_PASSWORD_FILE="$HOME/.zenbot/db-password"
-db_secure() {
-  local cur pw want
-  cur=$(zen_env DATABASE_URL)
-  if [ -n "$cur" ] && ! [[ $cur =~ ^postgres(ql)?://zen(:[^@]*)?@(127\.0\.0\.1|localhost):5432/ ]]; then
-    return 0 # not the bundled Postgres
-  fi
-  if [ ! -s "$DB_PASSWORD_FILE" ]; then
-    mkdir -p "$(dirname "$DB_PASSWORD_FILE")"
-    (umask 077 && head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 32 > "$DB_PASSWORD_FILE")
-  fi
-  chmod 600 "$DB_PASSWORD_FILE"
-  pw=$(cat "$DB_PASSWORD_FILE")
-  [[ $pw =~ ^[A-Za-z0-9]{16,}$ ]] || { echo "db_secure: $DB_PASSWORD_FILE isn't a password this script made" >&2; return 1; }
-  want="postgres://zen:$pw@127.0.0.1:5432/$(db_live_name)"
-  [ "$cur" != "$want" ] || return 0
-  # psql's own errors can quote the statement, so they're dropped: the caller logs stderr.
-  printf "ALTER USER zen PASSWORD '%s';\n" "$pw" | db_exec psql -U zen -d postgres -v ON_ERROR_STOP=1 -q >/dev/null 2>&1 || {
-    echo "db_secure: setting the database password failed (try: scripts/db.sh secure)" >&2; return 1; }
-  env_set DATABASE_URL "$want"
-  echo "database password replaced with a private one (~/.zenbot/db-password); DATABASE_URL updated in ~/.zenbot/env"
-}
-
-# How to put a backup back (stop zenbot first). Printed, never run by the scripts.
 db_restore_cmd() {
-  echo "sudo systemctl stop zenbot && sudo docker compose -f $DB_REPO/deploy/compose.yaml exec -T postgres pg_restore -U zen --clean --if-exists -d $(db_live_name) < $1 && sudo systemctl start zenbot"
+  echo "Stop the kernel, preserve the current SQLite database and its -wal/-shm files, then restore $1 using scripts/storage.py backup into a new database path. Never switch back to retained PostgreSQL after SQLite writes."
 }
-
-# Copy the live database into a new database <name> (for the upgrade's smoke test).
 db_copy_live() {
-  db_psql -d postgres -c "CREATE DATABASE $1" >/dev/null &&
-    db_exec sh -c "pg_dump -U zen -Fc '$(db_live_name)' | pg_restore -U zen --no-owner -d '$1'"
+  local source destination
+  destination=$(db_url_for "$1"); destination=${destination#sqlite://}
+  mkdir -p "$(dirname "$destination")"
+  if db_is_postgres; then
+    db_pg_export "$destination.jsonl" || return
+    python3 "$ZEN_STORAGE_TOOL" restore "$destination.jsonl" "$destination"
+  else
+    source=$(db_live_path) || return
+    python3 "$ZEN_STORAGE_TOOL" backup "$source" "$destination"
+  fi
 }
-db_drop() { db_psql -d postgres -c "DROP DATABASE IF EXISTS $1 WITH (FORCE)" >/dev/null 2>&1; }
+db_drop() {
+  # Only disposable smoke/e2e copies may be removed through this helper.
+  case "$1" in zen_smoke_*|zen_e2e_*|zen_eval_*|zen_matrix_e2e_*) ;; *) echo 'refusing to drop a non-test database' >&2; return 1 ;; esac
+  local path; path=$(db_url_for "$1"); path=${path#sqlite://}
+  rm -f -- "$path" "$path-wal" "$path-shm" "$path.jsonl"
+}
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   set -euo pipefail
   case ${1:-} in
     pending) db_pending ;;
     backup) db_backup "${2:-manual}" ;;
-    secure) env_backup; db_secure ;;
+    secure) db_secure ;;
     *) echo "usage: $0 pending | backup [label] | secure" >&2; exit 2 ;;
   esac
 fi

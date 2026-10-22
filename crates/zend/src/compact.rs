@@ -10,7 +10,7 @@ use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use sqlx::{PgPool, Row};
+use sqlx::{SqlitePool, Row};
 use uuid::Uuid;
 
 use crate::tape::{self, Block};
@@ -321,7 +321,7 @@ pub async fn prepare(app: &App, session: Uuid, keep_tokens: i64, session_model: 
 }
 
 /// The newest summary prepared for a session and not applied yet.
-pub async fn pending(db: &PgPool, session: Uuid) -> Result<Option<i64>, sqlx::Error> {
+pub async fn pending(db: &SqlitePool, session: Uuid) -> Result<Option<i64>, sqlx::Error> {
     sqlx::query_scalar("SELECT id FROM compactions WHERE session_id = $1 AND applied_seq IS NULL ORDER BY id DESC LIMIT 1")
         .bind(session)
         .fetch_optional(db)
@@ -329,7 +329,7 @@ pub async fn pending(db: &PgPool, session: Uuid) -> Result<Option<i64>, sqlx::Er
 }
 
 /// Apply a prepared summary: append the `compaction` block the model will read from now on.
-pub async fn apply(db: &PgPool, session: Uuid, id: i64) -> Result<()> {
+pub async fn apply(db: &SqlitePool, session: Uuid, id: i64) -> Result<()> {
     let row = sqlx::query("SELECT covers_from, covers_to, text FROM compactions WHERE id = $1").bind(id).fetch_one(db).await?;
     let payload = json!({
         "id": id,
@@ -376,14 +376,14 @@ pub(crate) fn id_prefix_range(prefix: &str) -> Option<(Uuid, Uuid)> {
     Some((format!("{p}{rest}").parse().ok()?, format!("{p}{}", rest.replace('0', "f")).parse().ok()?))
 }
 
-pub async fn history_tool(db: &PgPool, session: Uuid, args: &Value) -> (String, bool) {
+pub async fn history_tool(db: &SqlitePool, session: Uuid, args: &Value) -> (String, bool) {
     match history_inner(db, session, args).await {
         Ok(t) => (t, false),
         Err(e) => (format!("{e:#}"), true),
     }
 }
 
-async fn history_inner(db: &PgPool, session: Uuid, args: &Value) -> Result<String> {
+async fn history_inner(db: &SqlitePool, session: Uuid, args: &Value) -> Result<String> {
     const MAX: usize = 50 * 1024;
     let session = match args["session"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
         None => session,
@@ -405,11 +405,11 @@ async fn history_inner(db: &PgPool, session: Uuid, args: &Value) -> Result<Strin
         // message, and quotes or newlines in the text are escaped there).
         let pattern = format!("%{}%", q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
         let rows = sqlx::query("SELECT seq, payload FROM tape_events WHERE session_id = $1 AND kind = 'message' AND (
-                 CASE jsonb_typeof(payload->'content')
-                   WHEN 'string' THEN payload->>'content'
-                   WHEN 'array' THEN (SELECT string_agg(COALESCE(c->>'text', c->>'thinking', c->>'name' || ' ' || (c->'arguments')::text, ''), ' ')
-                                      FROM jsonb_array_elements(payload->'content') c)
-                   ELSE '' END) ILIKE $2
+                 CASE json_type(payload,'$.content')
+                   WHEN 'text' THEN payload->>'content'
+                   WHEN 'array' THEN (SELECT group_concat(COALESCE(c.value->>'text', c.value->>'thinking', c.value->>'name' || ' ' || (c.value->'arguments'), ''), ' ')
+                                      FROM json_each(payload,'$.content') c)
+                   ELSE '' END) LIKE $2 ESCAPE '\\'
              ORDER BY seq LIMIT 30")
             .bind(session)
             .bind(&pattern)

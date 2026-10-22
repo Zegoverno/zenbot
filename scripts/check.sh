@@ -41,6 +41,11 @@ step docs scripts/check-docs.py --base "$BASE"
 s1_guard() { ! grep -rnE 's1::wire|decide_with_model|/systemone' crates/zend/src --include='*.rs' | grep -v -e '^crates/zend/src/s1/' -e '^crates/zend/src/config.rs:'; }
 step s1-guard s1_guard
 step build cargo build --release --locked
+. "$REPO/scripts/test-sqlite.sh"
+step py-sqlite ensure_test_sqlite
+step storage python3 scripts/test_storage.py
+step pg-archive python3 scripts/test_postgres_archive.py
+step cutover python3 scripts/test_cutover.py
 step tests cargo test --release --locked
 step clippy cargo clippy --release --locked --all-targets -- -D warnings
 step sizes scripts/size-budget.sh

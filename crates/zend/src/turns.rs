@@ -160,8 +160,8 @@ impl Drop for Compacting {
 /// A session's cost: its turns, plus calls recorded before turns were (they have no turn_id).
 pub(crate) fn session_cost(session: &str) -> String {
     format!(
-        "(COALESCE((SELECT SUM(cost_usd) FROM turns t WHERE t.session_id = {session}), 0)
-          + COALESCE((SELECT SUM(cost_usd) FROM model_calls m WHERE m.session_id = {session} AND m.turn_id IS NULL), 0))"
+        "(COALESCE((SELECT SUM(cost_usd) FROM turns t WHERE t.session_id = {session}), 0.0)
+          + COALESCE((SELECT SUM(cost_usd) FROM model_calls m WHERE m.session_id = {session} AND m.turn_id IS NULL), 0.0))"
     )
 }
 
@@ -194,10 +194,10 @@ pub(crate) async fn record_turn(app: &App, turn: &Turn, error: &Value) -> Result
         sent["first_cache_read"] = json!(first_read);
     }
     let row = sqlx::query(
-        "WITH calls AS (SELECT COUNT(*)::int AS n, SUM(input_tokens) AS i, SUM(output_tokens) AS o, SUM(cache_read) AS cr,
+        "WITH calls AS (SELECT COUNT(*) AS n, SUM(input_tokens) AS i, SUM(output_tokens) AS o, SUM(cache_read) AS cr,
                                SUM(cache_write) AS cw, SUM(cost_usd) AS c FROM model_calls WHERE turn_id = $1),
-              tools AS (SELECT COUNT(*)::int AS n, (COUNT(*) FILTER (WHERE is_error))::int AS e FROM tool_calls WHERE turn_id = $1)
-         UPDATE turns SET ended_at = now(), duration_ms = $2, outcome = $3, error = $4,
+              tools AS (SELECT COUNT(*) AS n, (COUNT(*) FILTER (WHERE is_error)) AS e FROM tool_calls WHERE turn_id = $1)
+         UPDATE turns SET ended_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'), duration_ms = $2, outcome = $3, error = $4,
                 engine = $5, engine_version = $6, model_resolved = $7,
                 model_calls = (SELECT n FROM calls), tool_calls = (SELECT n FROM tools), tool_errors = (SELECT e FROM tools),
                 input_tokens = COALESCE($8, (SELECT i FROM calls), 0), output_tokens = COALESCE($9, (SELECT o FROM calls), 0),
@@ -314,7 +314,7 @@ fn sum_reports(reports: &[Value]) -> Value {
     total
 }
 
-pub(crate) fn turn_json(r: &sqlx::postgres::PgRow) -> Value {
+pub(crate) fn turn_json(r: &sqlx::sqlite::SqliteRow) -> Value {
     json!({
         "turn_id": r.get::<Uuid, _>("id"),
         "harness": r.get::<String, _>("harness"),
@@ -371,7 +371,7 @@ pub(crate) async fn submit_prompt(app: &AppState, id: Uuid, text: String, steer:
 pub(crate) async fn prompt_loop(app: AppState) {
     loop {
         tokio::time::sleep(Duration::from_millis(250)).await;
-        let rows = match sqlx::query("SELECT DISTINCT ON(session_id) id,session_id,text FROM pending_prompts WHERE error IS NULL ORDER BY session_id,steer DESC,id")
+        let rows = match sqlx::query("SELECT id,session_id,text FROM (SELECT id,session_id,text,row_number() OVER(PARTITION BY session_id ORDER BY steer DESC,id) AS rn FROM pending_prompts WHERE error IS NULL) WHERE rn=1 ORDER BY session_id")
             .fetch_all(&app.db).await {
                 Ok(rows) => rows,
                 Err(e) => { tracing::warn!("loading pending prompts: {e:#}"); continue; }
@@ -785,7 +785,7 @@ mod reservation_tests {
     use super::*;
     #[tokio::test]
     async fn summary_panic_releases_its_reservation() {
-        let db = PgPoolOptions::new().connect_lazy("postgres://unused:unused@localhost/unused").unwrap();
+        let db = sqlx::sqlite::SqlitePoolOptions::new().connect_lazy("sqlite::memory:").unwrap();
         let app = crate::test_util::app(db);
         let id = Uuid::new_v4();
         app.compacting.lock().await.insert(id);

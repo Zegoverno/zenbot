@@ -28,6 +28,7 @@ mod secrets;
 mod session_state;
 mod skills;
 mod tape;
+mod storage;
 mod task;
 mod taint;
 #[cfg(test)]
@@ -63,8 +64,7 @@ use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, Row};
+use sqlx::{SqlitePool, Row};
 use tokio::sync::{broadcast, mpsc, watch, Mutex};
 use uuid::Uuid;
 
@@ -76,7 +76,7 @@ use turns::*;
 use workers::*;
 
 struct App {
-    db: PgPool,
+    db: SqlitePool,
     workers: Vec<Worker>,
     /// Names in ZEN_WORKERS that aren't known workers, ignored (shown by /health and `zen status`).
     ignored_workers: Vec<String>,
@@ -195,7 +195,7 @@ async fn serve() -> Result<()> {
         tracing::warn!("setting {bad} isn't a number: using its default");
     }
 
-    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://zen:zen@127.0.0.1:5432/zen".into());
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| format!("sqlite://{}", zen_home().join("zen.sqlite3").display()));
     let token = std::env::var("ZEN_TOKEN").map_err(|_| anyhow::anyhow!("ZEN_TOKEN must be set"))?;
     let port: u16 = std::env::var("ZEN_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8100);
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
@@ -212,11 +212,7 @@ async fn serve() -> Result<()> {
     for f in defaults::install(&zen_home()) {
         tracing::info!("installed default {}", zen_home().join(f).display());
     }
-    let db = PgPoolOptions::new().max_connections(10).connect(&database_url).await?;
-    // A rolled-back build must still start on a database a newer build already migrated.
-    let mut migrator = sqlx::migrate!("./migrations");
-    migrator.set_ignore_missing(true);
-    migrator.run(&db).await?;
+    let db = storage::connect(&database_url).await?;
     mcp_interaction::recover(&db).await?;
     // Codex turns recorded before D-075: tokens counted once, an estimated cost.
     match prices::backfill(&db).await {
@@ -352,7 +348,7 @@ async fn serve() -> Result<()> {
 }
 
 /// A session's messages in order, each with its block number (`seq`).
-async fn load_messages(db: &PgPool, id: Uuid) -> Result<Vec<Value>, sqlx::Error> {
+async fn load_messages(db: &SqlitePool, id: Uuid) -> Result<Vec<Value>, sqlx::Error> {
     Ok(tape::load(db, id, &["message"])
         .await?
         .into_iter()

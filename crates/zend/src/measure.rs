@@ -10,7 +10,7 @@
 //!   explains it, but the provider read less than half of the previous context from its cache).
 
 use serde_json::{json, Value};
-use sqlx::{PgPool, Row};
+use sqlx::{SqlitePool, Row};
 use uuid::Uuid;
 
 use crate::compile::{Envelope, SummaryRef};
@@ -35,9 +35,9 @@ impl Previous {
     }
 }
 
-pub async fn previous(db: &PgPool, session: Uuid) -> Result<Option<Previous>, sqlx::Error> {
+pub async fn previous(db: &SqlitePool, session: Uuid) -> Result<Option<Previous>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT model, envelope, context, context_tokens, EXTRACT(EPOCH FROM now() - ended_at)::bigint AS idle
+        "SELECT model, envelope, context, context_tokens, CAST((julianday('now')-julianday(ended_at))*86400 AS INTEGER) AS idle
          FROM turns WHERE session_id = $1 ORDER BY started_at DESC LIMIT 1",
     )
     .bind(session)
@@ -130,7 +130,7 @@ pub fn break_at_end(at_start: Option<&str>, render: Option<&str>, resume_offered
 
 /// The provider's numbers for a turn: what its first model call read from the cache, and the
 /// context size of its last call (input including cached tokens). None where an engine reports none.
-pub async fn provider_numbers(db: &PgPool, turn: Uuid) -> Result<(Option<i64>, Option<i64>), sqlx::Error> {
+pub async fn provider_numbers(db: &SqlitePool, turn: Uuid) -> Result<(Option<i64>, Option<i64>), sqlx::Error> {
     let rows = sqlx::query("SELECT cache_read, input_tokens + cache_read + cache_write AS ctx FROM model_calls WHERE turn_id = $1 ORDER BY id")
         .bind(turn)
         .fetch_all(db)

@@ -18,7 +18,7 @@ fn basis(source: &str) -> &'static str {
 /// Write a long-term memory record from a memory's text. `session` writes it (`remember` past the
 /// high bar), or the kernel does (the sleep, citing the memory in `evidence`). Returns its id.
 pub async fn long_term(
-    db: &PgPool,
+    db: &SqlitePool,
     session: Option<Uuid>,
     text: &str,
     kind: &str,
@@ -48,11 +48,8 @@ pub async fn long_term(
 
 pub async fn consolidate(app: &crate::AppState, trigger: &str) -> Result<Value> {
     let db = &app.db;
-    let mut lock = db.begin().await?;
-    let free: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(704,6)")
-        .fetch_one(&mut *lock)
-        .await?;
-    ensure!(free, "a sleep is already running");
+    static SLEEP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _lock = SLEEP_LOCK.try_lock().map_err(|_| anyhow::anyhow!("a sleep is already running"))?;
     let run: i64 = sqlx::query_scalar("INSERT INTO sleep_runs(trigger,scorer) VALUES($1,$2) RETURNING id")
         .bind(trigger)
         .bind(crate::s1::default_model())
@@ -60,13 +57,12 @@ pub async fn consolidate(app: &crate::AppState, trigger: &str) -> Result<Value> 
         .await?;
     let result = sleep(db, run).await;
     if let Err(e) = &result {
-        sqlx::query("UPDATE sleep_runs SET ended_at=now(),error=$2 WHERE id=$1")
+        sqlx::query("UPDATE sleep_runs SET ended_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),error=$2 WHERE id=$1")
             .bind(run)
             .bind(format!("{e:#}"))
             .execute(db)
             .await?;
     }
-    lock.rollback().await?;
     result
 }
 
@@ -76,24 +72,24 @@ type Row = (
     String,
     String,
     chrono::DateTime<chrono::Utc>,
-    chrono::DateTime<chrono::Utc>,
+    String,
     bool,
 );
 
-async fn sleep(db: &PgPool, run: i64) -> Result<Value> {
+async fn sleep(db: &SqlitePool, run: i64) -> Result<Value> {
     crate::memory::import(db).await?;
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT id, text, source, record_type, created_at, updated_at, zen_memory_contaminated(id) FROM memories WHERE tier='short' ORDER BY id",
+        "SELECT id, text, source, record_type, created_at, updated_at, (id IN (SELECT id FROM zen_contaminated_memories)) FROM memories WHERE tier='short' ORDER BY id",
     )
     .fetch_all(db)
     .await?;
-    let archive = |id: i64, at: chrono::DateTime<chrono::Utc>, reason: String| {
-        sqlx::query("UPDATE memories SET tier='archived',reason=$3,updated_at=now() WHERE id=$1 AND updated_at=$2 AND tier='short'").bind(id).bind(at).bind(reason).execute(db)
+    let archive = |id: i64, at: String, reason: String| {
+        sqlx::query("UPDATE memories SET tier='archived',reason=$3,updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id=$1 AND updated_at=$2 AND tier='short'").bind(id).bind(at).bind(reason).execute(db)
     };
     let (mut promoted, mut archived, mut kept, mut changed) = (0, 0, 0, 0);
     let (denied, rows): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(|r| r.6);
     for r in &denied {
-        archived += archive(r.0, r.5, "a session that wrote it was denied".into())
+        archived += archive(r.0, r.5.clone(), "a session that wrote it was denied".into())
             .await?
             .rows_affected();
     }
@@ -112,7 +108,7 @@ async fn sleep(db: &PgPool, run: i64) -> Result<Value> {
                 "SELECT EXISTS(SELECT 1 FROM memories WHERE id=$1 AND updated_at=$2 AND tier='short')",
             )
             .bind(r.0)
-            .bind(r.5)
+            .bind(&r.5)
             .fetch_one(db)
             .await?;
             if !fresh {
@@ -120,7 +116,7 @@ async fn sleep(db: &PgPool, run: i64) -> Result<Value> {
             } else if durable.get(i).is_some_and(|d| d.is("promote")) {
                 match long_term(db, None, &r.1, &r.3, &r.2, &format!("m{}", r.0), r.4).await {
                     Ok(id) => {
-                        archive(r.0, r.5, format!("promoted to long-term memory {id}")).await?;
+                        archive(r.0, r.5.clone(), format!("promoted to long-term memory {id}")).await?;
                         promoted += 1;
                     }
                     Err(e) => {
@@ -129,7 +125,7 @@ async fn sleep(db: &PgPool, run: i64) -> Result<Value> {
                     }
                 }
             } else if disposition.get(i).is_some_and(|d| d.is("archive")) {
-                archived += archive(r.0, r.5, "the sleep: finished".into()).await?.rows_affected();
+                archived += archive(r.0, r.5.clone(), "the sleep: finished".into()).await?.rows_affected();
             } else {
                 kept += 1;
             }
@@ -138,7 +134,7 @@ async fn sleep(db: &PgPool, run: i64) -> Result<Value> {
     let note = format!(
         "{promoted} promoted to long-term memory, {archived} archived, {kept} kept, {changed} changed during the sleep and left as they are."
     );
-    sqlx::query("UPDATE sleep_runs SET ended_at=now(),entries=$2,kept=$3,promoted=$4,dropped=$5,note=$6 WHERE id=$1")
+    sqlx::query("UPDATE sleep_runs SET ended_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),entries=$2,kept=$3,promoted=$4,dropped=$5,note=$6 WHERE id=$1")
         .bind(run)
         .bind((denied.len() + rows.len()) as i32)
         .bind(kept)

@@ -14,7 +14,7 @@ pub use records::{index, put};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 pub use sleep::{consolidate, long_term};
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 use uuid::Uuid;
 
 pub fn hash(text: &str) -> String {
@@ -54,7 +54,7 @@ pub fn spec() -> Value {
 
 /// A `brain` action for the agent (`session`) or the owner (none): the result and the highest
 /// rating of the record text in it.
-pub async fn manage(db: &PgPool, session: Option<Uuid>, a: &Value) -> Result<(Value, i16)> {
+pub async fn manage(db: &SqlitePool, session: Option<Uuid>, a: &Value) -> Result<(Value, i16)> {
     let id = string(a, "id");
     match string(a, "action").as_str() {
         "get" => {
@@ -142,19 +142,19 @@ pub async fn run_tool(app: &crate::AppState, session: Uuid, args: &Value) -> (St
 }
 
 /// Search support: a record's file, if it still has the indexed body, with its rating.
-pub(crate) async fn current(db: &PgPool, id: &str, body: &str) -> Option<(String, i16)> {
+pub(crate) async fn current(db: &SqlitePool, id: &str, body: &str) -> Option<(String, i16)> {
     let (r, text, risk) = records::read(db, id).await.ok()?;
     (string(&r, "body") == body).then_some((text, risk))
 }
 
 /// Search support: typed links touching these records, as (from, relation, to).
-pub(crate) async fn links(db: &PgPool, ids: &[String]) -> Result<Vec<(String, String, String)>> {
+pub(crate) async fn links(db: &SqlitePool, ids: &[String]) -> Result<Vec<(String, String, String)>> {
     records::links(db, ids).await
 }
 
 /// The historical wiki job now checks record files. Only counts enter the morning note: record
 /// paths and parse errors can contain untrusted text.
-pub async fn tend(db: &PgPool) -> Result<Vec<String>> {
+pub async fn tend(db: &SqlitePool) -> Result<Vec<String>> {
     records::index(db).await?;
     let n = records::lint(db).await?.len();
     Ok(if n == 0 { vec![] } else { vec![format!("brain: {n} record issues; run zen brain lint to inspect")] })

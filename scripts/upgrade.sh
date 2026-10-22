@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build and check zenbot from this checkout, then apply it once no session is working.
 # Safe to run from inside a zen session: the restart waits until the current turn ends,
-# and a build that doesn't come up healthy is rolled back automatically.
+# SQLite-only upgrades roll back unhealthy binaries; a first PostgreSQL cutover retains SQLite
+# after startup is attempted and requires forward recovery rather than a stale PostgreSQL writer.
 #
 #   scripts/upgrade.sh           build, check, smoke test, then schedule the install
 #   scripts/upgrade.sh --check   build, check and smoke test only
@@ -95,8 +96,12 @@ if [ -n "$SMOKE_FAILED" ]; then
   exit 1
 fi
 rm -f "$SMOKE_LOG"
-PENDING=$(db_pending | tr '\n' ' ')
-[ -n "$PENDING" ] && echo "migrations pending on the live database: $PENDING(tested on a copy; the install backs it up first)"
+if db_is_postgres; then
+  echo "PostgreSQL snapshot migration tested on a copy; installation takes a final quiescent archive before SQLite cutover."
+else
+  PENDING=$(db_pending | tr '\n' ' ')
+  [ -n "$PENDING" ] && echo "migrations pending on the live database: $PENDING(tested on a copy; the install backs it up first)"
+fi
 
 if [ -n "$CHECK_ONLY" ]; then
   echo "Check OK ($(git rev-parse --short HEAD 2>/dev/null)$(git diff --quiet 2>/dev/null || echo ', uncommitted changes')); nothing installed."
@@ -113,10 +118,16 @@ mkdir -p "$STAGE"
 # A stage outlives its install only if that process was killed; past 2 hours none is still waiting.
 find "$HOME/.zenbot/upgrades" -mindepth 1 -maxdepth 1 -type d -mmin +120 -exec rm -rf {} +
 for b in zend zen zen-engine; do cp "target/release/$b" "$STAGE/$b"; done
+# Keep migration code/schema alongside the tested binaries; checkout changes cannot alter cutover.
+mkdir -p "$STAGE/storage-tool/scripts" "$STAGE/storage-tool/crates/zend/sqlite-migrations"
+cp "$REPO/scripts/storage.py" "$STAGE/storage-tool/scripts/storage.py"
+cp "$REPO/deploy/zenbot.service" "$STAGE/zenbot.service"
+cp "$REPO/deploy/compose.yaml" "$STAGE/compose.yaml"
+cp "$REPO"/crates/zend/sqlite-migrations/*.sql "$STAGE/storage-tool/crates/zend/sqlite-migrations/"
 git rev-parse --short HEAD > "$STAGE/commit"
 git diff --quiet HEAD 2>/dev/null || echo "uncommitted changes" > "$STAGE/note"
 sudo systemd-run --quiet --collect --unit "zen-upgrade-$STAGE_ID" --uid "$(id -u)" --gid "$(id -g)" \
   --setenv=HOME="$HOME" --setenv=PATH="$PATH" "$REPO/scripts/apply-upgrade.sh" "$STAGE"
 echo "Build OK ($(cat "$STAGE/commit")$([ -f "$STAGE/note" ] && echo ', uncommitted changes'))."
 echo "The new version will be installed and zenbot restarted as soon as no session is working."
-echo "Result is logged to ~/.zenbot/upgrade.log (rolls back automatically if unhealthy)."
+echo "Result is logged to ~/.zenbot/upgrade.log (a PostgreSQL cutover never rolls back after SQLite starts)."

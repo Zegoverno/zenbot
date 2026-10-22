@@ -34,8 +34,8 @@ Keep dogfooding zenbot on real work and let sessions, verdicts and what the owne
 sleep's promotions into long-term memory, skill drafts, tools, routes) drive what
 changes. Candidate follow-ups, each only when use calls for it:
 
-- **Redesign phases 1–6** are merged and installed (D-066 to D-074; PROGRESS.md has each). Phase 7,
-  engines (D-075), is on its branch; next, Phase 8 (storage: SQLite), 9 (clients), 10 (operations).
+- **Redesign phases 1–6** are merged and installed (D-066 to D-074). Phase 7 engines (D-075)
+  and Phase 8 storage (D-076) are integrated on the storage branch; next are clients and operations.
   Not planned yet: MCP sampling, roots and subscriptions; device-flow MCP sign-in.
 - **Matrix:** interactive (emoji) verification of the bot; streaming answers by editing a message,
   if waiting for the whole answer feels slow.
