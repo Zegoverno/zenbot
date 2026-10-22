@@ -98,6 +98,21 @@ rm -f "$SMOKE_LOG"
 PENDING=$(db_pending | tr '\n' ' ')
 [ -n "$PENDING" ] && echo "migrations pending on the live database: $PENDING(tested on a copy; the install backs it up first)"
 
+# zen-matrix (D-077): a bridge that's installed and enabled is rebuilt when its sources (or the
+# crates it shares with zen) changed since it was built; apply-upgrade.sh installs it once zenbot
+# is healthy and puts the old one back if the bridge doesn't come up.
+matrix_src=$(git log -1 --format=%h -- crates/zen-matrix crates/zen-proto crates/zen-client 2>/dev/null)
+matrix_bin=
+if [ -z "$CHECK_ONLY" ] && [ -n "$matrix_src" ] && systemctl is-enabled --quiet zen-matrix 2>/dev/null \
+  && [ "$(cat "$HOME/.zenbot/matrix.version" 2>/dev/null)" != "$matrix_src" ]; then
+  echo "== zen-matrix (changed since the installed build; the first build of matrix-sdk takes a while)"
+  if (cd crates/zen-matrix && cargo build --release --locked -q); then
+    matrix_bin=crates/zen-matrix/target/release/zen-matrix
+  else
+    echo "zen-matrix didn't build; the installed bridge stays as it is"
+  fi
+fi
+
 if [ -n "$CHECK_ONLY" ]; then
   echo "Check OK ($(git rev-parse --short HEAD 2>/dev/null)$(git diff --quiet 2>/dev/null || echo ', uncommitted changes')); nothing installed."
   exit 0
@@ -113,6 +128,7 @@ mkdir -p "$STAGE"
 # A stage outlives its install only if that process was killed; past 2 hours none is still waiting.
 find "$HOME/.zenbot/upgrades" -mindepth 1 -maxdepth 1 -type d -mmin +120 -exec rm -rf {} +
 for b in zend zen zen-engine; do cp "target/release/$b" "$STAGE/$b"; done
+[ -z "$matrix_bin" ] || { cp "$matrix_bin" "$STAGE/zen-matrix" && echo "$matrix_src" > "$STAGE/matrix-version"; }
 git rev-parse --short HEAD > "$STAGE/commit"
 git diff --quiet HEAD 2>/dev/null || echo "uncommitted changes" > "$STAGE/note"
 sudo systemd-run --quiet --collect --unit "zen-upgrade-$STAGE_ID" --uid "$(id -u)" --gid "$(id -g)" \
