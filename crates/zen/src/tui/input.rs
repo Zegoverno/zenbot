@@ -365,7 +365,9 @@ impl App {
         if steer { prompt["mode"] = json!("steer"); }
         // The prompt stays in the input until it can be sent.
         if self.session.is_none() {
-            let id = self.c.new_session(json!({ "model": self.model, "effort": self.effort })).await?;
+            // Only a model the owner chose; otherwise the kernel's router picks one (D-074).
+            let model = self.model_pinned.then_some(&self.model);
+            let id = self.c.new_session(json!({ "model": model, "effort": self.effort })).await?;
             self.session = Some(id.clone());
             self.connect(&id).await?;
         } else if self.sink.is_none() {

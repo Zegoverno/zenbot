@@ -142,6 +142,7 @@ impl App {
             PickKind::Session => self.switch_session(value).await?,
             PickKind::Model => {
                 self.model = value.clone();
+                self.model_pinned = true;
                 if let Some(id) = &self.session {
                     self.c.patch(&format!("/api/sessions/{id}"), json!({ "model": value })).await?;
                 }
@@ -220,6 +221,21 @@ mod tests {
         typed(&mut a, "/effort").await;
         key(&mut a, KeyCode::Enter).await;
         assert!(a.picker.is_none(), "no levels to choose for this model");
+    }
+
+    #[tokio::test]
+    async fn only_a_model_the_owner_chose_is_pinned_for_a_new_session() {
+        let mut a = app_with_models(80, 20);
+        assert!(!a.model_pinned, "the default model: the kernel's router may pick another");
+        typed(&mut a, "/model").await;
+        key(&mut a, KeyCode::Enter).await;
+        key(&mut a, KeyCode::Down).await;
+        key(&mut a, KeyCode::Enter).await;
+        assert!(a.model_pinned, "chosen with /model: kept");
+        a.on_event(json!({ "type": "model", "model": "claude/claude-sonnet-5-5", "effort": null }));
+        assert_eq!(a.model, "claude/claude-sonnet-5-5", "a routed or failed-over model is shown");
+        a.fresh_session();
+        assert!(!a.model_pinned && a.model == a.default_model, "a new session starts unpinned on the default");
     }
 
     #[tokio::test]

@@ -34,36 +34,17 @@ Keep dogfooding zenbot on real work and let sessions, verdicts and what the owne
 sleep's promotions into long-term memory, skill drafts, tools, routes) drive what
 changes. Candidate follow-ups, each only when use calls for it:
 
-- **D-062 taint redesign:** source ratings, origin-rated stored items, reversible denial and
-  masked shells are built. D-065 integrates metadata scoring, labelled admission through 3,
-  authenticated task checks and a combined owner queue on the branch; release validation and
-  owner review/merge/install remain before these changes are live.
-  Full read-only limits begin at 4; budgets remain out of scope.
-- **Phase 4 (D-069), merged in PR #86:** short-term `MEMORY.md`, long-term memory, knowledge
-  and entities as Markdown records, search over typed links. D-070 adds owner-run flat wiki migration
-  and retires `capture` and made-tool execution.
-- **Phase 5, tools (D-071), on its branch:** images and PDF pages through `read`, batch `edit` with
-  diffs, bounded saved output, a fuller MCP client (per-server calls, streaming, resources, prompts,
-  refresh-token OAuth, owner-answered forms) and shorter tool descriptions. Eval and owner review
-  precede merge. Not planned yet: browser OAuth login, MCP sampling, roots and subscriptions.
-- **Phase 2b + Phase 3 (D-068), merged:** approved job authority, contextual source
-  ratings, aligned high-risk edits, held-run continuation, contained MCP, trust suggestions,
-  worker hang recovery, durable prompts, permission snapshots and JSONL histories were merged in PR #85. The advisory model comparison lacked a usable local Docker environment.
-- **Earlier action-gate plan (D-056), superseded in part by D-062:** a session that reads outside content becomes *risky*, not
-  limited; its actions are checked before they run by fixed rules over parsed facts (run, run in
-  the offline sandbox, or ask the owner, with a one-tap `/allow`); then System One reads only the
-  owner's own request to grant the turn's outward actions (push, PR, deploy). Step 0's replay
-  backs the rules (none of 36 attacks escaped; 71% of recorded commands run unchecked) and found
-  System One scoring the actions themselves too weak to gate them. The first step, search not
-  spreading the mark and worktrees of trusted repositories trusted, is built.
+- **Redesign phases 2–5** (security, kernel core, memory and knowledge, tools: D-062 to D-071) are
+  merged and installed; PROGRESS.md has each.
+- **Phase 6, orchestration (D-072 to D-074), on its branch:** MCP sign-in from the terminal,
+  delivery that never blocks the schedule, script jobs, and the learning router (task kinds, routes,
+  A/B outcomes). Next: evals for jobs and subagents, then Phase 7 (engines: a concurrency cap).
+  Not planned yet: MCP sampling, roots and subscriptions; device-flow MCP sign-in.
 - **Matrix:** interactive (emoji) verification of the bot; streaming answers by editing a message,
   if waiting for the whole answer feels slow.
-- **Jobs:** reports can now be posted into an existing owner session (D-060), with a durable
-  delivery queue; pre-run checks that skip the model when nothing changed, if job costs call for it.
+- **Jobs:** pre-run checks that skip the model when nothing changed, if job costs call for it.
 - **Board:** a kernel-wide event stream instead of the 2 s poll, if that feels slow.
 - **Suggestions:** improve the suggestion prompt from `zen suggestions` data after a few weeks.
-- **Prefix cost:** shorter descriptions for `verify`, `remember` and `decide`, if the fixed prefix's
-  cost (Phase 1's +27%) calls for it.
 
 ## Open decisions
 

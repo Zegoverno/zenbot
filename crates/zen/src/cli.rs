@@ -275,16 +275,22 @@ pub(crate) enum SessionsCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum PolicyCmd {
-    /// Route a kind of work (understand, shape, build, verify, maintain, reflect, reach, bet, default) to a model
+    /// Route a kind of task (chat, recall, routine, writing, research, coding-small, ops, coding-large, planning, or one you add with --describe) to a model
     Set {
         kind: String,
         model: String,
         /// Other models to try now and then, comma-separated
         #[arg(long)]
         candidates: Option<String>,
-        /// Share of subtasks that try a candidate (default 0.1)
+        /// Share of routed work that tries a candidate (default 0.05)
         #[arg(long)]
         explore: Option<f64>,
+        /// Add (or redescribe) this kind of task: what it is, which System One reads to recognize it
+        #[arg(long)]
+        describe: Option<String>,
+        /// Never try candidates for this kind (work whose mistakes cost a lot)
+        #[arg(long)]
+        no_explore: bool,
     },
     /// Go back to the policy before the latest change
     Undo,

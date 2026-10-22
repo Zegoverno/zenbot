@@ -6,6 +6,32 @@
 
 ---
 
+## D-074 — A learning router picks the model for each piece of work
+
+**Date:** 2026-10-22 · **Status:** accepted (owner, 2026-10-21/22: route by task, learn by A/B tests
+and a multidimensional grade; the rules below were left to Claude). **Supersedes:** D-066's
+`unknown` kind for every subtask.
+
+**Decision:** Every owner session whose model nobody chose (no `-m`, no `/model`: `model_source`),
+every agent job run without a model the owner set, and every subtask `delegate` hands out without
+one is routed: System One's `task_kind` names its kind among the policy's kinds from the owner's
+words (or the job's or subtask's text); confident (p ≥ 0.7), the kind's route picks the model;
+otherwise the work keeps the model it would have had. The policy starts with nine kinds (chat,
+recall and routine on Sonnet; writing, research, small coding and ops on the default model with
+Sonnet a candidate; large builds and planning on the default, never explored), written once as a
+policy version the owner can change; `zen policy set --describe` adds a kind. 5% of routed work
+tries a candidate, each choice logged with its probability. A routed session keeps its model; the
+owner's choice always wins. The nightly `routes` job grades each kind and model: quality (the owner's
+verdict on the session or its parent, else the job run's status) is a gate (a challenger's lower
+bound within 0.05 of the champion's rate, at least 20 judged outcomes each), then a challenger wins
+on clearly better quality or on cost and time together (cost weighted 2:1) at least 15% better. It
+switches on its own, as a new policy version that `zen policy undo` reverts, except to another
+provider or a model over twice the cost, which it reports for the owner to decide.
+
+**Why:** Easy work shouldn't pay for the most capable model, and which model is best per kind of
+task should come from outcomes, not a fixed table. Starting light kinds on Sonnet and the rest on the
+default keeps quality where mistakes cost most while the evidence builds.
+
 ## D-073 — Script jobs: a command on a schedule, with no model
 
 **Date:** 2026-10-22 · **Status:** accepted (owner, 2026-10-21: the agent may create them, but they

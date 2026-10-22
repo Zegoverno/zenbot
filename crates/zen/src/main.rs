@@ -269,7 +269,7 @@ async fn run(cli: Cli) -> Result<()> {
             let r = c.post("/api/policy/undo", json!({})).await?;
             emit(json, &r, || format!("policy v{}", r["version"]));
         }
-        Cmd::Policy { cmd: Some(PolicyCmd::Set { kind, model, candidates, explore }) } => {
+        Cmd::Policy { cmd: Some(PolicyCmd::Set { kind, model, candidates, explore, describe, no_explore }) } => {
             let mut p = c.get("/api/policy").await?["policy"].clone();
             if !p["routes"].is_object() {
                 p["routes"] = json!({});
@@ -281,6 +281,16 @@ async fn run(cli: Cli) -> Result<()> {
             p["routes"][&kind] = route;
             if let Some(e) = explore {
                 p["explore"] = json!(e);
+            }
+            // A new kind explores unless told not to; an existing one keeps its setting.
+            if let Some(d) = describe {
+                if p["kinds"][&kind]["explore"].is_null() {
+                    p["kinds"][&kind]["explore"] = json!(true);
+                }
+                p["kinds"][&kind]["description"] = json!(d);
+            }
+            if no_explore {
+                p["kinds"][&kind]["explore"] = json!(false);
             }
             let r = c.post("/api/policy", json!({ "policy": p, "reason": format!("owner: {kind} -> {model}") })).await?;
             emit(json, &r, || format!("policy v{}", r["version"]));

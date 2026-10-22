@@ -314,6 +314,44 @@ script_jobs() {
   check "the owner sees the exact command to approve" grep -qF "$ echo CHANGED" "$TMP/jobs-list.txt"
 }
 
+# The learning router (D-074): a session whose model nobody chose gets one at its first prompt from
+# System One's task_kind (stub markers ROUTE-CHAT, ROUTE-VAGUE, ROUTE-PLAN) and the policy's route;
+# an unsure answer keeps the default; a pinned model, a later prompt and the owner's /model are never
+# rerouted; an agent job without the owner's model is routed per run; planning never explores.
+routing() {
+  local ws; ws=$(new_workspace routing)
+  local port=$((PORT + 3))
+  python3 "$REPO/scripts/e2e/systemone_stub.py" "$port" & local srv=$!
+  start_kernel "$ws" "$(script routing.json)" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone" \
+    ZEN_DEFAULT_MODEL=faux/smoke ZEN_JOBS=1 ZEN_JOBS_TICK=0.5
+  zen policy set chat faux/backup >/dev/null
+  new() { curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{}' "$URL/api/sessions" | jq -r .id; }
+  local model="SELECT model || '|' || coalesce(model_source, '-') FROM sessions WHERE id ="
+  local chosen="SELECT input->>'kind' || '|' || chosen || '|' || probability FROM decisions WHERE point = 'model' AND session_id ="
+  local chat; chat=$(new)
+  zen ask --json -s "$chat" "ROUTE-CHAT what does this error mean" >/dev/null
+  check "a confident chat goes to its route" eq "$(q "$model '$chat'")" "faux/backup|router"
+  check "the choice is logged with its kind and probability" eq "$(q "$chosen '$chat'")" "chat|faux/backup|1"
+  zen ask --json -s "$chat" "ROUTE-PLAN now design the whole system" >/dev/null
+  check "a later prompt keeps the session's model" eq "$(q "$model '$chat'")" "faux/backup|router"
+  local vague; vague=$(new)
+  zen ask --json -s "$vague" "ROUTE-VAGUE hmm" >/dev/null
+  check "an unsure kind keeps the default" eq "$(q "$model '$vague'")/$(q "SELECT input->>'kind' FROM decisions WHERE point = 'model' AND session_id = '$vague'")" "faux/smoke|router/unsure"
+  local pinned; pinned=$(zen ask --json -m faux/smoke "ROUTE-CHAT hello" | jq -r .session_id)
+  check "a model the owner named is never rerouted" eq "$(q "$model '$pinned'")/$(q "SELECT count(*) FROM decisions WHERE point = 'model' AND session_id = '$pinned'")" "faux/smoke|owner/0"
+  curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"model":"faux/smoke"}' "$URL/api/sessions/$chat" >/dev/null
+  check "/model makes it the owner's choice" eq "$(q "$model '$chat'")" "faux/smoke|owner"
+  local policy; policy=$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/policy" | jq -c .policy)
+  check "the policy holds the starting kinds; planning never explores" eq "$(jq -r '[(.kinds | length >= 9), .kinds.planning.explore, .routes.planning.model, .explore] | join("|")' <<<"$policy")" "true|false|faux/smoke|0.05"
+  zen jobs add routed --schedule "every 1h" --prompt "ROUTE-CHAT a quick daily check" >/dev/null
+  zen jobs run routed >/dev/null
+  check "an agent job without the owner's model is routed per run" poll "SELECT s.model FROM job_runs r JOIN jobs j ON j.id = r.job_id JOIN sessions s ON s.id = r.session_id WHERE j.name = 'routed'" faux/backup
+  check "and its run is logged as a routed choice" poll "SELECT d.input->>'via' FROM decisions d JOIN job_runs r ON r.session_id = d.session_id JOIN jobs j ON j.id = r.job_id WHERE j.name = 'routed' AND d.point = 'model'" job
+  zen policy set restarts faux/backup --describe "Restarting services" --no-explore >/dev/null
+  check "the owner can add a kind" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/policy" | jq -r '.policy.kinds.restarts | "\(.description)|\(.explore)"')" "Restarting services|false"
+  kill "$srv" 2>/dev/null || true
+}
+
 # MCP sign-in (D-072): a server behind OAuth (oauth_server.py on the e2e port + 16) asks for a
 # login; the owner's login discovers the authorization server, registers zenbot, and finishes with
 # the address the browser ended on; calls then carry a token that refreshes and rotates by itself.
@@ -550,7 +588,7 @@ delegation() {
   check "children inherit risk independently of legacy marks" eq "$(q "SELECT min(risk) || '/' || max(risk) FROM sessions WHERE parent='$sid'")" 3/3
   check "two delegations" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" delegate:false,delegate:false
   local res; res=$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='delegate'")
-  check "named model, then the policy's" bash -c 'grep -q "on faux/smoke (asked, asked)" <<<"$1" && grep -q "(unknown, policy)" <<<"$1"' _ "$res"
+  check "named model, then the router's (no kind fits: the parent's model)" bash -c 'grep -q "on faux/smoke (asked, asked)" <<<"$1" && grep -q "(unsure, unsure)" <<<"$1"' _ "$res"
   check "the subagents' answers come back" eq "$(grep -c '^Done\.$' <<<"${res//|/$'\n'}")" 2
   check "the subagents ran their task" eq "$(q "SELECT count(*) FROM sessions WHERE parent='$sid' AND kind='subagent'")" 2
   local child; child=$(q "SELECT id FROM sessions WHERE parent='$sid' AND kind='subagent' LIMIT 1")
@@ -562,7 +600,7 @@ delegation() {
   zen sessions decide "$sid" accept >/dev/null
   check "the owner's verdict is the evidence" grep -q '"accepted": 2' <<<"$(zen policy --json | jq '{accepted: ([.stats[].accepted] | add)}')"
   zen policy undo >/dev/null
-  check "undo restores the earlier policy" eq "$(zen policy --json | jq -c .policy)" '{"routes":{}}'
+  check "undo restores the earlier policy (the owner's, before the router added its kinds)" eq "$(zen policy --json | jq -c .policy)" '{"routes":{"default":{"model":"faux/smoke"}}}'
   r=$(zen ask --json -m faux/smoke "waitless")
   check "ask with wait=false keeps working" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" ask:false,bash:false
   # The sessions board: a session whose questions the owner hasn't answered is waiting on them,
@@ -714,7 +752,7 @@ system_one_direct() {
   # The decision files: the built-in ones pass the checker; an owner file with a typo is reported with
   # its line and a suggestion, and never takes effect.
   local zs="$TMP/home/.zenbot/s1"; mkdir -p "$zs"
-  check "the built-in decision files pass the checker" grep -q "15 decisions in force (0 from your files), 0 error" <<<"$(zen s1 check)"
+  check "the built-in decision files pass the checker" grep -q "16 decisions in force (0 from your files), 0 error" <<<"$(zen s1 check)"
   sed 's/^false_no = 1$/false_noo = 1/' "$REPO/crates/zend/s1/job_approval.toml" >"$zs/job_approval.toml"
   sleep 2.5
   local report; report=$(zen s1 check 2>&1 || true)
@@ -1693,6 +1731,7 @@ run security egress_proxy
 run file-trust kernel_tools project_files secrets_masked
 run reach mcp_tools web_tools
 run mcp-login mcp_login
+run routing routing
 run basics prompt_files open_loop restart_recovery layout_move
 run memory memory_across_sessions memory_sleep
 run delegation delegation

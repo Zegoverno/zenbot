@@ -1524,7 +1524,12 @@ async fn run_script(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
 const MAX_SCRIPT_REPORT: usize = 60 * 1024;
 
 async fn run_agent(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
-    let model = job.model.clone().unwrap_or_else(|| app.default_model.clone());
+    // A model the owner set wins; otherwise the learning router picks one for this run (D-074).
+    let routed = match &job.model {
+        Some(_) => None,
+        None => Some(crate::route::choose(app, None, job.prompt.as_deref().unwrap_or(""), &app.default_model).await),
+    };
+    let model = job.model.clone().or(routed.as_ref().map(|c| c.model.clone())).unwrap_or_else(|| app.default_model.clone());
     let approved: bool = sqlx::query_scalar("SELECT owner_approved FROM jobs WHERE id=$1").bind(job.id).fetch_one(&app.db).await?;
     let inferred = if approved && job.workspace.is_none() { inferred_workspace(app, job) } else { None };
     let workspace = workspace_of(app, job.workspace.as_deref().or(inferred.as_deref()));
@@ -1540,6 +1545,9 @@ async fn run_agent(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
         .execute(&app.db)
         .await?;
     sqlx::query("UPDATE job_runs SET session_id = $2 WHERE id = $1").bind(run).bind(id).execute(&app.db).await?;
+    if let Some(c) = &routed {
+        crate::route::log(app, id, c, "job", job.prompt.as_deref().unwrap_or(""), None).await;
+    }
     let base = job_instructions(app, job, &workspace, id).await?;
     anyhow::ensure!(!crate::taint::stopped(&app.db, id).await?, "instructions withheld: a source of them was stopped by the owner");
     tape::append(&app.db, id, "base", &json!({ "text": base })).await?;

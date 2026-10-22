@@ -17,6 +17,9 @@ pub(super) struct App {
     pub(super) session: Option<String>,
     pub(super) title: String,
     pub(super) model: String,
+    /// The owner chose `model` (`-m` or `/model`): a new session is created on it. Otherwise the
+    /// kernel's router picks the model at the first prompt (D-074).
+    pub(super) model_pinned: bool,
     /// The session's thinking level; None means the model's default.
     pub(super) effort: Option<String>,
     pub(super) default_model: String,
@@ -166,6 +169,7 @@ impl App {
             conn: 0,
             session: None,
             title: String::new(),
+            model_pinned: model != default_model,
             model,
             effort: None,
             default_model,

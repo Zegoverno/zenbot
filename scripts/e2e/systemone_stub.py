@@ -8,7 +8,7 @@ were in flight at once; other calls (a `remember` turn's) aren't counted.
 
 Memory markers: PROMOTE (the sleep promotes it), ARCHIVE (finished), LONG (clearly lasting, for
 `remember` with long), CAPTURE (an owner sentence worth keeping). Search: a result marked OFFTOPIC
-is judged irrelevant, anything else relevant.
+is judged irrelevant, anything else relevant. Routing: ROUTE-CHAT, ROUTE-PLAN, ROUTE-VAGUE (task_kind).
 """
 import json
 import os
@@ -153,10 +153,17 @@ class H(BaseHTTPRequestHandler):
                 elif name in ("known", "sensitive") and "pages" in state:
                     # Wiki fixtures are new facts and contain only an already masked token.
                     answers[name] = {"type": "noul", "noul": 0.0}
-                elif name == "kind" and "task" in state:
+                elif name == "kind" and "task" in state and "chat" not in str(question["criteria"]):
                     choice = "build"
                     assert choice in question["criteria"]
                     answers[name] = {"type": "choice", "choice": choice, "probabilities": {choice: 1.0}}
+                elif name == "kind" and "task" in state:
+                    # The router's task_kind (D-074): ROUTE-CHAT is a confident chat, ROUTE-PLAN a
+                    # confident planning task, ROUTE-VAGUE a chat at 0.5; anything else fits no kind.
+                    task = str(state["task"])
+                    choice, p = ("chat", 0.95) if "ROUTE-CHAT" in task else ("planning", 0.95) if "ROUTE-PLAN" in task else ("chat", 0.5) if "ROUTE-VAGUE" in task else ("other", 0.9)
+                    assert choice in question["criteria"], question["criteria"]
+                    answers[name] = {"type": "choice", "choice": choice, "probabilities": {choice: p}}
                 elif kind == "noul" and marked is not None:
                     answers[name] = {"type": "noul", "noul": 0.97 if name in marked else 0.05}
                 elif kind == "noul":

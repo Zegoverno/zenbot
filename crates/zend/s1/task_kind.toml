@@ -1,0 +1,35 @@
+# The learning router (route.rs, D-074): what kind of task a session, job run or subtask starts
+# with, from the owner's words (or the job's or subtask's text), among the routing policy's kinds.
+# The kind picks the model; an unsure answer takes the most capable one.
+name = "task_kind"
+version = 1
+description = "What kind of task is this, for choosing the model?"
+exposure = "private"
+evidence = ["task"]
+timeout = "20s"
+unavailable = "unsure"
+
+[question.kind]
+type = "choice"
+text = "Which kind of task is this request? Judge the work it needs (how hard, how much reasoning, how much is at stake), not its topic. If none fits well, answer other."
+options_from = "kinds"
+
+[policy]
+kind = "rules"
+else = "unsure"
+
+[[policy.rule]]
+when = "kind != other and kind.p >= 0.7"
+decide = "known"
+
+[[test]]
+answers = { kind = { choice = "chat", p = 0.9 } }
+expect = "known"
+
+[[test]]
+answers = { kind = { choice = "chat", p = 0.6 } }
+expect = "unsure"
+
+[[test]]
+answers = { kind = "other" }
+expect = "unsure"
