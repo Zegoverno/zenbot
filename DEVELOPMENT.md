@@ -24,7 +24,7 @@ every file, route, table and setting in `MAP.md`. The dev kernel has its own hom
 | `git`, `curl`, `jq` | apt | every script |
 | `python3` | preinstalled on Ubuntu | the e2e test servers (`scripts/e2e/*.py`) |
 | `pdftotext` (`poppler-utils`) | apt (`install.sh` installs it) | reading PDFs that `web_fetch` saves |
-| `bubblewrap` | apt | the verifier's read-only shell, a tainted session's offline shell and the sandbox for unapproved made tools; the e2e scenarios need it |
+| `bubblewrap` | apt | the verifier's read-only shell and a tainted session's offline shell; the e2e scenarios need it |
 | Node.js 22+ | `install.sh` puts it in `~/.local/node` | installing and running the Codex CLI (an npm package: Node runs it on every Codex turn) |
 | `gh` | GitHub CLI | pull requests, checking CI |
 
@@ -314,28 +314,23 @@ docker compose -f deploy/compose.yaml exec -T postgres psql -U zen -d zen_dev \
   -c "SELECT id, kind, ref, embed_attempts, embed_error FROM search_docs WHERE embed_attempts > 0"
 ```
 
-
 ## Wiki
 
-How the wiki works: DESIGN.md, "Memory and skills". It lives in `ZEN_WIKI_DIR` (default `<zen home>/global/wiki`, so `~/.zenbot-dev/global/wiki` for the dev kernel).
+Knowledge: `ZEN_WIKI_DIR` (default `<zen home>/global/wiki`); `zen brain migrate_legacy` previews,
+`--args '{"apply":true}'` migrates. Exact originals stay private in `_legacy/`; conflicts stay held.
+
+## Workshop: skills the agent improves
+
+`save_skill` changes remain drafts in `global/skills/_proposed/` until owner fingerprint review:
 
 ```bash
-git -C ~/.zenbot-dev/global/wiki log --oneline | head   # what the dev kernel captured
-cat ~/.zenbot-dev/global/wiki/index.md
-```
-
-## Workshop: skills and tools the agent makes
-
-`save_skill` creates or improves a skill (new ones are drafts in `global/skills/_proposed/`); `save_tool` makes a tool in `global/tools/<name>/`, offered through `find_tools` / `call_tool` as `made_<name>`. The owner reviews them from the CLI:
-
-```bash
-zen skills                                   # skills with their use, drafts marked with their fingerprint; the made tools with theirs
-zen skills accept work/release-notes 3f9a0c1d2e4b  # activate the draft you reviewed (reject moves it to _archived)
-zen tools accept word-count 81c2d0a7f3e9     # let the made tool you reviewed run unsandboxed, with the network
+zen skills                                   # skills, use and draft fingerprints; legacy tool artifacts
+zen skills accept work/release-notes 3f9a0c1d2e4b  # activate the draft reviewed (reject archives it)
 git -C ~/.zenbot-dev/global/skills log --oneline   # every change the dev kernel made to its skills
 ```
 
-How drafts become active and how made tools are sandboxed and approved: DESIGN.md, "Memory and skills" (Workshop). To test without a subscription, see the `workshop` e2e scenario and `scripts/e2e/workshop.json`.
+Made tools are retired (D-070): `global/tools/` stays inspectable; approval cannot reactivate it.
+Use skills with scripts (DESIGN.md, "Memory and knowledge"); e2e: `workshop`, `wiki`.
 
 ## Delegation and the routing policy
 

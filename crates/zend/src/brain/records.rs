@@ -442,7 +442,7 @@ pub async fn put(
 }
 
 /// Index one record file: its row, names, links and search document.
-async fn index_file(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, p: &Path, store: &str, text: &str) -> Result<()> {
+pub(super) async fn index_file(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, p: &Path, store: &str, text: &str) -> Result<()> {
     let r = parse(text)?;
     ensure!(
         r["store"] == store,

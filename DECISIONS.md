@@ -6,6 +6,20 @@
 
 ---
 
+## D-070 — Migrate legacy knowledge as sources; retire old writers and made tools
+
+**Date:** 2026-10-21 · **Status:** accepted (owner's Phase 4 cleanup before Phase 5 planning)
+**Supersedes:** D-036's flat wiki writer and D-037's made-tool authoring/execution.
+
+**Decision:** Owner-run preview/apply converts each legacy flat wiki page to a provisional source
+record, retaining original prose, types, aliases, links and exact private originals. Preserve every
+writer and rating; hold conflicts and oversized pages; retry without overwriting owner edits.
+`capture`, made-tool authoring, execution and approval are retired. Old tool files remain inspectable;
+repeatable procedures belong in reviewed skill folders with scripts. The nightly `wiki` compatibility
+job indexes and lints records and reports counts, never untrusted record titles or paths.
+
+**Why:** Complete D-069 while preserving uncertainty. Retrieval on real work remains the release check.
+
 ## D-068 — Approved job authority and recoverable kernel work
 
 **Decision:** ship the Phase 2 leftovers and kernel Phase 3 together. Explicit owner approval belongs to an unchanged job definition; agent edits revoke it. Named source domains use private public-suffix boundaries and defer to owner trust entries, including blocks. The explicit workspace wins over an inferred prompt/report folder. Held runs wait up to two hours for owner decisions and their recorded continuations.
@@ -924,6 +938,8 @@ estimates (too noisy at this volume).
 
 ## D-037 — The workshop: rules the kernel enforces for skills and tools the agent makes
 
+**Superseded in part by D-070** (legacy wiki writer and made-tool paths).
+
 > Skills and tools moved to `~/.zenbot/global/` (D-040).
 
 **Decision:** The agent changes skills only through `save_skill` and makes tools only through
@@ -949,30 +965,7 @@ moving parts for the same result).
 
 ---
 
-## D-036 — The wiki: pages over timelines; System One routes, the agent writes
-
-> The wiki moved to `~/.zenbot/global/wiki/` (D-040).
-
-**Decision:** Knowledge lives in markdown pages in `~/.zenbot/wiki/` (git), one per concept,
-entity, decision, playbook, project or person: frontmatter, a summary rewritten from the timeline,
-and an append-only timeline of dated entries with their source. `capture` appends an entry: search
-finds candidate pages, System One picks one (or a new page) and says whether the note is already
-recorded or sensitive; without System One, an exact title or alias match decides. The kernel keeps
-`index.md` and `log.md` and commits; the agent rewrites the summary with `edit`. The wiki isn't
-loaded into the instructions: `search` reaches it.
-
-**Why:** gbrain and Karpathy's LLM Wiki converge on summary-over-timeline; the timeline keeps
-provenance and never loses an observation, the summary keeps reading cheap. Choosing a page is a
-decision (System One); writing a summary is writing (a model). gbrain measured that always loading
-pages helped one model and hurt another, so pages are found, not injected
-(`docs/research/memory-search-web.md` §2, §C).
-
-**Considered:** pages in Postgres only (not plain files the owner owns), the kernel writing summaries
-through a separate model call (another moving part), always loading an index of pages.
-
-**Date:** 2026-10-07
-
----
+## D-036 — The wiki: pages over timelines; System One routes, the agent writes — Superseded by D-070; [archived](docs/archive/DECISIONS-superseded.md).
 
 ## D-035 — Search: three arms in one query; promotion earns its trust
 

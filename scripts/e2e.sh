@@ -52,7 +52,7 @@ start_kernel() {
   local ws=$1 script=$2; shift 2
   (
     # The scheduler is off unless a scenario turns it on (ZEN_JOBS=1).
-    export ZEN_LEGACY_TOOL_AUTHORING=1 ZEN_JOBS=0 ZEN_TOKEN=$TOKEN ZEN_PORT=$PORT ZEN_WORKERS=engine ZEN_FAUX=1 ZEN_FAUX_SCRIPT=$script ZEN_WORKSPACE=$ws \
+    export ZEN_JOBS=0 ZEN_TOKEN=$TOKEN ZEN_PORT=$PORT ZEN_WORKERS=engine ZEN_FAUX=1 ZEN_FAUX_SCRIPT=$script ZEN_WORKSPACE=$ws \
       ZEN_ENGINE_CMD="$BIN/zen-engine" DATABASE_URL="$DB_URL" HOME="$TMP/home"
     unset ZEN_S1_MODEL OPENROUTER_API_KEY
     for kv in "$@"; do export "$kv"; done
@@ -168,7 +168,7 @@ The owner's name is E2E Owner." >"$TMP/home/.zenbot/USER.md"
   check "the skills index is in the instructions" grep -q "work/verify:" <<<"$base"
   check "memory starts empty" grep -q "(empty)" <<<"$base"
   local tools; tools=$(q "SELECT string_agg(t->>'name', ',') FROM turns, envelopes e, jsonb_array_elements(e.tools) t WHERE turns.session_id='$sid' AND e.hash = turns.envelope")
-  check "the system tools, in order, no workflow tools" eq "$tools" bash,read,write,edit,history,search,ask,remember,brain,capture,web_search,web_fetch,find_skills,load_skill,save_skill,find_tools,load_tool,call_tool,save_tool,verify,delegate,schedule
+  check "the system tools, in order, no workflow tools" eq "$tools" bash,read,write,edit,history,search,ask,remember,brain,web_search,web_fetch,find_skills,load_skill,save_skill,find_tools,load_tool,call_tool,verify,delegate,schedule
 }
 
 # A home in the old flat layout moves into the scoped one (layout.rs) when the kernel starts, once:
@@ -396,67 +396,41 @@ search_index() {
   q "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART; DELETE FROM search_docs" >/dev/null
 }
 
-# Wiki: capture makes a page and appends to it (same title), commits, keeps the index and the log,
-# masks secrets; search finds the page; a capture after reading the web is labelled web; the `wiki`
-# job commits the agent's own edits and reports a page that still has no summary, and the next
-# session hears it in the morning note.
+# Legacy wiki migration is owner-only, previews changes, preserves raw bytes and is retryable.
 wiki_capture() {
   local ws; ws=$(new_workspace wiki)
-  local port=$((PORT + 2)) s1port=$((PORT+19))
-  python3 "$REPO/scripts/e2e/systemone_stub.py" "$s1port" & local s1srv=$!
-  python3 "$REPO/scripts/e2e/searxng_stub.py" "$port" & local srv=$!
-  start_kernel "$ws" "$(script wiki.json)" ZEN_SEARXNG_URL="http://127.0.0.1:$port" ZEN_S1_URL="http://127.0.0.1:$s1port/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key
-  local w="$TMP/home/.zenbot/global/wiki"
-  local r; r=$(zen ask --json -m faux/smoke "first")
-  check "a new page" bash -c 'grep -q "Captured to \[\[dom-smoothie\]\] (new page" <<<"$1"' _ "$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE payload->>'toolName'='capture' ORDER BY id DESC LIMIT 1")"
-  check "it has a dated entry with its source" grep -q "(verified) — dom_smoothie ports readability.js" "$w/dom-smoothie.md"
-  r=$(zen ask --json -m faux/smoke "second"); local sid; sid=$(echo "$r" | jq -r .session_id)
-  check "capture, then search" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" capture:false,search:false
-  check "the same page, two entries, newest first" eq "$(grep -c '^- \*\*' "$w/dom-smoothie.md"):$(grep -m1 '^- \*\*' "$w/dom-smoothie.md" | grep -c 'Markdown text mode')" 2:1
-  check "the secret is masked" bash -c '! grep -q "0123456789abcdef0123" "$1"' _ "$w/dom-smoothie.md"
-  check "committed in git" bash -c '[ "$(git -C "$1" log --oneline | wc -l)" -ge 2 ]' _ "$w"
-  check "listed in index.md, logged" bash -c 'grep -q "\[\[dom-smoothie\]\]" "$1/index.md" && grep -q "capture | dom-smoothie" "$1/log.md"' _ "$w"
-  check "search finds the page" grep -q "wiki \[\[dom-smoothie\]\]" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='search'")"
-  r=$(zen ask --json -m faux/smoke "web"); sid=$(echo "$r" | jq -r .session_id)
-  # After the web a capture waits for the owner (D-067); approved, it's labelled web.
-  for g in $(q "SELECT id FROM action_gates WHERE session_id='$sid' AND action LIKE '%\"capture\"%'"); do curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d "{\"id\":$g}" "$URL/api/sessions/$sid/allow" >/dev/null; done
-  zen ask --json -s "$sid" "web" >/dev/null
-  check "a capture after reading the web is labelled web" grep -q "(web) — SearXNG answers JSON" "$w/searxng.md"
-  echo "an edit by hand" >>"$w/searxng.md"
+  start_kernel "$ws" "$(script retired.json)" ZEN_LEGACY_TOOL_AUTHORING=1
+  check "legacy pages migrate without losing provenance or content" python3 "$REPO/scripts/e2e/legacy_wiki.py" "$URL" "$TOKEN" "$TMP/home"
+  local r; r=$(zen ask --json -m faux/smoke "retired tools")
+  check "stale capture and save_tool calls are refused even with the old flag" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" capture:true,save_tool:true,search:false,brain:false
+  local sid; sid=$(jq -r .session_id <<<"$r")
+  local legacy_id; legacy_id=$(jq -r '.[] | select(.tool=="brain") | .args.id' scripts/e2e/retired.json)
+  check "search retrieves the migrated knowledge record" eq "$(q "SELECT count(*) FROM searches s CROSS JOIN LATERAL jsonb_array_elements(s.results) f WHERE s.session_id='$sid' AND f->>'ref'='$legacy_id'")" 1
+  check "brain reads the owner's current correction after retrieval" grep -q "Owner corrected the meeting claim" <<<"$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='brain'")"
   zen jobs run wiki >/dev/null
-  check "the wiki job runs" poll "SELECT string_agg(r.status, ',') FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name = 'wiki'" ok
-  check "it reports pages without a summary" grep -q "wiki: dom-smoothie: no summary yet" <<<"$(zen jobs runs wiki)"
-  check "and commits the agent's edits" eq "$(git -C "$w" log -1 --format=%s):$(git -C "$w" status --porcelain | wc -l)" "wiki job: edits since the last capture:0"
-  sid=$(zen ask --json -m faux/smoke "after the upkeep" | jq -r .session_id)
-  check "the next session hears it in the morning note" grep -q "wiki: dom-smoothie: no summary yet" <<<"$(q "SELECT payload->>'text' FROM tape_events WHERE session_id='$sid' AND kind='base'")"
-  kill "$srv" "$s1srv" 2>/dev/null || true
-  wait "$s1srv" 2>/dev/null || true
+  check "the compatibility wiki job checks records" poll "SELECT string_agg(r.status, ',') FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name = 'wiki'" ok
 }
 
-# Workshop: a new skill is a draft, a near-duplicate is refused, a reason is required, a new domain
-# waits for the owner; drafts can be found and loaded; accepting a session that loaded a draft
-# activates it; a made tool runs sandboxed (files read-only) until the owner approves it. `zen skills`
-# lists use and fingerprints, and an accept naming a stale fingerprint is refused; `zen skills accept`
-# activates the new domain's draft; after `zen tools accept` the tool can write, from a copy, and
-# keeps its approval after its own writes; both folders are git repositories.
+# Workshop: reviewed skill drafts, duplicate/reason checks, explicit fingerprint activation;
+# retired made tools remain inspectable but old approvals cannot execute them.
 workshop() {
   local ws; ws=$(new_workspace workshop)
   start_kernel "$ws" "$(script workshop.json)"
   local sk="$TMP/home/.zenbot/global/skills"
   local r; r=$(zen ask --json -m faux/smoke "make")
-  check "draft saved, duplicate refused, reason required, new domain, tool saved" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" \
-    save_skill:false,save_skill:true,save_skill:true,save_skill:false,save_tool:false
+  check "draft saved, duplicate refused, reason required, new domain, tool retired" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" \
+    save_skill:false,save_skill:true,save_skill:true,save_skill:false,save_tool:true
   local sid; sid=$(echo "$r" | jq -r .session_id)
   local res; res=$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult'")
   check "the duplicate is told to extend the existing skill" grep -q "work/release-notes already does this job: extend it instead" <<<"$res"
   check "a new domain needs the owner" grep -q "finance\` is a new domain" <<<"$res"
   check "drafts live under _proposed" test -s "$sk/_proposed/work/release-notes/SKILL.md" -a -s "$sk/_proposed/finance/budget-review/SKILL.md"
   r=$(zen ask --json -m faux/smoke "use"); sid=$(echo "$r" | jq -r .session_id)
-  check "find, load a draft, find and run a made tool" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" find_skills:false,load_skill:false,find_tools:false,call_tool:false
+  check "find and load a draft; stale made-tool execution refused" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" find_skills:false,load_skill:false,find_tools:false,call_tool:true
   res=$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'role'='toolResult'")
   check "the draft is marked" grep -q "work/release-notes: (draft)" <<<"$res"
-  check "the made tool is found" grep -q "made_word-count: Count the words" <<<"$res"
-  check "it ran, sandboxed: files read-only" bash -c 'grep -q "^3" <<<"$1" && grep -q "write: refused" <<<"$1" && grep -q "ran sandboxed" <<<"$1"' _ "$res"
+  check "retired tools are absent from the catalog" bash -c '! grep -q "made_word-count: Count" <<<"$1"' _ "$res"
+  check "stale calls cannot execute" grep -q "Made tools are retired" <<<"$res"
   zen sessions decide "$sid" accept >/dev/null
   check "accepting work does not silently activate a skill" test -s "$sk/_proposed/work/release-notes/SKILL.md"
   local release_sha; release_sha=$(zen skills --json|jq -r '.skills[]|select(.skill=="work/release-notes")|.sha')
@@ -464,24 +438,24 @@ workshop() {
   check "owner review activates exactly the skill version" test -s "$sk/work/release-notes/SKILL.md"
   check "a new domain stays a draft" test -s "$sk/_proposed/finance/budget-review/SKILL.md"
   # The owner's decision names the fingerprint `zen skills` showed: a stale one is refused.
-  local listed; listed=$(zen skills --json)
-  local skill_sha tool_sha
-  skill_sha=$(jq -r '.skills[] | select(.skill == "finance/budget-review") | .sha' <<<"$listed")
-  tool_sha=$(jq -r '.tools[] | select(.tool == "word-count") | .sha' <<<"$listed")
-  check "zen skills shows each draft's and tool's fingerprint" bash -c 'grep -q "finance/budget-review (draft ${1:0:12})" <<<"$3" && grep -q "tool made_word-count ${2:0:12}" <<<"$3"' _ "$skill_sha" "$tool_sha" "$(zen skills)"
-  check "accepting what wasn't reviewed is refused" bash -c '! zen skills accept finance/budget-review 00000000 >/dev/null 2>&1 && ! zen tools accept word-count 00000000 >/dev/null 2>&1 && test -s "$1"' _ "$sk/_proposed/finance/budget-review/SKILL.md"
+  local skill_sha
+  skill_sha=$(zen skills --json | jq -r '.skills[] | select(.skill == "finance/budget-review") | .sha')
+  check "accepting a stale skill fingerprint is refused" bash -c '! zen skills accept finance/budget-review 00000000 >/dev/null 2>&1'
   zen skills accept finance/budget-review "${skill_sha:0:12}" >/dev/null
   check "the owner activates the new domain's skill" test -s "$sk/finance/budget-review/SKILL.md"
-  zen tools accept word-count "$tool_sha" >/dev/null
-  r=$(zen ask --json -m faux/smoke "again"); sid=$(echo "$r" | jq -r .session_id)
-  check "approved: it can write" grep -q "write: ok" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='call_tool'")"
-  check "it runs from a copy: what it wrote stayed out of its folder" test ! -e "$TMP/home/.zenbot/global/tools/word-count/wrote.txt"
-  r=$(zen ask --json -m faux/smoke "again"); sid=$(echo "$r" | jq -r .session_id)
-  check "so its own writes don't cost it its approval" bash -c 'grep -q "write: ok" <<<"$1" && ! grep -q "ran sandboxed" <<<"$1"' _ "$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='call_tool'")"
-  echo "# changed after approval" >>"$TMP/home/.zenbot/global/tools/word-count/run.py"
-  r=$(zen ask --json -m faux/smoke "again"); sid=$(echo "$r" | jq -r .session_id)
-  check "changed after approval: sandboxed again" grep -q "changed since the owner approved it" <<<"$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='call_tool'")"
-  check "skills and tools are in git" bash -c '[ "$(git -C "$1" log --oneline | wc -l)" -ge 4 ] && [ "$(git -C "$2" log --oneline | wc -l)" -ge 1 ]' _ "$sk" "$TMP/home/.zenbot/global/tools"
+  # Seed an old, approved tool directly: neither approval nor the old env switch revives it.
+  local tool_dir="$TMP/home/.zenbot/global/tools/word-count"
+  mkdir -p "$tool_dir"
+  printf '%s\n' '{"name":"word-count","description":"Count words","command":"touch EXECUTED","parameters":{"type":"object"}}' >"$tool_dir/tool.json"
+  q "INSERT INTO made_tools(name,approved_at) VALUES('word-count',now())" >/dev/null
+  local tool_sha; tool_sha=$(zen skills --json | jq -r '.tools[] | select(.tool == "word-count") | .sha')
+  check "retired artifacts remain inspectable" eq "$(zen skills --json | jq -r '.tools[] | select(.tool == "word-count") | .retired')" true
+  check "old tool review endpoint cannot reactivate it" bash -c '! zen tools accept word-count "$1" >/dev/null 2>&1' _ "$tool_sha"
+  r=$(zen ask --json -m faux/smoke "again")
+  check "an approved legacy tool is refused" eq "$(jq -r '.tools[0].is_error' <<<"$r")" true
+  check "the original is preserved and never executed" bash -c 'test -s "$1/tool.json" && test ! -e "$1/EXECUTED"' _ "$tool_dir"
+  check "skills remain committed" bash -c '[ "$(git -C "$1" log --oneline | wc -l)" -ge 4 ]' _ "$sk"
+
 }
 
 # Delegation: subagents run their own turns (one on a named model, one routed by the owner's policy),
@@ -664,7 +638,7 @@ system_one_direct() {
   # The decision files: the built-in ones pass the checker; an owner file with a typo is reported with
   # its line and a suggestion, and never takes effect.
   local zs="$TMP/home/.zenbot/s1"; mkdir -p "$zs"
-  check "the built-in decision files pass the checker" grep -q "16 decisions in force (0 from your files), 0 error" <<<"$(zen s1 check)"
+  check "the built-in decision files pass the checker" grep -q "15 decisions in force (0 from your files), 0 error" <<<"$(zen s1 check)"
   sed 's/^false_no = 1$/false_noo = 1/' "$REPO/crates/zend/s1/job_approval.toml" >"$zs/job_approval.toml"
   sleep 2.5
   local report; report=$(zen s1 check 2>&1 || true)
@@ -1165,7 +1139,7 @@ origin_attacks() {
   check "the USER.md edit didn't happen" eq "$(sha256sum "$zh/USER.md" 2>/dev/null)" "$user_before"
   # The owner approves the writer's stores once (memories, the wiki note, the file): what a
   # high-risk session stores keeps its rating and reaches readers wrapped.
-  for g in $(q "SELECT id FROM action_gates WHERE session_id='$w' AND (action LIKE '%\"remember\"%' OR action LIKE '%\"capture\"%' OR action LIKE '%w-note.md%')"); do api -d "{\"id\":$g}" "$URL/api/sessions/$w/allow" >/dev/null; done
+  for g in $(q "SELECT id FROM action_gates WHERE session_id='$w' AND (action LIKE '%\"remember\"%' OR action LIKE '%\"brain\"%' OR action LIKE '%w-note.md%')"); do api -d "{\"id\":$g}" "$URL/api/sessions/$w/allow" >/dev/null; done
   zen ask --json -s "$w" "OW-WRITE keep the gate code 7731" >/dev/null
   check "stored items carry the writer's rating; quoting the owner isn't the owner" eq \
     "$(q "SELECT string_agg(risk::text, ',' ORDER BY id) FROM memories")" 4,4,0
@@ -1174,8 +1148,8 @@ origin_attacks() {
   local res; res=$(res_of "$r1")
   check "a clean reader gets the memory, the file and the history wrapped" bash -c \
     'grep -q "<untrusted source=\"search\"" <<<"$1" && grep -q "<untrusted source=\"file\" about=\"w-note.md\"" <<<"$1" && grep -q "<untrusted source=\"history\"" <<<"$1"' _ "$res"
-  check "the wiki page it captured is listed with its text and name withheld" bash -c '! grep -q "ORIGWIKI the" <<<"$1" && grep -q "name withheld" <<<"$1"' _ \
-    "$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$r1' AND payload->>'role'='toolResult' AND payload->>'toolName'='search' AND payload->'content'->0->>'text' LIKE '%(wiki)%'")"
+  check "the knowledge record is listed with its text and id withheld" bash -c '! grep -q "ORIGWIKI the" <<<"$1" && grep -q "id withheld" <<<"$1"' _ \
+    "$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$r1' AND payload->>'role'='toolResult' AND payload->>'toolName'='search' AND payload->'content'->0->>'text' LIKE '%(wiki%'")"
   check "and its risk is raised, a dependency recorded, nothing stopped" eq \
     "$(q "SELECT s.risk || '/' || (SELECT count(*) FROM session_inputs WHERE reader=s.id AND writer='$w') FROM sessions s WHERE s.id='$r1'")/$(stopped "$r1")" 4/1/f
   # The owner denies a session while its turn runs: the turn stops before its next tool.
@@ -1212,7 +1186,7 @@ origin_attacks() {
   local r3; r3=$(zen ask --json -m faux/smoke "OR-AFTER" | jq -r .session_id)
   check "a new reader gets the product wrapped at its original rating, not withheld" bash -c 'grep -q "<untrusted source=\"file\"" <<<"$1" && grep -q ORIGFILE <<<"$1" && [ "$2" = f ]' _ \
     "$(res_of "$r3")" "$(stopped "$r3")"
-  check "and the captured wiki page wrapped too" grep -qF '<untrusted source="file" about="'"$zh"'/global/wiki/origwiki-harbour.md"' <<<"$(res_of "$r3")"
+  check "and the knowledge record file is wrapped too" grep -qF '<untrusted source="file" about="'"$zh"'/global/wiki/sources/origwiki-harbour.md"' <<<"$(res_of "$r3")"
   kill "$srv" "$s1srv" 2>/dev/null || true
   wait "$s1srv" 2>/dev/null || true
 }
@@ -1258,6 +1232,7 @@ action_gate() {
   local native_db="${DB}_sources"
   db_psql -d postgres -c "CREATE DATABASE $native_db" >/dev/null
   check "native source, redirect eligibility and forged-provenance checks" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend source_database -- --ignored
+  check "legacy wiki migration retains every writer and later denial" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend legacy_migration_database -- --ignored
   check "editing copied bytes preserves per-writer maximum provenance" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend copied_bytes_edit_database -- --ignored
   check "source proposals bind cached snapshots and reject stale approvals" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend source_cache_proposals_database -- --ignored
   check "System One learns from labelled outcomes: a calibration curve, a proposal, queue labels" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend s1_learn_database -- --ignored
@@ -1521,7 +1496,7 @@ phase4_brain() {
   local ws; ws=$(new_workspace phase4)
   local s1port=$((PORT + 5)) embed_port=$((PORT + 7)) zh="$TMP/home/.zenbot"
   python3 "$REPO/scripts/e2e/systemone_stub.py" "$s1port" & local s1srv=$!
-  local s1=(ZEN_DEFAULT_MODEL=faux/smoke ZEN_LEGACY_TOOL_AUTHORING=0 ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$s1port/systemone")
+  local s1=(ZEN_DEFAULT_MODEL=faux/smoke ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$s1port/systemone")
   # Words only first (no vectors), so which records links bring in is deterministic.
   start_kernel "$ws" "$(script phase4.json "s|ZENGLOBAL|$zh/global|")" "${s1[@]}" ZEN_EMBED=0
   out() { q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$(jq -r .session_id <<<"$1")' AND payload->>'role'='toolResult'"; }

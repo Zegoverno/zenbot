@@ -1,0 +1,33 @@
+[
+  {
+    "tool": "capture",
+    "args": {
+      "title": "Retired",
+      "note": "Must not write"
+    }
+  },
+  {
+    "tool": "save_tool",
+    "args": {
+      "name": "retired",
+      "command": "touch EXECUTED"
+    }
+  },
+  {
+    "tool": "search",
+    "args": {
+      "query": "`legacy-wiki-4135aa9dc1b842a653dea846`",
+      "scope": "knowledge"
+    }
+  },
+  {
+    "tool": "brain",
+    "args": {
+      "action": "get",
+      "id": "legacy-wiki-4135aa9dc1b842a653dea846"
+    }
+  },
+  {
+    "text": "Done."
+  }
+]

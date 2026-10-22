@@ -334,12 +334,13 @@ mod tests {
             assert_eq!(crate::gate::shell_mode(&db,sid).await,crate::tools::Sandbox::Contained{writable:true,net:true});
             assert!(matches!(crate::gate::check(&app,sid,&dir,"verify",&json!({"criteria":[{"run":"cargo test"}]})).await.unwrap(),crate::gate::Policy::Run));
             assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM action_gates WHERE session_id=$1").bind(sid).fetch_one(&db).await.unwrap(),0);
-            // An approved made tool runs on the host: outward, checked against the job (the stub
-            // reads it as following), from a trusted source: it runs.
+            // Historical made-tool approval no longer grants trust or execution (D-070).
             let made=format!("host-{}",Uuid::new_v4().simple());
             sqlx::query("INSERT INTO made_tools(name,approved_at) VALUES($1,now())").bind(&made).execute(&db).await.unwrap();
             let args=json!({"name":format!("made_{made}"),"arguments":{}});
-            assert!(matches!(crate::gate::check(&app,sid,&dir,"call_tool",&args).await.unwrap(),crate::gate::Policy::Run));
+            assert!(matches!(crate::gate::check(&app,sid,&dir,"call_tool",&args).await.unwrap(),crate::gate::Policy::Hold(_)));
+            let retired = crate::mcp::run_tool(&app,sid,"call_tool",&args).await.unwrap();
+            assert!(retired.is_error && retired.content.contains("Made tools are retired"));
             // A host command the stub reads as off the job locks the session after outside content.
             assert!(matches!(crate::gate::check(&app,sid,&dir,"bash",&json!({"command":"git push","host":true})).await.unwrap(),crate::gate::Policy::Lock(_)));
             assert_eq!(crate::gate::shell_mode(&db,sid).await,crate::tools::Sandbox::Contained{writable:false,net:false});

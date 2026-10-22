@@ -33,9 +33,10 @@ pub fn read_only(kind: Option<&str>) -> bool {
 /// what each kind of session may do (what it is offered is `specs`, which follows the same rules).
 /// Each kind is allowed what it needs; a kind not named here gets nothing.
 pub fn refusal(kind: Option<&str>, name: &str) -> Option<String> {
+    if matches!(name, "capture" | "save_tool") {
+        return Some("This tool is retired: use brain records for knowledge, or a reviewed skill with supporting scripts.".into());
+    }
     match kind {
-        None if name=="save_tool" && !crate::config::get().legacy_tool_authoring=>Some("New made-tool authoring is retired; use a reviewed skill with supporting scripts.".into()),
-        Some(crate::delegate::SUBAGENT | crate::jobs::JOB) if name=="save_tool" && !crate::config::get().legacy_tool_authoring=>Some("New made-tool authoring is retired; use a skill draft.".into()),
         None => (name == "submit_verdict").then(|| "`submit_verdict` is only for a verifier session".into()),
         Some(VERIFIER) => (!matches!(name, "bash" | "read" | "submit_verdict")).then(|| format!("`{name}` isn't available to a verifier")),
         // A subagent (also the sleep's kernel sessions) or a scheduled job can't ask the owner,
@@ -316,7 +317,6 @@ pub fn specs(kind: Option<&str>) -> Value {
     }
     all.push(crate::memory::spec());
     all.push(crate::brain::spec());
-    all.push(crate::wiki::spec());
     all.push(crate::web::search_spec());
     all.push(crate::web::fetch_spec());
     all.push(crate::skills::find_spec());
@@ -325,7 +325,6 @@ pub fn specs(kind: Option<&str>) -> Value {
     all.push(crate::mcp::find_spec());
     all.push(crate::mcp::load_spec());
     all.push(crate::mcp::call_spec());
-    if crate::config::get().legacy_tool_authoring {all.push(crate::workshop::save_tool_spec());}
     all.push(verify_spec());
     if !subagent {
         all.push(crate::delegate::spec());
@@ -433,11 +432,10 @@ If a question goes unanswered, take your recommended option and say it was an as
         "verify" => Some(verify(app, session, workspace, args, policy).await),
         "web_search" | "web_fetch" => crate::web::run_tool(app, session, name, args).await,
         "search" => crate::search::run_tool(app, session, name, args).await,
-        "capture" => crate::wiki::run_tool(app, session, name, args).await,
-        "save_skill" | "save_tool" => crate::workshop::run_tool(app, session, name, args).await,
+        "save_skill" => crate::workshop::run_tool(app, session, name, args).await,
         "delegate" => crate::delegate::run_tool(app, session, workspace, name, args).await,
         "schedule" => crate::jobs::run_tool(app, session, name, args, matches!(policy, crate::gate::Policy::Granted)).await,
-        "find_tools" | "load_tool" | "call_tool" => crate::mcp::run_tool(app, session, name, args, false, matches!(policy, crate::gate::Policy::Granted)).await,
+        "find_tools" | "load_tool" | "call_tool" => crate::mcp::run_tool(app, session, name, args).await,
         "judge" => Some(judge(app, session, args).await),
         _ => None,
     }
@@ -757,7 +755,13 @@ mod tests {
             }
         }
         let all = names(specs(None));
-        for t in ["bash", "read", "write", "edit", "history", "search", "ask", "remember", "brain", "capture", "web_search", "web_fetch", "find_skills", "load_skill", "save_skill", "find_tools", "load_tool", "call_tool", "verify", "delegate", "schedule"] {
+        for retired in ["capture", "save_tool"] {
+            assert!(!all.iter().any(|name| name == retired));
+            for kind in [None, Some(VERIFIER), Some(crate::delegate::SUBAGENT), Some(crate::jobs::JOB)] {
+                assert!(refusal(kind, retired).is_some());
+            }
+        }
+        for t in ["bash", "read", "write", "edit", "history", "search", "ask", "remember", "brain", "web_search", "web_fetch", "find_skills", "load_skill", "save_skill", "find_tools", "load_tool", "call_tool", "verify", "delegate", "schedule"] {
             assert!(all.contains(&t.to_string()), "{t} offered");
         }
         assert!(!all.contains(&"move".to_string()) && !all.contains(&"propose_brief".to_string()));

@@ -4,7 +4,9 @@
 //! linked by typed relationships (`records.rs`). The sleep moves lasting short-term memories into
 //! long-term ones (`sleep.rs`). Nothing is pushed into a turn: the brain finds records with
 //! `search` (which follows their links) and reads or changes them with the `brain` tool. Session
-//! history stays a searchable archive, not memory.
+//! history stays a searchable archive, not memory. Owner-only legacy migration preserves exact
+//! originals and provenance (`legacy.rs`); the historical wiki job indexes and lints records.
+mod legacy;
 mod records;
 mod sleep;
 use anyhow::{Result, ensure};
@@ -101,6 +103,10 @@ pub async fn manage(db: &PgPool, session: Option<Uuid>, a: &Value) -> Result<(Va
             Ok((r, 0))
         }
         "schema" => Ok((json!({"schema": records::SCHEMA, "relations": records::RELATIONS}), 0)),
+        "migrate_legacy" => {
+            ensure!(session.is_none(), "migration is the owner's");
+            Ok((legacy::migrate(db, a["apply"].as_bool().unwrap_or(false)).await?, 0))
+        }
         "lint" => {
             ensure!(session.is_none(), "lint is the owner's");
             Ok((json!({"issues": records::lint(db).await?}), 0))
@@ -144,4 +150,12 @@ pub(crate) async fn current(db: &PgPool, id: &str, body: &str) -> Option<(String
 /// Search support: typed links touching these records, as (from, relation, to).
 pub(crate) async fn links(db: &PgPool, ids: &[String]) -> Result<Vec<(String, String, String)>> {
     records::links(db, ids).await
+}
+
+/// The historical wiki job now checks record files. Only counts enter the morning note: record
+/// paths and parse errors can contain untrusted text.
+pub async fn tend(db: &PgPool) -> Result<Vec<String>> {
+    records::index(db).await?;
+    let n = records::lint(db).await?.len();
+    Ok(if n == 0 { vec![] } else { vec![format!("brain: {n} record issues; run zen brain lint to inspect")] })
 }

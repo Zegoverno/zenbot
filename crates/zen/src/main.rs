@@ -236,7 +236,7 @@ async fn run(cli: Cli) -> Result<()> {
                     );
                 }
                 for t in s["tools"].as_array().into_iter().flatten() {
-                    let state = if t["approved"] == true { "approved" } else { "sandboxed until approved" };
+                    let state = if t["retired"] == true { "retired; inspection only" } else if t["approved"] == true { "approved" } else { "sandboxed until approved" };
                     println!("tool made_{}{}  {}", for_stdout(t["tool"].as_str().unwrap_or("")), for_stdout(&short_sha(t)), dim(state));
                 }
             }

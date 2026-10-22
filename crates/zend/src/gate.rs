@@ -104,18 +104,11 @@ pub async fn classify(db: &sqlx::PgPool, session: Uuid, workspace: &Path, name: 
         "schedule" => (Effect::Persistent, true),
         "call_tool" => {
             let full = args["name"].as_str().unwrap_or("");
-            if let Some(tool) = full.strip_prefix("made_") {
-                // An unapproved made tool runs in its sandbox; an approved one on the host.
-                let approved: Option<bool> = sqlx::query_scalar("SELECT approved_at IS NOT NULL AND rejected_at IS NULL FROM made_tools WHERE name = $1")
-                    .bind(tool).fetch_optional(db).await?;
-                if approved == Some(true) { (Effect::Outward, true) } else { (Effect::Local, true) }
-            } else {
-                match crate::mcp::hints(db, full).await {
-                    Some((_, _, true)) => (Effect::Irreversible, false),
-                    Some((false, true, _)) => (Effect::Local, true),
-                    Some((untrusted, ..)) => (Effect::Outward, !untrusted),
-                    None => (Effect::Outward, false),
-                }
+            match crate::mcp::hints(db, full).await {
+                Some((_, _, true)) => (Effect::Irreversible, false),
+                Some((false, true, _)) => (Effect::Local, true),
+                Some((untrusted, ..)) => (Effect::Outward, !untrusted),
+                None => (Effect::Outward, false),
             }
         }
         _ => (Effect::Outward, false),
