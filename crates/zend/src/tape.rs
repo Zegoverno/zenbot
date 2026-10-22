@@ -70,7 +70,7 @@ pub async fn append_in(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, session: 
         let session_risk = risk;
         risk = if engine_error { session_risk } else { 4 };
         origin = if engine_error { "engine-error".into() } else { "unverified-tool-result".into() };
-        let text = zen_proto::text_of(&payload["content"]);
+        let text = zen_proto::digest_text(&payload["content"]);
         let rated = sqlx::query("SELECT id,risk,origin FROM tool_calls WHERE session_id=$1 AND call_id=$2 AND name=$3 AND is_error=$5 AND result_sha256=encode(sha256(convert_to($4,'UTF8')),'hex') ORDER BY id DESC LIMIT 1")
             .bind(session).bind(payload["toolCallId"].as_str().unwrap_or("")).bind(payload["toolName"].as_str().unwrap_or(""))
             .bind(text).bind(payload["isError"].as_bool().unwrap_or(false)).fetch_optional(&mut **tx).await?;

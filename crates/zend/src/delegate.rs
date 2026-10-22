@@ -160,11 +160,9 @@ async fn delegate(app: &AppState, session: Uuid, workspace: &std::path::Path, ar
 pub fn spec() -> Value {
     json!({
         "name": "delegate",
-        "description": "Hand a well-defined subtask to a subagent: a fresh session with your instructions, memory and tools (but it \
-can't ask the owner or delegate). Use it to keep your context clean (a broad search, a long investigation, a side task) or to work \
-in parallel: give several `tasks` in one call and they run at the same time. Write each task like a brief: the goal, what to read \
-first, what to avoid, and what to report. Returns each subagent's final answer. The model is chosen by the routing policy unless you \
-name one.",
+        "description": "Give a well-defined subtask to a subagent: a fresh session with your instructions, memory and tools, \
+without ask or delegate. Use it to keep your context clean or, with several `tasks`, to work in parallel. Brief each task: goal, \
+what to read first, what to avoid, what to report. Returns each final answer; the routing policy picks the model unless you name one.",
         "parameters": { "type": "object", "properties": {
             "task": { "type": "string", "description": "The subtask, self-contained: the subagent sees nothing of this conversation" },
             "tasks": { "type": "array", "description": "Several subtasks to run at the same time, each {task, model?, dir?}", "items": { "type": "object", "properties": {
@@ -181,8 +179,8 @@ pub async fn run_tool(app: &AppState, session: Uuid, workspace: &std::path::Path
         return None;
     }
     Some(match delegate_all(app, session, workspace, args).await {
-        Ok((content, is_error)) => tools::ToolOutput { rating: None, content, is_error },
-        Err(e) => tools::ToolOutput { rating: None, content: format!("delegate failed: {e:#}"), is_error: true },
+        Ok((content, is_error)) => tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content, is_error },
+        Err(e) => tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content: format!("delegate failed: {e:#}"), is_error: true },
     })
 }
 

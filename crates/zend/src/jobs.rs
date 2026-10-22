@@ -5,7 +5,7 @@
 //!   existed gets it at its next start): `sleep` (the nightly memory sleep, `memory::sleep`),
 //!   `wiki` (index and lint brain records: `brain::tend`), `skills` (flag and
 //!   archive unused skills: `workshop::tend`), `routes` (switch a delegation route on clear
-//!   evidence: `delegate::tune`), `prune` (old saved outputs, prompt-file backups, database dumps and eval runs) and `engines`
+//!   evidence: `delegate::tune`), `prune` (saved outputs bounded by age and size, prompt-file backups, database dumps and eval runs) and `engines`
 //!   (`scripts/update-engines.sh`). Each records its own run; a run with nothing to report is
 //!   `silent`. What `wiki`, `skills`, `routes` and `prune` found in the last day reaches the next
 //!   sessions with the sleep's morning note (`upkeep_note`). The owner can pause and run them;
@@ -1232,7 +1232,7 @@ fn prune_files(home: &std::path::Path) -> Vec<String> {
     }
     let outputs = prune_outputs(&home.join("outputs"), OUTPUT_DAYS);
     if outputs > 0 {
-        notes.push(format!("outputs: removed {outputs} saved tool output file(s) older than {OUTPUT_DAYS} days"));
+        notes.push(format!("outputs: removed {outputs} saved tool output file(s) expired after {OUTPUT_DAYS} days or over the 256 MiB storage budget"));
     }
     let dumps = prune_dumps(&home.join("backups"), DUMP_KEEP);
     if dumps > 0 {
@@ -1325,10 +1325,9 @@ fn prune_backups(dir: &std::path::Path, days: u64) -> usize {
     prune(dir, days, |n| n.ends_with(".md"))
 }
 
-/// Saved outputs older than `days` days: only files the kernel saves (`*.log`, `mcp-*.txt`,
-/// `web-*.pdf`).
+/// Saved outputs expire after `days` days, with oldest files evicted above the storage budget.
 fn prune_outputs(dir: &std::path::Path, days: u64) -> usize {
-    prune(dir, days, |n| n.ends_with(".log") || (n.starts_with("mcp-") && n.ends_with(".txt")) || (n.starts_with("web-") && n.ends_with(".pdf")))
+    crate::output::prune_saved(dir, days, crate::output::TOTAL_BYTES)
 }
 
 fn shell_quote(s: &str) -> String {
@@ -1580,19 +1579,7 @@ fn read_report(workspace: &std::path::Path, path: &std::path::Path, started: std
 pub fn spec() -> Value {
     json!({
         "name": "schedule",
-        "description": "Schedule work to run on its own: a job runs your `prompt` in a fresh session at the times you set, with no one \
-in the conversation (it can't ask, delegate or schedule, and takes no outward action); its final answer is a report the owner \
-reads with `zen jobs runs`, or nothing when there's nothing new. Create one when the owner asks for recurring or timed work \
-(\"every weekday at 7, …\", \"remind me tomorrow…\"). A job goes live only if the owner's own words in this conversation show \
-they asked for it; otherwise it's created paused until they approve it, so if you aren't sure the owner wants it, ask first. \
-Actions: create, update (changes the fields you give), list, runs (recent reports), pause, resume, remove, run (now). \
-Schedules: a 5-field cron expression read in `tz` (`0 7 * * 1-5`), `every 2h`, `at 2026-10-12 07:00`, or `in 30m`; at most every 5 minutes. \
-`context` picks the instructions it gets besides the soul: identity, agents, user, memory, skills, project (default: user, memory). \
-`report_file`: when a script builds the report and it must reach the owner exactly, the run writes it to this file (inside the job's \
-workspace, written during the run, UTF-8, at most 60 KB; empty means nothing to report) and the kernel posts the file instead of \
-the final answer; anything wrong with the file makes the run fail. \
-`post_to`: a session its reports go into as your message, where the owner can answer (`this` for this session, or a session id); \
-otherwise they go to the jobs feed.",
+        "description": "Run a self-contained prompt in fresh unattended sessions (no ask, delegate, schedule or outward actions). A job is live only if the owner's messages asked for timed/recurring work; otherwise it stays paused for approval. Schedules: 5-field cron in tz, every 2h, at YYYY-MM-DD HH:MM, in 30m; at most every 5 minutes. context: identity/agents/user/memory/skills/project besides soul (default user,memory). Reports go to the jobs feed or post_to. report_file: a workspace UTF-8 file (<=60 KB) the run writes, posted instead of its answer; empty is silent, invalid fails.",
         "parameters": { "type": "object", "properties": {
             "action": { "type": "string", "enum": ["create", "update", "list", "runs", "pause", "resume", "remove", "run"] },
             "name": { "type": "string", "description": "The job: lowercase letters, digits and hyphens (e.g. morning-brief)" },
@@ -1602,8 +1589,8 @@ otherwise they go to the jobs feed.",
             "context": { "type": "array", "items": { "type": "string" }, "description": "Optional: instruction parts besides the soul" },
             "skills": { "type": "array", "items": { "type": "string" }, "description": "Optional: skills loaded into its instructions (domain/name)" },
             "dir": { "type": "string", "description": "Optional: the directory it works in (default: the workspace)" },
-            "report_file": { "type": "string", "description": "Optional: the file the run writes its report to, posted as is instead of the final answer (\"\" clears it)" },
-            "post_to": { "type": "string", "description": "Optional: the session its reports are posted into: `this`, or a session id (\"\" clears it)" } },
+            "report_file": { "type": "string", "description": "Optional report file (\"\" clears)" },
+            "post_to": { "type": "string", "description": "Optional: `this` or a session id (\"\" clears)" } },
           "required": ["action"] }
     })
 }
@@ -1700,8 +1687,8 @@ pub async fn run_tool(app: &AppState, session: Uuid, name: &str, args: &Value, o
         return None;
     }
     Some(match tool(app, session, args, owner_allowed).await {
-        Ok(content) => tools::ToolOutput { rating: None, content, is_error: false },
-        Err(e) => tools::ToolOutput { rating: None, content: format!("schedule failed: {e:#}"), is_error: true },
+        Ok(content) => tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content, is_error: false },
+        Err(e) => tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content: format!("schedule failed: {e:#}"), is_error: true },
     })
 }
 

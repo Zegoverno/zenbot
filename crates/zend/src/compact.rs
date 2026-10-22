@@ -349,7 +349,7 @@ pub async fn apply(db: &PgPool, session: Uuid, id: i64) -> Result<()> {
 pub fn tool_spec() -> Value {
     json!({
         "name": "history",
-        "description": "Read messages word for word by number (#n), including ones a summary replaced, or find text in them: this session by default, or another (`session`: an id search gave). Use it before relying on a detail you only have from a summary.",
+        "description": "Read original numbered messages, including summarized ones, or search their text. Defaults to this session; search provides other session ids. Check original messages before relying on a summary detail.",
         "parameters": {
             "type": "object",
             "properties": {

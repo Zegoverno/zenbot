@@ -45,6 +45,31 @@ impl From<TurnStart> for TurnInput {
     }
 }
 
+/// Retain the kernel's provenance-bearing text beside rich media blocks.
+pub fn result_blocks(result: &ToolResult) -> Vec<Value> {
+    result.blocks()
+}
+
+/// Images a replayed history still sends: the latest few, by (message, block) position.
+pub const REPLAYED_IMAGES: usize = 4;
+
+pub fn replayed_images(history: &[Value]) -> HashSet<(usize, usize)> {
+    let mut all: Vec<(usize, usize)> = history.iter().enumerate()
+        .flat_map(|(i, m)| m["content"].as_array().into_iter().flatten().enumerate().filter(|(_, b)| b["type"] == "image").map(move |(j, _)| (i, j)))
+        .collect();
+    all.split_off(all.len().saturating_sub(REPLAYED_IMAGES)).into_iter().collect()
+}
+
+/// Convert a persisted MCP image to Claude's supported inline image format.
+pub fn claude_image(block: &Value) -> Option<Value> {
+    if block["type"] != "image" {
+        return None;
+    }
+    Some(
+        json!({ "type": "image", "source": { "type": "base64", "media_type": block["mimeType"].as_str()?, "data": block["data"].as_str()? } }),
+    )
+}
+
 /// Whether a tool call has no matching result in the captured transcript.
 fn has_unanswered_tool(messages: &[Value]) -> bool {
     let mut pending = std::collections::HashSet::new();
@@ -373,7 +398,7 @@ impl TurnCtx {
     }
 
     /// Execute a tool through the kernel and report the result as a toolResult message.
-    pub async fn call_tool(&self, name: &str, args: Value, call_id: Option<String>) -> (String, bool) {
+    pub async fn call_tool(&self, name: &str, args: Value, call_id: Option<String>) -> ToolResult {
         let mut flight = ToolFlight::new(&self.tool_flights, &self.tool_uncertain);
         let call_id = match call_id {
             Some(id) => id,
@@ -382,26 +407,26 @@ impl TurnCtx {
         self.answered.lock().unwrap().insert(call_id.clone());
         let call = ToolCall { session_id: self.session_id.clone(), turn_id: Some(self.turn_id.clone()), call_id: call_id.clone(), name: name.to_string(), args };
         let res = self.rpc.request(ToolCall::METHOD, serde_json::to_value(&call).unwrap_or_default()).await;
-        let (content, is_error) = match res.map(|v| serde_json::from_value::<ToolResult>(v).unwrap_or_default()) {
-            Ok(r) => (r.content, r.is_error),
+        let result = match res.map(|v| serde_json::from_value::<ToolResult>(v).unwrap_or_default()) {
+            Ok(r) => r,
             Err(e) => {
                 // The request may have executed before the RPC connection failed. Even though
                 // the model receives an error-shaped result, a second provider must not retry it.
                 self.captured.lock().await.uncertain_tool = true;
-                (e.to_string(), true)
+                ToolResult { content: e.to_string(), is_error: true, ..Default::default() }
             },
         };
-        if is_error {
+        if result.is_error {
             // A failed command or tool may still have changed external state before failing.
             self.captured.lock().await.uncertain_tool = true;
         }
         let message = json!({
             "role": "toolResult", "toolCallId": call_id, "toolName": name,
-            "content": [{ "type": "text", "text": content }], "isError": is_error, "timestamp": now_ms()
+            "content": result_blocks(&result), "isError": result.is_error, "timestamp": now_ms()
         });
         self.notify(TurnEvent::Message { message }).await;
         flight.complete();
-        (content, is_error)
+        result
     }
 
     /// Serve the MCP bridge on a Unix socket for the duration of the turn.
@@ -427,8 +452,8 @@ impl TurnCtx {
                             "name": t["name"], "description": t["description"], "inputSchema": t["parameters"]
                         })).collect::<Vec<_>>() }),
                         Some("call") => {
-                            let (content, is_error) = ctx.call_tool(req["name"].as_str().unwrap_or(""), req["args"].clone(), None).await;
-                            json!({ "content": content, "is_error": is_error })
+                            let result = ctx.call_tool(req["name"].as_str().unwrap_or(""), req["args"].clone(), None).await;
+                            serde_json::to_value(result).unwrap_or_default()
                         }
                         _ => json!({ "error": "unknown op" }),
                     };
@@ -642,6 +667,21 @@ pub fn seed_blocks(history: &[Value], prompt: &str, context: Option<&str>) -> Ve
     if !t.is_empty() {
         blocks.push(json!({ "type": "text", "text": t }));
     }
+    // Replay the latest images with their tape position, rather than silently losing visual
+    // context; older ones are named, not sent (each image costs every later turn).
+    let kept = replayed_images(history);
+    for (i, message) in history.iter().enumerate() {
+        for (j, block) in message["content"].as_array().into_iter().flatten().enumerate() {
+            if let Some(image) = claude_image(block) {
+                if kept.contains(&(i, j)) {
+                    blocks.push(json!({ "type": "text", "text": format!("Image from prior message #{} (conversation history):", message["seq"]) }));
+                    blocks.push(image);
+                } else {
+                    blocks.push(json!({ "type": "text", "text": format!("[an image from message #{} is not replayed; read it again if you need it]", message["seq"]) }));
+                }
+            }
+        }
+    }
     blocks.extend(prompt_blocks(prompt, context));
     blocks
 }
@@ -666,6 +706,28 @@ mod tests {
             flight.complete();
         }
         assert!(!known.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn rich_results_keep_source_text_and_replay_images() {
+        let result = ToolResult {
+            content: "[source 4] image".into(),
+            content_blocks: vec![json!({"type":"image","mimeType":"image/png","data":"AAAA"})],
+            is_error: false,
+        };
+        let blocks = result_blocks(&result);
+        assert_eq!(blocks[0]["text"], "[source 4] image");
+        let history = vec![json!({"seq":7,"role":"toolResult","content":blocks})];
+        let seed = seed_blocks(&history, "inspect", None);
+        let image = seed.iter().find(|b| b["type"] == "image").unwrap();
+        assert_eq!(
+            image["source"],
+            json!({"type":"base64","media_type":"image/png","data":"AAAA"})
+        );
+        let many: Vec<Value> = (0..6).map(|seq| json!({"seq":seq,"role":"toolResult","content":blocks.clone()})).collect();
+        let seed = seed_blocks(&many, "inspect", None);
+        assert_eq!(seed.iter().filter(|b| b["type"] == "image").count(), REPLAYED_IMAGES);
+        assert!(seed.iter().any(|b| b["text"].as_str().is_some_and(|t| t.contains("#0 is not replayed"))));
     }
 
     #[test]

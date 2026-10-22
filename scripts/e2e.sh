@@ -702,8 +702,16 @@ memory_sleep_judged() {
 kernel_tools() {
   local ws; ws=$(new_workspace kernel-tools)
   mkdir -p "$TMP/home/sub"
+  # A 1×1 PNG for `read`, and a file for a batch `edit` (D-071).
+  base64 -d >"$ws/pixel.png" <<<"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jF3sAAAAASUVORK5CYII="
+  printf 'alpha\nbeta\n' >"$ws/notes.txt"
   start_kernel "$ws" "$(script kernel-tools.json "s|ZENHOME|$TMP/home/.zenbot|" "s|ZENALIAS|$TMP/home/sub/../.zenbot|")"
   local sid; sid=$(zen ask --json -m faux/smoke "check kernel tools" | jq -r .session_id)
+  local image="SELECT %s FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='read' AND payload->'content'->1->>'type'='image'"
+  check "an image read reaches the tape as an image block" eq "$(q "$(printf "$image" "payload->'content'->1->>'mimeType'")")" image/png
+  check "and keeps the kernel's rating of the file, not an unverified result's" bash -c '[[ "$1" == file:*pixel.png ]]' _ "$(q "$(printf "$image" "origin")")"
+  check "a batch edit applies every replacement and shows the diff" bash -c '[ "$(cat "$1")" = "$(printf "one\ntwo")" ] && grep -q "^+one" <<<"$2"' _ "$ws/notes.txt" "$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='edit' ORDER BY seq LIMIT 1")"
+  check "a batch with a missing match changes nothing" bash -c 'grep -q "no edits written" <<<"$1" && grep -q "^one$" "$2"' _ "$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='edit' ORDER BY seq DESC LIMIT 1")" "$ws/notes.txt"
   check "the zen home environment file is not attached as project context" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id='$sid' AND kind='context'")" 0
   check "no OpenRouter key is reported as not signed in" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/models" | jq -r .authenticated.openrouter)" false
   check "even the owner's own session can't write mcp.json" bash -c 'grep -q "is the owner.s own configuration" <<<"$1" && ! grep -qs planted-by-owner-session "$2"' _ "$(q "SELECT payload->'content'->0->>'text' FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='write'")" "$TMP/home/.zenbot/mcp.json"
@@ -1243,6 +1251,7 @@ action_gate() {
   check "authenticated root, pre-exposure plans and stored job definitions" env TASK_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend task_database -- --ignored
   check "queue decisions are atomic, terminal and contamination-safe" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend queue_decisions_database -- --ignored
   check "permission snapshots refresh on risk, lock and denial" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend permission_snapshot_database -- --ignored
+  check "MCP forms require explicit validated owner responses and cancel on expiry, interruption or restart" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend owner_response_lifecycle_database -- --ignored
   check "job source authority is owner-only and revoked by agent edits" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release -q -p zend owner_job_authority_database -- --ignored
   db_drop "$native_db"
   local ws; ws=$(new_workspace action-gate)
@@ -1564,7 +1573,7 @@ phase4_upgrade() {
   local before; before=$(q "SELECT string_agg(id || ':' || tier || ':' || risk, ',' ORDER BY id) FROM memories")
   python3 "$REPO/scripts/e2e/systemone_stub.py" "$s1port" & local s1srv=$!
   start_kernel "$ws" "$(script agent.json)" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$s1port/systemone"
-  check "migration 35 applies on top of 34" eq "$(q "SELECT max(version) FROM _sqlx_migrations WHERE success")" 35
+  check "migration 35 applies on top of 34" eq "$(q "SELECT bool_and(success) FROM _sqlx_migrations WHERE version IN (34, 35)")/$(q "SELECT count(*) FROM _sqlx_migrations WHERE version IN (34, 35)")" t/2
   check "no memory is lost or re-rated" eq "$(q "SELECT string_agg(id || ':' || tier || ':' || risk, ',' ORDER BY id) FROM memories")" "$before"
   check "every writer is recorded" eq "$(q "SELECT count(*) FROM brain_memory_inputs")" 5
   local sid; sid=$(zen ask --json -m faux/smoke "hello" | jq -r .session_id)

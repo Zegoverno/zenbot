@@ -732,7 +732,7 @@ fn render(found: &[(Found, Option<f64>)], via: &std::collections::HashMap<String
 pub fn spec() -> Value {
     json!({
         "name": "search",
-        "description": "Search everything you know: long-term memories, knowledge and people/projects records (following their links: a person leads to their meetings and commitments, a claim to what supports or contradicts it), short-term memories, wiki notes and your earlier sessions with the owner. Search before answering about people, past decisions, preferences or ongoing work, and before saying you don't know or asking the owner again. Exact names and paths (quote them) match first, then words and meaning, in English or Portuguese. Returns dated results, ranked, with where each comes from; read a record with brain get, a session with history, a wiki page with read.",
+        "description": "Search memories, linked knowledge/people/project records, wiki notes and past sessions. Search before answering about people, past decisions, preferences or ongoing work, asking again, or claiming ignorance. Quoted names/paths match first, then words and meaning (English/Portuguese). Results include dates and sources; read records with brain get, sessions with history, wiki pages with read.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -933,8 +933,8 @@ pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value) -> Opt
         return None;
     }
     Some(match run(app, session, args).await {
-        Ok(content) => tools::ToolOutput { rating: None, content, is_error: false },
-        Err(e) => tools::ToolOutput { rating: None, content: format!("search failed: {e:#}"), is_error: true },
+        Ok(content) => tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content, is_error: false },
+        Err(e) => tools::ToolOutput { content_blocks: Vec::new(), saved_outputs: Vec::new(), rating: None, content: format!("search failed: {e:#}"), is_error: true },
     })
 }
 

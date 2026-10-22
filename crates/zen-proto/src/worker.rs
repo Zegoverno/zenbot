@@ -210,10 +210,23 @@ impl ToolCall {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolResult {
+    /// MCP-shaped text/image blocks. Empty for legacy text-only results.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "or_default")]
+    pub content_blocks: Vec<Value>,
     #[serde(deserialize_with = "or_default")]
     pub content: String,
     #[serde(deserialize_with = "or_default")]
     pub is_error: bool,
+}
+
+impl ToolResult {
+    /// The result as a tape message's content: the kernel's text (with its source labels) first,
+    /// then the rich blocks. The kernel hashes exactly this (`digest_text`) to rate it later.
+    pub fn blocks(&self) -> Vec<Value> {
+        let mut blocks = vec![serde_json::json!({ "type": "text", "text": self.content })];
+        blocks.extend(self.content_blocks.iter().cloned());
+        blocks
+    }
 }
 
 /// A notification a turn sends the kernel, by method. On the wire its params also carry the
@@ -368,6 +381,17 @@ pub fn is_hard_usage_limit(error: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_results_digest_is_its_text_unless_it_carries_images() {
+        let text = ToolResult { content: "[source 2] hello".into(), ..Default::default() };
+        assert_eq!(crate::digest_text(&json!(text.blocks())), "[source 2] hello");
+        let image = json!({ "type": "image", "mimeType": "image/png", "data": "AAAA" });
+        let with = ToolResult { content_blocks: vec![image.clone()], ..text.clone() };
+        let swapped = ToolResult { content_blocks: vec![json!({ "type": "image", "mimeType": "image/png", "data": "BBBB" })], ..text };
+        assert_ne!(crate::digest_text(&json!(with.blocks())), crate::digest_text(&json!(swapped.blocks())));
+        assert_eq!(with.blocks()[1], image);
+    }
 
     /// Each message read from a sample shaped as docs/worker-protocol.md shows it, and written back
     /// to the same JSON.

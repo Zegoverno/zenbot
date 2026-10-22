@@ -139,6 +139,17 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: Option<JobsCmd>,
     },
+    /// List MCP forms awaiting an explicit owner response
+    McpPending,
+    /// Answer a pending MCP form (owner only)
+    McpRespond {
+        id: String,
+        #[arg(long, value_parser = ["accept", "decline", "cancel"])]
+        action: String,
+        /// JSON object matching the pending schema; required for accept
+        #[arg(long)]
+        data: Option<String>,
+    },
     /// Update zenbot to the latest version on GitHub (main) and restart it
     Upgrade {
         /// Only check whether an update is available

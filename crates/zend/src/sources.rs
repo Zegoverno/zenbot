@@ -112,6 +112,30 @@ pub async fn file_rating(db: &PgPool, path: &std::path::Path, text: &str) -> Res
     }))
 }
 
+/// Retain the origin of binary downloads for later image/PDF reads.
+pub async fn register_binary(db: &PgPool, path: &std::path::Path, bytes: &[u8], writer: Uuid, risk: i16) -> Result<()> {
+    let path = file_key(path).to_string_lossy().into_owned();
+    sqlx::query("INSERT INTO item_ratings(path,sha256,session_id,risk) VALUES($1,encode(sha256($2::bytea),'hex'),$3,$4)
+        ON CONFLICT(path,sha256,session_id) DO UPDATE SET risk=GREATEST(item_ratings.risk,EXCLUDED.risk)")
+        .bind(path).bind(bytes).bind(writer).bind(risk).execute(db).await?;
+    Ok(())
+}
+
+/// Binary media uses the same digest and writer graph as text, without lossy decoding.
+pub async fn read_binary_rating(db: &PgPool, reader: Uuid, path: &std::path::Path, bytes: &[u8]) -> Result<Rating> {
+    let path = file_key(path).to_string_lossy().into_owned();
+    let writers: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT session_id FROM item_ratings WHERE sha256=encode(sha256($1::bytea),'hex') AND session_id IS NOT NULL")
+        .bind(bytes).fetch_all(db).await?;
+    depend(db, reader, &writers).await?;
+    let row = sqlx::query("SELECT
+        (SELECT max(CASE WHEN zen_session_contaminated(session_id) THEN 5::smallint ELSE risk END) FROM item_ratings WHERE sha256=encode(sha256($2::bytea),'hex')) AS risk,
+        (SELECT max(CASE WHEN zen_session_contaminated(session_id) THEN 5::smallint ELSE risk END) FROM item_ratings WHERE path=$1) AS writers")
+        .bind(&path).bind(bytes).fetch_one(db).await?;
+    let risk = row.get::<Option<i16>,_>("risk").or(row.get::<Option<i16>,_>("writers")).unwrap_or(1);
+    anyhow::ensure!(risk < 5, "binary source withheld: contaminated writer");
+    Ok(Rating { risk, origin: format!("file:{path}") })
+}
+
 /// Record the reader's dependency before handing content over. A later deny of the writer
 /// stops derived work too; max-risk alone would lose this causal link.
 pub async fn depend(db: &PgPool, reader: Uuid, writers: &[Uuid]) -> Result<()> {

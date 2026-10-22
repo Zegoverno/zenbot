@@ -17,6 +17,7 @@ mod gate;
 mod queue;
 mod jobs;
 mod mcp;
+mod mcp_interaction;
 mod measure;
 mod memory;
 mod brain;
@@ -34,6 +35,8 @@ mod test_util;
 mod sources;
 mod proxy;
 mod tools;
+mod output;
+mod media;
 mod trust;
 mod turns;
 mod update;
@@ -203,6 +206,7 @@ async fn serve() -> Result<()> {
     let mut migrator = sqlx::migrate!("./migrations");
     migrator.set_ignore_missing(true);
     migrator.run(&db).await?;
+    mcp_interaction::recover(&db).await?;
     let rerate_db = db.clone();
     tokio::spawn(async move {
         if let Err(e) = sources::rerate_once(&rerate_db).await { tracing::warn!("source rerating: {e:#}"); }
@@ -296,6 +300,8 @@ async fn serve() -> Result<()> {
         .route("/memory", get(list_memory))
         .route("/brain", axum::routing::post(brain_action))
         .route("/mcp", get(mcp_status))
+        .route("/mcp/pending", get(mcp_pending))
+        .route("/mcp/pending/{id}", axum::routing::post(mcp_respond))
         .route("/skills", get(list_skills))
         .route("/policy", get(get_policy).post(put_policy))
         .route("/policy/undo", axum::routing::post(undo_policy))

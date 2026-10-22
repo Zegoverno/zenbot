@@ -316,6 +316,12 @@ async fn run(cli: Cli) -> Result<()> {
             let res = c.post(&format!("/api/tools/{}/review", enc(name.trim_start_matches("made_"))), json!({ "decision": decision, "sha": sha })).await?;
             emit(json, &res, || res["result"].as_str().unwrap_or("").to_string());
         }
+        Cmd::McpPending => out(&c.get("/api/mcp/pending").await?),
+        Cmd::McpRespond { id, action, data } => {
+            let mut body = json!({"action": action});
+            if let Some(data) = data { body["content"] = serde_json::from_str(&data)?; }
+            out(&c.post(&format!("/api/mcp/pending/{}", enc(&id)), body).await?);
+        }
         Cmd::Jobs { cmd: None } => {
             let r = c.get("/api/jobs").await?;
             if json {

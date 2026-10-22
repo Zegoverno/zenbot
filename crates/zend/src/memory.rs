@@ -251,7 +251,7 @@ pub async fn import(db: &PgPool) -> Result<()> {
 pub fn spec() -> Value {
     json!({
         "name": "remember",
-        "description": "Save to your short-term memory, which every new session starts with (from the next session): the owner's decisions and why, commitments, preferences, open questions, where their projects stand; not what's in the code, docs or git. Write facts, not orders to yourself. Space is fixed; the sleep moves lasting entries to long-term memory (found with search) and archives finished ones. `replace` an entry by id (m12) rather than adding a near-duplicate; `remove` one that's wrong. `long: true` asks to keep it long-term at once: only for something clearly lasting (a high bar; otherwise it's saved short-term). `source`: owner (their exact words), verified (you checked it) or inferred (default).",
+        "description": "Save facts about owner decisions, commitments, preferences, questions and projects, not code/docs/git or self-instructions. Entries appear from the next session. Replace near-duplicates by id; remove wrong entries. Sleep archives finished entries and moves lasting ones to searchable long-term memory. long=true requests immediate retention only for clearly lasting facts. source=owner means exact owner words; verified means checked; otherwise inferred.",
         "parameters": {
             "type": "object",
             "properties": {
