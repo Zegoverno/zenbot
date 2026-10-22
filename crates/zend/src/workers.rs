@@ -103,6 +103,9 @@ pub(crate) async fn supervise(app: AppState, idx: usize, mut exited: tokio::sync
 /// summaries).
 pub(crate) async fn complete(app: &App, model: &str, system: &str, prompt: &str) -> Result<worker::Completion> {
     let Some(w) = worker_for(app, model).await else { anyhow::bail!("no worker serves `{model}`") };
+    // Takes an engine slot when one is free, never waits (D-075): a summary inside the owner's
+    // turn mustn't stall behind background work.
+    let _slot = app.engine_slots.clone().try_acquire_owned().ok();
     let req = worker::Request::Complete(worker::Complete { model: model.into(), system: system.into(), prompt: prompt.into() });
     let res = app.workers[w].mind().call_within(&req, Duration::from_secs(600)).await?;
     if let Some(e) = res["error"].as_str() {

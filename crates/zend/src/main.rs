@@ -100,6 +100,12 @@ struct App {
     starting_prompts: Mutex<HashSet<Uuid>>,
     /// Kernel-started turns being waited for (verifier sessions), by session.
     waiters: Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<()>>>,
+    /// Engine slots (D-075, `ZEN_ENGINE_CONCURRENCY` each): top-level background turns (job runs,
+    /// kernel sessions) wait for one; the owner's turns and completions take one when free and never
+    /// wait. Child turns (subagents, verifiers) have their own pool, so a parent holding a slot
+    /// never blocks its children.
+    engine_slots: Arc<tokio::sync::Semaphore>,
+    child_slots: Arc<tokio::sync::Semaphore>,
     /// Kernel tasks running outside a turn (after a verdict: skill activation, scoring), counted as
     /// busy so an upgrade waits for them. Held through `Background` guards.
     pub(crate) background: Arc<std::sync::atomic::AtomicUsize>,
@@ -268,6 +274,8 @@ async fn serve() -> Result<()> {
         finishing: Mutex::new(HashSet::new()),
         starting_prompts: Mutex::new(HashSet::new()),
         waiters: Mutex::new(HashMap::new()),
+        engine_slots: Arc::new(tokio::sync::Semaphore::new(config::get().engine_concurrency)),
+        child_slots: Arc::new(tokio::sync::Semaphore::new(config::get().engine_concurrency)),
         background: Arc::default(),
     });
     tokio::spawn(app.updater.clone().check_periodically());

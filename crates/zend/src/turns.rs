@@ -7,6 +7,8 @@ use zen_proto::worker;
 
 /// A turn in progress. A session has at most one.
 pub(crate) struct Turn {
+    /// The engine slot it holds (D-075); freed when the turn is removed.
+    pub(crate) _slot: Option<tokio::sync::OwnedSemaphorePermit>,
     pub(crate) worker: usize,
     /// Set to true to stop the kernel's tool calls for this turn (abort, crash, end).
     pub(crate) cancel: watch::Sender<bool>,
@@ -459,6 +461,27 @@ impl Drop for StopOnDrop {
     }
 }
 
+/// An engine slot for a turn (D-075). Background work (a session with a kind) waits for one,
+/// saying so in its session: subagents and verifiers from the child pool, job runs and kernel
+/// sessions from the main one. The owner's turns take a main slot when free and otherwise run
+/// without, so they never wait behind background work.
+pub(crate) async fn engine_slot(app: &AppState, id: Uuid, kind: Option<&str>) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    let pool = match kind {
+        Some(crate::delegate::SUBAGENT | crate::agent::VERIFIER) => app.child_slots.clone(),
+        _ => app.engine_slots.clone(),
+    };
+    if let Ok(p) = pool.clone().try_acquire_owned() {
+        return Some(p);
+    }
+    if kind.is_none() {
+        return None;
+    }
+    let limit = crate::config::get().engine_concurrency;
+    app.emit(id, json!({ "type": "status", "text": format!("waiting for an engine ({limit} busy)") })).await;
+    tracing::info!("session {id} waits for one of {limit} engine slots");
+    pool.acquire_owned().await.ok()
+}
+
 pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: Origin) -> Result<()> {
     begin_queued(app, id, text, origin, None).await
 }
@@ -489,6 +512,7 @@ async fn begin_queued(app: &AppState, id: Uuid, text: String, origin: Origin, qu
             anyhow::bail!("model `{model}` doesn't take effort `{e}`; pick another with /effort");
         }
     }
+    let slot = engine_slot(app, id, kind.as_deref()).await;
     let turn_id = Uuid::new_v4();
     let (cancel, mut stopped) = watch::channel(false);
     {
@@ -499,6 +523,7 @@ async fn begin_queued(app: &AppState, id: Uuid, text: String, origin: Origin, qu
         turns.insert(
             id,
             Turn {
+                _slot: slot,
                 worker: widx,
                 cancel,
                 last_activity: Instant::now(),
