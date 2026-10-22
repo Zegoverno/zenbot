@@ -314,6 +314,17 @@ script_jobs() {
   check "the owner sees the exact command to approve" grep -qF "$ echo CHANGED" "$TMP/jobs-list.txt"
 }
 
+# The engine cap (D-075): with ZEN_ENGINE_CONCURRENCY=2, eight delegated subtasks all finish, but
+# never more than two subagent turns run at once (they wait for a slot).
+engine_cap() {
+  local ws; ws=$(new_workspace engine-cap)
+  start_kernel "$ws" "$(script delegate.json)" ZEN_ENGINE_CONCURRENCY=2 ZEN_DEFAULT_MODEL=faux/smoke
+  local sid; sid=$(zen ask --json -m faux/smoke "fan out" | jq -r .session_id)
+  local kids="SELECT t.* FROM turns t JOIN sessions s ON s.id = t.session_id WHERE s.parent = '$sid' AND s.kind = 'subagent'"
+  check "every subtask finished" eq "$(q "SELECT count(*) FROM ($kids) k WHERE outcome = 'ok'")" 8
+  check "never more than two subagent turns at once" eq "$(q "SELECT max(n) FROM (SELECT count(b.id) AS n FROM ($kids) a JOIN ($kids) b ON b.started_at < a.ended_at AND b.ended_at > a.started_at GROUP BY a.id) x")" 2
+}
+
 # The learning router (D-074): a session whose model nobody chose gets one at its first prompt from
 # System One's task_kind (stub markers ROUTE-CHAT, ROUTE-VAGUE, ROUTE-PLAN) and the policy's route;
 # an unsure answer keeps the default; a pinned model, a later prompt and the owner's /model are never
@@ -1734,7 +1745,7 @@ run mcp-login mcp_login
 run routing routing
 run basics prompt_files open_loop restart_recovery layout_move
 run memory memory_across_sessions memory_sleep
-run delegation delegation
+run delegation delegation engine_cap
 run names-suggestions names_suggestions
 run trust trust_session origin_attacks
 run workshop workshop

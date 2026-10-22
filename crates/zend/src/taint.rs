@@ -643,6 +643,7 @@ mod db {
 
     fn test_turn(cancel: tokio::sync::watch::Sender<bool>) -> crate::turns::Turn {
         crate::turns::Turn {
+            _slot: None,
             worker: usize::MAX, cancel, last_activity: std::time::Instant::now(), tools_running: 0, abort_sent: None,
             model: "faux/smoke".into(), context: Default::default(), turn_id: Uuid::new_v4(), started: std::time::Instant::now(),
             model_resolved: None, reported: Value::Null, workspace: std::env::temp_dir(), sent: Value::Null,

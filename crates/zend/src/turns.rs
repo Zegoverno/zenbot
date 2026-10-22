@@ -7,6 +7,8 @@ use zen_proto::worker;
 
 /// A turn in progress. A session has at most one.
 pub(crate) struct Turn {
+    /// The engine slot it holds (D-075); freed when the turn is removed.
+    pub(crate) _slot: Option<tokio::sync::OwnedSemaphorePermit>,
     pub(crate) worker: usize,
     /// Set to true to stop the kernel's tool calls for this turn (abort, crash, end).
     pub(crate) cancel: watch::Sender<bool>,
@@ -82,6 +84,8 @@ pub(crate) async fn finish_turn(app: &AppState, id: Uuid, error: Value) -> bool 
     let mut finishing = app.finishing.lock().await;
     let Some(turn) = app.turns.lock().await.remove(&id) else { return false };
     finishing.insert(id);
+    // A call still in flight keeps its own handle; the next turn starts a fresh order.
+    app.tool_order.lock().await.remove(&id);
     drop(finishing);
     let _finishing = SessionFlag { app: app.clone(), id, finishing: true };
     let _ = turn.cancel.send(true);
@@ -255,8 +259,24 @@ pub(crate) async fn per_turn_report(app: &App, turn: &Turn) -> Result<Value> {
 }
 
 /// One provider's report made per turn (see `per_turn_report`).
-async fn per_turn(app: &App, turn_id: Uuid, mut r: Value) -> Result<Value> {
-    if r["render"] != "resume" {
+async fn per_turn(app: &App, turn_id: Uuid, r: Value) -> Result<Value> {
+    let mut r = since_previous(app, turn_id, r).await?;
+    // An engine that reports no cost (Codex on a subscription) gets an API-equivalent estimate,
+    // so costs compare across engines (D-075).
+    if r["cost_usd"].is_null() {
+        let n = |k: &str| r[k].as_i64().unwrap_or(0);
+        if let Some(c) = crate::prices::estimate(r["model"].as_str().unwrap_or(""), n("input"), n("cache_read"), n("output")) {
+            r["cost_usd"] = json!(c);
+            r["cost_estimated"] = json!(true);
+        }
+    }
+    Ok(r)
+}
+
+/// A report of whole-session totals (Claude Code resuming its own session) less the previous
+/// turn's; a report of the turn's own usage (`totals: "turn"`, Codex) as it is.
+async fn since_previous(app: &App, turn_id: Uuid, mut r: Value) -> Result<Value> {
+    if r["render"] != "resume" || r["totals"] == "turn" {
         return Ok(r);
     }
     let previous: Option<Value> = sqlx::query_scalar(
@@ -443,6 +463,26 @@ impl Drop for StopOnDrop {
     }
 }
 
+/// An engine slot for a turn (D-075). Background work (a session with a kind) waits for one,
+/// saying so in its session: subagents and verifiers from the child pool, job runs and kernel
+/// sessions from the main one. The owner's turns take a main slot when free and otherwise run
+/// without, so they never wait behind background work.
+pub(crate) async fn engine_slot(app: &AppState, id: Uuid, kind: Option<&str>) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    let pool = match kind {
+        Some(crate::delegate::SUBAGENT | crate::agent::VERIFIER) => app.child_slots.clone(),
+        _ => app.engine_slots.clone(),
+    };
+    if let Ok(p) = pool.clone().try_acquire_owned() {
+        return Some(p);
+    }
+    // No slot free: the owner's turn (no kind) runs without one; background work waits.
+    kind?;
+    let limit = crate::config::get().engine_concurrency;
+    app.emit(id, json!({ "type": "status", "text": format!("waiting for an engine ({limit} busy)") })).await;
+    tracing::info!("session {id} waits for one of {limit} engine slots");
+    pool.acquire_owned().await.ok()
+}
+
 pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: Origin) -> Result<()> {
     begin_queued(app, id, text, origin, None).await
 }
@@ -473,6 +513,7 @@ async fn begin_queued(app: &AppState, id: Uuid, text: String, origin: Origin, qu
             anyhow::bail!("model `{model}` doesn't take effort `{e}`; pick another with /effort");
         }
     }
+    let slot = engine_slot(app, id, kind.as_deref()).await;
     let turn_id = Uuid::new_v4();
     let (cancel, mut stopped) = watch::channel(false);
     {
@@ -483,6 +524,7 @@ async fn begin_queued(app: &AppState, id: Uuid, text: String, origin: Origin, qu
         turns.insert(
             id,
             Turn {
+                _slot: slot,
                 worker: widx,
                 cancel,
                 last_activity: Instant::now(),

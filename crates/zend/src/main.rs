@@ -36,6 +36,7 @@ mod sources;
 mod proxy;
 mod tools;
 mod output;
+mod prices;
 mod route;
 mod media;
 mod trust;
@@ -99,6 +100,15 @@ struct App {
     starting_prompts: Mutex<HashSet<Uuid>>,
     /// Kernel-started turns being waited for (verifier sessions), by session.
     waiters: Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<()>>>,
+    /// Engine slots (D-075, `ZEN_ENGINE_CONCURRENCY` each): top-level background turns (job runs,
+    /// kernel sessions) wait for one; the owner's turns and completions take one when free and never
+    /// wait. Child turns (subagents, verifiers) have their own pool, so a parent holding a slot
+    /// never blocks its children.
+    engine_slots: Arc<tokio::sync::Semaphore>,
+    child_slots: Arc<tokio::sync::Semaphore>,
+    /// Per session, the order of its tool calls (D-075): read-only ones share it, any other holds it
+    /// alone.
+    tool_order: Mutex<HashMap<Uuid, Arc<tokio::sync::RwLock<()>>>>,
     /// Kernel tasks running outside a turn (after a verdict: skill activation, scoring), counted as
     /// busy so an upgrade waits for them. Held through `Background` guards.
     pub(crate) background: Arc<std::sync::atomic::AtomicUsize>,
@@ -208,6 +218,12 @@ async fn serve() -> Result<()> {
     migrator.set_ignore_missing(true);
     migrator.run(&db).await?;
     mcp_interaction::recover(&db).await?;
+    // Codex turns recorded before D-075: tokens counted once, an estimated cost.
+    match prices::backfill(&db).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("repriced {n} earlier Codex turns"),
+        Err(e) => tracing::warn!("repricing earlier Codex turns: {e:#}"),
+    }
     let rerate_db = db.clone();
     tokio::spawn(async move {
         if let Err(e) = sources::rerate_once(&rerate_db).await { tracing::warn!("source rerating: {e:#}"); }
@@ -261,6 +277,9 @@ async fn serve() -> Result<()> {
         finishing: Mutex::new(HashSet::new()),
         starting_prompts: Mutex::new(HashSet::new()),
         waiters: Mutex::new(HashMap::new()),
+        engine_slots: Arc::new(tokio::sync::Semaphore::new(config::get().engine_concurrency)),
+        child_slots: Arc::new(tokio::sync::Semaphore::new(config::get().engine_concurrency)),
+        tool_order: Mutex::new(HashMap::new()),
         background: Arc::default(),
     });
     tokio::spawn(app.updater.clone().check_periodically());

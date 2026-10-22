@@ -1311,7 +1311,61 @@ fn prune_files(home: &std::path::Path) -> Vec<String> {
     if tmps > 0 {
         notes.push(format!("sandbox: removed {tmps} session /tmp folder(s) unused for 7 days"));
     }
+    let user = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let engines = prune_engine_sessions(home, &user.join(".claude/projects"), ENGINE_DAYS, EVAL_DAYS as u64);
+    if engines > 0 {
+        notes.push(format!("engines: removed {engines} engine session file(s) or folder(s) unused for {ENGINE_DAYS} days"));
+    }
     notes
+}
+
+/// Days an engine's own session state is kept (D-075): Codex rollouts in zenbot's private Codex
+/// home and Claude Code's session files for zenbot's engine folder. A turn whose session is gone
+/// starts it again from the kernel's history.
+const ENGINE_DAYS: u64 = 14;
+
+/// Claude Code's folder name for a working directory: every `/` and `.` a `-`.
+fn claude_project(dir: &std::path::Path) -> String {
+    dir.to_string_lossy().replace(['/', '.'], "-")
+}
+
+/// Remove what's directly in `dir` (with `deep`, files anywhere below it, then emptied folders) whose
+/// modification time is over `days` old; returns how many. Symlinks are never followed.
+fn remove_older(dir: &std::path::Path, days: u64, deep: bool, keep: &dyn Fn(&std::path::Path) -> bool) -> usize {
+    let limit = std::time::Duration::from_secs(days * 86_400);
+    let old = |m: &std::fs::Metadata| m.modified().ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > limit);
+    let Ok(read) = std::fs::read_dir(dir) else { return 0 };
+    let mut n = 0;
+    for entry in read.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+        if keep(&path) || meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() && deep {
+            n += remove_older(&path, days, true, keep);
+            if std::fs::read_dir(&path).is_ok_and(|mut d| d.next().is_none()) && std::fs::remove_dir(&path).is_ok() {
+                n += 1;
+            }
+        } else if old(&meta) && (if meta.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) }).is_ok() {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// zenbot's engine session state (D-075): Codex rollouts (`engine/codex/home/sessions`), Claude
+/// Code's files for the engine's folder (`projects`, only zenbot's own, never the owner's) after
+/// `days`; eval kernels' Claude folders after `eval_days`; turn socket folders after a day.
+fn prune_engine_sessions(home: &std::path::Path, projects: &std::path::Path, days: u64, eval_days: u64) -> usize {
+    let none = |_: &std::path::Path| false;
+    let mut n = remove_older(&home.join("engine/codex/home/sessions"), days, true, &none);
+    n += remove_older(&projects.join(claude_project(&home.join("engine/claude"))), days, false, &none);
+    n += remove_older(&home.join("engine/sockets"), 1, false, &none);
+    // Eval kernels run with their own zen home under an eval run's folder (scripts/eval.sh).
+    let not_eval = |p: &std::path::Path| !p.file_name().is_some_and(|f| f.to_string_lossy().contains("-zenbot-evals-"));
+    n += remove_older(projects, eval_days, false, &not_eval);
+    n
 }
 
 /// Database dumps (`<zen home>/backups/<UTC time>-<label>.dump`, scripts/db.sh `db_backup`) kept.
@@ -1850,6 +1904,36 @@ pub async fn run_tool(app: &AppState, session: Uuid, name: &str, args: &Value, o
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_sessions_are_pruned_and_the_owners_claude_projects_kept() {
+        let root = crate::test_util::TestDir::new("engine-prune");
+        let (home, projects) = (root.join("zh"), root.join("projects"));
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(20 * 86_400);
+        let touch = |p: &std::path::Path, aged: bool| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "x").unwrap();
+            if aged { std::fs::File::options().write(true).open(p).unwrap().set_modified(old).unwrap(); }
+        };
+        let rollout = home.join("engine/codex/home/sessions/2026/10/01/rollout-a.jsonl");
+        touch(&rollout, true);
+        touch(&home.join("engine/codex/home/sessions/2026/10/21/rollout-b.jsonl"), false);
+        let engine = projects.join(claude_project(&home.join("engine/claude")));
+        touch(&engine.join("old.jsonl"), true);
+        touch(&engine.join("new.jsonl"), false);
+        let owners = projects.join("-home-me-work");
+        touch(&owners.join("old.jsonl"), true);
+        let eval = projects.join("-home-me--zenbot-evals-20261001T000000Z-work-x--zenbot-engine-claude");
+        touch(&eval.join("s.jsonl"), true);
+        std::fs::File::open(&eval).unwrap().set_modified(old).unwrap();
+        let n = prune_engine_sessions(&home, &projects, 14, 7);
+        assert!(!rollout.exists() && !rollout.parent().unwrap().exists(), "an old rollout and its emptied day folder go");
+        assert!(home.join("engine/codex/home/sessions/2026/10/21/rollout-b.jsonl").exists(), "a recent one stays");
+        assert!(!engine.join("old.jsonl").exists() && engine.join("new.jsonl").exists());
+        assert!(owners.join("old.jsonl").exists(), "the owner's own Claude projects are never touched");
+        assert!(!eval.exists(), "an old eval kernel's Claude folder goes");
+        assert!(n >= 4, "{n}");
+    }
 
     #[tokio::test]
     #[ignore = "SOURCE_TEST_DB_URL must name a disposable database"]

@@ -23,6 +23,15 @@ pub fn text_of(content: &Value) -> String {
     }
 }
 
+/// Tools that only read (D-075): the kernel lets calls to these overlap within a turn, and the
+/// Claude bridge marks them `readOnlyHint` so Claude Code sends them together. Every other tool
+/// (writes, the shell, outward actions, MCP calls) runs alone, in the order the calls came.
+pub const READ_ONLY_TOOLS: &[&str] = &["read", "history", "search", "web_search", "web_fetch", "find_skills", "load_skill", "find_tools", "load_tool", "judge"];
+
+pub fn read_only_tool(name: &str) -> bool {
+    READ_ONLY_TOOLS.contains(&name)
+}
+
 /// What the kernel's provenance record of a result hashes: its text, then each image's media type
 /// and data. A text-only result digests as its text, so older records still match.
 pub fn digest_text(content: &Value) -> String {
@@ -56,6 +65,16 @@ pub fn tail(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn only_reading_tools_may_overlap() {
+        for t in ["read", "search", "web_fetch", "load_tool"] {
+            assert!(read_only_tool(t), "{t}");
+        }
+        for t in ["bash", "write", "edit", "remember", "brain", "call_tool", "delegate", "schedule", "ask", "verify", "save_skill"] {
+            assert!(!read_only_tool(t), "{t} changes something: it runs alone");
+        }
+    }
 
     #[test]
     fn text_and_cuts() {

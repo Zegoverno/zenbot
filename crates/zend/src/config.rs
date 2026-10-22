@@ -106,6 +106,9 @@ pub struct Config {
     pub explore: f64,
     /// `ZEN_POLICY_MIN_JUDGED` (20): judged subtasks each model needs before a route may switch.
     pub policy_min_judged: u64,
+    /// `ZEN_ENGINE_CONCURRENCY` (3, at least 1): engine processes background work (job runs,
+    /// subagents, verifiers, kernel sessions) may run at once; the owner's never wait (D-075).
+    pub engine_concurrency: usize,
     /// `ZEN_TURN_IDLE_SECS` (600): the watchdog aborts a turn quiet this long.
     pub turn_idle_secs: u64,
     /// `ZEN_TURN_ABORT_GRACE_SECS` (30): then ends it in the kernel this long after the abort.
@@ -173,6 +176,7 @@ impl Config {
             jobs_tick: num("ZEN_JOBS_TICK", 60.0).clamp(0.2, 60.0),
             explore: num("ZEN_EXPLORE", 0.1),
             policy_min_judged: num("ZEN_POLICY_MIN_JUDGED", 20.0) as u64,
+            engine_concurrency: (num("ZEN_ENGINE_CONCURRENCY", 3.0) as usize).max(1),
             turn_idle_secs: num("ZEN_TURN_IDLE_SECS", 600.0) as u64,
             turn_abort_grace_secs: num("ZEN_TURN_ABORT_GRACE_SECS", 30.0) as u64,
             update_check_secs: num("ZEN_UPDATE_CHECK_SECS", 3600.0) as u64,

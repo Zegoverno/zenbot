@@ -448,9 +448,14 @@ impl TurnCtx {
                     }
                     let Ok(req) = serde_json::from_str::<Value>(&line) else { return };
                     let resp = match req["op"].as_str() {
-                        Some("list") => json!({ "tools": ctx.tools.iter().map(|t| json!({
-                            "name": t["name"], "description": t["description"], "inputSchema": t["parameters"]
-                        })).collect::<Vec<_>>() }),
+                        // Read-only tools are marked so Claude Code may run several at once (D-075).
+                        Some("list") => json!({ "tools": ctx.tools.iter().map(|t| {
+                            let mut tool = json!({ "name": t["name"], "description": t["description"], "inputSchema": t["parameters"] });
+                            if zen_proto::read_only_tool(t["name"].as_str().unwrap_or("")) {
+                                tool["annotations"] = json!({ "readOnlyHint": true });
+                            }
+                            tool
+                        }).collect::<Vec<_>>() }),
                         Some("call") => {
                             let result = ctx.call_tool(req["name"].as_str().unwrap_or(""), req["args"].clone(), None).await;
                             serde_json::to_value(result).unwrap_or_default()

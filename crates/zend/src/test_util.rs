@@ -50,6 +50,9 @@ pub(crate) fn app(db: sqlx::PgPool) -> crate::AppState {
         finishing: Mutex::new(HashSet::new()),
         starting_prompts: Mutex::new(HashSet::new()),
         waiters: Mutex::new(HashMap::new()),
+        engine_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(3)),
+        child_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(3)),
+        tool_order: Mutex::new(HashMap::new()),
         background: std::sync::Arc::default(),
     })
 }
