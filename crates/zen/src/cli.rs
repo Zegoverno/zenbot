@@ -323,7 +323,7 @@ pub(crate) fn short_sha(v: &Value) -> String {
 
 #[derive(Subcommand)]
 pub(crate) enum JobsCmd {
-    /// Create an agent job: a prompt run in a fresh session on a schedule
+    /// Create a job: a prompt run in a fresh session on a schedule, or (--command) a shell command run with no model
     Add {
         /// Lowercase letters, digits and hyphens, e.g. morning-brief
         name: String,
@@ -331,8 +331,11 @@ pub(crate) enum JobsCmd {
         #[arg(short, long)]
         schedule: String,
         /// The task, self-contained
-        #[arg(short, long)]
-        prompt: String,
+        #[arg(short, long, required_unless_present = "command", conflicts_with = "command")]
+        prompt: Option<String>,
+        /// A script job: this shell command, run in the contained shell with no model; its output is the report
+        #[arg(long)]
+        command: Option<String>,
         /// IANA timezone the schedule is read in (default America/Sao_Paulo)
         #[arg(long)]
         tz: Option<String>,
@@ -362,6 +365,9 @@ pub(crate) enum JobsCmd {
         schedule: Option<String>,
         #[arg(short, long)]
         prompt: Option<String>,
+        /// A script job's new command
+        #[arg(long)]
+        command: Option<String>,
         #[arg(long)]
         tz: Option<String>,
         #[arg(long)]

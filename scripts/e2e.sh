@@ -275,6 +275,45 @@ JSON
   kill "$srv" 2>/dev/null || true
 }
 
+# Script jobs (D-073): a command run in the contained shell with no model. The owner's run at once;
+# one the agent writes waits paused for the owner, can't be resumed or run by the agent, and waits
+# again after the agent changes it. Each run records its command and exit code; exit 0 with no
+# output is silent, any other exit an error; the secrets stay out of reach.
+script_jobs() {
+  local ws; ws=$(new_workspace script-jobs)
+  start_kernel "$ws" "$(script jobs.json)" ZEN_JOBS=1 ZEN_JOBS_TICK=0.5 ZEN_DEFAULT_MODEL=faux/smoke
+  local runs="SELECT string_agg(r.status, ',' ORDER BY r.id) FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name ="
+  zen jobs add sj-ok --schedule "every 1h" --command 'echo hello from a script; echo line two' >/dev/null
+  zen jobs run sj-ok >/dev/null
+  check "an owner's script job runs" poll "$runs 'sj-ok'" ok
+  check "its output is the report" grep -q "hello from a script" <<<"$(zen jobs runs sj-ok)"
+  check "the run records its command and exit code" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/jobs/runs?job=sj-ok" | jq -r '.[0] | "\(.command)|\(.exit_code)"')" "echo hello from a script; echo line two|0"
+  check "and no model ran" eq "$(q "SELECT count(*) FROM turns t JOIN job_runs r ON r.session_id = t.session_id JOIN jobs j ON j.id = r.job_id WHERE j.name = 'sj-ok'")" 0
+  zen jobs add sj-fail --schedule "every 1h" --command 'echo about to fail; exit 3' >/dev/null
+  zen jobs run sj-fail >/dev/null
+  check "a non-zero exit is an error" poll "$runs 'sj-fail'" error
+  check "with its exit code" grep -q "exit code 3" <<<"$(q "SELECT error FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name = 'sj-fail'")"
+  zen jobs add sj-quiet --schedule "every 1h" --command 'true' >/dev/null
+  zen jobs run sj-quiet >/dev/null
+  check "no output is silent" poll "$runs 'sj-quiet'" silent
+  zen jobs add sj-secret --schedule "every 1h" --command "cat $TMP/home/.zenbot/token; echo done" >/dev/null
+  zen jobs run sj-secret >/dev/null
+  poll "$runs 'sj-secret'" ok >/dev/null || poll "$runs 'sj-secret'" error >/dev/null
+  check "the zen home's secrets stay out of reach" bash -c '! grep -q "$1" <<<"$2"' _ "$TOKEN" "$(q "SELECT coalesce(output,'') || coalesce(error,'') FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name = 'sj-secret'")"
+  zen ask --json -m faux/smoke "script please" >/dev/null
+  check "a script job the agent writes waits for the owner" eq "$(zen jobs --json | jq -r '.jobs[] | select(.name == "agent-script") | "\(.enabled)|\(.kind)|\(.paused_reason | test("owner.s approval"))"')" "false|script|true"
+  check "the agent can't resume it" grep -q "only the owner resumes a script job" <<<"$(q "SELECT string_agg(payload->'content'->0->>'text', '|') FROM tape_events WHERE payload->>'toolName' = 'schedule'")"
+  zen jobs run agent-script >/dev/null
+  check "nor does it run before the owner approves" poll "$runs 'agent-script'" error
+  zen jobs resume agent-script >/dev/null
+  zen jobs run agent-script >/dev/null
+  check "approved, it runs" poll "$runs 'agent-script'" error,ok
+  zen ask --json -m faux/smoke "change script" >/dev/null
+  check "changed by the agent, it waits again" eq "$(zen jobs --json | jq -r '.jobs[] | select(.name == "agent-script") | "\(.enabled)|\(.command)"')" "false|echo CHANGED"
+  zen jobs >"$TMP/jobs-list.txt" 2>&1
+  check "the owner sees the exact command to approve" grep -qF "$ echo CHANGED" "$TMP/jobs-list.txt"
+}
+
 # MCP sign-in (D-072): a server behind OAuth (oauth_server.py on the e2e port + 16) asks for a
 # login; the owner's login discovers the authorization server, registers zenbot, and finishes with
 # the address the browser ended on; calls then carry a token that refreshes and rotates by itself.
@@ -1644,7 +1683,7 @@ run phase4 phase4_brain
 run phase4-upgrade phase4_upgrade
 run phase3 phase3_kernel
 run turns abort_tool stale_turn
-run jobs scheduled_jobs job_report_file job_post_to
+run jobs scheduled_jobs job_report_file job_post_to script_jobs
 run search-index search_index
 run taint-on-data taint_on_data
 run summaries summaries slow_summary

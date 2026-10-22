@@ -10,5 +10,10 @@
   {"when": "JOBTASK-N", "text": "Done, but no file written."},
   {"when": "JOBTASK-E", "tool": "bash", "args": {"command": "mkdir -p out && : > out/empty.md"}},
   {"when": "JOBTASK-E", "text": "Done."},
+  {"when": "script please", "tool": "schedule", "args": {"action": "create", "name": "agent-script", "command": "echo AGENT SCRIPT RAN", "schedule": "every 1h"}},
+  {"when": "script please", "tool": "schedule", "args": {"action": "resume", "name": "agent-script"}},
+  {"when": "script please", "text": "Scheduled a script."},
+  {"when": "change script", "tool": "schedule", "args": {"action": "update", "name": "agent-script", "command": "echo CHANGED"}},
+  {"when": "change script", "text": "Changed."},
   {"when": "OWNER-HELLO", "text": "Hello, owner."}
 ]

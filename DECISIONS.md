@@ -6,6 +6,26 @@
 
 ---
 
+## D-073 — Script jobs: a command on a schedule, with no model
+
+**Date:** 2026-10-22 · **Status:** accepted (owner, 2026-10-21: the agent may create them, but they
+wait for the owner's approval, and every run is logged)
+
+**Decision:** A job may be `script`: a shell `command` instead of a prompt. A run makes a `job`
+session (model `script`) and runs the command as the agent's `bash` would, in the contained shell
+with the egress proxy and the masked files, for at most 600 s; its output is masked and rated by
+what it shows and the hosts it reached. Its output (head and tail past 60 KB), or its `report_file`
+checked as for D-055, is the report; exit 0 with no output is `silent`, any other exit or a timeout
+an error. Retries, pausing after failures and `post_to` are as for agent jobs. Each run records the
+exact command and its exit code. The owner's script jobs are live at once; one the agent creates,
+or changes, is paused until the owner resumes it, which approves its command: the agent can't resume
+one, no System One judgment makes it live, and the kernel refuses to run one without the owner's
+approval.
+
+**Why:** Three of the five live jobs only ran a fixed command through a model (two model calls and
+their context per run, and failures that weren't the script's). D-055 considered command jobs and
+left them out because the readings job needs judgment; that one stays an agent job.
+
 ## D-072 — MCP sign-in from the terminal: the owner pastes back the redirect address
 
 **Date:** 2026-10-22 · **Status:** accepted (owner: a TUI-only solution, shipped with Phase 6)

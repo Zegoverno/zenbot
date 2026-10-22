@@ -340,8 +340,10 @@ pub fn job_line(j: &Value) -> String {
         format!("paused: {}", j["paused_reason"].as_str().unwrap_or("paused"))
     };
     let last = j["last_status"].as_str().map(|s| format!("; last {s} {} UTC", minute(&j["last_run_at"]))).unwrap_or_default();
+    // A script job's exact command: what the owner approves when resuming one zenbot wrote.
+    let command = j["command"].as_str().map(|c| format!("\n  `$ {c}`")).unwrap_or_default();
     format!(
-        "- `{}` {} ({}): {state}{last}",
+        "- `{}` {} ({}): {state}{last}{command}",
         j["name"].as_str().unwrap_or(""),
         j["schedule"].as_str().unwrap_or(""),
         j["tz"].as_str().unwrap_or("")
@@ -349,6 +351,14 @@ pub fn job_line(j: &Value) -> String {
 }
 
 /// One run: its header, then the start of its report or error.
+/// The first `max` characters of `s`.
+fn short(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((i, _)) => format!("{}…", &s[..i]),
+        None => s.to_string(),
+    }
+}
+
 fn run_block(x: &Value) -> String {
     let mut s = format!(
         "**{}** {} UTC: {} ({})",
@@ -357,6 +367,11 @@ fn run_block(x: &Value) -> String {
         x["status"].as_str().unwrap_or(""),
         x["trigger"].as_str().unwrap_or("")
     );
+    // A script job's run: the exact command it ran and how it exited.
+    if let Some(c) = x["command"].as_str() {
+        let exit = x["exit_code"].as_i64().map(|e| format!(" (exit {e})")).unwrap_or_default();
+        s.push_str(&format!("\n`$ {}`{exit}", short(c, 200)));
+    }
     if let Some(body) = x["output"].as_str().or(x["error"].as_str()) {
         for line in body.lines().take(12) {
             s.push_str(&format!("\n> {line}"));

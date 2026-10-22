@@ -127,7 +127,9 @@ pub(crate) fn job_line(j: &Value) -> String {
     };
     let last = j["last_status"].as_str().map(|s| format!("; last {s} {} UTC", t("last_run_at"))).unwrap_or_default();
     let when = format!("{} ({})", j["schedule"].as_str().unwrap_or(""), j["tz"].as_str().unwrap_or(""));
-    format!("{:<16} {:<6} {:<34} {state}{last}", j["name"].as_str().unwrap_or(""), j["kind"].as_str().unwrap_or(""), when)
+    // A script job's exact command: what the owner approves by resuming one zenbot wrote.
+    let command = j["command"].as_str().map(|c| format!("\n{:<16} $ {c}", "")).unwrap_or_default();
+    format!("{:<16} {:<6} {:<34} {state}{last}{command}", j["name"].as_str().unwrap_or(""), j["kind"].as_str().unwrap_or(""), when)
 }
 
 pub(crate) fn memory_line(m: &Value) -> String {

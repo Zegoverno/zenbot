@@ -14,7 +14,7 @@ case "$(basename "$DIR")" in
 esac
 # D-068 adds durable queues/exports, MCP containment and a vendored public suffix list.
 # Raise only zend's budget for the combined feature set; the client/worker budgets stay fixed.
-# D-072/D-073 (MCP sign-in, script jobs, the learning router): zend +1000 KiB release, +800 dist.
+# D-072 to D-074 (MCP sign-in, script jobs, the learning router): zend +1000 KiB release, +800 dist.
 over=0
 for ((i = 0; i < ${#BUDGET[@]}; i += 2)); do
   name=${BUDGET[i]} max=${BUDGET[i + 1]}

@@ -754,9 +754,9 @@ mod tests {
             println!("{:>6} {}", serde_json::to_vec(tool).unwrap().len(), tool["name"].as_str().unwrap_or(""));
         }
         println!("Owner tool schemas including judge: {bytes} JSON bytes; approximately {} tokens at 4 bytes/token (estimate, not tokenizer measurement)", bytes.div_ceil(4));
-        // A guard against regrowth at the Phase 5 size (about 19 KB before it); lower it as
-        // descriptions shrink, raise it only on purpose.
-        assert!(bytes <= 16_000, "tool schemas exceed the 16,000-byte budget: {bytes}");
+        // A guard against regrowth at the Phase 5 size (about 19 KB before it), plus the script
+        // job's `command` (D-073); lower it as descriptions shrink, raise it only on purpose.
+        assert!(bytes <= 16_200, "tool schemas exceed the 16,200-byte budget: {bytes}");
     }
 
     #[test]
