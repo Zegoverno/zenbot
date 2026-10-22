@@ -255,8 +255,24 @@ pub(crate) async fn per_turn_report(app: &App, turn: &Turn) -> Result<Value> {
 }
 
 /// One provider's report made per turn (see `per_turn_report`).
-async fn per_turn(app: &App, turn_id: Uuid, mut r: Value) -> Result<Value> {
-    if r["render"] != "resume" {
+async fn per_turn(app: &App, turn_id: Uuid, r: Value) -> Result<Value> {
+    let mut r = since_previous(app, turn_id, r).await?;
+    // An engine that reports no cost (Codex on a subscription) gets an API-equivalent estimate,
+    // so costs compare across engines (D-075).
+    if r["cost_usd"].is_null() {
+        let n = |k: &str| r[k].as_i64().unwrap_or(0);
+        if let Some(c) = crate::prices::estimate(r["model"].as_str().unwrap_or(""), n("input"), n("cache_read"), n("output")) {
+            r["cost_usd"] = json!(c);
+            r["cost_estimated"] = json!(true);
+        }
+    }
+    Ok(r)
+}
+
+/// A report of whole-session totals (Claude Code resuming its own session) less the previous
+/// turn's; a report of the turn's own usage (`totals: "turn"`, Codex) as it is.
+async fn since_previous(app: &App, turn_id: Uuid, mut r: Value) -> Result<Value> {
+    if r["render"] != "resume" || r["totals"] == "turn" {
         return Ok(r);
     }
     let previous: Option<Value> = sqlx::query_scalar(

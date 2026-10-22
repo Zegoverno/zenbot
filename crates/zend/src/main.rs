@@ -36,6 +36,7 @@ mod sources;
 mod proxy;
 mod tools;
 mod output;
+mod prices;
 mod route;
 mod media;
 mod trust;
@@ -208,6 +209,12 @@ async fn serve() -> Result<()> {
     migrator.set_ignore_missing(true);
     migrator.run(&db).await?;
     mcp_interaction::recover(&db).await?;
+    // Codex turns recorded before D-075: tokens counted once, an estimated cost.
+    match prices::backfill(&db).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("repriced {n} earlier Codex turns"),
+        Err(e) => tracing::warn!("repricing earlier Codex turns: {e:#}"),
+    }
     let rerate_db = db.clone();
     tokio::spawn(async move {
         if let Err(e) = sources::rerate_once(&rerate_db).await { tracing::warn!("source rerating: {e:#}"); }

@@ -461,6 +461,9 @@ async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bo
             eprintln!("[engine] codex: {reason}");
         }
         let mut usage = json!({ "input": 0, "output": 0, "cacheRead": 0 });
+        // Model calls since the last message sent: they go on the next message, so the kernel's
+        // model_calls carry Codex's usage as they do Claude's.
+        let mut calls = json!({ "input": 0, "output": 0, "cacheRead": 0 });
         let mut error: Option<String> = None;
         let mut interrupted = false;
         // Messages sent to the tape: a turn that completes without any means the stream has changed.
@@ -496,7 +499,7 @@ async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bo
                     let it = &p["item"];
                     let message = json!({ "role": "assistant", "provider": "codex", "model": model, "stopReason": "toolUse", "timestamp": now_ms(),
                         "content": [{ "type": "toolCall", "id": it["id"], "name": it["tool"], "arguments": it["arguments"] }],
-                        "usage": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": { "total": 0.0 } } });
+                        "usage": message_usage(&mut calls) });
                     ctx.notify(TurnEvent::Message { message }).await;
                     sent += 1;
                 }
@@ -509,16 +512,21 @@ async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bo
                 "item/completed" if p["item"]["type"] == "agentMessage" => {
                     let message = json!({ "role": "assistant", "provider": "codex", "model": model, "stopReason": "stop", "timestamp": now_ms(),
                         "content": [{ "type": "text", "text": p["item"]["text"] }],
-                        "usage": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": { "total": 0.0 } } });
+                        "usage": message_usage(&mut calls) });
                     ctx.notify(TurnEvent::Message { message }).await;
                     sent += 1;
                 }
                 "thread/tokenUsage/updated" => {
+                    // Codex's inputTokens include the cached ones: input is the uncached rest, as
+                    // Claude reports it, so cached tokens are never counted twice.
                     let l = &p["tokenUsage"]["last"];
-                    let add = |k: &str, src: &str, u: &mut Value| u[k] = json!(u[k].as_i64().unwrap_or(0) + l[src].as_i64().unwrap_or(0));
-                    add("input", "inputTokens", &mut usage);
-                    add("output", "outputTokens", &mut usage);
-                    add("cacheRead", "cachedInputTokens", &mut usage);
+                    let cached = l["cachedInputTokens"].as_i64().unwrap_or(0);
+                    let input = (l["inputTokens"].as_i64().unwrap_or(0) - cached).max(0);
+                    for u in [&mut usage, &mut calls] {
+                        u["input"] = json!(u["input"].as_i64().unwrap_or(0) + input);
+                        u["output"] = json!(u["output"].as_i64().unwrap_or(0) + l["outputTokens"].as_i64().unwrap_or(0));
+                        u["cacheRead"] = json!(u["cacheRead"].as_i64().unwrap_or(0) + cached);
+                    }
                 }
                 "error" => error = Some(error_text(&p["error"])),
                 "turn/completed" => {
@@ -550,7 +558,7 @@ async fn run_turn(ctx: TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bo
             .report_usage(json!({ "engine": "codex", "engine_version": engine_version,
                 "provider": "codex", "model": model, "render": render, "fallback_reason": fallback,
                 "engine_session": if sessions { json!({ "id": thread_id, "resumable": error.is_none() && !interrupted }) } else { Value::Null },
-                "input": usage["input"], "output": usage["output"], "cache_read": usage["cacheRead"], "cost_usd": null }))
+                "input": usage["input"], "output": usage["output"], "cache_read": usage["cacheRead"], "cost_usd": null, "totals": "turn" }))
             .await;
         if interrupted {
             return Ok(Some("interrupted".into()));
@@ -610,6 +618,15 @@ async fn complete_now(model: &str, system: &str, prompt: &str) -> Result<Complet
     }
     let _ = s.child.start_kill();
     Ok(Completion { text, usage: json!({ "input": input, "output": output }), model: model.to_string() })
+}
+
+/// The usage of the model calls since the last message, for the next one; then none.
+fn message_usage(calls: &mut Value) -> Value {
+    let n = |k: &str| calls[k].as_i64().unwrap_or(0);
+    let u = json!({ "input": n("input"), "output": n("output"), "cacheRead": n("cacheRead"), "cacheWrite": 0,
+        "totalTokens": n("input") + n("output") + n("cacheRead"), "cost": { "total": 0.0 } });
+    *calls = json!({ "input": 0, "output": 0, "cacheRead": 0 });
+    u
 }
 
 /// The app-server's dynamic tool response supports inline images with subscription sign-in.
@@ -675,6 +692,14 @@ fn history_items(history: &[Value]) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_message_carries_the_calls_since_the_last_one_once() {
+        let mut calls = json!({ "input": 40, "output": 5, "cacheRead": 1000 });
+        let u = message_usage(&mut calls);
+        assert_eq!((u["input"].as_i64(), u["cacheRead"].as_i64(), u["totalTokens"].as_i64()), (Some(40), Some(1000), Some(1045)));
+        assert_eq!(message_usage(&mut calls)["totalTokens"], 0, "then none");
+    }
 
     #[test]
     fn dynamic_images_and_replay_use_supported_content_items() {
