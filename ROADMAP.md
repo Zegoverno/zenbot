@@ -34,11 +34,8 @@ Keep dogfooding zenbot on real work and let sessions, verdicts and what the owne
 sleep's promotions into long-term memory, skill drafts, tools, routes) drive what
 changes. Candidate follow-ups, each only when use calls for it:
 
-- **Redesign phases 2–5** (security, kernel core, memory and knowledge, tools: D-062 to D-071) are
-  merged and installed; PROGRESS.md has each.
-- **Phase 6, orchestration (D-072 to D-074), on its branch:** MCP sign-in from the terminal,
-  delivery that never blocks the schedule, script jobs, and the learning router (task kinds, routes,
-  A/B outcomes). Next: evals for jobs and subagents, then Phase 7 (engines: a concurrency cap).
+- **Redesign phases 1–6** are merged and installed (D-066 to D-074; PROGRESS.md has each). Phase 7,
+  engines (D-075), is on its branch; next, Phase 8 (storage: SQLite), 9 (clients), 10 (operations).
   Not planned yet: MCP sampling, roots and subscriptions; device-flow MCP sign-in.
 - **Matrix:** interactive (emoji) verification of the bot; streaming answers by editing a message,
   if waiting for the whole answer feels slow.
