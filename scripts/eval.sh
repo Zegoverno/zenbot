@@ -328,7 +328,8 @@ run_task() { # name bin label model effort db task repeat port
         local job; job=$(echo "$step" | jq -c --arg m "$model" --arg s "$sid" '.job | .schedule //= "every 1h" | (if .command then . else .model = $m end) | (if .post_to == "this" then .post_to = $s else . end)')
         local api=(curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json')
         local jname; jname=$(echo "$job" | jq -r .name)
-        "${api[@]}" -d "$job" "http://127.0.0.1:$port/api/jobs" | jq -e .name >/dev/null 2>&1 || { error="job step $((i + 1)): the job wasn't created"; break; }
+        local made; made=$("${api[@]}" -d "$job" "http://127.0.0.1:$port/api/jobs")
+        jq -e .name <<<"$made" >/dev/null 2>&1 || { error="job step $((i + 1)): the job wasn't created: $(head -c 300 <<<"$made")"; break; }
         "${api[@]}" -X POST -d '{}' "http://127.0.0.1:$port/api/jobs/$jname/run" >/dev/null
         local jt0 run="" status=""; jt0=$(date +%s%3N)
         for _ in $(seq 1 450); do

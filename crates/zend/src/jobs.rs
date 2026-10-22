@@ -474,6 +474,10 @@ pub async fn create(app: &AppState, spec: Spec, by: By) -> Result<(Job, Option<S
         By::Agent(s) => ("agent", Some(*s), None),
     };
     if let Some(m) = &model {
+        if !app.routes.lock().await.contains_key(m) {
+            // The workers' model lists may not have been read yet (a kernel that just started).
+            crate::collect_models(app).await;
+        }
         anyhow::ensure!(app.routes.lock().await.contains_key(m), "no worker serves model `{m}`");
     }
     let (approval, paused) = match (&by, kind) {
