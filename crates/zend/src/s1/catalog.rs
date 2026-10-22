@@ -89,6 +89,11 @@ pub const KINDS: &[Kind] = &[
         facts: &["new_skill", "skills"],
         outcomes: Some(&[("duplicate", Cautious), ("new", Neutral)]), unavailable: None, owner_rung: false,
     },
+    Kind {
+        name: "task_kind", exposure: Exposure::Private, mode: Mode::Single,
+        facts: &["task", "kinds"],
+        outcomes: Some(&[("known", Neutral), ("unsure", Cautious)]), unavailable: Some("unsure"), owner_rung: false,
+    },
     Kind { name: "judge", exposure: Exposure::Information, mode: Mode::Items, facts: &["context"], outcomes: None, unavailable: None, owner_rung: false },
 ];
 

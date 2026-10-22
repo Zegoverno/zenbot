@@ -269,7 +269,7 @@ async fn run(cli: Cli) -> Result<()> {
             let r = c.post("/api/policy/undo", json!({})).await?;
             emit(json, &r, || format!("policy v{}", r["version"]));
         }
-        Cmd::Policy { cmd: Some(PolicyCmd::Set { kind, model, candidates, explore }) } => {
+        Cmd::Policy { cmd: Some(PolicyCmd::Set { kind, model, candidates, explore, describe, no_explore }) } => {
             let mut p = c.get("/api/policy").await?["policy"].clone();
             if !p["routes"].is_object() {
                 p["routes"] = json!({});
@@ -281,6 +281,16 @@ async fn run(cli: Cli) -> Result<()> {
             p["routes"][&kind] = route;
             if let Some(e) = explore {
                 p["explore"] = json!(e);
+            }
+            // A new kind explores unless told not to; an existing one keeps its setting.
+            if let Some(d) = describe {
+                if p["kinds"][&kind]["explore"].is_null() {
+                    p["kinds"][&kind]["explore"] = json!(true);
+                }
+                p["kinds"][&kind]["description"] = json!(d);
+            }
+            if no_explore {
+                p["kinds"][&kind]["explore"] = json!(false);
             }
             let r = c.post("/api/policy", json!({ "policy": p, "reason": format!("owner: {kind} -> {model}") })).await?;
             emit(json, &r, || format!("policy v{}", r["version"]));
@@ -316,6 +326,15 @@ async fn run(cli: Cli) -> Result<()> {
             let res = c.post(&format!("/api/tools/{}/review", enc(name.trim_start_matches("made_"))), json!({ "decision": decision, "sha": sha })).await?;
             emit(json, &res, || res["result"].as_str().unwrap_or("").to_string());
         }
+        Cmd::McpLogin { server } => {
+            let r = c.post("/api/mcp/login", json!({ "server": server })).await?;
+            println!("{}", zen_client::owner::login_instructions(&r));
+            eprint!("address> ");
+            let mut pasted = String::new();
+            std::io::stdin().read_line(&mut pasted)?;
+            let done = c.post(&format!("/api/mcp/login/{}", enc(r["flow"].as_str().unwrap_or(""))), json!({ "callback": pasted.trim() })).await?;
+            println!("{}", zen_client::owner::login_done(&done));
+        }
         Cmd::McpPending => out(&c.get("/api/mcp/pending").await?),
         Cmd::McpRespond { id, action, data } => {
             let mut body = json!({"action": action});
@@ -336,13 +355,13 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Jobs { cmd: Some(cmd) } => match cmd {
-            JobsCmd::Add { name, schedule, prompt, tz, context, skills, model, dir, report_file, post_to } => {
-                let body = json!({ "name": name, "schedule": schedule, "prompt": prompt, "tz": tz, "context": context, "skills": skills, "model": model, "workspace": dir, "report_file": report_file, "post_to": post_to });
+            JobsCmd::Add { name, schedule, prompt, command, tz, context, skills, model, dir, report_file, post_to } => {
+                let body = json!({ "name": name, "schedule": schedule, "prompt": prompt, "command": command, "tz": tz, "context": context, "skills": skills, "model": model, "workspace": dir, "report_file": report_file, "post_to": post_to });
                 let j = c.post("/api/jobs", body).await?;
                 emit(json, &j, || job_line(&j));
             }
-            JobsCmd::Set { name, schedule, prompt, tz, context, skills, model, report_file, post_to } => {
-                let body = json!({ "schedule": schedule, "prompt": prompt, "tz": tz, "context": context, "skills": skills, "model": model, "report_file": report_file, "post_to": post_to });
+            JobsCmd::Set { name, schedule, prompt, command, tz, context, skills, model, report_file, post_to } => {
+                let body = json!({ "schedule": schedule, "prompt": prompt, "command": command, "tz": tz, "context": context, "skills": skills, "model": model, "report_file": report_file, "post_to": post_to });
                 let j = c.patch(&format!("/api/jobs/{}", enc(&name)), body).await?;
                 emit(json, &j, || job_line(&j));
             }

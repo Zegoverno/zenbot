@@ -275,6 +275,120 @@ JSON
   kill "$srv" 2>/dev/null || true
 }
 
+# Script jobs (D-073): a command run in the contained shell with no model. The owner's run at once;
+# one the agent writes waits paused for the owner, can't be resumed or run by the agent, and waits
+# again after the agent changes it. Each run records its command and exit code; exit 0 with no
+# output is silent, any other exit an error; the secrets stay out of reach.
+script_jobs() {
+  local ws; ws=$(new_workspace script-jobs)
+  start_kernel "$ws" "$(script jobs.json)" ZEN_JOBS=1 ZEN_JOBS_TICK=0.5 ZEN_DEFAULT_MODEL=faux/smoke
+  local runs="SELECT string_agg(r.status, ',' ORDER BY r.id) FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name ="
+  zen jobs add sj-ok --schedule "every 1h" --command 'echo hello from a script; echo line two' >/dev/null
+  zen jobs run sj-ok >/dev/null
+  check "an owner's script job runs" poll "$runs 'sj-ok'" ok
+  check "its output is the report" grep -q "hello from a script" <<<"$(zen jobs runs sj-ok)"
+  check "the run records its command and exit code" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/jobs/runs?job=sj-ok" | jq -r '.[0] | "\(.command)|\(.exit_code)"')" "echo hello from a script; echo line two|0"
+  check "and no model ran" eq "$(q "SELECT count(*) FROM turns t JOIN job_runs r ON r.session_id = t.session_id JOIN jobs j ON j.id = r.job_id WHERE j.name = 'sj-ok'")" 0
+  zen jobs add sj-fail --schedule "every 1h" --command 'echo about to fail; exit 3' >/dev/null
+  zen jobs run sj-fail >/dev/null
+  check "a non-zero exit is an error" poll "$runs 'sj-fail'" error
+  check "with its exit code" grep -q "exit code 3" <<<"$(q "SELECT error FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name = 'sj-fail'")"
+  zen jobs add sj-quiet --schedule "every 1h" --command 'true' >/dev/null
+  zen jobs run sj-quiet >/dev/null
+  check "no output is silent" poll "$runs 'sj-quiet'" silent
+  zen jobs add sj-secret --schedule "every 1h" --command "cat $TMP/home/.zenbot/token; echo done" >/dev/null
+  zen jobs run sj-secret >/dev/null
+  poll "$runs 'sj-secret'" ok >/dev/null || poll "$runs 'sj-secret'" error >/dev/null
+  check "the zen home's secrets stay out of reach" bash -c '! grep -q "$1" <<<"$2"' _ "$TOKEN" "$(q "SELECT coalesce(output,'') || coalesce(error,'') FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name = 'sj-secret'")"
+  zen ask --json -m faux/smoke "script please" >/dev/null
+  check "a script job the agent writes waits for the owner" eq "$(zen jobs --json | jq -r '.jobs[] | select(.name == "agent-script") | "\(.enabled)|\(.kind)|\(.paused_reason | test("owner.s approval"))"')" "false|script|true"
+  check "the agent can't resume it" grep -q "only the owner resumes a script job" <<<"$(q "SELECT string_agg(payload->'content'->0->>'text', '|') FROM tape_events WHERE payload->>'toolName' = 'schedule'")"
+  zen jobs run agent-script >/dev/null
+  check "nor does it run before the owner approves" poll "$runs 'agent-script'" error
+  zen jobs resume agent-script >/dev/null
+  zen jobs run agent-script >/dev/null
+  check "approved, it runs" poll "$runs 'agent-script'" error,ok
+  zen ask --json -m faux/smoke "change script" >/dev/null
+  check "changed by the agent, it waits again" eq "$(zen jobs --json | jq -r '.jobs[] | select(.name == "agent-script") | "\(.enabled)|\(.command)"')" "false|echo CHANGED"
+  zen jobs >"$TMP/jobs-list.txt" 2>&1
+  check "the owner sees the exact command to approve" grep -qF "$ echo CHANGED" "$TMP/jobs-list.txt"
+}
+
+# The learning router (D-074): a session whose model nobody chose gets one at its first prompt from
+# System One's task_kind (stub markers ROUTE-CHAT, ROUTE-VAGUE, ROUTE-PLAN) and the policy's route;
+# an unsure answer keeps the default; a pinned model, a later prompt and the owner's /model are never
+# rerouted; an agent job without the owner's model is routed per run; planning never explores.
+routing() {
+  local ws; ws=$(new_workspace routing)
+  local port=$((PORT + 3))
+  python3 "$REPO/scripts/e2e/systemone_stub.py" "$port" & local srv=$!
+  start_kernel "$ws" "$(script routing.json)" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key ZEN_S1_URL="http://127.0.0.1:$port/systemone" \
+    ZEN_DEFAULT_MODEL=faux/smoke ZEN_JOBS=1 ZEN_JOBS_TICK=0.5
+  zen policy set chat faux/backup >/dev/null
+  new() { curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{}' "$URL/api/sessions" | jq -r .id; }
+  local model="SELECT model || '|' || coalesce(model_source, '-') FROM sessions WHERE id ="
+  local chosen="SELECT input->>'kind' || '|' || chosen || '|' || probability FROM decisions WHERE point = 'model' AND session_id ="
+  local chat; chat=$(new)
+  zen ask --json -s "$chat" "ROUTE-CHAT what does this error mean" >/dev/null
+  check "a confident chat goes to its route" eq "$(q "$model '$chat'")" "faux/backup|router"
+  check "the choice is logged with its kind and probability" eq "$(q "$chosen '$chat'")" "chat|faux/backup|1"
+  zen ask --json -s "$chat" "ROUTE-PLAN now design the whole system" >/dev/null
+  check "a later prompt keeps the session's model" eq "$(q "$model '$chat'")" "faux/backup|router"
+  local vague; vague=$(new)
+  zen ask --json -s "$vague" "ROUTE-VAGUE hmm" >/dev/null
+  check "an unsure kind keeps the default" eq "$(q "$model '$vague'")/$(q "SELECT input->>'kind' FROM decisions WHERE point = 'model' AND session_id = '$vague'")" "faux/smoke|router/unsure"
+  local pinned; pinned=$(zen ask --json -m faux/smoke "ROUTE-CHAT hello" | jq -r .session_id)
+  check "a model the owner named is never rerouted" eq "$(q "$model '$pinned'")/$(q "SELECT count(*) FROM decisions WHERE point = 'model' AND session_id = '$pinned'")" "faux/smoke|owner/0"
+  curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"model":"faux/smoke"}' "$URL/api/sessions/$chat" >/dev/null
+  check "/model makes it the owner's choice" eq "$(q "$model '$chat'")" "faux/smoke|owner"
+  local policy; policy=$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/policy" | jq -c .policy)
+  check "the policy holds the starting kinds; planning never explores" eq "$(jq -r '[(.kinds | length >= 9), .kinds.planning.explore, .routes.planning.model, .explore] | join("|")' <<<"$policy")" "true|false|faux/smoke|0.05"
+  zen jobs add routed --schedule "every 1h" --prompt "ROUTE-CHAT a quick daily check" >/dev/null
+  zen jobs run routed >/dev/null
+  check "an agent job without the owner's model is routed per run" poll "SELECT s.model FROM job_runs r JOIN jobs j ON j.id = r.job_id JOIN sessions s ON s.id = r.session_id WHERE j.name = 'routed'" faux/backup
+  check "and its run is logged as a routed choice" poll "SELECT d.input->>'via' FROM decisions d JOIN job_runs r ON r.session_id = d.session_id JOIN jobs j ON j.id = r.job_id WHERE j.name = 'routed' AND d.point = 'model'" job
+  zen policy set restarts faux/backup --describe "Restarting services" --no-explore >/dev/null
+  check "the owner can add a kind" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/policy" | jq -r '.policy.kinds.restarts | "\(.description)|\(.explore)"')" "Restarting services|false"
+  kill "$srv" 2>/dev/null || true
+}
+
+# MCP sign-in (D-072): a server behind OAuth (oauth_server.py on the e2e port + 16) asks for a
+# login; the owner's login discovers the authorization server, registers zenbot, and finishes with
+# the address the browser ended on; calls then carry a token that refreshes and rotates by itself.
+mcp_login() {
+  local ws; ws=$(new_workspace mcp-login)
+  local port=$((PORT + 16))
+  python3 "$REPO/scripts/e2e/oauth_server.py" "$port" & local srv=$!
+  mkdir -p "$TMP/home/.zenbot"
+  cat >"$TMP/home/.zenbot/mcp.json" <<JSON
+{ "mcpServers": { "linear": { "url": "http://127.0.0.1:$port/mcp", "untrusted": false } } }
+JSON
+  start_kernel "$ws" "$(script mcp-login.json)"
+  until_ok curl -sf "http://127.0.0.1:$port/stats" -o /dev/null
+  api() { curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
+  local results="SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE payload->>'role'='toolResult' AND session_id="
+  local r; r=$(zen ask --json -m faux/smoke "call linear")
+  check "before signing in, a call says how to sign in" grep -q 'zen mcp-login linear' <<<"$(q "$results'$(jq -r .session_id <<<"$r")'")"
+  local start back
+  start=$(api -d '{"server":"linear"}' "$URL/api/mcp/login")
+  check "a login starts with the sign-in host and a PKCE link for this server" bash -c 'jq -e ".auth_server==\"127.0.0.1\" and (.authorize_url|test(\"code_challenge_method=S256\")) and (.authorize_url|test(\"resource=\"))" <<<"$1" >/dev/null' _ "$start"
+  back=$(curl -s -o /dev/null -w '%{redirect_url}' "$(jq -r .authorize_url <<<"$start")")
+  check "an answer for another sign-in is refused" grep -q 'another sign-in' <<<"$(api -d "{\"callback\":\"${back/state=/state=x}\"}" "$URL/api/mcp/login/$(jq -r .flow <<<"$start")")"
+  start=$(api -d '{"server":"linear"}' "$URL/api/mcp/login")
+  back=$(curl -s -o /dev/null -w '%{redirect_url}' "$(jq -r .authorize_url <<<"$start")")
+  check "the browser is sent back to the loopback redirect, with the issuer" grep -q '^http://127.0.0.1:33418/callback?code=.*iss=' <<<"$back"
+  check "pasting that address signs in, renewable" eq "$(api -d "{\"callback\":\"$back\"}" "$URL/api/mcp/login/$(jq -r .flow <<<"$start")" | jq -r '.renews')" true
+  check "the credentials are private" eq "$(stat -c %a "$TMP/home/.zenbot/mcp-auth/linear.json")" 600
+  check "status shows the server signed in" eq "$(api "$URL/api/mcp" | jq -r '.login.linear')" "signed in"
+  r=$(zen ask --json -m faux/smoke "call linear")
+  check "calls carry a token that refreshes and rotates" bash -c 'grep -qE "token [0-9]+\|token [0-9]+" <<<"$1" && [ "$(jq .refreshes <<<"$2")" -ge 2 ]' _ \
+    "$(q "$results'$(jq -r .session_id <<<"$r")'")" "$(curl -s "http://127.0.0.1:$port/stats")"
+  api -d '{"server":"linear"}' "$URL/api/mcp/login" >/dev/null
+  check "a new login reuses the registered client" eq "$(curl -s "http://127.0.0.1:$port/stats" | jq .registrations)" 2
+  check "an unknown server can't sign in" grep -q 'no MCP server named' <<<"$(api -d '{"server":"nope"}' "$URL/api/mcp/login")"
+  kill "$srv" 2>/dev/null || true
+}
+
 # Web: private addresses are refused; search results come back numbered and wrapped as untrusted,
 # with markers inside them defused; what a tainted session saves to memory counts as inference, and
 # its writes to USER.md, an active skill and mcp.json are refused. Search goes through
@@ -474,7 +588,7 @@ delegation() {
   check "children inherit risk independently of legacy marks" eq "$(q "SELECT min(risk) || '/' || max(risk) FROM sessions WHERE parent='$sid'")" 3/3
   check "two delegations" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" delegate:false,delegate:false
   local res; res=$(q "SELECT string_agg(payload->'content'->0->>'text', '|' ORDER BY seq) FROM tape_events WHERE session_id='$sid' AND payload->>'toolName'='delegate'")
-  check "named model, then the policy's" bash -c 'grep -q "on faux/smoke (asked, asked)" <<<"$1" && grep -q "(unknown, policy)" <<<"$1"' _ "$res"
+  check "named model, then the router's (no kind fits: the parent's model)" bash -c 'grep -q "on faux/smoke (asked, asked)" <<<"$1" && grep -q "(unsure, unsure)" <<<"$1"' _ "$res"
   check "the subagents' answers come back" eq "$(grep -c '^Done\.$' <<<"${res//|/$'\n'}")" 2
   check "the subagents ran their task" eq "$(q "SELECT count(*) FROM sessions WHERE parent='$sid' AND kind='subagent'")" 2
   local child; child=$(q "SELECT id FROM sessions WHERE parent='$sid' AND kind='subagent' LIMIT 1")
@@ -486,7 +600,7 @@ delegation() {
   zen sessions decide "$sid" accept >/dev/null
   check "the owner's verdict is the evidence" grep -q '"accepted": 2' <<<"$(zen policy --json | jq '{accepted: ([.stats[].accepted] | add)}')"
   zen policy undo >/dev/null
-  check "undo restores the earlier policy" eq "$(zen policy --json | jq -c .policy)" '{"routes":{}}'
+  check "undo restores the earlier policy (the owner's, before the router added its kinds)" eq "$(zen policy --json | jq -c .policy)" '{"routes":{"default":{"model":"faux/smoke"}}}'
   r=$(zen ask --json -m faux/smoke "waitless")
   check "ask with wait=false keeps working" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" ask:false,bash:false
   # The sessions board: a session whose questions the owner hasn't answered is waiting on them,
@@ -638,7 +752,7 @@ system_one_direct() {
   # The decision files: the built-in ones pass the checker; an owner file with a typo is reported with
   # its line and a suggestion, and never takes effect.
   local zs="$TMP/home/.zenbot/s1"; mkdir -p "$zs"
-  check "the built-in decision files pass the checker" grep -q "15 decisions in force (0 from your files), 0 error" <<<"$(zen s1 check)"
+  check "the built-in decision files pass the checker" grep -q "16 decisions in force (0 from your files), 0 error" <<<"$(zen s1 check)"
   sed 's/^false_no = 1$/false_noo = 1/' "$REPO/crates/zend/s1/job_approval.toml" >"$zs/job_approval.toml"
   sleep 2.5
   local report; report=$(zen s1 check 2>&1 || true)
@@ -985,6 +1099,18 @@ job_post_to() {
   check "an unknown one too" grep -q "no session of the owner's" <<<"$(zen jobs add pnone --schedule "every 1h" --prompt "JOBTASK-A" --post-to deadbeef 2>&1)"
   zen jobs set ppost --post-to "" >/dev/null
   check "an empty --post-to clears it" eq "$(zen jobs --json | jq -r '.jobs[] | select(.name == "ppost") | .post_to')" null
+  # A report that can't be delivered (here a trigger refuses its target's tape) never holds up the
+  # schedule: a due job still runs, and the report waits for its next try.
+  local stuck; stuck=$(zen ask --json -m faux/smoke "OWNER-HELLO" | jq -r .session_id)
+  q "CREATE FUNCTION e2e_refuse() RETURNS trigger LANGUAGE plpgsql AS \$\$ BEGIN IF NEW.session_id = '$stuck' THEN RAISE EXCEPTION 'e2e: refused'; END IF; RETURN NEW; END \$\$;
+     CREATE TRIGGER e2e_refuse BEFORE INSERT ON tape_events FOR EACH ROW EXECUTE FUNCTION e2e_refuse();
+     INSERT INTO job_runs (job_id, trigger, status, output, ended_at, pending_to) SELECT id, 'owner', 'ok', 'STUCK', now(), '$stuck' FROM jobs WHERE name = 'ppost';
+     UPDATE job_runs SET risk = 1 WHERE output = 'STUCK'" >/dev/null
+  zen jobs add pdue --schedule "every 1h" --prompt "JOBTASK-A" >/dev/null
+  q "UPDATE jobs SET next_run_at = now() WHERE name = 'pdue'" >/dev/null
+  check "a failing delivery doesn't stop a due job" poll "$runs 'pdue'" ok
+  check "and that report stays queued for its next try" eq "$(q "SELECT count(*) FROM job_runs WHERE output = 'STUCK' AND pending_to = '$stuck'")" 1
+  q "DROP TRIGGER e2e_refuse ON tape_events; DROP FUNCTION e2e_refuse()" >/dev/null
 }
 
 # Taint on data (taint.rs, D-053): what a session that read untrusted content stored carries the
@@ -1595,7 +1721,7 @@ run phase4 phase4_brain
 run phase4-upgrade phase4_upgrade
 run phase3 phase3_kernel
 run turns abort_tool stale_turn
-run jobs scheduled_jobs job_report_file job_post_to
+run jobs scheduled_jobs job_report_file job_post_to script_jobs
 run search-index search_index
 run taint-on-data taint_on_data
 run summaries summaries slow_summary
@@ -1604,6 +1730,8 @@ run action-gate action_gate source_task_queue
 run security egress_proxy
 run file-trust kernel_tools project_files secrets_masked
 run reach mcp_tools web_tools
+run mcp-login mcp_login
+run routing routing
 run basics prompt_files open_loop restart_recovery layout_move
 run memory memory_across_sessions memory_sleep
 run delegation delegation

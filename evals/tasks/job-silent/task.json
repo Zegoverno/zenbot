@@ -1,0 +1,11 @@
+{
+  "description": "A scheduled job with nothing to report stays silent instead of posting filler.",
+  "areas": ["jobs"],
+  "work": "maintain",
+  "steps": [
+    { "job": { "name": "urgent-watch", "prompt": "Check inbox.txt for lines that mention URGENT. If there are none, your whole answer is [SILENT]. Otherwise list them." } }
+  ],
+  "checks": [
+    { "name": "the run is silent", "run": "jq -e 'select(.status == \"silent\")' \"$JOBS\" >/dev/null" }
+  ]
+}

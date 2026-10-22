@@ -212,16 +212,20 @@ pub(crate) struct CreateSession {
 
 pub(crate) async fn create_session(State(app): State<AppState>, Json(body): Json<CreateSession>) -> ApiResult<Json<Value>> {
     let id = Uuid::new_v4();
+    // A model the client names is the owner's choice; without one, the router picks at the first
+    // prompt (D-074).
+    let chosen = body.model.is_some().then_some("owner");
     let model = body.model.unwrap_or_else(|| app.default_model.clone());
     check_effort(&app, &model, body.effort.as_deref()).await?;
     let row = sqlx::query(&format!(
-        "INSERT INTO sessions (id, title, model, effort, title_source) VALUES ($1, $2, $3, $4, CASE WHEN $2 = '' THEN 'auto' ELSE 'owner' END)
+        "INSERT INTO sessions (id, title, model, effort, title_source, model_source) VALUES ($1, $2, $3, $4, CASE WHEN $2 = '' THEN 'auto' ELSE 'owner' END, $5)
          RETURNING {SESSION_COLUMNS}, 0::float8 AS cost"
     ))
     .bind(id)
     .bind(body.title.map(|t| t.trim().to_string()).unwrap_or_default())
     .bind(model)
     .bind(body.effort)
+    .bind(chosen)
     .fetch_one(&app.db)
     .await?;
     Ok(Json(session_json(&row)))
@@ -255,6 +259,7 @@ pub(crate) async fn update_session(State(app): State<AppState>, Path(id): Path<U
     };
     let row = sqlx::query(&format!(
         "UPDATE sessions SET title = COALESCE($2, title), title_source = CASE WHEN $2 IS NULL THEN title_source ELSE 'owner' END, model = COALESCE($3, model), effort = $5,
+                model_source = CASE WHEN $3 IS NULL THEN model_source ELSE 'owner' END,
                 archived = COALESCE($4, archived), updated_at = now()
          WHERE id = $1
          RETURNING {SESSION_COLUMNS}, {} AS cost",
@@ -635,7 +640,7 @@ pub(crate) async fn get_policy(State(app): State<AppState>) -> ApiResult<Json<Va
     let stats = delegate::stats(&app.db).await?;
     let suggestions: Vec<Value> = delegate::suggest(&data, &stats, crate::config::get().policy_min_judged)
         .into_iter()
-        .map(|(k, m, why)| json!({ "kind": k, "model": m, "why": why }))
+        .map(|c| json!({ "kind": c.kind, "model": c.model, "why": c.why, "owner": c.owner }))
         .collect();
     Ok(Json(json!({ "version": version, "policy": data, "stats": stats, "suggestions": suggestions })))
 }
@@ -733,4 +738,16 @@ pub(crate) async fn mcp_pending(State(app): State<AppState>) -> ApiResult<Json<V
 
 pub(crate) async fn mcp_respond(State(app): State<AppState>, Path(id): Path<Uuid>, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
     Ok(Json(crate::mcp_interaction::respond(&app.db, id, &body).await.map_err(bad_request)?))
+}
+
+/// Start the owner's browser sign-in to a remote MCP server (`{server}`): the link to open.
+pub(crate) async fn mcp_login(Json(body): Json<Value>) -> ApiResult<Json<Value>> {
+    let server = body["server"].as_str().unwrap_or("");
+    Ok(Json(crate::mcp::login_start(server).await.map_err(bad_request)?))
+}
+
+/// Finish it with the address the owner's browser ended on (`{callback}`).
+pub(crate) async fn mcp_login_finish(Path(flow): Path<String>, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
+    let pasted = body["callback"].as_str().unwrap_or("");
+    Ok(Json(crate::mcp::login_finish(&flow, pasted).await.map_err(bad_request)?))
 }

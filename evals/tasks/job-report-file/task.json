@@ -1,0 +1,12 @@
+{
+  "description": "A scheduled agent job whose report must reach the owner exactly as written: it sums sales per region into a file, and the kernel posts the file (D-055), not the run's answer.",
+  "areas": ["jobs"],
+  "work": "maintain",
+  "steps": [
+    { "job": { "name": "sales-summary", "prompt": "Read sales.csv and write out/summary.md with one line per region, sorted by region, as `region: total` (for example `east: 55`). Nothing else in the file.", "report_file": "out/summary.md" } }
+  ],
+  "checks": [
+    { "name": "the run is ok", "run": "jq -e 'select(.status == \"ok\")' \"$JOBS\" >/dev/null" },
+    { "name": "the report is the file's totals", "run": "jq -r .output \"$JOBS\" | tr -d '\\r' | grep -v '^$' | diff - <(printf 'east: 55\\nnorth: 150\\nsouth: 100\\n')" }
+  ]
+}

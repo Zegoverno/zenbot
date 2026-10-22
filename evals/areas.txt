@@ -41,6 +41,7 @@ crates/zend/src/wiki.rs           wiki
 crates/zend/src/skills.rs         skills
 crates/zend/src/workshop.rs       skills
 crates/zend/src/delegate.rs       delegation
+crates/zend/src/route.rs          delegation jobs
 crates/zend/src/web.rs            web
 crates/zend/src/mcp.rs            mcp
 crates/zend/                      core   # the rest of the kernel: API, migrations, side calls, a new module

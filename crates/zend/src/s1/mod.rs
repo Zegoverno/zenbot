@@ -61,6 +61,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("web_rerank", include_str!("../../s1/web_rerank.toml")),
     ("search_rerank", include_str!("../../s1/search_rerank.toml")),
     ("skill_duplicate", include_str!("../../s1/skill_duplicate.toml")),
+    ("task_kind", include_str!("../../s1/task_kind.toml")),
     ("judge", include_str!("../../s1/judge.toml")),
     ("egress", include_str!("../../s1/egress.toml")),
 ];

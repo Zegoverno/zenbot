@@ -6,6 +6,75 @@
 
 ---
 
+## D-074 — A learning router picks the model for each piece of work
+
+**Date:** 2026-10-22 · **Status:** accepted (owner, 2026-10-21/22: route by task, learn by A/B tests
+and a multidimensional grade; the rules below were left to Claude). **Supersedes:** D-066's
+`unknown` kind for every subtask.
+
+**Decision:** Every owner session whose model nobody chose (no `-m`, no `/model`: `model_source`),
+every agent job run without a model the owner set, and every subtask `delegate` hands out without
+one is routed: System One's `task_kind` names its kind among the policy's kinds from the owner's
+words (or the job's or subtask's text); confident (p ≥ 0.7), the kind's route picks the model;
+otherwise the work keeps the model it would have had. The policy starts with nine kinds (chat,
+recall and routine on Sonnet; writing, research, small coding and ops on the default model with
+Sonnet a candidate; large builds and planning on the default, never explored), written once as a
+policy version the owner can change; `zen policy set --describe` adds a kind. 5% of routed work
+tries a candidate, each choice logged with its probability. A routed session keeps its model; the
+owner's choice always wins. The nightly `routes` job grades each kind and model: quality (the owner's
+verdict on the session or its parent, else the job run's status) is a gate (a challenger's lower
+bound within 0.05 of the champion's rate, at least 20 judged outcomes each), then a challenger wins
+on clearly better quality or on cost and time together (cost weighted 2:1) at least 15% better. It
+switches on its own, as a new policy version that `zen policy undo` reverts, except to another
+provider or a model over twice the cost, which it reports for the owner to decide.
+
+**Why:** Easy work shouldn't pay for the most capable model, and which model is best per kind of
+task should come from outcomes, not a fixed table. Starting light kinds on Sonnet and the rest on the
+default keeps quality where mistakes cost most while the evidence builds.
+
+## D-073 — Script jobs: a command on a schedule, with no model
+
+**Date:** 2026-10-22 · **Status:** accepted (owner, 2026-10-21: the agent may create them, but they
+wait for the owner's approval, and every run is logged)
+
+**Decision:** A job may be `script`: a shell `command` instead of a prompt. A run makes a `job`
+session (model `script`) and runs the command as the agent's `bash` would, in the contained shell
+with the egress proxy and the masked files, for at most 600 s; its output is masked and rated by
+what it shows and the hosts it reached. Its output (head and tail past 60 KB), or its `report_file`
+checked as for D-055, is the report; exit 0 with no output is `silent`, any other exit or a timeout
+an error. Retries, pausing after failures and `post_to` are as for agent jobs. Each run records the
+exact command and its exit code. The owner's script jobs are live at once; one the agent creates,
+or changes, is paused until the owner resumes it, which approves its command: the agent can't resume
+one, no System One judgment makes it live, and the kernel refuses to run one without the owner's
+approval.
+
+**Why:** Three of the five live jobs only ran a fixed command through a model (two model calls and
+their context per run, and failures that weren't the script's). D-055 considered command jobs and
+left them out because the readings job needs judgment; that one stays an agent job.
+
+## D-072 — MCP sign-in from the terminal: the owner pastes back the redirect address
+
+**Date:** 2026-10-22 · **Status:** accepted (owner: a TUI-only solution, shipped with Phase 6)
+
+**Decision:** `zen mcp-login <server>` and `/mcp login <server>` sign in to a remote MCP server
+through the owner's browser, following the MCP authorization spec: the server's 401 or well-known
+path names its protected resource metadata (RFC 9728), whose authorization server must publish
+metadata (RFC 8414 or OpenID discovery) matching its issuer and offering PKCE S256. The client is
+the one the owner set under `oauth` in mcp.json, the one an earlier login registered, or a new one
+registered dynamically (RFC 7591) as a native app with the fixed redirect
+`http://127.0.0.1:33418/callback`. The kernel builds the link (PKCE, state, resource indicator RFC
+8707); the owner opens it on any machine, approves, and pastes back the address the browser ended
+on, whose state and issuer (RFC 9207) are checked before the code is exchanged. Credentials go to
+`mcp-auth/<server>.json`, bound to the server's URL, and refresh by themselves; a 401 that refresh
+can't fix says how to sign in. Only the owner's token starts or finishes a login; the TUI sends the
+pasted line to the kernel, never to the agent; Matrix doesn't take it (codes would stay in room
+history). A flow lives 10 minutes in memory.
+
+**Why:** zend runs on a VM and the owner's browser elsewhere, so a redirect to a local listener
+never arrives; pasting the address needs no port forward or public endpoint (Claude Code's fallback
+does the same). Device flow, Client ID Metadata Documents and a redirect through the exe.dev proxy
+were left out until a server needs them.
+
 ## D-071 — Phase 5 tools: rich results, batch edits, bounded output, a fuller MCP client
 
 **Date:** 2026-10-21 · **Status:** accepted (owner agreed the Phase 5 scope, 2026-10-21)

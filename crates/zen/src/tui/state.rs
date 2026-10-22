@@ -17,6 +17,9 @@ pub(super) struct App {
     pub(super) session: Option<String>,
     pub(super) title: String,
     pub(super) model: String,
+    /// The owner chose `model` (`-m` or `/model`): a new session is created on it. Otherwise the
+    /// kernel's router picks the model at the first prompt (D-074).
+    pub(super) model_pinned: bool,
     /// The session's thinking level; None means the model's default.
     pub(super) effort: Option<String>,
     pub(super) default_model: String,
@@ -58,6 +61,9 @@ pub(super) struct App {
     pub(super) turn_effort: Option<String>,
     pub(super) session_tokens: i64,
     pub(super) pending_prompt: Option<String>,
+    /// An MCP sign-in waiting for the address the owner's browser ended on: (server, flow). The
+    /// next line typed goes to the kernel, never to the agent.
+    pub(super) mcp_login: Option<(String, String)>,
     pub(super) aborting: bool,
     pub(super) notice: Option<(String, Sty)>,
     pub(super) ctrl_c_at: Option<Instant>,
@@ -163,6 +169,7 @@ impl App {
             conn: 0,
             session: None,
             title: String::new(),
+            model_pinned: model != default_model,
             model,
             effort: None,
             default_model,
@@ -192,6 +199,7 @@ impl App {
             turn_effort: None,
             session_tokens: 0,
             pending_prompt: None,
+            mcp_login: None,
             aborting: false,
             notice: None,
             ctrl_c_at: None,

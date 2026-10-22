@@ -216,6 +216,8 @@ pub struct Job {
     pub kind: String,
     pub action: Option<String>,
     pub prompt: Option<String>,
+    /// A script job's shell command (D-073): run in the contained shell, no model.
+    pub command: Option<String>,
     pub context: Vec<String>,
     pub skills: Vec<String>,
     pub schedule: String,
@@ -236,7 +238,7 @@ pub struct Job {
     pub failures: i32,
 }
 
-const COLUMNS: &str = "id, name, kind, action, prompt, context, skills, schedule, tz, model, workspace, report_file, post_to, enabled, paused_reason, created_by, \
+const COLUMNS: &str = "id, name, kind, action, prompt, command, context, skills, schedule, tz, model, workspace, report_file, post_to, enabled, paused_reason, created_by, \
 next_run_at, last_run_at, last_status, last_error, failures";
 
 fn job_of(r: &sqlx::postgres::PgRow) -> Job {
@@ -246,6 +248,7 @@ fn job_of(r: &sqlx::postgres::PgRow) -> Job {
         kind: r.get("kind"),
         action: r.get("action"),
         prompt: r.get("prompt"),
+        command: r.get("command"),
         context: r.get("context"),
         skills: r.get("skills"),
         schedule: r.get("schedule"),
@@ -267,7 +270,7 @@ fn job_of(r: &sqlx::postgres::PgRow) -> Job {
 
 pub fn job_json(j: &Job) -> Value {
     json!({
-        "name": j.name, "kind": j.kind, "action": j.action, "prompt": j.prompt, "context": j.context, "skills": j.skills,
+        "name": j.name, "kind": j.kind, "action": j.action, "prompt": j.prompt, "command": j.command, "context": j.context, "skills": j.skills,
         "schedule": j.schedule, "tz": j.tz, "model": j.model, "workspace": j.workspace, "report_file": j.report_file, "post_to": j.post_to, "enabled": j.enabled,
         "paused_reason": j.paused_reason, "created_by": j.created_by, "next_run_at": j.next_run_at, "last_run_at": j.last_run_at,
         "last_status": j.last_status, "last_error": j.last_error, "failures": j.failures,
@@ -291,7 +294,7 @@ pub async fn list(db: &PgPool) -> Result<Vec<Job>> {
 /// Recent runs, newest first: of one job, or of all.
 pub async fn runs(db: &PgPool, name: Option<&str>, limit: i64) -> Result<Vec<Value>> {
     let rows = sqlx::query(
-        "SELECT r.id, j.name, r.trigger, r.status, r.session_id, r.started_at, r.ended_at, r.output, r.error, (r.risk>=4 OR zen_session_contaminated(r.session_id)) AS tainted, (CASE WHEN zen_session_contaminated(r.session_id) THEN 5::smallint ELSE r.risk END) AS risk, r.posted_to, r.pending_to
+        "SELECT r.id, j.name, r.trigger, r.status, r.session_id, r.started_at, r.ended_at, r.output, r.error, (r.risk>=4 OR zen_session_contaminated(r.session_id)) AS tainted, (CASE WHEN zen_session_contaminated(r.session_id) THEN 5::smallint ELSE r.risk END) AS risk, r.posted_to, r.pending_to, r.command, r.exit_code
          FROM job_runs r JOIN jobs j ON j.id = r.job_id
          WHERE ($1::text IS NULL OR (j.name = $1 AND j.removed_at IS NULL)) ORDER BY r.started_at DESC, r.id DESC LIMIT $2",
     )
@@ -309,6 +312,7 @@ pub async fn runs(db: &PgPool, name: Option<&str>, limit: i64) -> Result<Vec<Val
                 "output": r.get::<Option<String>, _>("output"), "error": r.get::<Option<String>, _>("error"),
                 "risk": r.get::<i16, _>("risk"), "untrusted": r.get::<bool, _>("tainted"), "posted_to": r.get::<Option<Uuid>, _>("posted_to"),
                 "pending_to": r.get::<Option<Uuid>, _>("pending_to"),
+                "command": r.get::<Option<String>, _>("command"), "exit_code": r.get::<Option<i32>, _>("exit_code"),
             })
         })
         .collect())
@@ -319,6 +323,8 @@ pub async fn runs(db: &PgPool, name: Option<&str>, limit: i64) -> Result<Vec<Val
 pub struct Spec {
     pub name: Option<String>,
     pub prompt: Option<String>,
+    /// A script job's command instead of a prompt (D-073).
+    pub command: Option<String>,
     pub schedule: Option<String>,
     pub tz: Option<String>,
     pub context: Option<Vec<String>>,
@@ -345,6 +351,7 @@ impl Spec {
         Spec {
             name: s("name"),
             prompt: s("prompt"),
+            command: s("command"),
             schedule: s("schedule"),
             tz: s("tz"),
             context: strings(&v["context"]),
@@ -437,7 +444,15 @@ async fn post_target(db: &PgPool, text: &str, by: &By) -> Result<Option<Uuid>> {
 pub async fn create(app: &AppState, spec: Spec, by: By) -> Result<(Job, Option<String>)> {
     let name = spec.name.clone().context("a job needs a `name`")?;
     valid_name(&name)?;
-    let prompt = spec.prompt.clone().context("a job needs a `prompt`: the task, self-contained (it sees nothing of this conversation)")?;
+    let command = spec.command.clone();
+    let kind = if command.is_some() { "script" } else { "agent" };
+    if let Some(c) = &command {
+        anyhow::ensure!(c.len() <= MAX_COMMAND, "a script job's command is at most {MAX_COMMAND} bytes; put longer scripts in a file in the workspace");
+    }
+    let prompt = match &command {
+        Some(_) => spec.prompt.clone().unwrap_or_default(),
+        None => spec.prompt.clone().context("a job needs a `prompt` (the task, self-contained: it sees nothing of this conversation) or a `command`")?,
+    };
     let tz_text = spec.tz.clone().unwrap_or_else(|| crate::config::get().tz.clone());
     let tz = parse_tz(&tz_text)?;
     let (schedule, next) = checked_schedule(spec.schedule.as_deref().context("a job needs a `schedule`")?, tz, Utc::now())?;
@@ -459,15 +474,21 @@ pub async fn create(app: &AppState, spec: Spec, by: By) -> Result<(Job, Option<S
         By::Agent(s) => ("agent", Some(*s), None),
     };
     if let Some(m) = &model {
+        if !app.routes.lock().await.contains_key(m) {
+            // The workers' model lists may not have been read yet (a kernel that just started).
+            crate::collect_models(app).await;
+        }
         anyhow::ensure!(app.routes.lock().await.contains_key(m), "no worker serves model `{m}`");
     }
-    let (approval, paused) = match &by {
-        By::Owner => (None, None),
-        By::Agent(s) => gate(app, *s, &name, &prompt, &schedule, report_file.as_deref(), post_to).await,
+    let (approval, paused) = match (&by, kind) {
+        (By::Owner, _) => (None, None),
+        // A command runs unattended with no model to notice anything odd: the owner approves it.
+        (By::Agent(_), "script") => (None, Some(SCRIPT_PAUSED.to_string())),
+        (By::Agent(s), _) => gate(app, *s, &name, &prompt, &schedule, report_file.as_deref(), post_to).await,
     };
     let row = sqlx::query(&format!(
-        "INSERT INTO jobs (name, kind, prompt, context, skills, schedule, tz, model, workspace, enabled, paused_reason, created_by, created_in, approval, next_run_at, report_file, post_to, owner_approved)
-         VALUES ($1, 'agent', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING {COLUMNS}"
+        "INSERT INTO jobs (name, kind, prompt, context, skills, schedule, tz, model, workspace, enabled, paused_reason, created_by, created_in, approval, next_run_at, report_file, post_to, owner_approved, command)
+         VALUES ($1, $18, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $19) RETURNING {COLUMNS}"
     ))
     .bind(&name)
     .bind(&prompt)
@@ -486,6 +507,8 @@ pub async fn create(app: &AppState, spec: Spec, by: By) -> Result<(Job, Option<S
     .bind(&report_file)
     .bind(post_to)
     .bind(matches!(by, By::Owner))
+    .bind(kind)
+    .bind(&command)
     .fetch_one(&app.db)
     .await
     .map_err(|e| match &e {
@@ -496,10 +519,22 @@ pub async fn create(app: &AppState, spec: Spec, by: By) -> Result<(Job, Option<S
     Ok((job_of(&row), paused))
 }
 
-/// Change an agent job. A change by the agent passes the gate again (a changed task is a new one).
+/// Why a script job the agent created or changed waits (D-073).
+const SCRIPT_PAUSED: &str = "waiting for the owner's approval: a script job zenbot wrote runs only after the owner reviews its command (`zen jobs resume <name>`)";
+
+/// The longest command a script job takes.
+const MAX_COMMAND: usize = 8 * 1024;
+
+/// Change an agent or script job. A change by the agent passes the gate again (a changed task is a
+/// new one); a script job the agent changes waits for the owner again.
 pub async fn update(app: &AppState, name: &str, spec: Spec, by: By) -> Result<(Job, Option<String>)> {
     let job = get(&app.db, name).await?;
-    anyhow::ensure!(job.kind == "agent", "`{}` is a system job: only pause, resume and run apply", job.name);
+    anyhow::ensure!(job.kind != "system", "`{}` is a system job: only pause, resume and run apply", job.name);
+    anyhow::ensure!(spec.command.is_none() || job.kind == "script", "`{}` runs a prompt; a script job is a new job with a `command`", job.name);
+    let command = spec.command.clone().or(job.command.clone());
+    if let Some(c) = &command {
+        anyhow::ensure!(c.len() <= MAX_COMMAND, "a script job's command is at most {MAX_COMMAND} bytes; put longer scripts in a file in the workspace");
+    }
     let prompt = spec.prompt.clone().or(job.prompt.clone()).unwrap_or_default();
     let tz = parse_tz(spec.tz.as_deref().unwrap_or(&job.tz))?;
     let (schedule, next) = checked_schedule(spec.schedule.as_deref().unwrap_or(&job.schedule), tz, Utc::now())?;
@@ -528,6 +563,7 @@ pub async fn update(app: &AppState, name: &str, spec: Spec, by: By) -> Result<(J
     };
     let (approval, paused) = match &by {
         By::Owner => (None, if job.enabled { None } else { job.paused_reason.clone() }),
+        By::Agent(_) if job.kind == "script" => (None, Some(SCRIPT_PAUSED.to_string())),
         By::Agent(s) => gate(app, *s, &job.name, &prompt, &schedule, report_file.as_deref(), post_to).await,
     };
     let enabled = match &by {
@@ -537,7 +573,7 @@ pub async fn update(app: &AppState, name: &str, spec: Spec, by: By) -> Result<(J
     let paused = if enabled { None } else { paused.or(job.paused_reason.clone()) };
     let row = sqlx::query(&format!(
         "UPDATE jobs SET prompt = $2, context = $3, skills = $4, schedule = $5, tz = $6, model = $7, workspace = COALESCE($8, workspace),
-                enabled = $9, paused_reason = $10, approval = COALESCE($11, approval), next_run_at = $12, report_file = $13, post_to = $14, owner_approved = $15, failures = 0, updated_at = now()
+                enabled = $9, paused_reason = $10, approval = COALESCE($11, approval), next_run_at = $12, report_file = $13, post_to = $14, owner_approved = $15, failures = 0, updated_at = now(), command = $16
          WHERE id = $1 RETURNING {COLUMNS}"
     ))
     .bind(job.id)
@@ -555,6 +591,7 @@ pub async fn update(app: &AppState, name: &str, spec: Spec, by: By) -> Result<(J
     .bind(&report_file)
     .bind(post_to)
     .bind(matches!(by, By::Owner))
+    .bind(&command)
     .fetch_one(&app.db)
     .await?;
     WAKE.notify_one();
@@ -569,7 +606,8 @@ pub async fn set_enabled(app: &AppState, name: &str, on: bool, by: By) -> Result
         By::Agent(_) => "paused by the agent".to_string(),
     });
     if let By::Agent(s) = by {
-        anyhow::ensure!(job.kind == "agent", "only the owner pauses or resumes a system job");
+        anyhow::ensure!(job.kind != "system", "only the owner pauses or resumes a system job");
+        anyhow::ensure!(!(on && job.kind == "script"), "only the owner resumes a script job (it runs a command unattended)");
         if on {
             let (_, paused) = gate(app, s, &job.name, job.prompt.as_deref().unwrap_or(""), &job.schedule, job.report_file.as_deref(), job.post_to).await;
             if let Some(p) = paused {
@@ -890,7 +928,12 @@ pub async fn run_loop(app: AppState) {
 
 /// Start the runs that are due.
 async fn tick(app: &AppState) -> Result<()> {
-    deliver_pending(app).await?;
+    // Delivering reports never holds up the schedule: a failure is logged, a hang cut off.
+    match tokio::time::timeout(DELIVERY_TIMEOUT, deliver_pending(app)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::error!("delivering pending job reports: {e:#}"),
+        Err(_) => tracing::error!("delivering pending job reports took over {}s; the schedule goes on", DELIVERY_TIMEOUT.as_secs()),
+    }
     let now = Utc::now();
     let mut tx = app.db.begin().await?;
     let rows = sqlx::query(&format!(
@@ -976,6 +1019,7 @@ fn spawn_run(app: &AppState, job: Job, run: i64) {
         tracing::info!("job `{}` run {run} started", job.name);
         let outcome = match job.kind.as_str() {
             "system" => run_system(&app, &job).await,
+            "script" => run_script(&app, &job, run).await,
             _ => run_agent(&app, &job, run).await,
         };
         let outcome = outcome.unwrap_or_else(|e| Outcome { status: "error", output: None, error: Some(format!("{e:#}")) });
@@ -1067,6 +1111,27 @@ async fn deliver_pending(app: &AppState) -> Result<()> {
     .fetch_all(&app.db)
     .await?;
     for (run, target) in rows {
+        // Each report on its own: one that can't be delivered is retried until its 2-hour window
+        // ends, then given up (it stays in the jobs feed), and never stops the others.
+        if let Err(e) = deliver_one(app, run, target).await {
+            tracing::error!("delivering job run {run} into session {target}: {e:#}");
+            let _ = sqlx::query("UPDATE job_runs SET pending_to = NULL, error = $2 WHERE id = $1 AND pending_to IS NOT NULL AND ended_at < now() - interval '2 hours'")
+                .bind(run)
+                .bind(format!("session delivery failed: {}; report retained in the jobs feed", zen_proto::head(&format!("{e:#}"), 300)))
+                .execute(&app.db)
+                .await;
+        }
+    }
+    Ok(())
+}
+
+/// The longest one pass of `deliver_pending` may hold up the scheduler's tick.
+const DELIVERY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Post one run's report into its target session, unless the target is busy (then it waits for
+/// the next pass) or the delivery is no longer allowed (then it's dropped with the reason).
+async fn deliver_one(app: &AppState, run: i64, target: Uuid) -> Result<()> {
+    {
         let turns = app.turns.lock().await;
         let mut tx = app.db.begin().await?;
         crate::sources::lock_provenance(&mut tx).await?;
@@ -1101,7 +1166,7 @@ async fn deliver_pending(app: &AppState) -> Result<()> {
         .bind(target)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some(row) = row else { continue };
+        let Some(row) = row else { return Ok(()) };
         let eligible: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sessions WHERE id = $1 AND kind IS NULL AND risk < 5 AND NOT zen_session_contaminated(id))")
             .bind(target)
             .fetch_one(&mut *tx)
@@ -1117,10 +1182,10 @@ async fn deliver_pending(app: &AppState) -> Result<()> {
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
-            continue;
+            return Ok(());
         }
         if turns.contains_key(&target) {
-            continue;
+            return Ok(());
         }
         let job: String = row.get("name");
         let risk: i16 = row.get("risk");
@@ -1391,8 +1456,84 @@ async fn last_report(app: &AppState, job: &Job, run: i64, id: Uuid) -> Result<Op
 
 /// An agent job: a fresh session with the job's instructions and its prompt; the final answer is
 /// the report.
+/// How long a script job's command may run.
+const SCRIPT_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// A script job's run (D-073): its command in the contained shell, as the agent's `bash` would run
+/// it in a fresh `job` session (masked files, egress through the proxy), with no model. The output
+/// is masked and rated by what it shows of rated files and the hosts it reached; it's the report
+/// (or `report_file` is), exit 0 with nothing to say is `silent`, anything else an error. The run
+/// records the exact command and its exit code.
+async fn run_script(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
+    let command = job.command.clone().context("a script job without a command")?;
+    let approved: bool = sqlx::query_scalar("SELECT owner_approved FROM jobs WHERE id=$1").bind(job.id).fetch_one(&app.db).await?;
+    anyhow::ensure!(approved, "a script job runs only once the owner approved its command");
+    let workspace = workspace_of(app, job.workspace.as_deref());
+    let started = std::time::SystemTime::now();
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO sessions (id, title, model, kind, workspace) VALUES ($1, $2, 'script', $3, $4)")
+        .bind(id)
+        .bind(format!("job: {}", job.name))
+        .bind(JOB)
+        .bind(workspace.display().to_string())
+        .execute(&app.db)
+        .await?;
+    sqlx::query("UPDATE job_runs SET session_id = $2, command = $3 WHERE id = $1").bind(run).bind(id).bind(&command).execute(&app.db).await?;
+    tape::append(&app.db, id, "message", &json!({ "role": "user", "content": format!("$ {command}"), "kernel": true, "timestamp": Utc::now().timestamp_millis() })).await?;
+    let view = crate::fsview::prepare(&app.db, &workspace).await.context("the shell's view couldn't be checked")?;
+    let sandbox = crate::gate::shell_mode(&app.db, id).await;
+    if let tools::Sandbox::Contained { net: true, .. } = sandbox {
+        if let Err(e) = crate::proxy::ensure(&app.db, id).await {
+            tracing::warn!("egress proxy for script job `{}`: {e:#}", job.name);
+        }
+    }
+    let proxy_since = std::time::Instant::now();
+    let session = id.to_string();
+    let shell = tools::run_shell(&workspace, &command, &[("ZEN_SESSION_ID", session.as_str())], sandbox, &view.masks, SCRIPT_TIMEOUT).await;
+    crate::fsview::finish(&app.db, id, &workspace, started, sandbox == tools::Sandbox::None).await?;
+    let (text, status) = match shell {
+        Ok(tools::Shell { text, status }) => (crate::secrets::mask_off_thread(text).await, status),
+        Err(e) => return Ok(Outcome { status: "error", output: None, error: Some(format!("couldn't run the command: {e}")) }),
+    };
+    // Rated as a `bash` result is: what it shows of rated files, and the hosts it reached.
+    let (risk, writers) = view.exposure(&text);
+    let risk = risk.max(crate::proxy::contacted_since(id, proxy_since).unwrap_or(1));
+    crate::sources::depend(&app.db, id, &writers).await?;
+    sqlx::query("UPDATE sessions SET risk = GREATEST(risk, $2) WHERE id = $1").bind(id).bind(risk).execute(&app.db).await?;
+    let exit = match &status {
+        Some(Ok(s)) => s.code(),
+        _ => None,
+    };
+    sqlx::query("UPDATE job_runs SET exit_code = $2 WHERE id = $1").bind(run).bind(exit).execute(&app.db).await?;
+    let shown = crate::output::preview_at(&text, MAX_SCRIPT_REPORT).unwrap_or_else(|| text.clone());
+    tape::append(&app.db, id, "message", &json!({ "role": "assistant", "content": [{ "type": "text", "text": format!("{}\n[exit code: {}]", shown.trim_end(), exit.map(|c| c.to_string()).unwrap_or_else(|| "none".into())) }], "timestamp": Utc::now().timestamp_millis() })).await?;
+    match status {
+        Some(Ok(s)) if s.success() => {}
+        Some(Ok(s)) => return Ok(Outcome { status: "error", output: (!text.trim().is_empty()).then(|| shown.trim_end().to_string()),
+            error: Some(format!("exit code {}: {}", s.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into()), zen_proto::tail(text.trim_end(), 500))) }),
+        Some(Err(e)) => return Ok(Outcome { status: "error", output: None, error: Some(format!("failed waiting for the command: {e}")) }),
+        None => return Ok(Outcome { status: "error", output: (!text.trim().is_empty()).then(|| shown.trim_end().to_string()), error: Some(format!("timed out after {}s and was killed", SCRIPT_TIMEOUT.as_secs())) }),
+    }
+    if let Some(file) = &job.report_file {
+        return Ok(file_report(app, id, workspace, file, started).await);
+    }
+    Ok(if text.trim().is_empty() {
+        Outcome { status: "silent", output: None, error: None }
+    } else {
+        Outcome { status: "ok", output: Some(shown.trim_end().to_string()), error: None }
+    })
+}
+
+/// The most of a script's output that becomes its report: its head and tail past that.
+const MAX_SCRIPT_REPORT: usize = 60 * 1024;
+
 async fn run_agent(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
-    let model = job.model.clone().unwrap_or_else(|| app.default_model.clone());
+    // A model the owner set wins; otherwise the learning router picks one for this run (D-074).
+    let routed = match &job.model {
+        Some(_) => None,
+        None => Some(crate::route::choose(app, None, job.prompt.as_deref().unwrap_or(""), &app.default_model).await),
+    };
+    let model = job.model.clone().or(routed.as_ref().map(|c| c.model.clone())).unwrap_or_else(|| app.default_model.clone());
     let approved: bool = sqlx::query_scalar("SELECT owner_approved FROM jobs WHERE id=$1").bind(job.id).fetch_one(&app.db).await?;
     let inferred = if approved && job.workspace.is_none() { inferred_workspace(app, job) } else { None };
     let workspace = workspace_of(app, job.workspace.as_deref().or(inferred.as_deref()));
@@ -1408,6 +1549,9 @@ async fn run_agent(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
         .execute(&app.db)
         .await?;
     sqlx::query("UPDATE job_runs SET session_id = $2 WHERE id = $1").bind(run).bind(id).execute(&app.db).await?;
+    if let Some(c) = &routed {
+        crate::route::log(app, id, c, "job", job.prompt.as_deref().unwrap_or(""), None).await;
+    }
     let base = job_instructions(app, job, &workspace, id).await?;
     anyhow::ensure!(!crate::taint::stopped(&app.db, id).await?, "instructions withheld: a source of them was stopped by the owner");
     tape::append(&app.db, id, "base", &json!({ "text": base })).await?;
@@ -1438,9 +1582,18 @@ async fn run_agent(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
     };
     // The report is the file, as the run left it; the answer stays in the session. Never the answer
     // instead: whatever is wrong with the file makes the run an error.
+    Ok(file_report(app, id, workspace, file, started).await)
+}
+
+/// A run's report from its `report_file` (D-055), read as the run left it: inside the workspace,
+/// written during the run, rated by its bytes' writers; anything wrong is the run's error.
+async fn file_report(app: &AppState, id: Uuid, workspace: PathBuf, file: &str, started: std::time::SystemTime) -> Outcome {
     let secrets = crate::secrets::secret_files();
-    let (path, started) = (tools::resolve(&workspace, file), started);
-    let report = tokio::task::spawn_blocking(move || read_report(&workspace, &path, started, &secrets)).await?;
+    let path = tools::resolve(&workspace, file);
+    let report = match tokio::task::spawn_blocking(move || read_report(&workspace, &path, started, &secrets)).await {
+        Ok(r) => r,
+        Err(e) => Err(anyhow::anyhow!("reading the report file: {e}")),
+    };
     // The file's exact bytes keep their origin (D-062): the run depends on whoever wrote them and
     // takes their rating, so the stored report (rated by its run's session) carries it too.
     // Bytes no session registered were written during this run, so they are the run's own.
@@ -1451,11 +1604,11 @@ async fn run_agent(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
         },
         other => other,
     };
-    Ok(match report {
+    match report {
         Ok(Some(text)) => Outcome { status: "ok", output: Some(crate::secrets::mask_off_thread(text).await), error: None },
         Ok(None) => Outcome { status: "silent", output: None, error: None },
         Err(e) => Outcome { status: "error", output: None, error: Some(format!("{e:#}")) },
-    })
+    }
 }
 
 /// Rate a report file's exact bytes for the run's session `id`: depend on their writers and raise
@@ -1584,6 +1737,7 @@ pub fn spec() -> Value {
             "action": { "type": "string", "enum": ["create", "update", "list", "runs", "pause", "resume", "remove", "run"] },
             "name": { "type": "string", "description": "The job: lowercase letters, digits and hyphens (e.g. morning-brief)" },
             "prompt": { "type": "string", "description": "create/update: the task, self-contained (the run sees nothing of this conversation)" },
+            "command": { "type": "string", "description": "Instead of prompt: a shell command run with no model; waits for the owner's approval" },
             "schedule": { "type": "string", "description": "create/update: when it runs" },
             "tz": { "type": "string", "description": "Optional IANA timezone (default America/Sao_Paulo)" },
             "context": { "type": "array", "items": { "type": "string" }, "description": "Optional: instruction parts besides the soul" },
@@ -1602,7 +1756,8 @@ fn describe(j: &Job) -> String {
         (true, None) => "no run ahead".into(),
     };
     let last = j.last_status.as_ref().map(|s| format!("; last run: {s}")).unwrap_or_default();
-    format!("- {} ({}, `{}` {}): {when}{last}", j.name, j.kind, j.schedule, j.tz)
+    let command = j.command.as_deref().map(|c| format!("\n  $ {}", zen_proto::head(c, 300))).unwrap_or_default();
+    format!("- {} ({}, `{}` {}): {when}{last}{command}", j.name, j.kind, j.schedule, j.tz)
 }
 
 async fn tool(app: &AppState, session: Uuid, args: &Value, owner_allowed: bool) -> Result<String> {

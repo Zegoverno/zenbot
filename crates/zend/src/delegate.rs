@@ -6,16 +6,16 @@
 //! (engines may run separate tool calls one after another). The parent gets the subagent's final answer; a subagent inherits the parent's
 //! taint, and an answer from a subagent that read the web is untrusted (and taints the parent).
 //!
-//! Which model a subagent runs on is learned from real use, not fixed eval tasks. Unless the call
-//! names one, the routing policy (`policies`, versioned; `zen policy`) maps the kind of work to a
-//! model; System One no longer classifies the kind (D-066: it never changed a choice), so subtasks
-//! take the `unknown` route. A small share of subtasks (ZEN_EXPLORE, default 0.1) try another
-//! of the route's candidates, and each choice is logged with its probability (`decisions`, point
-//! `model`) so the comparison stays unbiased. Outcomes are the owner's verdict on the parent
-//! session, and cost. The nightly `routes` job (jobs.rs) switches a route to another model only when the lower bound
-//! of that model's acceptance beats the upper bound of the current one's (at least 20 judged
-//! subtasks each); every change is a new policy version with its reason, and `zen policy undo`
-//! reverts.
+//! Which model a subagent runs on is the learning router's choice (route.rs, D-074) unless the
+//! call names one: System One's `task_kind` names the kind of work, the routing policy (`policies`,
+//! versioned; `zen policy`) maps it to a model, and a small share tries a candidate. This module
+//! keeps the policy, `pick`, and the learning every routed piece of work feeds (owner sessions and
+//! job runs too): `stats` per kind and model (outcomes are the owner's verdict on the session or
+//! its parent, else how a job run ended; mean cost and time), `suggest` (quality is a gate, then a
+//! challenger wins on clearly better quality or on cost and time together, cost weighted 2:1, with
+//! at least 20 judged outcomes each) and `tune`, the nightly `routes` job: it applies a change as a
+//! new policy version with its reason (`zen policy undo` reverts), and leaves a switch to another
+//! provider or to a model over twice the cost to the owner, as a note.
 
 use std::time::Duration;
 
@@ -50,7 +50,7 @@ pub async fn set_policy(db: &sqlx::PgPool, data: &Value, reason: &str, by: &str)
 }
 
 /// A number in [0, 1) from the clock: enough randomness to pick when to explore.
-fn draw() -> f64 {
+pub(crate) fn draw() -> f64 {
     // Random bits, not the clock: parallel tasks start in the same instant, and correlated draws
     // would bias exploration and the logged probabilities.
     (Uuid::new_v4().as_u128() >> 75) as f64 / (1u64 << 53) as f64
@@ -126,10 +126,9 @@ async fn delegate(app: &AppState, session: Uuid, workspace: &std::path::Path, ar
             (m.to_string(), "asked".to_string(), 1.0, "asked")
         }
         None => {
-            let kind = "unknown".to_string();
-            let (_, p) = policy(&app.db).await;
-            let (m, prob, how) = pick(&p, &kind, &parent_model, served, draw());
-            (m, kind, prob, how)
+            // The learning router (route.rs): the subtask's kind, then its route.
+            let c = crate::route::choose(app, Some(session), task, &parent_model).await;
+            (c.model, c.kind, c.propensity, c.how)
         }
     };
     let dir = args["dir"].as_str().map(|d| tools::resolve(workspace, d)).unwrap_or_else(|| workspace.to_path_buf());
@@ -189,15 +188,21 @@ pub async fn run_tool(app: &AppState, session: Uuid, workspace: &std::path::Path
 /// Per kind of work and model: subtasks, judged ones (the parent got a verdict), accepted ones and
 /// mean cost.
 pub async fn stats(db: &sqlx::PgPool) -> Result<Vec<Value>> {
+    // A routed piece of work's outcome (D-074): the owner's verdict on its session, else on its
+    // parent (a subtask), else how its job run ended (ok or silent is a success, error a failure).
     let rows = sqlx::query(
-        "WITH picks AS (SELECT d.session_id AS child, d.input->>'kind' AS kind, d.chosen AS model, (d.input->>'parent')::uuid AS parent
+        "WITH picks AS (SELECT d.session_id AS s, d.input->>'kind' AS kind, d.chosen AS model, (d.input->>'parent')::uuid AS parent
                         FROM decisions d WHERE d.point = 'model' AND d.session_id IS NOT NULL),
               verdicts AS (SELECT DISTINCT ON (session_id) session_id, decision FROM session_decisions ORDER BY session_id, created_at DESC),
-              costs AS (SELECT session_id, SUM(cost_usd) AS cost FROM turns GROUP BY session_id)
-         SELECT p.kind, p.model, count(*) AS n, count(v.decision) AS judged, count(*) FILTER (WHERE v.decision = 'accept') AS accepted,
-                avg(c.cost) AS cost
-         FROM picks p LEFT JOIN verdicts v ON v.session_id = p.parent LEFT JOIN costs c ON c.session_id = p.child
-         GROUP BY p.kind, p.model ORDER BY p.kind, p.model",
+              runs AS (SELECT session_id, status FROM job_runs WHERE session_id IS NOT NULL AND status IN ('ok', 'silent', 'error')),
+              costs AS (SELECT session_id, SUM(cost_usd) AS cost, SUM(EXTRACT(EPOCH FROM (ended_at - started_at)))::float8 AS secs FROM turns GROUP BY session_id),
+              outcomes AS (SELECT p.kind, p.model, c.cost, c.secs,
+                                  CASE WHEN COALESCE(vs.decision, vp.decision) IS NOT NULL THEN COALESCE(vs.decision, vp.decision) = 'accept'
+                                       WHEN r.status IS NOT NULL THEN r.status <> 'error' END AS good
+                           FROM picks p LEFT JOIN verdicts vs ON vs.session_id = p.s LEFT JOIN verdicts vp ON vp.session_id = p.parent
+                           LEFT JOIN runs r ON r.session_id = p.s LEFT JOIN costs c ON c.session_id = p.s)
+         SELECT kind, model, count(*) AS n, count(good) AS judged, count(*) FILTER (WHERE good) AS accepted, avg(cost) AS cost, avg(secs) AS secs
+         FROM outcomes GROUP BY kind, model ORDER BY kind, model",
     )
     .fetch_all(db)
     .await?;
@@ -205,7 +210,8 @@ pub async fn stats(db: &sqlx::PgPool) -> Result<Vec<Value>> {
         .iter()
         .map(|r| {
             json!({ "kind": r.get::<Option<String>, _>("kind"), "model": r.get::<Option<String>, _>("model"), "subtasks": r.get::<i64, _>("n"),
-                    "judged": r.get::<i64, _>("judged"), "accepted": r.get::<i64, _>("accepted"), "mean_cost": r.get::<Option<f64>, _>("cost") })
+                    "judged": r.get::<i64, _>("judged"), "accepted": r.get::<i64, _>("accepted"), "mean_cost": r.get::<Option<f64>, _>("cost"),
+                    "mean_secs": r.get::<Option<f64>, _>("secs") })
         })
         .collect())
 }
@@ -226,9 +232,25 @@ fn wilson_upper(k: u64, n: u64, z: f64) -> f64 {
     1.0 - wilson_lower(n - k.min(n), n, z)
 }
 
-/// What the evidence says to change: for each kind with a route, a model whose acceptance's lower
-/// bound beats the current model's upper bound, both with at least `min` judged subtasks.
-pub fn suggest(policy: &Value, stats: &[Value], min: u64) -> Vec<(String, String, String)> {
+/// One change the evidence supports.
+#[derive(Debug, PartialEq)]
+pub struct Change {
+    pub kind: String,
+    pub model: String,
+    pub why: String,
+    /// Left to the owner: another provider, or over twice the cost (D-074).
+    pub owner: bool,
+}
+
+/// How much worse a challenger's acceptance may be (its lower bound against the champion's rate)
+/// and still win on cost and speed.
+const QUALITY_MARGIN: f64 = 0.05;
+
+/// What the evidence says to change, per kind with a route, comparing each model with at least
+/// `min` judged outcomes against the champion (D-074): quality is a gate (the challenger's
+/// acceptance, at its lower bound, within QUALITY_MARGIN of the champion's), then a challenger wins
+/// on clearly better quality, or on cost and time together (cost weighted 2:1) at least 15% better.
+pub fn suggest(policy: &Value, stats: &[Value], min: u64) -> Vec<Change> {
     let mut out = Vec::new();
     let z = 1.645;
     let kinds: Vec<String> = stats.iter().filter_map(|s| s["kind"].as_str().map(String::from)).fold(Vec::new(), |mut v, k| {
@@ -239,21 +261,39 @@ pub fn suggest(policy: &Value, stats: &[Value], min: u64) -> Vec<(String, String
     });
     for kind in kinds {
         let Some(current) = policy["routes"][&kind]["model"].as_str() else { continue };
-        let row = |m: &str| stats.iter().find(|s| s["kind"] == kind.as_str() && s["model"] == m).map(|s| (s["accepted"].as_u64().unwrap_or(0), s["judged"].as_u64().unwrap_or(0)));
-        let Some((ck, cn)) = row(current) else { continue };
+        let Some(champ) = stats.iter().find(|s| s["kind"] == kind.as_str() && s["model"] == current) else { continue };
+        let num = |s: &Value, k: &str| s[k].as_u64().unwrap_or(0);
+        let (ck, cn) = (num(champ, "accepted"), num(champ, "judged"));
         if cn < min {
             continue;
         }
-        let cur_upper = wilson_upper(ck, cn, z);
-        let best = stats
-            .iter()
-            .filter(|s| s["kind"] == kind.as_str() && s["model"] != current && s["judged"].as_u64().unwrap_or(0) >= min)
-            .map(|s| (s["model"].as_str().unwrap_or("").to_string(), wilson_lower(s["accepted"].as_u64().unwrap_or(0), s["judged"].as_u64().unwrap_or(0), z)))
-            .filter(|(_, lower)| *lower > cur_upper)
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        if let Some((m, lower)) = best {
-            out.push((kind.clone(), m, format!("accepted at ≥{lower:.2} (lower bound) vs ≤{cur_upper:.2} for {current}")));
+        let rate = ck as f64 / cn as f64;
+        let upper = wilson_upper(ck, cn, z);
+        let cost = |s: &Value| s["mean_cost"].as_f64().unwrap_or(0.0);
+        let secs = |s: &Value| s["mean_secs"].as_f64().unwrap_or(0.0);
+        let mut best: Option<(f64, Change)> = None;
+        for s in stats.iter().filter(|s| s["kind"] == kind.as_str() && s["model"] != current && num(s, "judged") >= min) {
+            let model = s["model"].as_str().unwrap_or("").to_string();
+            let lower = wilson_lower(num(s, "accepted"), num(s, "judged"), z);
+            if lower < rate - QUALITY_MARGIN {
+                continue;
+            }
+            let ratio = |a: f64, b: f64| if b > 0.0 { a / b } else { 1.0 };
+            let value = (2.0 * ratio(cost(s), cost(champ)) + ratio(secs(s), secs(champ))) / 3.0;
+            let (score, why) = if lower > upper {
+                (2.0 + lower, format!("accepted at ≥{lower:.2} vs ≤{upper:.2} for {current}"))
+            } else if value <= 0.85 {
+                (1.0 - value, format!("as good (≥{lower:.2} vs {rate:.2}) at {:.0}% of {current}'s cost and time", value * 100.0))
+            } else {
+                continue;
+            };
+            let provider = |m: &str| m.split('/').next().unwrap_or("").to_string();
+            let owner = provider(&model) != provider(current) || cost(s) > 2.0 * cost(champ);
+            if best.as_ref().is_none_or(|(b, _)| score > *b) {
+                best = Some((score, Change { kind: kind.clone(), model, why, owner }));
+            }
         }
+        out.extend(best.map(|(_, c)| c));
     }
     out
 }
@@ -262,19 +302,29 @@ pub fn suggest(policy: &Value, stats: &[Value], min: u64) -> Vec<(String, String
 pub async fn tune(db: &sqlx::PgPool) -> Vec<String> {
     let (version, mut p) = policy(db).await;
     let Ok(st) = stats(db).await else { return Vec::new() };
-    let changes = suggest(&p, &st, crate::config::get().policy_min_judged);
     let mut notes = Vec::new();
-    for (kind, model, why) in changes {
-        let old = p["routes"][&kind]["model"].as_str().unwrap_or("").to_string();
-        p["routes"][&kind]["model"] = json!(model);
-        let mut cands: Vec<Value> = p["routes"][&kind]["candidates"].as_array().cloned().unwrap_or_default();
-        if !cands.iter().any(|c| c == old.as_str()) {
+    for c in suggest(&p, &st, crate::config::get().policy_min_judged) {
+        let old = p["routes"][&c.kind]["model"].as_str().unwrap_or("").to_string();
+        if c.owner {
+            notes.push(format!("routes: {}: {} looks better than {old} ({}); it's another provider or costs over twice as much, so it's yours to decide: `zen policy set {} {}`", c.kind, c.model, c.why, c.kind, c.model));
+            continue;
+        }
+        p["routes"][&c.kind]["model"] = json!(c.model);
+        let mut cands: Vec<Value> = p["routes"][&c.kind]["candidates"].as_array().cloned().unwrap_or_default();
+        cands.retain(|m| m != c.model.as_str());
+        if !cands.iter().any(|m| m == old.as_str()) {
             cands.push(json!(old));
         }
-        p["routes"][&kind]["candidates"] = Value::Array(cands);
-        let reason = format!("{kind}: {old} -> {model}, {why} (from policy v{version})");
+        p["routes"][&c.kind]["candidates"] = Value::Array(cands);
+        let reason = format!("{}: {old} -> {}, {} (from policy v{version})", c.kind, c.model, c.why);
         if set_policy(db, &p, &reason, "routes").await.is_ok() {
             notes.push(format!("policy: {reason}; `zen policy undo` reverts"));
+        }
+    }
+    // Work no kind fitted, to grow the list: the owner adds a kind to the policy (`zen policy`).
+    if let Ok(n) = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM decisions WHERE point = 'model' AND input->>'kind' = 'unsure' AND created_at > now() - interval '7 days'").fetch_one(db).await {
+        if n >= 10 {
+            notes.push(format!("routes: {n} pieces of work in the last week fitted no kind of task (the default model ran them); `zen policy` shows the kinds"));
         }
     }
     notes
@@ -307,10 +357,24 @@ mod tests {
     #[test]
     fn a_route_changes_only_on_clear_evidence() {
         let p = json!({ "routes": { "build": { "model": "claude/a" } } });
-        let s = |m: &str, k: u64, n: u64| json!({ "kind": "build", "model": m, "accepted": k, "judged": n });
+        let s = |m: &str, k: u64, n: u64| json!({ "kind": "build", "model": m, "accepted": k, "judged": n, "mean_cost": 1.0, "mean_secs": 60.0 });
         assert!(suggest(&p, &[s("claude/a", 10, 20), s("claude/b", 15, 20)], 20).is_empty(), "better, but not clearly");
         let r = suggest(&p, &[s("claude/a", 5, 40), s("claude/b", 38, 40)], 20);
-        assert_eq!(r[0].1, "claude/b");
+        assert_eq!((r[0].model.as_str(), r[0].owner), ("claude/b", false));
         assert!(suggest(&p, &[s("claude/a", 0, 5), s("claude/b", 5, 5)], 20).is_empty(), "too few judged");
+    }
+
+    #[test]
+    fn quality_is_a_gate_then_cost_and_time_decide() {
+        let p = json!({ "routes": { "chat": { "model": "claude/opus" } } });
+        let s = |m: &str, k: u64, cost: f64, secs: f64| json!({ "kind": "chat", "model": m, "accepted": k, "judged": 60, "mean_cost": cost, "mean_secs": secs });
+        let r = suggest(&p, &[s("claude/opus", 57, 1.0, 30.0), s("claude/sonnet", 58, 0.3, 20.0)], 20);
+        assert_eq!((r[0].model.as_str(), r[0].owner), ("claude/sonnet", false), "as good and much cheaper: switch on its own");
+        assert!(suggest(&p, &[s("claude/opus", 57, 1.0, 30.0), s("claude/haiku", 40, 0.1, 10.0)], 20).is_empty(), "cheaper but worse: never");
+        assert!(suggest(&p, &[s("claude/opus", 57, 1.0, 30.0), s("claude/sonnet", 58, 0.95, 29.0)], 20).is_empty(), "barely cheaper: not worth a switch");
+        let r = suggest(&p, &[s("claude/opus", 57, 1.0, 30.0), s("codex/gpt", 58, 0.3, 20.0)], 20);
+        assert!(r[0].owner, "another provider is the owner's call");
+        let r = suggest(&p, &[s("claude/opus", 30, 1.0, 30.0), s("claude/max", 59, 3.0, 40.0)], 20);
+        assert!(r[0].owner && r[0].model == "claude/max", "clearly better but three times the cost: the owner's call");
     }
 }

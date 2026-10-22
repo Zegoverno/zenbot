@@ -139,6 +139,11 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: Option<JobsCmd>,
     },
+    /// Sign in to a remote MCP server: open the link, then paste the address your browser ended on
+    McpLogin {
+        /// The server's name in mcp.json
+        server: String,
+    },
     /// List MCP forms awaiting an explicit owner response
     McpPending,
     /// Answer a pending MCP form (owner only)
@@ -270,16 +275,22 @@ pub(crate) enum SessionsCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum PolicyCmd {
-    /// Route a kind of work (understand, shape, build, verify, maintain, reflect, reach, bet, default) to a model
+    /// Route a kind of task (chat, recall, routine, writing, research, coding-small, ops, coding-large, planning, or one you add with --describe) to a model
     Set {
         kind: String,
         model: String,
         /// Other models to try now and then, comma-separated
         #[arg(long)]
         candidates: Option<String>,
-        /// Share of subtasks that try a candidate (default 0.1)
+        /// Share of routed work that tries a candidate (default 0.05)
         #[arg(long)]
         explore: Option<f64>,
+        /// Add (or redescribe) this kind of task: what it is, which System One reads to recognize it
+        #[arg(long)]
+        describe: Option<String>,
+        /// Never try candidates for this kind (work whose mistakes cost a lot)
+        #[arg(long)]
+        no_explore: bool,
     },
     /// Go back to the policy before the latest change
     Undo,
@@ -318,7 +329,7 @@ pub(crate) fn short_sha(v: &Value) -> String {
 
 #[derive(Subcommand)]
 pub(crate) enum JobsCmd {
-    /// Create an agent job: a prompt run in a fresh session on a schedule
+    /// Create a job: a prompt run in a fresh session on a schedule, or (--command) a shell command run with no model
     Add {
         /// Lowercase letters, digits and hyphens, e.g. morning-brief
         name: String,
@@ -326,8 +337,11 @@ pub(crate) enum JobsCmd {
         #[arg(short, long)]
         schedule: String,
         /// The task, self-contained
-        #[arg(short, long)]
-        prompt: String,
+        #[arg(short, long, required_unless_present = "command", conflicts_with = "command")]
+        prompt: Option<String>,
+        /// A script job: this shell command, run in the contained shell with no model; its output is the report
+        #[arg(long)]
+        command: Option<String>,
         /// IANA timezone the schedule is read in (default America/Sao_Paulo)
         #[arg(long)]
         tz: Option<String>,
@@ -357,6 +371,9 @@ pub(crate) enum JobsCmd {
         schedule: Option<String>,
         #[arg(short, long)]
         prompt: Option<String>,
+        /// A script job's new command
+        #[arg(long)]
+        command: Option<String>,
         #[arg(long)]
         tz: Option<String>,
         #[arg(long)]

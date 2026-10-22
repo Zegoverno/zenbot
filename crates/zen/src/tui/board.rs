@@ -336,6 +336,7 @@ impl App {
         self.board = None;
         self.reset_session();
         self.model = self.default_model.clone();
+        self.model_pinned = false;
         self.effort = None;
         self.commit(vec![line("── new session ──", Sty::Dim), Vec::new()]);
     }

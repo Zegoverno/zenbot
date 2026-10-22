@@ -36,6 +36,7 @@ mod sources;
 mod proxy;
 mod tools;
 mod output;
+mod route;
 mod media;
 mod trust;
 mod turns;
@@ -300,6 +301,8 @@ async fn serve() -> Result<()> {
         .route("/memory", get(list_memory))
         .route("/brain", axum::routing::post(brain_action))
         .route("/mcp", get(mcp_status))
+        .route("/mcp/login", axum::routing::post(mcp_login))
+        .route("/mcp/login/{flow}", axum::routing::post(mcp_login_finish))
         .route("/mcp/pending", get(mcp_pending))
         .route("/mcp/pending/{id}", axum::routing::post(mcp_respond))
         .route("/skills", get(list_skills))

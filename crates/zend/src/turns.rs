@@ -450,6 +450,8 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
 async fn begin_queued(app: &AppState, id: Uuid, text: String, origin: Origin, queued: Option<i64>) -> Result<()> {
     anyhow::ensure!(!app.finishing.lock().await.contains(&id), "this session is already working; wait or abort");
     anyhow::ensure!(!crate::taint::stopped(&app.db,id).await?, "session stopped by contamination; review it with /trust");
+    // A new owner session whose model nobody chose gets one from the learning router (D-074).
+    crate::route::session_start(app, id, &text).await;
     let row = sqlx::query("SELECT model, effort, title, workspace, kind FROM sessions WHERE id = $1")
         .bind(id)
         .fetch_optional(&app.db)
