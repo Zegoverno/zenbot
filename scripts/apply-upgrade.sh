@@ -176,6 +176,12 @@ if wait_healthy "$HEALTH" 45; then
   log "upgrade OK: now running $COMMIT$NOTE"
   # The kernel's scheduler runs the sleep and engine updates now (D-046): the old timers go.
   remove_old_timers 2>>"$LOG" || log "removing the old zen-sleep/zen-engines timers failed; remove them by hand"
+  # The web search runs natively (D-078): installed where it isn't yet, its settings kept current.
+  if SX=$("$REPO/scripts/searxng.sh" install 2>&1); then
+    grep -q "answers on" <<<"$SX" && [ ! -f "$HOME/.zenbot/searxng/.logged" ] && { log "SearXNG runs natively: $(tail -1 <<<"$SX")"; touch "$HOME/.zenbot/searxng/.logged"; }
+  else
+    log "SearXNG install failed: $(tail -1 <<<"$SX"); web search may be down (scripts/searxng.sh install)"
+  fi
   # Disk hygiene: trim build directories over 2 GiB. The installed binaries are in ~/.zenbot/bin, so nothing here can break the install.
   SRC=$(zen_env ZEN_REPO); SRC=${SRC:-$HOME/zenbot}
   for t in "$SRC/target" "$SRC/crates/zen-matrix/target"; do

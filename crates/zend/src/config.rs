@@ -88,7 +88,8 @@ pub struct Config {
     pub index_secs: u64,
     /// `ZEN_SEARCH_PROVIDER` (unset: Brave or Tavily when their key is set, else SearXNG).
     pub search_provider: Option<String>,
-    /// `ZEN_SEARXNG_URL` (unset): an optional external SearXNG server.
+    /// `ZEN_SEARXNG_URL` (`http://127.0.0.1:8888`): the SearXNG web search uses; the installer runs
+    /// one natively there (scripts/searxng.sh, D-078); empty turns it off.
     pub searxng_url: String,
     /// `ZEN_SEARCH_RERANK` (on): off means System One doesn't rerank web results.
     pub search_rerank: bool,
@@ -168,7 +169,7 @@ impl Config {
             memory_chars: num("ZEN_MEMORY_CHARS", 4000.0).max(200.0) as usize,
             index_secs: num("ZEN_INDEX_SECS", 20.0).max(1.0) as u64,
             search_provider: set("ZEN_SEARCH_PROVIDER"),
-            searxng_url: text("ZEN_SEARXNG_URL", ""),
+            searxng_url: text("ZEN_SEARXNG_URL", "http://127.0.0.1:8888"),
             search_rerank: on("ZEN_SEARCH_RERANK"),
             tz: text("ZEN_TZ", "America/Sao_Paulo"),
             jobs: on("ZEN_JOBS"),

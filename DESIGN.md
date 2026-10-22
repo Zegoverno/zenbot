@@ -101,7 +101,7 @@ saved under `~/.zenbot/outputs` (D-071).
   the owner says otherwise; stdio servers run contained behind their own egress proxy. Remote
   sign-in pastes back the redirect address (D-072).
 - **Web** (`web.rs`): public addresses only, checked on every redirect; results wrapped as
-  untrusted and rated by source; search through Brave, Tavily or SearXNG, reranked by S1.
+  untrusted and rated by source; search through a native SearXNG (free, D-078), or Brave or Tavily with a key, reranked by S1.
 - **Delegation** (`delegate.rs`): subagents run tasks in parallel, inherit the parent's risk, and
   can't ask, delegate or schedule. A child stops with the turn that waits for it.
 - **Briefs and verification**: skills plus `verify` and `ask` (`docs/brief.md`).

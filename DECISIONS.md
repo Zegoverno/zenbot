@@ -6,6 +6,16 @@
 > with the owner's OK. Add new ones at the top in this short form (≤ ~8 lines: status, date, the rule,
 > what it supersedes); the full reasoning goes in the pull request and PROGRESS.md.
 
+## D-078 — Free web search: SearXNG natively, no Docker
+
+Status: accepted (owner, 2026-10-22: a free way to search; drop Docker, the old Postgres and the SearXNG container) · 2026-10-22
+
+`scripts/searxng.sh` installs SearXNG from a pinned upstream commit in its own venv as the
+`zen-searxng` service on 127.0.0.1:8888 (the kernel's default), with extra engines enabled so one
+that blocks doesn't matter. Installs and upgrades set it up; the nightly `engines` job moves it to
+upstream's latest commit after a test search, or keeps the current one. Brave or Tavily keys still
+take precedence. Docker remains only for migrating a pre-SQLite install.
+
 ## D-077 — Clients show only visible text; Matrix upgrades itself; aarch64 releases
 Status: accepted · 2026-10-22
 The terminal and Matrix drop `zen_proto::invisible` characters. `upgrade.sh` rebuilds a changed zen-matrix and `apply-upgrade.sh` swaps it in, restoring the old one on failure. CI publishes x86_64 and aarch64 builds.

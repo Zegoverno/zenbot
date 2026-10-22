@@ -1,4 +1,5 @@
-# Postgres (with pgvector) for zenbot, and SearXNG for web search without an API key. zend and its workers run on the host (deploy/zenbot.service, or scripts/dev.sh).
+# Legacy: the PostgreSQL of installs from before SQLite (D-076), read once by the storage migration
+# (scripts/storage.py). zenbot itself needs no Docker; web search is SearXNG, natively (scripts/searxng.sh).
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -18,14 +19,5 @@ services:
       test: ["CMD-SHELL", "pg_isready -U zen"]
       interval: 5s
       retries: 10
-  searxng:
-    image: searxng/searxng@sha256:cc026dbee25b864d7f9731957cd5ef36ba2e2d61abd2996d57f1b863483e7409 # pinned; bump deliberately
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:8888:8080"
-    environment:
-      SEARXNG_BASE_URL: http://127.0.0.1:8888/
-    volumes:
-      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
 volumes:
   zen-pg:

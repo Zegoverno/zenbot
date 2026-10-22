@@ -45,5 +45,5 @@ previous version if a test turn fails ([DEVELOPMENT.md](DEVELOPMENT.md#engine-up
 `scripts/update-engines.sh --check` compares versions.
 
 Troubleshooting: `journalctl -u zenbot -n 50`. The service listens on port 8100; re-run the
-installer with `ZEN_PORT=…` to change it (other settings in `~/.zenbot/env` are kept). For
-`web_search`, set `ZEN_SEARXNG_URL`, `BRAVE_API_KEY` or `TAVILY_API_KEY` in `~/.zenbot/env`.
+installer with `ZEN_PORT=…` to change it (other settings in `~/.zenbot/env` are kept). Web
+search runs on SearXNG, installed natively (`systemctl status zen-searxng`; `scripts/searxng.sh check`).

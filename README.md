@@ -111,8 +111,9 @@ How each works: [DESIGN.md](DESIGN.md).
 
 ## The web, MCP and safety
 
-`web_fetch` reads public pages. For `web_search` set `ZEN_SEARXNG_URL` (an external SearXNG), or
-`BRAVE_API_KEY` or `TAVILY_API_KEY`, in `~/.zenbot/env`.
+`web_fetch` reads public pages. `web_search` is free: the installer runs SearXNG natively on
+127.0.0.1:8888 (`zen-searxng` service; several engines, so one that blocks doesn't matter), and the
+nightly `engines` job keeps it updated. A `BRAVE_API_KEY` or `TAVILY_API_KEY` in `~/.zenbot/env` uses that API instead.
 
 MCP servers go in `~/.zenbot/mcp.json`, the shape Claude Code uses. Secrets live in `~/.zenbot/env`
 as `${VAR}`; a secret-named variable reaches only a server listing it in `allow_env`. Per server:

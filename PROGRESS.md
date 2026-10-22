@@ -6,6 +6,13 @@
 
 ---
 
+## 2026-10-22 — Free web search without Docker (D-078)
+
+SearXNG runs natively as the `zen-searxng` service, installed by `install.sh` and upgrades and kept
+current by the nightly `engines` job (test search, else rollback); more engines are enabled, so a
+blocked one doesn't empty the results. Web search was off since the SQLite install (the kernel had
+no SearXNG address by default); it defaults to the native service again.
+
 ## 2026-10-22 — Phase 10: docs rewrite
 
 The reference docs are rewritten against the code at about a quarter of their size: protocols keep
