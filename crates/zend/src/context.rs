@@ -135,7 +135,7 @@ pub fn trusted(path: &Path, roots: &[PathBuf]) -> bool {
 /// How risky the instruction files of a repository the owner hasn't trusted are (D-067): the
 /// owner's level for its remote, else System One's rating of the remote (who can write there),
 /// else 1 for a repository with no remote (a local project of the owner's).
-pub async fn repo_rating(db: &sqlx::PgPool, path: &Path) -> i16 {
+pub async fn repo_rating(db: &sqlx::SqlitePool, path: &Path) -> i16 {
     let real = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if let Some(level) = crate::trust::repo_level(&real) {
         return level;
@@ -170,11 +170,11 @@ fn worktree_root(path: &Path) -> Option<PathBuf> {
 /// its shell runs read-only, D-063). Registered bytes take the maximum original rating, with
 /// contamination from any writer overlaid as 5. A second registration cannot launder an origin.
 /// Database errors are returned: the caller leaves the text out (fail closed).
-pub async fn rate(db: &sqlx::PgPool, text: &str, unknown: i16) -> anyhow::Result<(i16, Vec<uuid::Uuid>)> {
+pub async fn rate(db: &sqlx::SqlitePool, text: &str, unknown: i16) -> anyhow::Result<(i16, Vec<uuid::Uuid>)> {
     use sqlx::Row;
     let rows = sqlx::query(
-        "SELECT session_id, risk, (session_id IS NOT NULL AND zen_session_contaminated(session_id)) AS bad
-         FROM item_ratings WHERE sha256 = encode(sha256(convert_to($1, 'UTF8')), 'hex')",
+        "SELECT session_id, risk, (session_id IS NOT NULL AND COALESCE(session_id IN (SELECT id FROM zen_contaminated_sessions),false)) AS bad
+         FROM item_ratings WHERE sha256 = sha256_hex($1)",
     )
     .bind(text)
     .fetch_all(db)
@@ -193,7 +193,7 @@ pub fn label(source: &str, risk: i16, text: &str) -> String {
 }
 
 /// Admit ratings through 3; record dependency and rating before handing over. Errors withhold.
-pub async fn admit(db: &sqlx::PgPool, reader: uuid::Uuid, text: &str, unknown: i16) -> anyhow::Result<Option<i16>> {
+pub async fn admit(db: &sqlx::SqlitePool, reader: uuid::Uuid, text: &str, unknown: i16) -> anyhow::Result<Option<i16>> {
     let (risk, writers) = rate(db, text, unknown).await?;
     if risk > 3 {
         return Ok(None);
@@ -210,7 +210,7 @@ pub async fn admit(db: &sqlx::PgPool, reader: uuid::Uuid, text: &str, unknown: i
 /// an AGENTS.md there). Returns (attached as instructions, rating), after recording the reader's
 /// dependency on the writers. Level 5 (a contaminated writer) is returned for the caller to stop
 /// the reader.
-pub async fn attach_rating(db: &sqlx::PgPool, reader: uuid::Uuid, text: &str, in_trusted_repo: bool, repo: i16) -> anyhow::Result<(bool, i16)> {
+pub async fn attach_rating(db: &sqlx::SqlitePool, reader: uuid::Uuid, text: &str, in_trusted_repo: bool, repo: i16) -> anyhow::Result<(bool, i16)> {
     let (risk, writers) = rate(db, text, if in_trusted_repo { 1 } else { repo }).await?;
     if risk == 5 {
         return Ok((false, 5));
@@ -327,12 +327,10 @@ mod tests {
     }
 
     /// Instruction text and memories in prompts, and project files attached to results, keep
-    /// their origin (D-062). SOURCE_TEST_DB_URL must name a throwaway database.
+    /// their origin (D-062), using an isolated SQLite fixture.
     #[tokio::test]
-    #[ignore]
-    async fn instruction_provenance_database() {
-        let db = sqlx::PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
-        sqlx::migrate!().run(&db).await.unwrap();
+        async fn instruction_provenance_database() {
+        let (_db_dir, db) = crate::test_util::database().await;
         let session = |risk: i16| {
             let db = db.clone();
             async move {
@@ -445,7 +443,7 @@ mod tests {
         assert_eq!(admit(&db, session(1).await, &risky, 1).await.unwrap(), None);
 
         // Metadata errors fail closed.
-        let closed = sqlx::PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
+        let (_closed_dir, closed) = crate::test_util::database().await;
         closed.close().await;
         assert!(rate(&closed, &clean, 1).await.is_err());
         assert!(admit(&closed, mr, &clean, 1).await.is_err());

@@ -180,7 +180,7 @@ async fn save_skill(app: &App, session: Uuid, args: &Value) -> Result<String> {
 /// Make a draft skill active (or archive it). `by` is who decided; `reviewed` is the fingerprint
 /// of the draft the owner reviewed (`zen skills`), refused when the draft changed since. None only
 /// for the kernel's own decisions (`on_accept`).
-pub async fn decide_draft(db: &sqlx::PgPool, name: &str, accept: bool, by: &str, reviewed: Option<&str>) -> Result<String> {
+pub async fn decide_draft(db: &sqlx::SqlitePool, name: &str, accept: bool, by: &str, reviewed: Option<&str>) -> Result<String> {
     let name = name.trim().trim_end_matches('/');
     let draft = skills::lookup(&skills::drafts(), name).map_err(|e| anyhow::anyhow!(e))?.clone();
     if let Some(r) = reviewed {
@@ -214,7 +214,7 @@ pub async fn decide_draft(db: &sqlx::PgPool, name: &str, accept: bool, by: &str,
 
 /// Draft skills a session that read untrusted content wrote (domain/name). When that can't be
 /// read, every draft counts (fail closed).
-pub async fn tainted_drafts(db: &sqlx::PgPool) -> Vec<String> {
+pub async fn tainted_drafts(db: &sqlx::SqlitePool) -> Vec<String> {
     match sqlx::query_scalar("SELECT skill FROM draft_taint").fetch_all(db).await {
         Ok(v) => v,
         Err(e) => {
@@ -225,7 +225,7 @@ pub async fn tainted_drafts(db: &sqlx::PgPool) -> Vec<String> {
 }
 
 /// Mark a draft as written by a session that read untrusted content.
-async fn mark_draft(db: &sqlx::PgPool, skill: &str, session: Uuid) -> Result<()> {
+async fn mark_draft(db: &sqlx::SqlitePool, skill: &str, session: Uuid) -> Result<()> {
     sqlx::query("INSERT INTO draft_taint (skill, session_id) VALUES ($1, $2) ON CONFLICT (skill) DO NOTHING").bind(skill).bind(session).execute(db).await?;
     Ok(())
 }
@@ -253,10 +253,10 @@ pub async fn on_accept(app: &App, session: Uuid) {
     if let Err(e)=sqlx::query("UPDATE brain_skill_uses SET outcome='session accepted by owner' WHERE session_id=$1").bind(session).execute(&app.db).await {tracing::warn!("recording skill outcome: {e:#}");}
 }
 
-pub async fn stats(db: &sqlx::PgPool) -> Result<Value> {
+pub async fn stats(db: &sqlx::SqlitePool) -> Result<Value> {
     let rows = sqlx::query(
         "WITH loads AS (SELECT args->>'name' AS name, session_id, created_at FROM tool_calls WHERE name = 'load_skill' AND NOT is_error),
-              verdicts AS (SELECT DISTINCT ON (session_id) session_id, decision FROM session_decisions ORDER BY session_id, created_at DESC)
+              verdicts AS (SELECT session_id,decision FROM (SELECT session_id,decision,row_number() OVER(PARTITION BY session_id ORDER BY created_at DESC,id DESC) AS rn FROM session_decisions) WHERE rn=1)
          SELECT l.name, count(*) AS loads, max(l.created_at) AS last,
                 count(*) FILTER (WHERE v.decision = 'accept') AS accepted, count(v.decision) AS judged
          FROM loads l LEFT JOIN verdicts v USING (session_id) GROUP BY l.name",
@@ -295,7 +295,7 @@ pub async fn stats(db: &sqlx::PgPool) -> Result<Value> {
 
 /// The nightly `skills` job (jobs.rs): active skills unused for 30 days are flagged, for 90 archived.
 /// A skill's age counts from when it was written (its SKILL.md), so new skills aren't flagged.
-pub async fn tend(db: &sqlx::PgPool) -> Vec<String> {
+pub async fn tend(db: &sqlx::SqlitePool) -> Vec<String> {
     let mut notes = Vec::new();
     let Ok(st) = stats(db).await else { return notes };
     let now = chrono::Utc::now();
@@ -323,7 +323,7 @@ pub async fn tend(db: &sqlx::PgPool) -> Vec<String> {
 // ---------- tools the agent makes ----------
 
 /// The agent's tools and whether the owner approved each.
-pub async fn made_tools(db: &sqlx::PgPool) -> Vec<(crate::mcp::ToolEntry, bool)> {
+pub async fn made_tools(db: &sqlx::SqlitePool) -> Vec<(crate::mcp::ToolEntry, bool)> {
     let approved: Vec<String> = sqlx::query_scalar("SELECT name FROM made_tools WHERE approved_at IS NOT NULL AND rejected_at IS NULL").fetch_all(db).await.unwrap_or_default();
     made_entries().into_iter().map(|t| {
         let ok = approved.contains(&t.name);
@@ -385,11 +385,10 @@ fn content(dir: &Path) -> Vec<u8> {
     all
 }
 
-/// The SHA-256 of a folder's content: a tool's or a draft skill's (computed by Postgres: no
-/// hashing crate needed).
-async fn fingerprint(db: &sqlx::PgPool, dir: &Path) -> Result<String> {
+/// The SHA-256 of a tool or draft skill folder, using the registered SQLite digest function.
+async fn fingerprint(db: &sqlx::SqlitePool, dir: &Path) -> Result<String> {
     anyhow::ensure!(dir.is_dir(), "{} doesn't exist", dir.display());
-    Ok(sqlx::query_scalar("SELECT encode(sha256($1), 'hex')").bind(content(dir)).fetch_one(db).await?)
+    Ok(sqlx::query_scalar("SELECT sha256_hex($1)").bind(content(dir)).fetch_one(db).await?)
 }
 
 /// Whether the fingerprint the owner reviewed (all of it, or its first 8 or more characters, as
@@ -402,7 +401,7 @@ fn same_content(now: &str, reviewed: &str) -> Result<()> {
 }
 
 /// Compatibility endpoint: old approvals cannot reactivate retired made tools. Files remain on disk.
-pub async fn decide_tool(_db: &sqlx::PgPool, _name: &str, _accept: bool, _reviewed: &str) -> Result<String> {
+pub async fn decide_tool(_db: &sqlx::SqlitePool, _name: &str, _accept: bool, _reviewed: &str) -> Result<String> {
     bail!("Made tools are retired; migrate the procedure into a reviewed skill with supporting scripts.")
 }
 
@@ -411,7 +410,7 @@ pub async fn decide_tool(_db: &sqlx::PgPool, _name: &str, _accept: bool, _review
 /// this text provenance path and are rejected, not executed with an assumed rating.
 /// Errors fail closed: the tool doesn't run.
 #[cfg(test)]
-pub async fn folder_rating(db: &sqlx::PgPool, dir: &Path) -> Result<(i16, Vec<Uuid>)> {
+pub async fn folder_rating(db: &sqlx::SqlitePool, dir: &Path) -> Result<(i16, Vec<Uuid>)> {
     fn walk(dir: &Path, out: &mut Vec<(PathBuf, bool)>) -> std::io::Result<()> {
         for e in std::fs::read_dir(dir)? {
             let e = e?;

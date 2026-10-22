@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use sqlx::{PgPool, Row};
+use sqlx::{SqlitePool, Row};
 use uuid::Uuid;
 
 use crate::{tools, App};
@@ -104,11 +104,11 @@ async fn embed(texts: &[String]) -> Result<Vec<String>> {
 
 // ---------- indexing ----------
 
-async fn state_get(db: &PgPool, key: &str) -> Option<String> {
+async fn state_get(db: &SqlitePool, key: &str) -> Option<String> {
     sqlx::query_scalar("SELECT value FROM search_state WHERE key = $1").bind(key).fetch_optional(db).await.ok().flatten()
 }
 
-async fn state_set(db: &PgPool, key: &str, value: &str) -> Result<()> {
+async fn state_set(db: &SqlitePool, key: &str, value: &str) -> Result<()> {
     sqlx::query("INSERT INTO search_state (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
         .bind(key)
         .bind(value)
@@ -184,7 +184,7 @@ pub fn split_turns(msgs: Vec<(i32, chrono::DateTime<chrono::Utc>, Value)>) -> Ve
 }
 
 /// Index the turns that got new messages since the last pass. Returns how many documents changed.
-async fn index_turns(db: &PgPool) -> Result<usize> {
+async fn index_turns(db: &SqlitePool) -> Result<usize> {
     let wm: i64 = state_get(db, "tape").await.and_then(|v| v.parse().ok()).unwrap_or(0);
     let rows = sqlx::query(
         "SELECT e.id, e.session_id, e.seq FROM tape_events e JOIN sessions s ON s.id = e.session_id
@@ -192,7 +192,7 @@ async fn index_turns(db: &PgPool) -> Result<usize> {
            -- Ids are handed out before commit, so a later id can commit first: only events a few
            -- seconds old are taken, so the watermark never passes one still being written (each
            -- event is written in a short transaction of its own, tape::append).
-           AND e.created_at < now() - interval '5 seconds'
+           AND e.created_at < strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-5 seconds')
          ORDER BY e.id LIMIT 3000",
     )
     .bind(wm)
@@ -215,7 +215,7 @@ async fn index_turns(db: &PgPool) -> Result<usize> {
         let start: Option<i32> = sqlx::query_scalar(
             "SELECT coalesce(
                (SELECT max(seq) FROM tape_events WHERE session_id = $1 AND kind = 'message' AND seq <= $2
-                  AND payload->>'role' = 'user' AND (payload->>'kernel') IS DISTINCT FROM 'true'),
+                  AND payload->>'role' = 'user' AND (payload->>'kernel') IS DISTINCT FROM 1),
                (SELECT min(seq) FROM tape_events WHERE session_id = $1 AND kind = 'message'))",
         )
         .bind(session)
@@ -225,7 +225,7 @@ async fn index_turns(db: &PgPool) -> Result<usize> {
         let start = start.unwrap_or(from);
         // Only what a document holds: tool results (the bulk of a long turn) aren't read.
         let msgs = sqlx::query(
-            "SELECT seq, created_at, payload->>'role' AS role, coalesce(payload->'kernel' = 'true'::jsonb, false) AS kernel,
+            "SELECT seq, created_at, payload->>'role' AS role, coalesce(payload->>'kernel' = 1, false) AS kernel,
                     CASE WHEN payload->>'role' IN ('user', 'assistant') THEN payload->'content' END AS content
              FROM tape_events WHERE session_id = $1 AND kind = 'message' AND seq >= $2 ORDER BY seq",
         )
@@ -254,7 +254,7 @@ async fn index_turns(db: &PgPool) -> Result<usize> {
                  ON CONFLICT (kind, ref) DO UPDATE SET ident = EXCLUDED.ident, title = EXCLUDED.title, body = EXCLUDED.body,
                      embedding = CASE WHEN search_docs.body = EXCLUDED.body THEN search_docs.embedding END,
                      embed_attempts = CASE WHEN search_docs.body = EXCLUDED.body THEN search_docs.embed_attempts ELSE 0 END,
-                     updated_at = now()
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
                  WHERE (search_docs.ident, search_docs.title, search_docs.body) IS DISTINCT FROM (EXCLUDED.ident, EXCLUDED.title, EXCLUDED.body)",
             )
             .bind(format!("{session}:{seq}"))
@@ -277,7 +277,7 @@ async fn index_turns(db: &PgPool) -> Result<usize> {
 /// tier or source changes, in the change's own transaction, so none is missed however long that
 /// transaction ran): short- and long-term ones are searchable, archived and deleted ones are taken
 /// out. Queue rows are deleted once indexed; a change made meanwhile has queued a row of its own.
-async fn index_memories(db: &PgPool) -> Result<usize> {
+async fn index_memories(db: &SqlitePool) -> Result<usize> {
     let rows = sqlx::query(
         "SELECT q.id AS qid, q.ref, m.text, m.tier, m.source, m.created_at FROM search_queue q LEFT JOIN memories m ON m.id = q.ref
          WHERE q.kind = 'memory' ORDER BY q.id LIMIT 2000",
@@ -303,7 +303,7 @@ async fn index_memories(db: &PgPool) -> Result<usize> {
             "INSERT INTO search_docs (kind, ref, ident, title, body, at) VALUES ('memory', $1, $1, $2, $3, $4)
              ON CONFLICT (kind, ref) DO UPDATE SET title = EXCLUDED.title, body = EXCLUDED.body,
                  embedding = CASE WHEN search_docs.body = EXCLUDED.body THEN search_docs.embedding END,
-                 embed_attempts = CASE WHEN search_docs.body = EXCLUDED.body THEN search_docs.embed_attempts ELSE 0 END, updated_at = now()
+                 embed_attempts = CASE WHEN search_docs.body = EXCLUDED.body THEN search_docs.embed_attempts ELSE 0 END, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
              WHERE (search_docs.title, search_docs.body) IS DISTINCT FROM (EXCLUDED.title, EXCLUDED.body)",
         )
         .bind(format!("m{id}"))
@@ -314,21 +314,21 @@ async fn index_memories(db: &PgPool) -> Result<usize> {
         .await?;
     }
     let done: Vec<i64> = rows.iter().map(|r| r.get("qid")).collect();
-    sqlx::query("DELETE FROM search_queue WHERE id = ANY($1)").bind(&done).execute(db).await?;
+    sqlx::query("DELETE FROM search_queue WHERE id IN (SELECT value FROM json_each($1))").bind(json!(done)).execute(db).await?;
     Ok(seen.len())
 }
 
 /// Index wiki pages whose file changed since they were indexed (by each page's own time, so a page
 /// restored with an older time is indexed too), and take out pages that are gone. Only changed
 /// pages are read.
-async fn index_wiki(db: &PgPool) -> Result<usize> {
+async fn index_wiki(db: &SqlitePool) -> Result<usize> {
     let dir = crate::wiki::root();
     if !dir.is_dir() {
         return Ok(0);
     }
     let times = crate::wiki::page_times(&dir);
     let slugs: Vec<String> = times.iter().map(|t| t.0.clone()).collect();
-    sqlx::query("DELETE FROM search_docs WHERE kind = 'wiki' AND NOT (ref = ANY($1))").bind(&slugs).execute(db).await?;
+    sqlx::query("DELETE FROM search_docs WHERE kind = 'wiki' AND NOT (ref IN (SELECT value FROM json_each($1)))").bind(json!(slugs)).execute(db).await?;
     let indexed: HashMap<String, chrono::DateTime<chrono::Utc>> = sqlx::query("SELECT ref, at FROM search_docs WHERE kind = 'wiki'")
         .fetch_all(db)
         .await?
@@ -345,7 +345,7 @@ async fn index_wiki(db: &PgPool) -> Result<usize> {
             "INSERT INTO search_docs (kind, ref, ident, title, body, at) VALUES ('wiki', $1, $2, $3, $4, $5)
              ON CONFLICT (kind, ref) DO UPDATE SET ident = EXCLUDED.ident, title = EXCLUDED.title, body = EXCLUDED.body, at = EXCLUDED.at,
                  embedding = CASE WHEN search_docs.body = EXCLUDED.body THEN search_docs.embedding END,
-                 embed_attempts = CASE WHEN search_docs.body = EXCLUDED.body THEN search_docs.embed_attempts ELSE 0 END, updated_at = now()",
+                 embed_attempts = CASE WHEN search_docs.body = EXCLUDED.body THEN search_docs.embed_attempts ELSE 0 END, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')",
         )
         .bind(&slug)
         .bind(&ident)
@@ -362,7 +362,7 @@ async fn index_wiki(db: &PgPool) -> Result<usize> {
 /// Embed documents that have none yet, a batch at a time. Runs outside the indexing lock: the
 /// provider can take a minute, and a document that changes meanwhile isn't given the old text's
 /// embedding (it's stored only while `updated_at` is the one read).
-async fn embed_pending(db: &PgPool) -> Result<usize> {
+async fn embed_pending(db: &SqlitePool) -> Result<usize> {
     if embed_key().is_none() {
         return Ok(0);
     }
@@ -378,32 +378,32 @@ async fn embed_pending(db: &PgPool) -> Result<usize> {
         MODEL_CHECKED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     let rows = sqlx::query(
-        "SELECT d.id, d.updated_at, coalesce(d.title, '') || E'\\n' || d.body AS text FROM search_docs d
+        "SELECT d.id, d.updated_at, coalesce(d.title, '') || char(10) || d.body AS text FROM search_docs d
          -- A document the provider rejected is tried 3 times (the same 3 as the index
          -- search_docs_to_embed, migrations/0021, so the query uses it).
          WHERE d.embedding IS NULL AND d.embed_attempts < 3
            -- A turn still going changes with every message: it's embedded once its session has no
            -- turn running (ended 10 seconds ago, so the indexer has its last messages), or once
            -- it hasn't changed for 2 minutes.
-           AND (d.kind <> 'turn' OR d.updated_at < now() - interval '2 minutes'
-                OR NOT EXISTS (SELECT 1 FROM turns t WHERE t.session_id = d.session_id AND (t.ended_at IS NULL OR t.ended_at > now() - interval '10 seconds')))
+           AND (d.kind <> 'turn' OR d.updated_at < strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-2 minutes')
+                OR NOT EXISTS (SELECT 1 FROM turns t WHERE t.session_id = d.session_id AND (t.ended_at IS NULL OR t.ended_at > strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-10 seconds'))))
          ORDER BY d.id LIMIT 64",
     )
     .fetch_all(db)
     .await?;
-    let docs: Vec<(i64, chrono::DateTime<chrono::Utc>, String)> =
+    let docs: Vec<(i64, String, String)> =
         rows.iter().map(|r| (r.get("id"), r.get("updated_at"), zen_proto::head(&r.get::<String, _>("text"), 8000))).collect();
     // A batch the provider rejects is split in halves until the document it rejects is alone; that
     // one's attempt and error are recorded. Any other failure (network, sign-in, rate limit, the
     // provider down) ends the pass, to be tried again on the next.
-    let mut stack: Vec<&[(i64, chrono::DateTime<chrono::Utc>, String)]> = if docs.is_empty() { vec![] } else { vec![&docs] };
+    let mut stack: Vec<&[(i64, String, String)]> = if docs.is_empty() { vec![] } else { vec![&docs] };
     let mut stored = 0;
     while let Some(batch) = stack.pop() {
         let texts: Vec<String> = batch.iter().map(|d| d.2.clone()).collect();
         match embed(&texts).await {
             Ok(vecs) => {
                 for ((id, updated, _), v) in batch.iter().zip(vecs) {
-                    let n = sqlx::query("UPDATE search_docs SET embedding = $2::vector, embed_model = $3, embed_error = NULL WHERE id = $1 AND updated_at = $4 AND embedding IS NULL")
+                    let n = sqlx::query("UPDATE search_docs SET embedding = vec_f32($2), embed_model = $3, embed_error = NULL WHERE id = $1 AND updated_at = $4 AND embedding IS NULL")
                         .bind(id)
                         .bind(v)
                         .bind(&model)
@@ -443,7 +443,7 @@ static INDEXING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// One indexing pass (turns, memories, wiki, record files), then embeddings. Only the first holds
 /// the indexing lock, so a search never waits on the embeddings provider.
-pub async fn index_once(db: &PgPool) -> Result<(usize, usize, usize)> {
+pub async fn index_once(db: &SqlitePool) -> Result<(usize, usize, usize)> {
     let (t, m) = {
         let _one = INDEXING.lock().await;
         (index_turns(db).await?, index_memories(db).await? + index_wiki(db).await? + crate::brain::index(db).await?)
@@ -505,8 +505,14 @@ pub struct Found {
     pub exact: bool,
 }
 
-pub async fn query(db: &PgPool, q: &str, kinds: &[&str], session: Option<Uuid>, limit: i64) -> Result<Vec<Found>> {
-    let exact = exact_candidate(q);
+fn fts_query(query: &str) -> String {
+    let words: Vec<String> = query.split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|w| !w.is_empty()).take(64)
+        .map(|w| format!("\"{}\"", w.replace('"', "\"\""))).collect();
+    if words.is_empty() { "\"\"".into() } else { words.join(" AND ") }
+}
+
+pub async fn query(db: &SqlitePool, q: &str, kinds: &[&str], session: Option<Uuid>, limit: i64) -> Result<Vec<Found>> {
     let has_vectors: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM search_docs WHERE embedding IS NOT NULL AND embed_model = $1)").bind(embed_model()).fetch_one(db).await?;
     let qvec = if has_vectors && embed_key().is_some() {
         match embed(&[q.to_string()]).await {
@@ -519,52 +525,56 @@ pub async fn query(db: &PgPool, q: &str, kinds: &[&str], session: Option<Uuid>, 
     } else {
         None
     };
-    let kinds: Vec<String> = kinds.iter().map(|k| k.to_string()).collect();
-    let mut tx = db.begin().await?;
-    // The vector arm's filters (kind, session) apply as the index is walked: keep walking until
-    // enough rows pass them, in order (pgvector 0.8 iterative scans).
-    sqlx::query("SET LOCAL hnsw.ef_search = 100").execute(&mut *tx).await?;
-    sqlx::query("SET LOCAL hnsw.iterative_scan = strict_order").execute(&mut *tx).await?;
-    // Planned for its parameters every time: a generic plan (Postgres's choice for a statement
-    // prepared often enough) can't walk the HNSW index for a parameter vector, so it sorts every
-    // row, parsing the vector once per row (seconds on 30,000 documents).
-    sqlx::query("SET LOCAL plan_cache_mode = force_custom_plan").execute(&mut *tx).await?;
-    // Each arm filters `search_docs` itself, so each uses its own index (trigram, GIN over `tsv`,
-    // HNSW); only the candidates they return are read in full. Ties go to the older document.
+    query_candidates(db,q,kinds,session,limit,qvec).await
+}
+
+async fn query_candidates(db: &SqlitePool, q: &str, kinds: &[&str], session: Option<Uuid>, limit: i64, qvec: Option<String>) -> Result<Vec<Found>> {
+    let exact = exact_candidate(q);
+    let kinds = json!(kinds);
+    // FTS syntax is compiled from quoted literal tokens. User punctuation never becomes an
+    // operator or causes MATCH syntax errors. Exact identifiers have their own arm.
+    let terms = fts_query(q);
+    // Every arm filters before limiting. sqlite-vec computes cosine distance on the copied
+    // float32 vectors; no paid model call or re-embedding is needed to migrate them.
     let rows = sqlx::query(
         "WITH exact AS (
-           SELECT id, row_number() OVER (ORDER BY (ident ILIKE '%' || $3 || '%') DESC, similarity(ident, $3) DESC, id) AS r
-           FROM search_docs
-           WHERE $3 IS NOT NULL AND ident ILIKE '%' || replace(replace($3, '%', '\\%'), '_', '\\_') || '%'
-             AND kind = ANY($4) AND ($6::uuid IS NULL OR session_id = $6)
-           ORDER BY r LIMIT 10),
-         fts AS (
-           SELECT id, row_number() OVER (ORDER BY ts_rank_cd(tsv, websearch_to_tsquery('simple', $1), 32) DESC, id) AS r
-           FROM search_docs
-           WHERE (tsv @@ websearch_to_tsquery('simple', $1) OR fts_en @@ websearch_to_tsquery('english',$1) OR fts_pt @@ websearch_to_tsquery('portuguese',$1)) AND kind = ANY($4) AND ($6::uuid IS NULL OR session_id = $6)
-           ORDER BY r LIMIT 50),
-         vec AS (
-           SELECT id, row_number() OVER () AS r FROM (
-             SELECT id FROM search_docs
-             WHERE $2::text IS NOT NULL AND embedding IS NOT NULL AND embed_model = $7 AND kind = ANY($4) AND ($6::uuid IS NULL OR session_id = $6)
-             ORDER BY embedding <=> $2::text::vector LIMIT 50) v)
-         SELECT d.kind, d.ref, d.body, coalesce(d.title, '') AS title, d.at, (e.id IS NOT NULL) AS exact_hit,
-                coalesce(1.0 / (60 + f.r), 0) + coalesce(1.0 / (60 + v.r), 0) AS rrf,
-                ts_headline('simple', d.body, websearch_to_tsquery('simple', $1), 'MaxFragments=2,MaxWords=35,MinWords=12,FragmentDelimiter= … ') AS snippet,
-                left(d.body, 250) AS head, right(d.body, 450) AS tail, left(d.body, 700) AS whole, length(d.body) AS len, (f.id IS NOT NULL) AS text_hit
-         FROM exact e FULL JOIN fts f USING (id) FULL JOIN vec v USING (id) JOIN search_docs d USING (id)
-         ORDER BY exact_hit DESC, e.r NULLS LAST, rrf DESC, d.id LIMIT $5",
+           SELECT id, row_number() OVER (ORDER BY id) AS r FROM search_docs
+           WHERE $3 IS NOT NULL AND instr(lower(coalesce(ident,'')),lower($3))>0
+             AND kind IN (SELECT value FROM json_each($4)) AND ($6 IS NULL OR session_id=$6)
+           ORDER BY id LIMIT 10),
+         text_candidates AS MATERIALIZED (
+           SELECT d.id, bm25(search_docs_fts, 5.0, 3.0, 1.0) AS score, snippet(search_docs_fts,2,'','',' … ',45) AS excerpt
+           FROM search_docs_fts JOIN search_docs d ON d.id=search_docs_fts.rowid
+           WHERE search_docs_fts MATCH $1
+             AND d.kind IN (SELECT value FROM json_each($4)) AND ($6 IS NULL OR d.session_id=$6)
+           ORDER BY score,d.id LIMIT 50),
+         fts AS (SELECT id,excerpt,row_number() OVER (ORDER BY score,id) AS r FROM text_candidates),
+         vector_candidates AS (
+           SELECT id,vec_distance_cosine(embedding,vec_f32($2)) AS distance FROM search_docs
+           WHERE $2 IS NOT NULL AND embedding IS NOT NULL AND embed_model=$7
+             AND kind IN (SELECT value FROM json_each($4)) AND ($6 IS NULL OR session_id=$6)
+           AND vec_distance_cosine(embedding,vec_f32($2)) IS NOT NULL
+           ORDER BY distance,id LIMIT 50),
+         vec AS (SELECT id,row_number() OVER (ORDER BY distance,id) AS r FROM vector_candidates),
+         candidates AS (SELECT id FROM exact UNION SELECT id FROM fts UNION SELECT id FROM vec)
+         SELECT d.kind,d.ref,d.body,coalesce(d.title,'') AS title,d.at,(e.id IS NOT NULL) AS exact_hit,
+                coalesce(1.0/(60+f.r),0)+coalesce(1.0/(60+v.r),0) AS rrf,
+                coalesce(f.excerpt,substr(d.body,1,700)) AS snippet, substr(d.body,1,250) AS head,
+                substr(d.body,-450) AS tail,substr(d.body,1,700) AS whole,
+                length(d.body) AS len,(f.id IS NOT NULL) AS text_hit
+         FROM candidates c JOIN search_docs d ON d.id=c.id
+         LEFT JOIN exact e ON e.id=d.id LEFT JOIN fts f ON f.id=d.id LEFT JOIN vec v ON v.id=d.id
+         ORDER BY exact_hit DESC,e.r NULLS LAST,rrf DESC,d.id LIMIT $5",
     )
-    .bind(q)
+    .bind(terms)
     .bind(qvec)
     .bind(exact)
-    .bind(&kinds)
+    .bind(kinds)
     .bind(limit)
     .bind(session)
     .bind(embed_model())
-    .fetch_all(&mut *tx)
+    .fetch_all(db)
     .await?;
-    tx.commit().await?;
     Ok(rows
         .iter()
         .map(|r| {
@@ -617,9 +627,9 @@ fn is_record(f: &Found) -> bool {
 }
 
 /// Indexed record documents by id, for the records a search reaches through links.
-async fn records_found(db: &PgPool, ids: &[String]) -> Result<Vec<Found>> {
-    let rows = sqlx::query("SELECT kind, ref, body, coalesce(title, '') AS title, at FROM search_docs WHERE kind LIKE 'record:%' AND ref = ANY($1)")
-        .bind(ids)
+async fn records_found(db: &SqlitePool, ids: &[String]) -> Result<Vec<Found>> {
+    let rows = sqlx::query("SELECT kind, ref, body, coalesce(title, '') AS title, at FROM search_docs WHERE kind LIKE 'record:%' AND ref IN (SELECT value FROM json_each($1))")
+        .bind(json!(ids))
         .fetch_all(db)
         .await?;
     Ok(rows
@@ -774,7 +784,7 @@ async fn run(app: &App, session: Uuid, args: &Value) -> Result<String> {
     // Memories a search returned count as used.
     let ids: Vec<i64> = listed.iter().filter(|(f, _)| f.kind == "memory").filter_map(|(f, _)| f.reference.trim_start_matches('m').parse().ok()).collect();
     if !ids.is_empty() {
-        sqlx::query("UPDATE memories SET used_at = now(), uses = uses + 1 WHERE id = ANY($1)").bind(&ids).execute(&app.db).await?;
+        sqlx::query("UPDATE memories SET used_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'), uses = uses + 1 WHERE id IN (SELECT value FROM json_each($1))").bind(json!(ids)).execute(&app.db).await?;
     }
     let results: Vec<Value> = listed.iter().map(|(f, p)| json!({ "kind": f.kind, "ref": f.reference, "exact": f.exact, "relevance": p, "via": via.get(&f.reference) })).collect();
     sqlx::query("INSERT INTO searches (session_id, query, scope, results, reranked) VALUES ($1, $2, $3, $4, $5)")
@@ -831,7 +841,7 @@ async fn run(app: &App, session: Uuid, args: &Value) -> Result<String> {
 
 /// Which of `listed` carry the taint mark: a turn of a tainted session, a memory a tainted session
 /// saved, a wiki page with a `web` entry. Fails closed: a result whose mark can't be read is marked.
-pub(crate) async fn rated_results(db: &PgPool, reader: Uuid, listed: &[(Found, Option<f64>)]) -> Vec<Option<i16>> {
+pub(crate) async fn rated_results(db: &SqlitePool, reader: Uuid, listed: &[(Found, Option<f64>)]) -> Vec<Option<i16>> {
     let mut ratings = Vec::new();
     for (f,_) in listed {
         let rating = match f.kind.as_str() {
@@ -845,7 +855,7 @@ pub(crate) async fn rated_results(db: &PgPool, reader: Uuid, listed: &[(Found, O
                 if let Ok(id) = f.reference.trim_start_matches('m').parse::<i64>() {
                     // Bind origin and writer to the same row snapshot, then insert the edge
                     // through the provenance boundary shared with deny/delivery/spawn.
-                    match sqlx::query_as::<_, (i16, Option<Uuid>)>("SELECT CASE WHEN zen_memory_contaminated(id) THEN 5::smallint ELSE risk END, session_id FROM memories WHERE id=$1 AND text=$2 AND $3=(tier || '-term memory (' || source || ')') AND tier!='archived'")
+                    match sqlx::query_as::<_, (i16, Option<Uuid>)>("SELECT CASE WHEN EXISTS(SELECT 1 FROM zen_contaminated_memories cm WHERE cm.id=memories.id) THEN 5 ELSE risk END, session_id FROM memories WHERE id=$1 AND text=$2 AND $3=(tier || '-term memory (' || source || ')') AND tier!='archived'")
                         .bind(id).bind(&f.body).bind(&f.title).fetch_optional(db).await {
                         Ok(Some((risk, writer))) => {
                             if risk<4||f.exact {
@@ -862,7 +872,7 @@ pub(crate) async fn rated_results(db: &PgPool, reader: Uuid, listed: &[(Found, O
             }
             "turn" => {
                 if let Some((session,seq)) = f.reference.split_once(':').and_then(|(s,n)|Some((s.parse::<Uuid>().ok()?,n.parse::<i32>().ok()?))) {
-                    match sqlx::query("SELECT payload, CASE WHEN zen_session_contaminated(session_id) AND origin!='owner' THEN 5::smallint ELSE risk END AS risk FROM tape_events WHERE session_id=$1 AND seq >= $2 AND seq < COALESCE((SELECT min(seq) FROM tape_events WHERE session_id=$1 AND seq>$2 AND kind='message' AND payload->>'role'='user' AND NOT COALESCE((payload->>'kernel')::boolean,false)),2147483647) ORDER BY seq")
+                    match sqlx::query("SELECT payload, CASE WHEN EXISTS(SELECT 1 FROM zen_contaminated_sessions cs WHERE cs.id=tape_events.session_id) AND origin!='owner' THEN 5 ELSE risk END AS risk FROM tape_events WHERE session_id=$1 AND seq >= $2 AND seq < COALESCE((SELECT min(seq) FROM tape_events WHERE session_id=$1 AND seq>$2 AND kind='message' AND payload->>'role'='user' AND NOT COALESCE((payload->>'kernel'),false)),2147483647) ORDER BY seq")
                         .bind(session).bind(seq).fetch_all(db).await {
                         Ok(rows) => {
                             let messages:Vec<Value> = rows.iter().map(|r|r.get("payload")).collect();
@@ -941,6 +951,54 @@ pub async fn run_tool(app: &App, session: Uuid, name: &str, args: &Value) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sqlite_search_filters_before_ranking_and_quotes_fts() -> Result<()> {
+        let (_dir,db)=crate::test_util::database().await;
+        let session=Uuid::new_v4();
+        sqlx::query("INSERT INTO sessions(id,model) VALUES($1,'faux/smoke')")
+            .bind(session).execute(&db).await?;
+        for (kind,reference,ident,body) in [
+            ("memory","m1","crates/first_file.rs","Decisão: ação e memória de São Paulo"),
+            ("memory","m2","crates/firstXfile.rs","Different identifier"),
+            ("memory","m3","unrelated","Ação without the other query word"),
+            ("turn","s1","crates/first_file.rs","Only the selected scope may appear"),
+        ] {
+            sqlx::query("INSERT INTO search_docs(kind,ref,ident,body,session_id) VALUES($1,$2,$3,$4,$5)")
+                .bind(kind).bind(reference).bind(ident).bind(body).bind(session).execute(&db).await?;
+        }
+        let found=query_candidates(&db,"`crates/first_file.rs`",&["memory"],None,8,None).await?;
+        assert_eq!(found[0].reference,"m1");
+        assert!(found[0].exact);
+        assert!(!found.iter().any(|f|f.reference=="s1"));
+        assert!(!found.iter().any(|f|f.reference=="m2" && f.exact));
+        let found=query_candidates(&db,"acao memoria",&["memory"],None,8,None).await?;
+        assert_eq!(found.iter().map(|f| f.reference.as_str()).collect::<Vec<_>>(),vec!["m1"]);
+        for q in ["\"", "***", "foo:bar NOT (", "", "\"unclosed"] {
+            query_candidates(&db,q,&["memory"],None,8,None).await?;
+        }
+        let found=query_candidates(&db,"acao",&["memory"],Some(Uuid::new_v4()),8,None).await?;
+        assert!(found.is_empty());
+        db.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_cosine_search_uses_copied_vectors_without_reembedding() -> Result<()> {
+        let (_dir,db)=crate::test_util::database().await;
+        let mut a=vec![0.0_f32;1536]; a[0]=1.0;
+        let mut b=vec![0.0_f32;1536]; b[1]=1.0;
+        let zero=vec![0.0_f32;1536];
+        for (reference,vector) in [("m1",&a),("m2",&b),("m0",&zero)] {
+            let bytes: Vec<u8>=vector.iter().flat_map(|n|n.to_le_bytes()).collect();
+            sqlx::query("INSERT INTO search_docs(kind,ref,body,embedding,embed_model) VALUES('memory',$1,'unrelated words',$2,$3)")
+                .bind(reference).bind(bytes).bind(embed_model()).execute(&db).await?;
+        }
+        let found=query_candidates(&db,"a semantic query",&["memory"],None,8,Some(serde_json::to_string(&a)?)).await?;
+        assert_eq!(found.iter().map(|f|f.reference.as_str()).collect::<Vec<_>>(),["m1","m2"]);
+        db.close().await;
+        Ok(())
+    }
 
     #[test]
     fn identifiers_are_paths_names_and_decisions() {

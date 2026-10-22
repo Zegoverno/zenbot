@@ -6,7 +6,7 @@
 
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use super::spec::{Exposure, Spec};
@@ -84,7 +84,7 @@ pub fn input_of(spec: &Spec, state: &Value) -> Value {
 }
 
 /// Write the record; returns its id. Never fails the decision: a database error is logged.
-pub async fn record(db: &PgPool, r: &Record, state: Option<&Value>) -> Option<i64> {
+pub async fn record(db: &SqlitePool, r: &Record, state: Option<&Value>) -> Option<i64> {
     let res: Result<i64, sqlx::Error> = sqlx::query_scalar(
         "INSERT INTO decisions (session_id, point, model, input, answer, chosen, probability, acted, error,
                                 spec_sha, spec_version, rung, latency_ms, cost_usd, tokens, source, items)

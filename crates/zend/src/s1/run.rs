@@ -258,7 +258,7 @@ fn calibrator(l: &Loaded) -> impl Fn(&str, &str, f64) -> f64 + '_ {
     move |model: &str, question: &str, p: f64| if l.spec.calibrate { learn::calibrated(&l.spec.name, model, question, p) } else { p }
 }
 
-pub async fn single(db: &sqlx::PgPool, name: &str, facts: Facts) -> Decision {
+pub async fn single(db: &sqlx::SqlitePool, name: &str, facts: Facts) -> Decision {
     let Some(l) = spec_of(name) else { return Decision { error: Some(format!("no decision `{name}`")), ..Default::default() } };
     // Rules on the caller's inputs alone decide without a model (and without a record): most
     // low-risk decisions end here, even with System One off.
@@ -317,7 +317,7 @@ pub async fn single(db: &sqlx::PgPool, name: &str, facts: Facts) -> Decision {
     d
 }
 
-pub async fn items(db: &sqlx::PgPool, name: &str, facts: Facts, items: Vec<Value>) -> Vec<Decision> {
+pub async fn items(db: &sqlx::SqlitePool, name: &str, facts: Facts, items: Vec<Value>) -> Vec<Decision> {
     let n = items.len();
     let Some(l) = spec_of(name) else { return vec![Decision::default(); n] };
     let (qname, q) = match l.spec.question.iter().next() {
@@ -403,7 +403,7 @@ fn summarize(per: &[Decision]) -> Option<String> {
     Some(format!("{yes} of {} likely", per.len()))
 }
 
-pub async fn batch(db: &sqlx::PgPool, name: &str, session: Option<Uuid>, subjects: Vec<Facts>) -> Vec<Decision> {
+pub async fn batch(db: &sqlx::SqlitePool, name: &str, session: Option<Uuid>, subjects: Vec<Facts>) -> Vec<Decision> {
     let n = subjects.len();
     let Some(l) = spec_of(name) else { return vec![Decision::default(); n] };
     if n == 0 {
@@ -464,7 +464,7 @@ pub async fn batch(db: &sqlx::PgPool, name: &str, session: Option<Uuid>, subject
 
 /// The brain's `judge` tool: one ad-hoc question over items, through the built-in `judge` file
 /// (its ladder, timeout and size limit). Information only: answers and probabilities, no outcome.
-pub async fn judge(db: &sqlx::PgPool, session: Uuid, question: &str, kind: &str, options: Option<&Value>, items: Vec<Value>, context: Option<&str>) -> Result<Vec<Decision>, String> {
+pub async fn judge(db: &sqlx::SqlitePool, session: Uuid, question: &str, kind: &str, options: Option<&Value>, items: Vec<Value>, context: Option<&str>) -> Result<Vec<Decision>, String> {
     let Some(l) = spec_of("judge") else { return Err("the judge decision is missing".into()) };
     if let Some(why) = blocked(&l.spec) {
         return Err(match why {

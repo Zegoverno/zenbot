@@ -1,4 +1,4 @@
-//! Masking secrets in tool output before the model or the tape sees it (SPEC 5.18, docs/context.md).
+//! Masking secrets in tool output before the model or the tape sees it (DESIGN.md, docs/context.md).
 //!
 //! Two kinds are masked: the values of the kernel's own secrets (environment variables named like a
 //! token, key, secret or password, zenbot's API token, the database password and the Claude Code and
@@ -45,6 +45,37 @@ pub fn is_secret_var(name: &str) -> bool {
     k == "DATABASE_URL" || ["TOKEN", "KEY", "SECRET", "PASSWORD", "PASSWD"].iter().any(|w| k.contains(w))
 }
 
+/// Kernel state is never an agent capability, including an explicitly configured database.
+pub fn database_files() -> Vec<std::path::PathBuf> {
+    use std::str::FromStr;
+    let home=crate::zen_home();
+    let db=std::env::var("DATABASE_URL").ok()
+        .and_then(|url|sqlx::sqlite::SqliteConnectOptions::from_str(&url).ok())
+        .map(|options|options.get_filename().to_path_buf())
+        .unwrap_or_else(||home.join("zen.sqlite3"));
+    let db=if db.is_absolute() {db} else {std::env::current_dir().unwrap_or_default().join(db)};
+    let mut paths=vec![home.join("backups"),home.join("exports"),db.clone()];
+    for suffix in ["-wal","-shm","-journal"] {
+        let mut name=db.as_os_str().to_os_string();name.push(suffix);paths.push(name.into());
+    }
+    paths
+}
+
+/// Resolve existing ancestors too, so a not-yet-created WAL or backup stays protected.
+pub fn is_database_path(path: &std::path::Path) -> bool {
+    fn real(path:&std::path::Path) -> std::path::PathBuf {
+        if let Ok(path)=path.canonicalize() {return path;}
+        match (path.parent(),path.file_name()) {
+            (Some(parent),Some(name)) => real(parent).join(name),
+            _ => path.to_path_buf(),
+        }
+    }
+    use std::os::unix::fs::MetadataExt;
+    let target=real(path);
+    database_files().iter().any(|p|target.starts_with(real(p)) ||
+        std::fs::metadata(path).ok().zip(std::fs::metadata(p).ok()).is_some_and(|(a,b)|a.dev()==b.dev() && a.ino()==b.ino()))
+}
+
 /// The files and folders that hold secrets: under the zen home zenbot's API token, the database
 /// password, the settings file (and the copy an upgrade keeps when it rewrites it), the MCP config
 /// and the Matrix channel's sign-in; the engines' sign-ins. Hidden from a
@@ -54,6 +85,7 @@ pub fn secret_files() -> Vec<std::path::PathBuf> {
     let user = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
     let mut paths: Vec<std::path::PathBuf> = ["mcp-auth", "token", "db-password", "env", "env.prev", "mcp.json", "matrix.env", "matrix"].iter().map(|f| home.join(f)).collect();
     paths.push(crate::mcp::config_path());
+    paths.extend(database_files());
     paths.extend([user.join(".codex/auth.json"), user.join(".claude/.credentials.json"),
         user.join(".ssh"), user.join(".gnupg"), user.join(".config/gh"), user.join(".aws"), user.join(".netrc"),
         user.join(".git-credentials"), user.join(".npmrc"), user.join(".pypirc")]);

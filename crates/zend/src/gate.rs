@@ -76,7 +76,7 @@ fn key(workspace: &Path, name: &str, args: &Value) -> String {
 }
 
 /// The effect of a call, from facts, and whether its destination is trusted.
-pub async fn classify(db: &sqlx::PgPool, session: Uuid, workspace: &Path, name: &str, args: &Value) -> Result<(Effect, bool)> {
+pub async fn classify(db: &sqlx::SqlitePool, session: Uuid, workspace: &Path, name: &str, args: &Value) -> Result<(Effect, bool)> {
     let path = || real(&tools::resolve(workspace, args["path"].as_str().unwrap_or("")));
     Ok(match name {
         "bash" if args["host"] == true => (Effect::Outward, false),
@@ -122,9 +122,9 @@ pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args:
     let (risk, lock) = (state.risk, state.lock);
     let action = key(workspace, name, args);
     let grant: Option<i64> = sqlx::query_scalar(
-        "UPDATE action_gates SET used_at = now()
+        "UPDATE action_gates SET used_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
          WHERE id = (SELECT id FROM action_gates WHERE session_id = $1 AND action = $2
-            AND used_at IS NULL AND (decision IS NULL OR decision='approved') AND allowed_at > now() - interval '10 minutes' ORDER BY id DESC LIMIT 1)
+            AND used_at IS NULL AND (decision IS NULL OR decision='approved') AND allowed_at > strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-10 minutes') ORDER BY id DESC LIMIT 1)
          AND used_at IS NULL RETURNING id")
         .bind(session).bind(&action).fetch_optional(&app.db).await?;
     if grant.is_some() { return Ok(Policy::Granted); }
@@ -172,12 +172,12 @@ pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args:
     let reason = match &policy { Policy::Lock(r) | Policy::Hold(r) => r.clone(), _ => unreachable!() };
     if let Policy::Lock(_) = &policy {
         crate::session_state::invalidate();
-        sqlx::query("UPDATE sessions SET lock_reason = $2, locked_at = now() WHERE id = $1 AND lock_reason IS NULL").bind(session).bind(&reason).execute(&app.db).await?;
+        sqlx::query("UPDATE sessions SET lock_reason = $2, locked_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = $1 AND lock_reason IS NULL").bind(session).bind(&reason).execute(&app.db).await?;
     }
     sqlx::query("INSERT INTO action_gates (session_id, action, reason, s1_decision)
       SELECT $1, $2, $3, $4 WHERE NOT EXISTS (
         SELECT 1 FROM action_gates WHERE session_id = $1 AND action = $2
-          AND allowed_at IS NULL AND created_at > now() - interval '1 day')")
+          AND allowed_at IS NULL AND created_at > strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-1 day'))")
         .bind(session).bind(action).bind(&reason).bind(decision).execute(&app.db).await?;
     Ok(policy)
 }
@@ -185,7 +185,7 @@ pub async fn check(app: &App, session: Uuid, workspace: &Path, name: &str, args:
 /// The shell a session gets now: contained always; writable and online unless its context is high
 /// (read-only workspace, network only to hosts the egress decision allows) or it's locked
 /// (read-only, offline). A verifier's shell is read-only (dispatch).
-pub async fn shell_mode(db: &sqlx::PgPool, session: Uuid) -> tools::Sandbox {
+pub async fn shell_mode(db: &sqlx::SqlitePool, session: Uuid) -> tools::Sandbox {
     match crate::session_state::get(db, session).await {
         Ok(state) => tools::Sandbox::Contained { writable: state.lock.is_none() && state.risk < 4 && !state.stopped, net: state.lock.is_none() && !state.stopped },
         Err(_) => tools::Sandbox::Contained { writable: false, net: false },
@@ -193,8 +193,8 @@ pub async fn shell_mode(db: &sqlx::PgPool, session: Uuid) -> tools::Sandbox {
 }
 
 /// May a session's shell reach `host` (the egress proxy asks)? Returns the host's rating, or why not.
-pub async fn egress(db: &sqlx::PgPool, session: Uuid, host: &str) -> Result<i16, String> {
-    let row = sqlx::query("SELECT risk, lock_reason IS NOT NULL AS locked, zen_session_contaminated(id) AS stopped FROM sessions WHERE id=$1")
+pub async fn egress(db: &sqlx::SqlitePool, session: Uuid, host: &str) -> Result<i16, String> {
+    let row = sqlx::query("SELECT risk, lock_reason IS NOT NULL AS locked, COALESCE(id IN (SELECT id FROM zen_contaminated_sessions),false) AS stopped FROM sessions WHERE id=$1")
         .bind(session).fetch_optional(db).await.map_err(|e| e.to_string())?.ok_or("no such session")?;
     if row.get::<bool, _>("stopped") || row.get::<bool, _>("locked") {
         return Err("this session is locked or stopped: no network until the owner reviews it".into());
@@ -208,19 +208,19 @@ pub async fn egress(db: &sqlx::PgPool, session: Uuid, host: &str) -> Result<i16,
     };
     let action = json!({"tool": "egress", "host": host}).to_string();
     // The owner allowed this host for the session (a day).
-    let allowed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM action_gates WHERE session_id=$1 AND action=$2 AND decision='approved' AND allowed_at > now() - interval '1 day')")
+    let allowed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM action_gates WHERE session_id=$1 AND action=$2 AND decision='approved' AND allowed_at > strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-1 day'))")
         .bind(session).bind(&action).fetch_one(db).await.map_err(|e| e.to_string())?;
     let facts = crate::s1::Facts::new(Some(session)).with("context", level(risk)).with("rating", rating);
     let outcome = if allowed { "allow".to_string() } else { crate::s1::decide_early("egress", &facts).unwrap_or_else(|| "hold".into()) };
     let _ = sqlx::query("INSERT INTO egress (session_id, host, rating, outcome) VALUES ($1, $2, $3, $4)
-        ON CONFLICT (session_id, host) DO UPDATE SET count = egress.count + 1, last_at = now(), rating = $3, outcome = $4")
+        ON CONFLICT (session_id, host) DO UPDATE SET count = egress.count + 1, last_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'), rating = $3, outcome = $4")
         .bind(session).bind(host).bind(rating).bind(&outcome).execute(db).await;
     if outcome == "allow" {
         return Ok(rating);
     }
     let reason = format!("held: the shell reaching {host} (rated {rating}) from a {}-risk session", level(risk));
     let _ = sqlx::query("INSERT INTO action_gates (session_id, action, reason)
-      SELECT $1, $2, $3 WHERE NOT EXISTS (SELECT 1 FROM action_gates WHERE session_id = $1 AND action = $2 AND allowed_at IS NULL AND created_at > now() - interval '1 day')")
+      SELECT $1, $2, $3 WHERE NOT EXISTS (SELECT 1 FROM action_gates WHERE session_id = $1 AND action = $2 AND allowed_at IS NULL AND created_at > strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-1 day'))")
         .bind(session).bind(&action).bind(&reason).execute(db).await;
     Err(format!("{reason}; the owner can allow this host for the session in the queue"))
 }
@@ -262,11 +262,11 @@ pub fn held_note(reason: &str) -> String {
 /// model chose is removed first: the call's own arguments (a query, a `focus`) and the result's
 /// header lines, which can echo them. So a URL the model built, which could carry data out, isn't
 /// "seen" because the model wrote it into a query or a page repeated it.
-pub async fn fetch_allowed(db: &sqlx::PgPool, session: Uuid, url: &str) -> Result<bool> {
+pub async fn fetch_allowed(db: &sqlx::SqlitePool, session: Uuid, url: &str) -> Result<bool> {
     Ok(crate::sources::base(db, url).await? < 4 || url_seen(db, session, url).await?)
 }
 
-async fn url_seen(db: &sqlx::PgPool, session: Uuid, url: &str) -> Result<bool> {
+async fn url_seen(db: &sqlx::SqlitePool, session: Uuid, url: &str) -> Result<bool> {
     let url = url.trim();
     if url.is_empty() { return Ok(false); }
     let needle = serde_json::to_string(url)?;
@@ -276,11 +276,11 @@ async fn url_seen(db: &sqlx::PgPool, session: Uuid, url: &str) -> Result<bool> {
             AND t.id = e.tool_call_record AND t.call_id = e.payload->>'toolCallId' AND t.name = e.payload->>'toolName'
             AND NOT t.is_error ORDER BY t.id DESC LIMIT 1) AS call
          FROM tape_events e JOIN sessions s ON s.id = e.session_id
-         WHERE e.session_id = $1 AND e.kind = 'message' AND strpos(e.payload::text, $2) > 0
+         WHERE e.session_id = $1 AND e.kind = 'message' AND instr(e.payload, $2) > 0
            AND ((e.payload->>'role' = 'user' AND s.kind IS NULL AND e.origin = 'owner')
              OR (e.payload->>'role' = 'toolResult' AND e.payload->>'toolName' IN ('web_search', 'web_fetch')
                  AND (e.origin = 'web_search' OR e.origin LIKE 'web_fetch:%')
-                 AND NOT COALESCE((e.payload->>'isError')::boolean, false)))")
+                 AND NOT COALESCE((e.payload->>'isError'), false)))")
         .bind(session).bind(needle).fetch_all(db).await?;
     for row in rows {
         let payload: Value = row.get("payload");
@@ -348,7 +348,7 @@ fn outside_text(payload: &Value, args: &Value) -> String {
 
 pub async fn waiting(app: &App, session: Uuid) -> Result<Vec<Value>> {
     let rows = sqlx::query("SELECT id, action, reason FROM action_gates WHERE session_id = $1
-      AND decision IS NULL AND allowed_at IS NULL AND created_at > now() - interval '1 day' ORDER BY id DESC LIMIT 5")
+      AND decision IS NULL AND allowed_at IS NULL AND created_at > strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-1 day') ORDER BY id DESC LIMIT 5")
       .bind(session).fetch_all(&app.db).await?;
     Ok(rows.iter().map(|r| json!({"id":r.get::<i64,_>("id"),
       "action":crate::secrets::mask(&r.get::<String,_>("action")), "reason":r.get::<String,_>("reason")})).collect())
@@ -356,12 +356,10 @@ pub async fn waiting(app: &App, session: Uuid) -> Result<Vec<Value>> {
 
 /// The owner approved a held action: grant it once and, when it was the session's lock, unlock.
 pub async fn allow(app: &App, session: Uuid, id: i64) -> Result<bool> {
-    let mut tx = app.db.begin().await?;
-    // Match tape's lock ordering: session advisory lock before updating the session/audit.
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 7))")
-        .bind(session).execute(&mut *tx).await?;
-    let row = sqlx::query("UPDATE action_gates SET allowed_at = now(), decision='approved', resolved_at=now() WHERE id = $1 AND session_id = $2
-      AND decision IS NULL AND allowed_at IS NULL AND created_at > now() - interval '1 day' RETURNING reason")
+    let mut tx = crate::storage::begin(&app.db).await?;
+    // The immediate transaction serializes the approval and its session audit.
+        let row = sqlx::query("UPDATE action_gates SET allowed_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'), decision='approved', resolved_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = $1 AND session_id = $2
+      AND decision IS NULL AND allowed_at IS NULL AND created_at > strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-1 day') RETURNING reason")
       .bind(id).bind(session).fetch_optional(&mut *tx).await?;
     let Some(row) = row else { return Ok(false) };
     unlock_if_lock(&mut tx, session, &row.get::<String, _>("reason")).await?;
@@ -373,7 +371,7 @@ pub async fn allow(app: &App, session: Uuid, id: i64) -> Result<bool> {
 }
 
 /// Approving the item that locked a session unlocks it.
-pub async fn unlock_if_lock(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, session: Uuid, reason: &str) -> Result<()> {
+pub async fn unlock_if_lock(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, session: Uuid, reason: &str) -> Result<()> {
     if reason.starts_with("session locked") {
         sqlx::query("UPDATE sessions SET lock_reason = NULL, locked_at = NULL WHERE id = $1").bind(session).execute(&mut **tx).await?;
     }
@@ -388,7 +386,7 @@ mod tests {
     /// machine is above local (no database is touched for these tools).
     #[tokio::test]
     async fn effects_from_facts() {
-        let db = sqlx::PgPool::connect_lazy("postgres://unused@127.0.0.1:1/none").unwrap();
+        let db = sqlx::SqlitePool::connect_lazy("sqlite:/nonexistent/zen-test.sqlite").unwrap();
         let ws = crate::test_util::TestDir::new("effects");
         let s = Uuid::new_v4();
         let e = |name: &'static str, args: Value| { let (db, ws) = (db.clone(), ws.to_path_buf()); async move { classify(&db, s, &ws, name, &args).await.unwrap().0 } };
@@ -417,16 +415,16 @@ mod tests {
     async fn gate_replay() {
         let url = std::env::var("GATE_REPLAY_DB_URL").expect("GATE_REPLAY_DB_URL");
         let days: i32 = std::env::var("GATE_REPLAY_DAYS").ok().and_then(|d| d.parse().ok()).unwrap_or(14);
-        let db = sqlx::postgres::PgPoolOptions::new()
-            .after_connect(|c, _| Box::pin(async move { sqlx::query("SET default_transaction_read_only = on").execute(c).await.map(|_| ()) }))
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .after_connect(|c, _| Box::pin(async move { sqlx::query("PRAGMA query_only=ON").execute(c).await.map(|_| ()) }))
             .connect(&url).await.unwrap();
         let rows = sqlx::query(
             "SELECT t.session_id, t.name, t.args, s.workspace,
-               GREATEST(1, COALESCE((SELECT max(e.risk) FROM tape_events e WHERE e.session_id = t.session_id AND e.created_at < t.created_at
+               MAX(1, COALESCE((SELECT max(e.risk) FROM tape_events e WHERE e.session_id = t.session_id AND e.created_at < t.created_at
                  AND (e.origin LIKE 'web_%' OR (e.payload->>'role' = 'toolResult'
-                   AND e.payload->>'toolName' IN ('web_search','web_fetch','call_tool','load_tool','find_tools')))), 1))::int2 AS context
+                   AND e.payload->>'toolName' IN ('web_search','web_fetch','call_tool','load_tool','find_tools')))), 1)) AS context
              FROM tool_calls t JOIN sessions s ON s.id = t.session_id
-             WHERE t.created_at > now() - make_interval(days => $1)")
+             WHERE t.created_at > strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-' || $1 || ' days')")
             .bind(days).fetch_all(&db).await.unwrap();
         let mut counts: std::collections::BTreeMap<(String, String), usize> = Default::default();
         let mut sessions: std::collections::HashMap<Uuid, (i16, bool)> = Default::default();

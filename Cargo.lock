@@ -1265,6 +1265,7 @@ version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149"
 dependencies = [
+ "cc",
  "pkg-config",
  "vcpkg",
 ]
@@ -3487,6 +3488,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
+ "cc",
  "chrono",
  "chrono-tz",
  "croner",
@@ -3494,6 +3496,7 @@ dependencies = [
  "futures-util",
  "htmd",
  "libc",
+ "libsqlite3-sys",
  "reqwest",
  "serde",
  "serde_json",

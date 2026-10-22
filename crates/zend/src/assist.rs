@@ -184,7 +184,7 @@ fn parse(reply: &str) -> Option<(String, String)> {
 /// The owner sent a prompt: settle the session's open suggestion. `taken` is what the client
 /// reported for suggestion `reported` (Tab pressed on it); a suggestion the client didn't report
 /// on was never shown (`unseen`).
-pub(crate) async fn settle(db: &PgPool, id: Uuid, text: &str, reported: Option<(i64, bool)>) -> Result<(), sqlx::Error> {
+pub(crate) async fn settle(db: &SqlitePool, id: Uuid, text: &str, reported: Option<(i64, bool)>) -> Result<(), sqlx::Error> {
     let open: Vec<(i64, String)> = sqlx::query_as("SELECT id, suggested FROM prompt_suggestions WHERE session_id = $1 AND outcome IS NULL")
         .bind(id)
         .fetch_all(db)
@@ -194,7 +194,7 @@ pub(crate) async fn settle(db: &PgPool, id: Uuid, text: &str, reported: Option<(
             Some((r, taken)) if r == sid => outcome(&suggested, text, taken),
             _ => "unseen",
         };
-        sqlx::query("UPDATE prompt_suggestions SET outcome = $2, final = $3, decided_at = now() WHERE id = $1")
+        sqlx::query("UPDATE prompt_suggestions SET outcome = $2, final = $3, decided_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = $1")
             .bind(sid)
             .bind(outcome)
             .bind((outcome != "accepted").then_some(text))
@@ -221,7 +221,7 @@ pub(crate) async fn stats(State(app): State<AppState>) -> ApiResult<Json<Value>>
                 count(*) FILTER (WHERE outcome = 'declined') AS declined,
                 count(*) FILTER (WHERE outcome = 'unseen') AS unseen,
                 count(*) FILTER (WHERE outcome IS NULL) AS open,
-                avg(latency_ms)::float8 AS latency_ms, sum(cost_usd)::float8 AS cost_usd
+                avg(latency_ms) AS latency_ms, sum(cost_usd) AS cost_usd
          FROM prompt_suggestions GROUP BY 1, 2 ORDER BY min(created_at)",
     )
     .fetch_all(&app.db)

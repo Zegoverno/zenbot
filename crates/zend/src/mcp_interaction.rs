@@ -4,11 +4,11 @@
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
-use sqlx::{PgPool, Row};
+use sqlx::{SqlitePool, Row};
 use uuid::Uuid;
 
 /// Cancel requests left by a previous kernel process. Call once after database migrations.
-pub(crate) async fn recover(db: &PgPool) -> Result<()> {
+pub(crate) async fn recover(db: &SqlitePool) -> Result<()> {
     sqlx::query("UPDATE mcp_interactions SET status='cancel' WHERE status='pending'").execute(db).await?;
     Ok(())
 }
@@ -73,7 +73,7 @@ fn validate(schema: &Value, content: &Value) -> Result<()> {
     Ok(())
 }
 
-struct Pending { db: PgPool, id: Uuid }
+struct Pending { db: SqlitePool, id: Uuid }
 impl Drop for Pending {
     fn drop(&mut self) {
         let db = self.db.clone(); let id = self.id;
@@ -98,14 +98,18 @@ pub(crate) async fn elicit(app: &crate::App, session: Uuid, server: &str, reques
     let message = params["message"].as_str().context("elicitation requires a message")?;
     if message.len() > 8 * 1024 || serde_json::to_vec(schema)?.len() > 32 * 1024 { bail!("elicitation request exceeds size limit"); }
     let id = Uuid::new_v4();
+    // Install cancellation cleanup before publishing the pending row. SQLx can complete a
+    // write in its worker before its awaiting future resumes, so guard-before-commit matters.
+    let mut tx=crate::storage::begin(&app.db).await?;
     sqlx::query("INSERT INTO mcp_interactions(id,session_id,server,request_id,message,schema) VALUES($1,$2,$3,$4,$5,$6)")
-        .bind(id).bind(session).bind(server).bind(request_id).bind(crate::secrets::mask(message)).bind(schema).execute(&app.db).await?;
+        .bind(id).bind(session).bind(server).bind(request_id).bind(crate::secrets::mask(message)).bind(schema).execute(&mut *tx).await?;
     let _pending = Pending { db: app.db.clone(), id };
+    tx.commit().await?;
     let question = json!({"mcp_request":id,"questions":[{"question":format!("MCP server {server} requests input: {}. Review `zen mcp-pending`; reply with `zen mcp-respond {id} --action accept --data '{{...}}'`, or --action decline/cancel.", crate::secrets::mask(message)),"options":["Review pending MCP form","Decline or cancel via zen mcp-respond"]}]});
     crate::tape::append(&app.db, session, "questions", &question).await?;
     app.emit(session, json!({"type":"questions","questions":question["questions"]})).await;
     loop {
-        sqlx::query("UPDATE mcp_interactions SET status='cancel' WHERE id=$1 AND status='pending' AND expires_at<=now()").bind(id).execute(&app.db).await?;
+        sqlx::query("UPDATE mcp_interactions SET status='cancel' WHERE id=$1 AND status='pending' AND expires_at<=strftime('%Y-%m-%dT%H:%M:%f+00:00','now')").bind(id).execute(&app.db).await?;
         let row = sqlx::query("SELECT status,content FROM mcp_interactions WHERE id=$1").bind(id).fetch_one(&app.db).await?;
         let action: String = row.get("status");
         if action != "pending" {
@@ -115,20 +119,20 @@ pub(crate) async fn elicit(app: &crate::App, session: Uuid, server: &str, reques
     }
 }
 
-pub(crate) async fn list(db: &PgPool) -> Result<Value> {
-    sqlx::query("UPDATE mcp_interactions SET status='cancel' WHERE status='pending' AND expires_at<=now()").execute(db).await?;
+pub(crate) async fn list(db: &SqlitePool) -> Result<Value> {
+    sqlx::query("UPDATE mcp_interactions SET status='cancel' WHERE status='pending' AND expires_at<=strftime('%Y-%m-%dT%H:%M:%f+00:00','now')").execute(db).await?;
     let rows = sqlx::query("SELECT id,session_id,server,message,schema,created_at,expires_at FROM mcp_interactions WHERE status='pending' ORDER BY created_at LIMIT 100").fetch_all(db).await?;
     Ok(json!({"requests":rows.iter().map(|r| json!({"id":r.get::<Uuid,_>("id"),"session":r.get::<Uuid,_>("session_id"),"server":r.get::<String,_>("server"),"message":r.get::<String,_>("message"),"schema":r.get::<Value,_>("schema"),"created_at":r.get::<chrono::DateTime<chrono::Utc>,_>("created_at"),"expires_at":r.get::<chrono::DateTime<chrono::Utc>,_>("expires_at")})).collect::<Vec<_>>()}))
 }
 
-pub(crate) async fn respond(db: &PgPool, id: Uuid, response: &Value) -> Result<Value> {
+pub(crate) async fn respond(db: &SqlitePool, id: Uuid, response: &Value) -> Result<Value> {
     let action = response["action"].as_str().context("action required")?;
     if !matches!(action,"accept"|"decline"|"cancel") { bail!("action must be accept, decline or cancel"); }
-    let schema: Value = sqlx::query_scalar("SELECT schema FROM mcp_interactions WHERE id=$1 AND status='pending' AND expires_at>now()")
+    let schema: Value = sqlx::query_scalar("SELECT schema FROM mcp_interactions WHERE id=$1 AND status='pending' AND expires_at>strftime('%Y-%m-%dT%H:%M:%f+00:00','now')")
         .bind(id).fetch_optional(db).await?.context("request is absent, expired or already answered")?;
     if action == "accept" { validate(&schema, &response["content"])?; }
     else if response.get("content").is_some() { bail!("content is only valid with accept"); }
-    let result = sqlx::query("UPDATE mcp_interactions SET status=$2,content=$3 WHERE id=$1 AND status='pending' AND expires_at>now()")
+    let result = sqlx::query("UPDATE mcp_interactions SET status=$2,content=$3 WHERE id=$1 AND status='pending' AND expires_at>strftime('%Y-%m-%dT%H:%M:%f+00:00','now')")
         .bind(id).bind(action).bind(if action == "accept" {Some(&response["content"])} else {None}).execute(db).await?;
     if result.rows_affected() != 1 { bail!("request expired or was already answered"); }
     Ok(json!({"id":id,"action":action}))
@@ -138,10 +142,8 @@ pub(crate) async fn respond(db: &PgPool, id: Uuid, response: &Value) -> Result<V
 mod tests {
     use super::*;
     #[tokio::test]
-    #[ignore = "SOURCE_TEST_DB_URL must name a disposable database"]
     async fn owner_response_lifecycle_database() {
-        let db = PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
-        sqlx::migrate!("./migrations").run(&db).await.unwrap();
+        let (_db_dir, db) = crate::test_util::database().await;
         let app = crate::test_util::app(db.clone());
         let session = Uuid::new_v4();
         sqlx::query("INSERT INTO sessions(id,model) VALUES($1,'faux/smoke')").bind(session).execute(&db).await.unwrap();
@@ -162,7 +164,7 @@ mod tests {
         assert_eq!(task.await.unwrap().unwrap(),json!({"action":"accept","content":{"name":"Jo"}}));
         assert!(respond(&db,id,&json!({"action":"cancel"})).await.is_err());
         let task=spawn(app.clone()); let id=pending_id().await;
-        sqlx::query("UPDATE mcp_interactions SET expires_at=now()-interval '1 second' WHERE id=$1").bind(id).execute(&db).await.unwrap();
+        sqlx::query("UPDATE mcp_interactions SET expires_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-1 second') WHERE id=$1").bind(id).execute(&db).await.unwrap();
         assert_eq!(task.await.unwrap().unwrap(),json!({"action":"cancel"}));
         let task=spawn(app.clone()); let id=pending_id().await; task.abort(); let _=task.await;
         tokio::time::timeout(std::time::Duration::from_secs(3),async {

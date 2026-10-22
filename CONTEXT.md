@@ -2,8 +2,8 @@
 
 > Read this first. It says what zenbot is for, how success is measured and what constrains it.
 > Everything else follows from here: [ROADMAP.md](ROADMAP.md) for what's being built now,
-> [DESIGN.md](DESIGN.md) for how the system works, [SPEC.md](SPEC.md) for the modules it is meant
-> to have, [DECISIONS.md](DECISIONS.md) for why things are the way they are.
+> [DESIGN.md](DESIGN.md) for how the system works and its target design, [DECISIONS.md](DECISIONS.md)
+> for the rules in force.
 
 ## What zenbot is
 
@@ -45,8 +45,8 @@ tools does better on open-ended jobs than a fixed sequence of steps. zenbot owns
 tools, skills, memory and knowledge; any model can do the work. Fixed rules exist only for:
 
 - **authority:** the owner starts jobs and sets the budget; the agent never decides the owner's calls;
-- **safety:** every action runs through the kernel, secrets masked, audited, and sandboxed where it
-  matters most (a verifier's shell and a tainted session's shell); an ordinary session's shell is not sandboxed (DESIGN.md, "Security today");
+- **safety:** every action runs through the kernel, secrets masked, audited, and every shell
+  contained (DESIGN.md);
 - **measurement:** the tape records everything, so work can be judged and improved.
 
 ## Principles
@@ -64,7 +64,7 @@ tools, skills, memory and knowledge; any model can do the work. Fixed rules exis
 5. **Composable.** Every building block is a module with a documented contract; switching an
    implementation is a config change, not a rewrite. Adopt good open source before building.
 6. **Open contracts.** MCP for tools · OpenAI/Anthropic-compatible HTTP for models · JSON-RPC between
-   kernel and workers · markdown + git for knowledge · Postgres via `DATABASE_URL` for state.
+   kernel and workers · markdown + git for knowledge · SQLite + sqlite-vec for state (`DATABASE_URL` override).
 7. **The kernel owns state; workers are stateless.** All side effects go through the kernel, under one
    permission model.
 8. **Deterministic where possible.** Repeatable LLM work is distilled into scripts over time.
@@ -74,7 +74,7 @@ tools, skills, memory and knowledge; any model can do the work. Fixed rules exis
     comes with a recommendation and a default.
 11. **Own your data.** Everything is exportable as plain files; nothing important lives only in a
     database.
-12. **Host-agnostic.** Runs on any Linux box with Docker; exe.dev is only where it runs today.
+12. **Host-agnostic.** Runs on any Linux box; exe.dev is only where it runs today.
 
 ## Constraints
 
@@ -82,7 +82,6 @@ tools, skills, memory and knowledge; any model can do the work. Fixed rules exis
   (github.com/Zegoverno/zenbot).
 - **Subscriptions first.** Models run on the owner's existing Claude and ChatGPT plans through
   officially supported paths; a small, capped API budget covers System One and embeddings.
-
 - **zenbot improves zenbot.** Its own development is the first real workload (dogfooding).
 
 ## Thesis

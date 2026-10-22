@@ -4,7 +4,7 @@ use crate::*;
 use crate::api::{ApiError, ApiResult};
 
 pub(crate) async fn list(State(app): State<AppState>) -> ApiResult<Json<Value>> {
-    let rows=sqlx::query("SELECT g.id,g.action,g.reason,g.created_at,g.session_id,s.title,s.risk FROM action_gates g JOIN sessions s ON s.id=g.session_id WHERE g.decision IS NULL AND g.allowed_at IS NULL AND g.created_at>now()-interval '1 day' ORDER BY g.id DESC")
+    let rows=sqlx::query("SELECT g.id,g.action,g.reason,g.created_at,g.session_id,s.title,s.risk FROM action_gates g JOIN sessions s ON s.id=g.session_id WHERE g.decision IS NULL AND g.allowed_at IS NULL AND g.created_at>strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-1 day') ORDER BY g.id DESC")
         .fetch_all(&app.db).await?;
     let mut items:Vec<Value>=rows.iter().map(|r|json!({"kind":"action","id":r.get::<i64,_>("id"),"session_id":r.get::<Uuid,_>("session_id"),"title":r.get::<String,_>("title"),"summary":crate::secrets::mask(&r.get::<String,_>("action")),"reason":r.get::<String,_>("reason"),"risk":r.get::<i16,_>("risk"),"created_at":r.get::<chrono::DateTime<chrono::Utc>,_>("created_at")})).collect();
     for mut p in crate::sources::proposals(&app.db).await?.as_array().cloned().unwrap_or_default() {
@@ -29,15 +29,14 @@ pub(crate) async fn decide(State(app):State<AppState>,Path((kind,id)):Path<(Stri
     let Some(session)=session else { return Err(ApiError(StatusCode::NOT_FOUND,"queue item not found".into())); };
     let turns=app.turns.lock().await;
     if d!="deny" && turns.contains_key(&session) { return Err(ApiError(StatusCode::CONFLICT,"wait for the session to become idle".into())); }
-    let mut tx=app.db.begin().await?;
+    let mut tx=crate::storage::begin(&app.db).await?;
     // Match deny's lock order; a denied decision must stop work even if the process dies before notification.
     if d=="deny" { crate::sources::lock_provenance(&mut tx).await?; }
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text,7))").bind(session).execute(&mut *tx).await?;
     if d=="approve" {
-        let stopped:bool=sqlx::query_scalar("SELECT risk>=5 OR zen_session_contaminated(id) FROM sessions WHERE id=$1").bind(session).fetch_one(&mut *tx).await?;
+        let stopped:bool=sqlx::query_scalar("SELECT risk>=5 OR COALESCE(id IN (SELECT id FROM zen_contaminated_sessions),false) FROM sessions WHERE id=$1").bind(session).fetch_one(&mut *tx).await?;
         if stopped { return Err(ApiError(StatusCode::CONFLICT,"contaminated session: review and trust before approval".into())); }
     }
-    let row=sqlx::query("UPDATE action_gates SET decision=$2,resolved_at=now(),allowed_at=CASE WHEN $2='approved' THEN now() ELSE NULL END WHERE id=$1 AND decision IS NULL AND allowed_at IS NULL AND created_at>now()-interval '1 day' RETURNING action, reason")
+    let row=sqlx::query("UPDATE action_gates SET decision=$2,resolved_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),allowed_at=CASE WHEN $2='approved' THEN strftime('%Y-%m-%dT%H:%M:%f+00:00','now') ELSE NULL END WHERE id=$1 AND decision IS NULL AND allowed_at IS NULL AND created_at>strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-1 day') RETURNING action, reason")
         .bind(id).bind(match d {"approve"=>"approved","reject"=>"rejected",_=>"denied"}).fetch_optional(&mut *tx).await?;
     let Some(row)=row else { return Err(ApiError(StatusCode::CONFLICT,"expired or already decided".into())); };
     // Approving the item that locked the session unlocks it (D-067).
@@ -46,10 +45,10 @@ pub(crate) async fn decide(State(app):State<AppState>,Path((kind,id)):Path<(Stri
         sqlx::query("WITH RECURSIVE descendants AS (
             SELECT id FROM sessions WHERE id=$1 UNION
             SELECT e.reader FROM (SELECT id AS reader,parent AS writer FROM sessions WHERE parent IS NOT NULL UNION SELECT reader,writer FROM session_inputs) e JOIN descendants d ON e.writer=d.id)
-            INSERT INTO contamination(cause,affected) SELECT $1,id FROM descendants
-            ON CONFLICT(cause,affected) DO UPDATE SET at=now(),cleared_at=NULL")
+            INSERT INTO contamination(cause,affected) SELECT $1,id FROM descendants WHERE true
+            ON CONFLICT(cause,affected) DO UPDATE SET at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),cleared_at=NULL")
             .bind(session).execute(&mut *tx).await?;
-        sqlx::query("UPDATE sessions SET tainted_at=COALESCE(tainted_at,now()) WHERE id IN (SELECT affected FROM contamination WHERE cause=$1 AND cleared_at IS NULL)")
+        sqlx::query("UPDATE sessions SET tainted_at=COALESCE(tainted_at,strftime('%Y-%m-%dT%H:%M:%f+00:00','now')) WHERE id IN (SELECT affected FROM contamination WHERE cause=$1 AND cleared_at IS NULL)")
             .bind(session).execute(&mut *tx).await?;
         sqlx::query("UPDATE tape_events SET tainted=true WHERE origin!='owner' AND session_id IN (SELECT affected FROM contamination WHERE cause=$1 AND cleared_at IS NULL)")
             .bind(session).execute(&mut *tx).await?;
@@ -79,12 +78,10 @@ pub(crate) async fn decide(State(app):State<AppState>,Path((kind,id)):Path<(Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// SOURCE_TEST_DB_URL points at a throwaway migrated Postgres database.
+    /// Concurrent queue decisions use an isolated SQLite database.
     #[tokio::test]
-    #[ignore]
-    async fn queue_decisions_database() {
-        let db=sqlx::PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
-        sqlx::migrate!().run(&db).await.unwrap();
+        async fn queue_decisions_database() {
+        let (_db_dir, db) = crate::test_util::database().await;
         let app=crate::test_util::app(db.clone());
         let s=Uuid::new_v4();
         sqlx::query("INSERT INTO sessions(id,title,model,risk) VALUES($1,'queue test','faux/smoke',4)").bind(s).execute(&db).await.unwrap();

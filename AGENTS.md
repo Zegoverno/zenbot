@@ -1,138 +1,129 @@
 # Working on zenbot
 
-This file is for agents (and people) changing zenbot's own code, including zenbot itself. Read it
-fully before making changes.
+For agents (and people) changing zenbot's own code, including zenbot itself. Read it fully first.
 
 ## Read first
 
 1. [CONTEXT.md](CONTEXT.md): what zenbot is for and how success is measured.
-2. [ROADMAP.md](ROADMAP.md): what's next, open decisions and debt. Start new work from there.
-3. [MAP.md](MAP.md): find what you'll touch, what it depends on and what depends on it. Then read the
-   code itself.
-4. [DESIGN.md](DESIGN.md) for how the system works, [DECISIONS.md](DECISIONS.md) before revisiting a
-   choice, [DEVELOPMENT.md](DEVELOPMENT.md) for every command below.
+2. [ROADMAP.md](ROADMAP.md): what's next, open decisions and debt. Start new work there.
+3. [MAP.md](MAP.md): what you'll touch and what depends on it. Then read the code itself.
+4. [DESIGN.md](DESIGN.md) for how it works, [DECISIONS.md](DECISIONS.md) before revisiting a choice,
+   [DEVELOPMENT.md](DEVELOPMENT.md) for every command below.
 
 ## What runs where
 
 | Piece | Path | Runs as |
 |---|---|---|
-| Kernel `zend`: API, WebSocket, sessions, tools, auth, worker routing | `crates/zend` (Rust) | systemd service `zenbot`, binary `~/.zenbot/bin/zend` |
-| CLI `zen`: terminal app and script commands | `crates/zen` (Rust) | `~/.zenbot/bin/zen` (linked from `~/.local/bin/zen`) |
-| Worker `zen-engine`: turns on the Claude Code and Codex CLIs | `crates/zen-engine` (Rust) | child process of `zend` |
-| Shared `zen-proto`: message helpers, the client protocol's events and the worker protocol's messages, typed | `crates/zen-proto` (Rust library) | linked into `zend`, `zen-engine`, `zen` and `zen-matrix` |
-| Client `zen-client`: the kernel client (token, HTTP calls, session stream, `zen_home`, env files) | `crates/zen-client` (Rust library) | linked into `zen` and `zen-matrix` |
-| Channel `zen-matrix`: the owner's Matrix rooms ↔ sessions | `crates/zen-matrix` (Rust, its own Cargo workspace) | systemd service `zen-matrix`, binary `~/.zenbot/bin/zen-matrix` |
-| Database and web search | `deploy/compose.yaml` | Postgres + pgvector, and SearXNG, in Docker |
+| Kernel `zend`: API, sessions, tools, auth, state, worker routing | `crates/zend` | systemd service `zenbot`, `~/.zenbot/bin/zend` |
+| CLI `zen`: terminal app and script commands | `crates/zen` | `~/.zenbot/bin/zen` (linked from `~/.local/bin/zen`) |
+| Worker `zen-engine`: turns on the Claude Code and Codex CLIs | `crates/zen-engine` | child process of `zend` |
+| `zen-proto`: shared message helpers and typed protocols | `crates/zen-proto` | library |
+| `zen-client`: the kernel client (token, HTTP, session stream) | `crates/zen-client` | library, in `zen` and `zen-matrix` |
+| Channel `zen-matrix`: Matrix rooms ↔ sessions | `crates/zen-matrix` (own Cargo workspace) | systemd service `zen-matrix` |
+| Database | `crates/zend/sqlite-migrations/` | private SQLite file with FTS5 and sqlite-vec, inside `zend` |
 
-The kernel owns all state and executes every tool call. Workers hold no state: they get the context
-for a turn and ask the kernel to run tools. Engines run with their own tools switched off (Claude
-Code `--tools ""`, Codex shell disabled) so every action goes through the kernel. Keep it that way.
+The kernel owns all state and executes every tool call; workers are stateless. Engines run with their own tools off (Claude Code
+`--tools ""`, Codex shell disabled) so every action goes through the kernel. Keep it that way.
 
-Config lives in `~/.zenbot/` (MAP.md lists every file). `token`, `db-password`, `env`, `env.prev`,
-`matrix.env` and `matrix/` are secret: never print them.
+Config lives in `~/.zenbot/` (MAP.md lists every file). `token`, `env`, `env.prev`, `matrix.env`,
+`matrix/`, the SQLite database with its WAL/SHM files, backups and archives are private: never print
+them.
 
 ## Making a change
 
-1. **Branch.** Start from an up-to-date `main` and work on a branch (`feat/…`, `fix/…`, `docs/…`),
-   never directly on `main`.
-2. **Read the code you're changing.** Keep the existing style. Keep changes small.
-3. **Build and check** exactly as CI does: `scripts/check.sh` builds once, then runs the tests,
-   clippy as errors, `scripts/e2e.sh` and the docs check, timing each step and stopping at the
-   first failure (`scripts/check.sh <filter>` runs only matching e2e scenarios; DEVELOPMENT.md).
-   Extend an e2e scenario (or add one for a new setup) when you change the kernel's behavior. Test kernel behavior without a
-   subscription with the scripted `faux/smoke` model. `crates/zen-matrix` is built, tested and
-   linted in its own CI job; test it end to end with `scripts/matrix-e2e.sh` (not in CI). Changes
-   to the worker protocol update `docs/worker-protocol.md`, its types in `zen-proto` (`worker.rs`)
-   and every worker.
-4. **Test it for real** where you can, e.g. `./target/release/zen ask --json "…"` against the running
-   service or a dev kernel.
-5. **Update the docs** in the same branch (table below), then run `scripts/check-docs.py`. Docs are
-   not a follow-up task. Before you merge, reread what your docs say against the branch's final
-   diff: later commits often change what an earlier commit's docs describe.
-6. **Apply it** with `scripts/upgrade.sh` (safe from inside your own session; what it does:
-   DEVELOPMENT.md, "Applying a change"), then check `~/.zenbot/upgrade.log`. It also rebuilds an
-   installed `zen-matrix` when its sources changed; `scripts/matrix.sh` installs it the first time.
-7. **Ship.** Commit (one concern per commit), push the branch, open a pull request, merge when CI is
-   green. Harness changes (system prompt, history, tools, workers, model or effort handling) also get
-   an eval first: `scripts/eval.sh --plan` shows which tasks the change affects and why, then
-   `scripts/eval.sh` runs those (in parallel, the base from cache when it can); use `--full` for a
-   large harness change or when the owner asks. Show the owner the report (in the pull request
-   too), and merge only once the owner agrees. The report informs the owner's decision; it is never
-   a pass/fail gate.
-8. **After a merge**, `git checkout main && git pull` before starting the next branch.
+1. **Branch** from an up-to-date `main` (`feat/…`, `fix/…`, `docs/…`); never work on `main`.
+2. **Read the code you're changing.** Keep its style; keep changes small.
+3. **Check as CI does:** `scripts/check.sh` (`scripts/check.sh <filter>` for only the matching e2e
+   scenarios). Extend an e2e scenario (or add one for a new setup) when kernel behavior changes; test
+   without a subscription with the `faux/smoke` model. `crates/zen-matrix` has its own CI job and
+   `scripts/matrix-e2e.sh`. A worker-protocol change updates `docs/worker-protocol.md`,
+   `crates/zen-proto/src/worker.rs` and every worker.
+4. **Test it for real** where you can: `./target/release/zen ask --json "…"` against the service or
+   a dev kernel.
+5. **Update the docs** in the same branch (below) and run `scripts/check-docs.py`. Before merging,
+   reread your docs against the final diff: later commits often change what earlier docs describe.
+6. **Apply it** with `scripts/upgrade.sh` (safe from inside your own session), then check
+   `~/.zenbot/upgrade.log`.
+7. **Ship.** One concern per commit; push, open a pull request, merge when CI is green. Harness
+   changes (system prompt, history, tools, workers, model or effort handling) get an eval first:
+   `scripts/eval.sh --plan` shows the affected tasks, `scripts/eval.sh` runs them (`--full` for a
+   large change or when the owner asks). Show the owner the report (in the pull request too) and
+   merge only once they agree; the report informs that decision, it is never a pass/fail gate.
+8. **After a merge**, `git checkout main && git pull` before the next branch.
 
 ## Update the docs before shipping
 
-Every change updates only these, in the same branch:
+Every change updates, in the same branch:
 
-| File | Update when |
+| File | When |
 |---|---|
 | `PROGRESS.md` | Always: a short dated entry at the top saying what shipped and why |
-| `DECISIONS.md` | A decision is made or changed (new `D-NNN` entry; mark what it supersedes) |
-| `MAP.md` | Files, routes, tools, tables, settings, scripts or e2e scenarios are added, removed or change role |
-| `README.md` | How people use zen changes (commands, keys, settings they'd set) |
-| The module's header comment | What the module does or guarantees changes (it is the module's design note) |
+| `DECISIONS.md` | A decision is made or changed (below) |
+| `MAP.md` | Files, routes, tools, tables, settings, scripts or e2e scenarios added, removed or changing role |
+| `README.md` | How people use zen changes (commands, keys, settings) |
+| The module's header comment | What the module does or guarantees changes (it is its design note) |
 
-Every other doc (DESIGN, ROADMAP, DEVELOPMENT, SPEC, CONTEXT, INSTALL, `docs/*.md`, this file,
-`crates/zend/defaults/`) is updated when it becomes wrong: when you notice, or when your change
-makes a sentence in it false. `docs/archive/` is history: never updated, not required reading.
+Any other current doc (DESIGN, ROADMAP, DEVELOPMENT, CONTEXT, INSTALL, `docs/*.md`, this file,
+`crates/zend/defaults/`) is fixed when it becomes wrong: when you notice, or when your change makes a
+sentence false. `docs/archive/` is history: never updated, not required reading.
+
+**Decisions.** DECISIONS.md is an index of the rules in force; the full text of past decisions is in
+`docs/archive/DECISIONS-full.md`. A new decision is a short entry at the top: a heading
+`## D-NNN — title`, a status/date line, and the rule in about 8 lines at most. The reasoning goes in
+the pull request and PROGRESS.md. When a decision is superseded, its index entry becomes
+"Superseded by D-NNN".
 
 ### Keeping the docs true
 
-The docs are worth reading only while they match the code, and every session builds on them. So:
+- **The code wins.** When a doc disagrees with the code, fix the doc in the same branch, even if it
+  isn't part of your change, and say so in the commit.
+- **Present tense means shipped.** Describe what `main` does now. Plans go to ROADMAP.md (or a
+  marked "target" section); statuses change when the thing merges, not when it starts.
+- **History stays history.** PROGRESS.md entries and `docs/archive/` say what was true when written:
+  don't rewrite them. PROGRESS.md entries older than a week or two move to `docs/archive/` when the
+  file outgrows its budget.
+- **Keep docs short.** One fact in one file, linked from the others; module detail belongs in its
+  header comment; history moves to `docs/archive/` instead of growing a doc.
+- **`scripts/check-docs.py`** (CI runs it) fails when MAP.md misses a route, tool, setting, table,
+  e2e scenario or crate, when a current doc names a setting, repo path or decision that doesn't
+  exist, when the current docs exceed their size budget, and when a code change adds no PROGRESS.md
+  entry (`[no-progress]` in a commit message if nothing shipped). Whether a sentence is still true
+  is on you.
 
-- **The code wins.** When a doc disagrees with the code you're reading, fix the doc in the same
-  branch, even if it isn't part of your change, and say so in the commit.
-- **Present tense means shipped.** Describe what `main` does now. What's planned goes to ROADMAP.md
-  (or a "target" section), marked as not built; statuses (`built`, `done`, "next") change when the
-  thing merges, not when it's started.
-- **History stays history.** PROGRESS.md entries, DECISIONS.md entries and `docs/archive/` say
-  what was true when written: don't rewrite them; mark a superseded decision `Superseded by D-NNN`.
-  Move, don't edit: PROGRESS.md entries older than a week or two go to `docs/archive/` when the file
-  outgrows its budget, and a fully superseded decision moves to
-  `docs/archive/DECISIONS-superseded.md`, leaving its heading line in DECISIONS.md.
-- **`scripts/check-docs.py`** (CI runs it on every pull request) fails when a route, tool, setting,
-  e2e scenario or crate in the code is missing from MAP.md, when a current doc names a setting,
-  repo path or decision that doesn't exist, when the docs outgrow their line budgets, and when a
-  change to the code adds no PROGRESS.md entry (`[no-progress]` in a commit message if nothing
-  shipped). It can't tell whether a sentence is still true: that's on you.
-
-Keep each fact in one file and link to it from the others. Repo docs are for whoever works on the
-code next: no conversation notes, no memory-system link syntax (`[[…]]`), no perishable usage data.
-Refer to the owner as "the owner".
+Repo docs are for whoever works on the code next: no conversation notes, no memory-system link
+syntax (`[[…]]`), no perishable usage data. Refer to the owner as "the owner".
 
 ## Conventions
 
 - One concern per commit. The subject says what changed; the body says why, and what was tested.
-- Design decisions (DECISIONS.md, DESIGN.md, SPEC.md, or a module's header comment) change only with
-  the owner's OK. If a change needs one, ask first, then update the doc in the same pull request.
-- UI changes (`crates/zen/src/tui/`, `editor.rs`) come with render or key tests: build an `App` at a
-  fixed size with output captured (see the tests beside the modules in `tui/`).
-- Keep doc comments attached to the item they describe, and update them when behavior changes.
-- Commits made in a zen session get `Zen-Session` and `Co-Authored-By` trailers automatically
-  (`scripts/git-hooks`, enabled by `install.sh` and `scripts/upgrade.sh`); don't remove them.
+- Design decisions (DECISIONS.md, DESIGN.md, a module's header comment) change only with the
+  owner's OK: ask first, then update the doc in the same pull request.
+- UI changes (`crates/zen/src/tui/`, `editor.rs`) come with render or key tests: an `App` at a fixed
+  size with output captured (see the tests beside the modules in `tui/`).
+- Commits made in a zen session get `Zen-Session` and `Co-Authored-By` trailers from
+  `scripts/git-hooks` (enabled by `install.sh` and `scripts/upgrade.sh`); don't remove them.
 - Don't add dependencies without a good reason; prefer the standard library and what's already used.
 
 ## Rules
 
 - **Never** run `systemctl restart zenbot` or kill `zend` yourself: that kills the session you're
   running in. Always use `scripts/upgrade.sh`.
-- Database changes go in a new file in `crates/zend/migrations/`; never edit an applied migration.
-  Migrations are **expand-only**: add tables, columns and indexes; drop, rename or retype only in a
-  later release than the one that stops using it. A rollback swaps the binaries back but not the
-  schema.
-- Don't put secrets in the repo, logs or tool output.
-- Code that depends on a CLI's flags or output fails loudly, so the daily engine update check catches
-  a breaking change.
+- Schema changes go in a new file in `crates/zend/sqlite-migrations/`; never edit an applied
+  migration (the PostgreSQL ones in `crates/zend/migrations/` are history). Migrations are
+  **expand-only**: add tables, columns and indexes; drop, rename or retype only in a later release
+  than the one that stops using it. A rollback swaps the binaries back, not the schema.
+- No secrets in the repo, logs or tool output.
+- Code that depends on a CLI's flags or output fails loudly, so the daily engine update check
+  catches a breaking change.
 
 ## Useful commands
 
 ```bash
-zen status                  # health of kernel, database, workers, sign-in, engine versions, jobs
+zen status                  # kernel, database, workers, sign-in, engine versions, jobs
 journalctl -u zenbot -n 50  # service logs (zen-matrix: journalctl -u zen-matrix)
 cat ~/.zenbot/upgrade.log   # upgrade results
 scripts/upgrade.sh --check  # build, check and smoke test without installing
-scripts/check.sh            # what CI checks: build, tests, clippy, e2e, docs
+scripts/check.sh            # what CI checks
 scripts/eval.sh --plan      # which eval tasks a harness change affects, and why
-ZEN_FAUX=1 scripts/dev.sh   # dev kernel on :18100 with its own zen_dev database
+ZEN_FAUX=1 scripts/dev.sh   # dev kernel on :18100 with its own home and database
 ```

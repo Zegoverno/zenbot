@@ -1,6 +1,7 @@
 //! Built-in tools. The kernel is the only place side effects happen.
-//! Commands run on the host in the workspace (a verifier's in a read-only bubblewrap sandbox, and its
-//! `read` confined to the work it checks); per-project sandboxes come with M2.
+//! Every session's commands run in a contained bubblewrap shell in its workspace (D-067; a
+//! verifier's read-only, its `read` confined to the work it checks); `host: true` runs a command on
+//! the host only once the action gate or the owner allows it.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -198,10 +199,13 @@ pub async fn execute(workspace: &Path, name: &str, args: &Value, env: &[(&str, &
 }
 
 #[derive(Clone, Copy)]
-pub struct Origin<'a> { pub db: &'a sqlx::PgPool, pub session: uuid::Uuid, pub masks: &'a [PathBuf] }
+pub struct Origin<'a> { pub db: &'a sqlx::SqlitePool, pub session: uuid::Uuid, pub masks: &'a [PathBuf] }
 
 /// File provenance is computed from the exact bytes within the file operation, never a reread.
 pub async fn execute_origin(workspace: &Path, name: &str, args: &Value, env: &[(&str,&str)], sandbox: Sandbox, origin: Option<Origin<'_>>) -> ToolOutput {
+    if matches!(name,"read"|"write"|"edit") && args["path"].as_str().is_some_and(|p|crate::secrets::is_database_path(&resolve(workspace,p))) {
+        return err("kernel database and backups are private; use kernel APIs");
+    }
     let read_only = sandbox == Sandbox::ReadOnly;
     if read_only && !matches!(name, "bash" | "read") {
         return err(format!("`{name}` can't run in a read-only session"));
@@ -443,6 +447,10 @@ fn sandbox_command(filter: &std::fs::File) -> Command {
 /// `masks` (fsview.rs) are files the shell must not see: each is unreadable (a nodev /dev/null), in
 /// every mode; a host shell with masks runs in its own pid namespace with no_new_privs.
 pub async fn run_shell(dir: &Path, command: &str, env: &[(&str, &str)], sandbox: Sandbox, masks: &[PathBuf], timeout: Duration) -> Result<Shell, String> {
+    // Even the host-capability route cannot inspect or alter kernel storage.
+    let mut storage_masks=masks.to_vec();
+    storage_masks.extend(crate::secrets::database_files().into_iter().filter(|p|p.exists()));
+    let masks=storage_masks.as_slice();
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/home".into()));
     let filter = match sandbox {
         Sandbox::ReadOnly | Sandbox::Contained { net: false, .. } => Some(network_filter()?),
@@ -1006,6 +1014,17 @@ mod tests {
         assert!(good.content.contains("-alpha") && good.content.contains("+final"));
         let mixed = run(&ws, "edit", json!({"path":"a.txt","old_text":"final","new_text":"other","edits":[]})).await;
         assert!(mixed.is_error);
+    }
+
+    #[tokio::test]
+    async fn kernel_storage_is_refused_by_every_file_tool() {
+        for path in crate::secrets::database_files() {
+            for name in ["read","write","edit"] {
+                let out=execute(Path::new("/"),name,&json!({"path":path,"content":"forged state","old":"x","new":"y"}),&[],Sandbox::None).await;
+                assert!(out.is_error,"{name} must refuse {}",path.display());
+                assert!(out.content.contains("kernel database"),"{}",out.content);
+            }
+        }
     }
 
     #[test]

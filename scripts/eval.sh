@@ -38,6 +38,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 export PATH="$HOME/.local/node/bin:$HOME/.cargo/bin:$PATH"
 . "$REPO/scripts/db.sh"
+. "$REPO/scripts/test-sqlite.sh"
 
 BASE_REF="" MODEL="" EFFORT="" BASE_MODEL="" BASE_EFFORT="" TASKS="" REPEAT=1 ONLY="" KEEP="" NATIVE=""
 JOBS=${ZEN_EVAL_JOBS:-3} FRESH="" FULL="" PLAN=""
@@ -70,6 +71,7 @@ CACHE_DAYS=${ZEN_EVAL_CACHE_DAYS:-7}
 RUN="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="$HOME/.zenbot/evals/$RUN"
 WORK="$OUT/work"
+export ZEN_DB_DIR="$OUT/databases"
 BUILDS="$HOME/.zenbot/evals/builds"
 log() { echo "$*" >&2; }
 
@@ -172,6 +174,7 @@ BASE_EFFORT=${BASE_EFFORT:-$EFFORT}
 build_new() {
   log "== building new harness (this checkout)"
   cargo build --release -q
+  ensure_test_sqlite
   mkdir -p "$OUT/new-bin"
   cp target/release/zend target/release/zen-engine target/release/zen "$OUT/new-bin/"
   local label; label=$(git rev-parse --short HEAD)
@@ -270,7 +273,9 @@ cleanup() {
   wait 2>/dev/null || true
   if [ -z "$KEEP" ] && [ -d "$OUT" ]; then
     local db
-    for db in $(db_psql -d postgres -c "SELECT datname FROM pg_database WHERE datname LIKE 'zen_eval\_$(echo "$RUN" | tr 'A-Z' 'a-z')\_%'" 2>/dev/null); do
+    for db in "$ZEN_DB_DIR"/zen_eval_$(echo "$RUN" | tr 'A-Z' 'a-z')_*.sqlite3; do
+      [ -f "$db" ] || continue
+      db=$(basename "$db" .sqlite3)
       db_drop "$db"
     done
   fi
@@ -340,7 +345,7 @@ run_task() { # name bin label model effort db task repeat port
         done
         if [ -z "$status" ] || [ "$status" = running ]; then error="job step $((i + 1)): the run didn't finish"; break; fi
         local js rec='{}'; js=$(jq -r '.session // empty' <<<"$run")
-        [ -n "$js" ] && rec=$(db_psql -d "$db" -c "SELECT json_build_object('cost_usd', coalesce(sum(cost_usd), 0), 'input_tokens', coalesce(sum(input_tokens), 0), 'output_tokens', coalesce(sum(output_tokens), 0), 'cache_read', coalesce(sum(cache_read), 0), 'cache_write', coalesce(sum(cache_write), 0), 'tool_errors', 0) FROM turns WHERE session_id = '$js'")
+        [ -n "$js" ] && rec=$(db_query "$db" "SELECT json_object('cost_usd', coalesce(sum(cost_usd), 0), 'input_tokens', coalesce(sum(input_tokens), 0), 'output_tokens', coalesce(sum(output_tokens), 0), 'cache_read', coalesce(sum(cache_read), 0), 'cache_write', coalesce(sum(cache_write), 0), 'tool_errors', 0) FROM turns WHERE session_id = X'${js//-/}'")
         echo "$run" | jq -c --argjson rec "$rec" --argjson ms $(( $(date +%s%3N) - jt0 )) '{job: ., text: (.output // .error // ""), turn: $rec, client_ms: $ms}' >>"$turns"
         echo "$run" >>"$WORK/$name/$task-$r.jobs.jsonl"
         continue
@@ -412,7 +417,7 @@ run_unit() { # slot index
   fi
   log "-- $h · $task · run $r (port $((PORT + slot)))"
   local db; db="zen_eval_$(echo "$RUN" | tr 'A-Z' 'a-z')_$i"
-  [[ $bin == native:* ]] || db_psql -d postgres -c "CREATE DATABASE $db" >/dev/null
+  [[ $bin == native:* ]] || db_create "$db" >/dev/null
   mkdir -p "$WORK/$h"
   res=$(run_task "$h" "$bin" "$label" "$model" "$effort" "$db" "$task" "$r" $((PORT + slot)))
   [ -n "$KEEP" ] || [[ $bin == native:* ]] || db_drop "$db"

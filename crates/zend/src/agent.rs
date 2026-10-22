@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::{tape, tools, AppState};
@@ -62,7 +62,7 @@ const PROMPT_FILES: [&str; 4] = [crate::layout::SOUL, crate::layout::IDENTITY, "
 
 /// The owner's configuration and secrets under the zen home: the agent never changes them with
 /// `edit` or `write` (the owner edits them by hand). `matrix` and `bin` are folders.
-const OWNER_FILES: [&str; 11] = ["mcp-auth", "mcp.json", "env", "env.prev", "token", "db-password", "matrix.env", "matrix", "bin", "s1", "trust.toml"];
+const OWNER_FILES: [&str; 18] = ["mcp-auth", "mcp.json", "env", "env.prev", "token", "db-password", "matrix.env", "matrix", "bin", "s1", "trust.toml", "prices.toml", "zen.sqlite3", "zen.sqlite3-wal", "zen.sqlite3-shm", "zen.sqlite3-journal", "backups", "exports"];
 
 /// A file an `edit` or `write` call may not change freely.
 #[derive(Debug, PartialEq)]
@@ -132,7 +132,7 @@ pub fn protected_target(g: &Guarded, workspace: &Path, name: &str, args: &Value)
     if PROMPT_FILES.iter().any(|rel| is(g.home.join(rel))) {
         return Some(Protected::PromptFile(target));
     }
-    if OWNER_FILES.iter().any(|rel| under(g.home.join(rel))) || is(g.mcp.clone()) {
+    if OWNER_FILES.iter().any(|rel| under(g.home.join(rel))) || crate::secrets::database_files().into_iter().any(under) || is(g.mcp.clone()) {
         return Some(Protected::OwnerOnly(target));
     }
     if under(g.skills.clone()) && !under(g.skills.join("_proposed")) {
@@ -178,7 +178,7 @@ pub fn prompt_file_target(workspace: &Path, name: &str, args: &Value) -> Option<
 /// refused, so text from outside can't rewrite what steers every session. The owner's configuration
 /// and secrets are refused to every session: an MCP server's `command` runs as the kernel. `bash`
 /// can still write files as the owner's Unix user (ROADMAP.md, debt).
-pub async fn protected_refusal(db: &PgPool, session: Uuid, kind: Option<&str>, workspace: &Path, name: &str, args: &Value, allowed: bool) -> Option<String> {
+pub async fn protected_refusal(db: &SqlitePool, session: Uuid, kind: Option<&str>, workspace: &Path, name: &str, args: &Value, allowed: bool) -> Option<String> {
     let (path, what) = match protected_target(&Guarded::current(), workspace, name, args)? {
         Protected::OwnerOnly(p) => {
             return Some(format!(
@@ -364,7 +364,7 @@ pub async fn run_tool(app: &AppState, session: Uuid, workspace: &Path, name: &st
                         let writers: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM sessions WHERE id BETWEEN $1 AND $2")
                             .bind(lo).bind(hi).fetch_all(&app.db).await?;
                         crate::sources::depend(&app.db, session, &writers).await?;
-                        sqlx::query_scalar::<_,Option<i16>>("SELECT max(CASE WHEN zen_session_contaminated(session_id) AND origin!='owner' THEN 5::smallint ELSE risk END) FROM tape_events WHERE session_id BETWEEN $1 AND $2 AND seq>= $3 AND seq<= $4")
+                        sqlx::query_scalar::<_,Option<i16>>("SELECT max(CASE WHEN COALESCE(session_id IN (SELECT id FROM zen_contaminated_sessions),false) AND origin!='owner' THEN 5 ELSE risk END) FROM tape_events WHERE session_id BETWEEN $1 AND $2 AND seq>= $3 AND seq<= $4")
                             .bind(lo).bind(hi).bind(args["from"].as_i64().unwrap_or(0) as i32)
                             .bind(args["to"].as_i64().or(args["from"].as_i64()).unwrap_or(i32::MAX as i64) as i32)
                             .fetch_one(&app.db).await.map_err(Into::into)
@@ -481,7 +481,7 @@ pub fn refuse(ending: Option<&str>) -> Option<String> {
 /// Record a kernel choice that isn't a System One call (a subagent's model, point `model`) in
 /// `decisions`, beside S1's records, so `delegate::stats` reads them together.
 #[allow(clippy::too_many_arguments)]
-pub async fn log_decision(db: &PgPool, session: Option<Uuid>, point: &str, input: &Value, answer: &Value, chosen: Option<&str>, probability: Option<f64>, acted: bool, error: Option<&str>) {
+pub async fn log_decision(db: &SqlitePool, session: Option<Uuid>, point: &str, input: &Value, answer: &Value, chosen: Option<&str>, probability: Option<f64>, acted: bool, error: Option<&str>) {
     let r = sqlx::query(
         "INSERT INTO decisions (session_id, point, model, input, answer, chosen, probability, acted, error) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )

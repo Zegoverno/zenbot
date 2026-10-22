@@ -62,7 +62,7 @@ pub fn estimate(model: &str, input: i64, cache_read: i64, output: i64) -> Option
 /// Turns recorded before D-075: Codex's input counted its cached tokens twice, a resumed turn
 /// had the previous turn's usage subtracted, and the cost was $0. Rebuilt from each turn's own
 /// stored report (`usage`), once per turn (marked `usage.repriced`).
-pub async fn backfill(db: &sqlx::PgPool) -> anyhow::Result<u64> {
+pub async fn backfill(db: &sqlx::SqlitePool) -> anyhow::Result<u64> {
     let rows: Vec<(uuid::Uuid, Option<String>, Option<String>, serde_json::Value)> = sqlx::query_as(
         "SELECT id, model_resolved, model, usage FROM turns WHERE engine = 'codex' AND usage IS NOT NULL AND usage->>'repriced' IS NULL AND usage->>'totals' IS NULL",
     )
@@ -76,7 +76,7 @@ pub async fn backfill(db: &sqlx::PgPool) -> anyhow::Result<u64> {
         let input = (int("input") - cache_read).max(0);
         let model = resolved.or(model).unwrap_or_default();
         let cost = estimate(&model, input, cache_read, output);
-        sqlx::query("UPDATE turns SET input_tokens = $2, cache_read = $3, output_tokens = $4, cost_usd = COALESCE($5, cost_usd), usage = usage || '{\"repriced\": true}' WHERE id = $1")
+        sqlx::query("UPDATE turns SET input_tokens = $2, cache_read = $3, output_tokens = $4, cost_usd = COALESCE($5, cost_usd), usage = json_patch(usage, '{\"repriced\": true}') WHERE id = $1")
             .bind(id)
             .bind(input)
             .bind(cache_read)
@@ -92,6 +92,25 @@ pub async fn backfill(db: &sqlx::PgPool) -> anyhow::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sqlite_backfill_preserves_usage_and_runs_once() {
+        let (_dir,db)=crate::test_util::database().await;
+        let session=uuid::Uuid::new_v4();
+        let turn=uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO sessions(id,model) VALUES($1,'codex/gpt-6.1-sol')").bind(session).execute(&db).await.unwrap();
+        let usage=serde_json::json!({"input":120,"cache_read":20,"output":10,"extra":"preserved"});
+        sqlx::query("INSERT INTO turns(id,session_id,harness,worker,engine,model,usage) VALUES($1,$2,'test','test','codex','codex/gpt-6.1-sol',$3)")
+            .bind(turn).bind(session).bind(usage).execute(&db).await.unwrap();
+        assert_eq!(backfill(&db).await.unwrap(),1);
+        assert_eq!(backfill(&db).await.unwrap(),0);
+        let (input,cached,output,cost,usage):(i64,i64,i64,f64,serde_json::Value)=sqlx::query_as("SELECT input_tokens,cache_read,output_tokens,cost_usd,usage FROM turns WHERE id=$1")
+            .bind(turn).fetch_one(&db).await.unwrap();
+        assert_eq!((input,cached,output),(100,20,10));
+        assert!(cost>0.0);
+        assert_eq!(usage["repriced"],true);
+        assert_eq!(usage["extra"],"preserved");
+    }
 
     #[test]
     fn codex_tokens_are_priced_per_million_with_cached_input_cheap() {

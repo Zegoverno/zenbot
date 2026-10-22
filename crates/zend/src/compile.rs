@@ -6,7 +6,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use serde_json::{json, Value};
-use sqlx::{PgPool, Row};
+use sqlx::{SqlitePool, Row};
 use uuid::Uuid;
 
 use crate::context;
@@ -81,7 +81,7 @@ impl Admitted {
 /// those rated 0–3 (bytes no session registered count as 1: the owner's own edits). Recorded
 /// dependencies come first, so a later denial of a writer stops this session. A database error
 /// fails the whole prompt: nothing unrated gets in.
-pub async fn admitted(db: &PgPool, session: Uuid, workspace: &Path) -> Result<Admitted> {
+pub async fn admitted(db: &SqlitePool, session: Uuid, workspace: &Path) -> Result<Admitted> {
     let mut out = Admitted::default();
     for rel in PROMPT_FILES {
         let path = crate::zen_home().join(rel);
@@ -198,7 +198,7 @@ not this workspace: ignore its working directory and git status, and check the w
 
 /// The session's base instructions, fixed for the session: written on its first turn (a `base`
 /// block), or, for a session from before briefed work, the instructions it was already using.
-pub async fn base_prompt(db: &PgPool, session: Uuid, blocks: &[Block], workspace: &Path, repo: &str) -> Result<String> {
+pub async fn base_prompt(db: &SqlitePool, session: Uuid, blocks: &[Block], workspace: &Path, repo: &str) -> Result<String> {
     if let Some(b) = blocks.iter().find(|b| b.kind == "base") {
         return Ok(b.payload["text"].as_str().unwrap_or("").to_string());
     }
@@ -224,7 +224,7 @@ pub async fn base_prompt(db: &PgPool, session: Uuid, blocks: &[Block], workspace
 /// The envelope for this turn: the session's latest one if it has exactly these instructions and
 /// tools, else a new one (stored once per distinct pair). Returns it and, when new, why
 /// (`new`, `instructions`: the session's state changed what the model is told, `tools`).
-pub async fn envelope(db: &PgPool, session: Uuid, blocks: &[Block], system: &str, tools: &Value) -> Result<(Envelope, Option<&'static str>)> {
+pub async fn envelope(db: &SqlitePool, session: Uuid, blocks: &[Block], system: &str, tools: &Value) -> Result<(Envelope, Option<&'static str>)> {
     let current = match blocks.iter().rev().find(|b| b.kind == "envelope") {
         Some(b) => load_envelope(db, b.payload["hash"].as_str().unwrap_or("")).await?,
         None => None,
@@ -236,8 +236,8 @@ pub async fn envelope(db: &PgPool, session: Uuid, blocks: &[Block], system: &str
         None => "new",
     };
     let row = sqlx::query(
-        "WITH h AS (SELECT encode(sha256(convert_to($1 || $2::jsonb::text, 'UTF8')), 'hex') AS hash)
-         INSERT INTO envelopes (hash, system, tools) SELECT hash, $1, $2 FROM h
+        "WITH h AS (SELECT sha256_hex($1 || $2) AS hash)
+         INSERT INTO envelopes (hash, system, tools) SELECT hash, $1, $2 FROM h WHERE true
          ON CONFLICT (hash) DO UPDATE SET hash = EXCLUDED.hash
          RETURNING hash",
     )
@@ -250,7 +250,7 @@ pub async fn envelope(db: &PgPool, session: Uuid, blocks: &[Block], system: &str
     Ok((Envelope { hash, system: system.to_string(), tools: tools.clone() }, Some(reason)))
 }
 
-async fn load_envelope(db: &PgPool, hash: &str) -> Result<Option<Envelope>, sqlx::Error> {
+async fn load_envelope(db: &SqlitePool, hash: &str) -> Result<Option<Envelope>, sqlx::Error> {
     let row = sqlx::query("SELECT hash, system, tools FROM envelopes WHERE hash = $1").bind(hash).fetch_optional(db).await?;
     Ok(row.map(|r| Envelope { hash: r.get("hash"), system: r.get("system"), tools: r.get("tools") }))
 }

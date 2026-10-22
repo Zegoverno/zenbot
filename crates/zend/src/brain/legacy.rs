@@ -5,7 +5,7 @@
 use super::{hash, records, string};
 use anyhow::{ensure, Context, Result};
 use serde_json::{json, Value};
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 use std::path::{Path, PathBuf};
 
 fn id(slug: &str) -> String {
@@ -75,7 +75,7 @@ fn links(text: &str, slug: &str, names: &[String]) -> Vec<Value> {
 }
 
 async fn provenance(
-    db: &PgPool,
+    db: &SqlitePool,
     original: &Path,
     old: &str,
     target: &Path,
@@ -89,11 +89,11 @@ async fn provenance(
 }
 
 /// No text or error paths from this owner-only report enter agent instructions.
-pub async fn migrate(db: &PgPool, apply: bool) -> Result<Value> {
+pub async fn migrate(db: &SqlitePool, apply: bool) -> Result<Value> {
     migrate_at(db, apply, &crate::wiki::root()).await
 }
 
-async fn migrate_at(db: &PgPool, apply: bool, root: &Path) -> Result<Value> {
+async fn migrate_at(db: &SqlitePool, apply: bool, root: &Path) -> Result<Value> {
     if !root.exists() {
         return Ok(json!({"apply": apply, "pages": [], "migrated": 0, "held": 0}));
     }
@@ -148,10 +148,7 @@ async fn migrate_at(db: &PgPool, apply: bool, root: &Path) -> Result<Value> {
             let r = record(&slug, &source, &archive, &old, links(&old, &slug, &targets))?;
             let mut text = records::render(&r)?;
             // Serialize with record puts and other migration calls. Preview also detects conflicts.
-            let mut tx = db.begin().await?;
-            sqlx::query("SELECT pg_advisory_xact_lock(704,4)")
-                .execute(&mut *tx)
-                .await?;
+            let _writing=records::WRITING.lock().await;
             if dest.exists() {
                 regular(&dest)?;
                 text = tokio::fs::read_to_string(&dest).await?;
@@ -172,8 +169,8 @@ async fn migrate_at(db: &PgPool, apply: bool, root: &Path) -> Result<Value> {
                 .filter_map(|a| a.as_str()).map(|a| a.trim().to_lowercase()));
             let taken: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM brain_aliases a JOIN brain_records r ON r.id=a.record_id
-                 WHERE a.alias=ANY($1) AND a.record_id<>$2 AND r.store='knowledge')")
-                .bind(&names).bind(id(&slug)).fetch_one(&mut *tx).await?;
+                 WHERE a.alias IN (SELECT value FROM json_each($1)) AND a.record_id<>$2 AND r.store='knowledge')")
+                .bind(serde_json::json!(names)).bind(id(&slug)).fetch_one(db).await?;
             ensure!(!taken, "a name or alias already belongs to another knowledge record; resolve with the owner");
             if archive.exists() {
                 regular(&archive)?;
@@ -203,6 +200,7 @@ async fn migrate_at(db: &PgPool, apply: bool, root: &Path) -> Result<Value> {
                 std::fs::File::open(file.parent().unwrap())?.sync_all()?;
             }
             std::fs::File::open(root)?.sync_all()?;
+            let mut tx=crate::storage::begin(db).await?;
             records::index_file(&mut tx, &dest, "knowledge", &text).await?;
             sqlx::query("DELETE FROM search_docs WHERE kind='wiki' AND ref=$1")
                 .bind(&slug)
@@ -266,12 +264,8 @@ mod tests {
     }
     /// Real database test, invoked by the native source e2e scenario.
     #[tokio::test]
-    #[ignore]
-    async fn legacy_migration_database() {
-        let db = PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap())
-            .await
-            .unwrap();
-        sqlx::migrate!().run(&db).await.unwrap();
+        async fn legacy_migration_database() {
+        let (_db_dir, db) = crate::test_util::database().await;
         let dir = crate::test_util::TestDir::new("legacy-migration");
         let source = dir.join("page.md");
         let original = "# Legacy meeting\n\nTentative: the launch is Friday.\n";

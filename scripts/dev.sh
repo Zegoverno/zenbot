@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run a development kernel from this checkout in the foreground: Postgres in Docker and zend
+# Run a development kernel from this checkout in the foreground: SQLite and zend
 # on the host. It uses the service's settings (~/.zenbot/env: workers, models, budgets) but its own
 # database (zen_dev), port (ZEN_DEV_PORT, default 18100) and home (~/.zenbot-dev, or ZEN_DEV_HOME,
 # holding its workspace, wiki, skills, tools and MCP config), and none of the paid API keys, so it
@@ -26,7 +26,7 @@ if [ -z "${ZEN_DEV_REAL:-}" ]; then
 fi
 export PATH="$HOME/.local/node/bin:$HOME/.cargo/bin:$PATH"
 ZEN_TOKEN="$(cat "$HOME/.zenbot/token")"
-DATABASE_URL="$(db_url_for "$DB")"
+DATABASE_URL="sqlite://${ZEN_DEV_HOME:-$HOME/.zenbot-dev}/$DB.sqlite3"
 ZEN_HARNESS="$(git rev-parse --short HEAD)" # turns record this checkout, not the installed version
 export ZEN_TOKEN DATABASE_URL ZEN_HARNESS ZEN_PORT=$PORT
 # Keep the dev kernel outside the live home so the live file tree never exposes its prompt files.
@@ -43,9 +43,7 @@ export ZEN_HOME=${ZEN_DEV_HOME:-$HOME/.zenbot-dev}
 # A dev kernel doesn't run scheduled jobs (they would update the real CLIs); ZEN_JOBS=1 turns them on.
 export ZEN_JOBS=${ZEN_JOBS:-0}
 
-db_docker compose -f deploy/compose.yaml up -d --wait postgres
-[ "$(db_psql -d postgres -c "SELECT 1 FROM pg_database WHERE datname = '$DB'")" = 1 ] ||
-  db_psql -d postgres -c "CREATE DATABASE $DB"
+mkdir -p "$ZEN_HOME"
 cargo build --release -q
 echo "dev kernel on http://127.0.0.1:$PORT (database $DB); use it with: ZEN_URL=http://127.0.0.1:$PORT ./target/release/zen"
 exec ./target/release/zend

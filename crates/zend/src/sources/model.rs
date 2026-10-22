@@ -41,10 +41,10 @@ fn assessed_scope(state:&Value, answer:&Value)->Option<String> {
     if choice=="host" && (platform>=0.1 || known_platform) {return None}
     candidates(state).into_iter().find(|(kind,_)|kind==choice).map(|(_,scope)|scope)
 }
-async fn cached(db:&PgPool,state:&Value)->Result<Option<i16>> {
+async fn cached(db:&SqlitePool,state:&Value)->Result<Option<i16>> {
     let scopes:Vec<_>=candidates(state).into_iter().map(|(_,s)|s).collect();
-    let rows=sqlx::query("SELECT scope,risk,answers FROM source_ratings WHERE scope=ANY($1) AND rated_at>now()-interval '30 days' ORDER BY length(scope) DESC")
-        .bind(scopes).fetch_all(db).await?;
+    let rows=sqlx::query("SELECT scope,risk,answers FROM source_ratings WHERE scope IN (SELECT value FROM json_each($1)) AND rated_at>strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-30 days') ORDER BY length(scope) DESC")
+        .bind(serde_json::json!(scopes)).fetch_all(db).await?;
     for row in rows {
         let scope:String=row.get("scope");
         let answer:Value=row.get("answers");
@@ -69,7 +69,7 @@ fn complete(d: &crate::s1::Decision) -> Option<(i16, Value)> {
 
 /// Owner allowlist is the only inferred-trust bypass allowed to grant unseen URL egress.
 /// Metadata ratings are deliberately separate from base(), which reads only owner entries.
-pub async fn rated(db: &PgPool, url: &str, reached: &str) -> Result<i16> {
+pub async fn rated(db: &SqlitePool, url: &str, reached: &str) -> Result<i16> {
     let owner = base(db,url).await?;
     if owner != 4 { return Ok(owner); }
     let Ok(state) = metadata(url,reached) else { return Ok(4) };
@@ -82,7 +82,7 @@ pub async fn rated(db: &PgPool, url: &str, reached: &str) -> Result<i16> {
 }
 
 /// Batched metadata-only search ratings. Cache hits and owner entries need no model call.
-pub async fn rated_many(db: &PgPool, urls: &[&str]) -> Result<i16> {
+pub async fn rated_many(db: &SqlitePool, urls: &[&str]) -> Result<i16> {
     let mut risk=1;
     let mut pending=std::collections::BTreeMap::new();
     for url in urls {
@@ -104,19 +104,18 @@ pub async fn rated_many(db: &PgPool, urls: &[&str]) -> Result<i16> {
     Ok(risk)
 }
 
-async fn cache(db: &PgPool, scope: &str, risk: i16, answer: &Value) -> Result<()> {
+async fn cache(db: &SqlitePool, scope: &str, risk: i16, answer: &Value) -> Result<()> {
     // Page-only assessments cannot safely become segment-prefix owner grants.
     let proposal_risk=if matches!(answer["answers"]["scope"]["choice"].as_str(),
         Some("host"|"account"|"surface")) {risk} else {4};
-    let mut tx = db.begin().await?;
+    let mut tx = crate::storage::begin(db).await?;
     // Serialize decisions and refreshes for this scope, including first insertion.
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 65))").bind(scope).execute(&mut *tx).await?;
     let snapshot = Uuid::new_v4();
     sqlx::query("INSERT INTO source_ratings(scope,risk,answers,model,snapshot,proposal,proposed_at)
-        VALUES($1,$2,$3,$4,$5,CASE WHEN $6::smallint=2 THEN 'pending' END,CASE WHEN $6::smallint=2 THEN now() END)
-        ON CONFLICT(scope) DO UPDATE SET risk=$2,answers=$3,model=$4,snapshot=$5,rated_at=now(),
-        proposal=CASE WHEN source_ratings.proposal='rejected' THEN 'rejected' WHEN $6::smallint=2 THEN 'pending' END,
-        proposed_at=CASE WHEN $6::smallint=2 THEN now() END")
+        VALUES($1,$2,$3,$4,$5,CASE WHEN $6=2 THEN 'pending' END,CASE WHEN $6=2 THEN strftime('%Y-%m-%dT%H:%M:%f+00:00','now') END)
+        ON CONFLICT(scope) DO UPDATE SET risk=$2,answers=$3,model=$4,snapshot=$5,rated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),
+        proposal=CASE WHEN source_ratings.proposal='rejected' THEN 'rejected' WHEN $6=2 THEN 'pending' END,
+        proposed_at=CASE WHEN $6=2 THEN strftime('%Y-%m-%dT%H:%M:%f+00:00','now') END")
         .bind(scope).bind(risk).bind(answer).bind(answer["model"].as_str().unwrap_or("unknown")).bind(snapshot).bind(proposal_risk).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO source_proposals(scope,risk,snapshot)
         SELECT scope,risk,snapshot FROM source_ratings WHERE scope=$1 AND proposal='pending'
@@ -128,10 +127,10 @@ async fn cache(db: &PgPool, scope: &str, risk: i16, answer: &Value) -> Result<()
 
 /// Queue API: id and immutable cached scope/risk snapshot; expired/superseded entries omitted.
 #[allow(dead_code)] // consumed by the follow-on owner queue
-pub async fn proposals(db: &PgPool) -> Result<Value> {
+pub async fn proposals(db: &SqlitePool) -> Result<Value> {
     let rows = sqlx::query("SELECT p.id,p.scope,p.risk,p.snapshot,p.created_at FROM source_proposals p
         JOIN source_ratings r ON r.scope=p.scope AND r.snapshot=p.snapshot
-        WHERE p.decision IS NULL AND r.proposal='pending' AND r.rated_at>now()-interval '30 days'
+        WHERE p.decision IS NULL AND r.proposal='pending' AND r.rated_at>strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-30 days')
         AND r.answers->'answers'->'scope'->>'choice' IN ('host','account','surface')
         ORDER BY p.id DESC").fetch_all(db).await?;
     Ok(Value::Array(rows.iter().map(|r|json!({"id":r.get::<i64,_>("id"),"scope":r.get::<String,_>("scope"),
@@ -140,14 +139,13 @@ pub async fn proposals(db: &PgPool) -> Result<Value> {
 
 /// Owner route only. No caller-provided scope/risk. Concurrent, stale and repeated decisions reject.
 #[allow(dead_code)] // consumed by the follow-on owner queue
-pub async fn decide_proposal(db: &PgPool, id: i64, approve: bool) -> Result<Value> {
-    let mut tx = db.begin().await?;
+pub async fn decide_proposal(db: &SqlitePool, id: i64, approve: bool) -> Result<Value> {
+    let mut tx = crate::storage::begin(db).await?;
     let scope: String = sqlx::query_scalar("SELECT scope FROM source_proposals WHERE id=$1").bind(id).fetch_one(&mut *tx).await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,65))").bind(&scope).execute(&mut *tx).await?;
     let row = sqlx::query("SELECT p.risk FROM source_proposals p JOIN source_ratings r ON r.scope=p.scope
         AND r.snapshot=p.snapshot AND r.risk=p.risk WHERE p.id=$1 AND p.decision IS NULL
-        AND r.proposal='pending' AND r.rated_at>now()-interval '30 days'
-        AND r.answers->'answers'->'scope'->>'choice' IN ('host','account','surface') FOR UPDATE OF p,r")
+        AND r.proposal='pending' AND r.rated_at>strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-30 days')
+        AND r.answers->'answers'->'scope'->>'choice' IN ('host','account','surface')")
         .bind(id).fetch_optional(&mut *tx).await?;
     let Some(row) = row else { bail!("stale or already decided source proposal"); };
     let risk: i16 = row.get("risk");
@@ -160,7 +158,7 @@ pub async fn decide_proposal(db: &PgPool, id: i64, approve: bool) -> Result<Valu
             .bind(&scope).bind(risk).execute(&mut *tx).await?;
     }
     let decision = if approve {"approved"} else {"rejected"};
-    sqlx::query("UPDATE source_proposals SET decision=$2,decided_at=now() WHERE id=$1").bind(id).bind(decision).execute(&mut *tx).await?;
+    sqlx::query("UPDATE source_proposals SET decision=$2,decided_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id=$1").bind(id).bind(decision).execute(&mut *tx).await?;
     sqlx::query("UPDATE source_ratings SET proposal=$2 WHERE scope=$1").bind(&scope).bind(decision).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(json!({"id":id,"scope":scope,"risk":risk,"decision":decision}))
@@ -168,11 +166,11 @@ pub async fn decide_proposal(db: &PgPool, id: i64, approve: bool) -> Result<Valu
 
 /// Separate classifier (s1/content_risk.toml): outside text is inert and has no path to lower
 /// risk. Unavailable, blocked by ZEN_S1_PRIVATE or unsure => at least 4.
-pub async fn content_risk(db: &PgPool, text: &str, risk: i16) -> i16 {
+pub async fn content_risk(db: &SqlitePool, text: &str, risk: i16) -> i16 {
     content_rating(db,text,risk).await.0
 }
 
-pub(super) async fn content_rating(db: &PgPool, text: &str, risk: i16) -> (i16,bool) {
+pub(super) async fn content_rating(db: &SqlitePool, text: &str, risk: i16) -> (i16,bool) {
     if risk>=4 { return (risk,true); }
     let d = crate::s1::decide(db, "content_risk", crate::s1::Facts::new(None).with("untrusted_text", text)).await;
     (raised_content(risk, d.outcome.as_deref()), d.prob("injection").is_some())
@@ -216,7 +214,7 @@ mod tests {
     #[ignore]
     async fn private_disabled_content_never_transmits() {
         assert!(!crate::s1::private_ok());
-        let db = PgPool::connect_lazy("postgres://invalid@127.0.0.1:1/none").unwrap();
+        let db = SqlitePool::connect_lazy("sqlite:/nonexistent/zen-test.sqlite").unwrap();
         assert_eq!(content_rating(&db,"private bytes that must not be sent",2).await,(4,false));
     }
     #[test]
@@ -228,10 +226,8 @@ mod tests {
         }
     }
     #[tokio::test]
-    #[ignore]
-    async fn source_cache_proposals_database() {
-        let db=PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
-        sqlx::migrate!().run(&db).await.unwrap();
+        async fn source_cache_proposals_database() {
+        let (_db_dir, db) = crate::test_util::database().await;
         let host=format!("s{}.test",Uuid::new_v4().simple());
         let scope=format!("{host}/code");
         let answer=json!({"model":"fixture","answers":{"scope":{"choice":"account"},"platform":{"probability":1.0}}});
@@ -273,7 +269,7 @@ mod tests {
         let stale=format!("{host}/stale");
         cache(&db,&stale,2,&answer).await.unwrap();
         let id:i64=sqlx::query_scalar("SELECT max(id) FROM source_proposals WHERE scope=$1").bind(&stale).fetch_one(&db).await.unwrap();
-        sqlx::query("UPDATE source_ratings SET rated_at=now()-interval '31 days' WHERE scope=$1").bind(&stale).execute(&db).await.unwrap();
+        sqlx::query("UPDATE source_ratings SET rated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-31 days') WHERE scope=$1").bind(&stale).execute(&db).await.unwrap();
         assert!(decide_proposal(&db,id,true).await.is_err(),"expired approval rejected");
         let overridden=format!("{host}/overridden");
         cache(&db,&overridden,2,&answer).await.unwrap();
@@ -285,11 +281,10 @@ mod tests {
 
     /// Run against the e2e System One stub, never a paid provider.
     #[tokio::test]
-    #[ignore]
+    #[ignore = "requires the local System One e2e stub"]
     async fn source_system_one_database() {
         assert!(crate::config::get().s1_url.starts_with("http://127.0.0.1:"));
-        let db=PgPool::connect(&std::env::var("SOURCE_TEST_DB_URL").unwrap()).await.unwrap();
-        sqlx::migrate!().run(&db).await.unwrap();
+        let (_db_dir, db) = crate::test_util::database().await;
         let tag=Uuid::new_v4();
         let url=format!("https://reputable.source.test/{tag}/code?not_sent=secret");
         assert_eq!(rated(&db,&url,"owner_url").await.unwrap(),2);
@@ -307,7 +302,7 @@ mod tests {
         sqlx::query("INSERT INTO sessions(id,title,model,risk) VALUES($1,'rerate writer','faux/smoke',4)").bind(writer).execute(&db).await.unwrap();
         let result="ordinary exact documentation";
         let origin=format!("web_fetch:https://reputable.source.test/{tag}/rerate");
-        sqlx::query("INSERT INTO tool_calls(session_id,call_id,name,args,is_error,duration_ms,output_bytes,risk,origin,result_sha256) VALUES($1,'rerate','web_fetch','{}',false,0,0,4,$2,encode(sha256(convert_to($3,'UTF8')),'hex'))")
+        sqlx::query("INSERT INTO tool_calls(session_id,call_id,name,args,is_error,duration_ms,output_bytes,risk,origin,result_sha256) VALUES($1,'rerate','web_fetch','{}',false,0,0,4,$2,sha256_hex($3))")
             .bind(writer).bind(&origin).bind(result).execute(&db).await.unwrap();
         crate::tape::append(&db,writer,"message",&json!({"role":"toolResult","toolName":"web_fetch","toolCallId":"rerate","isError":false,"content":result})).await.unwrap();
         let known:i64=sqlx::query_scalar("INSERT INTO memories(text,source,session_id) VALUES($1,'inferred',$2) RETURNING id").bind(format!("known {tag}")).bind(writer).fetch_one(&db).await.unwrap();
@@ -336,7 +331,7 @@ mod tests {
             assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM action_gates WHERE session_id=$1").bind(sid).fetch_one(&db).await.unwrap(),0);
             // Historical made-tool approval no longer grants trust or execution (D-070).
             let made=format!("host-{}",Uuid::new_v4().simple());
-            sqlx::query("INSERT INTO made_tools(name,approved_at) VALUES($1,now())").bind(&made).execute(&db).await.unwrap();
+            sqlx::query("INSERT INTO made_tools(name,approved_at) VALUES($1,strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))").bind(&made).execute(&db).await.unwrap();
             let args=json!({"name":format!("made_{made}"),"arguments":{}});
             assert!(matches!(crate::gate::check(&app,sid,&dir,"call_tool",&args).await.unwrap(),crate::gate::Policy::Hold(_)));
             let retired = crate::mcp::run_tool(&app,sid,"call_tool",&args).await.unwrap();

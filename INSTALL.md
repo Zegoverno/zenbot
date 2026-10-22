@@ -1,58 +1,49 @@
 # Installing zenbot
 
-These steps are written so a coding agent (or a person) can follow them on a fresh Linux VM: Ubuntu or Debian, with systemd and passwordless `sudo`. `sudo` is needed because `install.sh` installs packages, Docker and the systemd service, and `scripts/upgrade.sh` restarts the service and runs Docker later without asking; it also means the agent's shell, which runs as that user, can do anything on the VM (DESIGN.md, "Security today").
+For a coding agent (or a person) on a fresh Linux VM: Ubuntu or Debian, systemd, passwordless `sudo`
+(the installer adds packages and the service). Shells run contained, but a `host: true` command that passes
+the gate runs as that user on the host, sudo included (DESIGN.md).
 
-1. Clone the repository into the home directory and run the installer:
+1. Clone and install (safe to re-run):
 
    ```bash
    git clone https://github.com/Zegoverno/zenbot.git ~/zenbot
    ~/zenbot/install.sh
    ```
 
-   The installer is safe to re-run. It installs Docker, Node.js 22, `git`, `curl`, `jq`, bubblewrap (for the sandboxed shells and tools), `pdftotext`, and the Claude Code and Codex CLIs if they're missing, downloads zenbot's prebuilt binaries for the checked-out commit, writes `~/.zenbot/env` and the API token, installs the `zenbot` systemd service (starts on boot, restarts on failure; it brings up Postgres and the SearXNG search container in Docker before the kernel), and links the `zen` command into `~/.local/bin`.
+   It installs Node.js 22, `git`, `curl`, `jq`, `python3`, bubblewrap, `pdftotext` and the Claude
+   Code and Codex CLIs if missing; downloads CI's prebuilt binaries for the checked-out commit
+   (x86_64 or aarch64 Linux, e.g. a Raspberry Pi with 64-bit OS), or installs Rust and compiles
+   (several minutes; forced with `ZEN_BUILD_FROM_SOURCE=1`); writes `~/.zenbot/env` and the API
+   token; installs the `zenbot` systemd service, with its SQLite database in `~/.zenbot/zen.sqlite3`
+   (no Docker); and links `zen` into `~/.local/bin`.
 
-   Prebuilt binaries exist for every commit on `main` that passed CI's checks (built for x86_64 and aarch64 Linux, e.g. a Raspberry Pi with 64-bit Pi OS, after the tests, clippy and end-to-end scenarios pass). On other platforms, for commits CI hasn't published yet, or with `ZEN_BUILD_FROM_SOURCE=1`, the installer installs Rust and compiles instead, which takes several minutes on a small VM.
+2. Check it: `~/.local/bin/zen status`. `kernel`, `database` and `worker:engine` should say `ok`;
+   `claude` and `codex` say `NOT signed in` until step 3.
 
-2. Check that it's healthy:
+3. Sign in (needs the owner: it opens a browser): `zen login` signs in to Claude Code (Claude plan)
+   and Codex (ChatGPT plan); open each link, approve, paste back any code.
 
-   ```bash
-   ~/.local/bin/zen status
-   ```
-
-   `kernel`, `database` and `worker:engine` should say `ok`; `claude` and `codex` say `NOT signed in` until step 3. The other lines (engines, model, memory, jobs, version) are information.
-
-3. Sign in to the model engines. This step needs the owner, because it opens a browser:
-
-   ```bash
-   zen login
-   ```
-
-   It signs in to Claude Code (your Claude plan) and Codex (your ChatGPT plan) in turn: open each printed link, approve, and paste back any code it asks for.
-
-4. Start zenbot:
-
-   ```bash
-   zen
-   ```
+4. Start: `zen`.
 
 ## Updating
 
-zenbot checks GitHub for a newer `main` about once an hour. `zen` mentions it when you start a session, and `zen status` shows it. To update:
+zenbot checks GitHub for a newer `main` about once an hour; `zen` and `zen status` mention it.
 
 ```bash
 zen upgrade            # or /upgrade inside zen; `zen upgrade --check` only checks
 ```
 
-It pulls `main` (refusing local changes or another branch) and runs `scripts/upgrade.sh`, which tests the new version, restarts zenbot once no session is working and rolls back if it isn't healthy; the result is in `~/.zenbot/upgrade.log`. After a healthy install it also trims oversized cargo build directories and old Docker leftovers, and `zen status` warns when the root filesystem is over 80% full. Every step: [DEVELOPMENT.md, "Applying a change"](DEVELOPMENT.md#applying-a-change-scriptsupgradesh).
+It pulls `main` (refusing local changes or another branch) and runs `scripts/upgrade.sh`: test,
+restart once no session is working, roll back if unhealthy; results in `~/.zenbot/upgrade.log`
+([DEVELOPMENT.md](DEVELOPMENT.md#applying-a-change-scriptsupgradesh)). An existing PostgreSQL
+installation is migrated to SQLite by its first upgrade (`install.sh` refuses it); PostgreSQL and
+the archive are kept.
 
-### Engines
+The kernel's daily `engines` job keeps the Claude Code and Codex CLIs current, putting back the
+previous version if a test turn fails ([DEVELOPMENT.md](DEVELOPMENT.md#engine-updates));
+`scripts/update-engines.sh --check` compares versions.
 
-The Claude Code and Codex CLIs are kept on their latest versions by the kernel's daily `engines` job: each new version must pass a real test turn, else the previous one is put back ([DEVELOPMENT.md, "Engine updates"](DEVELOPMENT.md#engine-updates)). Results are in `~/.zenbot/upgrade.log` (`engines:` lines), and `zen status` shows the versions.
-
-```bash
-~/zenbot/scripts/update-engines.sh --check   # installed vs latest, changes nothing
-~/zenbot/scripts/update-engines.sh           # update now
-zen jobs                                     # next run of every scheduled job
-```
-
-Troubleshooting: `journalctl -u zenbot -n 50` shows the service logs. The service listens on port 8100 (change it by re-running the installer with `ZEN_PORT=…`; a re-run keeps your other settings in `~/.zenbot/env`).
+Troubleshooting: `journalctl -u zenbot -n 50`. The service listens on port 8100; re-run the
+installer with `ZEN_PORT=…` to change it (other settings in `~/.zenbot/env` are kept). For
+`web_search`, set `ZEN_SEARXNG_URL`, `BRAVE_API_KEY` or `TAVILY_API_KEY` in `~/.zenbot/env`.

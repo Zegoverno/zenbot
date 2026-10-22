@@ -113,3 +113,11 @@ through a separate model call (another moving part), always loading an index of 
 **Date:** 2026-10-07
 
 ---
+
+## D-006 — Postgres + pgvector · Superseded by D-076
+
+**Decision:** Local Postgres with pgvector via `DATABASE_URL`, movable off the VM later.
+
+**Date:** 2026-09-30
+
+---
