@@ -65,6 +65,9 @@ pub struct Config {
     /// `ZEN_TRUSTED_REPOS` (none): comma-separated repositories whose AGENTS.md / CLAUDE.md are
     /// instructions (besides `ZEN_REPO`).
     pub trusted_repos: Vec<String>,
+    /// `ZEN_SESSION_RISK_CAP` (5): the highest context risk a session can reach by reading. At 1
+    /// reading never contains, locks or holds a session; items keep their own ratings (D-079).
+    pub session_risk_cap: i16,
     /// `ZEN_JUDGE_TOOL` (on): off hides the `judge` tool (s1/run.rs).
     pub judge_tool: bool,
 
@@ -159,6 +162,7 @@ impl Config {
             user_chars: num("ZEN_USER_CHARS", 3000.0) as usize,
             skill_index_chars: num("ZEN_SKILL_INDEX_CHARS", 2500.0) as usize,
             trusted_repos: text("ZEN_TRUSTED_REPOS", "").split(',').map(str::trim).filter(|p| !p.is_empty()).map(String::from).collect(),
+            session_risk_cap: num("ZEN_SESSION_RISK_CAP", 5.0).clamp(1.0, 5.0) as i16,
             judge_tool: on("ZEN_JUDGE_TOOL"),
             context_tokens: num("ZEN_CONTEXT_TOKENS", 200_000.0) as i64,
             compact_soft: num("ZEN_COMPACT_SOFT", 0.7),

@@ -89,6 +89,9 @@ pub async fn base(db: &SqlitePool, url: &str) -> Result<i16> {
 }
 
 pub async fn raise(db: &SqlitePool, session: Uuid, risk: i16) -> Result<()> {
+    // The owner's cap (D-079): reading raises a session at most this far. Level 5 (flagged or
+    // denied) never comes through here: `taint::deny` stops the session on its own.
+    let risk = risk.min(crate::config::get().session_risk_cap);
     crate::session_state::invalidate();
     sqlx::query("UPDATE sessions SET risk=MAX(risk,$2) WHERE id=$1").bind(session).bind(risk).execute(db).await?;
     Ok(())
