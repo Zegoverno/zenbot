@@ -6,6 +6,10 @@
 
 ---
 
+## 2026-10-23 — Owner cap on session context risk (D-079)
+
+Reading outside content, and repo files written by sessions that had, raised sessions to high risk: read-only shells, locks and held on-job pushes, so most real jobs stopped for the owner. `ZEN_SESSION_RISK_CAP` clamps the raise in one place; the owner sets it to 1.
+
 ## 2026-10-22 — Free web search without Docker (D-078)
 
 SearXNG runs natively as the `zen-searxng` service, installed by `install.sh` and upgrades and kept

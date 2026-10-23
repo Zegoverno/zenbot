@@ -176,6 +176,7 @@ pub async fn taint(app: &App, session: Uuid, source: &str, about: &str) -> anyho
         return Ok(()); // dispatch records the fetched bytes' numeric rating, not a blanket web mark.
     }
     crate::sources::raise(&app.db, session, 4).await?;
+    if crate::config::get().session_risk_cap < 4 { return Ok(()); } // the owner's cap (D-079)
     let first = sqlx::query("UPDATE sessions SET risky_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = $1 AND risky_at IS NULL")
         .bind(session).execute(&app.db).await?.rows_affected() == 1;
     if first {
@@ -257,7 +258,7 @@ pub async fn mark_rating(app: &App, session: Uuid, risk: i16, source: &str, abou
     }
     crate::sources::raise(&app.db,session,risk).await?;
     anyhow::ensure!(!stopped(&app.db, session).await?, "content withheld: a source was stopped during the read");
-    if risk < 4 { return Ok(()); }
+    if risk.min(crate::config::get().session_risk_cap) < 4 { return Ok(()); }
     let first = sqlx::query("UPDATE sessions SET risky_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id=$1 AND risky_at IS NULL")
         .bind(session).execute(&app.db).await?.rows_affected() == 1;
     if first {

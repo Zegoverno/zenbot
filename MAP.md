@@ -236,6 +236,7 @@ agent's shells get none of them.
 | ZEN_WORKSPACE | `$HOME` | Default working directory |
 | ZEN_REPO | `$HOME/zenbot` | zenbot's checkout: updater, trusted AGENTS.md |
 | ZEN_TRUSTED_REPOS | none | More repos whose AGENTS.md are instructions |
+| ZEN_SESSION_RISK_CAP | 5 | Highest context risk reading gives a session; 1: reading never contains, locks or holds (D-079) |
 | ZEN_DEFAULT_MODEL | `claude/claude-opus-5-5` | Model for new sessions |
 | ZEN_HARNESS | installed commit | Build id recorded per turn |
 | ZEN_WORKERS | `engine` | Workers to start; others need `ZEN_WORKER_<NAME>_CMD` |
