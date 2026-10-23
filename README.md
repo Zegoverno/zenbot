@@ -106,7 +106,7 @@ How each works: [DESIGN.md](DESIGN.md).
 - **Subagents and routing.** zenbot delegates side tasks to subagents. Unless you pick a model, it
   routes each session, job run and subtask by kind of task, and switches routes on evidence from your
   verdicts; a switch to another provider or a much costlier model waits for you.
-- **Matrix.** One encrypted room per session from your phone, plus a jobs room: [docs/matrix.md](docs/matrix.md).
+- **Matrix.** One encrypted room per session from your phone; job reports and held actions arrive in the main room: [docs/matrix.md](docs/matrix.md).
 
 ## The web, MCP and safety
 

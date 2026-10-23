@@ -15,7 +15,7 @@ Paths under `/api` but `/health`. Owner decisions (allow, trust, queue, reviews)
 | `GET /models` | | `{ models, authenticated, default, scorer }` |
 | `GET /sessions?archived=` | | owner and job sessions `{ id, title, model, effort, archived, kind, parent, cost, created_at, updated_at }` |
 | `GET /board?archived=` | | `{ sessions, archived }`: 200 top-level sessions, their latest 20 and running children, `busy`, `waiting`, `children`/`task` |
-| `POST /sessions` | `{ title?, model?, effort? }` | the session |
+| `POST /sessions` | `{ title?, model?, effort?, kind?: "channel" }` | the session; a channel (the Matrix main room's) is archived by done (accept or drop) |
 | `GET /sessions/{id}?last=&after=` | | the session with `messages` (each with `seq`), `message_count`, `tokens`, `busy` |
 | `PATCH /sessions/{id}` | `{ title?, model?, effort? ("default" clears), archived? }` | the session; a title set here stops auto-naming |
 | `GET /sessions/{id}/taint` | | `{ risky_at, tainted_at, taints, sources, checked, busy }` |

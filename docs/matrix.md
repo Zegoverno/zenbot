@@ -18,7 +18,7 @@ doesn't know Matrix exists. Owner → E2EE → matrix.org → `zen-matrix` → l
 3. Run `scripts/matrix.sh`: builds and tests `crates/zen-matrix`, installs `~/.zenbot/bin/zen-matrix`,
    signs in (`zen-matrix login`: cross-signing, key backup with the recovery key in
    `~/.zenbot/matrix/recovery-key`, two encrypted rooms), installs and starts the `zen-matrix` service.
-4. Accept the two invites (**zen** and **zen jobs**). Remove `MATRIX_PASSWORD` from `matrix.env`.
+4. Accept the invite to **zen**. Remove `MATRIX_PASSWORD` from `matrix.env`.
 5. Write only from sessions of your account that you verified: others are refused.
 
 After that, `scripts/upgrade.sh` rebuilds and restarts an enabled bridge whenever its sources
@@ -27,7 +27,7 @@ pinned owner key; `journalctl -u zen-matrix -f` the log.
 
 ## Use
 
-- **Each room is a session.** **zen** is a direct chat on a session titled "Matrix"; `!new [title]`
+- **Each room is a session.** **zen** is a direct chat on a `channel` session, always up (archive or done starts a clean one); `!new [title]`
   opens a new room and session; a room you create and invite the bot to (encrypted, only you) gets a
   session on its first message.
 - **Turns.** A message is the prompt; during a turn it queues, `!steer <text>` redirects at the
@@ -45,7 +45,7 @@ pinned owner key; `journalctl -u zen-matrix -f` the log.
 - **Approval queue.** Every 5 s new held items post to **zen**, numbered. Answer with an encrypted
   `!approve N` or `!deny N`; plaintext reactions never approve (they carry no device identity).
 - **Job reports.** Each finished run (`ok`, `error`, `missed`, `interrupted`; not `silent`) posts
-  once to **zen jobs**, except runs posted into a session (`post_to`, D-060).
+  once to **zen**, except runs posted into a session (`post_to`, D-060).
 
 ## Security
 

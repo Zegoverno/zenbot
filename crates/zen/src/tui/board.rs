@@ -107,10 +107,11 @@ fn task_of(s: &Value) -> String {
 
 /// The board section a top-level session is listed in.
 fn section(s: &Value) -> &'static str {
-    match (s["archived"] == true, s["kind"] == "job") {
+    match (s["archived"] == true, s["kind"].as_str()) {
         (true, _) => "Archived",
-        (false, true) => "Jobs",
-        (false, false) => "Main",
+        (false, Some("channel")) => "Channels",
+        (false, Some("job")) => "Jobs",
+        (false, _) => "Sessions",
     }
 }
 
@@ -139,7 +140,7 @@ impl Board {
         let hit = |s: &Value| needle.is_empty() || title_of(s).to_lowercase().contains(&needle) || task_of(s).to_lowercase().contains(&needle);
 
         let mut rows = Vec::new();
-        for name in ["Main", "Jobs", "Archived"] {
+        for name in ["Channels", "Sessions", "Jobs", "Archived"] {
             let mut group: Vec<&Value> = top.iter().copied().filter(|s| section(s) == name).filter(|s| hit(s) || kids(s).iter().any(|c| hit(c))).collect();
             // Waiting on the owner first, then running; otherwise the kernel's order (latest activity first).
             group.sort_by_key(|s| (!waiting(s), !active(s)));
@@ -151,7 +152,7 @@ impl Board {
             if archived {
                 head.push((if self.archived { "  · a hides" } else { "  · a shows" }.into(), Sty::Dim));
             }
-            if count == 0 && name != "Main" {
+            if count == 0 && name != "Sessions" {
                 continue;
             }
             rows.push(BoardRow { id: None, line: head });
@@ -543,13 +544,28 @@ mod tests {
     }
 
     #[test]
+    fn channels_are_listed_first_apart_from_sessions_and_jobs() {
+        let mut a = app(100, 30);
+        let mut all = sample();
+        all.push(s("chan", "Matrix", json!({ "kind": "channel" })));
+        let mut b = Board { sessions: Some(all), ..Board::default() };
+        b.rebuild(epoch_secs(NOW).unwrap(), 0);
+        a.board = Some(b);
+        a.draw();
+        let rows = plain_rows(&a);
+        let text = rows.join("\n");
+        let at = |needle: &str| rows.iter().position(|r| r.contains(needle)).unwrap_or_else(|| panic!("no {needle}: {text}"));
+        assert!(at("CHANNELS") < at("Matrix") && at("Matrix") < at("SESSIONS") && at("SESSIONS") < at("JOBS"), "{text}");
+    }
+
+    #[test]
     fn the_board_shows_sections_running_first_with_subagents_nested() {
         let a = board_app(100, 30);
         let rows = plain_rows(&a);
         let text = rows.join("\n");
         assert!(rows[0].starts_with("zen · sessions") && rows[0].contains("4 sessions · 1 running"), "{text}");
         let at = |needle: &str| rows.iter().position(|r| r.contains(needle)).unwrap_or_else(|| panic!("no {needle}: {text}"));
-        assert!(at("MAIN") < at("sessions board feature") && at("sessions board feature") < at("zenfitness research"), "running first: {text}");
+        assert!(at("SESSIONS") < at("sessions board feature") && at("sessions board feature") < at("zenfitness research"), "running first: {text}");
         assert!(at("sessions board feature") < at("subagent: Read the kernel's session code") && at("subagent: Read") < at("verifier: Check the diff"), "children under their parent, running first, task on one line: {text}");
         assert!(rows[at("sessions board feature")].contains("1/2 subagents working"), "{text}");
         assert!(rows[at("zenfitness research")].contains("· 5m"), "idle sessions say how long ago: {text}");
@@ -589,7 +605,7 @@ mod tests {
         let text = rows.join("\n");
         assert!(rows[0].contains("? 1 waiting on you · 6 sessions · 1 running"), "counted in the title, archived aside: {text}");
         let at = |needle: &str| rows.iter().position(|r| r.contains(needle)).unwrap_or_else(|| panic!("no {needle}: {text}"));
-        assert!(at("MAIN") < at("pricing questions") && at("pricing questions") < at("sessions board feature"), "waiting before running: {text}");
+        assert!(at("SESSIONS") < at("pricing questions") && at("pricing questions") < at("sessions board feature"), "waiting before running: {text}");
         assert!(rows[at("pricing questions")].contains("? pricing questions  · waiting on you · claude-opus-5-5 · 2h"), "{text}");
         assert!(!rows[at("zenfitness research")].contains("waiting"), "{text}");
         // Nothing running: the title still says who waits, not "all idle".
