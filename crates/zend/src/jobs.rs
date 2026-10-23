@@ -1187,7 +1187,7 @@ async fn deliver_one(app: &AppState, run: i64, target: Uuid) -> Result<()> {
         let job: String = row.get("name");
         let risk: i16 = row.get("risk");
         let report = crate::context::label(&format!("job {job} run {run}"), risk, &row.get::<Option<String>, _>("output").unwrap_or_default());
-        crate::sources::raise_in(&mut *tx, target, risk, "job report").await?;
+        crate::sources::raise_in(&mut tx, target, risk, "job report").await?;
         let message = json!({
             "role": "assistant",
             "content": [{ "type": "text", "text": format!("⏰ *{job}*\n\n{}", report.trim()) }],

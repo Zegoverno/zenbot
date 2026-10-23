@@ -97,7 +97,7 @@ pub async fn append_in(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, session: Uu
         .bind(session).bind(row.get::<i32,_>("seq")).execute(&mut **tx).await?;
     sqlx::query("UPDATE sessions SET updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = $1").bind(session).execute(&mut **tx).await?;
     // The block keeps its own rating; the session rises only as far as the owner's cap.
-    crate::sources::raise_in(&mut **tx, session, risk, kind).await?;
+    crate::sources::raise_in(tx, session, risk, kind).await?;
     Ok((row.get("seq"), row.get("hash")))
 }
 
