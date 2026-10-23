@@ -29,10 +29,10 @@ pub(super) const COMMANDS: &[Command] = &[
     cmd("/jobs", "scheduled jobs: /jobs [run|resume|pause <name> | runs [name]]", false),
     cmd("/skills", "skills and made tools: /skills [accept|reject <domain/name> <sha>]", false),
     cmd("/tools", "review a made tool: /tools accept|reject <name> <sha>", false),
-    cmd("/queue", "held actions and source proposals; select then a approve, r reject, d deny", false),
-    cmd("/allow", "the action held last; /allow yes runs that exact action once", false),
-    cmd("/deny", "stop this session and mark what it produced as contaminated", false),
-    cmd("/trust", "what made this session untrusted; /trust yes trusts it again", false),
+    cmd("/queue", "everything waiting for you; select then a approve, d deny", false),
+    cmd("/approve", "run held item N once: /approve [N] (no number: everything waiting)", false),
+    cmd("/deny", "refuse held item N for good: /deny [N] (no number: everything waiting)", false),
+    cmd("/trust", "the trust list: /trust [add|rm <url|repo> [level]]", false),
     cmd("/mcp", "MCP servers and their sign-in; /mcp login <server> signs in through your browser", false),
     cmd("/upgrade", "update zenbot to the latest version and restart it", false),
     cmd("/restart", "restart zen on the installed version, back in this session", false),
@@ -139,7 +139,7 @@ impl App {
         }
 
         if self.picker.as_ref().is_some_and(|p| matches!(p.kind,PickKind::Queue)) {
-            let decision=match k.code {KeyCode::Char('a')=>Some("approve"),KeyCode::Char('r')=>Some("reject"),KeyCode::Char('d')=>Some("deny"),_=>None};
+            let decision=match k.code {KeyCode::Char('a')=>Some("approve"),KeyCode::Char('d')=>Some("reject"),_=>None};
             if let Some(d)=decision { return self.queue_decide(d).await; }
         }
         if let Some(p) = &mut self.picker {
@@ -460,7 +460,6 @@ impl App {
                 self.commit(out);
             }
             Some("/queue") if arg.is_empty() => self.open_queue().await?,
-            Some("/queue") => self.owner_command(&format!("queue {arg}")).await,
             Some("/open") => self.open_panel(arg),
             Some("/files") if arg.is_empty() => self.toggle_side(),
             Some("/files") => self.show_folder(arg),
@@ -479,7 +478,7 @@ impl App {
             }
             Some("/mouse") => self.note("inline mode leaves the mouse to the terminal", Sty::Dim),
             // Read here and sent to the kernel with the owner's token, never to the agent.
-            Some(c @ ("/jobs" | "/skills" | "/tools" | "/trust" | "/allow" | "/deny")) => self.owner_command(&format!("{} {arg}", &c[1..])).await,
+            Some(c @ ("/queue" | "/approve" | "/deny" | "/trust" | "/jobs" | "/skills" | "/tools")) => self.owner_command(&format!("{} {arg}", &c[1..])).await,
             Some("/mcp") => self.mcp_command(arg).await,
             Some("/upgrade") => self.start_upgrade(),
             Some("/restart") => {
@@ -704,10 +703,10 @@ mod tests {
         a.command("/skills accept work/brief").await.unwrap();
         assert!(a.notice.as_ref().is_some_and(|(t, _)| t.starts_with("usage: skills")), "a review names the fingerprint");
         assert!(a.entries.is_empty() && !a.busy && a.pending_prompt.is_none(), "nothing was sent as a prompt");
-        for c in ["/allow", "/deny"] {
+        for c in ["/approve 3", "/deny", "/trust"] {
             a.notice = None;
             a.command(c).await.unwrap();
-            assert!(a.notice.is_none(), "{c} is an owner command, not unknown: {:?}", a.notice);
+            assert!(!a.notice.as_ref().is_some_and(|(t, _)| t.starts_with("unknown command")), "{c} is an owner command, not unknown: {:?}", a.notice);
         }
         assert!(!a.busy && a.pending_prompt.is_none(), "they aren't prompts either");
     }

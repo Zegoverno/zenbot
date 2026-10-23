@@ -38,7 +38,7 @@ mod tests {
         sqlx::query("INSERT INTO sessions(id,model) VALUES($1,'faux/smoke')").bind(id).execute(&db).await.unwrap();
         scope(async {
             assert_eq!(get(&db,id).await.unwrap().risk,1);
-            crate::sources::raise(&db,id,4).await.unwrap();
+            crate::sources::raise(&db,id,4,"test").await.unwrap();
             assert_eq!(get(&db,id).await.unwrap().risk,4);
             sqlx::query("UPDATE sessions SET lock_reason='held' WHERE id=$1").bind(id).execute(&db).await.unwrap();
             invalidate();

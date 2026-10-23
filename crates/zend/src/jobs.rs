@@ -1187,7 +1187,7 @@ async fn deliver_one(app: &AppState, run: i64, target: Uuid) -> Result<()> {
         let job: String = row.get("name");
         let risk: i16 = row.get("risk");
         let report = crate::context::label(&format!("job {job} run {run}"), risk, &row.get::<Option<String>, _>("output").unwrap_or_default());
-        sqlx::query("UPDATE sessions SET risk=MAX(risk,$2) WHERE id=$1").bind(target).bind(risk).execute(&mut *tx).await?;
+        crate::sources::raise_in(&mut *tx, target, risk, "job report").await?;
         let message = json!({
             "role": "assistant",
             "content": [{ "type": "text", "text": format!("⏰ *{job}*\n\n{}", report.trim()) }],
@@ -1550,7 +1550,7 @@ async fn run_script(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
     let (risk, writers) = view.exposure(&text);
     let risk = risk.max(crate::proxy::contacted_since(id, proxy_since).unwrap_or(1));
     crate::sources::depend(&app.db, id, &writers).await?;
-    sqlx::query("UPDATE sessions SET risk = MAX(risk, $2) WHERE id = $1").bind(id).bind(risk).execute(&app.db).await?;
+    crate::sources::raise(&app.db, id, risk, "job script output").await?;
     let exit = match &status {
         Some(Ok(s)) => s.code(),
         _ => None,
@@ -1668,7 +1668,7 @@ async fn report_rating(app: &AppState, id: Uuid, raw: &str) -> Result<()> {
     let (risk, writers) = crate::context::rate(&app.db, raw, 1).await?;
     anyhow::ensure!(risk < 5, "the report file was written by a session the owner stopped; it isn't posted");
     crate::sources::depend(&app.db, id, &writers).await?;
-    crate::sources::raise(&app.db, id, risk).await?;
+    crate::sources::raise(&app.db, id, risk, "report file").await?;
     anyhow::ensure!(!crate::taint::stopped(&app.db, id).await?, "report withheld: a writer was stopped during the read");
     Ok(())
 }

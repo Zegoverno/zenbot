@@ -444,7 +444,7 @@ impl Bridge {
         if check!=RoomCheck::Ok || !self.owner_identity_holds(&room).await? {return Ok(())}
         if trust::message(self.owner.as_str(),self.bot.as_str(),ev.sender.as_str(),
             &sealed(&ev.sender,enc.as_ref()),&check)!=trust::Verdict::Act {return Ok(())}
-        let decision=match ev.content.relates_to.key.as_str() {"✅"=>"approve","❌"=>"reject","🛑"=>"deny",_=>return Ok(())};
+        let decision=match ev.content.relates_to.key.as_str() {"✅"=>"approve","❌"=>"reject",_=>return Ok(())};
         let mapkey=serde_json::to_string(&(room.room_id().as_str(),ev.content.relates_to.event_id.as_str()))?;
         let key=self.state.lock().await.queue_messages.get(&mapkey).cloned();
         if let Some(key)=key {
@@ -473,9 +473,8 @@ impl Bridge {
         for item in self.kernel.queue().await? {
             let key=format!("{}/{}",item["kind"].as_str().unwrap_or(""),item["id"]);
             if self.state.lock().await.queue_posted.contains(&key) {continue}
-            let command_key=key.replace('/'," ");
-            let md=format!("**Approval queue {key}** · {} · risk {}\n\n{}\n\nReason: {}\n\nSend encrypted !queue approve {command_key}, !queue reject {command_key}, or !queue deny {command_key} (actions only). Plain reactions cannot authorize.\n\n!queue lists pending items.",
-                item["title"].as_str().unwrap_or("source proposal"),item["risk"],item["summary"].as_str().unwrap_or(""),item["reason"].as_str().unwrap_or(""));
+            let n=zen_client::owner::Item::of(&item).map(|i|i.label()).unwrap_or_default();
+            let md=format!("**Waiting for you**\n\n{}\n\nSend `!approve {n}` or `!deny {n}`. `!queue` lists everything waiting.",zen_client::owner::queue_line(&item));
             let sent=room.send(content(&md,true)).await?;
             let mut s=self.state.lock().await;
             s.queue_messages.insert(serde_json::to_string(&(room.room_id().as_str(),sent.response.event_id.as_str()))?,key.clone());

@@ -67,28 +67,15 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Login { .. } => unreachable!(),
-        Cmd::Queue {decision,kind,id} => {
-            if let (Some(decision),Some(kind),Some(id))=(&decision,&kind,id) {
-                let v=c.post(&format!("/api/queue/{kind}/{id}"),json!({"decision":decision})).await?;
-                emit(json,&v,||v.to_string());
-            } else if decision.is_some() || kind.is_some() || id.is_some() {
-                anyhow::bail!("usage: zen queue [approve|reject|deny <action|source> <id>]");
-            } else if !json && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-                tui::run(c,tui::Start::Queue,NewSession {model:None,effort:None},cli.inline).await?;
-            } else {
-                let v=c.get("/api/queue").await?;
-                emit(json,&v,||serde_json::to_string_pretty(&v).unwrap_or_default());
-            }
+        Cmd::Queue if !json && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
+            tui::run(c,tui::Start::Queue,NewSession {model:None,effort:None},cli.inline).await?;
         }
-        Cmd::Sources { cmd } => {
-            let value = match cmd {
-                SourcesCmd::List => c.get("/api/sources").await?,
-                SourcesCmd::Rerate => c.post("/api/sources/rerate", json!({})).await?,
-                SourcesCmd::Add { source, risk, note } => c.post("/api/sources", json!({"source":source,"risk":risk,"note":note})).await?,
-                SourcesCmd::Rm { source } => c.post("/api/sources", json!({"source":source,"remove":true})).await?,
-            };
-            emit(json, &value, || serde_json::to_string_pretty(&value).unwrap_or_default());
+        Cmd::Queue => {
+            let v=c.get("/api/queue").await?;
+            emit(json,&v,||v.as_array().into_iter().flatten().map(zen_client::owner::queue_line).collect::<Vec<_>>().join("\n\n"));
         }
+        Cmd::Approve { n } => owner(&c, "approve", n.as_deref().unwrap_or("")).await?,
+        Cmd::Deny { n } => owner(&c, "deny", n.as_deref().unwrap_or("")).await?,
         Cmd::Models => {
             let m = c.get("/api/models").await?;
             if json {
@@ -296,31 +283,7 @@ async fn run(cli: Cli) -> Result<()> {
             emit(json, &r, || format!("policy v{}", r["version"]));
         }
         Cmd::S1 { cmd } => s1(&c, cmd, json).await?,
-        Cmd::Trust { cmd } => {
-            let v = match cmd.unwrap_or(TrustCmd::List) {
-                TrustCmd::List => c.get("/api/trust").await?,
-                TrustCmd::Suggest => c.get("/api/trust?suggest=true").await?,
-                TrustCmd::Add { kind, pattern, level, note } => c.post("/api/trust", json!({ "kind": kind, "match": pattern, "level": level, "note": note })).await?,
-                TrustCmd::Rm { kind, pattern } => c.post("/api/trust", json!({ "kind": kind, "match": pattern, "remove": true })).await?,
-            };
-            emit(json, &v, || {
-                if v["entries"].is_array() {
-                    let mut s = String::new();
-                    if let Some(p) = v["problem"].as_str() {
-                        s.push_str(&format!("{}: {p} (the last good list is in force)\n", v["path"].as_str().unwrap_or("")));
-                    }
-                    for e in v["entries"].as_array().into_iter().flatten() {
-                        s.push_str(&format!("{:<5} {:<40} {}{}\n", e["kind"].as_str().unwrap_or(""), e["match"].as_str().unwrap_or(""), e["level"].as_str().unwrap_or(""),
-                            e["note"].as_str().filter(|n| !n.is_empty()).map(|n| format!("  ({n})")).unwrap_or_default()));
-                    }
-                    let built: Vec<&str> = v["built_in"].as_array().into_iter().flatten().filter_map(|e| e["match"].as_str()).collect();
-                    s.push_str(&format!("built in: {}", built.join(", ")));
-                    s
-                } else {
-                    format!("{} {} {}", v["kind"].as_str().unwrap_or(""), v["match"].as_str().unwrap_or(""), v["level"].as_str().unwrap_or("removed"))
-                }
-            });
-        }
+        Cmd::Trust { args } => owner(&c, "trust", &args.join(" ")).await?,
         Cmd::Tools { cmd } => {
             let (name, decision, sha) = cmd.parts();
             let res = c.post(&format!("/api/tools/{}/review", enc(name.trim_start_matches("made_"))), json!({ "decision": decision, "sha": sha })).await?;
@@ -589,6 +552,16 @@ async fn s1(c: &Client, cmd: Option<S1Cmd>, json: bool) -> anyhow::Result<()> {
             let v = c.post(&format!("/api/s1/proposals/{id}"), json!({ "decision": "reject" })).await?;
             emit(json, &v, || format!("proposal {id} declined"));
         }
+    }
+    Ok(())
+}
+
+/// An owner command run from the terminal the way the chats run it (zen_client::owner).
+async fn owner(c: &Client, word: &str, rest: &str) -> Result<()> {
+    match zen_client::owner::parse(&format!("{word} {rest}")) {
+        Some(Ok(cmd)) => println!("{}", zen_client::owner::run(c, &cmd, None, &mut zen_client::owner::Chat::new("zen ")).await?),
+        Some(Err(usage)) => anyhow::bail!("{}", usage.replacen("usage: ", "usage: zen ", 1)),
+        None => unreachable!("{word} is an owner command"),
     }
     Ok(())
 }

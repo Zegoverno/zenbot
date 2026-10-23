@@ -132,7 +132,7 @@ fn fold<'a>(files: impl Iterator<Item = &'a Seen>) -> (i16, Vec<Uuid>) {
 
 pub async fn record(db: &SqlitePool, session: Uuid, risk: i16, writers: &[Uuid]) -> Result<()> {
     crate::sources::depend(db, session, writers).await?;
-    crate::sources::raise(db, session, risk).await
+    crate::sources::raise(db, session, risk, "shell output").await
 }
 
 /// Find the masks and rated files of the view a shell in `workspace` will have. Errors mean the

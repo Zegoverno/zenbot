@@ -95,7 +95,9 @@ pub async fn append_in(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, session: Uu
     .await?;
     sqlx::query("UPDATE tape_events SET tainted=EXISTS(SELECT 1 FROM zen_contaminated_sessions c WHERE c.id=tape_events.session_id) WHERE session_id=$1 AND seq=$2")
         .bind(session).bind(row.get::<i32,_>("seq")).execute(&mut **tx).await?;
-    sqlx::query("UPDATE sessions SET updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'), risk=max(risk,$2) WHERE id = $1").bind(session).bind(risk).execute(&mut **tx).await?;
+    sqlx::query("UPDATE sessions SET updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = $1").bind(session).execute(&mut **tx).await?;
+    // The block keeps its own rating; the session rises only as far as the owner's cap.
+    crate::sources::raise_in(&mut **tx, session, risk, kind).await?;
     Ok((row.get("seq"), row.get("hash")))
 }
 

@@ -87,7 +87,7 @@ pub async fn render(db: &SqlitePool, reader: Uuid) -> Result<String> {
     let (marked, clean): (Vec<Entry>, Vec<Entry>) = entries.into_iter().partition(|e| e.tainted);
     let writers: Vec<Uuid> = clean.iter().flat_map(|e| e.writers.clone()).collect();
     crate::sources::depend(db, reader, &writers).await?;
-    crate::sources::raise(db, reader, clean.iter().map(|e| e.risk).max().unwrap_or(1)).await?;
+    crate::sources::raise(db, reader, clean.iter().map(|e| e.risk).max().unwrap_or(1), "memory").await?;
     ensure!(
         !crate::taint::stopped(db, reader).await?,
         "memories withheld: a writer was stopped"

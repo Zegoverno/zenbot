@@ -58,7 +58,7 @@ zen --inline               # no full screen (or ZEN_INLINE=1)
 ```
 
 Inside: `/new`, `/resume`, `/board`, `/model`, `/effort`, `/done`, `/rename`, `/files`, `/open`,
-`/close`, `/mouse`, `/archive`, `/jobs`, `/skills`, `/trust`, `/queue`, `/allow`, `/deny`, `/upgrade`,
+`/close`, `/mouse`, `/archive`, `/jobs`, `/skills`, `/queue`, `/approve`, `/deny`, `/trust`, `/upgrade`,
 `/restart`, `/help`, `/exit`. `/done` records your verdict (*accept*, *more*, *reshape*, *drop*): the
 ground truth zenbot is measured and tuned by.
 
@@ -71,9 +71,8 @@ zen memory [--tier short|long|archived|all] | zen memory sleep
 zen brain list --args '{"store":"entity"}' | zen brain get --id <id>   # records and links
 zen jobs [runs [name]] | add | pause | resume | rm | run | set
 zen skills [accept|reject <domain/name> <fingerprint>]
-zen queue                                 # held actions and source proposals
-zen sources add docs.rs --note "Rust docs" | list | rm   # your source allowlist
-zen trust [add|rm|suggest]                # sources that keep a session low risk
+zen queue | approve [N] | deny [N]        # what waits for you; no number: everything
+zen trust [add|rm <url|repo> [level]]     # sources that keep a session low risk
 zen policy [set|undo]                     # which model each kind of task gets, and the evidence
 zen s1 [check|models|replay|compare|proposals|approve|reject]   # System One decisions
 zen mcp-login <server> | mcp-pending | mcp-respond <id> --action accept --data '{…}'
@@ -126,9 +125,10 @@ trusted sources), **medium** (sources System One rated reputable), **high** (the
 action with effect zenbot weighs that risk, the action and whether it follows your job: at low risk
 everything on-job runs, including pushes (`host: true`); at medium pushes and new hosts wait; at high
 shells are read-only; an off-job action after outside content locks the session until you look. What
-waits is in `/queue` (`!queue` in Matrix, `zen queue`). `/deny` stops a session and what read its
-output; `/trust yes` lifts its marks. `zen trust add url docs.rs` (or `repo github.com/you/*`, `mcp
-calendar`) keeps sources low; `zen sources` is the allowlist of fetchable sources (levels 2–3).
+waits is numbered in `/queue`; `/approve N` runs it once, `/deny N` refuses it for good, and
+without a number both answer everything waiting. `/trust add docs.rs` (or `github.com/you/*`, `mcp
+calendar`) says yes in advance. The same four commands work as `!queue` … in Matrix and `zen queue` …
+on the command line. With `ZEN_SESSION_RISK_CAP=1` reading never raises a session's risk.
 
 ## Settings you might set
 

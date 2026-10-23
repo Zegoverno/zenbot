@@ -44,11 +44,10 @@ them.
    reread your docs against the final diff: later commits often change what earlier docs describe.
 6. **Apply it** with `scripts/upgrade.sh` (safe from inside your own session), then check
    `~/.zenbot/upgrade.log`.
-7. **Ship.** One concern per commit; push, open a pull request, merge when CI is green. Harness
-   changes (system prompt, history, tools, workers, model or effort handling) get an eval first:
-   `scripts/eval.sh --plan` shows the affected tasks, `scripts/eval.sh` runs them (`--full` for a
-   large change or when the owner asks). Show the owner the report (in the pull request too) and
-   merge only once they agree; the report informs that decision, it is never a pass/fail gate.
+7. **Ship.** One concern per commit; push, open a pull request, merge yourself when CI is green.
+   Run an eval only for a big harness change (system prompt, tools, workers, model handling):
+   `scripts/eval.sh --plan` shows the affected tasks, `scripts/eval.sh` runs them. The report goes
+   in the pull request; it informs, it never blocks.
 8. **After a merge**, `git checkout main && git pull` before the next branch.
 
 ## Update the docs before shipping

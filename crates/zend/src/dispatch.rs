@@ -478,7 +478,7 @@ pub(crate) async fn handle_incoming(app: &AppState, worker: usize, msg: Incoming
                     let about = args[if name == "web_search" { "query" } else { "url" }].as_str().unwrap_or("");
                     crate::taint::mark_rating(app,id,rating.risk,&name,about).await?;
                 } else {
-                    crate::sources::raise(&app.db, id, rating.risk).await?;
+                    crate::sources::raise(&app.db, id, rating.risk, &name).await?;
                 }
             }
             if rating.risk == 5 {
