@@ -6,6 +6,10 @@
 > with the owner's OK. Add new ones at the top in this short form (≤ ~8 lines: status, date, the rule,
 > what it supersedes); the full reasoning goes in the pull request and PROGRESS.md.
 
+## D-079 — The owner can cap a session's context risk
+Status: accepted · 2026-10-23
+`ZEN_SESSION_RISK_CAP` (default 5, unchanged behavior) clamps how far reading raises a session's context risk, in `sources::raise`; below 4 no `risky_at` is set. At 1 a session that read the open web stays low: its shell stays writable and on-job actions run. Items keep their own ratings, so outside text is still handed over as data, never instructions; level 5 and the owner's deny still stop a session; irreversible actions still wait.
+
 ## D-078 — Free web search: SearXNG natively, no Docker
 
 Status: accepted (owner, 2026-10-22: a free way to search; drop Docker, the old Postgres and the SearXNG container) · 2026-10-22
