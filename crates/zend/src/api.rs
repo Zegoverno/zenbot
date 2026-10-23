@@ -92,7 +92,7 @@ pub(crate) struct ListQuery {
 pub(crate) async fn list_sessions(State(app): State<AppState>, Query(q): Query<ListQuery>) -> ApiResult<Json<Value>> {
     let rows = sqlx::query(&format!(
         "SELECT {SESSION_COLUMNS}, {} AS cost
-         FROM sessions s WHERE s.archived = $1 AND (s.kind IS NULL OR s.kind = 'job') ORDER BY s.updated_at DESC",
+         FROM sessions s WHERE s.archived = $1 AND (s.kind IS NULL OR s.kind IN ('job', 'channel')) ORDER BY s.updated_at DESC",
         session_cost("s.id")
     ))
     .bind(q.archived.unwrap_or(false))
@@ -208,6 +208,8 @@ pub(crate) struct CreateSession {
     title: Option<String>,
     model: Option<String>,
     effort: Option<String>,
+    /// `channel`: a session a chat room (the Matrix bridge) keeps open; done ends it.
+    kind: Option<String>,
 }
 
 pub(crate) async fn create_session(State(app): State<AppState>, Json(body): Json<CreateSession>) -> ApiResult<Json<Value>> {
@@ -217,8 +219,11 @@ pub(crate) async fn create_session(State(app): State<AppState>, Json(body): Json
     let chosen = body.model.is_some().then_some("owner");
     let model = body.model.unwrap_or_else(|| app.default_model.clone());
     check_effort(&app, &model, body.effort.as_deref()).await?;
+    if body.kind.as_deref().is_some_and(|k| k != "channel") {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "kind must be channel".into()));
+    }
     let row = sqlx::query(&format!(
-        "INSERT INTO sessions (id, title, model, effort, title_source, model_source) VALUES ($1, $2, $3, $4, CASE WHEN $2 = '' THEN 'auto' ELSE 'owner' END, $5)
+        "INSERT INTO sessions (id, title, model, effort, title_source, model_source, kind) VALUES ($1, $2, $3, $4, CASE WHEN $2 = '' THEN 'auto' ELSE 'owner' END, $5, $6)
          RETURNING {SESSION_COLUMNS}, 0.0 AS cost"
     ))
     .bind(id)
@@ -226,6 +231,7 @@ pub(crate) async fn create_session(State(app): State<AppState>, Json(body): Json
     .bind(model)
     .bind(body.effort)
     .bind(chosen)
+    .bind(body.kind)
     .fetch_one(&app.db)
     .await?;
     Ok(Json(session_json(&row)))
@@ -363,6 +369,10 @@ pub(crate) async fn decide(State(app): State<AppState>, Path(id): Path<Uuid>, Js
     .fetch_optional(&app.db)
     .await?
     .ok_or_else(not_found)?;
+    // Done on a channel ends it: the bridge sees it archived and starts a clean one in the room.
+    if matches!(body.decision.as_str(), "accept" | "drop") {
+        sqlx::query("UPDATE sessions SET archived = true WHERE id = $1 AND kind = 'channel'").bind(id).execute(&app.db).await?;
+    }
     // Accepted work vouches for the draft skills it used (workshop.rs).
     if body.decision == "accept" {
         let app2 = app.clone();
@@ -549,6 +559,22 @@ mod tests {
         assert!(!same_secret(b"zen-token-123", b"zen-token-124"));
         assert!(!same_secret(b"zen-token-12", b"zen-token-123"));
         assert!(!same_secret(b"", b"x"));
+    }
+
+    /// Done (accept or drop) ends a channel session; an ordinary session stays open.
+    #[tokio::test]
+    async fn done_ends_a_channel_only() {
+        let (_db_dir, db) = crate::test_util::database().await;
+        let app = crate::test_util::app(db.clone());
+        let (chan, plain) = (Uuid::new_v4(), Uuid::new_v4());
+        sqlx::query("INSERT INTO sessions(id,model,kind) VALUES($1,'faux/smoke','channel')").bind(chan).execute(&db).await.unwrap();
+        sqlx::query("INSERT INTO sessions(id,model) VALUES($1,'faux/smoke')").bind(plain).execute(&db).await.unwrap();
+        for id in [chan, plain] {
+            assert!(decide(State(app.clone()), Path(id), Json(Decide { decision: "accept".into(), note: None })).await.is_ok());
+        }
+        let archived = |id: Uuid| sqlx::query_scalar::<_, bool>("SELECT archived FROM sessions WHERE id=$1").bind(id).fetch_one(&db);
+        assert!(archived(chan).await.unwrap() && !archived(plain).await.unwrap());
+        db.close().await;
     }
 }
 

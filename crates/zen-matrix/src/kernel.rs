@@ -36,6 +36,17 @@ impl Kernel {
         self.c.new_session(json!({ "title": title })).await
     }
 
+    /// A channel session for the main room: kept open by the bridge, ended by archive or done.
+    pub async fn new_channel(&self) -> Result<String> {
+        self.c.new_session(json!({ "title": "Matrix", "kind": "channel" })).await
+    }
+
+    /// Whether the session was archived (or ended with done, for a channel).
+    pub async fn archived(&self, id: &str) -> Result<bool> {
+        let v = self.c.get(&format!("/api/sessions/{}?last=0", enc(id))).await?;
+        Ok(v["archived"] == true)
+    }
+
     /// Recent job runs, newest first (GET /api/jobs/runs).
     pub async fn job_runs(&self, limit: u32) -> Result<Vec<Value>> {
         let v = self.c.get(&format!("/api/jobs/runs?limit={limit}")).await?;

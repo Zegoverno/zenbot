@@ -6,13 +6,12 @@
 
 ---
 
-## 2026-10-23 — The cap holds; four commands everywhere
+## 2026-10-23 — The cap holds; four commands; one Matrix room
 
-The risk cap leaked: every tape block raised its session uncapped, so one web result made a session
-high even at `ZEN_SESSION_RISK_CAP=1`; job reports did the same. Every raise now goes through
-`sources::raise_in` (capped, logged), with a test. Owner commands are four, the same in zen, Matrix
-and the CLI: `queue`, `approve [N]`, `deny [N]`, `trust [add|rm <url|repo>]`; `allow`, `trust yes`
-and `sources` are gone. Merging on green CI no longer waits for an eval unless the change is big.
+Every tape block raised its session uncapped; now every raise goes through `sources::raise_in`
+(capped, logged). Owner commands are `queue`, `approve [N]`, `deny [N]`, `trust` everywhere. Job
+reports post to **zen**; its `channel` session restarts clean after archive or done. The board
+lists channels apart.
 
 ## 2026-10-23 — Owner cap on session context risk (D-079)
 

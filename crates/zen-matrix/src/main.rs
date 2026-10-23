@@ -1,6 +1,6 @@
 //! zen-matrix: the owner talks to zen from any Matrix client (Beeper, Element) as well as the
 //! terminal. A separate process and a client of the kernel's client protocol, like `zen`: each
-//! Matrix room is one zen session, and job reports go to a "zen jobs" room. It answers only the
+//! Matrix room is one zen session, and job reports and held actions go to the main **zen** room. It answers only the
 //! owner's Matrix ID (`MATRIX_OWNER`), only end-to-end encrypted messages from the owner's
 //! cross-signed devices, and only in encrypted rooms it shares with the owner alone (the rules
 //! are in trust.rs). Queue reactions require the same verified encrypted device authentication.
@@ -59,7 +59,7 @@ use tokio_tungstenite::tungstenite::Message;
 use zen_proto::client::Event;
 
 const DEVICE_NAME: &str = "zenbot";
-/// How often the jobs room checks for finished runs.
+/// How often the bridge checks for finished job runs.
 const JOBS_EVERY: Duration = Duration::from_secs(60);
 
 #[tokio::main]
@@ -220,7 +220,8 @@ async fn create_room(c: &Client, owner: &UserId, name: &str, topic: &str, direct
     Ok(c.create_room(req).await?)
 }
 
-/// The main room (a direct chat with the owner, on its own session) and the jobs room.
+/// The main room: a direct chat with the owner, on its own session, where job reports arrive too.
+/// A jobs room from before is left once.
 async fn ensure_rooms(cfg: &Config, c: &Client, st: &Arc<Mutex<State>>) -> Result<()> {
     let kernel = Kernel::new(&cfg.kernel_url, cfg.kernel_token.clone())?;
     let owner = UserId::parse(&cfg.owner)?;
@@ -228,15 +229,16 @@ async fn ensure_rooms(cfg: &Config, c: &Client, st: &Arc<Mutex<State>>) -> Resul
     let alive = |id: &Option<String>| id.as_deref().and_then(|r| RoomId::parse(r).ok()).and_then(|r| c.get_room(&r)).is_some_and(|r| r.state() == RoomState::Joined);
     if !alive(&s.main_room) {
         let room = create_room(c, &owner, "zen", "Your zen. Write here as in the terminal; !help for commands.", true).await?;
-        let session = kernel.new_session(Some("Matrix")).await?;
+        let session = kernel.new_channel().await?;
         s.rooms.insert(room.room_id().to_string(), session.clone());
         s.main_room = Some(room.room_id().to_string());
         log(format!("created the main room {} for session {session}", room.room_id()));
     }
-    if !alive(&s.jobs_room) {
-        let room = create_room(c, &owner, "zen jobs", "Reports from zen's scheduled jobs.", false).await?;
-        s.jobs_room = Some(room.room_id().to_string());
-        log(format!("created the jobs room {}", room.room_id()));
+    if let Some(old) = s.jobs_room.take().and_then(|r| RoomId::parse(r).ok()).and_then(|r| c.get_room(&r)) {
+        if let Err(e) = old.leave().await {
+            log(format!("leaving the old jobs room: {e:#}"));
+        }
+        log(format!("left the old jobs room {}: job reports go to the main room", old.room_id()));
     }
     s.save(&cfg.dir)
 }
@@ -258,7 +260,7 @@ async fn status() -> Result<()> {
     println!("matrix   signed in, device {}", c.device_id().map(|d| d.to_string()).unwrap_or_default());
     println!("         cross-signing {}, key backup {:?}", if cs.is_some_and(|s| s.is_complete()) { "complete" } else { "INCOMPLETE" }, c.encryption().recovery().state());
     let s = State::load(&cfg.dir)?;
-    println!("rooms    main {}, jobs {}, {} mapped", s.main_room.as_deref().unwrap_or("-"), s.jobs_room.as_deref().unwrap_or("-"), s.rooms.len());
+    println!("rooms    main {}, {} mapped", s.main_room.as_deref().unwrap_or("-"), s.rooms.len());
     println!("owner    identity {}", s.owner_key.as_deref().map(|k| format!("pinned, master key {k}")).unwrap_or_else(|| "not pinned yet (the owner's first message pins it)".into()));
     Ok(())
 }
@@ -455,8 +457,39 @@ impl Bridge {
         }
         Ok(())
     }
+    /// The main room is always up: when its session is archived or done, a clean one takes over.
+    async fn keep_main_alive(&self) -> Result<()> {
+        let (rid, session) = {
+            let s = self.state.lock().await;
+            let Some(rid) = s.main_room.clone() else { return Ok(()) };
+            let Some(session) = s.rooms.get(&rid).cloned() else { return Ok(()) };
+            (rid, session)
+        };
+        if !self.kernel.archived(&session).await? {
+            return Ok(());
+        }
+        let new = self.kernel.new_channel().await?;
+        if !kernel::valid_id(&new) {
+            bail!("the kernel returned a bad session id");
+        }
+        {
+            let mut s = self.state.lock().await;
+            s.rooms.insert(rid.clone(), new.clone());
+            s.seen.remove(&rid);
+            s.save(&self.cfg.dir)?;
+        }
+        let rid = RoomId::parse(rid)?;
+        self.links.lock().await.remove(&rid); // ends the old session's link
+        log(format!("main room: session {session} ended, {new} takes over"));
+        if let Some(room) = self.client.get_room(&rid) {
+            self.note(&room, &format!("Fresh session `{}`: the last one was archived or done.", short(&new))).await;
+        }
+        Ok(())
+    }
+
     async fn report_queue(self:Arc<Self>) {
         loop {
+            if let Err(e)=self.keep_main_alive().await {log(format!("main room: {e:#}"))}
             if let Err(e)=self.post_queue().await {log(format!("queue: {e:#}"))}
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
@@ -464,7 +497,7 @@ impl Bridge {
     async fn post_queue(&self) -> Result<()> {
         let rid={
             let s=self.state.lock().await;
-            s.main_room.clone().or_else(||s.jobs_room.clone())
+            s.main_room.clone()
         };
         let Some(rid)=rid else {return Ok(())};
         let rid=RoomId::parse(rid)?;
@@ -575,7 +608,6 @@ impl Bridge {
         }
         let MessageType::Text(text) = &ev.content.msgtype else { return Ok(()) };
         let rid = room.room_id().to_owned();
-        let is_jobs = self.state.lock().await.jobs_room.as_deref() == Some(rid.as_str());
         match relay::parse(&text.body) {
             Input::Help => self.note(&room, relay::HELP).await,
             Input::New(title) => {
@@ -592,13 +624,11 @@ impl Bridge {
                 self.note(&room, &format!("New session `{}` in the room **{name}**: accept the invite.", short(&session))).await;
             }
             // Read here, run with the owner's token, answered by the bridge: never sent to the agent.
-            // Allowed in every room, the jobs room included (where its reports arrive).
             Input::Owner(cmd) => {
                 let session = self.state.lock().await.rooms.get(rid.as_str()).cloned();
                 let msg = self.kernel.owner(&cmd, session.as_deref()).await.unwrap_or_else(|e| format!("⚠️ {e:#}"));
                 self.note(&room, &msg).await;
             }
-            _ if is_jobs => self.note(&room, "This room only carries job reports; write to zen in the **zen** room.").await,
             Input::Which => {
                 let s = self.state.lock().await.rooms.get(rid.as_str()).cloned();
                 let msg = match s {
@@ -738,13 +768,13 @@ impl Bridge {
                         if let Err(e) = s.save(&self.cfg.dir) {
                             log(format!("saving state: {e:#}"));
                         }
-                        (reports, s.jobs_room.clone())
+                        (reports, s.main_room.clone())
                     };
                     let room = room.and_then(|r| RoomId::parse(r).ok()).and_then(|r| self.client.get_room(&r));
                     for r in reports {
                         match &room {
                             Some(room) => self.post(room, Out::Answer(r)).await,
-                            None => log("a job report, but no jobs room"),
+                            None => log("a job report, but no main room"),
                         }
                     }
                 }

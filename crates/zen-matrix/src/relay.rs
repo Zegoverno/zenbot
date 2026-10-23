@@ -191,7 +191,7 @@ pub fn answers(qs: &Questions, text: &str) -> Option<String> {
     Some(lines.join("\n"))
 }
 
-/// A job run as a report for the jobs room, or None when there's nothing to say (silent, still
+/// A job run as a report for the main room, or None when there's nothing to say (silent, still
 /// running, or posted into a session: its room gets it from the session, D-060).
 pub fn job_report(run: &Value) -> Option<String> {
     let job = run["job"].as_str().unwrap_or("job");

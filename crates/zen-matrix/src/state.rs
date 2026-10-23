@@ -88,7 +88,7 @@ pub struct State {
     pub queue_posted: BTreeSet<String>,
     /// The room that's the owner's main zen chat.
     pub main_room: Option<String>,
-    /// The room job reports go to.
+    /// The jobs room from before job reports moved to the main room: left once, then cleared.
     pub jobs_room: Option<String>,
     /// Room id → session id.
     pub rooms: BTreeMap<String, String>,

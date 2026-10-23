@@ -1364,20 +1364,20 @@ action_gate() {
   # The provenance tests need SQL, but not a kernel or a subscription; use a separate database.
   local native_db="${DB}_sources"
   db_create "$native_db" >/dev/null
-  check "native source, redirect eligibility and forged-provenance checks" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q source_database -- --include-ignored
-  check "legacy wiki migration retains every writer and later denial" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q legacy_migration_database -- --include-ignored
-  check "editing copied bytes preserves per-writer maximum provenance" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q copied_bytes_edit_database -- --include-ignored
-  check "source proposals bind cached snapshots and reject stale approvals" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q source_cache_proposals_database -- --include-ignored
-  check "System One learns from labelled outcomes: a calibration curve, a proposal, queue labels" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q s1_learn_database -- --include-ignored
+  check "native source, redirect eligibility and forged-provenance checks" env ZEN_HOME="$TMP/home/.zenbot" SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q source_database -- --include-ignored
+  check "legacy wiki migration retains every writer and later denial" env ZEN_HOME="$TMP/home/.zenbot" SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q legacy_migration_database -- --include-ignored
+  check "editing copied bytes preserves per-writer maximum provenance" env ZEN_HOME="$TMP/home/.zenbot" SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q copied_bytes_edit_database -- --include-ignored
+  check "source proposals bind cached snapshots and reject stale approvals" env ZEN_HOME="$TMP/home/.zenbot" SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q source_cache_proposals_database -- --include-ignored
+  check "System One learns from labelled outcomes: a calibration curve, a proposal, queue labels" env ZEN_HOME="$TMP/home/.zenbot" SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q s1_learn_database -- --include-ignored
   local source_port=$((PORT + 13))
   python3 "$REPO/scripts/e2e/systemone_stub.py" "$source_port" & local source_srv=$!
   sleep 0.3
-  check "metadata scoring, public surfaces, poisoned text, unavailable and labelled 2–3 admission" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" ZEN_S1_URL="http://127.0.0.1:$source_port/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key cargo test --release --locked -q source_system_one_database -- --include-ignored
-  check "authenticated root, pre-exposure plans and stored job definitions" env TASK_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q task_database -- --include-ignored
-  check "queue decisions are atomic, terminal and contamination-safe" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q queue_decisions_database -- --include-ignored
-  check "permission snapshots refresh on risk, lock and denial" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q permission_snapshot_database -- --include-ignored
-  check "MCP forms require explicit validated owner responses and cancel on expiry, interruption or restart" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q owner_response_lifecycle_database -- --include-ignored
-  check "job source authority is owner-only and revoked by agent edits" env SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q owner_job_authority_database -- --include-ignored
+  check "metadata scoring, public surfaces, poisoned text, unavailable and labelled 2–3 admission" env ZEN_HOME="$TMP/home/.zenbot" SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" ZEN_S1_URL="http://127.0.0.1:$source_port/systemone" ZEN_S1_MODEL=openrouter/typesafe/jev-1.13 OPENROUTER_API_KEY=e2e-key cargo test --release --locked -q source_system_one_database -- --include-ignored
+  check "authenticated root, pre-exposure plans and stored job definitions" env ZEN_HOME="$TMP/home/.zenbot" TASK_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q task_database -- --include-ignored
+  check "queue decisions are atomic, terminal and contamination-safe" env ZEN_HOME="$TMP/home/.zenbot" SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q queue_decisions_database -- --include-ignored
+  check "permission snapshots refresh on risk, lock and denial" env ZEN_HOME="$TMP/home/.zenbot" SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q permission_snapshot_database -- --include-ignored
+  check "MCP forms require explicit validated owner responses and cancel on expiry, interruption or restart" env ZEN_HOME="$TMP/home/.zenbot" SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q owner_response_lifecycle_database -- --include-ignored
+  check "job source authority is owner-only and revoked by agent edits" env ZEN_HOME="$TMP/home/.zenbot" SOURCE_TEST_DB_URL="$(db_url_for "$native_db")" cargo test --release --locked -q owner_job_authority_database -- --include-ignored
   db_drop "$native_db"
   local ws; ws=$(new_workspace action-gate)
   local port=$((PORT + 12))
