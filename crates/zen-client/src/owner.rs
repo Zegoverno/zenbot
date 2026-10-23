@@ -1,14 +1,12 @@
-//! The owner's commands typed in a chat: `jobs`, `skills`, `tools` and `trust`, as the `zen`
-//! terminal app's `/jobs …` and the Matrix bridge's `!jobs …`. They do what `zen jobs`, `zen skills`
-//! and `zen tools` do, with the owner's token, so they can approve what only the owner may (resume an
-//! agent's paused job, accept a draft skill or a made tool, trust a session that read untrusted
-//! content, D-054).
+//! The owner's commands, the same everywhere: `/queue` in the `zen` terminal app, `!queue` in
+//! Matrix, `zen queue` on the command line. Four answer what zenbot holds for the owner: `queue`
+//! (what waits), `approve [N]`, `deny [N]` (no number: everything waiting) and `trust [add|rm]
+//! <url|repo>` (say yes in advance); `jobs`, `skills` and `tools` manage the rest. They run with the
+//! owner's token, so they can approve what only the owner may.
 //!
 //! The client reads them before anything reaches the agent and calls the kernel itself: the agent
 //! never sees or relays them, so text it read can't approve anything. Parsing is pure and tested;
 //! [`run`] makes the calls and returns Markdown for the chat.
-
-use std::collections::HashMap;
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -39,12 +37,18 @@ pub fn login_done(done: &Value) -> String {
 /// One owner command.
 #[derive(Debug, PartialEq)]
 pub enum OwnerCmd {
+    /// `queue`: everything waiting for the owner, numbered.
     Queue,
-    QueueDecision { kind: String, id: i64, decision: String },
-    Deny,
-    Sources,
-    SourceAdd { source: String, risk: i16, note: String },
-    SourceRm(String),
+    /// `approve [N]`: run one held item once (or every one).
+    Approve(Option<Item>),
+    /// `deny [N]`: refuse one held item for good (or every one).
+    Deny(Option<Item>),
+    /// `trust`: the trust list.
+    TrustList,
+    /// `trust add [url|api|mcp|repo] <match> [trusted|known|partly-open|blocked]`.
+    TrustAdd { kind: String, pattern: String, level: String },
+    /// `trust rm [url|api|mcp|repo] <match>`.
+    TrustRm { kind: String, pattern: String },
     /// `jobs`: every job, its schedule and state.
     Jobs,
     /// `jobs run <name>`: run it now, in the background (works on a paused job too).
@@ -61,46 +65,76 @@ pub enum OwnerCmd {
     Skill { name: String, decision: &'static str, sha: String },
     /// `tools accept|reject <name> <sha>`.
     Tool { name: String, decision: &'static str, sha: String },
-    /// `trust`: what marked the chat's session as having read untrusted content; `trust yes`
-    /// lifts the mark, as the owner last looked at it.
-    Trust { yes: bool },
-    /// Inspect held actions or allow the exact action last inspected.
-    Allow { yes: bool },
 }
 
-/// What a chat client keeps between owner commands: the prefix it reads them by (`/` or `!`) and,
-/// per session, the last block the owner looked at with `trust`, which `trust yes` confirms.
+/// A queue item as the owner types it: a held action by its number (`12`), a source proposal
+/// with an `s` (`s7`).
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum Item {
+    Action(i64),
+    Source(i64),
+}
+
+impl Item {
+    fn parse(w: &str) -> Option<Item> {
+        match w.strip_prefix(['s', 'S']) {
+            Some(n) => n.parse().ok().map(Item::Source),
+            None => w.trim_start_matches('#').parse().ok().map(Item::Action),
+        }
+    }
+    pub fn of(v: &Value) -> Option<Item> {
+        let id = v["id"].as_i64()?;
+        Some(if v["kind"] == "source" { Item::Source(id) } else { Item::Action(id) })
+    }
+    pub fn label(self) -> String {
+        match self {
+            Item::Action(n) => n.to_string(),
+            Item::Source(n) => format!("s{n}"),
+        }
+    }
+    fn path(self) -> String {
+        match self {
+            Item::Action(n) => format!("/api/queue/action/{n}"),
+            Item::Source(n) => format!("/api/queue/source/{n}"),
+        }
+    }
+}
+
+/// What a chat client keeps between owner commands: the prefix it reads them by (`/`, `!` or `zen `).
 #[derive(Debug, Default)]
 pub struct Chat {
     pub prefix: &'static str,
-    looked: HashMap<String, i64>,
-    actions: HashMap<String, i64>,
 }
 
 impl Chat {
     pub fn new(prefix: &'static str) -> Self {
-        Chat { prefix, looked: HashMap::new(), actions: HashMap::new() }
+        Chat { prefix }
     }
 }
 
-/// How to use the commands, one line each, without the prefix (`/` or `!`) the client adds.
+/// How to use the commands, one line each, without the prefix the client adds.
 pub const USAGE: &[(&str, &str)] = &[
-    ("queue [approve|reject|deny <action|source> <id>]", "held actions and source proposals"),
-    ("sources [list|add <host/path> [2|3] [note…]|rm <host/path>]", "manage the owner source allowlist"),
+    ("queue", "everything waiting for you, numbered"),
+    ("approve [N]", "run held item N once; no number: everything waiting"),
+    ("deny [N]", "refuse held item N for good; no number: everything waiting"),
+    ("trust [add|rm <url|repo> [level]]", "the trust list; add or remove a host, host/path or repo (github.com/owner/*)"),
     ("jobs", "every job, its schedule and state"),
-    ("jobs run <name>", "run a job now (even a paused one)"),
-    ("jobs resume <name>", "turn a job on (approves one zenbot created paused)"),
-    ("jobs pause <name>", "pause a job"),
+    ("jobs run|resume|pause <name>", "run a job now, turn it on (approves one zenbot made), pause it"),
     ("jobs runs [name]", "recent runs and their reports"),
     ("skills", "skills and made tools, with the fingerprint to review a draft"),
     ("skills accept|reject <domain/name> <sha>", "activate or archive a draft skill"),
     ("tools accept|reject <name> <sha>", "approve a made tool (network, no sandbox) or reject it"),
-    ("deny", "stop this session and mark its products as contaminated"),
-    ("allow", "inspect the latest held action"),
-    ("allow yes", "allow that exact action once, for ten minutes"),
-    ("trust", "what made this session risky or tainted"),
-    ("trust yes", "trust it again, as you just looked at it"),
 ];
+
+const KINDS: &[&str] = &["url", "api", "mcp", "repo"];
+const LEVELS: &[&str] = &["trusted", "known", "partly-open", "blocked"];
+
+/// `host/owner/name` on a git host is a repo; anything else is a URL (host or host/path).
+fn kind_of(pattern: &str) -> &'static str {
+    let parts: Vec<&str> = pattern.split('/').collect();
+    let git = matches!(parts[0], "github.com" | "gitlab.com" | "codeberg.org" | "bitbucket.org");
+    if git && parts.len() == 3 { "repo" } else { "url" }
+}
 
 /// The command in `text` (after the client's prefix), or None when its first word isn't one of
 /// these. `Some(Err(usage))` when the word is ours but the rest doesn't fit.
@@ -113,13 +147,42 @@ pub fn parse(text: &str) -> Option<Result<OwnerCmd, String>> {
         "reject" => Some("reject"),
         _ => None,
     };
+    let item = |rest: &[&str]| match rest {
+        [] => Some(None),
+        [w] => Item::parse(w).map(Some),
+        _ => None,
+    };
     let parsed = match first.as_str() {
         "queue" => match &words[1..] {
             [] => Ok(OwnerCmd::Queue),
-            [d, kind, id] if matches!(*d,"approve"|"reject"|"deny") && matches!(*kind,"action"|"source") && id.parse::<i64>().is_ok() =>
-                Ok(OwnerCmd::QueueDecision {kind:kind.to_string(),id:id.parse().unwrap_or(0),decision:d.to_string()}),
-            _ => usage("queue [approve|reject|deny <action|source> <id>]"),
+            _ => usage("queue"),
         },
+        "approve" => item(&words[1..]).map(OwnerCmd::Approve).ok_or_else(|| "usage: approve [N]".to_string()),
+        "deny" => item(&words[1..]).map(OwnerCmd::Deny).ok_or_else(|| "usage: deny [N]".to_string()),
+        "trust" => {
+            let lower: Vec<String> = words[1..].iter().map(|w| w.to_ascii_lowercase()).collect();
+            let rest: Vec<&str> = lower.iter().map(String::as_str).collect();
+            let split = |args: &[&str], orig: &[&str]| -> Option<(String, String, Vec<String>)> {
+                match args.first() {
+                    Some(k) if KINDS.contains(k) && args.len() >= 2 => Some((k.to_string(), orig[1].to_string(), args[2..].iter().map(|s| s.to_string()).collect())),
+                    Some(_) => Some((kind_of(orig[0]).to_string(), orig[0].to_string(), args[1..].iter().map(|s| s.to_string()).collect())),
+                    None => None,
+                }
+            };
+            match rest.first().copied() {
+                None | Some("list") if rest.len() <= 1 => Ok(OwnerCmd::TrustList),
+                Some("add") => match split(&rest[1..], &words[2..]) {
+                    Some((kind, pattern, more)) if more.is_empty() => Ok(OwnerCmd::TrustAdd { kind, pattern, level: "trusted".into() }),
+                    Some((kind, pattern, more)) if more.len() == 1 && LEVELS.contains(&more[0].as_str()) => Ok(OwnerCmd::TrustAdd { kind, pattern, level: more[0].clone() }),
+                    _ => usage("trust add <url|repo> [trusted|known|partly-open|blocked]"),
+                },
+                Some("rm") => match split(&rest[1..], &words[2..]) {
+                    Some((kind, pattern, more)) if more.is_empty() => Ok(OwnerCmd::TrustRm { kind, pattern }),
+                    _ => usage("trust rm <url|repo>"),
+                },
+                _ => usage("trust [add|rm <url|repo> [level]]"),
+            }
+        }
         "jobs" => match (words.get(1).map(|w| w.to_ascii_lowercase()).as_deref(), &words[2.min(words.len())..]) {
             (None | Some("list"), []) => Ok(OwnerCmd::Jobs),
             (Some("run"), [n]) => Ok(OwnerCmd::Run(n.to_string())),
@@ -128,14 +191,6 @@ pub fn parse(text: &str) -> Option<Result<OwnerCmd, String>> {
             (Some("runs"), []) => Ok(OwnerCmd::Runs(None)),
             (Some("runs"), [n]) => Ok(OwnerCmd::Runs(Some(n.to_string()))),
             _ => usage("jobs [run|resume|pause <name> | runs [name]]"),
-        },
-        "sources" => match &words[1..] {
-            [] | ["list"] => Ok(OwnerCmd::Sources),
-            ["rm", source] => Ok(OwnerCmd::SourceRm(source.to_string())),
-            ["add", source] => Ok(OwnerCmd::SourceAdd { source: source.to_string(), risk: 2, note: String::new() }),
-            ["add", source, level, note @ ..] if matches!(*level, "2" | "3") =>
-                Ok(OwnerCmd::SourceAdd { source: source.to_string(), risk: level.parse().unwrap_or(2), note: note.join(" ") }),
-            _ => usage("sources [list|add <host/path> [2|3] [note…]|rm <host/path>]"),
         },
         "skills" => match &words[1..] {
             [] => Ok(OwnerCmd::Skills),
@@ -149,57 +204,68 @@ pub fn parse(text: &str) -> Option<Result<OwnerCmd, String>> {
             }
             _ => usage("tools [accept|reject <name> <sha>]"),
         },
-        "deny" => match &words[1..] {
-            [] => Ok(OwnerCmd::Deny),
-            _ => usage("deny"),
-        },
-        "allow" => match &words[1..] {
-            [] => Ok(OwnerCmd::Allow { yes: false }),
-            [v] if v.eq_ignore_ascii_case("yes") => Ok(OwnerCmd::Allow { yes: true }),
-            _ => usage("allow [yes]"),
-        },
-        "trust" => match words.get(1).map(|w| w.to_ascii_lowercase()).as_deref() {
-            None if words.len() == 1 => Ok(OwnerCmd::Trust { yes: false }),
-            Some("yes") if words.len() == 2 => Ok(OwnerCmd::Trust { yes: true }),
-            _ => usage("trust [yes]"),
-        },
         _ => return None,
     };
     Some(parsed)
 }
 
+/// One queue item for the chat: its number, where it's from, what it wants and why it waits.
+pub fn queue_line(v: &Value) -> String {
+    let n = Item::of(v).map(Item::label).unwrap_or_default();
+    let title = v["title"].as_str().unwrap_or(if v["kind"] == "source" { "source rating" } else { "" });
+    format!("**{n}** · {title}
+{}
+{}", short(v["summary"].as_str().unwrap_or(""), 300), v["reason"].as_str().unwrap_or(""))
+}
+
+/// Approve or deny `which` (None: everything waiting); one line per item.
+async fn answer(c: &Client, which: Option<Item>, approve: bool) -> Result<String> {
+    let items: Vec<Item> = match which {
+        Some(i) => vec![i],
+        None => c.get("/api/queue").await?.as_array().into_iter().flatten().filter_map(Item::of).collect(),
+    };
+    if items.is_empty() {
+        return Ok("Nothing waiting.".into());
+    }
+    let (verb, decision) = if approve { ("approved", "approve") } else { ("denied", "reject") };
+    let mut out = Vec::new();
+    for i in items {
+        out.push(match c.post(&i.path(), json!({ "decision": decision })).await {
+            Ok(_) => format!("{} {verb}", i.label()),
+            Err(e) => format!("{}: {e:#}", i.label()),
+        });
+    }
+    Ok(out.join("\n"))
+}
+
 /// Run `cmd` against the kernel for the chat's `session` (if it has one yet); the result as
 /// Markdown for the chat.
-pub async fn run(c: &Client, cmd: &OwnerCmd, session: Option<&str>, chat: &mut Chat) -> Result<String> {
+pub async fn run(c: &Client, cmd: &OwnerCmd, _session: Option<&str>, chat: &mut Chat) -> Result<String> {
     Ok(match cmd {
         OwnerCmd::Queue => {
-            let v=c.get("/api/queue").await?;
-            let lines:Vec<String>=v.as_array().into_iter().flatten().map(|r| format!("{} #{} · {} · risk {}\n{}\n{}",r["kind"].as_str().unwrap_or(""),r["id"],r["title"].as_str().unwrap_or("source proposal"),r["risk"],r["summary"].as_str().unwrap_or(""),r["reason"].as_str().unwrap_or(""))).collect();
-            if lines.is_empty() {"Queue empty.".into()} else {format!("{}\n\n{}queue approve|reject|deny <action|source> <id>",lines.join("\n\n"),chat.prefix)}
+            let v = c.get("/api/queue").await?;
+            let lines: Vec<String> = v.as_array().into_iter().flatten().map(queue_line).collect();
+            let p = chat.prefix;
+            if lines.is_empty() { "Nothing waiting.".into() } else { format!("{}\n\n`{p}approve N` · `{p}deny N` · no number: all", lines.join("\n\n")) }
         }
-        OwnerCmd::QueueDecision {kind,id,decision} => {
-            c.post(&format!("/api/queue/{kind}/{id}"),json!({"decision":decision})).await?.to_string()
+        OwnerCmd::Approve(which) => answer(c, *which, true).await?,
+        OwnerCmd::Deny(which) => answer(c, *which, false).await?,
+        OwnerCmd::TrustList => {
+            let v = c.get("/api/trust").await?;
+            let mut out: Vec<String> = v["entries"].as_array().into_iter().flatten()
+                .map(|e| format!("- {} `{}`: {}{}", e["kind"].as_str().unwrap_or(""), e["match"].as_str().unwrap_or(""), e["level"].as_str().unwrap_or(""),
+                    e["note"].as_str().filter(|n| !n.is_empty()).map(|n| format!(" ({n})")).unwrap_or_default())).collect();
+            if out.is_empty() { out.push("Nothing on the trust list.".into()); }
+            if let Some(p) = v["problem"].as_str() { out.push(format!("problem: {p}")); }
+            out.join("\n")
         }
-        OwnerCmd::Deny => {
-            let Some(id) = session else { return Ok("No session here yet.".into()) };
-            c.post(&format!("/api/sessions/{}/deny", enc(id)), json!({})).await?;
-            chat.looked.remove(id);
-            chat.actions.remove(id);
-            "Stopped. This session and its products are marked contaminated. Review with trust before resuming.".into()
+        OwnerCmd::TrustAdd { kind, pattern, level } => {
+            c.post("/api/trust", json!({ "kind": kind, "match": pattern, "level": level })).await?;
+            format!("Trust list: {kind} `{pattern}` is {level}.")
         }
-        OwnerCmd::Sources => {
-            let v = c.get("/api/sources").await?;
-            let lines: Vec<String> = v.as_array().into_iter().flatten()
-                .map(|r| format!("- `{}` — risk {}: {}", r["source"].as_str().unwrap_or(""), r["risk"], r["note"].as_str().unwrap_or(""))).collect();
-            if lines.is_empty() { "No allowlisted sources.".into() } else { lines.join("\n") }
-        }
-        OwnerCmd::SourceAdd { source, risk, note } => {
-            c.post("/api/sources", json!({"source":source,"risk":risk,"note":note})).await?;
-            format!("Allowlisted `{source}` at risk {risk}.")
-        }
-        OwnerCmd::SourceRm(source) => {
-            c.post("/api/sources", json!({"source":source,"remove":true})).await?;
-            format!("Removed `{source}`.")
+        OwnerCmd::TrustRm { kind, pattern } => {
+            c.post("/api/trust", json!({ "kind": kind, "match": pattern, "remove": true })).await?;
+            format!("Trust list: removed {kind} `{pattern}`.")
         }
         OwnerCmd::Jobs => {
             let r = c.get("/api/jobs").await?;
@@ -233,95 +299,7 @@ pub async fn run(c: &Client, cmd: &OwnerCmd, session: Option<&str>, chat: &mut C
             let r = c.post(&format!("/api/tools/{}/review", enc(name)), json!({ "decision": decision, "sha": sha })).await?;
             r["result"].as_str().unwrap_or("done").to_string()
         }
-        OwnerCmd::Allow { yes } => {
-            let Some(id) = session else { return Ok("No session here yet.".into()) };
-            let p = chat.prefix;
-            if !yes {
-                let r = c.get(&format!("/api/sessions/{}/allow", enc(id))).await?;
-                chat.actions.remove(id);
-                let Some(a) = r["actions"].as_array().and_then(|v| v.first()) else {
-                    return Ok("No held actions waiting.".into());
-                };
-                let gate = a["id"].as_i64().unwrap_or(0);
-                chat.actions.insert(id.to_string(), gate);
-                return Ok(format!("**Held action #{gate}**: {}\n\n```json\n{}\n```\n\nThis allows the exact workspace, tool and arguments once, for ten minutes. It does not trust the session. Review any scripts/files it will run too.\n\n`{p}allow yes` to allow it.",
-                    a["reason"].as_str().unwrap_or(""), a["action"].as_str().unwrap_or("")));
-            }
-            let Some(gate) = chat.actions.remove(id) else { return Ok(format!("Look first: `{p}allow`.")) };
-            let r = c.post(&format!("/api/sessions/{}/allow", enc(id)), json!({"id":gate})).await?;
-            if r["allowed"] == true { "Allowed once: ask the agent to retry unchanged.".into() }
-            else { "That action is no longer waiting: look again.".into() }
-        }
-        OwnerCmd::Trust { yes } => {
-            let Some(id) = session else { return Ok("No session here yet: nothing to trust.".into()) };
-            let p = chat.prefix;
-            if !yes {
-                let r = c.get(&format!("/api/sessions/{}/taint", enc(id))).await?;
-                if r["tainted_at"].is_null() && r["risky_at"].is_null() && r["risk"].as_i64().unwrap_or(1) < 2 {
-                    chat.looked.remove(id);
-                    return Ok("This session hasn't read untrusted content: nothing to trust.".into());
-                }
-                chat.looked.insert(id.to_string(), r["checked"].as_i64().unwrap_or(0));
-                return Ok(taint_report(&r, p));
-            }
-            let Some(seen) = chat.looked.get(id).copied() else {
-                return Ok(format!("Look first: `{p}trust` shows what made this session untrusted."));
-            };
-            let r = c.post(&format!("/api/sessions/{}/trust", enc(id)), json!({ "seen": seen })).await;
-            chat.looked.remove(id);
-            let r = r?;
-            match r["seq"].as_i64() {
-                Some(seq) => format!("Trusted from #{seq} on. Contamination caused by this session is reversed; original stored-item ratings stay unchanged."),
-                None => r["result"].as_str().unwrap_or("done").to_string(),
-            }
-        }
     })
-}
-
-/// What made a session untrusted (`GET /api/sessions/{id}/taint`), and what trusting it means.
-pub fn taint_report(r: &Value, prefix: &str) -> String {
-    let cut = |v: &Value| {
-        let s: String = v.as_str().unwrap_or("").chars().take(100).collect();
-        if s.is_empty() { String::new() } else { format!(": {s}") }
-    };
-    let mut out = vec![
-        format!(
-            "**This session is marked contaminated** (since {} UTC). Work is stopped until you review and trust it.",
-            minute(if r["tainted_at"].is_null() { &r["risky_at"] } else { &r["tainted_at"] })
-        ),
-        String::new(),
-    ];
-    if r["tainted_at"].is_null() {
-        out[0] = "**This session is risky, not tainted.** It read outside content. Safe reads run normally; programmable work runs sandboxed; dangerous actions wait for approval.".into();
-    }
-    let taints = r["taints"].as_array().cloned().unwrap_or_default();
-    if !taints.is_empty() {
-        out.push("What marked it:".into());
-        for t in &taints {
-            out.push(format!("- #{} {}{}", t["seq"], t["source"].as_str().unwrap_or("?"), cut(&t["about"])));
-        }
-    }
-    let sources = r["sources"].as_array().cloned().unwrap_or_default();
-    if !sources.is_empty() {
-        out.push("What it was handed as untrusted:".into());
-        for x in &sources {
-            let n = x["count"].as_i64().unwrap_or(1);
-            let times = if n > 1 { format!(" ({n}×)") } else { String::new() };
-            out.push(format!("- #{} {}{times}{}", x["first"], x["source"].as_str().unwrap_or("?"), cut(&x["about"])));
-        }
-    }
-    out.push(String::new());
-    out.push(
-        "Trusting it vouches for this reviewed window and reverses contamination caused by this session. \
-         Original stored-item risk ratings stay unchanged; later outside reads can raise risk again."
-            .into(),
-    );
-    if r["busy"] == true {
-        out.push("A turn is running: wait for it to end, then look again.".into());
-    } else {
-        out.push(format!("`{prefix}trust yes` to trust it."));
-    }
-    out.join("\n")
 }
 
 /// A UTC timestamp's date and minutes: "2026-10-13 09:30".
@@ -410,10 +388,22 @@ mod tests {
 
     #[test]
     fn parses_the_commands_and_leaves_anything_else_alone() {
-        assert_eq!(parse("queue"),Some(Ok(OwnerCmd::Queue)));
-        assert_eq!(parse("queue approve source 42"),Some(Ok(OwnerCmd::QueueDecision{kind:"source".into(),id:42,decision:"approve".into()})));
-        assert!(parse("queue approve action nope").unwrap().is_err());
-        assert!(parse("queue trust action 1").unwrap().is_err());
+        assert_eq!(parse("queue"), Some(Ok(OwnerCmd::Queue)));
+        assert_eq!(parse("approve"), Some(Ok(OwnerCmd::Approve(None))));
+        assert_eq!(parse("approve 12"), Some(Ok(OwnerCmd::Approve(Some(Item::Action(12))))));
+        assert_eq!(parse("APPROVE #12"), Some(Ok(OwnerCmd::Approve(Some(Item::Action(12))))));
+        assert_eq!(parse("deny s7"), Some(Ok(OwnerCmd::Deny(Some(Item::Source(7))))));
+        assert_eq!(parse("deny"), Some(Ok(OwnerCmd::Deny(None))));
+        assert!(parse("approve nope").unwrap().is_err());
+        assert!(parse("approve 1 2").unwrap().is_err());
+        assert_eq!(parse("trust"), Some(Ok(OwnerCmd::TrustList)));
+        assert_eq!(parse("trust add docs.rs"), Some(Ok(OwnerCmd::TrustAdd { kind: "url".into(), pattern: "docs.rs".into(), level: "trusted".into() })));
+        assert_eq!(parse("trust add x.com/paulg known"), Some(Ok(OwnerCmd::TrustAdd { kind: "url".into(), pattern: "x.com/paulg".into(), level: "known".into() })));
+        assert_eq!(parse("trust add github.com/Zegoverno/*"), Some(Ok(OwnerCmd::TrustAdd { kind: "repo".into(), pattern: "github.com/Zegoverno/*".into(), level: "trusted".into() })));
+        assert_eq!(parse("trust add mcp linear"), Some(Ok(OwnerCmd::TrustAdd { kind: "mcp".into(), pattern: "linear".into(), level: "trusted".into() })));
+        assert_eq!(parse("trust rm github.com/a/b"), Some(Ok(OwnerCmd::TrustRm { kind: "repo".into(), pattern: "github.com/a/b".into() })));
+        assert!(parse("trust add docs.rs maybe").unwrap().is_err());
+        assert!(parse("trust yes").unwrap().is_err());
         assert_eq!(parse("jobs"), Some(Ok(OwnerCmd::Jobs)));
         assert_eq!(parse("JOBS list"), Some(Ok(OwnerCmd::Jobs)));
         assert_eq!(parse("jobs run daily-readings"), Some(Ok(OwnerCmd::Run("daily-readings".into()))));
@@ -421,10 +411,6 @@ mod tests {
         assert_eq!(parse("jobs pause x"), Some(Ok(OwnerCmd::Pause("x".into()))));
         assert_eq!(parse("jobs runs"), Some(Ok(OwnerCmd::Runs(None))));
         assert_eq!(parse("jobs runs x"), Some(Ok(OwnerCmd::Runs(Some("x".into())))));
-        assert_eq!(parse("sources"), Some(Ok(OwnerCmd::Sources)));
-        assert_eq!(parse("sources add x.com/paulg 3 public comments"), Some(Ok(OwnerCmd::SourceAdd { source: "x.com/paulg".into(), risk: 3, note: "public comments".into() })));
-        assert!(parse("sources add x.com 0").unwrap().is_err());
-        assert_eq!(parse("sources rm x.com"), Some(Ok(OwnerCmd::SourceRm("x.com".into()))));
         assert_eq!(parse("skills"), Some(Ok(OwnerCmd::Skills)));
         assert_eq!(parse("tools"), Some(Ok(OwnerCmd::Skills)));
         assert_eq!(
@@ -432,13 +418,7 @@ mod tests {
             Some(Ok(OwnerCmd::Skill { name: "work/brief".into(), decision: "accept", sha: "abc123def456".into() }))
         );
         assert_eq!(parse("tools reject made_fetch 0123abcd"), Some(Ok(OwnerCmd::Tool { name: "fetch".into(), decision: "reject", sha: "0123abcd".into() })));
-        assert_eq!(parse("deny"), Some(Ok(OwnerCmd::Deny)));
-        assert!(parse("deny all").unwrap().is_err());
-        assert_eq!(parse("allow"), Some(Ok(OwnerCmd::Allow { yes: false })));
-        assert_eq!(parse("ALLOW YES"), Some(Ok(OwnerCmd::Allow { yes: true })));
-        assert!(matches!(parse("allow everything"), Some(Err(_))));
-        assert_eq!(parse("trust"), Some(Ok(OwnerCmd::Trust { yes: false })));
-        assert_eq!(parse("Trust YES"), Some(Ok(OwnerCmd::Trust { yes: true })));
+        for gone in ["allow", "sources"] { assert_eq!(parse(gone), None, "{gone} is gone"); }
         assert_eq!(parse("hello"), None);
         assert_eq!(parse(""), None);
     }
@@ -450,8 +430,7 @@ mod tests {
         assert!(matches!(parse("jobs delete x"), Some(Err(_))), "removing a job stays in the terminal (`zen jobs rm`)");
         assert!(matches!(parse("skills accept work/brief"), Some(Err(_))), "a review always names the fingerprint reviewed");
         assert!(matches!(parse("tools approve x abc"), Some(Err(_))));
-        assert!(matches!(parse("trust me"), Some(Err(u)) if u == "usage: trust [yes]"));
-        assert!(matches!(parse("trust yes please"), Some(Err(_))));
+        assert!(matches!(parse("queue approve action 1"), Some(Err(_))));
     }
 
     #[test]
@@ -468,26 +447,10 @@ mod tests {
     }
 
     #[test]
-    fn the_taint_report_says_what_and_what_trusting_means() {
-        let r = json!({ "tainted_at": "2026-10-13T09:30:12Z", "checked": 40, "busy": false,
-            "taints": [{ "seq": 12, "source": "web_search", "about": "harbour" }],
-            "sources": [{ "first": 12, "source": "web", "about": "harbour", "count": 3 }, { "first": 30, "source": "subagent", "about": "", "count": 1 }] });
-        let t = taint_report(&r, "!");
-        assert!(t.starts_with("**This session is marked contaminated** (since 2026-10-13 09:30 UTC)"), "{t}");
-        assert!(t.contains("What marked it:\n- #12 web_search: harbour\n"), "{t}");
-        assert!(t.contains("- #12 web (3×): harbour\n- #30 subagent\n"), "{t}");
-        assert!(t.ends_with("`!trust yes` to trust it."), "{t}");
-        let busy = taint_report(&json!({ "tainted_at": "2026-10-13T09:30:12Z", "busy": true }), "/");
-        assert!(busy.ends_with("wait for it to end, then look again.") && !busy.contains("trust yes"), "{busy}");
-    }
-
-    #[tokio::test]
-    async fn trust_yes_needs_a_look_first() {
-        let c = Client::new("http://127.0.0.1:9", Some("t".into())).unwrap();
-        let mut chat = Chat::new("/");
-        let out = run(&c, &OwnerCmd::Trust { yes: true }, Some("s1"), &mut chat).await.unwrap();
-        assert_eq!(out, "Look first: `/trust` shows what made this session untrusted.");
-        let out = run(&c, &OwnerCmd::Trust { yes: false }, None, &mut chat).await.unwrap();
-        assert!(out.starts_with("No session here yet"), "{out}");
+    fn queue_lines_number_actions_and_sources() {
+        let a = json!({"kind":"action","id":12,"title":"ship it","summary":"git push","reason":"held: off-job"});
+        assert_eq!(queue_line(&a), "**12** · ship it\ngit push\nheld: off-job");
+        let s = json!({"kind":"source","id":7,"summary":"x.com/paulg","reason":"rating"});
+        assert!(queue_line(&s).starts_with("**s7** · source rating"));
     }
 }

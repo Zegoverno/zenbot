@@ -86,33 +86,26 @@ pub(crate) enum Cmd {
     },
     /// Check that the kernel, database, worker and model sign-in are healthy
     Status,
-    /// Held actions and source proposals; without arguments opens an interactive review
-    Queue {
-        #[arg(value_parser=["approve","reject","deny"])]
-        decision: Option<String>,
-        #[arg(value_parser=["action","source"])]
-        kind: Option<String>,
-        id: Option<i64>,
-    },
+    /// Everything waiting for you, numbered; in a terminal opens an interactive review
+    Queue,
+    /// Run held item N once (no number: everything waiting)
+    Approve { n: Option<String> },
+    /// Refuse held item N for good (no number: everything waiting)
+    Deny { n: Option<String> },
     /// zenbot's skills (active and drafts) with how often they're used, and the tools it made
     Skills {
         #[command(subcommand)]
         cmd: Option<ReviewCmd>,
-    },
-    /// Owner source allowlist (HTTPS host or path; risk 2 or 3)
-    Sources {
-        #[command(subcommand)]
-        cmd: SourcesCmd,
     },
     /// The routing policy for subagents (which model per kind of work) and the evidence for it
     Policy {
         #[command(subcommand)]
         cmd: Option<PolicyCmd>,
     },
-    /// The owner's trust list: URLs, APIs, MCP servers and repos whose content keeps a session low
+    /// The trust list: `zen trust [add|rm <url|repo> [level]]` (level: trusted, known, partly-open, blocked)
     Trust {
-        #[command(subcommand)]
-        cmd: Option<TrustCmd>,
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
     },
     /// System One: each decision's numbers; check the decision files; replay, compare, proposals
     S1 {
@@ -164,33 +157,6 @@ pub(crate) enum Cmd {
 }
 
 #[derive(Subcommand)]
-pub(crate) enum TrustCmd {
-    /// Propose entries from repeated clean web reads and egress; review then add explicitly
-    Suggest,
-    /// The list, with the built-in package registries
-    List,
-    /// Add or change an entry: kind url|api|mcp|repo, then a host (or host/path), an MCP server's name, or host/owner/name (* for any)
-    Add {
-        #[arg(value_parser = ["url", "api", "mcp", "repo"])]
-        kind: String,
-        #[arg(name = "match")]
-        pattern: String,
-        /// trusted (default), known, partly-open or blocked
-        #[arg(long, default_value = "trusted", value_parser = ["trusted", "known", "partly-open", "blocked"])]
-        level: String,
-        #[arg(long, default_value = "")]
-        note: String,
-    },
-    /// Remove an entry
-    Rm {
-        #[arg(value_parser = ["url", "api", "mcp", "repo"])]
-        kind: String,
-        #[arg(name = "match")]
-        pattern: String,
-    },
-}
-
-#[derive(Subcommand)]
 pub(crate) enum S1Cmd {
     /// Check the decision files (~/.zenbot/s1/ and the built-in ones): errors with line and column
     Check,
@@ -222,20 +188,6 @@ pub(crate) enum S1Cmd {
     Approve { id: i64 },
     /// Decline a proposal
     Reject { id: i64 },
-}
-
-#[derive(Subcommand)]
-pub(crate) enum SourcesCmd {
-    List,
-    Rerate,
-    Add {
-        source: String,
-        #[arg(long, default_value_t = 2)]
-        risk: i16,
-        #[arg(long, default_value = "")]
-        note: String,
-    },
-    Rm { source: String },
 }
 
 #[derive(Subcommand)]

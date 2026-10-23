@@ -37,14 +37,13 @@ pinned owner key; `journalctl -u zen-matrix -f` the log.
 - **Questions** from `ask` post numbered; reply `1 2` to pick options, or answer in words.
 - **Nothing lost.** Per room the bridge keeps the last session `seq` it posted (`state.json`) and
   catches up (`?after=`) on every reconnect, so answers arriving while anything was down post once.
-- **Owner commands** (`zen_client::owner`, as in zen; run against the kernel, never seen by the
-  agent): `!session`, `!help`, `!jobs [run|resume|pause <name> | runs [name]]`,
-  `!skills [accept|reject <domain/name> <sha>]`, `!tools accept|reject <name> <sha>`,
-  `!sources [add <host/path> [2|3] [note] | rm <host/path>]`, `!allow [yes]`, `!trust [yes]` (D-054),
-  `!deny` (stop the session, mark its products contaminated), `!queue [approve|reject|deny
-  action|source <id>]`. Creating or removing jobs stays in the terminal.
-- **Approval queue.** Every 5 s new held actions and source proposals post to **zen**. Decide with an
-  encrypted `!queue …` command; plaintext reactions never approve (they carry no device identity).
+- **Owner commands** (`zen_client::owner`, the same as `/…` in zen and `zen …`; run against the
+  kernel, never seen by the agent): `!session`, `!help`, `!queue`, `!approve [N]`, `!deny [N]` (no
+  number: everything waiting), `!trust [add|rm <url|repo> [level]]`, `!jobs [run|resume|pause <name>
+  | runs [name]]`, `!skills [accept|reject <domain/name> <sha>]`, `!tools accept|reject <name> <sha>`.
+  Creating or removing jobs stays in the terminal.
+- **Approval queue.** Every 5 s new held items post to **zen**, numbered. Answer with an encrypted
+  `!approve N` or `!deny N`; plaintext reactions never approve (they carry no device identity).
 - **Job reports.** Each finished run (`ok`, `error`, `missed`, `interrupted`; not `silent`) posts
   once to **zen jobs**, except runs posted into a session (`post_to`, D-060).
 

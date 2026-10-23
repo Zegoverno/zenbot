@@ -1391,20 +1391,20 @@ action_gate() {
   check "only real owner messages are rated zero" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id=X'${sid//-/}' AND origin='owner' AND risk=0")" 1
   check "sources mutation needs the owner token" eq "$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{\"source\":\"evil.example\"}' "$URL/api/sources")" 401
   check "invalid source level rejected" eq "$(api -o /dev/null -w '%{http_code}' -d '{\"source\":\"example.com\",\"risk\":1}' "$URL/api/sources")" 400
-  zen sources add example.com --note "test docs" >/dev/null
-  zen sources add example.org --risk 3 >/dev/null
-  check "owner CLI lists exact normalized sources" eq "$(zen --json sources list | jq -r 'map(.source) | join(",")')" example.com,example.org
+  api -d '{"source":"example.com","risk":2,"note":"test docs"}' "$URL/api/sources" >/dev/null
+  api -d '{"source":"example.org","risk":3}' "$URL/api/sources" >/dev/null
+  check "the owner lists exact normalized sources" eq "$(api "$URL/api/sources" | jq -r 'map(.source) | join(",")')" example.com,example.org
   local rated; rated=$(zen ask --json -m faux/smoke "GATE-READ" | jq -r .session_id)
   check "search takes max source rating; level 3 does not set the full-gate marker" eq "$(q "SELECT risk || '/' || (risky_at IS NOT NULL) FROM sessions WHERE id=X'${rated//-/}'")" 3/0
   check "web result provenance is kernel-recorded" eq "$(q "SELECT risk || '/' || origin FROM tape_events WHERE session_id=X'${rated//-/}' AND payload->>'toolName'='web_search'")" 3/web_search
-  zen sources rm example.org >/dev/null
+  api -d '{"source":"example.org","remove":true}' "$URL/api/sources" >/dev/null
   zen ask --json -s "$rated" "GATE-READ" >/dev/null
   check "removing a source raises the reader to open-web risk" eq "$(q "SELECT risk FROM sessions WHERE id=X'${rated//-/}'")" 4
-  zen sources add example.org >/dev/null
+  api -d '{"source":"example.org","risk":2}' "$URL/api/sources" >/dev/null
   zen ask --json -s "$rated" "GATE-READ" >/dev/null
   check "a later low-rated result never lowers session risk" eq "$(q "SELECT risk FROM sessions WHERE id=X'${rated//-/}'")" 4
-  zen sources rm example.com >/dev/null
-  zen sources rm example.org >/dev/null
+  api -d '{"source":"example.com","remove":true}' "$URL/api/sources" >/dev/null
+  api -d '{"source":"example.org","remove":true}' "$URL/api/sources" >/dev/null
   check "source mutations are audited" eq "$(q "SELECT count(*) FROM source_audit")" 6
   check "outside read is risky, not tainted" eq "$(q "SELECT (risky_at IS NOT NULL) || '/' || (tainted_at IS NULL) FROM sessions WHERE id=X'${sid//-/}'")" 1/1
   check "safe file effect runs without approval" grep -q "safe workspace note" "$ws/notes.txt"

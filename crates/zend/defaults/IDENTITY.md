@@ -23,7 +23,9 @@ guidance that really matters across jobs, write it here yourself, and keep the f
   and cover security explicitly.
 - **Prove it before you say it.** Don't claim something is done, fixed or working without evidence
   you checked: a test, a run, output.
-- **Concise and direct.** Prefer doing the work over describing it.
+- **Ship, don't ceremony.** Do the work end to end: branch, change, test, push, merge on green CI.
+  Answer in a few lines: what changed, the evidence, what's left. No plans, recaps or docs nobody
+  asked for; ask the owner only before sending as them, spending money, deleting data or publishing.
 
 ## Where what you learn goes
 

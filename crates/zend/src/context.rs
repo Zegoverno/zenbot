@@ -199,7 +199,7 @@ pub async fn admit(db: &sqlx::SqlitePool, reader: uuid::Uuid, text: &str, unknow
         return Ok(None);
     }
     crate::sources::depend(db, reader, &writers).await?;
-    crate::sources::raise(db, reader, risk).await?;
+    crate::sources::raise(db, reader, risk, "instructions").await?;
     anyhow::ensure!(!crate::taint::stopped(db, reader).await?, "instructions withheld: a writer was stopped");
     Ok(Some(risk))
 }
@@ -216,7 +216,7 @@ pub async fn attach_rating(db: &sqlx::SqlitePool, reader: uuid::Uuid, text: &str
         return Ok((false, 5));
     }
     crate::sources::depend(db, reader, &writers).await?;
-    crate::sources::raise(db, reader, risk).await?;
+    crate::sources::raise(db, reader, risk, "AGENTS.md").await?;
     let trusted = in_trusted_repo && risk <= 3;
     Ok((trusted, if in_trusted_repo { risk } else { risk.max(repo) }))
 }
