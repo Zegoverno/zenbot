@@ -1,0 +1,14 @@
+# `web_search`: how likely each result is to help; the caller orders results by it and shows it.
+name = "web_rerank"
+version = 1
+description = "Is this search result likely to help answer the query?"
+exposure = "outside"
+evidence = ["query"]
+item = "result"
+timeout = "30s"
+
+[question.helps]
+type = "yes/no"
+text = "Is {item} likely to help answer `query`?"
+yes = "Relevant and likely useful"
+no = "Off-topic, spam or unlikely to help"

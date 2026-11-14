@@ -1,0 +1,14 @@
+[
+ {"when":"P3-SLOW","tool":"bash","args":{"command":"sleep 2; echo slow"}},
+ {"when":"P3-QUEUED","tool":"write","args":{"path":"queued.txt","content":"queued"}},
+ {"when":"P3-BASE","tool":"bash","args":{"command":"sleep 2; echo base"}},
+ {"when":"P3-BASE","tool":"write","args":{"path":"should-not-run.txt","content":"late"}},
+ {"when":"P3-CORRECT","tool":"write","args":{"path":"steered.txt","content":"steered"}},
+ {"when":"P3-INCIDENT","tool":"bash","args":{"command":"curl -sf --noproxy '' http://127.0.0.1:STUBPORT/ping"}},
+ {"when":"P3-INCIDENT","tool":"write","args":{"path":"out/notes.json","content":"readings"}},
+ {"when":"P3-HOLD","tool":"web_search","args":{"query":"lighthouse"}},
+ {"when":"P3-HOLD","tool":"write","args":{"path":"out/held.json","content":"approved"}},
+ {"when":"The owner approved held action","tool":"write","args":{"path":"out/held.json","content":"approved"}},
+ {"when":"P3-WRITE","tool":"write","args":{"path":"out/aligned.json","content":"aligned"}},
+ {"text":"Delivered."}
+]

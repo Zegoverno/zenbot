@@ -1,0 +1,13 @@
+{
+  "description": "A script job (D-073): a fixed command on a schedule, with no model; its output is the report, and the run records its command and exit code. A build without script jobs can't create it.",
+  "areas": ["jobs"],
+  "work": "maintain",
+  "steps": [
+    { "job": { "name": "open-count", "command": "python3 count.py" } }
+  ],
+  "checks": [
+    { "name": "the run is ok", "run": "jq -e 'select(.status == \"ok\")' \"$JOBS\" >/dev/null" },
+    { "name": "its output is the report", "answer_contains": "2 open tasks" },
+    { "name": "the run records its command and exit code", "run": "jq -e 'select(.command == \"python3 count.py\" and .exit_code == 0)' \"$JOBS\" >/dev/null" }
+  ]
+}

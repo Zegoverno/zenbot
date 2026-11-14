@@ -1,0 +1,116 @@
+[
+  {
+    "when": "garry try",
+    "tool": "bash",
+    "args": {
+      "command": "echo should-not-run"
+    }
+  },
+  {
+    "when": "garry try",
+    "tool": "read",
+    "args": {
+      "path": "ZENHOME/agents/garry/SOUL.md"
+    }
+  },
+  {
+    "when": "garry try",
+    "tool": "find_tools",
+    "args": {
+      "query": "echo"
+    }
+  },
+  {
+    "when": "widen",
+    "tool": "write",
+    "args": {
+      "path": "ZENHOME/agents/garry/agent.toml",
+      "content": "description = \"wider\"\n"
+    }
+  },
+  {
+    "when": "widen",
+    "tool": "edit",
+    "args": {
+      "path": "ZENHOME/agents/garry/SOUL.md",
+      "old_text": "Lines you don't cross",
+      "new_text": "Lines"
+    }
+  },
+  {
+    "when": "schedule as",
+    "tool": "schedule",
+    "args": {
+      "action": "create",
+      "name": "garry-escalates",
+      "schedule": "every 2h",
+      "prompt": "x",
+      "agent": "zenbot"
+    }
+  },
+  {
+    "when": "hijack",
+    "tool": "schedule",
+    "args": {
+      "action": "update",
+      "name": "zen-daily",
+      "prompt": "do something only zenbot may"
+    }
+  },
+  {
+    "when": "hijack",
+    "tool": "schedule",
+    "args": {
+      "action": "run",
+      "name": "zen-daily"
+    }
+  },
+  {
+    "when": "hijack",
+    "tool": "schedule",
+    "args": {
+      "action": "create",
+      "name": "garry-shell",
+      "schedule": "every 2h",
+      "command": "echo shell"
+    }
+  },
+  {
+    "when": "hijack",
+    "tool": "schedule",
+    "args": {
+      "action": "create",
+      "name": "garry-own",
+      "schedule": "every 2h",
+      "prompt": "review my ideas"
+    }
+  },
+  {
+    "when": "hijack",
+    "tool": "schedule",
+    "args": {
+      "action": "update",
+      "name": "garry-own",
+      "prompt": "review them harder"
+    }
+  },
+  {
+    "text": "Done."
+  },
+  {
+    "when": "hand garry",
+    "tool": "delegate",
+    "args": {
+      "task": "review this idea",
+      "agent": "garry"
+    }
+  },
+  {
+    "when": "hand garry",
+    "tool": "delegate",
+    "args": {
+      "task": "x",
+      "agent": "nobody"
+    }
+  }
+]

@@ -1,0 +1,43 @@
+[Unit]
+Description=zenbot Matrix channel (zen-matrix: the owner's Matrix rooms <-> zen sessions)
+After=network-online.target zenbot.service
+Wants=network-online.target
+# Inert until set up (scripts/matrix.sh, INSTALL.md, "Matrix").
+ConditionPathExists=__HOME__/.zenbot/matrix/session.json
+
+[Service]
+Type=simple
+User=__USER__
+Environment=HOME=__HOME__
+ExecStart=__HOME__/.zenbot/bin/zen-matrix run
+Restart=always
+RestartSec=10
+# It needs its binary, the kernel's token and port, its settings and its own folder: the home
+# folder is an empty tmpfs with exactly those bound in (the folder read-write, the rest read-only).
+ProtectHome=tmpfs
+BindReadOnlyPaths=__HOME__/.zenbot/bin/zen-matrix __HOME__/.zenbot/token -__HOME__/.zenbot/env -__HOME__/.zenbot/matrix.env
+BindPaths=__HOME__/.zenbot/matrix
+ProtectSystem=strict
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

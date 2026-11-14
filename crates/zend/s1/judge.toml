@@ -1,0 +1,15 @@
+# The brain's `judge` tool: its own question over up to 200 items. The question and its type come
+# from the brain at call time; this file sets the models, timeout and size. Information only: the
+# answers never approve or lower anything.
+name = "judge"
+version = 1
+description = "The brain's own quick judgments over many items."
+exposure = "information"
+evidence = ["context"]
+item = "item"
+timeout = "30s"
+max_state_chars = 150000
+
+[question.answer]
+type = "yes/no"
+text = "Given by the brain at call time."

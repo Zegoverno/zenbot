@@ -1,0 +1,153 @@
+//! Helpers shared by the tests: a temporary folder, an `App` on a fake terminal, and sessions for
+//! the board.
+
+use std::path::{Path, PathBuf};
+
+use super::*;
+
+/// A fresh temporary folder, removed when dropped, so a failing test doesn't leave it behind.
+pub struct TempDir(PathBuf);
+
+impl TempDir {
+    pub fn new(name: &str) -> TempDir {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("zen-test-{name}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        TempDir(dir)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    pub fn join(&self, rel: &str) -> PathBuf {
+        self.0.join(rel)
+    }
+
+    /// Write `text` to `rel` inside the folder (creating its parents) and return its path.
+    pub fn file(&self, rel: &str, text: &str) -> PathBuf {
+        let path = self.0.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// An app on a fake terminal of `cols` x `rows`, capturing output, with no kernel behind it.
+pub(super) fn app(cols: usize, rows: usize) -> App {
+    let c = Client::new("http://127.0.0.1:9", Some("test".into())).unwrap();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut a = App::new(c, tx, "claude/claude-opus-5-5".into(), "claude/claude-opus-5-5".into(), vec![], None, (cols, rows), false);
+    a.capture = Some(String::new());
+    a
+}
+
+/// An app with a model list: one model with thinking levels (default high), one without.
+pub(super) fn app_with_models(cols: usize, rows: usize) -> App {
+    let mut a = app(cols, rows);
+    a.models = vec![
+        json!({ "id": "claude/claude-opus-5-5", "efforts": ["low", "medium", "high", "xhigh", "max"], "default_effort": "high" }),
+        json!({ "id": "faux/smoke" }),
+    ];
+    a
+}
+
+pub(super) fn footer(a: &App) -> String {
+    texts(&a.compose().0).last().cloned().unwrap_or_default()
+}
+
+pub(super) fn texts(lines: &[Line]) -> Vec<String> {
+    lines.iter().map(|l| l.iter().map(|(t, _)| t.as_str()).collect()).collect()
+}
+
+/// The screen's rows as plain text, without escape codes (styles split words across codes).
+pub(super) fn plain_rows(a: &App) -> Vec<String> {
+    a.screen.rows().iter().map(|r| {
+        let mut out = String::new();
+        let mut chars = r.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                // CSI: ESC [ params final-byte; OSC (a hyperlink): ESC ] ... ESC \
+                match chars.next() {
+                    Some('[') => {
+                        for d in chars.by_ref() {
+                            if ('@'..='~').contains(&d) {
+                                break;
+                            }
+                        }
+                    }
+                    Some(']') => {
+                        while chars.next().is_some_and(|d| d != '\x07' && d != '\\') {}
+                    }
+                    _ => {}
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }).collect()
+}
+
+pub(super) fn width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
+pub(super) async fn key(a: &mut App, code: KeyCode) {
+    a.on_key(KeyEvent::new(code, KeyModifiers::NONE)).await.unwrap();
+}
+
+pub(super) async fn typed(a: &mut App, text: &str) {
+    for ch in text.chars() {
+        key(a, KeyCode::Char(ch)).await;
+    }
+}
+
+pub(super) fn tool_turn(a: &mut App, n: usize) {
+    for i in 0..n {
+        a.on_event(json!({ "type": "tool_start", "name": "bash", "args": { "command": format!("step {i}") } }));
+        a.on_event(json!({ "type": "message", "message": { "role": "assistant", "content": [{ "type": "toolCall", "name": "bash", "arguments": { "command": format!("step {i}") } }] } }));
+        a.on_event(json!({ "type": "tool_end" }));
+        a.on_event(json!({ "type": "message", "message": { "role": "toolResult", "content": [{ "type": "text", "text": format!("out {i}a\nout {i}b") }] } }));
+    }
+}
+
+/// The board's clock in tests.
+pub(super) const NOW: &str = "2026-10-09T12:00:00Z";
+
+/// A session as the board gets it, with `extra` fields over the defaults.
+pub(super) fn s(id: &str, title: &str, extra: Value) -> Value {
+    let mut v = json!({ "id": id, "title": title, "model": "claude/claude-opus-5-5", "archived": false, "kind": null, "parent": null, "busy": false, "updated_at": "2026-10-09T11:00:00Z" });
+    for (k, x) in extra.as_object().unwrap() {
+        v[k] = x.clone();
+    }
+    v
+}
+
+/// Sessions of every kind: idle, running with two children, a job, an archived one.
+pub(super) fn sample() -> Vec<Value> {
+    vec![
+        s("idle-main", "garden research", json!({ "updated_at": "2026-10-09T11:55:00Z" })),
+        s("busy-main", "sessions board feature", json!({})),
+        s("kid-1", "subagent: sessions board feature", json!({ "kind": "subagent", "parent": "busy-main", "busy": true, "task": "Read the kernel's\nsession code" })),
+        s("kid-2", "verifier: x", json!({ "kind": "verifier", "parent": "busy-main", "task": "Check the diff" })),
+        s("job-1", "job: sleep", json!({ "kind": "job" })),
+        s("old", "archived thing", json!({ "archived": true })),
+    ]
+}
+
+/// An app on the board, with `sample` sessions as of `NOW`.
+pub(super) fn board_app(cols: usize, rows: usize) -> App {
+    let mut a = app(cols, rows);
+    let mut b = Board { sessions: Some(sample()), ..Board::default() };
+    b.rebuild(epoch_secs(NOW).unwrap(), 0);
+    a.board = Some(b);
+    a.draw();
+    a
+}

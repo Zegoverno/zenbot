@@ -1,0 +1,200 @@
+//! Self-update: notice when origin/main has moved past the running version, and run
+//! scripts/self-update.sh (pull + upgrade.sh) on request. The restart itself is done by
+//! upgrade.sh once no session is working, so the kernel only has to start the job.
+
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
+use tokio::sync::Mutex;
+
+use crate::git::git;
+
+pub struct Updater {
+    repo: PathBuf,
+    last_check: Mutex<Value>,
+    job: Arc<Mutex<Option<Job>>>,
+}
+
+struct Job {
+    started_at: String,
+    status: &'static str, // running | scheduled | failed
+    log: String,
+}
+
+fn now() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+impl Updater {
+    pub fn new(repo: PathBuf) -> Self {
+        Updater { repo, last_check: Mutex::new(Value::Null), job: Arc::default() }
+    }
+
+    /// The installed commit (~/.zenbot/version). Read each time: apply-upgrade.sh writes it only
+    /// after the new kernel has passed its health check, so it can change after startup.
+    pub fn running(&self) -> String {
+        std::fs::read_to_string(crate::zen_home().join("version")).unwrap_or_default().trim().to_string()
+    }
+
+    /// The last check's result (without checking again).
+    pub async fn info(&self) -> Value {
+        let last = self.last_check.lock().await.clone();
+        if last.is_null() {
+            json!({ "running": self.running(), "checked_at": null })
+        } else {
+            last
+        }
+    }
+
+    /// Fetch origin/main and compare it with the running version.
+    pub async fn check(&self) -> Value {
+        let repo = &self.repo;
+        let result = async {
+            if !crate::git::fetch_github(repo, "origin", "main").await {
+                return Err("could not fetch origin/main (offline, or not signed in to GitHub: gh auth status)");
+            }
+            let latest = git(repo, &["rev-parse", "origin/main"]).await.ok_or("no origin/main")?;
+            let running = self.running();
+            let base = if running.is_empty() { "HEAD".to_string() } else { running };
+            let running_full = git(repo, &["rev-parse", &format!("{base}^{{commit}}")]).await.ok_or("running version is not in the repository")?;
+            let range = format!("{running_full}..{latest}");
+            let behind: u64 = git(repo, &["rev-list", "--count", &range]).await.and_then(|n| n.parse().ok()).unwrap_or(0);
+            let commits: Vec<String> = git(repo, &["log", "--format=%h %s", "-n", "15", &range])
+                .await
+                .unwrap_or_default()
+                .lines()
+                .map(String::from)
+                .collect();
+            Ok::<Value, &str>(json!({
+                "running": short(&running_full),
+                "latest": short(&latest),
+                "behind": behind,
+                "available": behind > 0,
+                "commits": commits,
+            }))
+        }
+        .await;
+        let mut info = match result {
+            Ok(v) => v,
+            Err(e) => json!({ "running": self.running(), "error": e }),
+        };
+        info["checked_at"] = json!(now());
+        *self.last_check.lock().await = info.clone();
+        info
+    }
+
+    /// Check now and then every ZEN_UPDATE_CHECK_SECS (default an hour; 0 turns it off).
+    pub async fn check_periodically(self: Arc<Self>) {
+        let every = crate::config::get().update_check_secs;
+        if every == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        loop {
+            let info = self.check().await;
+            if info["available"] == true {
+                tracing::info!("update available: {} -> {} ({} commits)", info["running"], info["latest"], info["behind"]);
+            }
+            tokio::time::sleep(Duration::from_secs(every)).await;
+        }
+    }
+
+    /// Start scripts/self-update.sh in the background. Errors if one is already running.
+    pub async fn start(&self) -> Result<String, String> {
+        let mut slot = self.job.lock().await;
+        if slot.as_ref().is_some_and(|j| j.status == "running") {
+            return Err("an upgrade is already running".into());
+        }
+        let mut child = Command::new("bash")
+            .arg(self.repo.join("scripts/self-update.sh"))
+            .current_dir(&self.repo)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("cannot start scripts/self-update.sh: {e}"))?;
+        let started_at = now();
+        *slot = Some(Job { started_at: started_at.clone(), status: "running", log: String::new() });
+        drop(slot);
+
+        let job = self.job.clone();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        tokio::spawn(async move {
+            let append = |job: Arc<Mutex<Option<Job>>>, pipe: Option<Box<dyn tokio::io::AsyncRead + Unpin + Send>>| async move {
+                let Some(pipe) = pipe else { return };
+                let mut lines = BufReader::new(pipe).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if let Some(j) = job.lock().await.as_mut() {
+                        j.log.push_str(&line);
+                        j.log.push('\n');
+                        keep_tail(&mut j.log, LOG_CAP);
+                    }
+                }
+            };
+            let out = append(job.clone(), stdout.map(|p| Box::new(p) as _));
+            let err = append(job.clone(), stderr.map(|p| Box::new(p) as _));
+            let (status, _, _) = tokio::join!(child.wait(), out, err);
+            if let Some(j) = job.lock().await.as_mut() {
+                j.status = if status.is_ok_and(|s| s.success()) { "scheduled" } else { "failed" };
+            }
+        });
+        Ok(started_at)
+    }
+
+    /// The current job (if this kernel started one) and the last line of ~/.zenbot/upgrade.log.
+    pub async fn status(&self) -> Value {
+        let job = self.job.lock().await.as_ref().map(|j| json!({ "started_at": j.started_at, "status": j.status, "log": j.log }));
+        let last = std::fs::read_to_string(crate::zen_home().join("upgrade.log"))
+            .unwrap_or_default()
+            .lines()
+            .rev()
+            .find(|l| l.starts_with("20"))
+            .unwrap_or("")
+            .to_string();
+        json!({ "running": self.running(), "job": job, "last_result": last })
+    }
+}
+
+/// How much of an upgrade's output the kernel keeps for `GET /api/upgrade`: its end, where the result is.
+const LOG_CAP: usize = 64 * 1024;
+
+/// Cut `log` to about its last `cap` bytes, at a line start when there is one.
+fn keep_tail(log: &mut String, cap: usize) {
+    if log.len() <= cap {
+        return;
+    }
+    let mut cut = log.ceil_char_boundary(log.len() - cap);
+    if let Some(nl) = log[cut..].find('\n').filter(|&i| i + 1 < log.len() - cut) {
+        cut += nl + 1;
+    }
+    log.drain(..cut);
+}
+
+fn short(sha: &str) -> String {
+    sha.chars().take(7).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_log_keeps_its_end() {
+        let mut log = String::new();
+        for i in 0..10_000 {
+            log.push_str(&format!("line {i} é\n"));
+            keep_tail(&mut log, 1000);
+        }
+        assert!(log.len() <= 1000);
+        assert!(log.starts_with("line ") && log.ends_with("line 9999 é\n"), "whole lines, the newest kept");
+        let mut one = "x".repeat(5000);
+        keep_tail(&mut one, 1000);
+        assert_eq!(one.len(), 1000, "a single long line is cut too");
+    }
+}

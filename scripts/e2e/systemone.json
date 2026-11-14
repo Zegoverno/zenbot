@@ -1,0 +1,65 @@
+[
+ {
+  "tool": "judge",
+  "args": {
+   "question": "Did this pass?",
+   "type": "yes/no",
+   "items": [
+    "The build passed",
+    "The deploy passed",
+    "Tests failed"
+   ],
+   "context": "CI results"
+  },
+  "when": "decide directly"
+ },
+ {
+  "tool": "judge",
+  "args": {
+   "question": "What kind of event is it?",
+   "type": "choice",
+   "options": [
+    "build",
+    "other"
+   ],
+   "items": [
+    "The build passed"
+   ]
+  },
+  "when": "decide directly"
+ },
+ {
+  "text": "Done.",
+  "when": "decide directly"
+ },
+ {
+  "tool": "judge",
+  "args": {
+   "question": "Did this pass?",
+   "items": [
+    "The build passed"
+   ]
+  },
+  "when": "judge without System One"
+ },
+ {
+  "text": "Done.",
+  "when": "judge without System One"
+ },
+ {
+  "when": "grow the profile",
+  "tool": "write",
+  "args": {
+   "path": "~/.zenbot/USER.md",
+   "content": "# USER.md\n\nThe owner wrote a long profile line that the agent will have to compact. The owner wrote a long profile line that the agent will have to compact. The owner wrote a long profile line that the agent will have to compact. The owner wrote a long profile line that the agent will have to compact. The owner wrote a long profile line that the agent will have to compact. The owner wrote a long profile line that the agent will have to compact. The owner wrote a long profile line that the agent will have to compact. The owner wrote a long profile line that the agent will have to compact. The owner wrote a long profile line that the agent will have to compact. The owner wrote a long profile line that the agent will have to compact. The owner wrote a long profile line that the agent will have to compact. The owner wrote a long profile line that the agent will have to compact. The owner wrote a long profile line that the agent will have to compact. The owner wrote a long profile line that the agent will have to compact. The owner wrote a long profile line that the agent will have to compact. The owner wrote a long profile line that the agent will have to compact. The owner wrote a long profile line that the agent will have to compact. The owner wrote a long profile line that the agent will have to compact. The owner wrote a long profile line that the agent will have to compact. The owner wrote a long profile line that the agent will have to compact.\n"
+  }
+ },
+ {
+  "when": "grow the profile",
+  "text": "Done."
+ },
+ {
+  "when": "Compact USER.md",
+  "text": "<<<FILE\n# USER.md\n\nCompacted by the e2e: only what matters stays. only what matters stays. only what matters stays. only what matters stays. only what matters stays. only what matters stays. only what matters stays. only what matters stays. only what matters stays. only what matters stays. only what matters stays. only what matters stays.\nFILE>>>"
+ }
+]

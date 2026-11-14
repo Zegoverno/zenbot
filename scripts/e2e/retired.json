@@ -1,0 +1,40 @@
+[
+  {
+    "tool": "capture",
+    "args": {
+      "title": "Retired",
+      "note": "Must not write"
+    }
+  },
+  {
+    "tool": "save_tool",
+    "args": {
+      "name": "retired",
+      "command": "touch EXECUTED"
+    }
+  },
+  {
+    "tool": "search",
+    "args": {
+      "query": "TAILMARK likelihood",
+      "scope": "knowledge"
+    }
+  },
+  {
+    "tool": "brain",
+    "args": {
+      "action": "put",
+      "record": {"id": "new-concept", "store": "knowledge", "kind": "concept", "title": "New concept", "body": "Must become a wiki page."}
+    }
+  },
+  {
+    "tool": "brain",
+    "args": {
+      "action": "get",
+      "id": "old-claim"
+    }
+  },
+  {
+    "text": "Done."
+  }
+]

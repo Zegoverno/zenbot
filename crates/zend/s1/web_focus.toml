@@ -1,0 +1,35 @@
+# `web_fetch` with a focus: which parts of the page reach the brain. Outside content, so it can
+# only cut: a part is dropped when it's unlikely to help, kept otherwise (and when unanswered).
+name = "web_focus"
+version = 1
+description = "Does this part of a page help with what the brain needs?"
+exposure = "outside"
+evidence = ["need"]
+item = "part"
+timeout = "30s"
+unavailable = "keep"
+
+[question.helps]
+type = "yes/no"
+text = "Does {item} of the page contain information that helps with `need`?"
+yes = "It bears on the need"
+no = "Navigation, boilerplate or off-topic"
+
+[policy]
+kind = "rules"
+else = "keep"
+
+[[policy.rule]]
+when = "helps < 0.5"
+decide = "drop"
+
+[[test]]
+answers = { helps = 0.3 }
+expect = "drop"
+
+[[test]]
+answers = { helps = 0.5 }
+expect = "keep"
+
+[[test]]
+expect = "keep"

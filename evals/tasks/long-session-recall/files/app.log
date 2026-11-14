@@ -1,0 +1,7 @@
+2026-09-20T08:00:01Z INFO  storage: starting replica sync
+2026-09-20T08:00:03Z INFO  storage: 1,204 blocks to verify
+2026-09-20T08:00:09Z WARN  storage: slow read on block 41 (220 ms)
+2026-09-20T08:00:14Z ERROR storage: checksum mismatch on block 88 (error E4127): expected 9f3a77c1, got 9f3a71c1
+2026-09-20T08:00:14Z INFO  storage: block 88 queued for repair
+2026-09-20T08:00:21Z WARN  net: retrying peer 10.0.0.7 (timeout, error E2210)
+2026-09-20T08:00:30Z INFO  storage: sync finished: 1,203 ok, 1 queued for repair

@@ -1,0 +1,115 @@
+//! Helpers shared by the kernel, the engine worker and the CLI, so they read messages the same way.
+//! Messages use Pi's format (MAP.md, "Worker protocol"): `content` is a string or a list of parts.
+//! `client` types the client protocol's events (MAP.md, "Client protocol"), `worker` the worker
+//! protocol's messages (MAP.md, "Worker protocol").
+
+use serde::{Deserialize, Deserializer};
+use serde_json::Value;
+
+pub mod client;
+pub mod worker;
+
+/// A field that may be missing or `null`: its default then.
+pub(crate) fn or_default<'de, D: Deserializer<'de>, T: Default + Deserialize<'de>>(d: D) -> Result<T, D::Error> {
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
+/// The text of a message's content: a string as is, or its text parts joined by newlines.
+pub fn text_of(content: &Value) -> String {
+    match content {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts.iter().filter(|p| p["type"] == "text").filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// Whether `c` is an invisible format character that can hide or reorder what the owner reads:
+/// bidirectional controls (U+061C, U+200E/F, U+202A–E, U+2066–9), zero-width space,
+/// word joiner and invisible operators (U+200B, U+2060–4), the byte-order mark (U+FEFF), the
+/// Mongolian vowel separator (U+180E), tag characters (U+E0000–E007F) and the supplementary
+/// variation selectors (U+E0100–E01EF). Zero-width (non-)joiners (U+200C/D: Persian, Indic,
+/// emoji sequences) and the emoji variation selectors (U+FE0E/F) stay.
+pub fn invisible(c: char) -> bool {
+    matches!(c, '\u{061C}' | '\u{180E}' | '\u{200B}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}'
+        | '\u{2066}'..='\u{2069}' | '\u{FEFF}' | '\u{E0000}'..='\u{E007F}' | '\u{E0100}'..='\u{E01EF}')
+}
+
+/// `s` without its `invisible` characters, borrowed when there are none.
+pub fn visible(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.contains(invisible) { std::borrow::Cow::Owned(s.chars().filter(|c| !invisible(*c)).collect()) } else { std::borrow::Cow::Borrowed(s) }
+}
+
+/// Tools that only read: the kernel lets calls to these overlap within a turn, and the
+/// Claude bridge marks them `readOnlyHint` so Claude Code sends them together. Every other tool
+/// (writes, the shell, outward actions, MCP calls) runs alone, in the order the calls came.
+pub const READ_ONLY_TOOLS: &[&str] = &["read", "history", "search", "web_search", "web_fetch", "find_skills", "load_skill", "find_tools", "load_tool", "judge"];
+
+pub fn read_only_tool(name: &str) -> bool {
+    READ_ONLY_TOOLS.contains(&name)
+}
+
+/// What the kernel's provenance record of a result hashes: its text, then each image's media type
+/// and data. A text-only result digests as its text, so older records still match.
+pub fn digest_text(content: &Value) -> String {
+    let mut text = text_of(content);
+    for part in content.as_array().into_iter().flatten().filter(|p| p["type"] == "image") {
+        text.push_str(&format!("\n[image {} {}]", part["mimeType"].as_str().unwrap_or(""), part["data"].as_str().unwrap_or("")));
+    }
+    text
+}
+
+/// The first `max` characters of `s`, saying how much was left out.
+pub fn head(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    let kept: String = s.chars().take(max).collect();
+    format!("{kept} [… {} more characters]", n - max)
+}
+
+/// The last `max` characters of `s` (where errors and results usually are).
+pub fn tail(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    s.chars().skip(n - max).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn invisible_characters_go_and_joiners_stay() {
+        for c in ['\u{202E}', '\u{2066}', '\u{200B}', '\u{200E}', '\u{FEFF}', '\u{E0041}', '\u{E0100}', '\u{061C}', '\u{2060}'] {
+            assert_eq!(visible(&format!("a{c}b")), "ab", "U+{:04X}", c as u32);
+        }
+        let family = "👨\u{200D}👩\u{200D}👧";
+        assert!(matches!(visible(family), std::borrow::Cow::Borrowed(_)), "emoji ZWJ sequences stay whole");
+        assert_eq!(visible("می\u{200C}خواهم"), "می\u{200C}خواهم", "Persian ZWNJ stays");
+        assert_eq!(visible("❤\u{FE0F}"), "❤\u{FE0F}", "emoji presentation stays");
+    }
+
+    #[test]
+    fn only_reading_tools_may_overlap() {
+        for t in ["read", "search", "web_fetch", "load_tool"] {
+            assert!(read_only_tool(t), "{t}");
+        }
+        for t in ["bash", "write", "edit", "remember", "brain", "call_tool", "delegate", "schedule", "ask", "verify", "save_skill"] {
+            assert!(!read_only_tool(t), "{t} changes something: it runs alone");
+        }
+    }
+
+    #[test]
+    fn text_and_cuts() {
+        assert_eq!(text_of(&json!("hi")), "hi");
+        assert_eq!(text_of(&json!([{ "type": "text", "text": "a" }, { "type": "thinking", "thinking": "x" }, { "type": "text", "text": "b" }])), "a\nb");
+        assert_eq!(text_of(&json!(null)), "");
+        assert_eq!(head("héllo", 2), "hé [… 3 more characters]");
+        assert_eq!(head("hi", 5), "hi");
+        assert_eq!(tail("héllo", 3), "llo");
+    }
+}

@@ -1,0 +1,6 @@
+name = "ledger"
+port = 7342
+
+[db]
+path = "data/ledger.sqlite"
+retries = 3

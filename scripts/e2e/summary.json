@@ -1,0 +1,4 @@
+{ "default": [
+    {"tool": "bash", "args": {"command": "echo 'FACT: the error code is E4127'; head -c 6000 /dev/zero | tr '\\0' 'x'"}},
+    {"tool": "history", "args": {"query": "E4127"}},
+    {"text": "Done. FACT: block 88"}] }

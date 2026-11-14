@@ -1,0 +1,7 @@
+[
+  {"when": "quick", "tool": "search", "args": {"query": "lighthouse keeper", "scope": "memories"}},
+  {"when": "compare", "tool": "search", "args": {"query": "crates/fixture/engine_core.rs"}},
+  {"when": "compare", "tool": "search", "args": {"query": "lighthouse keeper harbour", "scope": "memories"}},
+  {"when": "compare", "tool": "search", "args": {"query": "automobile", "scope": "memories"}},
+  {"text": "Done."}
+]

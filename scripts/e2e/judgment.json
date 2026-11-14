@@ -1,0 +1,66 @@
+{
+  "default": [
+    {
+      "tool": "write",
+      "args": {
+        "path": "done.txt",
+        "content": "ok"
+      }
+    },
+    {
+      "tool": "verify",
+      "args": {
+        "goal": "no done.txt -> done.txt exists and reads well",
+        "summary": "created done.txt",
+        "criteria": [
+          {
+            "text": "done.txt exists",
+            "run": "test -f TARGET && echo present",
+            "expect": "present"
+          },
+          {
+            "text": "done.txt reads well"
+          }
+        ]
+      }
+    },
+    {
+      "text": "Checked."
+    }
+  ],
+  "verify": [
+    {
+      "tool": "bash",
+      "args": {
+        "command": "pwd; ls"
+      }
+    },
+    {
+      "tool": "write",
+      "args": {
+        "path": "verifier-wrote.txt",
+        "content": "x"
+      }
+    },
+    {
+      "tool": "submit_verdict",
+      "args": {
+        "criteria": [
+          {
+            "id": "c1",
+            "verdict": "pass",
+            "evidence": "in the diff"
+          },
+          {
+            "id": "c2",
+            "verdict": "uncertain",
+            "evidence": "taste"
+          }
+        ]
+      }
+    },
+    {
+      "text": "Done."
+    }
+  ]
+}

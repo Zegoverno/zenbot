@@ -1,0 +1,36 @@
+# What this agent may use. The owner's file: the agent can't change it. Every key is optional;
+# a missing one means "as zenbot has it". Settings only narrow what zenbot has.
+
+description = "{{description}}"
+
+# Built-in tools it may use (missing: all of them). Tools: bash, read, write, edit, history,
+# search, ask, remember, brain, web_search, web_fetch, find_skills, load_skill, save_skill,
+# find_tools, load_tool, call_tool, verify, delegate, schedule, judge.
+# Its bash and file tools run sandboxed: they reach only its workspace, its vault, this folder
+# (this file, SOUL.md and mcp.json read-only), the system folders and the paths below.
+# Its bash has the internet but not the host's own services (127.0.0.1).
+# tools = ["read", "search", "history", "ask", "web_search", "web_fetch", "find_skills", "load_skill", "remember"]
+# deny = ["schedule"]
+
+# Global MCP servers from ~/.zenbot/mcp.json it may use (they run as the owner, outside its
+# sandbox): missing or [] means none. Its own servers (mcp.json next to this file) are always its.
+# mcp = ["github"]
+
+# The global vault (the owner's wiki, records and long-term memory): "none" (default: only its
+# own vault, agents/<name>/ under it), "read", or "write". Its own vault is always its own.
+# global = "none"
+
+# Its own skills live in skills/ next to this file; set false to hide the shared ones.
+# shared_skills = true
+
+# Where its sessions start: a model (<engine>/<model>) and a workspace.
+# model = "claude/claude-opus-5-5"
+# workspace = "~/garry"       # missing: its own folder's work/
+
+# Paths it may read or write besides its own (`~` allowed; nothing of ~/.zenbot but its own).
+# read = ["~/notes"]
+# write = ["~/garry-projects"]
+
+# Parts of the instructions besides its soul (missing: all):
+# identity, agents, user, memory, skills, project.
+# context = ["identity", "agents", "user", "memory", "skills", "project"]

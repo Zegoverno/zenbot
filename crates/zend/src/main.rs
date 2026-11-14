@@ -1,0 +1,355 @@
+//! zend — the zenbot kernel. Owns all state and all side effects.
+
+mod agent;
+mod agents;
+mod api;
+mod assist;
+mod compact;
+mod compile;
+mod config;
+mod context;
+mod defaults;
+mod layout;
+mod delegate;
+mod dispatch;
+mod git;
+mod jobs;
+mod mcp;
+mod mcp_interaction;
+mod measure;
+mod memory;
+mod brain;
+mod mind;
+mod s1;
+mod search;
+mod sandbox;
+mod secrets;
+mod skills;
+mod tape;
+mod tasks;
+mod work;
+mod storage;
+#[cfg(test)]
+mod test_util;
+mod tools;
+mod output;
+mod prices;
+mod media;
+mod turns;
+mod update;
+mod web;
+mod wiki;
+mod workers;
+mod workshop;
+
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use anyhow::Result;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{header, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::{Json, Router};
+use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use sqlx::{SqlitePool, Row};
+use tokio::sync::{broadcast, mpsc, watch, Mutex};
+use uuid::Uuid;
+
+use mind::{Incoming, Mind};
+
+use api::*;
+use dispatch::*;
+use turns::*;
+use workers::*;
+
+struct App {
+    db: SqlitePool,
+    workers: Vec<Worker>,
+    /// Names in ZEN_WORKERS that aren't known workers, ignored (shown by /health and `zen status`).
+    ignored_workers: Vec<String>,
+    /// model or classifier id -> index into `workers`
+    routes: Mutex<HashMap<String, usize>>,
+    /// model id -> its entry from `models.list` (name, efforts, default_effort, …)
+    catalog: Mutex<HashMap<String, Value>>,
+    turns: Mutex<HashMap<Uuid, Turn>>,
+    token: String,
+    workspace: PathBuf,
+    repo: String,
+    default_model: String,
+    /// What built this kernel, recorded with every turn: ZEN_HARNESS, else the installed commit.
+    harness: String,
+    /// Event channels of sessions with clients connected; removed when the last one leaves.
+    hubs: Mutex<HashMap<Uuid, broadcast::Sender<String>>>,
+    updater: Arc<update::Updater>,
+    /// Sessions whose summary is being prepared in the background.
+    compacting: Mutex<HashSet<Uuid>>,
+    finishing: Mutex<HashSet<Uuid>>,
+    starting_prompts: Mutex<HashSet<Uuid>>,
+    /// Kernel-started turns being waited for (verifier sessions), by session.
+    waiters: Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<()>>>,
+    /// Engine slots (`ZEN_ENGINE_CONCURRENCY` each): top-level background turns (job runs,
+    /// kernel sessions) wait for one; the owner's turns and completions take one when free and never
+    /// wait. Child turns (subagents, verifiers) have their own pool, so a parent holding a slot
+    /// never blocks its children.
+    engine_slots: Arc<tokio::sync::Semaphore>,
+    child_slots: Arc<tokio::sync::Semaphore>,
+    /// Per session, the order of its tool calls: read-only ones share it, any other holds it
+    /// alone.
+    tool_order: Mutex<HashMap<Uuid, Arc<tokio::sync::RwLock<()>>>>,
+    /// Kernel tasks running outside a turn (after a verdict: skill activation, scoring), counted as
+    /// busy so an upgrade waits for them. Held through `Background` guards.
+    pub(crate) background: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+type AppState = Arc<App>;
+
+/// zenbot's home on the host: ZEN_HOME, else `~/.zenbot` (prompt files, skills, outputs, …).
+pub(crate) fn zen_home() -> PathBuf {
+    // Unit tests never reach the owner's real home, even when one forgets to set ZEN_HOME.
+    if cfg!(test) && std::env::var_os("ZEN_HOME").is_none() {
+        return std::env::temp_dir().join(format!("zend-test-home-{}", std::process::id()));
+    }
+    std::env::var("ZEN_HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())).join(".zenbot"))
+}
+
+/// Where full outputs too long for a tool result are kept (`<zen home>/outputs`), created readable
+/// only by the owner. None when it can't be created.
+pub(crate) fn outputs_dir() -> Option<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = zen_home().join("outputs");
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).ok()?;
+    Some(dir)
+}
+
+/// Whether `n` is a valid name for a skill, a skill domain, a made tool or a job: lowercase letters,
+/// digits and single hyphens, not at either end (agentskills.io's rule for skill names), at most
+/// `max` bytes. The rule is the same everywhere; only the length differs (64 for skills and tools,
+/// from agentskills.io; 40 for jobs, which `zen jobs` shows in a column).
+pub(crate) fn valid_name(n: &str, max: usize) -> bool {
+    !n.is_empty() && n.len() <= max && n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') && !n.starts_with('-') && !n.ends_with('-') && !n.contains("--")
+}
+
+/// One unit of background work in `App::background`, released when dropped (even on a panic).
+pub(crate) struct Background(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for Background {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl App {
+    /// Count kernel work that runs outside a turn until the guard is dropped.
+    pub(crate) fn background_work(&self) -> Background {
+        self.background.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Background(self.background.clone())
+    }
+
+    /// Listen to a session's events (a client's WebSocket). Call `unsubscribe` when it closes.
+    async fn subscribe(&self, id: Uuid) -> broadcast::Receiver<String> {
+        self.hubs.lock().await.entry(id).or_insert_with(|| broadcast::channel(1024).0).subscribe()
+    }
+
+    /// Forget a session's hub once its last client has gone (the receiver must be dropped first).
+    async fn unsubscribe(&self, id: Uuid) {
+        let mut hubs = self.hubs.lock().await;
+        if hubs.get(&id).is_some_and(|h| h.receiver_count() == 0) {
+            hubs.remove(&id);
+        }
+    }
+
+    /// Send an event to a session's clients, if any are listening.
+    async fn emit(&self, id: Uuid, event: Value) {
+        if let Some(hub) = self.hubs.lock().await.get(&id) {
+            let _ = hub.send(event.to_string());
+        }
+    }
+
+    async fn is_busy(&self, id: Uuid) -> bool {
+        self.finishing.lock().await.contains(&id) || self.turns.lock().await.contains_key(&id)
+    }
+}
+
+fn main() -> Result<()> {
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(serve())
+}
+
+async fn serve() -> Result<()> {
+    tracing_subscriber::fmt().with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "zend=info".into())).init();
+    // The settings are read once, here (config.rs); a value that doesn't parse runs on its default.
+    for bad in &config::get().unparsed {
+        tracing::warn!("setting {bad} isn't a number: using its default");
+    }
+
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| format!("sqlite://{}", zen_home().join("zen.sqlite3").display()));
+    let token = std::env::var("ZEN_TOKEN").map_err(|_| anyhow::anyhow!("ZEN_TOKEN must be set"))?;
+    let port: u16 = std::env::var("ZEN_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8100);
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let workspace = PathBuf::from(std::env::var("ZEN_WORKSPACE").unwrap_or_else(|_| home.clone()));
+    let repo = std::env::var("ZEN_REPO").unwrap_or_else(|_| format!("{home}/zenbot"));
+    let repo_dir = repo.clone();
+    let default_model = std::env::var("ZEN_DEFAULT_MODEL").unwrap_or_else(|_| "claude/claude-opus-5-5".into());
+
+    tokio::fs::create_dir_all(&workspace).await?;
+    // Move an older flat layout first, so a default never takes the place of the owner's file.
+    for m in layout::migrate(&zen_home()) {
+        tracing::info!("moved {m} (a symlink stays at the old path)");
+    }
+    for f in defaults::install(&zen_home()) {
+        tracing::info!("installed default {}", zen_home().join(f).display());
+    }
+    let db = storage::connect(&database_url).await?;
+    mcp_interaction::recover(&db).await?;
+    // Codex turns older versions recorded: tokens counted once, an estimated cost.
+    match prices::backfill(&db).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("repriced {n} earlier Codex turns"),
+        Err(e) => tracing::warn!("repricing earlier Codex turns: {e:#}"),
+    }
+    // System One: decision files checked now (problems are logged), calibration curves loaded.
+    let _ = s1::status();
+    if tape::repair(&db).await? > 0 {
+        tracing::warn!("numbered tape blocks an older build wrote");
+    }
+
+    work::recover(&db).await?;
+
+    let updater = Arc::new(update::Updater::new(PathBuf::from(&repo_dir)));
+    let harness = std::env::var("ZEN_HARNESS").ok().filter(|h| !h.is_empty()).unwrap_or_else(|| updater.running());
+    let harness = if harness.is_empty() { "unknown".to_string() } else { harness };
+    let (merged_tx, incoming) = mpsc::unbounded_channel();
+    let mut workers = Vec::new();
+    let mut exits = Vec::new();
+    let (configs, ignored_workers) = worker_configs();
+    for (name, cmd, dir) in configs {
+        match Mind::spawn(&cmd, &dir).await {
+            Ok((mind, rx, exited)) => {
+                forward_worker(workers.len(), rx, merged_tx.clone());
+                tracing::info!("worker `{name}` started: {cmd}");
+                exits.push(exited);
+                workers.push(Worker { name, cmd, dir, mind: std::sync::RwLock::new(mind) });
+            }
+            Err(e) => tracing::error!("worker `{name}` failed to start: {e:#}"),
+        }
+    }
+    if workers.is_empty() {
+        anyhow::bail!("no workers could be started; check ZEN_WORKERS");
+    }
+    for name in &ignored_workers {
+        tracing::warn!("ZEN_WORKERS: `{name}` ignored (not a known worker); remove it from ~/.zenbot/env");
+    }
+    let app: AppState = Arc::new(App {
+        db,
+        workers,
+        ignored_workers,
+        routes: Mutex::new(HashMap::new()),
+        catalog: Mutex::new(HashMap::new()),
+        turns: Mutex::new(HashMap::new()),
+        token,
+        workspace,
+        repo,
+        default_model,
+        harness,
+        hubs: Mutex::new(HashMap::new()),
+        updater,
+        compacting: Mutex::new(HashSet::new()),
+        finishing: Mutex::new(HashSet::new()),
+        starting_prompts: Mutex::new(HashSet::new()),
+        waiters: Mutex::new(HashMap::new()),
+        engine_slots: Arc::new(tokio::sync::Semaphore::new(config::get().engine_concurrency)),
+        child_slots: Arc::new(tokio::sync::Semaphore::new(config::get().engine_concurrency)),
+        tool_order: Mutex::new(HashMap::new()),
+        background: Arc::default(),
+    });
+    tokio::spawn(app.updater.clone().check_periodically());
+    for (idx, exited) in exits.into_iter().enumerate() {
+        tokio::spawn(supervise(app.clone(), idx, exited, merged_tx.clone()));
+    }
+    tokio::spawn(dispatch(app.clone(), incoming));
+    tokio::spawn(watchdog(app.clone()));
+    tokio::spawn(turns::prompt_loop(app.clone()));
+    tokio::spawn(tape::mirror_loop(app.db.clone()));
+    tokio::spawn(search::index_loop(app.clone()));
+    tokio::spawn(jobs::run_loop(app.clone()));
+
+    let api = Router::new()
+        .route("/models", get(list_models))
+        .route("/complete", axum::routing::post(complete_once))
+        .route("/search", axum::routing::post(search_once))
+        .route("/s1", get(s1::api::stats))
+        .route("/s1/check", get(s1::api::check_files))
+        .route("/s1/models", get(s1::api::models))
+        .route("/s1/replay", axum::routing::post(s1::api::replay))
+        .route("/s1/compare", axum::routing::post(s1::api::compare))
+        .route("/sessions", get(list_sessions).post(create_session))
+        .route("/board", get(board))
+        .route("/agents", get(list_agents).post(create_agent))
+        .route("/agents/{name}", get(get_agent).put(update_agent).delete(delete_agent))
+        .route("/sessions/{id}", get(get_session).patch(update_session))
+        .route("/sessions/{id}/ws", get(session_ws))
+        .route("/sessions/{id}/decision", axum::routing::post(decide))
+        .route("/suggestions", get(assist::stats))
+        .route("/memory", get(list_memory))
+        .route("/brain", axum::routing::post(brain_action))
+        .route("/mcp", get(mcp_status))
+        .route("/mcp/login", axum::routing::post(mcp_login))
+        .route("/mcp/login/{flow}", axum::routing::post(mcp_login_finish))
+        .route("/mcp/pending", get(mcp_pending))
+        .route("/mcp/pending/{id}", axum::routing::post(mcp_respond))
+        .route("/skills", get(list_skills))
+        .route("/tasks", get(list_tasks))
+        .route("/tasks/{id}/agent", axum::routing::post(task_agent))
+        .route("/memory/sleep", axum::routing::post(run_sleep))
+        .route("/jobs", get(list_jobs).post(create_job))
+        .route("/jobs/runs", get(list_job_runs))
+        .route("/jobs/{name}", axum::routing::patch(update_job).delete(delete_job))
+        .route("/jobs/{name}/run", axum::routing::post(run_job))
+        .route("/version", get(version))
+        .route("/upgrade", get(upgrade_status).post(upgrade_start))
+        .route_layer(middleware::from_fn_with_state(app.clone(), auth));
+
+    let router = Router::new()
+        .route("/health", get(health))
+        .nest("/api", api)
+        .with_state(app);
+
+    // Localhost only unless ZEN_BIND says otherwise: anyone with the token can run commands.
+    let bind = std::env::var("ZEN_BIND").ok().filter(|b| !b.trim().is_empty()).unwrap_or_else(|| "127.0.0.1".into());
+    let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
+    tracing::info!("zend listening on {bind}:{port}");
+    axum::serve(listener, router).await?;
+    Ok(())
+}
+
+/// A session's messages in order, each with its block number (`seq`).
+async fn load_messages(db: &SqlitePool, id: Uuid) -> Result<Vec<Value>, sqlx::Error> {
+    Ok(tape::load(db, id, &["message"])
+        .await?
+        .into_iter()
+        .map(|b| {
+            let mut m = b.payload;
+            m["seq"] = json!(b.seq);
+            m
+        })
+        .collect())
+}
+
+/// Instruction files recorded for a session (tape kind `context`), oldest first.
+fn context_in(blocks: &[tape::Block]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for b in blocks.iter().filter(|b| b.kind == "context") {
+        if let Some(p) = b.payload["path"].as_str().map(PathBuf::from) {
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}

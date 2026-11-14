@@ -1,0 +1,34 @@
+[package]
+name = "zend"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "zenbot kernel"
+
+[dependencies]
+libsqlite3-sys = { version = "0.30.1", features = ["bundled"] }
+zen-proto = { path = "../zen-proto" }
+anyhow = "1"
+base64 = "0.22"
+axum = { version = "0.8", features = ["ws"] }
+chrono = { version = "0.4", features = ["serde"] }
+dom_smoothie = "0.18"
+futures-util = "0.3"
+htmd = "0.5"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "uuid", "chrono", "json", "migrate", "macros"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+croner = "4"
+chrono-tz = "0.10"
+libc = "0.2"
+sha2 = "0.10"
+# Decision files (s1/): parse and report errors with their line and column.
+toml = { version = "1", default-features = false, features = ["std", "serde", "parse"] }
+
+[build-dependencies]
+cc = "1"

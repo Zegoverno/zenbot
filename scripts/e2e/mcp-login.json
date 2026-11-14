@@ -1,0 +1,5 @@
+[
+  {"when": "call linear", "tool": "call_tool", "args": {"name": "linear_whoami", "arguments": {}}},
+  {"when": "call linear", "tool": "call_tool", "args": {"name": "linear_whoami", "arguments": {}}},
+  {"text": "Done."}
+]

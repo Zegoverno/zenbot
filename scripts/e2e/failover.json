@@ -1,0 +1,6 @@
+[
+  { "when": "first", "text": "Starting on the first model." },
+  { "when": "first", "fallback": "faux/backup" },
+  { "when": "first", "text": "Finished on the backup model." },
+  { "when": "second", "text": "Second turn done." }
+]

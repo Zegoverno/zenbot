@@ -1,0 +1,5 @@
+[
+  {"tool":"work","args":{"action":"create","key":"e2e-work","contract":{"goal":"Produce a checked result","criteria":[{"id":"result","text":"Result is correct","method":"review"}]}}},
+  {"tool":"work","args":{"action":"create","key":"e2e-work","contract":{"goal":"Produce a checked result","criteria":[{"id":"result","text":"Result is correct","method":"review"}]}}},
+  {"text":"Result is ready."}
+]

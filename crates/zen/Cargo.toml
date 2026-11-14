@@ -1,0 +1,26 @@
+[package]
+name = "zen"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "zenbot command-line interface"
+
+[dependencies]
+zen-proto = { path = "../zen-proto" }
+zen-client = { path = "../zen-client" }
+anyhow = "1"
+# No colored help or "did you mean" suggestions: a smaller binary.
+clap = { version = "4", default-features = false, features = ["std", "help", "usage", "error-context", "derive", "env"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt", "net", "signal", "sync", "time"] }
+tokio-tungstenite = { version = "0.27", features = ["rustls-tls-webpki-roots"] }
+unicode-width = "0.2"
+# Cutting text between grapheme clusters (emoji sequences), measured as unicode-width measures
+# whole strings. Already in the lock file (crossterm's build uses it).
+unicode-segmentation = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util"] }
