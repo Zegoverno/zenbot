@@ -25,7 +25,7 @@ The same screens as the terminal app, with its keys, and a mouse and a phone way
   its path as `(attached ~/inbox/…)` so zenbot reads it with its own tools. Enter
   sends (also during a turn: it queues), Esc interrupts, ↑↓ walk your prompts, `/` lists zen's
   commands (zenbot's own table; kernel commands run through the `zen` command line, so they answer
-  as everywhere). `ctrl+b` opens the side panel with the same four views, `shift+tab` gives it
+  as everywhere). `ctrl+b` opens the side panel with the same views, `shift+tab` gives it
   the keys. A link or a path in the chat opens there.
 - **The file viewer** opens in place of the Files tree: prose laid out for reading (width `< >`,
   spacing `:`, bionic `b`, focus `f` by paragraph or line with five dim levels `d`, play `p` word by
@@ -40,6 +40,42 @@ opens only for pages of this site), shows the home folder (`server/home.ts`: nev
 zen's token, settings or database, the engines' sign-ins, ssh, gpg or cloud credentials, nor
 anything outside home; it only creates empty files and folders and renames, never over anything), and runs kernel commands (`server/commands.ts`: listed ones only, plain
 arguments, no shell). The page is `src/zen/`.
+
+## Plugin host
+
+**Settings → Plugins** lists installed versions, approved permissions, enable/disable and removal
+(with confirmation; plugin data stays). **Marketplace** offers Install/Update. The kernel checks
+release archives; its exact permission request is shown before approval, including renewed approval
+if the requested permissions change while the dialog is open. Marketplace configuration belongs to
+the kernel (`ZEN_MARKETPLACE`); see [PLUGINS.md](../PLUGINS.md) and [ADR 0001](../docs/adr/0001-plugins.md).
+
+Enabled plugins add board and side-panel view tabs. **Games** lists their installed games and
+remembers the last played in this browser; with none it links to the marketplace. Vault files have
+**Open with…** choices for read/edit, plus per-pattern defaults in Settings. Built-ins stay the default
+until explicitly changed; files outside the vault always use the built-ins.
+
+MCP Apps run through `AppBridge` in opaque-origin iframes (`allow-scripts allow-forms`, never
+`allow-same-origin`). A host CSP precedes all plugin HTML, allowing no network by default and only
+validated declared CSP domains otherwise. No kernel token, host cookies, popups or top navigation
+are granted. Tool calls pass through the authenticated server relay to the kernel, which enforces
+plugin/tool ownership, visibility, sandbox permissions and recording. `zen://open` links route
+vault-relative paths through the pane's opener; http(s) links open a separate tab. Host context
+includes theme, styles and `{ zen: { pane, path, mode, slot } }`.
+
+Plugin slash commands come from the shared command table (refreshed when plugin state changes).
+Results with a UI resource open in the side panel; otherwise their text appears in chat. The tool
+result must expose `_meta.ui.resourceUri` (or the command table supply `ui`) for this host to locate
+it. Model-context updates are held per session and prepended to its next prompt once, as a labelled
+`app_context` block (the kernel has no separate context field yet). `sendMessage` only queues a
+visible DRAFT attributed to the plugin ID, even for zero-permission games. It never submits a
+prompt: the owner must click Send plugin draft (or Dismiss). The owner's composer stays separate;
+plugin text is tagged so it cannot execute as a slash command. At most 20 drafts queue per chat.
+
+The browser tests use a stand-in kernel and the real MCP Apps SDK, covering permissions, views,
+games, openers, commands, context and iframe isolation/CSP. They do not prove live archive installs,
+bubblewrap/network isolation, sampling or real plugin-server interoperability; those require the
+kernel's integration tests and a live development kernel. The plugin files root is assumed to be
+the web vault; deployments overriding `ZEN_PLUGIN_FILES` must keep those aligned.
 
 ## The writer
 

@@ -106,7 +106,7 @@ pub(crate) async fn complete(app: &App, model: &str, system: &str, prompt: &str)
     // Takes an engine slot when one is free, never waits: a summary inside the owner's
     // turn mustn't stall behind background work.
     let _slot = app.engine_slots.clone().try_acquire_owned().ok();
-    let req = worker::Request::Complete(worker::Complete { model: model.into(), system: system.into(), prompt: prompt.into() });
+    let req = worker::Request::Complete(worker::Complete { model: model.into(), system: system.into(), prompt: prompt.into(), max_output_tokens: None });
     let res = app.workers[w].mind().call_within(&req, Duration::from_secs(600)).await?;
     if let Some(e) = res["error"].as_str() {
         anyhow::bail!("{e}");

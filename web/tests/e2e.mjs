@@ -12,8 +12,8 @@ const ROOT = mkdtempSync(path.join(tmpdir(), 'zen-web-e2e-'));
 mkdirSync(path.join(ROOT, 'wiki'));
 const TOKEN = path.join(ROOT, '.token');
 writeFileSync(TOKEN, 'test-token');
-const PORT = 4410;
-const KERNEL = 4411;
+const PORT = Number(process.env.ZEN_E2E_PORT ?? 4410);
+const KERNEL = Number(process.env.ZEN_E2E_KERNEL_PORT ?? 4411);
 const shots = process.argv.includes('--shots');
 const shotDir = path.resolve('tests/shots');
 if (shots) mkdirSync(shotDir, { recursive: true });
@@ -45,7 +45,12 @@ const server = spawn(process.execPath, ['server/main.ts', '--dev'], {
   env: { ...process.env, ZEN_WEB_HOME: ROOT, ZEN_WEB_ROOT: ROOT, ZEN_WEB_PORT: String(PORT), ZEN_WEB_AUTH: 'off', ZEN_URL: `http://127.0.0.1:${KERNEL}`, ZEN_TOKEN_FILE: TOKEN },
   stdio: ['ignore', 'pipe', 'inherit'],
 });
-await new Promise((ok) => server.stdout.on('data', (d) => String(d).includes('zen web on') && ok()));
+await new Promise((ok, fail) => {
+  const timer = setTimeout(() => fail(new Error('web server startup timed out')), 30000);
+  server.once('error', fail);
+  server.once('exit', (code) => { clearTimeout(timer); fail(new Error(`web server exited during startup (${code})`)); });
+  server.stdout.on('data', (d) => { if (String(d).includes('zen web on')) { clearTimeout(timer); ok(); } });
+});
 
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1200, height: 800 }, deviceScaleFactor: shots ? 3 : 1 });

@@ -109,3 +109,73 @@ only replaces the screen.
   say so in its manifest.
 - Slots are added only when a real plugin needs one. `views`, `openers` and `commands` come first.
   `widgets` come with the first plugin that needs them.
+
+## Host API (v0)
+
+The precise contract between the kernel, the web shell and plugins. The plugin side (manifest,
+slots, permissions, UI rules, release archive, marketplace entry) is [PLUGINS.md](../../PLUGINS.md);
+this section is the host side.
+
+**Install without running anyone's code.** A plugin is installed from a release archive
+(`<name>-<version>.tgz`) whose sha256 the marketplace pins, the way Obsidian and VS Code install
+extensions: zenbot downloads, checks and unpacks it; it never runs `npm` or a build. A local folder
+or archive can be added too, for development.
+
+**Kernel** (`crates/zend/src/plugins.rs`, uses `mcp.rs` for the server):
+- Installed plugins live in `~/.zenbot/plugins/<name>/` with their data in
+  `~/.zenbot/plugin-data/<name>/`; the list, versions, approved permissions, enabled flag and slot
+  defaults in the database (new migration).
+- The marketplace is a JSON file at a URL (`ZEN_MARKETPLACE`, default this repo's
+  `marketplace/plugins.json` on `main`), fetched with a timeout and a size cap and cached briefly.
+- `zen plugins` lists; `zen plugins add <name | path.tgz | folder> [--yes]` installs or upgrades:
+  for a name, the marketplace entry's archive, checked against its sha256; the archive is unpacked
+  into a staging folder refusing links, absolute paths, `..`, devices and anything over 50 MB; then
+  `plugin.json` is validated (name `[a-z0-9-]{2,40}` and equal to the entry's, every `ui` a
+  `ui://<name>/…` URI, known slots and permissions, `server.command` `node`), the requested
+  permissions are shown and approved (unless `--yes`), and the folder is moved in place (the old
+  version to backups). More permissions on an upgrade ask again. `zen plugins rm <name>` stops it
+  and moves its folder to backups (data stays). Same commands in the shared table (`/plugins`).
+- The server runs as an MCP stdio server named `plugin-<name>`, in bubblewrap (`sandbox.rs`): its
+  plugin folder read-only, its data folder read-write, the files root (`ZEN_PLUGIN_FILES`, the vault
+  `~/.zenbot/global`) read-only with `files:read`, read-write with `files:write`
+  (`files:write:<sub>`: only that subfolder writable), no other home paths; network only with
+  `network` (through pasta, as agents), otherwise none. Env `ZEN_PLUGIN_FILES`, `ZEN_PLUGIN_DATA`.
+  Without bubblewrap the plugin doesn't run (an error, never unsandboxed). Agents see its tools
+  through `find_tools`/`call_tool` like any MCP server.
+- **Sampling:** currently fails closed, even with `ai`: the Claude/Codex CLI adapters have no
+  verified provider-native output cap. Refusals are audited; no provider request starts. Re-enabling
+  requires a native cap plus per-plugin request/spend budgets. Normal chat is unchanged.
+- HTTP (owner token, like the rest of the API):
+  - `GET /api/plugins` → `{ plugins: [{ name, version, title, description, contributes, permissions, enabled }], defaults: { "<pattern>:<mode>": "<plugin>/<opener id>" | "builtin" } }`.
+  - `PUT /api/plugins/defaults` `{ key, value }`; `PATCH /api/plugins/{name}` `{ enabled }`.
+  - `GET /api/plugins/marketplace` → the entries, each with `installed` (version or null).
+  - `POST /api/plugins/install` `{ name, approve? }`: without `approve`, `{ needs_approval: true, permissions }`
+    (nothing installed); with `approve: true` (and the same permissions), installs and returns the plugin.
+  - `DELETE /api/plugins/{name}`.
+  - `GET /api/plugins/{name}/resource?uri=ui://…` → `{ uri, mimeType, text, _meta }` (only `ui://<name>/…`).
+  - `POST /api/plugins/{name}/call` `{ tool, arguments, session? }` → the MCP `CallToolResult`.
+    Recorded like an agent's MCP call (caller `ui`), with the same timeout, cap and masking. Only
+    that plugin's tools; tools whose `_meta.ui.visibility` excludes `app` are refused.
+  - `zen --commands` includes each enabled plugin's `contributes.commands` (name, args,
+    description, `plugin`, `tool`).
+
+**Web shell** (`web/`):
+- The server relays `/api/plugins*` to the kernel (token added server-side, writes need the write
+  header).
+- **Settings** (a page off the top bar): *Plugins* (installed: version, permissions, enable or
+  disable, remove; the default opener per pattern and mode) and *Marketplace* (the entries, with
+  Install / Update, a permission dialog before installing).
+- Views: each enabled plugin's `views` become tabs after the built-in ones, on the board and in
+  the side panel. **Games** is a built-in tab: a picker over every enabled plugin's `games`
+  (the last one played opens), with a link to the marketplace when there are none. Openers:
+  opening a file picks the default for its pattern and mode (`builtin` until the owner chooses);
+  "Open with" lists the alternatives and can set the default.
+- Each `ui://` resource renders in an `<iframe sandbox="allow-scripts allow-forms">` (no
+  `allow-same-origin`: an opaque origin, no cookies, no token) through `AppBridge` from
+  `@modelcontextprotocol/ext-apps/app-bridge`, with a CSP built from the resource's `_meta.ui.csp`
+  (default: no network). Tool calls go to `POST /api/plugins/{name}/call`; `openLink` with
+  `zen://open` opens the path in the same pane through its opener; http(s) links open a new tab;
+  `sendMessage` posts into the open session's chat; `updateModelContext` is kept and sent as
+  context with that session's next prompt.
+- Slash commands from plugins call the tool and show its UI in the side panel (or the result text
+  when it has none). In Matrix they return the result text.

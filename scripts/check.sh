@@ -7,6 +7,7 @@
 #   scripts/check.sh            every step
 #   scripts/check.sh memory     the web checks, then only the e2e scenarios matching "memory"
 #
+# The first step is the marketplace checker's offline self-test (marketplace/, seconds).
 # crates/zen-matrix is its own Cargo workspace and isn't checked here (scripts/matrix.sh --build).
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -30,6 +31,7 @@ step() { # name command…
 }
 
 web() { (cd web && "$@"); }
+step market node scripts/marketplace-check.mjs --self-test
 step web web sh -c 'npm ci --no-audit --no-fund --loglevel=error && npm run check --silent'
 step web-e2e web sh -c 'node tests/e2e.mjs && node tests/zen-e2e.mjs'
 step build cargo build --release --locked

@@ -2,7 +2,8 @@
 // reaches the browser.
 //
 // - HTTP: `/api/zen/<route>` goes to the kernel's `/api/<route>` when the method and route are on
-//   the list below (what the terminal app uses, and nothing else); `/api/zen/health` to `/health`.
+//   the list below (what the terminal app and the plugin host use, and nothing else);
+//   `/api/zen/health` to `/health`.
 // - WebSocket: `/api/zen/sessions/<id>/ws` is relayed byte for byte to the kernel's session
 //   socket, with `Authorization` added to the upgrade request (a browser can't set that header on
 //   a WebSocket). The upgrade must come from this site (`Origin` matches `Host`): without that
@@ -24,6 +25,8 @@ const ID = '[A-Za-z0-9_-]{1,80}';
 const NAME = '[A-Za-z0-9._-]{1,80}';
 /** An agent's name, as the kernel takes it (agents.rs): a lowercase letter, then letters, digits, hyphens. */
 const AGENT = '[a-z][a-z0-9-]{0,31}';
+/** A plugin's name, as the kernel takes it (plugins.rs). */
+const PLUGIN = '[a-z0-9-]{2,40}';
 /** Method and route (after `/api/`) the page may reach. */
 const ROUTES: [string, RegExp][] = [
   ['GET', /^health$/],
@@ -41,6 +44,15 @@ const ROUTES: [string, RegExp][] = [
   ['GET', new RegExp(`^agents/${AGENT}$`)],
   ['PUT', new RegExp(`^agents/${AGENT}$`)],
   ['DELETE', new RegExp(`^agents/${AGENT}$`)],
+  // Plugins (ADR 0001, Host API): the list, the marketplace, installs, and each plugin's UI
+  // resources and tool calls (the kernel checks the URI and the tool belong to that plugin).
+  ['GET', /^plugins(\/marketplace)?$/],
+  ['PUT', /^plugins\/defaults$/],
+  ['POST', /^plugins\/install$/],
+  ['PATCH', new RegExp(`^plugins/${PLUGIN}$`)],
+  ['DELETE', new RegExp(`^plugins/${PLUGIN}$`)],
+  ['GET', new RegExp(`^plugins/${PLUGIN}/resource$`)],
+  ['POST', new RegExp(`^plugins/${PLUGIN}/call$`)],
 ];
 
 export const allowed = (method: string, route: string) => ROUTES.some(([m, re]) => m === method && re.test(route));

@@ -1,0 +1,3 @@
+# Listings and CI need the owner's review (with "Require review from Code Owners" on main).
+/marketplace/ @Zegoverno
+/.github/ @Zegoverno

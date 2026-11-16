@@ -1,6 +1,7 @@
-// The page's side of zen: the kernel through the server's proxy (`/api/zen/…`, server/zen.ts), the
-// home folder (`/api/fs/…`, server/home.ts) and the kernel commands (`/api/command`). Writes carry
-// `X-Zen-Web: 1` (no cross-site writes); the kernel's token stays on the server.
+// The page's side of zen: the kernel through the server's proxy (`/api/zen/…`, server/zen.ts; the
+// plugin host's routes too), the home folder (`/api/fs/…`, server/home.ts) and the kernel commands
+// (`/api/command`). Writes carry `X-Zen-Web: 1` (no cross-site writes); the kernel's token stays on
+// the server.
 
 async function call<T>(method: string, url: string, body?: unknown): Promise<T> {
   const res = await fetch(url, {
@@ -139,7 +140,72 @@ export type Decision = 'accept' | 'more' | 'reshape' | 'drop';
 export interface Entry { name: string; path: string; dir: boolean; hidden: boolean; size: number; mtime: number }
 export interface FileRead { path: string; mtime: number; size: number; text?: string; binary?: boolean; tooBig?: boolean; dir?: boolean; vault?: string | null }
 export interface ReaderSettings { wpm: number; pauses: boolean; width: 0 | 60 | 72 | 90; spaced: boolean; bionic: boolean; focus: 'off' | 'paragraph' | 'line'; dim: 100 | 300 | 500 | 700 | 900 }
-export interface Command { name: string; args: string; help: string; scope: 'kernel' | 'session' | 'screen' }
+/** A command of the shared table; a plugin's (`plugin`, `tool`) calls that plugin's tool. */
+export interface Command {
+  name: string;
+  args: string;
+  help: string;
+  scope: 'kernel' | 'session' | 'screen' | 'plugin';
+  /** A plugin's command: its plugin, its tool, and the tool's UI resource when it has one. */
+  plugin?: string;
+  tool?: string;
+  description?: string;
+  ui?: string;
+}
+
+// ---- plugins (ADR 0001, Host API; the kernel's plugins.rs) ----
+
+export interface PluginView { id: string; title: string; ui: string }
+export interface PluginOpener { id: string; title: string; ui: string; patterns: string[]; mode: 'read' | 'edit' }
+export interface PluginGame { id: string; title: string; ui: string; description?: string }
+export interface PluginCommand { name: string; tool: string; args?: string; description?: string }
+export interface Plugin {
+  name: string;
+  version: string;
+  title: string;
+  description: string;
+  contributes: { views?: PluginView[]; openers?: PluginOpener[]; games?: PluginGame[]; commands?: PluginCommand[] };
+  permissions: string[];
+  enabled: boolean;
+}
+/** `"<pattern>:<mode>"` → `"<plugin>/<opener id>"` or `"builtin"`. */
+export type OpenerDefaults = Record<string, string>;
+export interface MarketEntry {
+  name: string;
+  title?: string;
+  description?: string;
+  author?: string;
+  repository?: string;
+  license?: string;
+  version: string;
+  kernel?: string[];
+  contributes?: string[];
+  categories?: string[];
+  /** The installed version, or null. */
+  installed: string | null;
+}
+export type Install = { needs_approval: true; permissions: string[] } | Plugin;
+/** An MCP `CallToolResult`. */
+export interface ToolResult { content?: { type: string; text?: string }[]; structuredContent?: Record<string, unknown>; isError?: boolean; _meta?: Record<string, unknown>; [k: string]: unknown }
+export interface UiResource { uri: string; mimeType?: string; text: string; _meta?: { ui?: { csp?: Csp; permissions?: Record<string, object> } } }
+export interface Csp { connectDomains?: string[]; resourceDomains?: string[]; frameDomains?: string[]; baseUriDomains?: string[] }
+
+export const pluginApi = {
+  list: () => call<{ plugins: Plugin[]; defaults: OpenerDefaults }>('GET', '/api/zen/plugins'),
+  setDefault: (key: string, value: string) => call<unknown>('PUT', '/api/zen/plugins/defaults', { key, value }),
+  setEnabled: (name: string, enabled: boolean) => call<unknown>('PATCH', `/api/zen/plugins/${enc(name)}`, { enabled }),
+  remove: (name: string) => call<unknown>('DELETE', `/api/zen/plugins/${enc(name)}`),
+  /** The entries; the kernel may answer with the list itself or `{ plugins }` / `{ entries }`. */
+  marketplace: async () => {
+    const r = await call<MarketEntry[] | { plugins?: MarketEntry[]; entries?: MarketEntry[] }>('GET', '/api/zen/plugins/marketplace');
+    return Array.isArray(r) ? r : (r.entries ?? r.plugins ?? []);
+  },
+  install: (name: string, approve?: string[]) =>
+    call<Install>('POST', '/api/zen/plugins/install', approve ? { name, approve: true, permissions: approve } : { name }),
+  resource: (name: string, uri: string) => call<UiResource>('GET', `/api/zen/plugins/${enc(name)}/resource?uri=${enc(uri)}`),
+  call: (name: string, tool: string, args: Record<string, unknown>, session?: string | null) =>
+    call<ToolResult>('POST', `/api/zen/plugins/${enc(name)}/call`, { tool, arguments: args, ...(session ? { session } : {}) }),
+};
 
 export const zen = {
   board: (archived = false) => call<{ sessions: BoardSession[]; archived?: number }>('GET', `/api/zen/board${archived ? '?archived=true' : ''}`),
@@ -207,7 +273,11 @@ export const files = {
 };
 
 export const commands = {
-  list: () => call<{ commands: Command[] }>('GET', '/api/commands'),
+  /** The shared table; a plugin's command may carry `description` rather than `help`. */
+  list: async () => {
+    const r = await call<{ commands: Command[] }>('GET', '/api/commands');
+    return { commands: r.commands.map((c) => ({ ...c, args: c.args ?? '', help: c.help ?? c.description ?? '' })) };
+  },
   run: (name: string, args: string[] = []) => call<{ output: string; ok: boolean }>('POST', '/api/command', { name, args }),
 };
 

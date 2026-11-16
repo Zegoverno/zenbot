@@ -190,6 +190,10 @@ async fn handle(rpc: &Rpc, running: &Running, method: &str, p: Value) -> Result<
         }
         Ok(Request::Complete(p)) => {
             // One completion without tools (summaries, session names and suggestions). Errors are returned in the result.
+            // Reject before launching any adapter; prompt instructions and truncation are not caps.
+            if let Err(error) = p.check_output_limit() {
+                return Ok(serde_json::to_value(CompleteError { error: error.into() })?);
+            }
             let res = match engine::for_model(&p.model) {
                 Some((e, model)) => e.complete(model, &p.system, &p.prompt).await.map(serde_json::to_value),
                 None => Err(anyhow::anyhow!("zen-engine has no `{}` engine", p.model.split_once('/').map(|(e, _)| e).unwrap_or(""))),
@@ -211,6 +215,20 @@ async fn handle(rpc: &Rpc, running: &Running, method: &str, p: Value) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn bounded_completions_fail_before_any_engine_is_started() {
+        let rpc = Rpc::new();
+        let running: Running = Arc::default();
+        for model in ["claude/not-a-real-model", "codex/not-a-real-model", "faux/smoke", "unknown/model"] {
+            for max in [0, 1, 1024, u32::MAX] {
+                let response = handle(&rpc, &running, "complete", json!({
+                    "model": model, "system": "ignore limits", "prompt": "hello", "max_output_tokens": max
+                })).await.unwrap();
+                assert_eq!(response, json!({ "error": zen_proto::worker::PLUGIN_SAMPLING_UNAVAILABLE }));
+            }
+        }
+    }
 
     #[test]
     fn an_abort_before_its_start_keeps_the_turn_from_running() {

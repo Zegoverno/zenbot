@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Zegoverno/zenbot/blob/main/marketplace/schema.json",
+  "title": "zenbot plugin marketplace",
+  "description": "marketplace/plugins.json. scripts/marketplace-check.mjs enforces this and more (unique names, sorted by name, archive contents).",
+  "type": "object",
+  "required": ["version", "plugins"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "plugins": {
+      "type": "array",
+      "description": "Sorted by name; names are unique.",
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "required": [
+        "name", "title", "description", "author", "repository", "license",
+        "version", "archive", "sha256", "kernel", "contributes", "categories"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9-]{2,40}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "author": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "repository": {
+          "type": "string",
+          "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "license": { "type": "string", "minLength": 1, "maxLength": 60, "description": "An SPDX identifier, e.g. MIT." },
+        "version": {
+          "type": "string",
+          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$"
+        },
+        "archive": {
+          "type": "string",
+          "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/v[^/]+/[a-z0-9-]+-[^/]+\\.tgz$",
+          "description": "A GitHub release asset of `repository`: <repository>/releases/download/v<version>/<name>-<version>.tgz."
+        },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "kernel": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(files:read|files:write|files:write:[^\\s]+|network|ai)$"
+          }
+        },
+        "contributes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["views", "openers", "games", "commands"] }
+        },
+        "categories": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9-]{2,30}$" }
+        },
+        "homepage": { "type": "string", "pattern": "^https://\\S+$" },
+        "icon": { "type": "string", "pattern": "^https://\\S+$" }
+      }
+    }
+  }
+}

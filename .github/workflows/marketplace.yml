@@ -1,0 +1,68 @@
+# The plugin marketplace (marketplace/plugins.json):
+#  - on a pull request that touches it, scripts/marketplace-check.mjs checks the list and downloads
+#    and checks the archive of every entry the pull request adds or changes;
+#  - on a push to main that touches it, the static page (scripts/marketplace-page.mjs) is deployed
+#    to GitHub Pages (repository Settings > Pages > Source: GitHub Actions).
+# Nothing from a plugin archive is unpacked to disk or run: the check reads it in memory.
+name: marketplace
+
+on:
+  pull_request:
+    paths:
+      - 'marketplace/**'
+      - 'scripts/marketplace-*.mjs'
+      - '.github/workflows/marketplace.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'marketplace/**'
+      - 'scripts/marketplace-*.mjs'
+      - '.github/workflows/marketplace.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0 # origin/main, to tell which entries are new or changed
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+      - name: The checker's own tests
+        run: node scripts/marketplace-check.mjs --self-test
+      - name: The list, and the archives of new or changed entries
+        run: node scripts/marketplace-check.mjs --base origin/main
+
+  pages:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+      - name: The list is valid
+        run: node scripts/marketplace-check.mjs --self-test && node scripts/marketplace-check.mjs --base HEAD
+      - name: Build the page
+        run: node scripts/marketplace-page.mjs
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: marketplace/site
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

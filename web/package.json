@@ -18,6 +18,8 @@
     "@codemirror/view": "^6.43.15",
     "@lezer/highlight": "^1.2.5",
     "@lezer/markdown": "^1.8.1",
+    "@modelcontextprotocol/ext-apps": "^1.7.5",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "katex": "^0.19.1",
     "svelte": "^5.57.3",
     "yaml": "^2.9.1"

@@ -75,6 +75,8 @@ pub struct ServerConfig {
     pub timeout: Duration,
     pub include: Vec<String>,
     pub exclude: Vec<String>,
+    /// A plugin's server (`plugin-<name>`, plugins.rs): run in its own sandbox, never as the owner.
+    pub plugin: Option<crate::plugins::Run>,
 }
 
 #[derive(Clone, Debug)]
@@ -83,6 +85,8 @@ pub struct ToolEntry {
     pub name: String,
     pub description: String,
     pub schema: Value,
+    /// The tool's `_meta` (MCP Apps: `ui.resourceUri`, `ui.visibility`).
+    pub meta: Value,
 }
 
 impl ToolEntry {
@@ -178,6 +182,7 @@ pub fn parse_config(text: &str) -> (Vec<ServerConfig>, Vec<String>) {
             exclude: s["exclude"].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect(),
             command,
             url,
+            plugin: None,
         };
         if !missing.is_empty() {
             problems.push(format!("server `{name}`: environment variables left empty: {}", missing.join(", ")));
@@ -204,13 +209,59 @@ struct StdioConn {
     closed: AtomicBool,
     /// Set when the server said its tool list changed (`notifications/tools/list_changed`).
     stale: AtomicBool,
+    /// The plugin whose server this is, when it may ask for completions (`ai`): its
+    /// `sampling/createMessage` requests are answered (plugins.rs `sample`); anyone else's refused.
+    sampling: Option<String>,
     /// The server runs in its own process group (an `npx` or `sh` starts children): dropping the
     /// connection kills all of it, not just the first process.
     _group: tools::GroupKill,
     _child: Child,
 }
 
+/// What zenbot offers a server at `initialize`: forms (elicitation) to all, sampling only to a plugin
+/// with `ai`.
+fn capabilities(cfg: &ServerConfig) -> Value {
+    if cfg.plugin.as_ref().is_some_and(|p| p.ai) {
+        json!({ "elicitation": {}, "sampling": {} })
+    } else {
+        json!({ "elicitation": {} })
+    }
+}
+
+/// A started server's pipes, before its process is attached (`with_child`).
+struct Started {
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    group: tools::GroupKill,
+    sampling: Option<String>,
+}
+
+impl Started {
+    fn with_child(self, child: Child) -> Arc<StdioConn> {
+        let io = Arc::new(StdioConn {
+            stdin: Mutex::new(self.stdin),
+            pending: Default::default(),
+            elicitation: Default::default(),
+            closed: AtomicBool::new(false),
+            stale: AtomicBool::new(false),
+            sampling: self.sampling,
+            _group: self.group,
+            _child: child,
+        });
+        tokio::spawn(read_stdio(Arc::downgrade(&io), self.stdout));
+        io
+    }
+}
+
 impl StdioConn {
+    /// Take a spawned server's pipes; `sampling` names the plugin whose requests are answered.
+    fn start(child: &mut Child, sampling: Option<String>) -> Result<Started> {
+        let group = tools::GroupKill(child.id().map(|p| p as i32));
+        let stdin = child.stdin.take().context("no stdin")?;
+        let stdout = BufReader::new(child.stdout.take().context("no stdout")?);
+        Ok(Started { stdin, stdout, group, sampling })
+    }
+
     fn fail_pending(&self, why: &str) {
         self.closed.store(true, Ordering::SeqCst);
         let waiters: Vec<_> = self.pending.lock().unwrap_or_else(|e| e.into_inner()).drain().collect();
@@ -264,7 +315,17 @@ async fn read_stdio(conn: std::sync::Weak<StdioConn>, mut stdout: BufReader<Chil
                 }
                 let _ = conn.write(&json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"elicitation requires one unambiguous active owner tool call"}})).await;
             }
-            // Sampling and filesystem roots remain unsupported.
+            (Some("sampling/createMessage"), Some(id)) if conn.sampling.is_some() => {
+                let (io, id, plugin, params) = (conn.clone(), id.clone(), conn.sampling.clone().unwrap_or_default(), v["params"].clone());
+                tokio::spawn(async move {
+                    let reply = match crate::plugins::sample(&plugin, &params).await {
+                        Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+                        Err(e) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32603, "message": format!("{e:#}") } }),
+                    };
+                    let _ = io.write(&reply).await;
+                });
+            }
+            // Sampling (but for a plugin with `ai`) and filesystem roots remain unsupported.
             (Some(_), Some(id)) => {
                 let reply = json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": "not supported by zenbot" } });
                 let _ = conn.write(&reply).await;
@@ -358,9 +419,11 @@ struct Registry {
     servers: HashMap<String, Arc<Server>>,
     loaded: Option<SystemTime>,
     problems: Vec<String>,
+    /// The global registry's plugin servers: `plugins::servers()`'s generation when last merged in.
+    plugins: u64,
 }
 
-static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(|| Mutex::new(Registry { servers: HashMap::new(), loaded: None, problems: Vec::new() }));
+static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(|| Mutex::new(Registry { servers: HashMap::new(), loaded: None, problems: Vec::new(), plugins: 0 }));
 
 /// Each agent's own servers (`agents/<name>/mcp.json`), by agent: only that agent sees them.
 static AGENT_REGISTRIES: LazyLock<Mutex<HashMap<String, Registry>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -380,13 +443,15 @@ async fn refresh_agent(agent: &str) {
         return;
     }
     let mut regs = AGENT_REGISTRIES.lock().await;
-    let reg = regs.entry(agent.to_string()).or_insert_with(|| Registry { servers: HashMap::new(), loaded: None, problems: Vec::new() });
+    let reg = regs.entry(agent.to_string()).or_insert_with(|| Registry { servers: HashMap::new(), loaded: None, problems: Vec::new(), plugins: 0 });
     reload(reg, &crate::agents::dir(agent).join("mcp.json"), Some(agent));
 }
 
 fn reload(reg: &mut Registry, path: &std::path::Path, agent: Option<&str>) {
     let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-    if reg.loaded.is_some() && reg.loaded == mtime {
+    // The global registry also holds the enabled plugins' servers (plugins.rs).
+    let (generation, plugins) = if agent.is_none() { crate::plugins::servers() } else { (0, Vec::new()) };
+    if reg.loaded.is_some() && reg.loaded == mtime && reg.plugins == generation {
         return;
     }
     let (mut cfgs, mut problems) = match std::fs::read_to_string(path) {
@@ -400,13 +465,28 @@ fn reload(reg: &mut Registry, path: &std::path::Path, agent: Option<&str>) {
         }
         cfgs.retain(|c| c.oauth.is_none());
     }
-    // A config change replaces the handles without waiting for active calls. Those calls finish on
-    // their old Arc; subsequent calls use the new server. Never hold the registry lock over I/O.
+    // `plugin-…` names are the plugins' own: an mcp.json server can't pose as one (and get a UI's calls).
+    for c in cfgs.iter().filter(|c| c.name.starts_with("plugin-")) {
+        problems.push(format!("server `{}`: names starting with plugin- are reserved for plugins", c.name));
+    }
+    cfgs.retain(|c| !c.name.starts_with("plugin-"));
+    cfgs.extend(plugins);
+    // A config change replaces the handles of the servers whose config changed, without waiting for
+    // their active calls: those finish on their old Arc, and the dropped server's process is
+    // killed with its last handle. Never hold the registry lock over I/O.
+    let mut old = std::mem::take(&mut reg.servers);
     reg.servers = cfgs
         .into_iter()
-        .map(|cfg| (cfg.name.clone(), Arc::new(Server { cfg, agent: agent.map(str::to_string), next_id: AtomicI64::new(1), state: Mutex::default(), auth: Mutex::default() })))
+        .map(|cfg| {
+            let server = match old.remove(&cfg.name) {
+                Some(s) if s.cfg == cfg => s,
+                _ => Arc::new(Server { cfg, agent: agent.map(str::to_string), next_id: AtomicI64::new(1), state: Mutex::default(), auth: Mutex::default() }),
+            };
+            (server.cfg.name.clone(), server)
+        })
         .collect();
     reg.loaded = mtime;
+    reg.plugins = generation;
     reg.problems = problems;
 }
 
@@ -474,8 +554,22 @@ impl Server {
     }
 
     async fn connect(&self) -> Result<(Arc<Conn>, Vec<ToolEntry>)> {
-        let conn = match (&self.cfg.command, &self.cfg.url) {
-            (Some(cmd), _) => {
+        let conn = match (&self.cfg.command, &self.cfg.url, &self.cfg.plugin) {
+            (Some(_), _, Some(run)) => {
+                // A plugin's server: only ever in its sandbox (an error without bubblewrap), with
+                // a clean environment (plugins.rs `command`).
+                let mut command = crate::plugins::command(run, &self.cfg.args)?;
+                let mut child = command
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .process_group(0)
+                    .kill_on_drop(true)
+                    .spawn()
+                    .with_context(|| format!("starting plugin `{}`'s server", run.name))?;
+                Arc::new(Conn::Stdio(StdioConn::start(&mut child, run.ai.then(|| run.name.clone()))?.with_child(child)))
+            }
+            (Some(cmd), _, None) => {
                 // A clean environment: the kernel's own (its token, API keys) never reaches a
                 // server; only the basics and what the config gives it.
                 let keep = ["PATH", "HOME", "USER", "LANG", "LC_ALL", "TZ", "TMPDIR"];
@@ -508,25 +602,12 @@ impl Server {
                     .kill_on_drop(true)
                     .spawn()
                     .with_context(|| format!("starting `{cmd}`"))?;
-                let group = tools::GroupKill(child.id().map(|p| p as i32));
-                let stdin = child.stdin.take().context("no stdin")?;
-                let stdout = BufReader::new(child.stdout.take().context("no stdout")?);
-                let io = Arc::new(StdioConn {
-                    stdin: Mutex::new(stdin),
-                    pending: Default::default(),
-                    elicitation: Default::default(),
-                    closed: AtomicBool::new(false),
-                    stale: AtomicBool::new(false),
-                    _group: group,
-                    _child: child,
-                });
-                tokio::spawn(read_stdio(Arc::downgrade(&io), stdout));
-                Arc::new(Conn::Stdio(io))
+                Arc::new(Conn::Stdio(StdioConn::start(&mut child, None)?.with_child(child)))
             }
             _ => Arc::new(Conn::Http { session: std::sync::Mutex::new(None), closed: AtomicBool::new(false) }),
         };
         let init = self
-            .request(&conn, "initialize", json!({ "protocolVersion": PROTOCOL, "capabilities": {"elicitation":{}}, "clientInfo": { "name": "zenbot", "version": env!("CARGO_PKG_VERSION") } }))
+            .request(&conn, "initialize", json!({ "protocolVersion": PROTOCOL, "capabilities": capabilities(&self.cfg), "clientInfo": { "name": "zenbot", "version": env!("CARGO_PKG_VERSION") } }))
             .await?;
         validate_protocol(&init)?;
         self.notify(&conn, "notifications/initialized", json!({})).await?;
@@ -561,6 +642,7 @@ impl Server {
                     name,
                     description: t["description"].as_str().unwrap_or("").to_string(),
                     schema: t["inputSchema"].clone(),
+                    meta: t["_meta"].clone(),
                 });
             }
             cursor = page["nextCursor"].as_str().map(String::from);
@@ -793,6 +875,7 @@ fn service_entries(cfg: &ServerConfig, capabilities: &Value) -> Vec<ToolEntry> {
     ].into_iter().filter(|(cap, name, ..)| capabilities.get(*cap).is_some() && (cfg.include.is_empty() || cfg.include.iter().any(|n| n == name)) && !cfg.exclude.iter().any(|n| n == name)).map(|(_, name, description, properties, required)| ToolEntry {
         server: cfg.name.clone(), name: name.into(), description: description.into(),
         schema: json!({"type":"object", "properties":properties, "required":required}),
+        meta: Value::Null,
     }).collect()
 }
 
@@ -1062,6 +1145,32 @@ pub async fn run_tool(app: &App, session: Uuid, who: &crate::agents::Agent, name
     Some(tools::ToolOutput::text(content, is_error))
 }
 
+/// Take the enabled plugins' servers into the registry now (plugins.rs, after an install, a
+/// removal or a change of `enabled`): a removed or disabled plugin's server stops with its last call.
+pub async fn reload_plugins() {
+    refresh().await;
+}
+
+/// A plugin's running server (`plugin-<name>`; never a server from mcp.json).
+async fn plugin_server(plugin: &str) -> Result<Arc<Server>> {
+    refresh().await;
+    let server = REGISTRY.lock().await.servers.get(&format!("plugin-{plugin}")).filter(|s| s.cfg.plugin.is_some()).cloned();
+    server.with_context(|| format!("plugin `{plugin}` isn't installed or is disabled"))
+}
+
+/// A plugin server's tools, connecting it when needed (resource and prompt operations left out).
+pub async fn plugin_tools(plugin: &str) -> Result<Vec<ToolEntry>> {
+    let (_, tools) = plugin_server(plugin).await?.ensure().await?;
+    Ok(tools.into_iter().filter(|t| service_method(&t.name).is_none()).collect())
+}
+
+/// One request to a plugin's server (`tools/call`, `resources/read`), with the server's timeout.
+pub async fn plugin_request(plugin: &str, method: &str, params: Value) -> Result<Value> {
+    let server = plugin_server(plugin).await?;
+    let (conn, _) = server.ensure().await?;
+    server.request(&conn, method, params).await
+}
+
 /// Configured servers and cached tool counts; status never starts a process or contacts a server.
 pub async fn status() -> Value {
     refresh().await;
@@ -1300,7 +1409,7 @@ mod tests {
             std::fs::write(&p, text).unwrap();
             p
         };
-        let empty = || Registry { servers: HashMap::new(), loaded: None, problems: Vec::new() };
+        let empty = || Registry { servers: HashMap::new(), loaded: None, problems: Vec::new(), plugins: 0 };
         let mut global = empty();
         reload(&mut global, &file("global.json", r#"{"mcpServers": {"shared": {"command": "a"}, "mail": {"command": "b"}, "cal": {"command": "c"}}}"#), None);
         let mut own = empty();
@@ -1334,7 +1443,7 @@ mod tests {
 
     #[test]
     fn tools_rank_by_name_then_description_and_args_are_checked() {
-        let t = |server: &str, name: &str, d: &str| ToolEntry { server: server.into(), name: name.into(), description: d.into(), schema: json!({}) };
+        let t = |server: &str, name: &str, d: &str| ToolEntry { server: server.into(), name: name.into(), description: d.into(), schema: json!({}), meta: Value::Null };
         let all = vec![t("cal", "list_events", "List calendar events"), t("mail", "send_email", "Send an email"), t("mail", "search", "Search email by sender")];
         let r = rank(&all, "send email", 5);
         assert_eq!(r[0].full(), "mail_send_email");

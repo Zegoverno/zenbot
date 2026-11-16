@@ -37,6 +37,23 @@ describe('kernel proxy', () => {
       for (const m of ['GET', 'PUT', 'DELETE']) expect(allowed(m, `agents/${bad}`), `${m} agents/${bad}`).toBe(false);
   });
 
+  it('reaches plugins by their names, and only the host routes', () => {
+    expect(allowed('GET', 'plugins')).toBe(true);
+    expect(allowed('GET', 'plugins/marketplace')).toBe(true);
+    expect(allowed('PUT', 'plugins/defaults')).toBe(true);
+    expect(allowed('POST', 'plugins/install')).toBe(true);
+    expect(allowed('PATCH', 'plugins/zenread')).toBe(true);
+    expect(allowed('DELETE', 'plugins/zen-sudoku')).toBe(true);
+    expect(allowed('GET', 'plugins/zenread/resource')).toBe(true);
+    expect(allowed('POST', 'plugins/zenread/call')).toBe(true);
+    expect(allowed('GET', 'plugins/zenread/call')).toBe(false);
+    expect(allowed('POST', 'plugins/zenread/resource')).toBe(false);
+    expect(allowed('POST', 'plugins/zenread')).toBe(false);
+    expect(allowed('DELETE', 'plugins')).toBe(false);
+    for (const bad of ['Zen', 'z', '..', 'zen_read', 'zen.read', `a${'b'.repeat(40)}`, 'zenread/../x'])
+      expect(allowed('POST', `plugins/${bad}/call`), bad).toBe(false);
+  });
+
   it('opens a session socket only for pages of this site', () => {
     const req = (h: Record<string, string>) => ({ headers: h }) as unknown as IncomingMessage;
     expect(sameOrigin(req({ origin: 'https://zen.example.com', host: 'zen.example.com' }))).toBe(true);

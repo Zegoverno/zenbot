@@ -1,9 +1,14 @@
 <script lang="ts">
-  // The zen app: the board (Sessions · Files · Tasks · Agents) or a session's chat with the side panel, as
-  // the terminal app lays them out. Keys that act everywhere live here; each view handles its own
-  // when its pane has the keys (`active`).
+  // The zen app: the board (Sessions · Files · Tasks · Agents · Games, then the plugins' views) or a
+  // session's chat with the side panel, as the terminal app lays them out; Settings off the board's
+  // top bar. Keys that act everywhere live here; each view handles its own when its pane has the
+  // keys (`active`).
   import { onMount } from 'svelte';
-  import { app, start, board, setView, openSession, toggleSide, VIEWS, typing, type View, type Pane } from './app.svelte.ts';
+  import { app, start, board, setView, openSession, toggleSide, settings, VIEWS, typing, type View, type Pane } from './app.svelte.ts';
+  import { findView, loadPlugins, panel, views as pluginViews } from './plugins.svelte.ts';
+  import PluginFrame from './PluginFrame.svelte';
+  import Games from './views/Games.svelte';
+  import Settings from './views/Settings.svelte';
   import Chat from './Chat.svelte';
   import Sessions from './views/Sessions.svelte';
   import Files from './views/Files.svelte';
@@ -11,7 +16,10 @@
   import Agents from './views/Agents.svelte';
   import { zen, type BoardSession } from './api.ts';
 
-  const LABEL: Record<View, string> = { sessions: 'Sessions', files: 'Files', tasks: 'Tasks', agents: 'Agents' };
+  const LABEL: Record<string, string> = { sessions: 'Sessions', files: 'Files', tasks: 'Tasks', agents: 'Agents', games: 'Games' };
+  /** The tabs in order: the built-ins, then each enabled plugin's views. */
+  const tabList = $derived([...VIEWS.map((v) => ({ key: v, label: LABEL[v] })), ...pluginViews().map((v) => ({ key: v.key as View, label: v.title }))]);
+  const keysOf = () => tabList.map((t) => t.key);
   let wide = $state(true);
 
   // The side panel's share of the split, dragged on the separator and kept across visits.
@@ -56,6 +64,7 @@
 
   onMount(() => {
     start();
+    void loadPlugins();
     const mq = matchMedia('(min-width: 900px)');
     const fit = () => (wide = mq.matches);
     fit();
@@ -95,15 +104,16 @@
     }
     if (inSession || typing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
     // The board.
-    const i = ['1', '2', '3', '4'].indexOf(e.key);
-    if (i >= 0) {
+    const keys = keysOf();
+    const i = /^[1-9]$/.test(e.key) ? Number(e.key) - 1 : -1;
+    if (i >= 0 && i < keys.length) {
       e.preventDefault();
-      setView('home', VIEWS[i]);
+      setView('home', keys[i]);
     } else if (e.key === 'Tab') {
       e.preventDefault();
-      const n = VIEWS.indexOf(app.view);
-      setView('home', VIEWS[(n + (e.shiftKey ? VIEWS.length - 1 : 1)) % VIEWS.length]);
-    } else if (e.key === 'n' && !(app.view === 'files' && app.file.home) && app.view !== 'agents') {
+      const n = Math.max(0, keys.indexOf(app.view));
+      setView('home', keys[(n + (e.shiftKey ? keys.length - 1 : 1)) % keys.length]);
+    } else if (e.key === 'n' && !(app.view === 'files' && app.file.home) && ['sessions', 'files', 'tasks'].includes(app.view)) {
       // (The Agents view's own `n` starts a session with the chosen agent.)
       e.preventDefault();
       openSession('new');
@@ -115,9 +125,12 @@
 
 {#snippet tabs(pane: Pane, current: View)}
   <div class="ztabs" role="tablist">
-    {#each VIEWS as v, i}
-      <button role="tab" class:on={current === v} aria-selected={current === v} onclick={() => setView(pane, v)} title={String(i + 1)}>{LABEL[v]}</button>
+    {#each tabList as t, i (t.key)}
+      <button role="tab" class:on={current === t.key} aria-selected={current === t.key} onclick={() => setView(pane, t.key)} title={i < 9 ? String(i + 1) : undefined}>{t.label}</button>
     {/each}
+    {#if pane === 'side' && panel.current}
+      <button role="tab" class:on={current === 'panel'} aria-selected={current === 'panel'} onclick={() => setView(pane, 'panel')}>{panel.current.title}</button>
+    {/if}
   </div>
 {/snippet}
 
@@ -128,8 +141,23 @@
     <Files {pane} {active} />
   {:else if v === 'tasks'}
     <Tasks {pane} {active} />
-  {:else}
+  {:else if v === 'agents'}
     <Agents {pane} {active} />
+  {:else if v === 'games'}
+    <Games {pane} {active} />
+  {:else if v === 'settings'}
+    <Settings />
+  {:else if v === 'panel' && panel.current}
+    {#key panel.current.n}
+      <PluginFrame plugin={panel.current.plugin} ui={panel.current.ui} {pane} slot="view" title={panel.current.title} input={panel.current.input} result={panel.current.result} />
+    {/key}
+  {:else if findView(v)}
+    {@const pv = findView(v)!}
+    {#key pv.key}
+      <PluginFrame plugin={pv.plugin} ui={pv.ui} {pane} slot="view" title={pv.title} />
+    {/key}
+  {:else}
+    <p class="dim gone">This view isn't available: its plugin is off or removed.</p>
   {/if}
 {/snippet}
 
@@ -141,6 +169,7 @@
       <span class="grow"></span>
       {#if counts.waiting}<span class="waiting">? {counts.waiting} waiting on you</span>{/if}
       <span class="dim">{counts.sessions} sessions · {counts.running ? `${counts.running} running` : 'all idle'}</span>
+      <button class="dim settings" class:on={app.view === 'settings'} onclick={() => settings()}>Settings</button>
       <button class="new" onclick={() => openSession('new')} title="n">New session</button>
     </div>
     <div class="board">{@render view('home', app.view, true)}</div>
@@ -196,6 +225,8 @@
   .grow { flex: 1; }
   .waiting { color: var(--warn); }
   .new { color: var(--accent); }
+  .settings:hover, .settings.on { color: var(--ink); }
+  .gone { padding: 12px 16px; margin: 0; }
   .board { flex: 1; min-height: 0; overflow: auto; }
   .split { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr; position: relative; }
   .split.with-side { grid-template-columns: minmax(0, 1fr) 0 minmax(0, var(--side, 50%)); }

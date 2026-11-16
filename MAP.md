@@ -293,7 +293,7 @@ In `~/.zenbot/env`. Read once in `config.rs` (default in brackets):
 | Script | What |
 |---|---|
 | `install.sh` | install on a fresh VM (INSTALL.md) |
-| `scripts/check.sh` | what CI runs: the web app's checks and e2e tests, build, unit tests, clippy, e2e |
+| `scripts/check.sh` | what CI runs: the marketplace checker's self-test, the web app's checks and e2e tests, build, unit tests, clippy, e2e |
 | `scripts/e2e.sh [filter]` | end-to-end scenarios on throwaway kernels with the faux model |
 | `scripts/upgrade.sh [--check]` | build this checkout and install it once no session is working |
 | `scripts/apply-upgrade.sh` | the install step: back up the database, swap, health-check, roll back; then the web app |
@@ -304,4 +304,16 @@ In `~/.zenbot/env`. Read once in `config.rs` (default in brackets):
 | `scripts/update-engines.sh [--check]` | keep the Claude Code and Codex CLIs current, with rollback |
 | `scripts/searxng.sh` | install and check the native SearXNG web search |
 | `scripts/matrix.sh`, `scripts/matrix-e2e.sh` | build and install the Matrix bridge; its end-to-end test |
+| `scripts/marketplace-check.mjs [--base <ref>] [--self-test]` | check `marketplace/plugins.json` (rules, and the archive of each new or changed entry); CI runs it on pull requests touching `marketplace/` |
+| `scripts/marketplace-page.mjs` | build the static marketplace page `marketplace/site/` (CI deploys it to GitHub Pages from `main`) |
 | `scripts/eval.sh` (+ `eval-*`) | compare harness versions on `evals/tasks/` |
+
+## Plugin host
+
+`crates/zend/src/plugins.rs` validates manifests, approves permissions, installs SHA256-pinned
+release archives and serves `/api/plugins`. `sandbox.rs` pins grants with file descriptors before
+bubblewrap binds them; servers join MCP discovery through `mcp.rs`. Installed state and opener
+defaults live in migration `0007_plugins.sql`. UI slots, Games and Settings live in
+`web/src/zen/`; `PluginFrame.svelte` hosts opaque-origin MCP Apps. Plugin messages create drafts,
+never autonomous chat turns. Sampling currently fails closed (native token caps are unavailable).
+See [PLUGINS.md](PLUGINS.md) for authoring and the curated marketplace workflow.

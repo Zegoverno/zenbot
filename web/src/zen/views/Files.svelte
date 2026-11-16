@@ -1,15 +1,16 @@
 <script lang="ts">
   // The Files view (the TUI's files.rs): a folder tree from the pane's root, read lazily per open
-  // folder, dotfiles off until `.`; a file opens in the pane's reader, in place of the tree, and the
-  // tree comes back as it was when the file closes. Secrets are never listed (the server leaves
-  // them out). Expansion and selection are kept per pane for the page's life (tree.svelte.ts).
+  // folder, dotfiles off until `.`; a file opens through its opener (Opened.svelte: the built-in
+  // reader or a plugin's) in place of the tree, and the tree comes back as it was when the file
+  // closes. Secrets are never listed (the server leaves them out). Expansion and selection are kept
+  // per pane for the page's life (tree.svelte.ts).
   // `a` makes a file (a name ending in `/` a folder), `A` a folder and `R` renames the selected row,
   // asked with a small input over the tree; the server never overwrites (server/home.ts).
   import { onMount } from 'svelte';
   import type { Pane } from '../app.svelte.ts';
   import { app, openFile, openDir, tilde, typing, notice } from '../app.svelte.ts';
   import { files } from '../api.ts';
-  import Viewer from '../Viewer.svelte';
+  import Opened from '../Opened.svelte';
   import { trees } from './tree.svelte.ts';
   import { pageRows, follow, plain, human } from './list.ts';
 
@@ -302,7 +303,7 @@
 <svelte:window onkeydown={key} />
 
 {#if app.file[pane]}
-  <Viewer path={app.file[pane]} {pane} {active} />
+  <Opened path={app.file[pane]} {pane} {active} />
 {:else}
   <div class="view" bind:this={list}>
     <div class="tools">

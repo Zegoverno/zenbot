@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "name": "zenread",
+      "title": "zenread",
+      "description": "A calm Markdown reader: width, spacing, bionic reading, focus, play word by word, links and headings, the next note in the folder.",
+      "author": "Zegoverno",
+      "repository": "https://github.com/Zegoverno/zenread",
+      "license": "MIT",
+      "version": "0.1.0",
+      "archive": "https://github.com/Zegoverno/zenread/releases/download/v0.1.0/zenread-0.1.0.tgz",
+      "sha256": "4ad175b97f606156bf90a3fd2d9c7e1fe6ccf4eee7e4b6685e92c00bd4c64043",
+      "kernel": [
+        "files:read"
+      ],
+      "contributes": [
+        "views",
+        "openers",
+        "commands"
+      ],
+      "categories": [
+        "reading"
+      ]
+    },
+    {
+      "name": "zensudoku",
+      "title": "zensudoku",
+      "description": "Sudoku with value, corner and center notes, colors, undo and redo, and hints. A standalone PWA, a zenbot plugin and an MCP App.",
+      "author": "Zegoverno",
+      "repository": "https://github.com/Zegoverno/zensudoku",
+      "license": "MIT",
+      "version": "0.1.0",
+      "archive": "https://github.com/Zegoverno/zensudoku/releases/download/v0.1.0/zensudoku-0.1.0.tgz",
+      "sha256": "6a92c282bce71a5e162b6ddf65277044d02f30fa9c12216bdc3954de2392dfbb",
+      "kernel": [],
+      "contributes": [
+        "games",
+        "commands"
+      ],
+      "categories": [
+        "games"
+      ]
+    },
+    {
+      "name": "zenwrite",
+      "title": "zenwrite",
+      "description": "A calm Markdown writing app: live preview, alternatives, ghosts, versions, AI proofreading and shrink. Notes stay plain files.",
+      "author": "Zegoverno",
+      "repository": "https://github.com/Zegoverno/zenwrite",
+      "license": "MIT",
+      "version": "0.1.0",
+      "archive": "https://github.com/Zegoverno/zenwrite/releases/download/v0.1.0/zenwrite-0.1.0.tgz",
+      "sha256": "5569ab24e0912a16e7835e91c9d88ccd51c1defb800230f56dedb15b3a632166",
+      "kernel": [
+        "files:read",
+        "files:write",
+        "ai"
+      ],
+      "contributes": [
+        "openers",
+        "commands"
+      ],
+      "categories": [
+        "writing"
+      ]
+    }
+  ]
+}
