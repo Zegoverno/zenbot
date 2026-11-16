@@ -8,7 +8,8 @@
 #
 # install keeps the build that ran before it and goes back to it if the new one doesn't answer.
 # Settings for the service go in ~/.config/zen-web.env (ZEN_WEB_* in web/README.md); kernel
-# secrets in ~/.zenbot/env never reach it. It replaces the older `zenwrite` user unit.
+# secrets in ~/.zenbot/env never reach it. `ZEN_WEB_REPLACES` (in its settings) names an older
+# user unit on the same port, retired at install.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export PATH="$HOME/.local/node/bin:$PATH"
@@ -63,11 +64,11 @@ EnvironmentFile=-$SETTINGS
 WantedBy=default.target
 UNIT
 
-  # The older unit held the same port; it goes once, here (and comes back if this build fails
-  # with no build of ours to go back to).
-  local retired=
-  if [ "$NAME" = zen-web ] && systemctl --user is-enabled --quiet zenwrite.service 2>/dev/null; then
-    systemctl --user disable --now --quiet zenwrite.service && retired=1
+  # An older unit on the same port (ZEN_WEB_REPLACES) goes once, here, and comes back if this
+  # build fails with no build of ours to go back to.
+  local retired= old; old=$(setting ZEN_WEB_REPLACES)
+  if [ -n "$old" ] && systemctl --user is-enabled --quiet "$old" 2>/dev/null; then
+    systemctl --user disable --now --quiet "$old" && retired=1
   fi
   previous=$(readlink "$APPS/current" 2>/dev/null || true)
   [ "$previous" != "$dir" ] || previous=
@@ -89,7 +90,7 @@ UNIT
       answers "$port" && rm -rf "$dir" || echo "web: the previous build doesn't answer either" >&2
     elif [ -n "$retired" ]; then
       systemctl --user disable --now --quiet "$UNIT" || true
-      systemctl --user enable --now --quiet zenwrite.service && echo "web: the older zenwrite unit is back" >&2
+      systemctl --user enable --now --quiet "$old" && echo "web: $old is back" >&2
     fi
     return 1
   fi
