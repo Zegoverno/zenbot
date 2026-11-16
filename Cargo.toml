@@ -7,7 +7,7 @@ exclude = ["crates/zen-matrix"]
 
 [workspace.package]
 edition = "2021"
-license = "Apache-2.0"
+license = "MIT"
 
 [profile.release]
 # Smaller binaries to download and install; panics still print a message.
