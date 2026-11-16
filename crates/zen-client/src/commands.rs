@@ -18,7 +18,7 @@ pub enum Scope {
     Kernel,
     /// Everywhere, on a session: the open one in a chat, `-s <id>` on the command line.
     Session,
-    /// Only in the terminal app: its screens and panels.
+    /// Only in a chat page: its screens and panels (the web app; Matrix leaves them out).
     Screen,
     /// Only on the command line: scripting and setup.
     Line,
@@ -67,7 +67,6 @@ pub const COMMANDS: &[Command] = &[
     cmd("help", "", "keys and commands", Screen),
     cmd("exit", "", "quit zen", Screen),
     cmd("ask", "<prompt>", "run one task and print the answer", Line),
-    cmd("chat", "", "an interactive session", Line),
     cmd("sessions", "ls|show|restore", "list, show or restore sessions", Line),
     cmd("brain", "<action>", "records: get, list, put, schema, lint, index", Line),
     cmd("s1", "[check|models|replay|compare]", "System One's decisions and files", Line),

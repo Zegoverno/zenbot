@@ -1,5 +1,5 @@
-//! One turn from a script or a plain terminal: `zen ask` and the line-by-line `zen chat`, which
-//! stream a turn over the session's WebSocket and report what it did.
+//! One turn from a script: `zen ask` streams a turn over the session's WebSocket and reports what
+//! it did.
 
 use std::io::{IsTerminal, Read, Write};
 
@@ -235,40 +235,6 @@ pub(crate) async fn ask(c: &Client, json_out: bool, prompt: Option<String>, sess
         }
         std::process::exit(1);
     }
-    Ok(())
-}
-
-pub(crate) async fn chat(c: &Client, session: Option<String>, new: NewSession) -> Result<()> {
-    let id = match session {
-        Some(s) => c.resolve(&s).await?,
-        None => c.new_session(new.body()).await?,
-    };
-    let info = c.get(&format!("/api/sessions/{id}")).await?;
-    eprintln!("{}", dim(&format!("zenbot · {} · session {} · Ctrl-C stops a turn, Ctrl-D exits", info["model"].as_str().unwrap_or(""), short(&id))));
-    let mut ws = c.connect(&id).await?;
-    let stdin = std::io::stdin();
-    loop {
-        eprint!("\n› ");
-        std::io::stderr().flush().ok();
-        let mut line = String::new();
-        if stdin.read_line(&mut line)? == 0 {
-            eprintln!();
-            break;
-        }
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line == "/exit" || line == "/quit" {
-            break;
-        }
-        println!();
-        let turn = run_turn(&mut ws, line, true, true).await?;
-        if let Some(e) = turn.error {
-            eprintln!("error: {}", for_stderr(&e));
-        }
-    }
-    eprintln!("{}", dim(&format!("session {id}")));
     Ok(())
 }
 

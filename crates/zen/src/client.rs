@@ -84,7 +84,7 @@ pub async fn upgrade(c: &Client, mut progress: impl FnMut(String)) -> Result<Str
 /// `s` dimmed when stderr is a terminal, where it's printed.
 pub fn dim(s: &str) -> String {
     if std::io::stderr().is_terminal() {
-        format!("\x1b[2m{}\x1b[0m", crate::md::sanitize(s))
+        format!("\x1b[2m{}\x1b[0m", crate::print::sanitize(s))
     } else {
         s.to_string()
     }
@@ -113,7 +113,7 @@ pub fn tool_summary(name: &str, args: &Value) -> String {
         .or_else(|| args["from"].as_str().map(|f| format!("{f} → {}", args["to"].as_str().unwrap_or(""))))
         .unwrap_or_else(|| args.to_string());
     let detail: String = detail.lines().next().unwrap_or("").chars().take(120).collect();
-    crate::md::sanitize(&format!("{name} {detail}")).into_owned()
+    crate::print::sanitize(&format!("{name} {detail}")).into_owned()
 }
 
 #[cfg(test)]

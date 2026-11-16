@@ -8,7 +8,6 @@ use serde_json::Value;
 use zen_proto::text_of;
 
 use crate::client::{dim, short, tool_summary};
-use crate::md;
 
 /// A model's thinking levels for `zen models`, the default in brackets: "  effort: low [high] max".
 pub(crate) fn effort_list(model: &Value) -> String {
@@ -43,12 +42,30 @@ pub(crate) fn print_sessions(list: &Value) {
 
 /// Text for stdout: sanitized when it is a terminal (escape sequences in a model's reply or a
 /// tool's output must not reach it), as is when piped.
+/// `s` safe for a terminal: control characters (but newlines) and invisible ones dropped, tabs
+/// as four spaces, so text from the kernel can't move the cursor or hide what it says.
+pub(crate) fn sanitize(s: &str) -> std::borrow::Cow<'_, str> {
+    let unsafe_char = |c: char| (c.is_control() && c != '\n') || zen_proto::invisible(c); // C0, DEL, C1, invisible
+    if !s.contains(unsafe_char) {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\t' => out.push_str("    "),
+            c if unsafe_char(c) => {}
+            c => out.push(c),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 pub(crate) fn for_stdout(s: &str) -> std::borrow::Cow<'_, str> {
-    if std::io::stdout().is_terminal() { md::sanitize(s) } else { s.into() }
+    if std::io::stdout().is_terminal() { sanitize(s) } else { s.into() }
 }
 
 pub(crate) fn for_stderr(s: &str) -> std::borrow::Cow<'_, str> {
-    if std::io::stderr().is_terminal() { md::sanitize(s) } else { s.into() }
+    if std::io::stderr().is_terminal() { sanitize(s) } else { s.into() }
 }
 
 pub(crate) fn print_messages(s: &Value) {

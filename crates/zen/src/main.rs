@@ -3,13 +3,8 @@
 
 mod cli;
 mod client;
-mod editor;
-mod md;
 mod print;
-mod screen;
 mod setup;
-mod tex;
-mod tui;
 mod turn;
 
 use std::io::IsTerminal;
@@ -19,7 +14,7 @@ use client::{describe_update, dim, enc, short, Client, NewSession};
 use zen_client::commands;
 use print::*;
 use setup::*;
-use turn::{ask, chat};
+use turn::ask;
 
 use anyhow::Result;
 use clap::Parser;
@@ -36,6 +31,11 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    if cli.commands {
+        // Needs no kernel: the web app asks for it before any is reachable.
+        println!("{}", commands_json());
+        return Ok(());
+    }
     if let Some(Cmd::Login { which }) = &cli.cmd {
         return login(which.as_deref());
     }
@@ -43,31 +43,15 @@ async fn run(cli: Cli) -> Result<()> {
     let json = cli.json;
     let out = |v: &Value| emit(true, v, String::new);
     let Some(cmd) = cli.cmd else {
-        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        if !std::io::stdin().is_terminal() {
             // Piped use without a command behaves like `zen ask`.
             return ask(&c, json, None, None, NewSession { model: cli.model, effort: cli.effort, agent: cli.agent }, false).await;
         }
-        let start = match (cli.cont, cli.resume) {
-            (_, Some(id)) if !id.is_empty() => tui::Start::Resume(Some(id)),
-            (_, Some(_)) => tui::Start::Resume(None),
-            (true, None) => tui::Start::Continue,
-            // A model or thinking level asked for means a new session on it; plain `zen` is the board.
-            _ if cli.model.is_some() || cli.effort.is_some() => tui::Start::New,
-            _ => tui::Start::Board,
-        };
-        return tui::run(c, start, NewSession { model: cli.model, effort: cli.effort, agent: cli.agent }, cli.inline).await;
+        <Cli as clap::CommandFactory>::command().print_help()?;
+        return Ok(());
     };
     match cmd {
         Cmd::Ask { prompt, session, model, effort, agent, quiet } => ask(&c, json, prompt, session, NewSession { model, effort, agent }, quiet).await?,
-        Cmd::Chat { session, model, effort, agent } => {
-            let new = NewSession { model, effort, agent };
-            if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-                let start = session.map(|s| tui::Start::Resume(Some(s))).unwrap_or(tui::Start::New);
-                tui::run(c, start, new, cli.inline).await?
-            } else {
-                chat(&c, session, new).await?
-            }
-        }
         Cmd::Login { .. } => unreachable!(),
         Cmd::New { title, model, effort, agent } => {
             let s = c.post("/api/sessions", json!({ "model": model, "effort": effort, "title": title, "agent": agent })).await?;
@@ -411,6 +395,25 @@ async fn s1(c: &Client, cmd: Option<S1Cmd>, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The shared table's chat commands (every scope but the command line's own), as JSON: the web
+/// page's slash commands come from here, so no client keeps a copy.
+fn commands_json() -> Value {
+    let list: Vec<Value> = commands::COMMANDS
+        .iter()
+        .filter(|c| c.scope != commands::Scope::Line)
+        .map(|c| {
+            let scope = match c.scope {
+                commands::Scope::Kernel => "kernel",
+                commands::Scope::Session => "session",
+                commands::Scope::Screen => "screen",
+                commands::Scope::Line => "line",
+            };
+            json!({ "name": c.name, "args": c.args, "help": c.help, "scope": scope })
+        })
+        .collect();
+    json!({ "commands": list })
+}
+
 /// A command from the shared table (`zen_client::commands`), run as every client runs it; `session`
 /// is an id or a unique prefix.
 async fn shared(c: &Client, json: bool, text: &str, session: Option<&str>) -> Result<()> {
@@ -426,4 +429,21 @@ async fn shared(c: &Client, json: bool, text: &str, session: Option<&str>) -> Re
     let r = commands::run(c, &cmd, session.as_deref()).await?;
     emit(json, &r.json, || r.text.clone());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `zen --commands` lists the shared table's chat commands in its order, scope by scope.
+    #[test]
+    fn commands_json_is_the_chat_part_of_the_shared_table() {
+        let v = commands_json();
+        let list = v["commands"].as_array().unwrap();
+        let names: Vec<&str> = list.iter().map(|c| c["name"].as_str().unwrap()).collect();
+        let want: Vec<&str> = commands::COMMANDS.iter().filter(|c| c.scope != commands::Scope::Line).map(|c| c.name).collect();
+        assert_eq!(names, want);
+        assert!(list.iter().all(|c| ["kernel", "session", "screen"].contains(&c["scope"].as_str().unwrap())));
+        assert!(!names.contains(&"ask"));
+    }
 }
