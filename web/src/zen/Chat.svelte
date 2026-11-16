@@ -10,7 +10,7 @@
   import { onMount, tick } from 'svelte';
   import { zen, files, commands, upload, toolSummary, short, readOnly, agentTag, AGENT_NAME, pluginApi, type Command, type Message, type Models, type SessionDetail, type ZenEvent } from './api.ts';
   import { chat, plugins, resultText, showPanel, takeContext, toolArgs, uiOf } from './plugins.svelte.ts';
-  import { app, board, openSession, sessionStarted, openFile, openDir, toggleSide, notice, typing, tilde } from './app.svelte.ts';
+  import { app, board, openSession, sessionStarted, openFile, openDir, toggleSide, settings, notice, typing, tilde } from './app.svelte.ts';
   import { render as mdRender } from './md.ts';
   import * as M from './chat/model.ts';
   import Work from './chat/Work.svelte';
@@ -1321,6 +1321,7 @@
       {#if sessionTokens}· {M.fmtTokens(sessionTokens)} tokens{/if}
       <span class="zc-grow"></span>
       <button onclick={() => push({ k: 'help', rows: cmds.map((c) => [`/${c.name}`, `${c.help}${c.args ? `: /${c.name} ${c.args}` : ''}`]), keys: M.KEYS })} title="/help">?</button>
+      <button class="zc-dim" onclick={() => settings()}>Settings</button>
       {#if !wide}<button class="zc-panel" onclick={() => toggleSide()} title="side panel (ctrl+b)" aria-label="side panel">▤</button>{/if}
     </div>
   </div>

@@ -51,8 +51,10 @@ zenbot's shell owns the layout. Plugins fill these fixed slots and never draw th
 | `widgets` | a tool result inline in chat (plain MCP Apps) | text |
 | `commands` | slash commands in the shared command table (CLI, web chat, Matrix) | core commands |
 
-When two plugins claim the same opener or view, the owner chooses the default in settings. An
-install never silently takes a slot over.
+Policy amended 2026-11-16: installing a new plugin assigns its openers as defaults for their
+declared patterns and modes, replacing previous choices. Updates preserve owner choices; removal
+clears that plugin's defaults. The owner can override them in Settings or Open with. This replaces
+the original built-in-until-chosen policy.
 
 ### Host
 
@@ -162,19 +164,20 @@ or archive can be added too, for development.
 **Web shell** (`web/`):
 - The server relays `/api/plugins*` to the kernel (token added server-side, writes need the write
   header).
-- **Settings** (a page off the top bar): *Plugins* (installed: version, permissions, enable or
+- **Settings** (on the board or in the chat side panel): *Plugins* (installed: version, permissions, enable or
   disable, remove; the default opener per pattern and mode) and *Marketplace* (the entries, with
   Install / Update, a permission dialog before installing).
 - Views: each enabled plugin's `views` become tabs after the built-in ones, on the board and in
   the side panel. **Games** is a built-in tab: a picker over every enabled plugin's `games`
   (the last one played opens), with a link to the marketplace when there are none. Openers:
-  opening a file picks the default for its pattern and mode (`builtin` until the owner chooses);
+  opening a file picks the default for its pattern and mode (new installs assign defaults; built-ins are the fallback);
   "Open with" lists the alternatives and can set the default.
 - Each `ui://` resource renders in an `<iframe sandbox="allow-scripts allow-forms">` (no
   `allow-same-origin`: an opaque origin, no cookies, no token) through `AppBridge` from
   `@modelcontextprotocol/ext-apps/app-bridge`, with a CSP built from the resource's `_meta.ui.csp`
   (default: no network). Tool calls go to `POST /api/plugins/{name}/call`; `openLink` with
-  `zen://open` opens the path in the same pane through its opener; http(s) links open a new tab;
+  `zen://open?path=…&mode=read|edit` opens the path in the same pane through its mode default;
+  `zen://close` returns that pane to the core Files tree; http(s) links open a new tab;
   `sendMessage` posts into the open session's chat; `updateModelContext` is kept and sent as
   context with that session's next prompt.
 - Slash commands from plugins call the tool and show its UI in the side panel (or the result text

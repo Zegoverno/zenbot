@@ -825,9 +825,28 @@ pub async fn install(db: &SqlitePool, source: Source, approve: Option<Vec<String
     .bind(from)
     .execute(db)
     .await?;
+    // Installing an opener is an explicit choice to use it, per pattern and mode.
+    // Upgrades retain the owner's choices; removal already clears this plugin's defaults.
+    if old.is_none() {
+        install_defaults(db, &name, &raw).await?;
+    }
     reload(db).await?;
     tracing::info!(plugin = %name, version = %manifest.version, from, "plugin installed");
     Ok(Outcome::Installed(one(db, &name).await?.context("the plugin went missing")?))
+}
+
+/// A newly installed opener becomes the default, replacing even a prior plugin choice.
+async fn install_defaults(db: &SqlitePool, name: &str, manifest: &Value) -> Result<()> {
+    for o in manifest["contributes"]["openers"].as_array().into_iter().flatten() {
+        let id = o["id"].as_str().context("opener id")?;
+        let mode = o["mode"].as_str().context("opener mode")?;
+        for pattern in o["patterns"].as_array().into_iter().flatten() {
+            let key = format!("{}:{mode}", pattern.as_str().context("opener pattern")?);
+            sqlx::query("INSERT INTO plugin_defaults (key, value) VALUES ($1, $2) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')")
+                .bind(key).bind(format!("{name}/{id}")).execute(db).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Move an installed plugin's folder to `backups/plugins/<name>-<version>-<time>`.
@@ -1169,6 +1188,23 @@ pub(crate) async fn api_call(State(app): State<AppState>, UrlPath(name): UrlPath
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn new_openers_replace_defaults_per_mode_and_remove_clears_them() {
+        let (_dir, db) = crate::test_util::database().await;
+        sqlx::query("INSERT INTO plugin_defaults (key, value) VALUES ('*.hello:read', 'other/read'), ('*.hello:edit', 'builtin')")
+            .execute(&db).await.unwrap();
+        let manifest = json!({"contributes":{"openers":[{"id":"open","mode":"read","patterns":["*.hello"]}]}});
+        install_defaults(&db, "hello", &manifest).await.unwrap();
+        let d = defaults(&db).await.unwrap();
+        assert_eq!(d["*.hello:read"], "hello/open");
+        assert_eq!(d["*.hello:edit"], "builtin");
+        // Removal's exact cleanup query must not remove other modes/plugins.
+        sqlx::query("DELETE FROM plugin_defaults WHERE value LIKE $1 || '/%'").bind("hello").execute(&db).await.unwrap();
+        let d = defaults(&db).await.unwrap();
+        assert!(d.get("*.hello:read").is_none());
+        assert_eq!(d["*.hello:edit"], "builtin");
+    }
 
     #[test]
     fn gnu_metadata_bomb_and_trailing_gzip_are_bounded() {

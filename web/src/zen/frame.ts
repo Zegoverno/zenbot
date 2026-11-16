@@ -40,18 +40,25 @@ export function withCsp(html: string, csp: Csp | undefined): string {
   return `<!doctype html><meta http-equiv="Content-Security-Policy" content="${attr(cspFor(csp))}">` + html;
 }
 
-/** A `zen://open?path=<vault-relative path>` link's path, or null (no `..`, no absolute paths). */
-export function zenOpen(url: string): string | null {
+/** Strict pane navigation: no credentials, fragments, duplicate or unknown parameters. */
+export function zenNavigation(url: string): { action: 'close' } | { action: 'open'; path: string; mode: 'read' | 'edit' } | null {
   let u: URL;
-  try {
-    u = new URL(url);
-  } catch {
-    return null;
-  }
-  if (u.protocol !== 'zen:' || u.host !== 'open' || (u.pathname !== '' && u.pathname !== '/')) return null;
+  try { u = new URL(url); } catch { return null; }
+  if (u.protocol !== 'zen:' || u.username || u.password || u.port || u.hash || (u.pathname !== '' && u.pathname !== '/')) return null;
+  if (u.host === 'close') return u.search ? null : { action: 'close' };
+  if (u.host !== 'open' || [...u.searchParams.keys()].some((k) => !['path', 'mode'].includes(k)) ||
+      u.searchParams.getAll('path').length !== 1 || u.searchParams.getAll('mode').length > 1) return null;
   const p = u.searchParams.get('path');
+  const mode = u.searchParams.get('mode') ?? 'read';
+  if (mode !== 'read' && mode !== 'edit') return null;
   if (!p || /[\\\x00-\x1f\x7f]/.test(p) || p.startsWith('/') || p.split('/').some((s) => s === '..' || s === '' || s === '.')) return null;
-  return p;
+  return { action: 'open', path: p, mode };
+}
+
+/** Compatibility helper for callers needing only the validated path. */
+export function zenOpen(url: string): string | null {
+  const nav = zenNavigation(url);
+  return nav?.action === 'open' ? nav.path : null;
 }
 
 /** Whether a link may open in a new tab: http(s) only. */

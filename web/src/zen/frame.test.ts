@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cspFor, withCsp, zenOpen, webLink, SANDBOX } from './frame.ts';
+import { cspFor, withCsp, zenNavigation, zenOpen, webLink, SANDBOX } from './frame.ts';
 
 describe('plugin frame', () => {
   it('never gives a plugin UI the page origin', () => {
@@ -50,5 +50,15 @@ describe('plugin frame', () => {
     expect(zenOpen('https://example.com')).toBeNull();
     expect(webLink('https://example.com')).toBe(true);
     expect(webLink('javascript:alert(1)')).toBe(false);
+  });
+});
+
+describe('pane navigation', () => {
+  it('validates mode and close without accepting ambiguous URLs', () => {
+    expect(zenNavigation('zen://open?path=wiki/a.md&mode=edit')).toEqual({ action: 'open', path: 'wiki/a.md', mode: 'edit' });
+    expect(zenNavigation('zen://close')).toEqual({ action: 'close' });
+    for (const u of ['zen://close?path=a', 'zen://close#x', 'zen://user@close', 'zen://open?path=a&mode=write',
+      'zen://open?path=a&mode=read&mode=edit', 'zen://open?path=a&path=b', 'zen://open?path=a&unknown=x',
+      'zen://open?path=%2E%2E/token', 'zen://open?path=a%5Cb', 'zen://close/other']) expect(zenNavigation(u)).toBeNull();
   });
 });

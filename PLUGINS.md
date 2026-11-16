@@ -57,9 +57,10 @@ zenbot draws the shell. A plugin fills these slots:
 | `games` | an entry in the **Games** tab's game picker | `id`, `title`, `ui`, `description` |
 | `commands` | a slash command in the web chat and in Matrix, and `zen <plugin> …` | `name`, `tool`, `args`, `description` |
 
-When two plugins claim the same opener, the owner picks the default in **Settings → Plugins**.
-An install never takes over a slot silently: the built-in reader and editor stay the default until
-the owner chooses.
+Installing a new plugin makes its openers the defaults for each declared pattern and mode,
+replacing previous choices (including another plugin). Upgrades preserve the owner's choices.
+Change them in **Settings → Plugins** or **Open with**; removal clears that plugin's defaults.
+This replaces the original built-in-until-chosen policy.
 
 ### Permissions (`kernel`)
 
@@ -165,3 +166,7 @@ at the [marketplace page](https://zegoverno.github.io/zenbot/).
 Requirements for a listing: an open-source licence, a public repo, a README that says what the
 plugin does and why it needs each permission, and no telemetry or network calls beyond those the
 README declares.
+
+Hosted UIs may use `zen://open?path=<vault-relative>&mode=read|edit` (read by default)
+and `zen://close` to return the current pane to the core Files tree. The host context
+`zen.pane` identifies `board` or `side`; navigation never affects the other pane.

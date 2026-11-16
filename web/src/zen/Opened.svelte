@@ -1,6 +1,6 @@
 <script lang="ts">
   // A pane's open file through its opener: the default for the file's pattern and mode (the
-  // built-in reader and writer until the owner chooses, ADR 0001), or what "Open with" picked.
+  // installed reader and writer, or the built-ins as fallback), or what "Open with" picked.
   // "Open with" lists the built-ins and every enabled plugin opener for the file, and makes one the
   // default. Plugins see vault files only, so files elsewhere always open built-in.
   import Viewer from './Viewer.svelte';
@@ -32,8 +32,11 @@
   const current = (c: Choice) => (chosen ? c.key === chosen.key : c.key === 'builtin' && c.mode === mode);
 
   let menu = $state(false);
+  let viewer: Viewer | undefined = $state();
+  const leave = () => viewer?.canLeave() ?? true;
 
   function open(c: Choice) {
+    if (!leave()) return;
     menu = false;
     openFile(path, pane, c.mode === 'edit', c.key);
   }
@@ -49,12 +52,11 @@
 </script>
 
 <div class="opened">
-  {#if options.length}
-    <div class="with">
-      {#if chosen}
-        <button class="dim" onclick={() => closeFile(pane)} title="back to the folder">←</button>
-        <span class="dim name">{name} · {chosen.title}</span>
-      {/if}
+    <div class="with" role="toolbar" aria-label="file actions">
+      <button class="dim" onclick={() => leave() && closeFile(pane)} title="back to the folder">Back</button>
+      <button class="dim" aria-pressed={mode === 'read'} onclick={() => leave() && openFile(path, pane)}>Read</button>
+      <button class="dim" aria-pressed={mode === 'edit'} disabled={!vaultNote(path) && !options.some((o) => o.mode === 'edit')} onclick={() => leave() && openFile(path, pane, true)}>Edit</button>
+      <span class="dim name">{name}{chosen ? ` · ${chosen.title}` : ''}</span>
       <span class="grow"></span>
       <div class="menu-at">
         <button class="dim" aria-haspopup="menu" aria-expanded={menu} onclick={() => (menu = !menu)}>Open with…</button>
@@ -71,14 +73,13 @@
         {/if}
       </div>
     </div>
-  {/if}
   <div class="body">
     {#if chosen && rel !== null}
       {#key `${chosen.key}:${rel}`}
         <PluginFrame plugin={chosen.plugin} ui={chosen.ui} {pane} path={rel} mode={chosen.mode} slot="opener" title={chosen.title} />
       {/key}
     {:else}
-      <Viewer {path} {pane} {active} />
+      <Viewer bind:this={viewer} {path} {pane} {active} />
     {/if}
   </div>
 </div>

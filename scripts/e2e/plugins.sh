@@ -14,7 +14,7 @@ plugins_host() {
   body=$(jq '. + {approve:true,permissions:["ai","files:read"]}' <<<"$body")
   r=$(plugin_api -d "$body" "$URL/api/plugins/install")
   check "fixture installed" eq "$(jq -r .name <<<"$r")" hello
-  check "list slots and no silent default" eq "$(plugin_api "$URL/api/plugins" | jq -r '[.plugins[0].contributes.games[0].id, (.defaults|length)]|join("|")')" "guess|0"
+  check "install assigns declared default" eq "$(plugin_api "$URL/api/plugins" | jq -r '[.plugins[0].contributes.games[0].id, .defaults["*.hello:read"]]|join("|")')" "guess|hello/open"
   r=$(plugin_call hello_greet '{"name":"World"}')
   check "real sandboxed stdio tool" eq "$(jq -r '.content[0].text' <<<"$r")" 'Hello, World!'
   check "UI call audited" eq "$(q "SELECT count(*) FROM plugin_calls WHERE caller='ui' AND tool='hello_greet' AND is_error=0")" 1
@@ -37,6 +37,7 @@ plugins_host() {
   plugin_api -X PATCH -d '{"enabled":false}' "$URL/api/plugins/hello" >/dev/null
   check "disabled server refused" eq "$(plugin_api -o /dev/null -w '%{http_code}' -d '{"tool":"hello_greet"}' "$URL/api/plugins/hello/call")" 409
   plugin_api -X PATCH -d '{"enabled":true}' "$URL/api/plugins/hello" >/dev/null
+  plugin_api -X PUT -d '{"key":"*.hello:read","value":"builtin"}' "$URL/api/plugins/defaults" >/dev/null
   local dev="$TMP/plugin"
   cp -R "$fixture" "$dev"
   jq '.version="0.2.0" | .kernel=["files:write:Reading"]' "$dev/plugin.json" > "$dev/next.json"
@@ -47,6 +48,8 @@ plugins_host() {
   check "unapproved upgrade leaves old version" eq "$(q "SELECT version FROM plugins WHERE name='hello'")" 0.1.0
   body=$(jq '. + {approve:true,permissions:["files:write:Reading"]}' <<<"$body")
   r=$(plugin_api -d "$body" "$URL/api/plugins/install")
+  check "upgrade preserves chosen builtin" eq "$(plugin_api "$URL/api/plugins" | jq -r '.defaults["*.hello:read"]')" builtin
+  plugin_api -X PUT -d '{"key":"*.hello:read","value":"hello/open"}' "$URL/api/plugins/defaults" >/dev/null
   check "approved upgrade" eq "$(jq -r .version <<<"$r")" 0.2.0
   r=$(plugin_call hello_peek "$(jq -nc --arg path "$files/Reading/new" '{path:$path,text:"saved"}')")
   check "scoped write allowed" eq "$(jq -r '.content[0].text' <<<"$r")" written

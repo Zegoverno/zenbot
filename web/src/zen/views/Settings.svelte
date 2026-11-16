@@ -194,6 +194,7 @@
   <div class="scrim">
     <div class="dialog" role="dialog" aria-modal="true" aria-label={`Install ${asking.entry.title || asking.entry.name}`}>
       <h3>Install {asking.entry.title || asking.entry.name} {asking.entry.version}?</h3>
+      <p>New plugins become the default reader or editor for their supported file types. Updates preserve your choices.</p>
       {#if asking.permissions.length}
         <p class="dim">It asks to:</p>
         <ul>{#each asking.permissions as p}<li>{permissionWords(p)}</li>{/each}</ul>

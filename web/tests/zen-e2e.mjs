@@ -62,7 +62,7 @@ const bundle = readFileSync(path.join(ROOT, 'node_modules/@modelcontextprotocol/
   .replace(/export\s*\{([^}]*)\};?\s*$/, (_, list) => `window.__ext={${list.split(',').map((x) => { const [a, b] = x.trim().split(/\s+as\s+/); return `${b ?? a}:${a}`; }).join(',')}};`);
 const FIXTURE = `<!doctype html><script>window.earlyBlocked = false; addEventListener('securitypolicyviolation', (e) => { if (e.blockedURI === 'https://forbidden.example/early.js') window.earlyBlocked = true; });</script><script src="https://forbidden.example/early.js"></script><!-- <head> --><html><head><meta charset="utf-8"><title>fx</title></head><body>
 <p id="ctx">starting</p><p id="out"></p>
-<button id="roll">Roll</button> <button id="open">Open Grace</button> <button id="say">Say</button>
+<button id="edit">Edit Grace</button> <button id="close">Close file</button> <button id="roll">Roll</button> <button id="open">Open Grace</button> <button id="say">Say</button>
 <script type="module">${bundle}
 const { App } = window.__ext;
 const app = new App({ name: 'fx', version: '1.0.0' });
@@ -74,6 +74,8 @@ await app.connect();
 show();
 $('roll').onclick = async () => { const r = await app.callServerTool({ name: 'zenfx_roll', arguments: { sides: 20 } }); $('out').textContent = r.content[0].text; };
 $('open').onclick = () => app.openLink({ url: 'zen://open?path=wiki%2FGrace.md' });
+$('edit').onclick = () => app.openLink({ url: 'zen://open?path=wiki%2FGrace.md&mode=edit' });
+$('close').onclick = () => app.openLink({ url: 'zen://close' });
 $('say').onclick = async () => { await app.updateModelContext({ content: [{ type: 'text', text: 'Board shows 4' }] }); $('out').textContent = 'told'; };
 </script></body></html>`;
 let maliciousInit = false;
@@ -529,6 +531,28 @@ try {
   assert.deepEqual(defaultsSet, [{ key: '*.fx:read', value: 'zenfx/read' }]);
   await page.reload();
   await fx.locator('#ctx', { hasText: 'slot=opener' }).waitFor();
+  // Host toolbar remains outside the iframe, and mode changes drop an explicit opener.
+  const actions = page.getByRole('toolbar', { name: 'file actions' });
+  await page.getByRole('button', { name: 'Open with…' }).click();
+  await withMenu.getByRole('menuitem', { name: 'Reader (built-in)' }).click();
+  assert.equal(await frame.count(), 0);
+  await actions.getByRole('button', { name: 'Read', exact: true }).click();
+  await fx.locator('#ctx', { hasText: 'slot=opener' }).waitFor();
+  // Plugin edit links honor mode; close returns the core Files tree, not its library.
+  await fx.getByRole('button', { name: 'Edit Grace' }).click();
+  await page.getByRole('textbox', { name: 'Markdown source' }).waitFor();
+  await actions.getByRole('button', { name: 'Back', exact: true }).click();
+  await page.getByRole('tree', { name: 'files' }).waitFor();
+  await page.getByRole('treeitem', { name: /wiki\// }).click();
+  await page.getByRole('treeitem', { name: /Grace.md/ }).click();
+  await actions.getByRole('button', { name: 'Back', exact: true }).click();
+  await page.getByRole('button', { name: 'Edit selected file' }).click();
+  await page.getByRole('textbox', { name: 'Markdown source' }).waitFor();
+  await page.goto(`${base}/?view=files&file=${encodeURIComponent(path.join(VAULT, 'games/board.fx'))}`);
+  await fx.locator('#ctx', { hasText: 'slot=opener' }).waitFor();
+  await fx.getByRole('button', { name: 'Close file' }).click();
+  await page.getByRole('tree', { name: 'files' }).waitFor();
+  await page.goto(`${base}/?view=files&file=${encodeURIComponent(path.join(VAULT, 'games/board.fx'))}`);
   // A default selected in Settings for a second matching pattern must also apply.
   fxPlugin.contributes.openers[0].patterns.push('board.*');
   delete openerDefaults['*.fx:read'];
@@ -650,7 +674,7 @@ try {
   await page.locator('a[data-wiki="God"]').first().click();
   await page.getByRole('heading', { name: 'God' }).waitFor();
   // ...where it is written too, beside the chat.
-  await page.locator('.zside .reader button[title^="write"]').click();
+  await page.locator('.zside').getByRole('toolbar', { name: 'file actions' }).getByRole('button', { name: 'Edit', exact: true }).click();
   await page.locator('.zside textarea').waitFor();
   if (shots) {
     await page.screenshot({ path: 'tests/shots/zen-side-editor.png' });
@@ -786,6 +810,9 @@ try {
   await box.press('Enter');
   await until(() => prompts.at(-1) === 'And now?', 'the context went once');
 
+  await page.locator('.chat-pane').getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.locator('.zside').getByRole('tab', { name: 'Plugins', exact: true }).waitFor();
+  assert.match(page.url(), /s=s1/);
   await page.goto(`${base}/`);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   const cardsRow = page.locator('section[aria-label="Cards"]');

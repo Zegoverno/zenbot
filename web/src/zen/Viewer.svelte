@@ -60,8 +60,11 @@
         : (e as Error).message;
     } finally { saving = false; }
   }
+  export function canLeave() {
+    return !writing || (!saving && (!(text !== saved || hash === null) || confirm('Discard unsaved edits?')));
+  }
   function read() {
-    if (saving || ((text !== saved || hash === null) && !confirm('Discard unsaved edits?'))) return;
+    if (!canLeave()) return;
     readNote(pane);
   }
   function key(e: KeyboardEvent) {
@@ -78,11 +81,8 @@
   <header>
     <span>{path.split('/').pop()}</span>
     {#if writing}
-      <button onclick={read} disabled={saving}>Read</button>
       <button onclick={save} disabled={!loaded || saving || text === saved && hash !== null}>Save</button>
       <span role="status">{saving ? 'Saving…' : text !== saved || hash === null ? 'Unsaved' : 'Saved'}</span>
-    {:else if rel !== null}
-      <button title="write (e)" onclick={() => editNote(rel!, pane)}>Edit</button>
     {/if}
     <button onclick={() => writing ? read() : closeFile(pane)}>{writing ? 'Cancel' : 'Close'}</button>
   </header>
