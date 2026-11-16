@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Install a build staged by upgrade.sh: wait until no session is working, back up the database,
 # swap the binaries, restart and health-check; on failure put the old binaries and database back.
+# Once the kernel is healthy, the web app built with it is installed (scripts/web-install.sh).
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$REPO/scripts/db.sh"
@@ -59,6 +60,18 @@ sudo systemctl start zenbot
 
 if wait_healthy "$HEALTH" 45; then
   log "upgrade OK: now running $COMMIT$NOTE"
+  # The web app, built from the same checkout. A web build that doesn't answer goes back to the one
+  # before it; the kernel stays (the web only relays it).
+  if [ -d "$STAGE/web" ]; then
+    WEB_NAME="$COMMIT-$(basename "$STAGE")"
+    if WEB_OUT=$("$REPO/scripts/web-install.sh" install "$STAGE/web" "$WEB_NAME" 2>&1); then
+      echo "$COMMIT" > "$HOME/.zenbot/web.version"
+      log "web app updated ($WEB_NAME)"
+    else
+      log "web app update FAILED; the previous web build is back (journalctl --user -u zen-web):"
+      echo "$WEB_OUT" | tail -25 >> "$LOG"
+    fi
+  fi
   "$REPO/scripts/searxng.sh" install >/dev/null 2>&1 || log "SearXNG install failed; web search may be down (scripts/searxng.sh install)"
   SRC=$(zen_env ZEN_REPO); SRC=${SRC:-$HOME/zenbot}
   for t in "$SRC/target" "$SRC/crates/zen-matrix/target"; do

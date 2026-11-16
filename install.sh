@@ -97,6 +97,15 @@ sudo systemctl enable zenbot >/dev/null 2>&1
 sudo systemctl restart zenbot
 wait_healthy "http://127.0.0.1:$PORT/health" 60 || { echo "zenbot did not become healthy; see: journalctl -u zenbot -n 50"; exit 1; }
 
+say "Web app"
+WEB_BUILD=$(mktemp -d "$HOME/.zenbot/.web.XXXXXX")
+if scripts/web-install.sh build "$WEB_BUILD/web" && scripts/web-install.sh install "$WEB_BUILD/web" "$(git rev-parse --short HEAD 2>/dev/null || echo local)-$(date +%s)"; then
+  echo "The web app runs on 127.0.0.1:4400; put a signing-in proxy in front of it (INSTALL.md)."
+else
+  echo "The web app didn't install (see above); the kernel and the zen command line work without it."
+fi
+rm -rf "$WEB_BUILD"
+
 git -C "$REPO" config core.hooksPath scripts/git-hooks # commit trailers linking zen's commits to sessions
 
 say "Done"
