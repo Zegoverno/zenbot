@@ -16,6 +16,8 @@ const VAULT = path.join(HOME, '.zenbot/global');
 mkdirSync(path.join(VAULT, 'wiki'), { recursive: true });
 writeFileSync(path.join(VAULT, 'wiki/God.md'), '---\ntype: idea\n---\n# God\n\nThree persons.\n\n## Changelog\n\n- v1: first\n');
 writeFileSync(path.join(VAULT, 'wiki/Grace.md'), '---\ntype: source\nlink: https://example.com/grace\n---\n# Grace\n\nA gift.\n');
+const para = (n) => Array.from({ length: n }, (_, i) => `Paragraph ${i + 1} of plain words to read through slowly.`).join('\n\n');
+writeFileSync(path.join(VAULT, 'wiki/Atlas.md'), `# Atlas\n\n${para(40)}\n\n## North\n\n${para(40)}\n\n## South\n\n${para(40)}\n`);
 writeFileSync(path.join(HOME, '.zenbot/token'), 'test-token');
 writeFileSync(path.join(HOME, 'plain.txt'), 'hello file');
 const PORT = 4412;
@@ -24,6 +26,15 @@ const shots = process.argv.includes('--shots');
 const now = new Date().toISOString();
 const session = (id, title, extra = {}) => ({ id, title, model: 'faux/smoke', effort: null, archived: false, kind: null, parent: null, created_at: now, updated_at: now, ...extra });
 const prompts = [];
+/** What else the page sent on the socket: steers, aborts; and tasks handed to an agent. */
+const steers = [];
+const aborts = [];
+const handed = [];
+/** Waits until the stand-in kernel has seen what the page sent. */
+const until = async (ok, what) => {
+  for (let i = 0; i < 100 && !ok(); i++) await new Promise((r) => setTimeout(r, 50));
+  assert.ok(ok(), what);
+};
 /** What the page asked the stand-in kernel to do: new sessions' bodies, agent saves. */
 const created = [];
 const saves = [];
@@ -60,8 +71,10 @@ const kernel = createServer(async (req, res) => {
       { ...session('a2', 'vault-sync', { archived: true, kind: 'job' }), busy: false, waiting: false },
     ] : [];
     return json(res, { sessions: [
-      { ...session('s1', 'Plan the week', { agent: 'zenbot' }), busy: false, waiting: true },
+      { ...session('c0', 'zen room', { kind: 'channel' }), busy: false, waiting: false },
       { ...session('s0', 'Pitch practice', { agent: 'rex' }), busy: false, waiting: false },
+      { ...session('s1', 'Plan the week', { agent: 'zenbot' }), busy: false, waiting: true },
+      { ...session('k1', 'verifier', { kind: 'verifier', parent: 's1' }), task: 'Check the plan', busy: true, waiting: false },
       ...old,
     ], archived: 2 });
   }
@@ -103,6 +116,10 @@ const kernel = createServer(async (req, res) => {
     return json(res, { today: '2026-10-30', tz: 'UTC', count: 1, problems: [], projects: [{ project: 'acme', tasks: [
       { project: 'acme', text: 'Price the offer', id: 't1', due: '2026-10-29', scheduled: null, priority: 'urgent', goals: [], file: 'x', line: 1, overdue: true },
     ] }] });
+  if (r === 'POST /api/tasks/t1/agent') {
+    handed.push('t1');
+    return json(res, { task: {}, session: 's1', existing: false });
+  }
   json(res, { error: `no stand-in for ${r}` }, 404);
 });
 
@@ -116,6 +133,7 @@ kernel.on('upgrade', (req, socket) => {
     const head = data.length < 126 ? Buffer.from([0x81, data.length]) : Buffer.from([0x81, 126, data.length >> 8, data.length & 255]);
     socket.write(Buffer.concat([head, data]));
   };
+  let long = null;
   socket.on('data', (buf) => {
     if ((buf[0] & 0x0f) !== 1) return;
     let len = buf[1] & 0x7f, at = 2;
@@ -123,8 +141,37 @@ kernel.on('upgrade', (req, socket) => {
     const mask = buf.subarray(at, at + 4);
     const body = Buffer.from(buf.subarray(at + 4, at + 4 + len).map((b, i) => b ^ mask[i % 4])).toString();
     const m = JSON.parse(body);
+    if (m.type === 'abort') {
+      aborts.push(1);
+      if (long) {
+        clearTimeout(long);
+        long = null;
+        send({ type: 'end', error: null, turn: { input_tokens: 1, output_tokens: 1 }, next: false });
+        send({ type: 'idle' });
+      }
+      return;
+    }
     if (m.type !== 'prompt') return;
+    if (m.mode === 'steer') return void steers.push(m.text);
     prompts.push(m.text);
+    if (long) return; // queued: the kernel runs it after this turn
+    if (m.text === 'Take your time') {
+      send({ type: 'message', message: { role: 'user', content: m.text } });
+      send({ type: 'busy', busy: true, model: 'faux/smoke' });
+      send({ type: 'delta', delta: 'Thinking it over' });
+      long = setTimeout(() => {}, 60_000);
+      return;
+    }
+    if (m.text === 'Ask me') {
+      send({ type: 'message', message: { role: 'user', content: m.text } });
+      send({ type: 'busy', busy: true, model: 'faux/smoke' });
+      send({ type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'Two questions.' }] } });
+      send({ type: 'questions', questions: [{ question: 'Which day?', options: ['Thursday', 'Friday'] }, { question: 'Who comes?', options: ['Just me', 'The team'] }] });
+      send({ type: 'end', error: null, turn: { input_tokens: 1, output_tokens: 1 }, next: false });
+      send({ type: 'idle' });
+      send({ type: 'suggestion', id: 'sg1', text: 'Thursday, just me' });
+      return;
+    }
     send({ type: 'message', message: { role: 'user', content: m.text } });
     send({ type: 'busy', busy: true, model: 'faux/smoke' });
     send({ type: 'tool_start', call_id: 'c1', name: 'bash', args: { command: 'echo hi' } });
@@ -160,6 +207,13 @@ try {
   await page.goto(`${base}/`);
   await page.getByText('Plan the week').first().waitFor();
   assert.ok(await page.getByText('waiting on you').first().isVisible());
+  // Channels apart; waiting first; a subagent under its session.
+  await page.locator('.head', { hasText: 'CHANNELS' }).waitFor();
+  const boardRows = (await page.locator('.row').allInnerTexts()).map((t) => t.replace(/\s+/g, ' '));
+  const at = (re) => boardRows.findIndex((t) => re.test(t));
+  assert.ok(at(/zen room/) >= 0 && at(/zen room/) < at(/Plan the week/), `channels come first: ${boardRows}`);
+  assert.ok(at(/Plan the week/) < at(/Pitch practice/), 'the session waiting on the owner comes first');
+  assert.equal(at(/verifier: Check the plan/), at(/Plan the week/) + 1, 'the subagent sits under its session');
   if (shots) await page.screenshot({ path: 'tests/shots/zen-board.png' });
 
   // Sessions: a `+ new session` button does what `n` does.
@@ -194,6 +248,14 @@ try {
   await page.keyboard.press('3');
   await page.getByText('Price the offer').waitFor();
   assert.ok(await page.getByText(/overdue/).first().isVisible());
+  // Handing a task to an agent: `a` arms, `a` again hands it over and opens its session.
+  await page.keyboard.press('a');
+  await page.getByText(/a again: hand/).waitFor();
+  await page.keyboard.press('a');
+  await page.waitForURL(/\?s=s1/);
+  assert.deepEqual(handed, ['t1']);
+  await page.goto(`${base}/`);
+  await page.getByText('Plan the week').first().waitFor();
 
   // Files: opens in the shared workspace (the vault); `..` climbs to the home folder, without the
   // token; a note opens in the reader, changelog apart.
@@ -274,6 +336,53 @@ try {
   await tab.close();
   await page.bringToFront();
   await page.keyboard.press('N');
+  await page.getByRole('heading', { name: 'God' }).waitFor();
+
+  // Reading aids: spacing, bionic, focus, width and play; the front matter unfolds.
+  const reader = page.locator('.reader').first();
+  await page.keyboard.press(':');
+  await page.locator('.reader.spaced').waitFor();
+  await page.keyboard.press(':');
+  await page.locator('.reader.spaced').waitFor({ state: 'detached' });
+  const isOn = (l) => l.evaluate((e) => e.classList.contains('on'));
+  const bionic = reader.locator('button[title="bionic (b)"]');
+  await page.keyboard.press('b');
+  assert.ok(await isOn(bionic), 'b turns bionic on');
+  await page.keyboard.press('b');
+  assert.ok(!(await isOn(bionic)));
+  const focusButton = reader.locator('button[title^="focus:"]');
+  for (const want of [/para/, /line/, /off/]) {
+    await page.keyboard.press('f');
+    assert.match(await focusButton.innerText(), want);
+  }
+  const measure = () => reader.locator('.rpage').first().evaluate((e) => e.style.maxWidth);
+  const measure0 = await measure();
+  await page.keyboard.press('>');
+  assert.notEqual(await measure(), measure0, '> widens the page');
+  await page.keyboard.press('<');
+  assert.equal(await measure(), measure0);
+  const playButton = reader.locator('button[title^="play one word"]');
+  await page.keyboard.press('p');
+  assert.match(await playButton.innerText(), /stop/, 'p plays word by word');
+  await page.keyboard.press('Escape');
+  assert.match(await playButton.innerText(), /play/);
+  await page.keyboard.press('i');
+  await reader.locator('.fm.open', { hasText: 'idea' }).waitFor();
+  await page.keyboard.press('i');
+  await reader.locator('.fm.open').waitFor({ state: 'detached' });
+  // Headings: ] and [ jump between them.
+  await page.goto(`${base}/?view=files&file=${encodeURIComponent(path.join(VAULT, 'wiki/Atlas.md'))}`);
+  await page.getByRole('heading', { name: 'Atlas' }).waitFor();
+  const scrolled = () => page.locator('.reader .scroll').evaluate((e) => e.scrollTop);
+  await page.keyboard.press(']'); // the title
+  await page.keyboard.press(']'); // North
+  await page.waitForFunction(() => document.querySelector('.reader .scroll').scrollTop > 100);
+  const north = await scrolled();
+  await page.keyboard.press(']');
+  await page.waitForFunction((n) => document.querySelector('.reader .scroll').scrollTop > n + 100, north);
+  await page.keyboard.press('[');
+  await page.waitForFunction((n) => Math.abs(document.querySelector('.reader .scroll').scrollTop - n) < 4, north);
+  await page.goto(`${base}/?view=files&file=${encodeURIComponent(path.join(VAULT, 'wiki/God.md'))}`);
   await page.getByRole('heading', { name: 'God' }).waitFor();
 
   // The same pane writes it (e), in the writer, and Alt+W reads it again.
@@ -442,6 +551,50 @@ try {
   await box.click();
   await box.press('7');
   assert.equal(await box.inputValue(), '7', 'chat typing is untouched');
+  await box.fill('');
+
+  // Tool runs fold into one line; a click or ctrl+o shows the steps.
+  const run = page.locator('.work').last();
+  assert.match(await run.innerText(), /echo hi/);
+  assert.ok(!(await run.evaluate((e) => e.classList.contains('wk-open'))), 'a run starts folded');
+  await run.locator('button.head').click();
+  await page.locator('.work.wk-open').last().waitFor();
+  await box.click();
+  await page.keyboard.press('Control+o');
+  await page.keyboard.press('Control+o');
+  assert.equal(await page.locator('.work.wk-open').count(), 0, 'ctrl+o folds every run again');
+
+  // Questions with options, and the next-prompt suggestion (Tab takes it).
+  await box.fill('Ask me');
+  await box.press('Enter');
+  await page.getByText('── Questions ──').waitFor();
+  await page.getByRole('button', { name: 'tab: use suggestion' }).waitFor();
+  assert.equal(await box.getAttribute('placeholder'), 'Thursday, just me');
+  await box.press('Tab');
+  assert.equal(await box.inputValue(), 'Thursday, just me');
+  await box.fill('');
+  await page.locator('.zc-opt', { hasText: 'Friday' }).click();
+  await page.locator('.zc-opt', { hasText: 'The team' }).click();
+  assert.equal(await box.inputValue(), '1. Friday\n2. The team', 'options fill the answer, one row per question');
+  await box.fill('');
+
+  // During a turn: Enter queues, /steer steers, Esc interrupts.
+  await box.fill('Take your time');
+  await box.press('Enter');
+  await page.getByText('Thinking it over').waitFor();
+  await box.fill('And then this');
+  await box.press('Enter');
+  await page.getByText(/queued: zenbot reads it when this turn ends/).waitFor();
+  await until(() => prompts.at(-1) === 'And then this', 'the queued prompt reaches the kernel');
+  await box.fill('/steer Shorter, please');
+  await box.press('Enter');
+  await page.getByText(/steering: zenbot reads it at the next tool boundary/).waitFor();
+  await until(() => steers.length === 1, 'the steer reaches the kernel');
+  assert.deepEqual(steers, ['Shorter, please']);
+  await box.press('Escape');
+  await page.getByText('interrupted', { exact: true }).waitFor();
+  await until(() => aborts.length >= 1, 'Esc sends an abort');
+  assert.equal(aborts.length, 1, 'Esc sends one abort');
 
   assert.deepEqual(errors, []);
   console.log('zen e2e: all passed');
