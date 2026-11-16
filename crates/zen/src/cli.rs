@@ -32,6 +32,9 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Cmd {
+    /// An enabled plugin command, resolved through the shared command table.
+    #[command(external_subcommand)]
+    Plugin(Vec<String>),
     /// Records (people, organizations, projects, long-term memory): get, list, put, schema, lint, index.
     /// Arguments as JSON with --args (or - for stdin).
     Brain {
@@ -75,6 +78,12 @@ pub(crate) enum Cmd {
         /// The agent it is (default zenbot)
         #[arg(short, long)]
         agent: Option<String>,
+    },
+    /// Installed plugins; `zen plugins add <name|path.tgz|folder> [--yes]` installs or upgrades one (asking you to approve its permissions), `zen plugins rm <name>` removes one
+    Plugins {
+        /// `add <name|path> [--yes]` or `rm <name>`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        words: Vec<String>,
     },
     /// Your agents and what each may use; `zen agents new <name> [description]` makes one, `zen agents rm <name>` removes one
     Agents {

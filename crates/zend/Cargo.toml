@@ -30,5 +30,9 @@ sha2 = "0.10"
 # Decision files (s1/): parse and report errors with their line and column.
 toml = { version = "1", default-features = false, features = ["std", "serde", "parse"] }
 
+# Plugin release archives (plugins.rs): read a .tgz entry by entry, checking each before writing it.
+tar = { version = "0.4", default-features = false }
+flate2 = "1"
+
 [build-dependencies]
 cc = "1"

@@ -1,18 +1,24 @@
 // Where the page is, as the terminal app's: the board (home screen) with its Sessions · Files ·
-// Tasks · Agents views, or a session's chat with the side panel holding the same views. Each pane (the
-// board's, the side panel's) has its own open file; the file viewer is not a tab, it opens in place
-// of the Files tree.
+// Tasks · Agents · Games views and the plugins' views after them, or a session's chat with the side
+// panel holding the same views (and a plugin command's panel). Settings is a board page off the top
+// bar. Each pane (the board's, the side panel's) has its own open file; the file viewer is not a
+// tab, it opens in place of the Files tree, with the file's opener (the built-in reader and writer,
+// or a plugin's).
 //
 // The address follows: `/?s=<id>` a session (`/?s=new` a fresh chat), `/?view=files&file=<path>` the
-// board (`&edit=1`: writing it). `?path=<note>` (a vault note, as the terminal app's `e` opens it)
+// board (`&edit=1`: writing it; `&with=<plugin>/<opener>` opened with that opener),
+// `/?view=settings&tab=marketplace`. `?path=<note>` (a vault note, as the terminal app's `e` opens it)
 // lands on the board writing that note; `?notes` on the board's Files at the vault. Back and
 // forward work.
 
 import { files } from './api.ts';
 
-export type View = 'sessions' | 'files' | 'tasks' | 'agents';
+/** The built-in views, Games, Settings (the board's), a plugin command's panel (the side's) and plugin views. */
+export type View = 'sessions' | 'files' | 'tasks' | 'agents' | 'games' | 'settings' | 'panel' | `plugin:${string}`;
 export type Pane = 'home' | 'side';
-export const VIEWS: View[] = ['sessions', 'files', 'tasks', 'agents'];
+/** The built-in tabs, in order; plugin views come after them. */
+export const VIEWS: View[] = ['sessions', 'files', 'tasks', 'agents', 'games'];
+const isView = (v: string | null): v is View => !!v && (VIEWS.includes(v as View) || v === 'settings' || /^plugin:[a-z0-9-]{2,40}\/[A-Za-z0-9._-]+$/.test(v));
 
 export const app = $state({
   /** The open session; 'new' a chat whose session starts with its first prompt; null the board. */
@@ -26,6 +32,10 @@ export const app = $state({
   file: { home: null as string | null, side: null as string | null },
   /** Whether each pane's file (a vault note) is open for writing (the writer) rather than reading. */
   write: { home: false, side: false },
+  /** The opener the owner picked for each pane's file ("Open with"): `<plugin>/<id>`, 'builtin', or null for the default. */
+  opener: { home: null as string | null, side: null as string | null },
+  /** Settings' page. */
+  settings: 'plugins' as 'plugins' | 'marketplace',
   /** A new note not yet on disk (vault path and its first text), for the editor to start from. */
   draft: null as { path: string; text: string } | null,
   /** Each pane's Files tree root. */
@@ -52,6 +62,8 @@ function url(): string {
     if (app.view !== 'sessions') p.set('view', app.view);
     if (app.view === 'files' && app.file.home) p.set('file', app.file.home);
     if (app.view === 'files' && app.file.home && app.write.home) p.set('edit', '1');
+    if (app.view === 'files' && app.file.home && app.opener.home) p.set('with', app.opener.home);
+    if (app.view === 'settings' && app.settings !== 'plugins') p.set('tab', app.settings);
   }
   const q = p.toString();
   return q ? `/?${q}` : '/';
@@ -68,11 +80,13 @@ function push(replace = false) {
 export function fromUrl() {
   const p = new URLSearchParams(location.search);
   app.session = p.get('s');
-  const v = p.get('view') as View | null;
-  app.view = v && VIEWS.includes(v) ? v : app.session ? app.view : 'sessions';
+  const v = p.get('view');
+  app.view = isView(v) ? v : app.session ? app.view : 'sessions';
   if (!app.session) {
     app.file.home = p.get('file');
     app.write.home = p.has('edit');
+    app.opener.home = p.get('with');
+    app.settings = p.get('tab') === 'marketplace' ? 'marketplace' : 'plugins';
   }
   app.focus = 'chat';
 }
@@ -140,10 +154,11 @@ export function setView(pane: Pane, view: View) {
   }
 }
 
-/** Opens a file in a pane's file viewer (the side panel opens on Files). */
-export function openFile(path: string, pane: Pane = app.session ? 'side' : 'home', write = false) {
+/** Opens a file in a pane's file viewer (the side panel opens on Files); `opener` as "Open with" picks. */
+export function openFile(path: string, pane: Pane = app.session ? 'side' : 'home', write = false, opener: string | null = null) {
   app.file[pane] = path;
   app.write[pane] = write;
+  app.opener[pane] = opener;
   if (pane === 'side') {
     app.side.open = true;
     app.side.view = 'files';
@@ -156,6 +171,7 @@ export function openFile(path: string, pane: Pane = app.session ? 'side' : 'home
 export function closeFile(pane: Pane) {
   app.file[pane] = null;
   app.write[pane] = false;
+  app.opener[pane] = null;
   if (pane === 'home') push();
 }
 
@@ -164,6 +180,7 @@ export function openDir(dir: string, pane: Pane = app.session ? 'side' : 'home')
   app.root[pane] = dir;
   app.file[pane] = null;
   app.write[pane] = false;
+  app.opener[pane] = null;
   setView(pane, 'files');
 }
 
@@ -180,9 +197,16 @@ export function editNote(vaultPath: string, pane: Pane = app.session ? 'side' : 
   openFile(`${app.vault}/${vaultPath}`, pane, true);
 }
 
+/** Settings, on the board (`tab`: its page). */
+export function settings(tab: 'plugins' | 'marketplace' = 'plugins') {
+  app.settings = tab;
+  board('settings');
+}
+
 /** Back from writing to reading the same file. */
 export function readNote(pane: Pane) {
   app.write[pane] = false;
+  app.opener[pane] = null;
   if (pane === 'home') push();
 }
 

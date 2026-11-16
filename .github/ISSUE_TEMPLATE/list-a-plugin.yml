@@ -1,0 +1,128 @@
+name: List a plugin
+description: Ask for your plugin to be listed in the zenbot marketplace.
+title: "List plugin: <name>"
+labels: ["marketplace"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for building a plugin. Read [PLUGINS.md](https://github.com/Zegoverno/zenbot/blob/main/PLUGINS.md)
+        first ("Releasing" and "Listing in the marketplace"). A maintainer turns this into an entry in
+        `marketplace/plugins.json`, CI checks the archive, and a maintainer reviews your code at the
+        release tag. You can also open a pull request with the entry yourself.
+  - type: input
+    id: name
+    attributes:
+      label: Name
+      description: "`[a-z0-9-]{2,40}`; it must equal `name` in your plugin.json."
+      placeholder: zenread
+    validations:
+      required: true
+  - type: input
+    id: title
+    attributes:
+      label: Title
+      placeholder: zenread
+    validations:
+      required: true
+  - type: input
+    id: description
+    attributes:
+      label: One-line description
+      description: At most 200 characters.
+    validations:
+      required: true
+  - type: input
+    id: author
+    attributes:
+      label: Author
+      description: The name to show.
+    validations:
+      required: true
+  - type: input
+    id: repository
+    attributes:
+      label: Repository
+      description: Public, on GitHub.
+      placeholder: https://github.com/you/zenread
+    validations:
+      required: true
+  - type: input
+    id: license
+    attributes:
+      label: Licence
+      description: An open-source licence (SPDX identifier).
+      placeholder: MIT
+    validations:
+      required: true
+  - type: input
+    id: tag
+    attributes:
+      label: Release tag
+      description: "`v<version>`, the release a maintainer will review."
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: input
+    id: archive
+    attributes:
+      label: Archive URL
+      description: "The release asset `<name>-<version>.tgz` on your repository's GitHub releases."
+      placeholder: https://github.com/you/zenread/releases/download/v0.1.0/zenread-0.1.0.tgz
+    validations:
+      required: true
+  - type: input
+    id: sha256
+    attributes:
+      label: sha256 of the archive
+      description: "`sha256sum zenread-0.1.0.tgz` (64 hex characters)."
+    validations:
+      required: true
+  - type: textarea
+    id: permissions
+    attributes:
+      label: Permissions, and why each is needed
+      description: |
+        One per line, with the reason: `files:read`, `files:write` or `files:write:<subfolder>`,
+        `network`, `ai`. Write "none" if the plugin asks for nothing. They must equal `kernel` in
+        your plugin.json, and your README must explain them.
+      placeholder: |
+        files:read: reads the notes the owner opens
+        network: fetches a web page to save it
+    validations:
+      required: true
+  - type: checkboxes
+    id: slots
+    attributes:
+      label: Slots it fills
+      description: Must equal the non-empty keys of `contributes` in your plugin.json.
+      options:
+        - label: views
+        - label: openers
+        - label: games
+        - label: commands
+  - type: input
+    id: categories
+    attributes:
+      label: Categories
+      description: Comma-separated, lowercase (for example `reading, notes`).
+    validations:
+      required: true
+  - type: input
+    id: homepage
+    attributes:
+      label: Homepage and icon (optional)
+      description: https URLs.
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: The plugin has an open-source licence and a public repository.
+          required: true
+        - label: The README says what the plugin does and why it needs each permission.
+          required: true
+        - label: The plugin makes no network calls or telemetry beyond what the README declares.
+          required: true
+        - label: The archive is a GitHub release asset with no links, absolute paths, `..`, dot files or `node_modules`, and I tried it with `zen plugins add ./<file>.tgz`.
+          required: true

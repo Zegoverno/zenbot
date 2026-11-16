@@ -33,16 +33,9 @@ const SHAPES: Record<string, (a: string[]) => boolean> = {
 
 const ZEN = process.env.ZEN_BIN ?? path.join(os.homedir(), '.zenbot/bin/zen');
 
-let table: Promise<Command[]> | null = null;
-
-/** The shared table's chat commands, in help's order (`zen --commands`; kept once it answers). */
+/** Read the shared table afresh: plugin installs and enable/disable change it at runtime. */
 export function list(bin = ZEN): Promise<Command[]> {
-  if (bin !== ZEN) return load(bin);
-  table ??= load(bin).catch((e) => {
-    table = null;
-    throw e;
-  });
-  return table;
+  return load(bin);
 }
 
 function load(bin: string): Promise<Command[]> {

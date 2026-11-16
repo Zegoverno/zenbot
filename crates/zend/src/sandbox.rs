@@ -133,13 +133,80 @@ impl Mount {
 pub struct Sandbox {
     pub agent: String,
     pub mounts: Vec<Mount>,
+    /// No network at all (a plugin without `network`): bubblewrap's own empty network namespace
+    /// (`--unshare-net`, loopback only) instead of pasta's.
+    pub offline: bool,
+    pinned: Vec<(PathBuf, std::sync::Arc<std::fs::File>)>,
 }
 
 impl Sandbox {
     pub fn new(agent: &str, mut mounts: Vec<Mount>) -> Sandbox {
         // Parents first (a stable sort keeps the given order among equals): a child is bound on top.
         mounts.sort_by_key(|m| m.path.components().count());
-        Sandbox { agent: agent.to_string(), mounts }
+        Sandbox {
+            agent: agent.to_string(),
+            mounts,
+            offline: false,
+            pinned: Vec::new(),
+        }
+    }
+
+    /// Pin plugin grants before spawn. Every component is opened relative to its pinned
+    /// parent with O_NOFOLLOW: a replacement symlink is refused, never canonicalized.
+    pub fn pin_plugin_sources(
+        &mut self,
+        dirs: &[&Path],
+        files: Option<&Path>,
+        runtime: Option<&Path>,
+    ) -> anyhow::Result<()> {
+        for path in dirs.iter().copied().chain(files).chain(runtime) {
+            let fd = std::sync::Arc::new(pin_path(path)?);
+            let mount = self
+                .mounts
+                .iter()
+                .find(|m| m.path == path)
+                .ok_or_else(|| anyhow::anyhow!("missing plugin mount {}", path.display()))?;
+            self.pinned.push((mount.path.clone(), fd));
+        }
+        Ok(())
+    }
+
+    /// Resolve and create the scoped grant relative to the already pinned root, never
+    /// through a host pathname. Renaming any parent cannot redirect mkdir or the bind.
+    pub fn pin_plugin_scope(&mut self, root: &Path, sub: &Path) -> anyhow::Result<()> {
+        let relative = sub.strip_prefix(root)?;
+        anyhow::ensure!(!relative.as_os_str().is_empty()
+            && relative.components().all(|p| matches!(p, Component::Normal(_)))
+            && relative.components().next().unwrap().as_os_str() != "agents", "invalid scoped plugin grant");
+        let (_, root_fd) = self.pinned.iter().find(|(p, _)| p == root)
+            .ok_or_else(|| anyhow::anyhow!("files root is not pinned"))?;
+        let fd = pin_relative_dir(root_fd.try_clone()?, relative)?;
+        anyhow::ensure!(self.mounts.iter().any(|m| m.path == sub), "scoped mount missing");
+        self.pinned.push((sub.to_path_buf(), std::sync::Arc::new(fd)));
+        Ok(())
+    }
+
+    fn inherit_pins(&self, cmd: &mut tokio::process::Command) {
+        use std::os::fd::AsRawFd;
+        let pins = self.pinned.clone();
+        // Only the forked child drops CLOEXEC. The parent retains CLOEXEC, so concurrent
+        // commands cannot inherit these grants. Captured Arcs keep them alive until spawn.
+        unsafe {
+            cmd.pre_exec(move || {
+                for (_, fd) in &pins {
+                    if libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, 0) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
+
+    /// The same sandbox with no network at all.
+    pub fn offline(mut self) -> Sandbox {
+        self.offline = true;
+        self
     }
 
     /// Why `path` is out of reach (for writing when `write`), if it is. Symlinks are resolved and
@@ -168,6 +235,16 @@ impl Sandbox {
         for m in &self.mounts {
             match m.access {
                 Access::Empty => a.extend(["--tmpfs".into(), s(&m.path)]),
+                access if self.pinned.iter().any(|(p, _)| p == &m.path) => {
+                    use std::os::fd::AsRawFd;
+                    let (_, fd) = self.pinned.iter().find(|(p, _)| p == &m.path).unwrap();
+                    let flag = if access == Access::Write {
+                        "--bind-fd"
+                    } else {
+                        "--ro-bind-fd"
+                    };
+                    a.extend([flag.into(), fd.as_raw_fd().to_string(), s(&m.path)]);
+                }
                 access => match std::fs::read_link(&m.path) {
                     // A system symlink (`/bin -> usr/bin`) is recreated, not bound.
                     Ok(target) if m.path.parent() == Some(Path::new("/")) => a.extend(["--symlink".into(), s(&target), s(&m.path)]),
@@ -177,6 +254,9 @@ impl Sandbox {
                     }
                 },
             }
+        }
+        if self.offline {
+            a.push("--unshare-net".into());
         }
         a.extend(
             ["--dev", "/dev", "--proc", "/proc", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--die-with-parent", "--new-session", "--chdir"]
@@ -202,18 +282,80 @@ impl Sandbox {
         if !Path::new(BWRAP).is_file() {
             return Err(format!("{}'s commands run only sandboxed, and bubblewrap isn't installed ({BWRAP}); install it with `sudo apt-get install -y bubblewrap`", self.agent));
         }
+        self.check(cwd, false).map_err(|e| format!("can't run there: {e}"))?;
+        if self.offline {
+            let mut cmd = tokio::process::Command::new(BWRAP);
+            cmd.args(self.args(cwd)).arg("--").arg(program).args(args).current_dir("/");
+            self.inherit_pins(&mut cmd);
+            return Ok(cmd);
+        }
         if !Path::new(PASTA).is_file() {
             return Err(format!("{}'s commands run only on a private network, and pasta isn't installed ({PASTA}); install it with `sudo apt-get install -y passt`", self.agent));
         }
-        self.check(cwd, false).map_err(|e| format!("can't run there: {e}"))?;
         let mut cmd = tokio::process::Command::new(PASTA);
         cmd.args(PASTA_ARGS);
         for s in sandbox_servers().unwrap_or_default() {
             cmd.args(["-D", &s]);
         }
         cmd.arg("--").arg(BWRAP).args(self.args(cwd)).arg("--").arg(program).args(args).current_dir("/");
+        self.inherit_pins(&mut cmd);
         Ok(cmd)
     }
+}
+
+/// Open an absolute path without following any symlink, even in intermediate components.
+fn pin_path(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    if !path.is_absolute() {
+        return Err(std::io::Error::other("plugin mount must be absolute"));
+    }
+    let mut parent = std::fs::File::open("/")?;
+    for part in path.components() {
+        let Component::Normal(name) = part else {
+            if part == Component::RootDir {
+                continue;
+            }
+            return Err(std::io::Error::other("invalid plugin mount component"));
+        };
+        let name = std::ffi::CString::new(name.as_bytes())?;
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        parent = unsafe { std::fs::File::from_raw_fd(fd) };
+        if parent.metadata()?.file_type().is_symlink() {
+            return Err(std::io::Error::other("symlink in plugin mount"));
+        }
+    }
+    Ok(parent)
+}
+
+/// Create/open each scope component under a directory fd. O_DIRECTORY rejects symlinks
+/// together with O_NOFOLLOW, including a symlink installed between mkdirat and openat.
+fn pin_relative_dir(mut parent: std::fs::File, relative: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    for part in relative.components() {
+        let Component::Normal(name) = part else { return Err(std::io::Error::other("invalid scoped grant")); };
+        let name = std::ffi::CString::new(name.as_bytes())?;
+        let made = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
+        if made < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::AlreadyExists { return Err(error); }
+        }
+        let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(),
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+        if fd < 0 { return Err(std::io::Error::last_os_error()); }
+        parent = unsafe { std::fs::File::from_raw_fd(fd) };
+    }
+    Ok(parent)
 }
 
 /// `path` with symlinks resolved and `..` handled; for a path that doesn't exist, its nearest
@@ -337,28 +479,7 @@ pub struct Layout<'a> {
 
 pub fn mounts(l: &Layout) -> Vec<Mount> {
     use crate::agents::Global;
-    let mut m = Vec::new();
-    for p in SYSTEM {
-        if std::fs::symlink_metadata(p).is_ok() {
-            m.push(Mount::new(*p, Access::Read));
-        }
-    }
-    // DNS: /etc/resolv.conf often points into /run. A resolver on the host's loopback (systemd-
-    // resolved's 127.0.0.53) isn't reachable from the agent's own network: it gets a resolv.conf
-    // naming that resolver's upstream servers instead (`sandbox_servers`).
-    let target = Path::new(RESOLV).canonicalize().ok();
-    if let Some(dir) = target.as_ref().and_then(|r| r.parent().map(Path::to_path_buf)).filter(|d| !d.starts_with("/etc")) {
-        m.push(Mount::new(dir, Access::Read));
-    }
-    if let (Some(target), Some(text), Some(servers)) = (target, std::fs::read_to_string(RESOLV).ok(), sandbox_servers()) {
-        let file = l.zen.join("sandbox/resolv.conf");
-        let ours = sandbox_resolv(&text, &servers);
-        let written = std::fs::read_to_string(&file).is_ok_and(|t| t == ours)
-            || (std::fs::create_dir_all(l.zen.join("sandbox")).is_ok() && std::fs::write(&file, &ours).is_ok());
-        if written {
-            m.push(Mount { path: target, real: file, access: Access::Read });
-        }
-    }
+    let mut m = system_mounts(l.zen, true);
     m.push(Mount::new(l.user_home, Access::Empty));
     m.push(Mount::new("/tmp", Access::Empty));
     for rel in [".local/node", ".local/bin", ".cargo/bin", ".gitconfig"] {
@@ -394,6 +515,70 @@ pub fn mounts(l: &Layout) -> Vec<Mount> {
     m
 }
 
+/// The system folders, read-only, and with `dns` what name resolution needs.
+fn system_mounts(zen: &Path, dns: bool) -> Vec<Mount> {
+    let mut m = Vec::new();
+    for p in SYSTEM {
+        if std::fs::symlink_metadata(p).is_ok() {
+            m.push(Mount::new(*p, Access::Read));
+        }
+    }
+    // DNS: /etc/resolv.conf often points into /run. A resolver on the host's loopback (systemd-
+    // resolved's 127.0.0.53) isn't reachable from the agent's own network: it gets a resolv.conf
+    // naming that resolver's upstream servers instead (`sandbox_servers`).
+    let target = Path::new(RESOLV).canonicalize().ok();
+    if let Some(dir) = target.as_ref().and_then(|r| r.parent().map(Path::to_path_buf)).filter(|d| !d.starts_with("/etc")) {
+        m.push(Mount::new(dir, Access::Read));
+    }
+    if let (true, Some(target), Some(text), Some(servers)) = (dns, target, std::fs::read_to_string(RESOLV).ok(), sandbox_servers()) {
+        let file = zen.join("sandbox/resolv.conf");
+        let ours = sandbox_resolv(&text, &servers);
+        let written = std::fs::read_to_string(&file).is_ok_and(|t| t == ours)
+            || (std::fs::create_dir_all(zen.join("sandbox")).is_ok() && std::fs::write(&file, &ours).is_ok());
+        if written {
+            m.push(Mount { path: target, real: file, access: Access::Read });
+        }
+    }
+    m
+}
+
+/// What a plugin's server reaches (plugins.rs): the system folders, the node runtime's folder, its
+/// own folder read-only, its data folder read-write and, as its permissions say, the files root
+/// (other agents' vaults under it hidden) read-only or read-write, or read-only with one subfolder
+/// writable. The owner's home is otherwise an empty tmpfs: no `.ssh`, no zen home, no tokens.
+pub struct PluginLayout<'a> {
+    pub user_home: &'a Path,
+    pub zen: &'a Path,
+    pub plugin: &'a Path,
+    pub data: &'a Path,
+    /// The folder holding the node runtime, when it isn't under a system folder.
+    pub runtime: Option<&'a Path>,
+    pub files: Option<(&'a Path, Access)>,
+    pub write_sub: Option<&'a Path>,
+    pub network: bool,
+}
+
+pub fn plugin_mounts(l: &PluginLayout) -> Vec<Mount> {
+    let mut m = system_mounts(l.zen, l.network);
+    m.push(Mount::new(l.user_home, Access::Empty));
+    m.push(Mount::new("/tmp", Access::Empty));
+    if let Some(r) = l.runtime {
+        m.push(Mount::new(r, Access::Read));
+    }
+    if let Some((files, access)) = l.files {
+        m.push(Mount::new(files, access));
+        if files.join("agents").is_dir() {
+            m.push(Mount::new(files.join("agents"), Access::Empty));
+        }
+        if let Some(sub) = l.write_sub {
+            m.push(Mount::new(sub, Access::Write));
+        }
+    }
+    m.push(Mount::new(l.plugin, Access::Read));
+    m.push(Mount::new(l.data, Access::Write));
+    m
+}
+
 /// Why an extra path (`workspace`, `read`, `write` in `agent.toml`) can't be given to the agent
 /// whose folder is `dir` and vault `vault`, if it can't: it must be an existing absolute path,
 /// neither the zen home, a folder holding it, nor inside it except in the agent's own folder or vault.
@@ -414,6 +599,99 @@ pub fn refuse_path(p: &Path, zen: &Path, dir: &Path, vault: &Path) -> Option<Str
 mod tests {
     use super::*;
     use crate::agents::Global;
+
+    #[test]
+    fn plugin_bindings_survive_rename_and_refuse_symlink_replacement() {
+        use std::os::unix::fs::symlink;
+        let t = crate::test_util::TestDir::new("plugin-pins");
+        let grant = t.join("grant");
+        let moved = t.join("moved");
+        let outside = t.join("outside");
+        std::fs::create_dir(&grant).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(grant.join("marker"), "granted").unwrap();
+        std::fs::write(outside.join("marker"), "secret").unwrap();
+        let mut sandbox = Sandbox::new("plugin", vec![Mount::new(&grant, Access::Write)]).offline();
+        sandbox.pin_plugin_sources(&[&grant], None, None).unwrap();
+        let mut commands = Vec::new();
+        if Path::new(BWRAP).is_file() {
+            for offline in [true, false] {
+                if !offline && !Path::new(PASTA).is_file() {
+                    continue;
+                }
+                let mut runnable = sandbox.clone();
+                runnable.offline = offline;
+                // System executables plus pinned grant, without widening owner files.
+                runnable
+                    .mounts
+                    .extend(system_mounts(&t.join("zen"), !offline));
+                commands.push(runnable.wrap(&grant, "/bin/cat", ["marker"]).unwrap());
+            }
+        }
+        std::fs::rename(&grant, &moved).unwrap();
+        symlink(&outside, &grant).unwrap();
+        use std::os::fd::AsRawFd;
+        let fd = sandbox.pinned[0].1.as_raw_fd();
+        assert_eq!(
+            std::fs::read_to_string(format!("/proc/self/fd/{fd}/marker")).unwrap(),
+            "granted"
+        );
+        assert!(sandbox
+            .args(&grant)
+            .windows(2)
+            .any(|w| w == ["--bind-fd", &fd.to_string()]));
+        // Deterministic swap between mount validation and pinning must fail closed.
+        let mut raced = Sandbox::new(
+            "plugin",
+            vec![Mount {
+                path: grant.clone(),
+                real: grant.clone(),
+                access: Access::Write,
+            }],
+        );
+        assert!(raced.pin_plugin_sources(&[&grant], None, None).is_err());
+        assert!(pin_path(&grant.join("nested")).is_err());
+        for mut command in commands {
+            let out = command.as_std_mut().output().unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(out.stdout, b"granted");
+        }
+    }
+
+    #[test]
+    fn scoped_grants_walk_the_pinned_root_and_never_follow_replacements() {
+        use std::os::unix::fs::symlink;
+        use std::os::fd::AsRawFd;
+        let t = crate::test_util::TestDir::new("scope-pins");
+        let root = t.join("files");
+        let moved = t.join("moved");
+        let outside = t.join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let scope = root.join("Reading/new");
+        let mut sandbox = Sandbox::new("plugin", vec![
+            Mount::new(&root, Access::Read), Mount::new(&scope, Access::Write),
+        ]);
+        sandbox.pin_plugin_sources(&[], Some(&root), None).unwrap();
+        // Swap the root after validation and opening, before scope resolution/creation.
+        std::fs::rename(&root, &moved).unwrap();
+        symlink(&outside, &root).unwrap();
+        sandbox.pin_plugin_scope(&root, &scope).unwrap();
+        assert!(moved.join("Reading/new").is_dir());
+        assert!(!outside.join("Reading").exists());
+        let fd = sandbox.pinned.last().unwrap().1.as_raw_fd();
+        std::fs::rename(moved.join("Reading"), moved.join("old")).unwrap();
+        symlink(&outside, moved.join("Reading")).unwrap();
+        std::fs::write(format!("/proc/self/fd/{fd}/allowed"), "yes").unwrap();
+        assert_eq!(std::fs::read_to_string(moved.join("old/new/allowed")).unwrap(), "yes");
+        assert!(!outside.join("allowed").exists());
+        assert!(sandbox.pin_plugin_scope(&root, &scope).is_err());
+        assert!(!outside.join("new").exists(), "no mkdir through a replacement symlink");
+    }
 
     struct Home {
         _t: crate::test_util::TestDir,

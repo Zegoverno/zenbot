@@ -32,8 +32,17 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<()> {
     if cli.commands {
-        // Needs no kernel: the web app asks for it before any is reachable.
-        println!("{}", commands_json());
+        // Works without a kernel (the web app asks before any is reachable); with one, the enabled
+        // plugins' commands follow the table's.
+        let mut list = commands_json();
+        if let Ok(c) = Client::new(&cli.url, cli.token.clone()) {
+            if let Ok(Ok(p)) = tokio::time::timeout(std::time::Duration::from_secs(3), c.get("/api/plugins")).await {
+                if let Some(l) = list["commands"].as_array_mut() {
+                    l.extend(commands::plugin_commands(&p));
+                }
+            }
+        }
+        println!("{list}");
         return Ok(());
     }
     if let Some(Cmd::Login { which }) = &cli.cmd {
@@ -51,6 +60,10 @@ async fn run(cli: Cli) -> Result<()> {
         return Ok(());
     };
     match cmd {
+        Cmd::Plugin(words) => {
+            let r = commands::run_plugin(&c, &words.join(" "), None).await?.ok_or_else(|| anyhow::anyhow!("unknown plugin command"))?;
+            emit(json, &r.json, || r.text);
+        }
         Cmd::Ask { prompt, session, model, effort, agent, quiet } => ask(&c, json, prompt, session, NewSession { model, effort, agent }, quiet).await?,
         Cmd::Login { .. } => unreachable!(),
         Cmd::New { title, model, effort, agent } => {
@@ -66,6 +79,35 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Skills => shared(&c, json, "skills", None).await?,
         Cmd::Tasks => shared(&c, json, "tasks", None).await?,
         Cmd::Agents { action, words } => shared(&c, json, &format!("agents {} {}", action.unwrap_or_default(), words.join(" ")), None).await?,
+        Cmd::Plugins { words } => {
+            let text = format!("plugins {}", words.join(" "));
+            match commands::parse(&text) {
+                // On a terminal, show what it asks for and ask; scripts give --yes.
+                Some(Ok(commands::Cmd::PluginAdd { target, yes: false })) if !json && std::io::stdin().is_terminal() => {
+                    let r = commands::run(&c, &commands::Cmd::PluginAdd { target: target.clone(), yes: false }, None).await?;
+                    if r.json["needs_approval"] != true {
+                        println!("{}", r.text);
+                    } else {
+                        println!("{}", commands::approval_text(&r.json));
+                        eprint!("Approve? [y/N] ");
+                        let mut answer = String::new();
+                        std::io::stdin().read_line(&mut answer)?;
+                        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+                            anyhow::bail!("not installed");
+                        }
+                        // Approve exactly the permissions displayed, not a second preview
+                        // that might have changed while the owner was answering.
+                        let mut body = commands::install_body(&target)?;
+                        body["approve"] = serde_json::json!(true);
+                        body["permissions"] = r.json["permissions"].clone();
+                        let installed = c.post("/api/plugins/install", body).await?;
+                        anyhow::ensure!(installed["needs_approval"] != true, "the plugin changed its permissions; run the install again to review them");
+                        println!("Installed plugin `{}` {}.", installed["name"].as_str().unwrap_or("?"), installed["version"].as_str().unwrap_or(""));
+                    }
+                }
+                _ => shared(&c, json, &text, None).await?,
+            }
+        }
         Cmd::Memory { what } => shared(&c, json, &format!("memory {}", what.unwrap_or_default()), None).await?,
         Cmd::Models => {
             let m = c.get("/api/models").await?;

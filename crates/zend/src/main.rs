@@ -33,6 +33,7 @@ mod storage;
 mod test_util;
 mod tools;
 mod output;
+mod plugins;
 mod prices;
 mod media;
 mod turns;
@@ -278,6 +279,9 @@ async fn serve() -> Result<()> {
     tokio::spawn(tape::mirror_loop(app.db.clone()));
     tokio::spawn(search::index_loop(app.clone()));
     tokio::spawn(jobs::run_loop(app.clone()));
+    if let Err(e) = plugins::init(&app).await {
+        tracing::error!("starting the plugins: {e:#}");
+    }
 
     let api = Router::new()
         .route("/models", get(list_models))
@@ -311,6 +315,13 @@ async fn serve() -> Result<()> {
         .route("/jobs/runs", get(list_job_runs))
         .route("/jobs/{name}", axum::routing::patch(update_job).delete(delete_job))
         .route("/jobs/{name}/run", axum::routing::post(run_job))
+        .route("/plugins", get(plugins::api_list))
+        .route("/plugins/defaults", axum::routing::put(plugins::api_set_default))
+        .route("/plugins/marketplace", get(plugins::api_marketplace))
+        .route("/plugins/install", axum::routing::post(plugins::api_install))
+        .route("/plugins/{name}", axum::routing::patch(plugins::api_patch).delete(plugins::api_remove))
+        .route("/plugins/{name}/resource", get(plugins::api_resource))
+        .route("/plugins/{name}/call", axum::routing::post(plugins::api_call))
         .route("/version", get(version))
         .route("/upgrade", get(upgrade_status).post(upgrade_start))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth));

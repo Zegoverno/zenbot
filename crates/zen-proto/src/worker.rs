@@ -114,6 +114,23 @@ pub struct Complete {
     pub system: String,
     #[serde(deserialize_with = "or_default")]
     pub prompt: String,
+    /// Hard provider generation cap. Unsupported workers must reject before generation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+}
+
+/// No bypass: sampling requires verified native caps and durable request/spend budgets.
+pub const PLUGIN_SAMPLING_UNAVAILABLE: &str = "plugin sampling unavailable: native output-token limits and per-plugin/session request/spend budgets are not supported; no completion was started";
+
+impl Complete {
+    /// No current CLI adapter supports a verified native output-token cap.
+    pub fn check_output_limit(&self) -> Result<(), &'static str> {
+        if self.max_output_tokens.is_some() {
+            Err(PLUGIN_SAMPLING_UNAVAILABLE)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// The answer to `ping`.
@@ -429,6 +446,23 @@ mod tests {
         } }));
         round_trip_request(json!({ "method": "turn.abort", "params": { "session_id": "s1", "turn_id": "t1" } }));
         round_trip_request(json!({ "method": "complete", "params": { "model": "codex/gpt-6.1-sol", "system": "Summarize.", "prompt": "…" } }));
+    }
+
+    #[test]
+    fn completion_output_limits_fail_closed() {
+        let legacy = Complete::default();
+        assert!(legacy.check_output_limit().is_ok());
+        for max in [0, 1, 4096, u32::MAX] {
+            let req = round_trip_request(json!({ "method": "complete", "params": {
+                "model": "claude/example", "system": "", "prompt": "hello", "max_output_tokens": max
+            } }));
+            let Request::Complete(req) = req else { panic!() };
+            assert_eq!(req.max_output_tokens, Some(max));
+            assert_eq!(req.check_output_limit(), Err(PLUGIN_SAMPLING_UNAVAILABLE));
+        }
+        for invalid in [json!(-1), json!("1024"), json!(1.5), json!(u64::MAX)] {
+            assert!(Request::parse("complete", json!({ "max_output_tokens": invalid })).is_err());
+        }
     }
 
     #[test]

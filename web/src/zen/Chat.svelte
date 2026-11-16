@@ -4,8 +4,12 @@
   // into one line), the composer with its / menu and pickers, the status line while zenbot works,
   // and the footer. 'new' is a chat whose session starts with its first prompt; that prompt is
   // handed to the chat re-created with the session's id (Shell keys Chat on the session).
+  // Plugins: a plugin's slash command calls its tool and shows its UI in the side panel; a plugin
+  // UI's `sendMessage` queues an owner-reviewed draft here (`chat.queue`), and what plugin UIs put in the model context goes
+  // with the next prompt (plugins.svelte.ts).
   import { onMount, tick } from 'svelte';
-  import { zen, files, commands, upload, toolSummary, short, readOnly, agentTag, AGENT_NAME, type Command, type Message, type Models, type SessionDetail, type ZenEvent } from './api.ts';
+  import { zen, files, commands, upload, toolSummary, short, readOnly, agentTag, AGENT_NAME, pluginApi, type Command, type Message, type Models, type SessionDetail, type ZenEvent } from './api.ts';
+  import { chat, plugins, resultText, showPanel, takeContext, toolArgs, uiOf } from './plugins.svelte.ts';
   import { app, board, openSession, sessionStarted, openFile, openDir, toggleSide, notice, typing, tilde } from './app.svelte.ts';
   import { render as mdRender } from './md.ts';
   import * as M from './chat/model.ts';
@@ -444,6 +448,16 @@
     aborting = true;
   }
 
+  let pluginDrafts = $state<{ plugin: string; text: string }[]>([]);
+
+  function sendPluginDraft(draft: { plugin: string; text: string }) {
+    if (ro || creating || uploading || mcpFlow || ready.length) return;
+    const ownDraft = input;
+    input = `(from the ${draft.plugin} plugin) ${draft.text}`;
+    void submit().finally(() => { if (!input) input = ownDraft; });
+    pluginDrafts = pluginDrafts.filter((d) => d !== draft);
+  }
+
   async function submit() {
     const raw = input.trim();
     if ((!raw && !ready.length) || creating) return;
@@ -483,6 +497,9 @@
       return command(text);
     }
     if (ro) return notice('this session is read-only: zenbot drives it');
+    // What plugin UIs on screen told the chat: no context field on the kernel's prompt yet, so it
+    // leads the prompt in one delimited block.
+    text = takeContext(sid ?? 'new') + text;
     const message: Record<string, unknown> = { type: 'prompt', text };
     if (suggestion) message.suggestion = { id: suggestion.id, taken: suggestion.taken };
     if (steer) message.mode = 'steer';
@@ -551,6 +568,8 @@
       } catch {}
     }
     const name = resolve(word);
+    const plugged = cmds.find((c) => c.name === name && c.plugin && c.tool);
+    if (plugged) return await pluginCommand(plugged, arg);
     const needSession = () => {
       if (sid) return false;
       notice('send a message first: this works on the session');
@@ -640,6 +659,34 @@
     try {
       const r = await commands.run(name, arg ? arg.split(/\s+/) : []);
       e.text = M.clean(r.output);
+    } catch (err) {
+      e.text = String((err as Error).message ?? err);
+    }
+    await bottom(false);
+  }
+
+  // The shared command table changes when plugins are installed or switched on/off.
+  $effect(() => {
+    void plugins.revision;
+    let gone = false;
+    commands.list().then((c) => { if (!gone) cmds = c.commands; }).catch(() => {});
+    return () => { gone = true; };
+  });
+
+  /** A plugin's command: calls its tool; its UI opens in the side panel, or its text shows here. */
+  async function pluginCommand(c: Command, arg: string) {
+    const head = `/${c.name}${arg ? ' ' + arg : ''}`;
+    push({ k: 'mono', text: '…', title: head });
+    const e = entries[entries.length - 1] as Extract<M.Entry, { k: 'mono' }>;
+    const args = toolArgs(c.args, arg);
+    try {
+      const r = await pluginApi.call(c.plugin!, c.tool!, args, sid);
+      const ui = r.isError ? null : (c.ui ?? uiOf(r));
+      const title = plugins.list.find((p) => p.name === c.plugin)?.title || c.plugin!;
+      if (ui) {
+        showPanel(c.plugin!, ui, title, args, r);
+        e.text = `opened in the side panel (${title})`;
+      } else e.text = M.clean(resultText(r) || (r.isError ? 'failed' : '(nothing)'));
     } catch (err) {
       e.text = String((err as Error).message ?? err);
     }
@@ -1087,7 +1134,7 @@
       models = m;
       if (!sid && !model) model = m.default;
     }).catch(() => {});
-    commands.list().then((c) => (cmds = c.commands)).catch(() => {});
+
     if (sid) load();
     else {
       loaded = true;
@@ -1095,7 +1142,15 @@
     }
     const online = () => !conn && sid && retry(0);
     addEventListener('online', online);
+    // Untrusted iframe messages never enter submit() without an owner's Send click.
+    const queue = (plugin: string, text: string) => {
+      if (ro || pluginDrafts.length >= 20) return false;
+      pluginDrafts = [...pluginDrafts, { plugin, text }];
+      return true;
+    };
+    chat.queue = queue;
     return () => {
+      if (chat.queue === queue) chat.queue = null;
       alive = false;
       gen++;
       conn?.close();
@@ -1220,6 +1275,15 @@
         {/each}
       </div>
     {/if}
+
+    {#each pluginDrafts as draft}
+      <section aria-label="plugin draft">
+        <strong>DRAFT · plugin: {draft.plugin}</strong>
+        <pre style="white-space: pre-wrap; overflow-wrap: anywhere">{draft.text}</pre>
+        <button onclick={() => sendPluginDraft(draft)} disabled={ro || creating || uploading || !!mcpFlow || !!ready.length}>Send plugin draft</button>
+        <button onclick={() => (pluginDrafts = pluginDrafts.filter((d) => d !== draft))}>Dismiss</button>
+      </section>
+    {/each}
 
     <div class="zc-compose" class:zc-ro={ro} class:zc-drag={dragging}>
       {#if !ro}

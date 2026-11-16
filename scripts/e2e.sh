@@ -1265,6 +1265,7 @@ complete_api() {
 
 # Scenarios that share a setup run as parts of one; `scripts/e2e.sh <filter>` matches the scenario's
 # name or a part's function name. Slowest first, so the parallel run ends sooner.
+. "$REPO/scripts/e2e/plugins.sh"
 run phase4 phase4_brain
 run phase3 phase3_kernel
 run turns abort_tool stale_turn

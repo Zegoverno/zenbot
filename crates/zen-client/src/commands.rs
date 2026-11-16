@@ -59,6 +59,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("skills", "", "skills and how often they're used", Kernel),
     cmd("memory", "[short|long|archived|all | sleep]", "zenbot's memory; `memory sleep` tidies it now", Kernel),
     cmd("mcp", "[login <server>]", "MCP servers; `mcp login <server>` signs in to one", Kernel),
+    cmd("plugins", "[add <name|path> [--yes] | rm <name>]", "installed plugins; `plugins add` installs or upgrades one from the marketplace, a .tgz or a folder (asks you to approve its permissions), `plugins rm` removes one (kept in backups, its data stays)", Kernel),
     cmd("models", "", "the models and their thinking levels", Kernel),
     cmd("suggestions", "", "what became of suggested next prompts", Kernel),
     cmd("status", "", "kernel, workers, sign-ins and version", Kernel),
@@ -115,6 +116,10 @@ pub enum Cmd {
     Sleep,
     Mcp,
     McpLogin(String),
+    Plugins,
+    /// Install or upgrade from a marketplace name or a local path; `yes` approves its permissions.
+    PluginAdd { target: String, yes: bool },
+    PluginRm(String),
     Models,
     Suggestions,
     Status,
@@ -199,6 +204,13 @@ pub fn parse(text: &str) -> Option<Result<Cmd, String>> {
         "mcp" => match words.as_slice() {
             [] => Ok(Cmd::Mcp),
             ["login", server] => Ok(Cmd::McpLogin(server.to_string())),
+            _ => usage(),
+        },
+        "plugins" => match words.as_slice() {
+            [] | ["list"] => Ok(Cmd::Plugins),
+            ["add", t] if !t.starts_with("--") => Ok(Cmd::PluginAdd { target: t.to_string(), yes: false }),
+            ["add", t, "--yes"] | ["add", "--yes", t] if *t != "--yes" => Ok(Cmd::PluginAdd { target: t.to_string(), yes: true }),
+            ["rm", n] => Ok(Cmd::PluginRm(n.to_ascii_lowercase())),
             _ => usage(),
         },
         "models" if rest.is_empty() => Ok(Cmd::Models),
@@ -381,6 +393,30 @@ pub async fn run(c: &Client, cmd: &Cmd, session: Option<&str>) -> Result<Reply> 
                 .join("\n");
             reply(if text.is_empty() { "No suggestions yet.".to_string() } else { text }, s)
         }
+        Cmd::Plugins => {
+            let p = c.get("/api/plugins").await?;
+            reply(plugins_list(&p), p)
+        }
+        Cmd::PluginAdd { target, yes } => {
+            let body = install_body(target)?;
+            let r = c.post("/api/plugins/install", body.clone()).await?;
+            if r["needs_approval"] != true {
+                reply(installed_line(&r), r)
+            } else if *yes {
+                let mut body = body;
+                body["approve"] = json!(true);
+                body["permissions"] = r["permissions"].clone();
+                let p = c.post("/api/plugins/install", body).await?;
+                reply(installed_line(&p), p)
+            } else {
+                reply(format!("{}
+Approve with `plugins add {target} --yes`.", approval_text(&r)), r)
+            }
+        }
+        Cmd::PluginRm(name) => {
+            let r = c.delete(&format!("/api/plugins/{}", enc(name))).await?;
+            reply(format!("Removed plugin `{name}`; its folder is kept in `{}` and its data stays.", r["moved_to"].as_str().unwrap_or("")), r)
+        }
         Cmd::Status => {
             let h = c.health().await?;
             let m = c.get("/api/models").await.unwrap_or(Value::Null);
@@ -403,6 +439,113 @@ pub async fn run(c: &Client, cmd: &Cmd, session: Option<&str>) -> Result<Reply> 
             reply("Upgrading: zenbot builds the new version and restarts once no session is working.", r)
         }
     })
+}
+
+/// The body of `POST /api/plugins/install` for what was typed: a marketplace name, or a path on
+/// this machine (a `.tgz` or a folder), made absolute.
+pub fn install_body(target: &str) -> Result<Value> {
+    let path = std::path::Path::new(target);
+    let named = !target.is_empty() && target.len() <= 40 && target.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    if named && !path.exists() {
+        return Ok(json!({ "name": target }));
+    }
+    let full = std::path::absolute(path)?;
+    Ok(json!({ "path": full }))
+}
+
+/// What a plugin asks for, to approve (`needs_approval` from `POST /api/plugins/install`).
+pub fn approval_text(r: &Value) -> String {
+    let perms: Vec<&str> = r["permissions"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let what = if r["upgrade"] == true { "This upgrade of" } else { "Installing" };
+    let list = if perms.is_empty() { "no permissions (its own folder and data only)".to_string() } else { perms.iter().map(|p| format!("`{p}` ({})", permission_meaning(p))).collect::<Vec<_>>().join(", ") };
+    format!("{what} `{}` {} asks for: {list}.", r["name"].as_str().unwrap_or("?"), r["version"].as_str().unwrap_or(""))
+}
+
+/// What a plugin permission grants, in a few words.
+pub fn permission_meaning(p: &str) -> String {
+    match p {
+        "files:read" => "read your vault".into(),
+        "files:write" => "read and write your vault".into(),
+        "network" => "the internet".into(),
+        "ai" => "ask your model for completions".into(),
+        _ => match p.strip_prefix("files:write:") {
+            Some(sub) => format!("read your vault, write only {sub}/"),
+            None => "unknown".into(),
+        },
+    }
+}
+
+fn installed_line(p: &Value) -> String {
+    format!("Installed plugin `{}` {}.", p["name"].as_str().unwrap_or("?"), p["version"].as_str().unwrap_or(""))
+}
+
+/// The plugins as `GET /api/plugins` lists them.
+pub fn plugins_list(p: &Value) -> String {
+    let lines: Vec<String> = p["plugins"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|x| {
+            let perms: Vec<&str> = x["permissions"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+            let slots: Vec<&str> = x["contributes"].as_object().map(|m| m.iter().filter(|(_, v)| v.as_array().is_some_and(|a| !a.is_empty())).map(|(k, _)| k.as_str()).collect()).unwrap_or_default();
+            format!(
+                "- `{}` {}{}: {} · permissions: {} · slots: {}",
+                x["name"].as_str().unwrap_or("?"),
+                x["version"].as_str().unwrap_or(""),
+                if x["enabled"] == true { "" } else { " (disabled)" },
+                x["description"].as_str().filter(|d| !d.is_empty()).unwrap_or("no description"),
+                if perms.is_empty() { "none".into() } else { perms.join(", ") },
+                if slots.is_empty() { "none".into() } else { slots.join(", ") },
+            )
+        })
+        .collect();
+    if lines.is_empty() { "No plugins (`plugins add <name>` installs one from the marketplace).".into() } else { lines.join("\n") }
+}
+
+/// Run an installed plugin command, after checking the same command list every client uses.
+/// Positional argument names come from the manifest's <name> / [name] placeholders; the last
+/// consumes the remaining words, matching the web shell.
+pub async fn run_plugin(c: &Client, text: &str, session: Option<&str>) -> Result<Option<Reply>> {
+    let (name, rest) = text.trim().split_once(char::is_whitespace).unwrap_or((text.trim(), ""));
+    let plugins = c.get("/api/plugins").await?;
+    let Some(cmd) = plugin_commands(&plugins).into_iter().find(|x| x["name"] == name) else { return Ok(None) };
+    let spec = cmd["args"].as_str().unwrap_or("");
+    let names: Vec<&str> = spec.split(['<', '[']).skip(1)
+        .filter_map(|s| s.split(['>', ']']).next())
+        .map(|s| s.trim_end_matches("..."))
+        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')).collect();
+    let words: Vec<&str> = rest.split_whitespace().collect();
+    let mut args = json!({});
+    for (i, name) in names.iter().enumerate() {
+        let value = if i + 1 == names.len() { words.get(i..).unwrap_or_default().join(" ") } else { words.get(i).unwrap_or(&"").to_string() };
+        if !value.is_empty() { args[*name] = json!(value); }
+    }
+    let result = c.post(&format!("/api/plugins/{}/call", enc(cmd["plugin"].as_str().unwrap_or(""))),
+        json!({ "tool": cmd["tool"], "arguments": args, "session": session })).await?;
+    let text = result["content"].as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n");
+    Ok(Some(reply(text, result)))
+}
+
+/// The enabled plugins' slash commands (`contributes.commands`), as `zen --commands` lists them:
+/// a plugin's command never hides a core one, and the first plugin (by name) to claim a name has it.
+pub fn plugin_commands(p: &Value) -> Vec<Value> {
+    let mut seen: Vec<String> = COMMANDS.iter().map(|c| c.name.to_string()).collect();
+    let mut out = Vec::new();
+    for x in p["plugins"].as_array().into_iter().flatten().filter(|x| x["enabled"] == true) {
+        for c in x["contributes"]["commands"].as_array().into_iter().flatten() {
+            let Some(name) = c["name"].as_str() else { continue };
+            if seen.iter().any(|s| s == name) {
+                continue;
+            }
+            seen.push(name.to_string());
+            let description = c["description"].as_str().unwrap_or("");
+            out.push(json!({
+                "name": name, "args": c["args"].as_str().unwrap_or(""), "description": description, "help": description,
+                "scope": "plugin", "plugin": x["name"], "tool": c["tool"],
+            }));
+        }
+    }
+    out
 }
 
 /// The agents as `GET /api/agents` lists them: what each is for and may use.
@@ -714,6 +857,14 @@ mod tests {
         assert_eq!(parse("agents rm Garry"), Some(Ok(Cmd::AgentRm("garry".into()))));
         assert!(matches!(parse("agents rm"), Some(Err(_))));
         assert_eq!(parse("tasks"), Some(Ok(Cmd::Tasks)));
+        assert_eq!(parse("plugins"), Some(Ok(Cmd::Plugins)));
+        assert_eq!(parse("plugins add zenread"), Some(Ok(Cmd::PluginAdd { target: "zenread".into(), yes: false })));
+        assert_eq!(parse("plugins add ./x-0.1.0.tgz --yes"), Some(Ok(Cmd::PluginAdd { target: "./x-0.1.0.tgz".into(), yes: true })));
+        assert_eq!(parse("plugins add --yes zenread"), Some(Ok(Cmd::PluginAdd { target: "zenread".into(), yes: true })));
+        assert_eq!(parse("plugins rm Zenread"), Some(Ok(Cmd::PluginRm("zenread".into()))));
+        assert!(matches!(parse("plugins add"), Some(Err(_))));
+        assert!(matches!(parse("plugins add --yes"), Some(Err(_))));
+        assert!(matches!(parse("plugins add a b"), Some(Err(_))));
         for gone in ["queue", "approve 1", "deny", "trust add docs.rs", "policy", "tools"] {
             assert_eq!(parse(gone), None, "{gone} is gone");
         }
@@ -742,6 +893,28 @@ mod tests {
         assert_eq!(names.len(), n);
         assert!(help("!", false).contains("- `!jobs [run|resume|pause|rm <name> | runs [name]]`"));
         assert!(!help("!", false).contains("`!board`") && help("/", true).contains("`/board`"));
+    }
+
+    #[test]
+    fn plugins_lines_and_commands() {
+        let p = json!({ "plugins": [
+            { "name": "hello", "version": "0.1.0", "description": "Hi.", "enabled": true, "permissions": ["ai"],
+              "contributes": { "views": [{}], "games": [], "commands": [
+                  { "name": "hello", "tool": "hello_greet", "args": "<name>", "description": "Say hello." },
+                  { "name": "jobs", "tool": "hello_jobs" }] } },
+            { "name": "off", "version": "1.0.0", "description": "", "enabled": false, "permissions": [],
+              "contributes": { "commands": [{ "name": "off", "tool": "off_x" }] } },
+            { "name": "two", "version": "1.0.0", "enabled": true, "contributes": { "commands": [{ "name": "hello", "tool": "two_hello" }] } }
+        ], "defaults": {} });
+        assert_eq!(plugins_list(&p).lines().next().unwrap(), "- `hello` 0.1.0: Hi. · permissions: ai · slots: commands, views");
+        assert!(plugins_list(&p).contains("`off` 1.0.0 (disabled): no description · permissions: none"));
+        let c = plugin_commands(&p);
+        assert_eq!(c.len(), 1, "core names and later claims are left out, disabled plugins too: {c:?}");
+        assert_eq!(c[0], json!({ "name": "hello", "args": "<name>", "description": "Say hello.", "help": "Say hello.", "scope": "plugin", "plugin": "hello", "tool": "hello_greet" }));
+        let ask = json!({ "needs_approval": true, "name": "hello", "version": "0.2.0", "permissions": ["files:write:Reading", "network"], "upgrade": true });
+        assert_eq!(approval_text(&ask), "This upgrade of `hello` 0.2.0 asks for: `files:write:Reading` (read your vault, write only Reading/), `network` (the internet).");
+        assert_eq!(install_body("zenread").unwrap(), json!({ "name": "zenread" }));
+        assert!(install_body("./hello-0.1.0.tgz").unwrap()["path"].as_str().unwrap().starts_with('/'));
     }
 
     #[test]

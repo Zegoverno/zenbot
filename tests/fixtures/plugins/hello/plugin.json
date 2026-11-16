@@ -1,0 +1,15 @@
+{
+  "name": "hello",
+  "version": "0.1.0",
+  "title": "Hello",
+  "description": "The plugin host's test fixture: one tool, one UI, every slot.",
+  "license": "MIT",
+  "server": { "command": "node", "args": ["server.js"] },
+  "contributes": {
+    "views": [{ "id": "main", "title": "Hello", "ui": "ui://hello/app" }],
+    "openers": [{ "id": "open", "title": "Open with Hello", "ui": "ui://hello/app", "patterns": ["*.hello"], "mode": "read" }],
+    "games": [{ "id": "guess", "title": "Guess", "ui": "ui://hello/app", "description": "Guess the greeting." }],
+    "commands": [{ "name": "hello", "tool": "hello_greet", "args": "<name>", "description": "Say hello." }]
+  },
+  "kernel": ["files:read", "ai"]
+}
