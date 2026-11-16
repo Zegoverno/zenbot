@@ -115,7 +115,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
     case 'POST /api/upload':
       return send(res, 200, await uploads.save(path.join(home.HOME, 'inbox'), q('name'), req));
     case 'GET /api/commands':
-      return send(res, 200, { commands: commands.COMMANDS });
+      return send(res, 200, { commands: await commands.list() });
     case 'POST /api/command': {
       const b = (await readBody(req)) as { name?: unknown; args?: unknown };
       return send(res, 200, await commands.run(b.name, b.args));
