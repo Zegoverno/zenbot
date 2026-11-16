@@ -27,7 +27,8 @@ your user: its shell commands run on the host with your permissions.
 3. Sign in (opens a browser link): `zen login` signs in to Claude Code (Claude plan) and Codex
    (ChatGPT plan).
 
-4. Start: `zen` opens the sessions board; `zen ask "…"` runs one task from a script.
+4. Start: open the web app (below) or the Matrix room; `zen ask "…"` runs one task from a script,
+   and `zen` alone lists the commands.
 
 ## The web app
 
@@ -48,10 +49,10 @@ After changing `env`, restart the service from outside a zen session: `sudo syst
 
 ## Updating
 
-zenbot checks GitHub for a newer `main` hourly; `zen` and `zen status` say when there is one.
+zenbot checks GitHub for a newer `main` hourly; `zen status` and the web app say when there is one.
 
 ```bash
-zen upgrade          # or /upgrade in zen; `zen upgrade check` only checks
+zen upgrade          # or /upgrade in the web chat; `zen upgrade check` only checks
 ```
 
 That pulls `main` and runs `scripts/upgrade.sh`, which builds the checkout and installs it once no

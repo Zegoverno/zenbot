@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send one message on a session's WebSocket, as zen's terminal app does, and print the events
+"""Send one message on a session's WebSocket, as zen's clients do, and print the events
 that follow as JSON lines: until the turn's `end`, then for up to WAIT seconds more (the kernel's
 after-turn events: `title`, `suggestion`). With ABORT seconds, also sends `{"type": "abort"}` that
 long after the message. Standard library only.

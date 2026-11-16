@@ -1,5 +1,5 @@
 //! The kernel, as the bridge sees it: a client of the client protocol (MAP.md, "Client protocol"),
-//! like the `zen` terminal app, through the same client (`zen-client`: the token in a header,
+//! like `zen` and the web app, through the same client (`zen-client`: the token in a header,
 //! never a URL; timeouts; path encoding; the plain-http warning).
 
 use anyhow::Result;

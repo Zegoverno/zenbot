@@ -9,7 +9,7 @@ replaces archived or missing sessions automatically; authentication and server e
 create replacements.
 
 ```
- web/ (zen web: browser)   zen (terminal app, scripts)   zen-matrix (Matrix rooms)
+ web/ (zen web: browser)   zen (command line, scripts)   zen-matrix (Matrix rooms)
         │ HTTP + WebSocket on 127.0.0.1, owner token
  zend: API · sessions/tape · context compiler · tools · System One · brain · jobs
         │ JSON-RPC over stdio            │ SQLite file        │ HTTPS
@@ -23,7 +23,7 @@ create replacements.
 |---|---|---|
 | `crates/zend` | The kernel: API, sessions, the tape, context, tools, System One, memory, jobs | systemd service `zenbot`, `~/.zenbot/bin/zend` |
 | `crates/zen-engine` | The worker: runs each turn on the Claude Code or Codex CLI | child process of `zend` |
-| `crates/zen` | The terminal app (`src/tui/`: the board and the side panel share the Sessions · Files · Tasks views, `views.rs`; the Sessions view's first row is a `+ new session` button and archived jobs stay hidden until `J`; the Files view makes files and folders and renames (`a`, `A`, `R`: a name prompt on the key line, `files.rs` has the rules: no overwrite, no secrets, home and `~/.zenbot` top folders protected); the Tasks view and handing a task to an agent, `tasks.rs`; the file viewer lays prose out for reading, follows links and gives a vault note's web link (`e`, `ZEN_WEB_URL`), `viewer.rs` and `reader.rs`) and the script commands | `~/.zenbot/bin/zen`, linked from `~/.local/bin/zen` |
+| `crates/zen` | The command line for scripts: `zen ask`, the shared table's commands (`zen jobs`, `zen memory`, …), `status`, `login`, `brain`, `s1`; no command prints help, piped input runs `zen ask`; `zen --commands` gives the web chat its slash commands | `~/.zenbot/bin/zen`, linked from `~/.local/bin/zen` |
 | `crates/zen-client` | The kernel client and the shared command table (`commands.rs`) | library of `zen` and `zen-matrix` |
 | `crates/zen-proto` | Typed worker and client protocol messages, shared helpers | library |
 | `crates/zen-matrix` | Matrix rooms ↔ sessions (its own Cargo workspace) | systemd service `zen-matrix` |
@@ -228,11 +228,11 @@ WebSocket events (`crates/zen-proto/src/client.rs`): `message`, `busy`, `delta`,
 
 ## Commands
 
-`crates/zen-client/src/commands.rs` is the one command table: `/x` in the terminal app and the web chat, `!x` in
+`crates/zen-client/src/commands.rs` is the one command table: `/x` in the web chat, `!x` in
 Matrix and `zen x` on the command line are the same command. Shared: `new` (`new @garry` starts
 a session with another agent), `model`, `effort`, `done`, `rename`, `archive`, `steer`, `agents`, `tasks`, `jobs`, `skills`, `memory`, `mcp`, `models`, `suggestions`,
-`status`, `upgrade`. The terminal app's own: `resume`, `board`, `files`, `open`, `close`, `mouse`,
-`restart`, `help`, `exit`. The command line's own: `ask`, `chat`, `sessions`, `brain`, `s1`,
+`status`, `upgrade`. The web chat's own (scope `Screen`): `resume`, `board`, `files`, `open`, `close`, `mouse`,
+`restart`, `help`, `exit`; it gets the list from `zen --commands`. The command line's own: `ask`, `sessions`, `brain`, `s1`,
 `login`, `mcp-pending`, `mcp-respond`. Tests keep the command line and the table in step.
 
 ## Files under `~/.zenbot`
