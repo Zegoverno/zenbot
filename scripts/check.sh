@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# What CI checks, in one command: build, unit tests, clippy with warnings as errors, and the
-# kernel's end-to-end scenarios (scripts/e2e.sh) on that build. Prints each step's time and stops
-# at the first failure.
+# What CI checks, in one command: the web app's types, unit tests and browser end-to-end tests
+# (web/, Node 22 and Playwright's Chromium), then the build, unit tests, clippy with warnings as
+# errors, and the kernel's end-to-end scenarios (scripts/e2e.sh) on that build. Prints each step's
+# time and stops at the first failure.
 #
 #   scripts/check.sh            every step
-#   scripts/check.sh memory     only the e2e scenarios matching "memory"
+#   scripts/check.sh memory     the web checks, then only the e2e scenarios matching "memory"
 #
 # crates/zen-matrix is its own Cargo workspace and isn't checked here (scripts/matrix.sh --build).
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
-export PATH="$HOME/.cargo/bin:$PATH"
+export PATH="$HOME/.local/node/bin:$HOME/.cargo/bin:$PATH"
 export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2}  # this VM has 2 CPUs; more has been OOM-killed
 
 SUMMARY=()
@@ -28,6 +29,9 @@ step() { # name command…
   SUMMARY+=("$(printf '%-8s ok   %4ss' "$name" "$secs")")
 }
 
+web() { (cd web && "$@"); }
+step web web sh -c 'npm ci --no-audit --no-fund --loglevel=error && npm run check --silent'
+step web-e2e web sh -c 'node tests/e2e.mjs && node tests/zen-e2e.mjs'
 step build cargo build --release --locked
 . "$REPO/scripts/test-sqlite.sh"
 step sqlite ensure_test_sqlite
