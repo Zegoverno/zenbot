@@ -34,7 +34,7 @@ your user: its shell commands run on the host with your permissions.
 
 `zen-web` listens on loopback only and expects a proxy in front that signs you in and adds a
 login header to every request: by default exe.dev's `X-ExeDev-UserID`; set
-`ZEN_WEB_AUTH_HEADER` in `~/.config/zen-web.env` for another proxy (oauth2-proxy, Cloudflare
+`ZEN_WEB_AUTH_HEADER` (and `ZEN_WEB_REPLACES`, an older user unit on the same port to retire) in `~/.config/zen-web.env` for another proxy (oauth2-proxy, Cloudflare
 Access, Tailscale Serve with identity headers). Without the header it answers 401. In front of
 `/api/upload` the proxy must allow 1 GiB bodies without buffering (nginx: `client_max_body_size 1g;
 proxy_request_buffering off;`), and pass WebSocket upgrades. Its settings (`ZEN_WEB_*`) are in
