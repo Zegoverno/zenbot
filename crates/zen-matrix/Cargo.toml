@@ -2,7 +2,7 @@
 name = "zen-matrix"
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0"
+license = "MIT"
 description = "zenbot's Matrix channel: a bridge between the owner's Matrix rooms and zen sessions"
 
 [dependencies]
