@@ -56,7 +56,7 @@ start_kernel() {
     # The scheduler is off unless a scenario turns it on (ZEN_JOBS=1).
     export ZEN_JOBS=0 ZEN_TOKEN=$TOKEN ZEN_PORT=$PORT ZEN_WORKERS=engine ZEN_FAUX=1 ZEN_FAUX_SCRIPT=$script ZEN_WORKSPACE=$ws \
       ZEN_ENGINE_CMD="$BIN/zen-engine" DATABASE_URL="$DB_URL" HOME="$TMP/home"
-    unset ZEN_S1_MODEL OPENROUTER_API_KEY
+    unset ZEN_S1_MODEL OPENROUTER_API_KEY ZEN_TZ # the owner's settings stay out when run from a session
     for kv in "$@"; do export "$kv"; done
     mkdir -p "$HOME"
     exec "$BIN/zend"
