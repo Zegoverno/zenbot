@@ -3,7 +3,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "zen", version, about = "zenbot in your terminal. Run `zen` for an interactive session, or use the commands below for scripts.")]
+#[command(name = "zen", version, about = "zenbot from the command line, for scripts. Piped input with no command runs `zen ask`; the chat is the web app and Matrix.")]
 pub(crate) struct Cli {
     /// Kernel URL
     #[arg(long, env = "ZEN_URL", default_value = "http://127.0.0.1:8100", global = true)]
@@ -14,12 +14,6 @@ pub(crate) struct Cli {
     /// Print machine-readable JSON
     #[arg(long, global = true)]
     pub(crate) json: bool,
-    /// Continue the most recent session
-    #[arg(short = 'c', long = "continue")]
-    pub(crate) cont: bool,
-    /// Resume a session (opens a picker when no id is given)
-    #[arg(short = 'r', long, num_args = 0..=1, default_missing_value = "")]
-    pub(crate) resume: Option<String>,
     /// Model for a new session
     #[arg(short, long)]
     pub(crate) model: Option<String>,
@@ -29,9 +23,9 @@ pub(crate) struct Cli {
     /// The agent a new session is (`zen agents` lists them; default zenbot)
     #[arg(short, long)]
     pub(crate) agent: Option<String>,
-    /// Inline terminal app (no full-screen clearing; the input follows the conversation)
-    #[arg(long, env = "ZEN_INLINE", global = true)]
-    pub(crate) inline: bool,
+    /// Print the chat commands of the shared table as JSON (for the web app)
+    #[arg(long, hide = true)]
+    pub(crate) commands: bool,
     #[command(subcommand)]
     pub(crate) cmd: Option<Cmd>,
 }
@@ -66,21 +60,6 @@ pub(crate) enum Cmd {
         /// Don't show tool activity on stderr
         #[arg(short, long)]
         quiet: bool,
-    },
-    /// Interactive session in the terminal (same as running `zen` with no command)
-    Chat {
-        /// Continue an existing session (id or unique prefix)
-        #[arg(short, long)]
-        session: Option<String>,
-        /// Model for a new session
-        #[arg(short, long)]
-        model: Option<String>,
-        /// Thinking level for a new session
-        #[arg(short, long)]
-        effort: Option<String>,
-        /// The agent a new session is (default zenbot)
-        #[arg(short, long)]
-        agent: Option<String>,
     },
     /// List, show or restore sessions
     #[command(subcommand)]
@@ -324,7 +303,7 @@ mod tests {
     use clap::CommandFactory;
     use zen_client::commands::{Scope, COMMANDS};
 
-    /// The command line offers exactly the shared table's commands that aren't the terminal app's own.
+    /// The command line offers exactly the shared table's commands that aren't the chat's own.
     #[test]
     fn the_command_line_and_the_shared_table_agree() {
         let cli = Cli::command();
