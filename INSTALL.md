@@ -17,7 +17,8 @@ your user: its shell commands run on the host with your permissions.
    `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`), Node.js 22 and the
    Claude Code and Codex CLIs if missing; installs Rust and builds zenbot (several minutes the first
    time); writes `~/.zenbot/env` and the API token; installs the `zenbot` service (database
-   `~/.zenbot/zen.sqlite3`) and the native SearXNG web search (`zen-searxng`); and links `zen` into
+   `~/.zenbot/zen.sqlite3`) and the native SearXNG web search (`zen-searxng`); builds the web app
+   and runs it as the user service `zen-web` on 127.0.0.1:4400; and links `zen` into
    `~/.local/bin`.
 
 2. Check it: `zen status`. `kernel`, `database` and `worker:engine` say `ok`; `claude` and `codex`
@@ -27,6 +28,16 @@ your user: its shell commands run on the host with your permissions.
    (ChatGPT plan).
 
 4. Start: `zen` opens the sessions board; `zen ask "…"` runs one task from a script.
+
+## The web app
+
+`zen-web` listens on loopback only and expects a proxy in front that signs you in and adds a
+login header to every request: by default exe.dev's `X-ExeDev-UserID`; set
+`ZEN_WEB_AUTH_HEADER` in `~/.config/zen-web.env` for another proxy (oauth2-proxy, Cloudflare
+Access, Tailscale Serve with identity headers). Without the header it answers 401. In front of
+`/api/upload` the proxy must allow 1 GiB bodies without buffering (nginx: `client_max_body_size 1g;
+proxy_request_buffering off;`), and pass WebSocket upgrades. Its settings (`ZEN_WEB_*`) are in
+`web/README.md`; after changing them: `systemctl --user restart zen-web`.
 
 Optional, in `~/.zenbot/env` (MAP.md lists every setting): `OPENROUTER_API_KEY` and
 `ZEN_S1_MODEL=openrouter/typesafe/jev-1.13` turn on System One and search embeddings;
@@ -45,7 +56,9 @@ zen upgrade          # or /upgrade in zen; `zen upgrade check` only checks
 
 That pulls `main` and runs `scripts/upgrade.sh`, which builds the checkout and installs it once no
 session is working: the database is backed up first, and if the new kernel isn't healthy the old
-binaries and the database come back. Results go to `~/.zenbot/upgrade.log`. To run a branch,
+binaries and the database come back. The web app is built from the same checkout and installed
+right after the kernel (`scripts/web-install.sh`); if it doesn't answer, the previous build comes
+back. Results go to `~/.zenbot/upgrade.log`. To run a branch,
 check it out in `~/zenbot` and run `scripts/upgrade.sh` yourself.
 
 The kernel's daily `engines` job keeps the Claude Code and Codex CLIs current, putting the previous
@@ -79,5 +92,6 @@ identity (`zen-matrix repin-owner` after the owner resets it, with the service s
 
 ## Troubleshooting
 
-`journalctl -u zenbot -n 50` (and `-u zen-matrix`, `-u zen-searxng`). The service listens on
+`journalctl -u zenbot -n 50` (and `-u zen-matrix`, `-u zen-searxng`; the web app:
+`journalctl --user -u zen-web`). The service listens on
 127.0.0.1:8100; re-run the installer with `ZEN_PORT=…` to change it (other settings are kept).

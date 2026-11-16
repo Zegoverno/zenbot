@@ -9,7 +9,7 @@ replaces archived or missing sessions automatically; authentication and server e
 create replacements.
 
 ```
- zen (terminal app, scripts)        zen-matrix (Matrix rooms)
+ web/ (zen web: browser)   zen (terminal app, scripts)   zen-matrix (Matrix rooms)
         │ HTTP + WebSocket on 127.0.0.1, owner token
  zend: API · sessions/tape · context compiler · tools · System One · brain · jobs
         │ JSON-RPC over stdio            │ SQLite file        │ HTTPS
@@ -23,10 +23,23 @@ create replacements.
 |---|---|---|
 | `crates/zend` | The kernel: API, sessions, the tape, context, tools, System One, memory, jobs | systemd service `zenbot`, `~/.zenbot/bin/zend` |
 | `crates/zen-engine` | The worker: runs each turn on the Claude Code or Codex CLI | child process of `zend` |
-| `crates/zen` | The terminal app (`src/tui/`: the board and the side panel share the Sessions · Files · Tasks views, `views.rs`; the Sessions view's first row is a `+ new session` button and archived jobs stay hidden until `J`; the Files view makes files and folders and renames (`a`, `A`, `R`: a name prompt on the key line, `files.rs` has the rules: no overwrite, no secrets, home and `~/.zenbot` top folders protected); the Tasks view and handing a task to an agent, `tasks.rs`; the file viewer lays prose out for reading, follows links and gives a vault note's zenwrite link (`e`), `viewer.rs` and `reader.rs`) and the script commands | `~/.zenbot/bin/zen`, linked from `~/.local/bin/zen` |
+| `crates/zen` | The terminal app (`src/tui/`: the board and the side panel share the Sessions · Files · Tasks views, `views.rs`; the Sessions view's first row is a `+ new session` button and archived jobs stay hidden until `J`; the Files view makes files and folders and renames (`a`, `A`, `R`: a name prompt on the key line, `files.rs` has the rules: no overwrite, no secrets, home and `~/.zenbot` top folders protected); the Tasks view and handing a task to an agent, `tasks.rs`; the file viewer lays prose out for reading, follows links and gives a vault note's web link (`e`, `ZEN_WEB_URL`), `viewer.rs` and `reader.rs`) and the script commands | `~/.zenbot/bin/zen`, linked from `~/.local/bin/zen` |
 | `crates/zen-client` | The kernel client and the shared command table (`commands.rs`) | library of `zen` and `zen-matrix` |
 | `crates/zen-proto` | Typed worker and client protocol messages, shared helpers | library |
 | `crates/zen-matrix` | Matrix rooms ↔ sessions (its own Cargo workspace) | systemd service `zen-matrix` |
+
+## The web app
+
+`web/` is zen in the browser: a Svelte page (`src/zen/`: the board with Sessions · Files · Tasks ·
+Agents, a session's chat with the side panel, the file viewer; `src/editor/`: the writer) and a
+Node server (`server/`) that serves it on 127.0.0.1:4400 and relays the kernel with the owner token
+added on the server, so the token never reaches the page. It also shows the home folder
+(`home.ts`), takes chat attachments into `~/inbox` (`uploads.ts`) and runs the shared commands
+through the `zen` command line (`commands.ts`). It trusts a signing-in proxy in front: every
+request needs the proxy's login header and every write `X-Zen-Web: 1`. `upgrade.sh` builds it
+with the binaries and `scripts/web-install.sh` runs it as the user unit `zen-web`
+(`~/.local/share/zen-web/current`, settings in `~/.config/zen-web.env`). `web/README.md` has its
+features, settings and security rules; `web/AGENTS.md` how to work on it.
 
 ## A turn
 
@@ -128,7 +141,7 @@ its workspace (`workspace`, else its own `agents/<name>/work`, never the owner's
 paths and the global vault when `global` allows (writable when write; other agents' vaults hidden).
 The owner's home is an empty tmpfs, `/tmp` private. `bash`, `verify` checks and its script jobs run
 in bubblewrap built from that list, inside pasta: a network of its own with internet but not the
-host's loopback (the kernel, zenwrite, local engines) nor gateway (either missing: an error, never
+host's loopback (the kernel, the web app, local engines) nor gateway (either missing: an error, never
 unsandboxed); `read`/`write`/`edit` refuse
 paths outside it (links resolved). `workspace`, `read` and `write` can't name the zen home or any of
 it but the agent's own folder and vault (in its folder, `workspace` and `write` only under `work/`).
@@ -199,8 +212,8 @@ busy turns, commit) needs no token; the rest are under `/api` (`main.rs`):
 | `GET /sessions/{id}/ws` | the session's events; send `{"type":"prompt","text":…,"mode":"steer"?}` or `{"type":"abort"}` |
 | `POST /sessions/{id}/decision` | the owner's verdict: accept, more, reshape, drop |
 | `GET /models`, `GET /version`, `GET/POST /upgrade` | models, update check, self-upgrade |
-| `POST /complete` | one completion without tools (`model`, `system`, `prompt`, `purpose`), for the owner's apps on this machine (zenwrite's AI alternatives); logged, not on a tape |
-| `POST /search` | the search tool for the owner's apps (`query`, `scope` default `knowledge`, `limit`): words and meaning, reranked by System One, as JSON results (zenwrite's wiki notes) |
+| `POST /complete` | one completion without tools (`model`, `system`, `prompt`, `purpose`), for the owner's apps on this machine (the web app's writer); logged, not on a tape |
+| `POST /search` | the search tool for the owner's apps (`query`, `scope` default `knowledge`, `limit`): words and meaning, reranked by System One, as JSON results (the writer's notes finder) |
 | `GET /memory`, `POST /memory/sleep`, `POST /brain` | memory and records |
 | `GET /skills`, `GET /suggestions` | skill use, next-prompt suggestions |
 | `GET /tasks` | the owner's open vault tasks, grouped by project, most pressing first (`tasks.rs`, read-only), each with its agent's session and state |
@@ -215,7 +228,7 @@ WebSocket events (`crates/zen-proto/src/client.rs`): `message`, `busy`, `delta`,
 
 ## Commands
 
-`crates/zen-client/src/commands.rs` is the one command table: `/x` in the terminal app, `!x` in
+`crates/zen-client/src/commands.rs` is the one command table: `/x` in the terminal app and the web chat, `!x` in
 Matrix and `zen x` on the command line are the same command. Shared: `new` (`new @garry` starts
 a session with another agent), `model`, `effort`, `done`, `rename`, `archive`, `steer`, `agents`, `tasks`, `jobs`, `skills`, `memory`, `mcp`, `models`, `suggestions`,
 `status`, `upgrade`. The terminal app's own: `resume`, `board`, `files`, `open`, `close`, `mouse`,
@@ -237,7 +250,7 @@ a session with another agent), `model`, `effort`, `done`, `rename`, `archive`, `
 | `s1/` | the owner's decision files and `models.toml` |
 | `outputs/` | full tool outputs too long to show |
 | `reader.json` | the file viewer's settings (speed, width, focus…), read when a file opens |
-| `bin/`, `version`, `upgrades/`, `upgrade.log`, `backups/` | the installed binaries and upgrades |
+| `bin/`, `version`, `web.version`, `upgrades/`, `upgrade.log`, `backups/` | the installed binaries, web app and upgrades |
 | `engine/` | the engines' own working folders |
 | `matrix/`, `matrix.env` | the Matrix bridge (private) |
 
@@ -280,10 +293,11 @@ In `~/.zenbot/env`. Read once in `config.rs` (default in brackets):
 | Script | What |
 |---|---|
 | `install.sh` | install on a fresh VM (INSTALL.md) |
-| `scripts/check.sh` | what CI runs: build, unit tests, clippy, e2e |
+| `scripts/check.sh` | what CI runs: the web app's checks and e2e tests, build, unit tests, clippy, e2e |
 | `scripts/e2e.sh [filter]` | end-to-end scenarios on throwaway kernels with the faux model |
 | `scripts/upgrade.sh [--check]` | build this checkout and install it once no session is working |
-| `scripts/apply-upgrade.sh` | the install step: back up the database, swap, health-check, roll back |
+| `scripts/apply-upgrade.sh` | the install step: back up the database, swap, health-check, roll back; then the web app |
+| `scripts/web-install.sh` | build `web/`, and run a build as the user unit `zen-web` on :4400, with rollback |
 | `scripts/self-update.sh` | `zen upgrade`: pull `main`, then `upgrade.sh` |
 | `scripts/dev.sh` | a dev kernel on :18100 with its own home and database |
 | `scripts/db.sh`, `scripts/storage.py` | SQLite helpers and online backups |

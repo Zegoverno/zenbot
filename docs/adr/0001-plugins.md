@@ -4,7 +4,7 @@ Status: proposed (2026-11-14)
 
 ## Context
 
-zenbot keeps the reader, the writer and Sudoku inside its own apps (the TUI and zenwrite's web
+zenbot keeps the reader, the writer and Sudoku inside its own apps (the TUI and the separate web
 app). These three should become products of their own: a hosted web app, a desktop app and a
 mobile app, each usable without zenbot. zenbot should also be able to install them and show them in
 its own UI. Other pieces (a richer Tasks screen, an agents org chart, an Obsidian-like vault) should
