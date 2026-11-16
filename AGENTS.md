@@ -37,8 +37,8 @@ and where things are; each module's header comment is its design note.
 
 ## Conventions
 
-- UI changes (`crates/zen/src/tui/`, `editor.rs`) come with render or key tests (see the tests next
-  to the modules); web changes (`web/`, see `web/AGENTS.md`) with an assertion in its e2e tests.
+- UI changes (`web/`, see `web/AGENTS.md`) come with an assertion in its e2e tests
+  (`web/tests/zen-e2e.mjs`, `web/tests/e2e.mjs`).
 - Commits made from a zen session get `Zen-Session` and `Co-Authored-By` trailers from
   `scripts/git-hooks`; keep them.
 - Code that depends on a CLI's flags or output fails loudly, so the daily engine update catches a

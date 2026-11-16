@@ -42,7 +42,7 @@ pub fn parse(text: &str) -> Input {
     let (word, rest) = cmd.split_once(char::is_whitespace).unwrap_or((cmd, ""));
     let rest = rest.trim();
     match word.to_ascii_lowercase().as_str() {
-        // Read by the shared table, so `@agent` means the same as in the terminal app.
+        // Read by the shared table, so `@agent` means the same as in the web chat.
         "new" => match zen_client::commands::parse(&format!("new {rest}")) {
             Some(Ok(zen_client::commands::Cmd::New { agent, title })) => Input::New { agent, title },
             _ => Input::Help,

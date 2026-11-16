@@ -1,9 +1,9 @@
-//! zen's commands, one table for every client: `/model` in the `zen` terminal app, `!model` in
+//! zen's commands, one table for every client: `/model` in the web chat, `!model` in
 //! Matrix and `zen model` on the command line are the same command with the same arguments.
 //!
 //! [`COMMANDS`] lists them all with where each works ([`Scope`]). The kernel and session commands
 //! are parsed ([`parse`]) and run ([`run`]) here, so every client does the same thing; a client
-//! adds only what is its own (the terminal app's panels and pickers, `zen ask`). The client reads
+//! adds only what is its own (the web chat's panels and pickers, `zen ask`). The client reads
 //! a command before anything reaches the agent and calls the kernel itself with the owner's token.
 
 use anyhow::{bail, Result};
@@ -717,7 +717,7 @@ mod tests {
         for gone in ["queue", "approve 1", "deny", "trust add docs.rs", "policy", "tools"] {
             assert_eq!(parse(gone), None, "{gone} is gone");
         }
-        assert_eq!(parse("board"), None, "a screen command is the terminal app's own");
+        assert_eq!(parse("board"), None, "a screen command is the web chat's own");
         assert_eq!(parse("hello"), None);
         assert_eq!(parse(""), None);
     }

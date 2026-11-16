@@ -1,5 +1,5 @@
 //! The kernel client as `zen` uses it: the shared one (`zen-client`: token, calls, the session
-//! stream, path encoding) plus what only the terminal app needs (upgrades, display helpers).
+//! stream, path encoding) plus what only the command line needs (upgrades, display helpers).
 
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
