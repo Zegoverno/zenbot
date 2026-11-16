@@ -316,6 +316,7 @@
       <span class="grow"></span>
       <button class="chip" onclick={() => begin('file')} title="a">+ file</button>
       <button class="chip" onclick={() => begin('folder')} title="A">+ folder</button>
+      <button class="chip" disabled={!chosen || chosen.dir} onclick={() => chosen && !chosen.dir && openFile(chosen.path, pane, true)}>Edit selected file</button>
       <button class="chip" onclick={() => begin('rename')} disabled={!chosen} title="R">rename</button>
       <button class="chip" class:on={t.hidden} onclick={() => (t.hidden = !t.hidden)} title=".">hidden</button>
       <button class="chip" onclick={() => reload(true)} title="r">↻</button>

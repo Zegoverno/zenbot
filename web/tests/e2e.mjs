@@ -127,7 +127,7 @@ try {
     await page.locator('.reader pre').waitFor();
     assert.match(await page.locator('.reader pre').innerText(), /<img/);
     assert.equal(await page.locator('.reader img').count(), 0);
-    assert.equal(await page.getByRole('button', { name: 'Edit', exact: true }).count(), 0);
+    assert.equal(await page.getByRole('button', { name: 'Edit', exact: true }).isDisabled(), true);
     assert.equal(await page.evaluate(() => window.pwned), undefined);
   }
   assert.deepEqual(errors, []);

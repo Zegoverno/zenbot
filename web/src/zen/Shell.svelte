@@ -202,6 +202,7 @@
           <div class="bar">
             {@render tabs('side', app.side.view)}
             <span class="grow"></span>
+            <button class="dim settings" onclick={() => settings()}>Settings</button>
             {#if app.focus === 'side'}<span class="dim" title="shift+tab gives the keys back">●</span>{/if}
             <button class="dim" onclick={() => toggleSide()} title="ctrl+b">✕</button>
           </div>

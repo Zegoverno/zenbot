@@ -197,10 +197,13 @@ export function editNote(vaultPath: string, pane: Pane = app.session ? 'side' : 
   openFile(`${app.vault}/${vaultPath}`, pane, true);
 }
 
-/** Settings, on the board (`tab`: its page). */
+/** Settings on the board or, while chatting, in the side panel (`tab`: its page). */
 export function settings(tab: 'plugins' | 'marketplace' = 'plugins') {
   app.settings = tab;
-  board('settings');
+  if (app.session) {
+    app.side.open = true;
+    setView('side', 'settings');
+  } else board('settings');
 }
 
 /** Back from writing to reading the same file. */

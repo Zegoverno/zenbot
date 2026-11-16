@@ -6,7 +6,8 @@
   //
   // What the app may ask, and where it goes:
   // - tool calls → `POST /api/plugins/<name>/call` (the kernel runs and records them);
-  // - `openLink`: `zen://open?path=…` opens that vault file in this pane through its opener,
+  // - `openLink`: `zen://open?path=…&mode=read|edit` opens that vault file in this pane;
+  //   `zen://close` returns this pane to the core Files tree,
   //   http(s) opens a new tab (noopener), anything else is refused;
   // - `sendMessage` queues a visible, attributed draft; only the owner can send it;
   // - `updateModelContext` is kept for the open session and goes with its next prompt.
@@ -14,9 +15,9 @@
   import { AppBridge, PostMessageTransport, type McpUiHostContext } from '@modelcontextprotocol/ext-apps/app-bridge';
   import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
   import { pluginApi, type ToolResult } from './api.ts';
-  import { app, openFile, notice, type Pane } from './app.svelte.ts';
+  import { app, openFile, closeFile, setView, notice, type Pane } from './app.svelte.ts';
   import { chat, keepContext, resultText } from './plugins.svelte.ts';
-  import { SANDBOX, webLink, withCsp, zenOpen } from './frame.ts';
+  import { SANDBOX, webLink, withCsp, zenNavigation } from './frame.ts';
 
   let {
     plugin,
@@ -106,9 +107,14 @@
           }
         };
         b.onopenlink = async ({ url }) => {
-          const rel = zenOpen(url);
-          if (rel !== null && app.vault) {
-            openFile(`${app.vault}/${rel}`, pane);
+          const nav = zenNavigation(url);
+          if (nav?.action === 'close') {
+            closeFile(pane);
+            setView(pane, 'files');
+            return {};
+          }
+          if (nav?.action === 'open' && app.vault) {
+            openFile(`${app.vault}/${nav.path}`, pane, nav.mode === 'edit');
             return {};
           }
           if (webLink(url)) {
