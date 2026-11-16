@@ -1,5 +1,6 @@
-# One job: scripts/check.sh (build, unit tests, clippy, end-to-end scenarios), exactly as it runs
-# locally. A safety net, not a release pipeline: upgrades build from the checkout (scripts/upgrade.sh).
+# One job: scripts/check.sh (the web app's checks, build, unit tests, clippy, end-to-end scenarios),
+# exactly as it runs locally. A safety net, not a release pipeline: upgrades build from the checkout
+# (scripts/upgrade.sh).
 name: ci
 
 on:
@@ -22,6 +23,14 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Chromium for the web app's end-to-end tests (Playwright)
+        working-directory: web
+        run: npm ci --no-audit --no-fund && npx playwright install --with-deps chromium
       - name: Tools for the end-to-end scenarios
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends jq poppler-utils python3 bubblewrap passt
       - name: Let the agent sandbox make user namespaces (Ubuntu 24.04's AppArmor restricts them)
