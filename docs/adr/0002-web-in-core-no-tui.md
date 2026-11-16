@@ -6,7 +6,7 @@ Status: proposed (2026-11-14)
 
 zenbot has two full UIs that do the same things:
 - the TUI (`crates/zen/src/tui`, about 9.4k lines, plus `editor.rs`);
-- zenwrite's zen app (a separate repo with a Svelte page and a Node server that relays the kernel).
+- the web app (a separate private repo with a Svelte page and a Node server that relays the kernel).
 
 Every feature is built twice. The writer, the reader and Sudoku are moving to plugins (ADR 0001),
 so what is left in either UI is the shell.
@@ -14,7 +14,7 @@ so what is left in either UI is the shell.
 ## Decision
 
 - **zenbot's UIs:**
-  - the **web UI** (moved from zenwrite into this repo as `web/`);
+  - the **web UI** (moved from its own repo into this one as `web/`);
   - the `zen` **CLI** for scripts (`ask`, `jobs`, `memory`, `status`, `plugins`…);
   - **Matrix**.
 
@@ -30,7 +30,7 @@ so what is left in either UI is the shell.
   - what remains (the kernel relay, home files, commands, uploads) is either served by `zend`
     directly, or kept as a thin Node server if that turns out simpler. This is decided when we get
     there, with measurements.
-- **The zenwrite repo is archived** after the move. Its history stays there; the public plugin
+- **The old web app repo is archived** after the move. Its history stays there; the public plugin
   repos start with fresh history.
 
 ## Consequences
