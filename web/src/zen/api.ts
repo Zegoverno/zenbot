@@ -139,7 +139,6 @@ export type Decision = 'accept' | 'more' | 'reshape' | 'drop';
 
 export interface Entry { name: string; path: string; dir: boolean; hidden: boolean; size: number; mtime: number }
 export interface FileRead { path: string; mtime: number; size: number; text?: string; binary?: boolean; tooBig?: boolean; dir?: boolean; vault?: string | null }
-export interface ReaderSettings { wpm: number; pauses: boolean; width: 0 | 60 | 72 | 90; spaced: boolean; bionic: boolean; focus: 'off' | 'paragraph' | 'line'; dim: 100 | 300 | 500 | 700 | 900 }
 /** A command of the shared table; a plugin's (`plugin`, `tool`) calls that plugin's tool. */
 export interface Command {
   name: string;
@@ -268,8 +267,6 @@ export const files = {
   create: (dir: string, name: string) => call<{ path: string }>('POST', '/api/fs/create', { dir, name }),
   mkdir: (dir: string, name: string) => call<{ path: string }>('POST', '/api/fs/mkdir', { dir, name }),
   rename: (path: string, name: string) => call<{ path: string }>('POST', '/api/fs/rename', { path, name }),
-  reader: () => call<ReaderSettings>('GET', '/api/reader'),
-  setReader: (change: Partial<ReaderSettings>) => call<ReaderSettings>('PUT', '/api/reader', change),
 };
 
 export const commands = {

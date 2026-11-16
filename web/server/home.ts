@@ -5,8 +5,6 @@
 //   ssh, gpg and cloud credentials (the terminal app's list, and more, since a web page is easier
 //   to reach than a terminal). Anything under a denied folder is denied too.
 // - Reads stop at 2 MB; a binary file says so instead of its bytes.
-// - `reader.json` (the file viewer's settings, shared with the terminal app) is read and written
-//   here, key by key, so other keys in it survive.
 // - Writes are only these: create an empty file, make a folder, rename. The new name is one plain
 //   segment (no `/`, `\`, NUL, `.` or `..`, at most 255 bytes) and never a denied one (no new
 //   `.env` or `id_rsa`); the parent must be a folder inside home. Nothing is overwritten (a taken
@@ -16,7 +14,7 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { HttpError, writeAtomic } from './files.ts';
+import { HttpError } from './files.ts';
 
 export const HOME = path.resolve(process.env.ZEN_WEB_HOME ?? os.homedir());
 const ZEN = path.join(HOME, '.zenbot');
@@ -213,44 +211,4 @@ async function findByName(name: string): Promise<{ path: string; dir: boolean } 
     level = next;
   }
   return null;
-}
-
-// The file viewer's settings, shared with the terminal app (which ignores keys it doesn't know).
-const READER = path.join(ZEN, 'reader.json');
-export const READER_DEFAULTS = { wpm: 200, pauses: false, width: 72, spaced: false, bionic: false, focus: 'off', dim: 300 };
-const CHECK: Record<string, (v: unknown) => boolean> = {
-  wpm: (v) => Number.isInteger(v) && (v as number) >= 100 && (v as number) <= 1000,
-  pauses: (v) => typeof v === 'boolean',
-  width: (v) => [0, 60, 72, 90].includes(v as number),
-  spaced: (v) => typeof v === 'boolean',
-  bionic: (v) => typeof v === 'boolean',
-  focus: (v) => ['off', 'paragraph', 'line'].includes(v as string),
-  dim: (v) => [100, 300, 500, 700, 900].includes(v as number),
-};
-
-async function readerFile(): Promise<Record<string, unknown>> {
-  try {
-    const v = JSON.parse(await fs.readFile(READER, 'utf8'));
-    return v && typeof v === 'object' ? v : {};
-  } catch {
-    return {};
-  }
-}
-
-export async function reader() {
-  const file = await readerFile();
-  const out: Record<string, unknown> = { ...READER_DEFAULTS };
-  for (const k of Object.keys(CHECK)) if (k in file && CHECK[k](file[k])) out[k] = file[k];
-  return out;
-}
-
-export async function setReader(change: unknown) {
-  if (!change || typeof change !== 'object') throw new HttpError(400, 'bad settings');
-  const file = await readerFile();
-  for (const [k, v] of Object.entries(change)) {
-    if (!(k in CHECK) || !CHECK[k](v)) throw new HttpError(400, `bad setting ${k}`);
-    file[k] = v;
-  }
-  await writeAtomic(READER, JSON.stringify(file, null, 2) + '\n');
-  return reader();
 }

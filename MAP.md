@@ -31,7 +31,8 @@ create replacements.
 ## The web app
 
 `web/` is zen in the browser: a Svelte page (`src/zen/`: the board with Sessions · Files · Tasks ·
-Agents, a session's chat with the side panel, the file viewer; `src/editor/`: the writer) and a
+Agents, a session's chat with the side panel, and Files with a safe Markdown preview and plain
+textarea edit/save fallback; rich reader/writer features are optional plugins) and a
 Node server (`server/`) that serves it on 127.0.0.1:4400 and relays the kernel with the owner token
 added on the server, so the token never reaches the page. It also shows the home folder
 (`home.ts`), takes chat attachments into `~/inbox` (`uploads.ts`) and runs the shared commands
@@ -212,8 +213,8 @@ busy turns, commit) needs no token; the rest are under `/api` (`main.rs`):
 | `GET /sessions/{id}/ws` | the session's events; send `{"type":"prompt","text":…,"mode":"steer"?}` or `{"type":"abort"}` |
 | `POST /sessions/{id}/decision` | the owner's verdict: accept, more, reshape, drop |
 | `GET /models`, `GET /version`, `GET/POST /upgrade` | models, update check, self-upgrade |
-| `POST /complete` | one completion without tools (`model`, `system`, `prompt`, `purpose`), for the owner's apps on this machine (the web app's writer); logged, not on a tape |
-| `POST /search` | the search tool for the owner's apps (`query`, `scope` default `knowledge`, `limit`): words and meaning, reranked by System One, as JSON results (the writer's notes finder) |
+| `POST /complete` | one completion without tools (`model`, `system`, `prompt`, `purpose`), for the owner's apps on this machine (including optional writing apps); logged, not on a tape |
+| `POST /search` | the search tool for the owner's apps (`query`, `scope` default `knowledge`, `limit`): words and meaning, reranked by System One, as JSON results (including optional note-finding apps) |
 | `GET /memory`, `POST /memory/sleep`, `POST /brain` | memory and records |
 | `GET /skills`, `GET /suggestions` | skill use, next-prompt suggestions |
 | `GET /tasks` | the owner's open vault tasks, grouped by project, most pressing first (`tasks.rs`, read-only), each with its agent's session and state |
@@ -249,7 +250,6 @@ a session with another agent), `model`, `effort`, `done`, `rename`, `archive`, `
 | `mcp.json`, `mcp-auth/` | MCP servers and their sign-ins |
 | `s1/` | the owner's decision files and `models.toml` |
 | `outputs/` | full tool outputs too long to show |
-| `reader.json` | the file viewer's settings (speed, width, focus…), read when a file opens |
 | `bin/`, `version`, `web.version`, `upgrades/`, `upgrade.log`, `backups/` | the installed binaries, web app and upgrades |
 | `engine/` | the engines' own working folders |
 | `matrix/`, `matrix.env` | the Matrix bridge (private) |
