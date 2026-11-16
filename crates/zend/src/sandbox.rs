@@ -14,7 +14,7 @@
 //!
 //! The network is private too: bubblewrap runs inside pasta (`passt`), a network namespace of its
 //! own with outbound internet but no host loopback and no gateway mapping, so the
-//! agent can't reach services on the host's 127.0.0.1 (the kernel, zenwrite, local engines) that
+//! agent can't reach services on the host's 127.0.0.1 (the kernel, the web app, local engines) that
 //! trust whoever connects or forgeable headers. IPv4 only (`-4`: pasta otherwise warns on a host
 //! without IPv6, into the agent's output); no port forwarding either way. pasta passes on the exit
 //! status, stays in the command's process group (killing the group on a timeout ends it all) and

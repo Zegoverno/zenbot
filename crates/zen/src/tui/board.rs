@@ -609,7 +609,7 @@ impl App {
             let keys = match view {
                 View::Sessions if b.filtering => " type to filter · enter keep · esc clear",
                 View::Sessions => " ↑↓ choose · enter open · n new session · / filter · a archived · J jobs · r refresh · tab views · q quit",
-                View::Files if viewing => " ↑↓ scroll · e zenwrite · esc back to the files · tab views · q quit",
+                View::Files if viewing => " ↑↓ scroll · e web · esc back to the files · tab views · q quit",
                 View::Files => " ↑↓ move · →/enter open · ← fold · . hidden · a file · A folder · R rename · tab views · q quit",
                 View::Tasks => " ↑↓ choose · a hand to an agent · enter its session · r refresh · n new session · tab views · q quit",
             };

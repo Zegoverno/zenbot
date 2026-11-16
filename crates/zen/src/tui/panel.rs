@@ -76,18 +76,18 @@ impl App {
         zen_client::zen_home().join("global")
     }
 
-    /// `e` in the viewer: the file in `pane`, when it's a note of the vault, as a zenwrite link
+    /// `e` in the viewer: the file in `pane`, when it's a note of the vault, as a zen web link
     /// (the web editor). zen may run in a browser terminal, far from the owner's browser, so it
     /// opens nothing: the link goes to the clipboard (OSC 52) and shows as a hyperlink (OSC 8).
-    pub(super) fn open_in_zenwrite(&mut self, pane: Pane) {
+    pub(super) fn open_in_web(&mut self, pane: Pane) {
         let Some(path) = self.viewer(pane).as_ref().map(|p| p.path.clone()) else { return };
-        let base = std::env::var("ZENWRITE_URL").ok().filter(|u| !u.is_empty()).unwrap_or_else(|| ZENWRITE_URL.into());
-        match zenwrite_url(&base, &self.vault(), &path) {
+        let base = std::env::var("ZEN_WEB_URL").ok().filter(|u| !u.is_empty()).unwrap_or_else(|| ZEN_WEB_URL.into());
+        match web_url(&base, &self.vault(), &path) {
             Some(url) => {
                 self.flush(format!("\x1b]52;c;{}\x07", base64(url.as_bytes())));
-                self.note(format!("zenwrite: {url} (copied; click or paste to open)"), Sty::Dim);
+                self.note(format!("zen web: {url} (copied; click or paste to open)"), Sty::Dim);
             }
-            None => self.note("zenwrite opens only Markdown notes of the vault (~/.zenbot/global)", Sty::Warn),
+            None => self.note("zen web opens only Markdown notes of the vault (~/.zenbot/global)", Sty::Warn),
         }
     }
 
@@ -150,12 +150,12 @@ impl App {
     }
 }
 
-/// Where zenwrite is served, unless `ZENWRITE_URL` says otherwise.
-const ZENWRITE_URL: &str = "http://127.0.0.1:4400";
+/// Where the zen web app is served, unless `ZEN_WEB_URL` says otherwise.
+const ZEN_WEB_URL: &str = "http://127.0.0.1:4400";
 
-/// zenwrite's link to `path`, when it's a Markdown file inside `vault` that zenwrite lists (not
+/// The web app's link to `path`, when it's a Markdown file inside `vault` that it lists (not
 /// in a hidden folder nor in Archive).
-fn zenwrite_url(base: &str, vault: &std::path::Path, path: &std::path::Path) -> Option<String> {
+fn web_url(base: &str, vault: &std::path::Path, path: &std::path::Path) -> Option<String> {
     let real = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let rel = real(path).strip_prefix(real(vault)).ok()?.to_path_buf();
     let listed = rel.components().all(|c| {
@@ -384,28 +384,28 @@ mod tests {
     }
 
     #[test]
-    fn zenwrite_links_only_markdown_notes_of_the_vault() {
-        let vault = TempDir::new("zenwrite-vault");
+    fn web_links_only_markdown_notes_of_the_vault() {
+        let vault = TempDir::new("web-vault");
         let note = vault.file("wiki/Ideas and me.md", "# Ideas\n");
         let base = "https://zenbot.example/";
-        assert_eq!(zenwrite_url(base, vault.path(), &note).as_deref(), Some("https://zenbot.example/?path=wiki%2FIdeas%20and%20me.md"));
+        assert_eq!(web_url(base, vault.path(), &note).as_deref(), Some("https://zenbot.example/?path=wiki%2FIdeas%20and%20me.md"));
         for rel in ["notes.txt", ".versions/wiki/v1.md", "Archive/old.md"] {
-            assert_eq!(zenwrite_url(base, vault.path(), &vault.file(rel, "x")), None, "{rel}");
+            assert_eq!(web_url(base, vault.path(), &vault.file(rel, "x")), None, "{rel}");
         }
-        let other = TempDir::new("zenwrite-elsewhere");
-        assert_eq!(zenwrite_url(base, vault.path(), &other.file("a.md", "x")), None);
+        let other = TempDir::new("web-elsewhere");
+        assert_eq!(web_url(base, vault.path(), &other.file("a.md", "x")), None);
         assert_eq!([base64(b""), base64(b"f"), base64(b"fo"), base64(b"foo"), base64(b"foob")], ["", "Zg==", "Zm8=", "Zm9v", "Zm9vYg=="]);
     }
 
     #[tokio::test]
     async fn e_in_the_viewer_refuses_a_file_outside_the_vault() {
         let mut a = app(110, 24);
-        let dir = TempDir::new("zenwrite-outside");
+        let dir = TempDir::new("web-outside");
         a.command(&format!("/open {}", dir.file("notes.md", "hello").display())).await.unwrap();
         a.side_focus = true;
         a.capture = Some(String::new());
         key(&mut a, KeyCode::Char('e')).await;
-        assert!(a.notice.as_ref().is_some_and(|(t, s)| t.starts_with("zenwrite opens only") && *s == Sty::Warn), "{:?}", a.notice);
+        assert!(a.notice.as_ref().is_some_and(|(t, s)| t.starts_with("zen web opens only") && *s == Sty::Warn), "{:?}", a.notice);
         assert!(!a.capture.as_ref().unwrap().contains("\x1b]52"), "nothing copied");
         assert!(a.side_file.is_some(), "the file stays open");
     }
@@ -413,10 +413,10 @@ mod tests {
     #[test]
     fn a_link_in_the_notice_is_a_terminal_hyperlink() {
         let mut a = app(110, 24);
-        a.note("zenwrite: https://zenbot.example/?path=wiki%2FIdeas.md (copied; click or paste to open)", Sty::Dim);
+        a.note("zen web: https://zenbot.example/?path=wiki%2FIdeas.md (copied; click or paste to open)", Sty::Dim);
         a.draw();
         let rows = a.screen.rows().join("\n");
         assert!(rows.contains("\x1b]8;;https://zenbot.example/?path=wiki%2FIdeas.md\x1b\\"), "{rows:?}");
-        assert!(plain_rows(&a).iter().any(|r| r.contains("zenwrite: https://zenbot.example/?path=wiki%2FIdeas.md (copied")), "{:#?}", plain_rows(&a));
+        assert!(plain_rows(&a).iter().any(|r| r.contains("zen web: https://zenbot.example/?path=wiki%2FIdeas.md (copied")), "{:#?}", plain_rows(&a));
     }
 }
