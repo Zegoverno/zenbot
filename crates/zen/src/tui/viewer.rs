@@ -6,8 +6,8 @@
 //! text), `l` `L` choose a link and enter follows it (a click too; ← comes back), `p` one word at
 //! a time (`Rsvp`; space pauses, `+` `-` speed, esc stops), `[` `]` the previous or next heading,
 //! `i` the properties header, `h` the changelog footer. The header says how far in you are and
-//! the minutes left, and a file opens again where it was left. `e` gives a vault note's zenwrite
-//! link (`App::open_in_zenwrite`).
+//! the minutes left, and a file opens again where it was left. `e` gives a vault note's zen web
+//! link (`App::open_in_web`).
 
 use super::*;
 
@@ -20,7 +20,7 @@ impl App {
             return true;
         }
         if k.code == KeyCode::Char('e') {
-            self.open_in_zenwrite(pane);
+            self.open_in_web(pane);
             return true;
         }
         let (focus, wpm, pauses) = (self.reading.focus, self.wpm, self.pauses);

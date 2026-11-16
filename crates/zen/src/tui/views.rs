@@ -470,7 +470,7 @@ impl App {
             let hint = match (self.side_focus, self.side_view) {
                 _ if prompt.is_some() => prompt.as_deref().unwrap_or_default(),
                 (false, _) => "shift+tab: use this panel · ctrl+b: close",
-                (true, View::Files) if self.side_file.is_some() => "↑↓ scroll · e zenwrite · esc/← back to the files · tab chat",
+                (true, View::Files) if self.side_file.is_some() => "↑↓ scroll · e web · esc/← back to the files · tab chat",
                 (true, View::Files) => "↑↓ move · →/enter open · ← fold · . hidden · a file · A folder · R rename · esc/tab chat",
                 (true, View::Sessions) => "↑↓ choose · enter switch · a archived · J jobs · 1 2 3 views · esc/tab chat",
                 (true, View::Tasks) => "↑↓ choose · a hand to an agent · enter its session · 1 2 3 views · esc/tab chat",

@@ -632,7 +632,7 @@ impl Md {
 /// line without a closing stop, followed by more of the same paragraph; short lines stay apart, as
 /// Obsidian shows them), and a `$$` block over several lines becomes one line. Code is untouched.
 /// HTML comments on lines of their own are left out, as Obsidian's reading view hides them: they
-/// hold what a tool keeps behind the text (zenwrite's alternatives and ghosted text).
+/// hold what a tool keeps behind the text (the writer's alternatives and ghosted text).
 pub fn reader_source(lines: &[&str]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut code = false;

@@ -86,7 +86,7 @@ pub(crate) struct CompleteBody {
     model: Option<String>,
     system: String,
     prompt: String,
-    /// What it's for, for the log (`zenwrite alternatives`).
+    /// What it's for, for the log (`writer alternatives`).
     purpose: Option<String>,
 }
 
@@ -94,7 +94,7 @@ pub(crate) struct CompleteBody {
 const COMPLETE_MAX_SYSTEM: usize = 20_000;
 const COMPLETE_MAX_PROMPT: usize = 100_000;
 
-/// One completion without tools, for the owner's own apps on this machine (zenwrite's AI
+/// One completion without tools, for the owner's own apps on this machine (the web app's writer AI
 /// alternatives): their own models through the kernel, no key of their own, every call logged.
 pub(crate) async fn complete_once(State(app): State<AppState>, Json(body): Json<CompleteBody>) -> ApiResult<Json<Value>> {
     if body.prompt.trim().is_empty() || body.system.len() > COMPLETE_MAX_SYSTEM || body.prompt.len() > COMPLETE_MAX_PROMPT {
@@ -119,7 +119,7 @@ pub(crate) struct SearchBody {
     limit: Option<i64>,
 }
 
-/// The search tool for the owner's own apps (zenwrite finding wiki notes for a piece): the same
+/// The search tool for the owner's own apps (the web app's writer finding wiki notes for a piece): the same
 /// words-and-meaning search, reranked by System One, as structured results.
 pub(crate) async fn search_once(State(app): State<AppState>, Json(body): Json<SearchBody>) -> ApiResult<Json<Value>> {
     let q = body.query.trim();
