@@ -34,29 +34,8 @@ const AUTH_HEADER = (process.env.ZEN_WEB_AUTH_HEADER || 'X-ExeDev-UserID').toLow
 const DEV_HOSTS = (process.env.ZEN_WEB_DEV_HOSTS ?? '').split(',').map((h) => h.trim()).filter(Boolean);
 const DEV = process.argv.includes('--dev');
 const DIST = path.resolve(import.meta.dirname, '../dist');
-const SKIP = new Set(['node_modules', 'Archive']);
 const MAX_BODY = 5 * 1024 * 1024;
 const resolvePath = (rel: unknown) => inRoot(ROOT, rel);
-
-async function listNotes(): Promise<string[]> {
-  const out: string[] = [];
-  async function walk(dir: string, rel: string) {
-    let entries;
-    try {
-      entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries) {
-      if (e.name.startsWith('.') || SKIP.has(e.name) || out.length >= 5000) continue;
-      const r = rel ? `${rel}/${e.name}` : e.name;
-      if (e.isDirectory()) await walk(path.join(dir, e.name), r);
-      else if (e.isFile() && e.name.endsWith('.md')) out.push(r);
-    }
-  }
-  await walk(ROOT, '');
-  return out.sort((a, b) => a.localeCompare(b));
-}
 
 async function readBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -121,8 +100,6 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
       const text = await readText(await resolvePath(url.searchParams.get('path')));
       return send(res, 200, { exists: text !== null });
     }
-    case 'GET /api/files':
-      return send(res, 200, { files: await listNotes() });
     case 'PUT /api/file': {
       const b = (await readBody(req)) as { path?: unknown; text?: unknown; base?: unknown };
       const text = b.text;

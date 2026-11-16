@@ -25,6 +25,5 @@ async function call<T>(method: string, url: string, body?: unknown): Promise<T> 
 export const api = {
   read: (path: string) => call<{ text: string; hash: string }>('GET', `/api/file?path=${encodeURIComponent(path)}`),
   exists: (path: string) => call<{ exists: boolean }>('GET', `/api/exists?path=${encodeURIComponent(path)}`),
-  files: () => call<{ files: string[] }>('GET', '/api/files'),
   write: (path: string, text: string, base: string | null) => call<{ hash: string }>('PUT', '/api/file', { path, text, base }),
 };

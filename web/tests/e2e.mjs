@@ -54,7 +54,7 @@ try {
   });
   // Legacy writer surfaces are gone, not merely hidden.
   for (const [method, route] of [
-    ['GET', '/api/versions'], ['GET', '/api/version'], ['GET', '/api/reader'],
+    ['GET', '/api/files'], ['GET', '/api/versions'], ['GET', '/api/version'], ['GET', '/api/reader'],
     ['PUT', '/api/reader'], ['POST', '/api/close'], ['POST', '/api/branch'],
     ['POST', '/api/changelog'], ['POST', '/api/notes/find'], ['POST', '/api/check'],
     ['POST', '/api/shrink'], ['POST', '/api/marks'], ['POST', '/api/suggest'],
