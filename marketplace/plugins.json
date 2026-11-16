@@ -8,9 +8,9 @@
       "author": "Zegoverno",
       "repository": "https://github.com/Zegoverno/zenread",
       "license": "MIT",
-      "version": "0.1.1",
-      "archive": "https://github.com/Zegoverno/zenread/releases/download/v0.1.1/zenread-0.1.1.tgz",
-      "sha256": "f42673fbbea6e683a3a680a71b4c9c4426744faf6109fd08a17d0b51a4bf1c2d",
+      "version": "0.1.2",
+      "archive": "https://github.com/Zegoverno/zenread/releases/download/v0.1.2/zenread-0.1.2.tgz",
+      "sha256": "f4bea7fe88d37aceb685784b10621c8f94cd7fa0b1cf2f93ac8c0b98bbd949ea",
       "kernel": [
         "files:read"
       ],
