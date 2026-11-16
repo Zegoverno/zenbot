@@ -1,7 +1,7 @@
 {
   "name": "zen-web",
   "version": "0.9.0",
-  "description": "zen's web app: the board, sessions, files and tasks, and a calm writing page for Markdown notes.",
+  "description": "zen's web app: the board, sessions, files and tasks, and minimal Markdown editing in Files.",
   "scripts": {
     "dev": "node server/main.ts --dev",
     "build": "vite build",
@@ -12,17 +12,11 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@codemirror/commands": "^6.11.1",
-    "@codemirror/language": "^6.13.1",
-    "@codemirror/state": "^6.7.6",
-    "@codemirror/view": "^6.43.15",
-    "@lezer/highlight": "^1.2.5",
     "@lezer/markdown": "^1.8.1",
     "@modelcontextprotocol/ext-apps": "^1.7.5",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "katex": "^0.19.1",
-    "svelte": "^5.57.3",
-    "yaml": "^2.9.1"
+    "svelte": "^5.57.3"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.1",

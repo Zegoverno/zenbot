@@ -432,78 +432,24 @@ try {
   rmSync(path.join(HOME, 'renamed.txt'));
   await page.goto(`${base}/?view=files&file=${encodeURIComponent(path.join(VAULT, 'wiki/God.md'))}`);
   await page.getByRole('heading', { name: 'God' }).waitFor();
-  assert.equal(await page.getByText('v1: first').isVisible().catch(() => false), false, 'the changelog is not in the body');
-  // Next / previous file in the folder, without the tree (buttons and n / N).
-  await page.locator('.reader button[title^="next file"]').click();
-  await page.getByRole('heading', { name: 'Grace' }).waitFor();
-  assert.ok(await page.locator('.reader button[title^="next file"]').isDisabled(), 'the last file has no next');
-  // Alt+O opens the source named in the properties, in a new tab.
-  const [tab] = await Promise.all([page.context().waitForEvent('page'), page.keyboard.press('Alt+o')]);
-  await tab.waitForLoadState('commit').catch(() => {});
-  assert.match(tab.url(), /example\.com\/grace/);
-  await tab.close();
-  await page.bringToFront();
-  await page.keyboard.press('N');
-  await page.getByRole('heading', { name: 'God' }).waitFor();
-
-  // Reading aids: spacing, bionic, focus, width and play; the front matter unfolds.
-  const reader = page.locator('.reader').first();
-  await page.keyboard.press(':');
-  await page.locator('.reader.spaced').waitFor();
-  await page.keyboard.press(':');
-  await page.locator('.reader.spaced').waitFor({ state: 'detached' });
-  const isOn = (l) => l.evaluate((e) => e.classList.contains('on'));
-  const bionic = reader.locator('button[title="bionic (b)"]');
-  await page.keyboard.press('b');
-  assert.ok(await isOn(bionic), 'b turns bionic on');
-  await page.keyboard.press('b');
-  assert.ok(!(await isOn(bionic)));
-  const focusButton = reader.locator('button[title^="focus:"]');
-  for (const want of [/para/, /line/, /off/]) {
-    await page.keyboard.press('f');
-    assert.match(await focusButton.innerText(), want);
-  }
-  const measure = () => reader.locator('.rpage').first().evaluate((e) => e.style.maxWidth);
-  const measure0 = await measure();
-  await page.keyboard.press('>');
-  assert.notEqual(await measure(), measure0, '> widens the page');
-  await page.keyboard.press('<');
-  assert.equal(await measure(), measure0);
-  const playButton = reader.locator('button[title^="play one word"]');
-  await page.keyboard.press('p');
-  assert.match(await playButton.innerText(), /stop/, 'p plays word by word');
-  await page.keyboard.press('Escape');
-  assert.match(await playButton.innerText(), /play/);
-  await page.keyboard.press('i');
-  await reader.locator('.fm.open', { hasText: 'idea' }).waitFor();
-  await page.keyboard.press('i');
-  await reader.locator('.fm.open').waitFor({ state: 'detached' });
-  // Headings: ] and [ jump between them.
-  await page.goto(`${base}/?view=files&file=${encodeURIComponent(path.join(VAULT, 'wiki/Atlas.md'))}`);
-  await page.getByRole('heading', { name: 'Atlas' }).waitFor();
-  const scrolled = () => page.locator('.reader .scroll').evaluate((e) => e.scrollTop);
-  await page.keyboard.press(']'); // the title
-  await page.keyboard.press(']'); // North
-  await page.waitForFunction(() => document.querySelector('.reader .scroll').scrollTop > 100);
-  const north = await scrolled();
-  await page.keyboard.press(']');
-  await page.waitForFunction((n) => document.querySelector('.reader .scroll').scrollTop > n + 100, north);
-  await page.keyboard.press('[');
-  await page.waitForFunction((n) => Math.abs(document.querySelector('.reader .scroll').scrollTop - n) < 4, north);
-  await page.goto(`${base}/?view=files&file=${encodeURIComponent(path.join(VAULT, 'wiki/God.md'))}`);
-  await page.getByRole('heading', { name: 'God' }).waitFor();
-
-  // The same pane writes it (e), in the writer, and Alt+W reads it again.
+  // Minimal core fallback, with no rich reader/editor tools.
+  await page.getByText('v1: first', { exact: false }).waitFor();
+  assert.equal(await page.getByRole('tab', { name: 'Reading', exact: true }).count(), 0);
+  assert.equal(await page.locator('.cm-editor').count(), 0);
   await page.keyboard.press('e');
-  await page.locator('.page .cm-content').waitFor();
+  const source = page.getByRole('textbox', { name: 'Markdown source' });
+  await source.waitFor();
   assert.match(page.url(), /edit=1/);
-  assert.equal(await page.locator('.board .page').count(), 1, 'the editor sits in the board');
+  const original = await source.inputValue();
+  await source.fill(original + '\nSaved in Files.\n');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await page.getByRole('status').filter({ hasText: /^Saved$/ }).waitFor();
+  assert.match(readFileSync(path.join(VAULT, 'wiki/God.md'), 'utf8'), /Saved in Files/);
   await page.keyboard.press('Alt+w');
-  await page.locator('.reader').waitFor();
-  assert.equal(await page.locator('.page').count(), 0);
-  // The editor's old address lands on the board, writing the note.
+  await page.getByRole('heading', { name: 'God' }).waitFor();
+  await page.getByText('Saved in Files.').waitFor();
   await page.goto(`${base}/?path=${encodeURIComponent('wiki/God.md')}`);
-  await page.locator('.board .page .cm-content').waitFor();
+  await page.getByRole('textbox', { name: 'Markdown source' }).waitFor();
   assert.match(page.url(), /view=files&file=.*God\.md&edit=1/);
 
   // Plugins. Settings (off the top bar) lists the installed ones, with permissions in plain words;
@@ -705,14 +651,14 @@ try {
   await page.getByRole('heading', { name: 'God' }).waitFor();
   // ...where it is written too, beside the chat.
   await page.locator('.zside .reader button[title^="write"]').click();
-  await page.locator('.zside .page .cm-content').waitFor();
+  await page.locator('.zside textarea').waitFor();
   if (shots) {
     await page.screenshot({ path: 'tests/shots/zen-side-editor.png' });
     await page.keyboard.press('Alt+l');
     await page.keyboard.press('Alt+r');
     await page.screenshot({ path: 'tests/shots/zen-side-panels.png' });
   }
-  await page.locator('.zside .page header .home').click();
+  await page.locator('.zside').getByRole('button', { name: 'Read', exact: true }).click();
   await page.locator('.zside .reader').waitFor();
 
   // The separator resizes the side panel, and the width is kept for the next visit.
@@ -848,6 +794,18 @@ try {
   await cardsRow.getByRole('button', { name: 'Yes, remove Cards', exact: true }).click();
   await cardsRow.waitFor({ state: 'detached' });
   assert.equal(installedPlugins.length, 1);
+
+  const fixtureRow = page.locator('section[aria-label="Fixture"]');
+  await fixtureRow.getByRole('button', { name: 'remove', exact: true }).click();
+  await fixtureRow.getByRole('button', { name: 'Yes, remove Fixture', exact: true }).click();
+  await fixtureRow.waitFor({ state: 'detached' });
+  assert.equal(installedPlugins.length, 0);
+  await page.goto(`${base}/?view=files&file=${encodeURIComponent(path.join(VAULT, 'wiki/God.md'))}`);
+  await page.getByRole('heading', { name: 'God' }).waitFor();
+  assert.equal(await page.getByRole('tab', { name: 'Reading', exact: true }).count(), 0);
+  assert.equal(await page.locator('iframe').count(), 0);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await page.getByRole('textbox', { name: 'Markdown source' }).waitFor();
 
   assert.deepEqual(errors, []);
   console.log('zen e2e: all passed');

@@ -9,7 +9,7 @@
   import Shell from './zen/Shell.svelte';
   import { app } from './zen/app.svelte.ts';
   import { api } from './lib/api.ts';
-  import { cleanFileName } from './doc/note.ts';
+  import { cleanFileName } from './lib/filename.ts';
 
   const params = new URLSearchParams(location.search);
   let mode = $state<'name' | 'title' | 'zen'>(params.has('new') && !params.has('path') ? 'name' : 'zen');
@@ -39,7 +39,7 @@
   function titleDone() {
     const t = title.trim();
     if (!t) return;
-    // Written only once it has something past its H1 (the editor decides).
+    // The draft stays in memory until the owner explicitly saves it.
     app.draft = { path, text: `# ${t}\n\n` };
     write(path);
   }

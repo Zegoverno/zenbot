@@ -2,38 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { promises as fs, existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import * as versions from './versions.ts';
 import { locked, resolvePath, writeAtomic } from './files.ts';
-import { parseFixes, parseMarks } from './check.ts';
-import { parseReply } from './ai.ts';
-import { proposals, queriesIn } from './findnotes.ts';
-import type { Hit } from './kernel.ts';
 import { cleanName, save as saveUpload } from './uploads.ts';
 import { Readable } from 'node:stream';
 
 const tmp = () => fs.mkdtemp(path.join(os.tmpdir(), 'zw-'));
-
-describe('versions', () => {
-  it('baseline, open, close, and branch only when nothing is open', async () => {
-    const root = await tmp();
-    await versions.baseline(root, 'a.md', '# A\n\nOne.\n');
-    expect(await versions.state(root, 'a.md', '# A\n\nOne.\n')).toMatchObject({ current: 1, open: false });
-    const edited = '# A\n\nTwo.\n';
-    expect((await versions.state(root, 'a.md', edited)).open).toBe(true);
-    await expect(versions.branch(root, 'a.md', edited, 1)).rejects.toThrow(/close v2/);
-    const closed = await versions.close(root, 'a.md', edited, 'second', 'owner');
-    expect(closed).toMatch(/## Changelog\n\n- \d{4}-\d\d-\d\d — v2: second\n/);
-    expect(await versions.state(root, 'a.md', closed)).toMatchObject({ current: 2, open: false });
-    expect(await versions.read(root, 'a.md', 1)).toBe('# A\n\nOne.\n');
-  });
-
-  it('a broken index stops instead of being overwritten', async () => {
-    const root = await tmp();
-    await fs.mkdir(path.join(root, '.versions/a.md'), { recursive: true });
-    await fs.writeFile(path.join(root, '.versions/a.md/index.json'), '{oops');
-    await expect(versions.state(root, 'a.md', 'x')).rejects.toThrow();
-  });
-});
 
 describe('files', () => {
   it('keeps paths inside the root', async () => {
@@ -59,37 +32,6 @@ describe('files', () => {
     const f = path.join(root, 'n/A.md');
     await Promise.all([writeAtomic(f, 'one'), writeAtomic(f, 'two')]);
     expect(['one', 'two']).toContain(await fs.readFile(f, 'utf8'));
-  });
-});
-
-describe('reading the AI answers', () => {
-  it('fixes must name text that is in the note', () => {
-    const note = 'This are fine.';
-    const reply = 'Sure: {"fixes":[{"find":"This are","replace":"This is","kind":"grammar","why":"agreement"},{"find":"missing","replace":"x","kind":"spelling","why":""},{"find":"fine","replace":"fine","kind":"odd","why":""}]}';
-    expect(parseFixes(reply, note)).toEqual([{ find: 'This are', replace: 'This is', kind: 'grammar', why: 'agreement' }]);
-  });
-
-  it('cuts are shorter, found in the note, all of kind cut', () => {
-    const note = 'It is really very good. We go.';
-    const reply = '{"fixes":[{"find":" really very","replace":"","why":"filler"},{"find":"We go.","replace":"We all go now.","why":"longer"},{"find":"nope","replace":""}]}';
-    expect(parseFixes(reply, note, 'cut')).toEqual([{ find: ' really very', replace: '', kind: 'cut', why: 'filler' }]);
-  });
-
-  it('marks point at text in the note and change nothing', () => {
-    const reply = '{"marks":[{"find":"It is","kind":"weak","why":"flat"},{"find":"nope","kind":"long"},{"find":"We go.","kind":"odd"}]}';
-    expect(parseMarks(reply, 'It is good. We go.')).toEqual([{ find: 'It is', replace: 'It is', kind: 'weak', why: 'flat' }]);
-  });
-
-  it('alternatives are trimmed, unquoted, new and on one line', () => {
-    const r = { paragraph: 'A b.', target: 'b', scope: 'word' as const, existing: ['b', 'c'] };
-    expect(parseReply('{"alternatives":["“d”"," b ","c","e\\nf","d"]}', r)).toEqual(['d']);
-  });
-
-  it('notes link only pages the search found', () => {
-    const hits = new Map<string, Hit>([['Angels', { kind: 'wiki', ref: 'Angels', title: 'Angels', snippet: '', relevance: null, path: null }]]);
-    const v = { notes: [{ text: 'Backs the angels part.', page: '[[Angels]]', quote: 'pure spirits' }, { text: 'Made up.', page: 'Nowhere' }] };
-    expect(proposals(v, hits)).toEqual([{ text: 'Backs the angels part.', page: 'Angels', quote: 'pure spirits' }]);
-    expect(queriesIn({ search: ['a', ' a ', 'b', 3] }, 6)).toEqual(['a', 'b']);
   });
 });
 

@@ -98,13 +98,6 @@ describe('home folder', async () => {
     expect(await h.locate('https://example.com')).toBeNull();
   });
 
-  it('keeps reader settings valid and other keys in the file', async () => {
-    await fs.writeFile(path.join(home, '.zenbot/reader.json'), '{"wpm": 260, "mine": 1}');
-    expect(await h.setReader({ dim: 700, focus: 'line' })).toMatchObject({ wpm: 260, dim: 700, focus: 'line' });
-    await expect(h.setReader({ dim: 650 })).rejects.toThrow(/bad setting/);
-    await expect(h.setReader({ evil: true })).rejects.toThrow(/bad setting/);
-    expect(JSON.parse(readFileSync(path.join(home, '.zenbot/reader.json'), 'utf8')).mine).toBe(1);
-  });
 });
 
 describe('commands', () => {

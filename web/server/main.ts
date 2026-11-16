@@ -11,7 +11,7 @@
 // - Every write needs the `X-Zen-Web: 1` header, which a page on another site can't send without
 //   a CORS preflight this server never grants: no cross-site writes.
 // - Paths stay inside the root: relative, Markdown only, no dot folders, no symlinks out.
-// - AI requests go to the zen kernel on loopback; its token is read here and never sent to the page.
+// - The kernel token is read here for authenticated relays and never sent to the page.
 //
 // Run with Node's own type stripping: `node server/main.ts` (`--dev` serves the page from Vite;
 // `ZEN_WEB_DEV_HOSTS`, comma-separated, are the host names Vite accepts besides localhost).
@@ -20,12 +20,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { suggest, type SuggestRequest } from './ai.ts';
-import * as versions from './versions.ts';
 import { hash, HttpError, locked, readText, resolvePath as inRoot, writeAtomic } from './files.ts';
-import { check, marks, shrink } from './check.ts';
-import { findNotes } from './findnotes.ts';
-import { suggestLog } from './changelog.ts';
 import * as zen from './zen.ts';
 import * as home from './home.ts';
 import * as commands from './commands.ts';
@@ -39,29 +34,8 @@ const AUTH_HEADER = (process.env.ZEN_WEB_AUTH_HEADER || 'X-ExeDev-UserID').toLow
 const DEV_HOSTS = (process.env.ZEN_WEB_DEV_HOSTS ?? '').split(',').map((h) => h.trim()).filter(Boolean);
 const DEV = process.argv.includes('--dev');
 const DIST = path.resolve(import.meta.dirname, '../dist');
-const SKIP = new Set(['node_modules', 'Archive']);
 const MAX_BODY = 5 * 1024 * 1024;
 const resolvePath = (rel: unknown) => inRoot(ROOT, rel);
-
-async function listNotes(): Promise<string[]> {
-  const out: string[] = [];
-  async function walk(dir: string, rel: string) {
-    let entries;
-    try {
-      entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries) {
-      if (e.name.startsWith('.') || SKIP.has(e.name) || out.length >= 5000) continue;
-      const r = rel ? `${rel}/${e.name}` : e.name;
-      if (e.isDirectory()) await walk(path.join(dir, e.name), r);
-      else if (e.isFile() && e.name.endsWith('.md')) out.push(r);
-    }
-  }
-  await walk(ROOT, '');
-  return out.sort((a, b) => a.localeCompare(b));
-}
 
 async function readBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -100,10 +74,6 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
       return send(res, 200, { found: await home.locate(q('ref'), q('from')) });
     case 'GET /api/fs/home':
       return send(res, 200, { home: home.HOME, vault: home.VAULT });
-    case 'GET /api/reader':
-      return send(res, 200, await home.reader());
-    case 'PUT /api/reader':
-      return send(res, 200, await home.setReader(await readBody(req)));
     case 'POST /api/fs/create':
     case 'POST /api/fs/mkdir':
     case 'POST /api/fs/rename': {
@@ -130,8 +100,6 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
       const text = await readText(await resolvePath(url.searchParams.get('path')));
       return send(res, 200, { exists: text !== null });
     }
-    case 'GET /api/files':
-      return send(res, 200, { files: await listNotes() });
     case 'PUT /api/file': {
       const b = (await readBody(req)) as { path?: unknown; text?: unknown; base?: unknown };
       const text = b.text;
@@ -143,54 +111,9 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
         if ((current === null) !== (b.base === null) || (current !== null && hash(current) !== b.base)) {
           return send(res, 409, { error: 'changed on disk', text: current, hash: current === null ? null : hash(current) });
         }
-        if (current !== text) await versions.baseline(ROOT, b.path as string, current);
         await writeAtomic(full, text);
         send(res, 200, { hash: hash(text) });
       });
-    }
-    case 'GET /api/versions': {
-      const rel = url.searchParams.get('path');
-      const text = await readText(await resolvePath(rel));
-      return send(res, 200, await versions.state(ROOT, rel!, text));
-    }
-    case 'GET /api/version': {
-      const rel = url.searchParams.get('path');
-      await resolvePath(rel);
-      const text = await versions.read(ROOT, rel!, Number(url.searchParams.get('n')));
-      if (text === null) return send(res, 404, { error: 'no such version' });
-      return send(res, 200, { text });
-    }
-    case 'POST /api/close':
-    case 'POST /api/branch': {
-      const b = (await readBody(req)) as { path?: unknown; base?: unknown; log?: unknown; n?: unknown };
-      const full = await resolvePath(b.path);
-      const rel = b.path as string;
-      return locked(full, async () => {
-        const current = await readText(full);
-        if (current === null) throw new HttpError(404, 'not found');
-        if (hash(current) !== b.base) return send(res, 409, { error: 'changed on disk', text: current, hash: hash(current) });
-        const out = url.pathname === '/api/close'
-          ? await versions.close(ROOT, rel, current, String(b.log ?? ''), 'owner')
-          : await versions.branch(ROOT, rel, current, Number(b.n));
-        await writeAtomic(full, out);
-        send(res, 200, { text: out, hash: hash(out), ...(await versions.state(ROOT, rel, out)) });
-      });
-    }
-    case 'POST /api/changelog': {
-      const rel = String(((await readBody(req)) as { path?: unknown }).path ?? '');
-      return send(res, 200, await suggestLog(ROOT, rel, await readText(await resolvePath(rel))));
-    }
-    case 'POST /api/notes/find':
-      return send(res, 200, await findNotes((await readBody(req)) as { path?: unknown; text?: unknown }));
-    case 'POST /api/check':
-      return send(res, 200, await check((await readBody(req)) as { text?: unknown }));
-    case 'POST /api/shrink':
-      return send(res, 200, await shrink((await readBody(req)) as { text?: unknown }));
-    case 'POST /api/marks':
-      return send(res, 200, await marks((await readBody(req)) as { text?: unknown }));
-    case 'POST /api/suggest': {
-      const b = (await readBody(req)) as SuggestRequest;
-      return send(res, 200, await suggest(b));
     }
     default:
       throw new HttpError(404, 'no such route');

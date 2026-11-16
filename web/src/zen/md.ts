@@ -1,4 +1,4 @@
-// Markdown to DOM for the chat and the file viewer, built on Lezer's parser (as the editor is).
+// Markdown to DOM for the chat and the file viewer, built on Lezer's parser.
 //
 // Safe by construction: every piece of text becomes a text node and no HTML in the source is ever
 // parsed as HTML (HTML shows as text, comments are hidden), so nothing a model or a file says can
@@ -359,27 +359,5 @@ function inlineNode(c: SyntaxNode, src: string, out: HTMLElement) {
     default:
       if (c.firstChild) inline(c, src, out, new Set());
       else out.append(s);
-  }
-}
-
-/** Bold on the first part of each word (bionic reading), in the text nodes under `root`. */
-export function bionic(root: HTMLElement) {
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode: (n) => (n.parentElement?.closest('code, pre, .md-math, .katex, .md-bionic') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
-  });
-  const nodes: Text[] = [];
-  while (walker.nextNode()) nodes.push(walker.currentNode as Text);
-  for (const t of nodes) {
-    const parts = t.data.split(/(\p{L}[\p{L}\p{M}'’-]*)/u);
-    if (parts.length < 2) continue;
-    const frag = document.createDocumentFragment();
-    parts.forEach((p, i) => {
-      if (i % 2 === 0) return p && frag.append(p);
-      const k = p.length <= 3 ? 1 : Math.ceil(p.length * 0.45);
-      const b = el('b', 'md-bionic');
-      b.textContent = p.slice(0, k);
-      frag.append(b, p.slice(k));
-    });
-    t.replaceWith(frag);
   }
 }
