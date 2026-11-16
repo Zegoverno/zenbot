@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { IncomingMessage } from 'node:http';
 import { allowed, sameOrigin } from './zen.ts';
-import { COMMANDS, run } from './commands.ts';
+import { list, run } from './commands.ts';
 
 describe('kernel proxy', () => {
   it('lets through only what the terminal app uses', () => {
@@ -98,13 +98,13 @@ describe('commands', () => {
     await expect(run('status', ['--url', 'http://evil'])).rejects.toThrow(/not a command/);
   });
 
-  // The page's table mirrors zenbot's (crates/zen-client/src/commands.rs).
-  const table = path.resolve(import.meta.dirname, '../../crates/zen-client/src/commands.rs');
-  it('is the zenbot table without its command-line-only commands', () => {
-    const rs = readFileSync(table, 'utf8');
-    const theirs = [...rs.matchAll(/cmd\("([\w-]+)", "([^"]*)", "((?:[^"\\]|\\.)*)", (\w+)\)/g)]
-      .filter((m) => m[4] !== 'Line')
-      .map((m) => ({ name: m[1], args: m[2], help: m[3].replace(/\\"/g, '"'), scope: m[4].toLowerCase() }));
-    expect(COMMANDS).toEqual(theirs);
+  // The table comes from `zen --commands` (crates/zen/src/main.rs tests what it prints).
+  it('takes the table from zen --commands', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'zen-bin-'));
+    const bin = path.join(dir, 'zen');
+    const table = [{ name: 'new', args: '[@agent] [title]', help: 'start a new session', scope: 'session' }];
+    await fs.writeFile(bin, `#!/bin/sh\n[ "$1" = --commands ] && echo '${JSON.stringify({ commands: table })}'\n`, { mode: 0o755 });
+    expect(await list(bin)).toEqual(table);
+    await expect(list(path.join(dir, 'missing'))).rejects.toThrow(/zen --commands/);
   });
 });

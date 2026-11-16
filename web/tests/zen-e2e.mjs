@@ -1,7 +1,8 @@
 // End-to-end for the zen app: the real server (dev mode) on a scratch home, a stand-in zen kernel
 // (HTTP and a minimal WebSocket, checking the token on every request), and headless Chromium.
+// The slash commands come from this checkout's `zen --commands` (built here, or ZEN_BIN).
 // `node tests/zen-e2e.mjs [--shots]`.
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -20,6 +21,11 @@ const para = (n) => Array.from({ length: n }, (_, i) => `Paragraph ${i + 1} of p
 writeFileSync(path.join(VAULT, 'wiki/Atlas.md'), `# Atlas\n\n${para(40)}\n\n## North\n\n${para(40)}\n\n## South\n\n${para(40)}\n`);
 writeFileSync(path.join(HOME, '.zenbot/token'), 'test-token');
 writeFileSync(path.join(HOME, 'plain.txt'), 'hello file');
+const ZEN_BIN = process.env.ZEN_BIN ?? (() => {
+  const root = path.resolve(import.meta.dirname, '../..');
+  execFileSync('cargo', ['build', '-q', '-p', 'zen'], { cwd: root, stdio: 'inherit' });
+  return path.join(root, 'target/debug/zen');
+})();
 const PORT = 4412;
 const KERNEL = 4413;
 const shots = process.argv.includes('--shots');
@@ -192,7 +198,7 @@ kernel.on('upgrade', (req, socket) => {
 kernel.listen(KERNEL, '127.0.0.1');
 
 const server = spawn(process.execPath, ['server/main.ts', '--dev'], {
-  env: { ...process.env, ZEN_WEB_HOME: HOME, ZEN_WEB_ROOT: VAULT, ZEN_WEB_PORT: String(PORT), ZEN_WEB_AUTH: 'off', ZEN_URL: `http://127.0.0.1:${KERNEL}`, ZEN_TOKEN_FILE: path.join(HOME, '.zenbot/token') },
+  env: { ...process.env, ZEN_WEB_HOME: HOME, ZEN_WEB_ROOT: VAULT, ZEN_WEB_PORT: String(PORT), ZEN_WEB_AUTH: 'off', ZEN_URL: `http://127.0.0.1:${KERNEL}`, ZEN_TOKEN_FILE: path.join(HOME, '.zenbot/token'), ZEN_BIN },
   stdio: ['ignore', 'pipe', 'inherit'],
 });
 await new Promise((ok) => server.stdout.on('data', (d) => String(d).includes('zen web on') && ok()));
@@ -576,6 +582,11 @@ try {
   await page.locator('.zc-opt', { hasText: 'Friday' }).click();
   await page.locator('.zc-opt', { hasText: 'The team' }).click();
   assert.equal(await box.inputValue(), '1. Friday\n2. The team', 'options fill the answer, one row per question');
+  await box.fill('');
+
+  // The slash commands are the shared table's, from `zen --commands`.
+  await box.fill('/ste');
+  await page.locator('.zc-pop', { hasText: 'change direction at the next tool boundary' }).waitFor();
   await box.fill('');
 
   // During a turn: Enter queues, /steer steers, Esc interrupts.
