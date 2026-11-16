@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build zenbot from this checkout (whatever is checked out, branch or main) and install it once no
-# session is working. Safe to run from inside a zen session: the restart waits for the turn to end,
+# Build zenbot (the binaries and the web app) from this checkout (whatever is checked out, branch
+# or main) and install it once no session is working. Safe to run from inside a zen session: the restart waits for the turn to end,
 # and apply-upgrade.sh rolls back if the new kernel isn't healthy.
 #
 #   scripts/upgrade.sh           build, then schedule the install
@@ -47,6 +47,18 @@ if [ -z "$CHECK_ONLY" ] && [ -n "$matrix_src" ] && systemctl is-enabled --quiet 
   fi
 fi
 
+echo "== web"
+mkdir -p "$HOME/.zenbot/upgrades"
+WEB_BUILD=$(mktemp -d "$HOME/.zenbot/upgrades/.web.XXXXXX")
+trap 'rm -rf "$WEB_BUILD"' EXIT
+WEB_LOG=$(mktemp)
+if ! nice -n 10 scripts/web-install.sh build "$WEB_BUILD/web" >"$WEB_LOG" 2>&1; then
+  tail -40 "$WEB_LOG"; rm -f "$WEB_LOG"
+  echo "WEB BUILD FAILED: fix the errors above, then run this script again."
+  exit 1
+fi
+rm -f "$WEB_LOG"
+
 if [ -n "$CHECK_ONLY" ]; then
   echo "Build OK ($COMMIT$DIRTY); nothing installed."
   exit 0
@@ -59,6 +71,7 @@ STAGE="$HOME/.zenbot/upgrades/$(date +%s%N)"
 mkdir -p "$STAGE"
 find "$HOME/.zenbot/upgrades" -mindepth 1 -maxdepth 1 -type d -mmin +120 -exec rm -rf {} +
 for b in zend zen zen-engine; do cp "target/dist/$b" "$STAGE/$b"; done
+mv "$WEB_BUILD/web" "$STAGE/web"
 [ -z "$matrix_bin" ] || { cp "$matrix_bin" "$STAGE/zen-matrix" && echo "$matrix_src" > "$STAGE/matrix-version"; }
 echo "$COMMIT" > "$STAGE/commit"
 [ -z "$DIRTY" ] || echo "uncommitted changes" > "$STAGE/note"
