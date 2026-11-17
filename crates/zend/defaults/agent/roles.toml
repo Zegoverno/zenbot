@@ -1,0 +1,26 @@
+# Roles for subagents: profiles `delegate` can name (`role`), not agents. Each is a kind of work,
+# a model, an optional effort, an optional narrower tool list (it never widens what the subagent
+# would get) and the skills attached to its brief. This file is the agent's to keep: tune the
+# models and lists as you learn what works.
+
+# The model of a subagent given no model and no role (else the parent's).
+default_model = "claude/claude-sonnet-5-5"
+
+[roles.researcher]
+description = "Find and read sources, code and memory; report facts with evidence. No changes."
+model = "claude/claude-haiku-5-5"
+tools = ["read", "history", "search", "web_search", "web_fetch", "find_skills", "load_skill"]
+skills = ["work/search"]
+effort = "low"
+
+[roles.coder]
+description = "Change code or files end to end: read, edit, test, commit."
+model = "claude/claude-sonnet-5-5"
+
+# Reviewer bash runs as the owner and can write: "No changes" is behavioral guidance,
+# not an enforced read-only security boundary. Bash is needed for test commands.
+[roles.reviewer]
+description = "Review finished work against its goal: run the checks, read the diff, report what fails. No changes."
+model = "claude/claude-opus-5-5"
+tools = ["read", "bash", "history", "search", "find_skills", "load_skill", "verify"]
+skills = ["work/verify"]

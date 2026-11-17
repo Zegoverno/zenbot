@@ -29,7 +29,13 @@ pub async fn append(db: &SqlitePool, session: Uuid, kind: &str, payload: &Value)
 
 pub async fn append_owner_queued(db: &SqlitePool, session: Uuid, payload: &Value, queued: Option<i64>) -> Result<(i32, String), sqlx::Error> {
     let mut tx = crate::storage::begin(db).await?;
-    let (seq, hash) = append_in(&mut tx, session, "message", payload).await?;
+    let mut payload = payload.clone();
+    if let Some(queued) = queued {
+        let steer: bool = sqlx::query_scalar("SELECT steer FROM pending_prompts WHERE id=$1 AND session_id=$2 AND error IS NULL")
+            .bind(queued).bind(session).fetch_one(&mut *tx).await?;
+        payload["steer"] = serde_json::json!(steer);
+    }
+    let (seq, hash) = append_in(&mut tx, session, "message", &payload).await?;
     if let Some(queued) = queued {
         let deleted = sqlx::query("DELETE FROM pending_prompts WHERE id=$1 AND session_id=$2 AND error IS NULL")
             .bind(queued).bind(session).execute(&mut *tx).await?.rows_affected();

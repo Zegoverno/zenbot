@@ -105,21 +105,16 @@ pub(crate) enum Cmd {
         #[arg(short, long)]
         session: Option<String>,
     },
-    /// Your verdict on a session's work so far: accept, more, reshape or drop, with an optional note
-    Done {
-        decision: String,
-        note: Vec<String>,
-        #[arg(short, long)]
-        session: String,
-    },
     /// Rename a session
     Rename {
         title: Vec<String>,
         #[arg(short, long)]
         session: String,
     },
-    /// Archive a session
+    /// Archive a session, optionally saying how it ended: done, partial (continues in a new session with a handoff) or not-done, with a note
     Archive {
+        outcome: Option<String>,
+        note: Vec<String>,
         #[arg(short, long)]
         session: String,
     },
@@ -161,6 +156,12 @@ pub(crate) enum Cmd {
     /// MCP servers; `zen mcp login <server>` signs in to one (open the link, paste the address your browser ended on)
     Mcp {
         args: Vec<String>,
+        /// Explicit agent scope for mcp serve
+        #[arg(long)]
+        agent: Option<String>,
+        /// Allow memory and record writes in mcp serve
+        #[arg(long)]
+        write: bool,
     },
     /// List MCP forms awaiting an explicit owner response
     McpPending,

@@ -59,6 +59,10 @@ start_kernel() {
     unset ZEN_S1_MODEL OPENROUTER_API_KEY ZEN_TZ # the owner's settings stay out when run from a session
     for kv in "$@"; do export "$kv"; done
     mkdir -p "$HOME"
+    # The shipped roles without their default model (a claude one), so a subagent given no model
+    # runs on its parent's faux one.
+    local roles="$HOME/.zenbot/agents/zenbot/roles.toml"
+    [ -e "$roles" ] || { mkdir -p "${roles%/*}"; grep -v '^default_model' "$REPO/crates/zend/defaults/agent/roles.toml" >"$roles"; }
     exec "$BIN/zend"
   ) >"$TMP/kernel.log" 2>&1 &
   KERNEL_PID=$!
@@ -156,7 +160,7 @@ The owner's name is E2E Owner." >"$TMP/home/.zenbot/USER.md"
   check "the skills index is in the instructions" grep -q "work/verify:" <<<"$base"
   check "memory starts empty" grep -q "(empty)" <<<"$base"
   local tools; tools=$(q "SELECT group_concat(t.value->>'name', ',') FROM turns, envelopes e, json_each(e.tools) t WHERE turns.session_id=X'${sid//-/}' AND e.hash = turns.envelope")
-  check "the system tools, in order, including work records" eq "$tools" bash,read,write,edit,history,search,ask,remember,brain,web_search,web_fetch,find_skills,load_skill,save_skill,find_tools,load_tool,call_tool,verify,work,delegate,schedule
+  check "the system tools, in order, without the retired work tool" eq "$tools" bash,read,write,edit,history,search,ask,remember,brain,web_search,web_fetch,find_skills,load_skill,save_skill,find_tools,load_tool,call_tool,verify,delegate,schedule
 }
 
 # A home in the old flat layout moves into the scoped one (layout.rs) when the kernel starts, once:
@@ -561,6 +565,18 @@ delegation() {
   local child; child=$(q "SELECT id FROM sessions WHERE parent=X'${sid//-/}' AND kind='subagent' LIMIT 1")
   local tools; tools=$(q "SELECT group_concat(t.value->>'name', ',') FROM turns, envelopes e, json_each(e.tools) t WHERE turns.session_id=X'${child//-/}' AND e.hash = turns.envelope")
   check "a subagent can't ask or delegate" bash -c '! grep -qE "(^|,)(ask|delegate)(,|$)" <<<"$1" && grep -q "save_skill" <<<"$1"' _ "$tools"
+  # A role: recorded on the child, its tools narrowed (the researcher can't write), its skills in
+  # the brief; an unknown role is refused with the list.
+  r=$(zen ask --json -m faux/smoke "role play")
+  check "a role delegates; an unknown one is refused" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" delegate:false,delegate:true
+  local rsid; rsid=$(echo "$r" | jq -r .session_id)
+  local rchild; rchild=$(q "SELECT id FROM sessions WHERE parent=X'${rsid//-/}' AND kind='subagent'")
+  check "the child records its role" eq "$(q "SELECT role FROM sessions WHERE id=X'${rchild//-/}'")" researcher
+  check "the board shows its role" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/board" | jq -r --arg c "$rchild" '.sessions[] | select(.id == $c) | .role')" researcher
+  check "the role's tools: no write, offered or run" eq "$(q "SELECT (SELECT count(*) FROM turns, envelopes e, json_each(e.tools) t WHERE turns.session_id=X'${rchild//-/}' AND e.hash = turns.envelope AND t.value->>'name' IN ('write','edit')) || '|' || (SELECT count(*) FROM tape_events WHERE session_id=X'${rchild//-/}' AND payload->>'toolName'='write' AND payload->'content'->0->>'text' LIKE '%researcher%role%')")" "0|1"
+  check "its skill goes with the brief" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id=X'${rchild//-/}' AND kind='message' AND payload->>'role'='user' AND payload LIKE '%skill name=%work/search%'")" 1
+  check "an unknown role lists the roles" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id=X'${rsid//-/}' AND payload->>'toolName'='delegate' AND payload->'content'->0->>'text' LIKE '%no role \`poet\`%coder, researcher, reviewer%'")" 1
+  check "the parent's delegate lists its roles" bash -c '[ "$1" -ge 1 ]' _ "$(q "SELECT count(*) FROM turns, envelopes e, json_each(e.tools) t WHERE turns.session_id=X'${rsid//-/}' AND e.hash = turns.envelope AND t.value->>'name'='delegate' AND t.value->>'description' LIKE '%- researcher (claude/claude-haiku-5-5)%'")"
   r=$(zen ask --json -m faux/smoke "waitless")
   check "ask with wait=false keeps working" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" ask:false,bash:false
   # The sessions board: a session whose questions the owner hasn't answered is waiting on them,
@@ -706,7 +722,7 @@ system_one_direct() {
   # The decision files: the built-in ones pass the checker; an owner file with a typo is reported with
   # its line and a suggestion, and never takes effect.
   local zs="$TMP/home/.zenbot/s1"; mkdir -p "$zs"
-  check "the built-in decision files pass the checker" grep -q "9 decisions in force (0 from your files), 0 error" <<<"$(zen s1 check)"
+  check "the built-in decision files pass the checker" grep -Eq "[0-9]+ decisions in force \(0 from your files\), 0 error" <<<"$(zen s1 check)"
   sed 's/^false_no = 1$/false_noo = 1/' "$REPO/crates/zend/s1/memory_long.toml" >"$zs/memory_long.toml"
   sleep 2.5
   local report; report=$(zen s1 check 2>&1 || true)
@@ -731,7 +747,8 @@ system_one_direct() {
 }
 
 # The sleep with System One (stub): a lasting memory moves to long-term memory, a finished one is
-# archived, an open one stays; a memory changed while the sleep runs is left as it is now. The stub holds the questions about a HOLD
+# archived, an open one stays; a memory changed while the sleep runs is left as it is now; past its
+# size the least active leave until it fits. The stub holds the questions about a HOLD
 # entry until the scenario has changed it.
 memory_sleep_judged() {
   local ws; ws=$(new_workspace sleep-judged)
@@ -754,6 +771,14 @@ memory_sleep_judged() {
   touch "$release"; wait "$sleeper"
   check "a memory changed during the sleep is left as it is now" eq "$(q "SELECT text || '/' || tier FROM memories WHERE id=$mid")" 'a corrected pending decision/short'
   check "and the sleep says so" eq "$(jq -r .changed "$TMP/sleep-concurrent.json")" 1
+  # Over its size with every entry still current: the oldest leave (to the archive, none is
+  # lasting) until it fits with room to spare; the newest stay.
+  q "DELETE FROM memories; INSERT INTO memories (text, source, created_at) SELECT 'current entry ' || i || ' ' || replace(hex(zeroblob(140)), '00', 'y'), 'inferred', strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-' || (41-i) || ' hours') FROM (WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<40) SELECT i FROM n)" >/dev/null
+  r=$(zen memory sleep --json)
+  check "past its size, the sleep brings memory under it" test "$(q "SELECT SUM(length(text) + 10) FROM memories WHERE tier='short'")" -le 3200
+  check "the oldest leave first, archived and not deleted" eq "$(q "SELECT tier || '/' || reason FROM memories WHERE text LIKE 'current entry 1 %'")" "archived/the sleep: to fit the size"
+  check "the newest stay" eq "$(q "SELECT tier FROM memories WHERE text LIKE 'current entry 40 %'")" short
+  check "and the report counts them" eq "$(echo "$r" | jq -r '.fitted == .archived and .fitted > 0 and .entries == .kept + .promoted + .archived + .changed')" true
   kill "$srv"; wait "$srv" 2>/dev/null || true
 }
 
@@ -1215,36 +1240,13 @@ vault_tasks() {
   check "the vault files are never written" eq "$(cat "$p"/*/tasks.md | sha256sum)" "$before"
 }
 
-work_contract() {
-  local ws; ws=$(new_workspace work-contract)
-  local sc; sc=$(script work.json)
-  start_kernel "$ws" "$sc" ZEN_DEFAULT_MODEL=faux/smoke
-  local sid; sid=$(zen ask --json -m faux/smoke "create work" | jq -r .session_id)
-  check "idempotent create records one work and attempt" eq "$(q "SELECT (SELECT count(*) FROM work_items)||'/'||(SELECT count(*) FROM work_attempts)")" 1/1
-  check "one authoritative creation event" eq "$(q "SELECT count(*) FROM tape_events WHERE kind='work_created'")" 1
-  local aid wid seq
-  aid=$(q "SELECT lower(hex(id)) FROM work_attempts")
-  aid="${aid:0:8}-${aid:8:4}-${aid:12:4}-${aid:16:4}-${aid:20:12}"
-  wid=$(q "SELECT lower(hex(id)) FROM work_items")
-  wid="${wid:0:8}-${wid:8:4}-${wid:12:4}-${wid:16:4}-${wid:20:12}"
-  seq=$(q "SELECT max(seq) FROM tape_events WHERE kind='message' AND payload->>'role'='assistant' AND payload->>'stopReason'='stop'")
-  jq -n --arg aid "$aid" --arg wid "$wid" --argjson seq "$seq" '[
-    {tool:"work",args:{action:"submit",key:"submit",attempt_id:$aid,artifacts:[{kind:"answer",seq:$seq}]}},
-    {tool:"work",args:{action:"submit",key:"submit",attempt_id:$aid,artifacts:[{kind:"answer",seq:$seq}]}},
-    {tool:"work",args:{action:"get",work_id:$wid}},
-    {text:"Submitted, not verified."}
-  ]' >"$sc"
-  zen ask --json -m faux/smoke -s "$sid" "submit work" >/dev/null
-  check "submission completes execution" eq "$(q "SELECT status FROM work_attempts")" completed
-  check "idempotent submit captures one artifact and event" eq "$(q "SELECT (SELECT count(*) FROM work_artifacts)||'/'||(SELECT count(*) FROM tape_events WHERE kind='work_submitted')")" 1/1
-  check "work get explicitly remains unassessed and pending" grep -q 'unassessed' <<<"$(q "SELECT payload FROM tape_events WHERE payload->>'toolName'='work' ORDER BY seq DESC LIMIT 1")"
-  # Leave a second attempt unfinished, then restart only the throwaway kernel.
-  cp "$REPO/scripts/e2e/work.json" "$sc"
-  zen ask --json -m faux/smoke "unfinished work" >/dev/null
-  stop_kernel
-  start_kernel "$ws" "$sc" ZEN_DEFAULT_MODEL=faux/smoke
-  check "startup interrupts only unfinished work" eq "$(q "SELECT group_concat(status,',' ORDER BY status) FROM work_attempts")" completed,interrupted
-  check "restart records one interruption event" eq "$(q "SELECT count(*) FROM tape_events WHERE kind='work_interrupted'")" 1
+retired_work_rejected() {
+  local ws; ws=$(new_workspace retired-work)
+  start_kernel "$ws" "$(script work.json)" ZEN_DEFAULT_MODEL=faux/smoke
+  zen ask --json -m faux/smoke "try the retired work tool" >/dev/null
+  check "retired work calls are refused and audited" eq "$(q "SELECT count(*) FROM tool_calls WHERE name='work' AND is_error")" 2
+  check "no obsolete work records are created" eq "$(q "SELECT (SELECT count(*) FROM work_items)||'/'||(SELECT count(*) FROM work_attempts)")" 0/0
+  check "no obsolete creation events are emitted" eq "$(q "SELECT count(*) FROM tape_events WHERE kind='work_created'")" 0
 }
 
 complete_api() {
@@ -1266,6 +1268,8 @@ complete_api() {
 # Scenarios that share a setup run as parts of one; `scripts/e2e.sh <filter>` matches the scenario's
 # name or a part's function name. Slowest first, so the parallel run ends sooner.
 . "$REPO/scripts/e2e/plugins.sh"
+. "$REPO/scripts/e2e/learning.sh"
+run learning learning_loop
 run phase4 phase4_brain
 run phase3 phase3_kernel
 run turns abort_tool stale_turn
@@ -1278,7 +1282,7 @@ run reach mcp_tools web_tools
 run mcp-login mcp_login
 run basics prompt_files open_loop restart_recovery layout_move vault_tasks complete_api
 run memory memory_across_sessions memory_sleep
-run work-contract work_contract
+run retired-work retired_work_rejected
 run delegation delegation engine_cap
 run names-suggestions names_suggestions
 run workshop workshop

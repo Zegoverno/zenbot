@@ -46,6 +46,26 @@ and [zensudoku](https://github.com/Zegoverno/zensudoku).
   your dependencies. The installed plugin has no `node_modules`, and zenbot never runs `npm` for
   you.
 
+### Packaged skills
+
+Optional `skills` names a directory relative to the plugin root (for example `skills/`),
+containing `<domain>/<name>/SKILL.md` folders. Absolute paths, traversal, hidden components,
+node_modules and symlink paths are refused. Installed, enabled plugins with approved manifest
+permissions and readable skill files participate in the prompt index, `find_skills` and
+`load_skill`. Disable or uninstall removes them from subsequent discovery; an existing session's
+fixed prompt and already-loaded text are not rewritten.
+
+Plugin skills are exposed as `plugin-<plugin>-<domain>/<name>` (for example,
+`plugin-zenwrite-writing/shrink`), so packaged and original global skills can be compared without
+deleting either. Agent/global skills win even if they use that exact namespace. Bare local skill
+names retain their meaning when a plugin adds the same short name; use the qualified plugin name
+to load the packaged version. Between plugins installation names sort lexically (first wins for
+a collision). Skills are instructions, not a permission grant; they cannot widen the session's tools. Files are trusted owner-managed installed artifacts: path checks reject
+symlinks, but are not a sandbox against concurrent filesystem mutation by the owner.
+
+Original global writing skills must remain until installed plugin parity has been verified;
+packaging a release alone does not prove parity on the running installation.
+
 ### Slots (`contributes`)
 
 zenbot draws the shell. A plugin fills these slots:
@@ -79,9 +99,13 @@ for more is approved again.
 
 ## The server
 
-**Current limitation:** plugin AI sampling is disabled in zenbot until the CLI engines support
-provider-native output-token limits and per-plugin budgets. No provider completion starts; AI
-tools return an unavailable error. Editing, reading, games and normal chat are unaffected.
+**AI (sampling):** a plugin granted `ai` may ask zenbot's model with `sampling/createMessage`,
+while the owner's AI switch for it (Settings → Plugins, on by default) is on. Text only; the model
+is zenbot's assist model unless `modelPreferences.hints` name one zenbot knows. There is no token
+cap: `maxTokens` is ignored (the CLI engines can't enforce one), so ask for short answers in the
+prompt when you need them. Every request is recorded, with its model, tokens and cost, and Settings
+shows each plugin's AI calls of the last 30 days. Switched off, a request fails with "AI is turned
+off for this plugin".
 
 - stdio MCP, any revision from 2024-11-05 to 2025-06-18. The TypeScript SDK
   (`@modelcontextprotocol/sdk`) and `@modelcontextprotocol/ext-apps/server` (`registerAppTool`,
@@ -90,8 +114,8 @@ tools return an unavailable error. Editing, reading, games and normal chat are u
   (your writable folder). Every path a tool takes is relative to `ZEN_PLUGIN_FILES`: refuse `..`,
   absolute paths, links that point out, and dot folders. When `ZEN_PLUGIN_FILES` is unset (in
   Claude Desktop, say), file tools must say so and refuse.
-- AI: ask the host with `sampling/createMessage`. When the host can't sample, return a clear "AI
-  isn't available here" result instead of failing.
+- AI: ask the host with `sampling/createMessage`. When the host can't sample (no `ai`, switched off,
+  or another host), return a clear "AI isn't available here" result instead of failing.
 
 ## The UI
 

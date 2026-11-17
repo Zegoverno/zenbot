@@ -223,6 +223,12 @@ pub async fn envelope(db: &SqlitePool, session: Uuid, blocks: &[Block], system: 
     Ok((Envelope { hash, system: system.to_string(), tools: tools.clone() }, Some(reason)))
 }
 
+/// The tools of the session's current envelope, if it has one.
+pub async fn current_tools(db: &SqlitePool, blocks: &[Block]) -> Result<Option<Value>> {
+    let Some(b) = blocks.iter().rev().find(|b| b.kind == "envelope") else { return Ok(None) };
+    Ok(load_envelope(db, b.payload["hash"].as_str().unwrap_or("")).await?.map(|e| e.tools))
+}
+
 async fn load_envelope(db: &SqlitePool, hash: &str) -> Result<Option<Envelope>, sqlx::Error> {
     let row = sqlx::query("SELECT hash, system, tools FROM envelopes WHERE hash = $1").bind(hash).fetch_optional(db).await?;
     Ok(row.map(|r| Envelope { hash: r.get("hash"), system: r.get("system"), tools: r.get("tools") }))

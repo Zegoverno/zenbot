@@ -28,6 +28,10 @@ pub struct Config {
     // ---- models ----
     /// `ZEN_SUMMARY_MODEL` (`claude/claude-sonnet-5-5`): writes session summaries (compact.rs).
     pub summary_model: String,
+    /// `ZEN_REVIEW` (on): review each session the owner archives with an outcome (review.rs).
+    pub review: bool,
+    /// `ZEN_REVIEW_MODEL` (the summary model): the model a review session runs on.
+    pub review_model: String,
     /// `ZEN_ASSIST_MODEL` (`claude/claude-haiku-5-5`): names sessions and suggests the next prompt
     /// (assist.rs; measured 2026-10-09: about 2 s and $0.0006 a call, the cheapest and fastest
     /// model on the owner's plans).
@@ -59,7 +63,8 @@ pub struct Config {
     pub identity_chars: usize,
     pub agents_chars: usize,
     pub user_chars: usize,
-    /// `ZEN_SKILL_INDEX_CHARS` (2500): above this the skills index lists domains only.
+    /// `ZEN_SKILL_INDEX_CHARS` (2500): the skills index's budget; past it each skill keeps only its
+    /// trigger (first clause), then only its name (skills.rs `index_within`).
     pub skill_index_chars: usize,
     /// `ZEN_JUDGE_TOOL` (on): off hides the `judge` tool (s1/run.rs).
     pub judge_tool: bool,
@@ -135,6 +140,8 @@ impl Config {
             .collect();
         let c = Config {
             summary_model: text("ZEN_SUMMARY_MODEL", "claude/claude-sonnet-5-5"),
+            review: on("ZEN_REVIEW"),
+            review_model: set("ZEN_REVIEW_MODEL").unwrap_or_else(|| text("ZEN_SUMMARY_MODEL", "claude/claude-sonnet-5-5")),
             assist_model: text("ZEN_ASSIST_MODEL", "claude/claude-haiku-5-5"),
             embed_model: text("ZEN_EMBED_MODEL", "openai/text-embedding-3-small"),
             embed_url: text("ZEN_EMBED_URL", "https://openrouter.ai/api/v1"),

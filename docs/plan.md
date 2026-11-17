@@ -69,6 +69,55 @@ Removed: `crates/zen/src/tui`, `editor.rs`, `md.rs`, `tex.rs`, `screen.rs`, `zen
 - Anything that spends money: hosting beyond free tiers, store accounts.
 
 ## Current release limits
-Plugin AI sampling is disabled until provider-native output caps and per-plugin budgets exist.
+Plugin AI sampling is on for plugins granted `ai`, with no token cap (the owner's decision,
+2026-11-17): each plugin has an AI switch in Settings → Plugins and every call is recorded.
 Desktop ACP and store shells remain future work; the standalone PWAs and MCP Apps ship now.
 Curated listings and releases are described in [PLUGINS.md](../PLUGINS.md).
+
+# Next: a harness that learns (agreed 2026-11-17)
+
+Phases 4 (work OS: task board, channels, flows) and 5 (ACP, desktop and store shells) wait.
+
+## Phase 0: fixes
+- Plugin AI on: a plugin with the `ai` permission may sample, with no token cap. The assist
+  model by default, every call recorded, a count and an on/off switch per plugin in Settings.
+- The skills index lists each skill with its trigger, not a count per domain.
+- The sleep budget handling is implemented; verify actual nightly retention rather than assuming a fixed reduction.
+- Packaged skill discovery is implemented in this branch (see PLUGINS.md). zenwrite v0.2.0
+  and local zenvault declare skills; original global skills remain pending installed parity.
+  Read-only comparison found all five packaged writing SKILL.md files differ from the global
+  copies; zenvault/organize has no global counterpart. This is not a migration proof.
+  Read-only live SQLite inspection on 2026-11-17 found zensudoku v0.1.0 installed and enabled,
+  so its live listing is not evidence of a stale entry. No installation changes made.
+
+## Phase 1: roles
+- A role is a profile, not an agent: a kind of work, a model, tools and skills
+  (`[roles.<name>]` in `roles.toml`). `delegate` takes `role`; when a task has neither role nor
+  model, System One picks the role from the task.
+- Each agent has a default subagent model (zenbot: Sonnet).
+
+## Phase 2: the learning loop
+A session is one job, done end to end: fixes, reviews and corrections happen inside it. The owner
+ends it when the work shipped, or when it derailed and a fresh start is better.
+- `/archive done | partial | not-done [note]` replaces `/done`; `partial` writes a handoff brief
+  for the next session. The `work` tool and the empty `session_scores` table go.
+- On archive, a review job rereads the session from the tape and records how the work went: the
+  kind of work, the role, model and skills used, the outcome, and how much the owner had to
+  intervene (corrections, steers, interrupts, repeated requests, errors), with message numbers.
+- From the reviews it decides only two things:
+  - a better (or cheaper) model for that kind of work: the role's model;
+  - notes for IDENTITY, USER, memory or a skill (applied and reported in the zen room, revertible).
+    AGENTS.md and SOUL.md are the owner's: changes there are suggested, never made.
+  Automated model tuning remains deferred; review reports are evidence, not validated
+  quantitative thresholds for promoting model changes.
+
+## Phase 3: one brain for every harness
+- `zen mcp`: the kernel's memory, wiki, records and session search as a local MCP server (owner
+  token, read or read-write scope, every call recorded), so Claude Code, Claude Desktop and Codex
+  share zenbot's second brain.
+- A vault-structure plugin packages the owner's method: Daily, Goals, Projects, Skills, Templates
+  and the wiki (folders, templates, frontmatter types, wiki rules, lint, a UI). Not PARA.
+- Deferred: long-document semantic chunks. Current embedding input is a document prefix
+  (8000 characters), not chunked retrieval. A safe migration, chunk embedding rebuild,
+  source deduplication, unchanged text/scopes and long-tail retrieval tests are still needed.
+  Do not claim long-tail semantic recall from the current implementation.

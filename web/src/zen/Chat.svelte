@@ -8,7 +8,7 @@
   // UI's `sendMessage` queues an owner-reviewed draft here (`chat.queue`), and what plugin UIs put in the model context goes
   // with the next prompt (plugins.svelte.ts).
   import { onMount, tick } from 'svelte';
-  import { zen, files, commands, upload, toolSummary, short, readOnly, agentTag, AGENT_NAME, pluginApi, type Command, type Message, type Models, type SessionDetail, type ZenEvent } from './api.ts';
+  import { zen, files, commands, upload, toolSummary, short, readOnly, agentTag, AGENT_NAME, pluginApi, type Command, type Message, type Models, type Outcome, type SessionDetail, type ZenEvent } from './api.ts';
   import { chat, plugins, resultText, showPanel, takeContext, toolArgs, uiOf } from './plugins.svelte.ts';
   import { app, board, openSession, sessionStarted, openFile, openDir, toggleSide, settings, notice, typing, tilde } from './app.svelte.ts';
   import { render as mdRender } from './md.ts';
@@ -93,7 +93,7 @@
   let content = $state<HTMLElement>();
   let menuSel = $state(0);
   let creating = $state(false);
-  type Pick = { title: string; items: { label: string; value: string }[]; sel: number; kind: 'session' | 'model' | 'effort' | 'decision' | 'agent' };
+  type Pick = { title: string; items: { label: string; value: string }[]; sel: number; kind: 'session' | 'model' | 'effort' | 'outcome' | 'agent' };
   let picker = $state<Pick | null>(null);
   let hist: string[] = [];
   let hi = $state(-1);
@@ -200,6 +200,7 @@
       known = d.message_count;
       for (const m of d.messages) firstSeq = Math.min(firstSeq, m.seq);
       if (d.busy) beginTurn();
+      else if (d.suggestion) suggestion = { id: d.suggestion.id, text: d.suggestion.text.trim(), taken: false };
       loaded = true;
       const h = M.takeHandoff(id);
       if (h) {
@@ -594,24 +595,19 @@
           return arg ? await setModel(arg) : modelPicker();
         case 'effort':
           return arg ? await setEffort(arg) : effortPicker();
-        case 'done': {
-          if (needSession()) return;
-          const [d, ...note] = arg.split(' ');
-          if (!d) return void (picker = { title: 'How did it go?', kind: 'decision', sel: 0, items: M.DECISIONS.map(([v, h]) => ({ label: `${v.padEnd(8)} ${h}`, value: v })) });
-          if (!M.DECISIONS.some(([v]) => v === d)) return notice('usage: /done accept|more|reshape|drop [note]');
-          return await decide(d, note.join(' ').trim());
-        }
         case 'rename':
           if (!arg) return notice('usage: /rename <title>');
           if (needSession()) return;
           await zen.update(sid!, { title: arg });
           title = arg;
           return notice('renamed');
-        case 'archive':
+        case 'archive': {
           if (!sid) return notice('nothing to archive yet');
-          await zen.update(sid, { archived: true });
-          notice(`archived ${short(sid)}`);
-          return openSession('new');
+          const [o, ...note] = arg.split(' ');
+          if (!o) return void (picker = { title: 'How did it end?', kind: 'outcome', sel: 0, items: M.OUTCOMES.map(([v, h]) => ({ label: `${v.padEnd(9)} ${h}`, value: v })) });
+          if (!M.OUTCOMES.some(([v]) => v === o)) return notice('usage: /archive [done|partial|not-done [note]]');
+          return await archive(o, note.join(' ').trim());
+        }
         case 'steer':
           return notice('usage: /steer <message>');
         case 'files':
@@ -831,7 +827,7 @@
       else if (p.kind === 'model') await setModel(v);
       else if (p.kind === 'effort') await setEffort(v);
       else if (p.kind === 'agent') agent = v;
-      else await decide(v, '');
+      else await archive(v, '');
     } catch (e) {
       notice(String((e as Error).message ?? e));
     }
@@ -869,10 +865,13 @@
     notice(`effort: ${shownEffort ?? value}`);
   }
 
-  async function decide(d: string, note: string) {
-    if (!sid) return notice('nothing to judge yet; send a message first');
-    await zen.decide(sid, d as 'accept', note || undefined);
-    notice(`recorded: ${d}`);
+  /** Archive the session with how it ended (`-`: unsaid); after partial, open the session that continues it. */
+  async function archive(o: string, note: string) {
+    if (!sid) return notice('nothing to archive yet');
+    const outcome = o === '-' ? undefined : (o as Outcome);
+    const s = await zen.update(sid, { archived: true, ...(outcome ? { outcome } : {}), ...(note ? { note } : {}) });
+    notice(`archived ${short(sid)}${outcome ? ` as ${outcome}` : ''}`);
+    return openSession(s.continued_by ?? 'new');
   }
 
   // ---- links ----

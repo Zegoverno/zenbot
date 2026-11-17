@@ -242,7 +242,7 @@ pub(crate) async fn board(State(app): State<AppState>, Query(q): Query<BoardQuer
 }
 
 /// The columns `session_json` reads, without the cost (each query computes it its own way).
-const SESSION_COLUMNS: &str = "id, title, model, effort, archived, created_at, updated_at, kind, parent, agent";
+const SESSION_COLUMNS: &str = "id, title, model, effort, archived, created_at, updated_at, kind, parent, agent, role, outcome, outcome_note, ended_at, continues";
 
 pub(crate) fn session_json(r: &sqlx::sqlite::SqliteRow) -> Value {
     json!({
@@ -256,6 +256,14 @@ pub(crate) fn session_json(r: &sqlx::sqlite::SqliteRow) -> Value {
         "parent": r.get::<Option<Uuid>, _>("parent"),
         // Who the session is (agents.rs): "zenbot" unless the owner picked another agent.
         "agent": r.try_get::<String, _>("agent").unwrap_or_else(|_| crate::agents::DEFAULT.into()),
+        // A subagent's role (roles.rs), named in its delegate call or picked by System One.
+        "role": r.try_get::<Option<String>, _>("role").ok().flatten(),
+        // How it ended, the owner's call when archiving (`archive done|partial|not-done`); None if unsaid.
+        "outcome": r.try_get::<Option<String>, _>("outcome").ok().flatten(),
+        "outcome_note": r.try_get::<Option<String>, _>("outcome_note").ok().flatten(),
+        "ended_at": r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("ended_at").ok().flatten(),
+        // The partial session this one continues (handoff.rs).
+        "continues": r.try_get::<Option<Uuid>, _>("continues").ok().flatten(),
         "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
         "updated_at": r.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
         "cost": r.try_get::<f64, _>("cost").unwrap_or(0.0),
@@ -375,7 +383,13 @@ pub(crate) struct UpdateSession {
     /// A thinking level, or "default" for the model's default.
     effort: Option<String>,
     archived: Option<bool>,
+    /// With `archived: true`: how the session ended (`done`, `partial`, `not-done`) and a note.
+    outcome: Option<String>,
+    note: Option<String>,
 }
+
+/// How a session can end (`sessions.outcome`), the owner's verdict when archiving it.
+pub(crate) const OUTCOMES: [&str; 3] = ["done", "partial", "not-done"];
 
 pub(crate) async fn update_session(State(app): State<AppState>, Path(id): Path<Uuid>, Json(body): Json<UpdateSession>) -> ApiResult<Json<Value>> {
     let current = sqlx::query("SELECT model, effort FROM sessions WHERE id = $1")
@@ -394,10 +408,22 @@ pub(crate) async fn update_session(State(app): State<AppState>, Path(id): Path<U
         None if body.model.is_some() => effort_on(&app, &model, current.get("effort")).await,
         None => current.get("effort"),
     };
+    if let Some(o) = body.outcome.as_deref() {
+        if !OUTCOMES.contains(&o) {
+            return Err(ApiError(StatusCode::BAD_REQUEST, format!("outcome must be one of {}", OUTCOMES.join(", "))));
+        }
+        if body.archived != Some(true) {
+            return Err(ApiError(StatusCode::BAD_REQUEST, "an outcome is given when archiving (archived: true)".into()));
+        }
+    }
+    let note = body.note.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);
     let row = sqlx::query(&format!(
         "UPDATE sessions SET title = COALESCE($2, title), title_source = CASE WHEN $2 IS NULL THEN title_source ELSE 'owner' END, model = COALESCE($3, model), effort = $5,
                 model_source = CASE WHEN $3 IS NULL THEN model_source ELSE 'owner' END,
-                archived = COALESCE($4, archived), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+                archived = COALESCE($4, archived), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),
+                outcome = CASE WHEN $4 = 1 THEN COALESCE($6, outcome) WHEN $4 = 0 THEN NULL ELSE outcome END,
+                outcome_note = CASE WHEN $4 = 1 THEN COALESCE($7, outcome_note) WHEN $4 = 0 THEN NULL ELSE outcome_note END,
+                ended_at = CASE WHEN $4 = 1 THEN COALESCE(ended_at, strftime('%Y-%m-%dT%H:%M:%f+00:00','now')) WHEN $4 = 0 THEN NULL ELSE ended_at END
          WHERE id = $1
          RETURNING {SESSION_COLUMNS}, {} AS cost",
         session_cost("$1")
@@ -407,10 +433,24 @@ pub(crate) async fn update_session(State(app): State<AppState>, Path(id): Path<U
     .bind(body.model)
     .bind(body.archived)
     .bind(effort)
+    .bind(&body.outcome)
+    .bind(&note)
     .fetch_optional(&app.db)
     .await?
     .ok_or_else(not_found)?;
-    Ok(Json(session_json(&row)))
+    let mut out = session_json(&row);
+    match body.outcome.as_deref() {
+        // Finished work vouches for the draft skills it used (workshop.rs).
+        Some("done") => workshop::on_accept(&app, id).await,
+        // Partial work goes on in a new session, offered a handoff brief (handoff.rs).
+        Some("partial") => out["continued_by"] = json!(crate::handoff::start(&app, id).await?),
+        _ => {}
+    }
+    // An outcome is the learning loop's signal: review how the session went (review.rs).
+    if body.outcome.is_some() {
+        crate::review::queue(&app, id).await;
+    }
+    Ok(Json(out))
 }
 
 #[derive(Deserialize)]
@@ -471,56 +511,14 @@ pub(crate) async fn get_session(State(app): State<AppState>, Path(id): Path<Uuid
     session["message_count"] = json!(totals.get::<i64, _>("messages"));
     session["tokens"] = json!(totals.get::<i64, _>("tokens"));
     session["busy"] = json!(app.is_busy(id).await);
+    // The open suggested prompt, for a client that opens the session after it was offered (a
+    // partial session's handoff brief arrives before anyone is watching).
+    let open: Option<(i64, String)> = sqlx::query_as("SELECT id, suggested FROM prompt_suggestions WHERE session_id = $1 AND outcome IS NULL ORDER BY id DESC LIMIT 1")
+        .bind(id)
+        .fetch_optional(&app.db)
+        .await?;
+    session["suggestion"] = open.map_or(Value::Null, |(sid, text)| json!({ "id": sid, "text": text }));
     Ok(Json(session))
-}
-
-/// What the owner decides about the work so far (table `session_decisions`).
-pub(crate) const DECISIONS: [&str; 4] = ["accept", "more", "reshape", "drop"];
-
-#[derive(Deserialize)]
-pub(crate) struct Decide {
-    decision: String,
-    note: Option<String>,
-}
-
-/// Record the owner's decision on the session's work up to its latest turn.
-pub(crate) async fn decide(State(app): State<AppState>, Path(id): Path<Uuid>, Json(body): Json<Decide>) -> ApiResult<Json<Value>> {
-    if !DECISIONS.contains(&body.decision.as_str()) {
-        return Err(ApiError(StatusCode::BAD_REQUEST, format!("decision must be one of {}", DECISIONS.join(", "))));
-    }
-    let row = sqlx::query(
-        "INSERT INTO session_decisions (session_id, turn_id, decision, note)
-         SELECT s.id, (SELECT t.id FROM turns t WHERE t.session_id = s.id ORDER BY t.started_at DESC LIMIT 1), $2, $3
-         FROM sessions s WHERE s.id = $1
-         RETURNING id, turn_id, decision, note, created_at",
-    )
-    .bind(id)
-    .bind(&body.decision)
-    .bind(body.note.as_deref().map(str::trim).filter(|n| !n.is_empty()))
-    .fetch_optional(&app.db)
-    .await?
-    .ok_or_else(not_found)?;
-    // Done on a channel ends it: the bridge sees it archived and starts a clean one in the room.
-    if matches!(body.decision.as_str(), "accept" | "drop") {
-        sqlx::query("UPDATE sessions SET archived = true WHERE id = $1 AND kind = 'channel'").bind(id).execute(&app.db).await?;
-    }
-    // Accepted work vouches for the draft skills it used (workshop.rs).
-    if body.decision == "accept" {
-        let app2 = app.clone();
-        let work = app.background_work();
-        tokio::spawn(async move {
-            let _work = work;
-            workshop::on_accept(&app2, id).await
-        });
-    }
-    Ok(Json(json!({
-        "id": row.get::<i64, _>("id"),
-        "session_id": id,
-        "turn_id": row.get::<Option<Uuid>, _>("turn_id"),
-        "decision": row.get::<String, _>("decision"),
-        "note": row.get::<Option<String>, _>("note"),
-        "created_at": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
-    })))
 }
 
 pub(crate) async fn session_ws(State(app): State<AppState>, Path(id): Path<Uuid>, ws: WebSocketUpgrade) -> Response {
@@ -609,19 +607,25 @@ mod tests {
         assert!(!same_secret(b"", b"x"));
     }
 
-    /// Done (accept or drop) ends a channel session; an ordinary session stays open.
+    /// Archiving records the outcome and when the session ended; restoring clears them.
     #[tokio::test]
-    async fn done_ends_a_channel_only() {
+    async fn archive_records_the_outcome() {
         let (_db_dir, db) = crate::test_util::database().await;
         let app = crate::test_util::app(db.clone());
-        let (chan, plain) = (Uuid::new_v4(), Uuid::new_v4());
-        sqlx::query("INSERT INTO sessions(id,model,kind) VALUES($1,'faux/smoke','channel')").bind(chan).execute(&db).await.unwrap();
-        sqlx::query("INSERT INTO sessions(id,model) VALUES($1,'faux/smoke')").bind(plain).execute(&db).await.unwrap();
-        for id in [chan, plain] {
-            assert!(decide(State(app.clone()), Path(id), Json(Decide { decision: "accept".into(), note: None })).await.is_ok());
-        }
-        let archived = |id: Uuid| sqlx::query_scalar::<_, bool>("SELECT archived FROM sessions WHERE id=$1").bind(id).fetch_one(&db);
-        assert!(archived(chan).await.unwrap() && !archived(plain).await.unwrap());
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO sessions(id,model) VALUES($1,'faux/smoke')").bind(id).execute(&db).await.unwrap();
+        let patch = |v: Value| update_session(State(app.clone()), Path(id), Json(serde_json::from_value(v).unwrap()));
+        assert!(patch(json!({ "outcome": "done" })).await.is_err(), "an outcome needs archiving");
+        assert!(patch(json!({ "archived": true, "outcome": "accept" })).await.is_err());
+        let s = patch(json!({ "archived": true, "outcome": "not-done", "note": " wrong approach " })).await.ok().unwrap().0;
+        assert_eq!((s["outcome"].as_str(), s["outcome_note"].as_str(), s["archived"].as_bool()), (Some("not-done"), Some("wrong approach"), Some(true)));
+        assert!(s["ended_at"].is_string() && s.get("continued_by").is_none());
+        let s = patch(json!({ "archived": true, "outcome": "partial" })).await.ok().unwrap().0;
+        assert!(s["continued_by"].is_string(), "partial continues in a new session");
+        let s = patch(json!({ "archived": false })).await.ok().unwrap().0;
+        assert!(s["outcome"].is_null() && s["ended_at"].is_null());
+        let s = patch(json!({ "archived": true })).await.ok().unwrap().0;
+        assert!(s["outcome"].is_null() && s["ended_at"].is_string(), "plain archive leaves the outcome unset");
         db.close().await;
     }
 }

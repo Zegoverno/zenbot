@@ -431,7 +431,12 @@ async fn run_tool(app: &AppState, id: Uuid, turn: &CallTurn, name: &str, args: &
     let why = agent::refusal(turn.kind.as_deref(), name)
         .or_else(|| turn.agent.refusal(name))
         .or_else(|| agent::refuse(*ending))
-        .or_else(|| agent::record_refusal(workspace, name, args));
+        .or_else(|| agent::record_refusal(workspace, name, args))
+        .or_else(|| {
+            (turn.kind.as_deref() == Some(crate::review::REVIEW))
+                .then(|| crate::review::write_refusal(&crate::zen_home(), &turn.agent.name, &[turn.agent.skill_home()], workspace, name, args))
+                .flatten()
+        });
     if let Some(why) = why {
         return tools::ToolOutput::error(why);
     }
@@ -562,6 +567,35 @@ async fn fail_over(app: &AppState, id: Uuid, from: String, to: String) -> Result
         .await?;
     app.emit(id, json!({ "type": "model", "model": to, "effort": effort })).await;
     Ok(())
+}
+
+/// External shared-brain calls run kernel tools with a real session and the same masking,
+/// output bounding, serialization and SQLite audit as worker calls. No worker turn is invented.
+pub(crate) async fn external_brain_call(app: &AppState, id: Uuid, who: &crate::agents::Agent, name: &str, args: &Value, permitted: bool) -> Result<Value> {
+    let order = app.tool_order.lock().await.entry(id).or_default().clone();
+    let _guard = order.write_owned().await;
+    let call_id = format!("mcp-{}", Uuid::new_v4());
+    let started = Instant::now();
+    let mut out = if !permitted {
+        tools::ToolOutput::error("tool or action is not permitted by this shared-brain session")
+    } else if name == "wiki_read" {
+        match crate::shared_brain::read_wiki(who, args) {
+            Ok(text) => tools::ToolOutput::text(text, false),
+            Err(e) => tools::ToolOutput::error(format!("wiki read refused: {e}")),
+        }
+    } else {
+        let turn = CallTurn { model: app.default_model.clone(), turn_id: Uuid::new_v4(), workspace: app.workspace.clone(), kind: None, agent: who.clone() };
+        run_tool(app, id, &turn, name, args, &mut None).await
+    };
+    bound_output(&mut out).await;
+    let (shown, full) = shown_args(args);
+    let result = json!({"content":[{"type":"text","text":out.content}],"isError":out.is_error});
+    sqlx::query("INSERT INTO tool_calls (session_id,call_id,name,args,is_error,duration_ms,output_bytes,result_sha256) VALUES ($1,$2,$3,CASE WHEN $8 IS NULL THEN $4 ELSE json_patch($4,json_object('_full',json_object('sha256',sha256_hex($8),'bytes',length(CAST($8 AS BLOB))))) END,$5,$6,$7,sha256_hex($9))")
+        .bind(id).bind(&call_id).bind(name).bind(&shown)
+        .bind(out.is_error).bind(started.elapsed().as_millis() as i64).bind(result.to_string().len() as i64)
+        .bind(full).bind(zen_proto::digest_text(&result["content"])).execute(&app.db).await?;
+    tape::append(&app.db, id, "mcp_call", &json!({"call_id":call_id,"name":name,"args":shown,"result":result})).await?;
+    Ok(result)
 }
 
 #[cfg(test)]

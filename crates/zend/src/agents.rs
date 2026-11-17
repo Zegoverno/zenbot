@@ -5,6 +5,7 @@
 //! agents/<name>/SOUL.md       who it is (the owner's file)
 //! agents/<name>/IDENTITY.md   how it works (the agent keeps it)
 //! agents/<name>/agent.toml    what it may use (optional; the owner's file)
+//! agents/<name>/roles.toml    its roles for subagents (the agent keeps it; roles.rs)
 //! agents/<name>/skills/       its own skills (optional), on top of the shared ones
 //! ```
 //!
@@ -27,7 +28,7 @@
 //! tools refuse other paths, so even with `bash` it reaches only its
 //! workspace (by default `agents/<name>/work`), vault and folder, the system, the shared
 //! instructions, the global vault as `global` allows, and the `read`/`write` paths of `agent.toml`.
-//! Its folder is read-only to it but for `IDENTITY.md` and `work/`: the kernel trusts the rest
+//! Its folder is read-only to it but for `IDENTITY.md`, `roles.toml` and `work/`: the kernel trusts the rest
 //! (settings, soul, skills, which `save_skill` writes for it), so the agent can't create a missing
 //! `mcp.json` or `agent.toml` either; `workspace`/`write` paths inside the folder must be under
 //! `work/`. Its own MCP servers run in its sandbox too (`mcp.rs`).
@@ -121,18 +122,34 @@ pub struct Agent {
     /// Extra paths of its sandbox (`read`, `write` in agent.toml).
     read: Vec<PathBuf>,
     write: Vec<PathBuf>,
+    /// A subagent's role and the tools it narrows the list to (roles.rs; never widens it).
+    role: Option<(String, BTreeSet<String>)>,
 }
 
 impl Agent {
+    /// This agent working in the role `name`, which allows only `tools` of what it may use.
+    pub fn in_role(mut self, name: &str, tools: &[String]) -> Agent {
+        self.role = Some((name.to_string(), tools.iter().cloned().collect()));
+        self
+    }
+
     /// Whether this agent may use the tool `name`. `submit_verdict` belongs to the verifier's
     /// role, not to an agent, and is left to `agent::refusal`.
     pub fn allows(&self, name: &str) -> bool {
-        name == "submit_verdict" || (self.tools.as_ref().is_none_or(|t| t.contains(name)) && !self.deny.contains(name))
+        name == "submit_verdict"
+            || name == "submit_review"
+            || (self.tools.as_ref().is_none_or(|t| t.contains(name)) && !self.deny.contains(name) && self.role.as_ref().is_none_or(|(_, t)| t.contains(name)))
     }
 
     /// Why this agent may not call `name`, if it may not.
     pub fn refusal(&self, name: &str) -> Option<String> {
-        (!self.allows(name)).then(|| format!("`{name}` isn't one of {}'s tools (agents/{}/agent.toml)", self.name, self.name))
+        if self.allows(name) {
+            return None;
+        }
+        Some(match &self.role {
+            Some((role, t)) if !t.contains(name) => format!("`{name}` isn't one of the `{role}` role's tools (agents/{}/roles.toml)", self.name),
+            _ => format!("`{name}` isn't one of {}'s tools (agents/{}/agent.toml)", self.name, self.name),
+        })
     }
 
     /// A tool list (`agent::specs`) with only the tools this agent may use, in the same order. A
@@ -148,7 +165,7 @@ impl Agent {
         if self.name != DEFAULT && t["name"] == "bash" {
             if let Some(d) = t["description"].as_str() {
                 let global = match self.global_level() { Global::None => "", Global::Read => ", the shared vault read-only", Global::Write => ", the shared vault" };
-                let here = format!("Runs in a sandbox that sees only your workspace, vault and agent folder (read-only but for IDENTITY.md and work/; plus system and tool folders{global}, and paths your agent.toml adds); the rest of the home is hidden.");
+                let here = format!("Runs in a sandbox that sees only your workspace, vault and agent folder (read-only but for IDENTITY.md, roles.toml and work/; plus system and tool folders{global}, and paths your agent.toml adds); the rest of the home is hidden.");
                 t["description"] = Value::String(d.replace("Runs as the owner on the host.", &here));
             }
         }
@@ -239,6 +256,8 @@ impl Agent {
                 tracing::warn!("creating {}: {e}", identity.display());
             }
         }
+        // Its roles.toml too, which it keeps the same way (roles.rs).
+        crate::roles::ensure(&dir);
         let l = crate::sandbox::Layout {
             user_home, zen: home, global: &global, dir: &dir, vault: &vault, workspace: &workspace,
             global_level: self.global_level(), read: &self.read, write: &self.write,
@@ -478,6 +497,7 @@ fn from_settings(name: &str, s: Settings) -> Result<Agent> {
         global,
         read: s.read.iter().map(|p| expand_home(p)).collect(),
         write: s.write.iter().map(|p| expand_home(p)).collect(),
+        role: None,
     })
 }
 
@@ -536,6 +556,7 @@ fn create_in(home: &Path, name: &str, description: &str) -> Result<Agent> {
     std::fs::write(dir.join("SOUL.md"), soul)?;
     std::fs::write(dir.join("IDENTITY.md"), identity)?;
     std::fs::write(dir.join("agent.toml"), settings)?;
+    std::fs::write(dir.join(crate::roles::FILE), crate::roles::DEFAULT)?;
     write_vault(&vault_in(&home.join("global"), name), name)?;
     load_in(home, name)
 }
@@ -655,6 +676,19 @@ mod tests {
 
     fn settings(text: &str) -> Result<Agent> {
         from_settings("garry", toml::from_str(text)?)
+    }
+
+    #[test]
+    fn a_role_narrows_the_tools_and_never_widens_them() {
+        let garry = settings("tools = [\"read\", \"bash\", \"write\"]").unwrap();
+        let researcher = garry.clone().in_role("researcher", &["read".into(), "bash".into(), "web_fetch".into()]);
+        assert!(researcher.allows("read") && researcher.allows("bash"));
+        assert!(!researcher.allows("web_fetch"), "agent.toml still wins");
+        let e = researcher.refusal("write").unwrap();
+        assert!(e.contains("`researcher` role") && e.contains("roles.toml"), "{e}");
+        assert!(researcher.refusal("web_fetch").unwrap().contains("agent.toml"));
+        let names: Vec<String> = researcher.filter(crate::agent::specs(Some(crate::delegate::SUBAGENT))).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        assert_eq!(names, ["bash", "read"]);
     }
 
     #[test]

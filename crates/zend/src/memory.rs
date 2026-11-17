@@ -206,7 +206,7 @@ fn parse_id(v: &Value) -> Option<i64> {
         .or_else(|| v.as_i64())
 }
 
-async fn used_chars(db: &SqlitePool, agent: &str) -> usize {
+pub(crate) async fn used_chars(db: &SqlitePool, agent: &str) -> usize {
     sqlx::query_scalar::<_, Option<i64>>("SELECT SUM(length(text) + 10) FROM memories WHERE tier = 'short' AND agent = $1")
         .bind(agent)
         .fetch_one(db)

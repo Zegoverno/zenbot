@@ -12,7 +12,9 @@ mod defaults;
 mod layout;
 mod delegate;
 mod dispatch;
+mod shared_brain;
 mod git;
+mod handoff;
 mod jobs;
 mod mcp;
 mod mcp_interaction;
@@ -20,6 +22,8 @@ mod measure;
 mod memory;
 mod brain;
 mod mind;
+mod roles;
+mod review;
 mod s1;
 mod search;
 mod sandbox;
@@ -27,7 +31,6 @@ mod secrets;
 mod skills;
 mod tape;
 mod tasks;
-mod work;
 mod storage;
 #[cfg(test)]
 mod test_util;
@@ -220,8 +223,6 @@ async fn serve() -> Result<()> {
         tracing::warn!("numbered tape blocks an older build wrote");
     }
 
-    work::recover(&db).await?;
-
     let updater = Arc::new(update::Updater::new(PathBuf::from(&repo_dir)));
     let harness = std::env::var("ZEN_HARNESS").ok().filter(|h| !h.is_empty()).unwrap_or_else(|| updater.running());
     let harness = if harness.is_empty() { "unknown".to_string() } else { harness };
@@ -285,6 +286,7 @@ async fn serve() -> Result<()> {
 
     let api = Router::new()
         .route("/models", get(list_models))
+        .route("/reviews", get(review::list))
         .route("/complete", axum::routing::post(complete_once))
         .route("/search", axum::routing::post(search_once))
         .route("/s1", get(s1::api::stats))
@@ -298,10 +300,11 @@ async fn serve() -> Result<()> {
         .route("/agents/{name}", get(get_agent).put(update_agent).delete(delete_agent))
         .route("/sessions/{id}", get(get_session).patch(update_session))
         .route("/sessions/{id}/ws", get(session_ws))
-        .route("/sessions/{id}/decision", axum::routing::post(decide))
         .route("/suggestions", get(assist::stats))
         .route("/memory", get(list_memory))
         .route("/brain", axum::routing::post(brain_action))
+        .route("/shared-brain/sessions", axum::routing::post(shared_brain::open))
+        .route("/shared-brain/sessions/{id}/tools", get(shared_brain::list).post(shared_brain::call))
         .route("/mcp", get(mcp_status))
         .route("/mcp/login", axum::routing::post(mcp_login))
         .route("/mcp/login/{flow}", axum::routing::post(mcp_login_finish))

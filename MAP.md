@@ -80,35 +80,44 @@ One list per session, in a fixed order (`agent.rs::specs`):
 
 - Files and shell (`tools.rs`): `bash` (on the host, as the owner, in the workspace; the kernel's
   secret variables removed), `read` (text, images, PDF pages), `write`, `edit`.
+- External harnesses: `zen mcp serve --agent <name>` exports the read-only shared brain over stdio MCP; `--write` opts in to memory/record writes. Agent-bound synthetic sessions, allowlisted authenticated routes and kernel tool auditing live in `shared_brain.rs`; see [docs/shared-brain.md](docs/shared-brain.md).
 - Recall: `history` (the session's messages, or another of the same agent's), `search` (`search.rs`: memories, wiki pages, records and sessions, scoped by agent; exact
   names, FTS5 and sqlite-vec merged, reranked by System One, following typed links between
   records), `remember` (`memory.rs`), `brain` (`brain/`: record files).
 - Web (`web.rs`): `web_search` (SearXNG, or Brave/Tavily with a key), `web_fetch`.
 - Skills: `find_skills`, `load_skill` (`skills.rs`), `save_skill` (`workshop.rs`: live at once,
-  duplicates refused, each save a commit in the skills folder).
+  duplicates refused, each save a commit in the skills folder). Enabled installed plugin skills
+  join the catalog after agent/global skills, without overriding their domain/name (PLUGINS.md).
 - MCP (`mcp.rs`): `find_tools`, `load_tool`, `call_tool` over the servers in `~/.zenbot/mcp.json`
   and the agent's own `agents/<name>/mcp.json`.
-- Work records (`work.rs`): `work create/get/submit` freezes a goal and criteria, starts one
-  session-bound attempt and records submitted answer/file identities. Idempotent writes append
-  `work_created`, `work_submitted`, `work_interrupted` events and update `work_items`,
-  `work_attempts`, `work_artifacts` in one transaction. Submission completes execution, never
-  verification or acceptance. Startup interrupts unfinished attempts before workers start.
-  Reads are agent-scoped (zenbot sees all); writes require the executing session. Files are
-  workspace-relative regular files, descriptor-checked against the sandbox, at most 16 MB each.
-  Contracts have no edit API; retries, assessments and delegation/verify integration are later work.
 - Work: `ask` (questions to the owner), `verify` (`agent.rs`: the kernel runs the checks, a fresh
-  verifier session judges the rest), `delegate` (`delegate.rs`: subagents in parallel, on the named
-  model or the parent's; zenbot may hand a task to another agent), `schedule` (`jobs/`), `judge` (System One over many items; when System
+  verifier session judges the rest), `delegate` (`delegate.rs`: subagents in parallel, each optionally in a `role`
+  (`roles.rs`, below; with neither a role nor a model, System One may pick one, `role_pick`); on the task's model, else the role's, else the other agent's, else the roles
+  file's `default_model` when served, else the parent's; zenbot may hand a task to another agent), `schedule` (`jobs/`), `judge` (System One over many items; when System
   One is on).
 
 Subagents and job runs get no `ask`, `delegate` or `schedule`; a verifier gets `bash`, `read` and
-`submit_verdict`. A session's agent narrows the list further (Agents).
+`submit_verdict`. A session's agent narrows the list further (Agents), and a subagent's role
+further still.
+
+Default researcher has no bash/write/edit tools. Reviewer retains bash for tests:
+"No changes" is behavioral guidance, not an enforced read-only boundary; bash runs as the owner.
+Defaults do not overwrite existing owner role files.
+
+Roles (`roles.rs`) are profiles for subagents, not agents: each agent's `agents/<name>/roles.toml`
+(the agent keeps it, so a learning loop can tune it; written from `defaults/agent/roles.toml` when
+missing: researcher, coder, reviewer) holds `default_model` and `[roles.<name>]` with
+`description`, `model`, `effort`, `tools` (narrows, never widens: `Agent::in_role`, enforced at
+each of the child's turns by the tool list and `dispatch.rs`) and `skills` (each SKILL.md attached
+to the brief, not the instructions). The role is the delegating agent's; the child records it in
+`sessions.role`. `delegate`'s description lists the roles as the session's first tool list had them
+(the prefix stays fixed); a call checks the current file, and a broken file or unknown role fails it.
 
 ## Agents
 
 Every session is one agent's (`agents.rs`, `sessions.agent`): zenbot by default, or one the owner
 made (`agents new <name>`, `POST /api/agents`). An agent is a folder `agents/<name>/`: `SOUL.md`
-(the owner's), `IDENTITY.md` (the agent keeps it), an optional `agent.toml` and `skills/`. Each agent
+(the owner's), `IDENTITY.md` and `roles.toml` (the agent keeps them), an optional `agent.toml` and `skills/`. Each agent
 has a vault (`Agent::vault`): zenbot's is `global/`; another's is private, `global/agents/<name>/`
 (`AGENTS.md`, `MEMORY.md`, `wiki/`, `memory/`, `entities/`; written by `agents new`, or at its next
 turn), moved to its backup on `agents rm`. Its short-term memory (`memories.agent`), `remember`,
@@ -122,7 +131,7 @@ documents, plus the global memories, pages and records when `global` allows (`se
 `AGENTS.md` and `USER.md` are shared. zenbot can hand a task to another agent (`delegate` with
 `agent`, per task or for all; no other agent can): the child `subagent` session is that agent's,
 with its instructions, tools, limits and vault, in its workspace (else the kernel's), on the task's
-model, else the agent's, else the parent's. An agent may have its own MCP servers
+model, else its role's, else the agent's, else zenbot's `default_model`, else the parent's. An agent may have its own MCP servers
 (`agents/<name>/mcp.json`, no OAuth), seen only by it and winning a name clash with a global one;
 its stdio servers run in its sandbox (not at all without bubblewrap and pasta), global ones as the owner.
 `agent.toml` otherwise only narrows what zenbot has:
@@ -137,7 +146,7 @@ agent that scheduled it (the owner may pick one), never another, and an agent ot
 changes, runs or removes only its own jobs and makes a script job only if it has `bash`. With `bash` an agent can still
 Every agent but zenbot is sandboxed (`sandbox.rs`): `Agent::mounts` lists what it reaches, read-write
 its workspace (`workspace`, else its own `agents/<name>/work`, never the owner's home), its vault, its
-`IDENTITY.md` and extra `write` paths; read-only the rest of its folder (it can't change or create
+`IDENTITY.md`, `roles.toml` and extra `write` paths; read-only the rest of its folder (it can't change or create
 `agent.toml`, `mcp.json`, `SOUL.md`, `skills/`), the system folders, `USER.md`, `AGENTS.md`, `~/.local/{node,bin}`, `~/.cargo/bin`, `~/.gitconfig`, extra `read`
 paths and the global vault when `global` allows (writable when write; other agents' vaults hidden).
 The owner's home is an empty tmpfs, `/tmp` private. `bash`, `verify` checks and its script jobs run
@@ -154,7 +163,8 @@ Fast, cheap decisions (`s1/`): each is a TOML file in `crates/zend/s1/` (owner o
 outcome, a ladder of approved OpenRouter models and test cases. `catalog.rs` fixes what each
 caller sends and accepts; `check.rs` validates files (`zen s1 check`); every call is recorded in
 `decisions`. Decisions: `memory_capture`, `memory_durable`, `memory_disposition`, `memory_long`,
-`search_rerank`, `web_rerank`, `web_focus`, `skill_duplicate`, `judge`. Off unless
+`search_rerank`, `web_rerank`, `web_focus`, `skill_duplicate`, `role_pick` (a delegated task's
+role when it names none), `judge`. Off unless
 `ZEN_S1_MODEL` (or `~/.zenbot/s1/models.toml`) and `OPENROUTER_API_KEY` are set.
 
 ## Memory and knowledge
@@ -175,7 +185,9 @@ caller sends and accepts; `check.rs` validates files (`zen s1 check`); every cal
   truth, `brain_*` tables an index rebuilt from them. `brain put` refuses new knowledge records;
   old ones (kind folders under `wiki/`) are still indexed, read and linted.
 - The sleep (`brain/sleep.rs`; nightly, when memory passes its size, or `zen memory sleep`):
-  System One moves lasting memories to records and archives finished ones. Nothing is deleted.
+  System One judges each entry against the whole short-term memory; lasting ones move to records,
+  finished ones (settled, superseded, repeated) leave too, to records when lasting, else to the
+  archive. Still over its size, the least active leave until it fits. Nothing is deleted.
 
 ## Jobs
 
@@ -207,11 +219,10 @@ busy turns, commit) needs no token; the rest are under `/api` (`main.rs`):
 
 | Route | What |
 |---|---|
-| `GET/POST /sessions`, `GET/PATCH /sessions/{id}`, `GET /board` | sessions (`agent` picks who a new one is), their messages, the board |
+| `GET/POST /sessions`, `GET/PATCH /sessions/{id}`, `GET /board` | sessions (`agent` picks who a new one is), their messages, the board; `PATCH` with `archived: true` takes the owner's `outcome` (`done`, `partial`, `not-done`) and `note`, and returns `continued_by` (the new session) after `partial`; `GET /sessions/{id}` includes the open `suggestion` |
 | `GET/POST /agents` | the agents and what each may use; make one (`name`, `description`) |
 | `GET/PUT/DELETE /agents/{name}` | an agent's files (`soul`, `identity`, `settings` as text) and session count; replace any of them (settings checked first, old files backed up); remove one (not zenbot; its folder moves to `backups/agents/`) |
 | `GET /sessions/{id}/ws` | the session's events; send `{"type":"prompt","text":…,"mode":"steer"?}` or `{"type":"abort"}` |
-| `POST /sessions/{id}/decision` | the owner's verdict: accept, more, reshape, drop |
 | `GET /models`, `GET /version`, `GET/POST /upgrade` | models, update check, self-upgrade |
 | `POST /complete` | one completion without tools (`model`, `system`, `prompt`, `purpose`), for the owner's apps on this machine (including optional writing apps); logged, not on a tape |
 | `POST /search` | the search tool for the owner's apps (`query`, `scope` default `knowledge`, `limit`): words and meaning, reranked by System One, as JSON results (including optional note-finding apps) |
@@ -231,7 +242,7 @@ WebSocket events (`crates/zen-proto/src/client.rs`): `message`, `busy`, `delta`,
 
 `crates/zen-client/src/commands.rs` is the one command table: `/x` in the web chat, `!x` in
 Matrix and `zen x` on the command line are the same command. Shared: `new` (`new @garry` starts
-a session with another agent), `model`, `effort`, `done`, `rename`, `archive`, `steer`, `agents`, `tasks`, `jobs`, `skills`, `memory`, `mcp`, `models`, `suggestions`,
+a session with another agent), `model`, `effort`, `rename`, `archive [done|partial|not-done [note]]` (how the session ended: the learning loop's ground truth; `partial` starts a linked "Continue:" session for the same agent whose suggested first prompt is a handoff brief from the summary model, `handoff.rs`), `steer`, `agents`, `tasks`, `jobs`, `skills`, `memory`, `mcp`, `models`, `suggestions`,
 `status`, `upgrade`. The web chat's own (scope `Screen`): `resume`, `board`, `files`, `open`, `close`, `mouse`,
 `restart`, `help`, `exit`; it gets the list from `zen --commands`. The command line's own: `ask`, `sessions`, `brain`, `s1`,
 `login`, `mcp-pending`, `mcp-respond`. Tests keep the command line and the table in step.
@@ -245,6 +256,7 @@ a session with another agent), `model`, `effort`, `done`, `rename`, `archive`, `
 | `sessions/` | the tape mirrored as JSONL, one file per session |
 | `agents/<name>/SOUL.md`, `IDENTITY.md`, `AGENTS.md`, `USER.md` | prompt files (backups in `backups/prompt-files/`) |
 | `agents/<name>/agent.toml`, `agents/<name>/skills/` | what an agent may use (the owner's), its own skills |
+| `agents/<name>/roles.toml` | its roles for subagents (the agent's; `roles.rs`) |
 | `global/MEMORY.md`, `global/memory/`, `global/entities/`, `global/wiki/`, `global/skills/` | memory, records, wiki pages, skills |
 | `global/Projects/<project>/tasks.md` | the owner's tasks (Obsidian Tasks format); the kernel only reads them |
 | `mcp.json`, `mcp-auth/` | MCP servers and their sign-ins |
@@ -258,11 +270,28 @@ a session with another agent), `model`, `effort`, `done`, `rename`, `archive`, `
 
 `crates/zend/sqlite-migrations/` (run at start by `storage.rs`; sqlite-vec and FTS5 built in).
 Tables: `sessions`, `tape_events`, `tape_exports`, `pending_prompts`, `turns`, `model_calls`,
-`tool_calls`, `envelopes`, `compactions`, `session_decisions`, `session_scores`,
+`tool_calls`, `envelopes`, `compactions`, `session_decisions` (old `/done` verdicts, history only; `sessions.outcome` replaces them),
 `prompt_suggestions`, `memories`, `sleep_runs`, `brain_records`, `brain_aliases`, `brain_links`,
 `brain_skill_uses`, `search_docs` (+ `search_docs_fts`), `search_state`, `search_queue`,
 `searches`, `jobs`, `job_runs`, `decisions`, `s1_states`, `s1_outcomes`, `mcp_interactions`,
-`task_agents`.
+`task_agents`, `session_reviews` (retired `work_*` and `session_scores` retained as history).
+
+## Learning loop
+
+Archiving an owner session with `done`, `partial` or `not-done` queues a serialized,
+background review (`review.rs`); plain archive does not. `ZEN_REVIEW` defaults on and
+`ZEN_REVIEW_MODEL` defaults to the summary model. The review reads session history and
+kernel-counted facts: owner messages exclude kernel prompts; delivered queued steers carry a
+persistent tape marker (older tapes cannot reconstruct deleted pending steers).
+It submits one structured record to `session_reviews`. Nonempty changes/suggestions create
+an event-only, disabled system job and completed `job_runs` entry: the existing jobs feed,
+including Matrix's polling bridge, delivers it. Empty reports are silent.
+
+Reviews can update only their agent's IDENTITY, zenbot's USER, own skills and agent-scoped
+memory through the usual tools. Review writes reject symlink traversal, including dangling links.
+AGENTS/SOUL and role/model changes are suggestions only; model proposals must cite at least two
+reviews of the same kind showing the same pattern. No automated role/model writes are allowed.
+The retired work/session_scores tables remain intact as historical data.
 
 ## Settings
 
@@ -315,5 +344,7 @@ release archives and serves `/api/plugins`. `sandbox.rs` pins grants with file d
 bubblewrap binds them; servers join MCP discovery through `mcp.rs`. Installed state and opener
 defaults live in migration `0007_plugins.sql`. UI slots, Games and Settings live in
 `web/src/zen/`; `PluginFrame.svelte` hosts opaque-origin MCP Apps. Plugin messages create drafts,
-never autonomous chat turns. Sampling currently fails closed (native token caps are unavailable).
+never autonomous chat turns. A plugin granted `ai` may sample (`sample`: the kernel's tool-free completion, assist model unless
+its hints name a known one, no token cap) while its AI switch (`plugins.ai_enabled`, migration
+`0008_plugin_ai.sql`, `PATCH { ai }`) is on; each request goes in `plugin_calls`.
 See [PLUGINS.md](PLUGINS.md) for authoring and the curated marketplace workflow.

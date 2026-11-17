@@ -5,7 +5,8 @@
 //! session's fixed prefix carries only an index (`index_text`); the model finds skills with
 //! `find_skills` and loads one with `load_skill`, whose text arrives as a tool result, so the prefix
 //! and the prompt cache never change mid-session. Loads are recorded like any tool call
-//! (`tool_calls`), which is how unused and overused skills are measured.
+//! (`tool_calls`), which is how unused and overused skills are measured. Enabled installed plugin
+//! skill roots join after agent/global skills; lifecycle changes affect subsequent discovery.
 
 use std::path::{Path, PathBuf};
 
@@ -22,6 +23,7 @@ pub struct Skill {
     pub dir: PathBuf,
     /// Exact SKILL.md bytes used for validation, search and source ratings.
     pub text: String,
+    plugin: bool,
 }
 
 /// Where skills live: `ZEN_SKILLS_DIR`, else `~/.zenbot/global/skills` (shared by every agent).
@@ -108,10 +110,15 @@ fn validate_text(dir: &Path, text: &str) -> Vec<String> {
 /// Every valid skill under `root`, sorted by domain and name. Invalid folders are skipped (and
 /// logged), so one broken skill doesn't hide the rest.
 pub fn scan(root: &Path) -> Vec<Skill> {
+    scan_checked(root, false)
+}
+
+fn scan_checked(root: &Path, plugin: bool) -> Vec<Skill> {
     let mut out = Vec::new();
     let Ok(domains) = std::fs::read_dir(root) else { return out };
     for d in domains.flatten() {
         let dpath = d.path();
+        if plugin && !crate::plugins::safe_skill_path(root, &dpath) { continue; }
         let domain = d.file_name().to_string_lossy().to_string();
         // `_archived` isn't a domain (workshop.rs).
         if !dpath.is_dir() || domain.starts_with('.') || domain.starts_with('_') {
@@ -120,6 +127,7 @@ pub fn scan(root: &Path) -> Vec<Skill> {
         let Ok(skills) = std::fs::read_dir(&dpath) else { continue };
         for s in skills.flatten() {
             let dir = s.path();
+            if plugin && !crate::plugins::safe_skill_path(root, &dir.join("SKILL.md")) { continue; }
             if !dir.join("SKILL.md").is_file() {
                 continue;
             }
@@ -131,6 +139,7 @@ pub fn scan(root: &Path) -> Vec<Skill> {
             }
             let (fields, _) = frontmatter(&text);
             out.push(Skill {
+                plugin,
                 domain: domain.clone(),
                 name: field(&fields, "name").unwrap_or("").to_string(),
                 description: field(&fields, "description").unwrap_or("").to_string(),
@@ -143,30 +152,70 @@ pub fn scan(root: &Path) -> Vec<Skill> {
     out
 }
 
-/// The skills index for the system prompt: every skill's name and description while that fits
-/// in `ZEN_SKILL_INDEX_CHARS` (default 2500), else the domains with their skill counts. Empty
-/// when there are no skills.
+/// The skills index for the system prompt: every skill by name with what it's for, in
+/// `ZEN_SKILL_INDEX_CHARS` (default 2500) when it can be (`index_within`). Empty when there are no
+/// skills.
 pub fn index_text(skills: &[Skill]) -> String {
     index_within(skills, crate::config::get().skill_index_chars)
 }
 
-/// The skills index in at most `limit` characters (domains only above it).
+/// The shortest description that still says when to use a skill: its first sentence or clause
+/// (up to the first `. `, ` - `, ` — ` or `; `), without the closing full stop.
+fn trigger(description: &str) -> &str {
+    let d = description.trim();
+    let cut = [". ", " - ", " — ", "; "].iter().filter_map(|sep| d.find(sep)).min().unwrap_or(d.len());
+    d[..cut].trim_end_matches('.').trim_end()
+}
+
+/// `text` in at most `max` characters, cut at a word with `…` when longer.
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    // The last whole word that leaves room for the `…`.
+    let head: String = text.chars().take(max).collect();
+    let head = match head.rfind(' ').filter(|&i| i > 0) {
+        Some(i) => head[..i].to_string(),
+        None => head.chars().take(max.saturating_sub(1)).collect(),
+    };
+    format!("{}…", head.trim_end_matches([',', ';', ':', ' ']))
+}
+
+/// The skills index in `limit` characters, always naming every skill (never just counts), in the
+/// first form that fits: full descriptions; each cut to its trigger (`trigger`); the triggers
+/// clipped to an equal share of what's left; names only, grouped by domain (even past `limit`).
 fn index_within(skills: &[Skill], limit: usize) -> String {
+    /// Below this a clipped trigger says too little to choose by; names alone are clearer.
+    const MIN_TRIGGER: usize = 24;
     if skills.is_empty() {
         return String::new();
     }
-    let full: String = skills.iter().map(|s| format!("- {}/{}: {}\n", s.domain, s.name, s.description)).collect();
-    if full.len() <= limit {
+    let lines = |describe: &dyn Fn(&Skill) -> String| -> String { skills.iter().map(|s| format!("- {}/{}: {}\n", s.domain, s.name, describe(s))).collect() };
+    let fits = |text: &String| text.chars().count() <= limit;
+    let full = lines(&|s| s.description.trim().to_string());
+    if fits(&full) {
         return full;
     }
-    let mut domains: Vec<(String, usize)> = Vec::new();
-    for s in skills {
-        match domains.iter_mut().find(|(d, _)| d == &s.domain) {
-            Some((_, n)) => *n += 1,
-            None => domains.push((s.domain.clone(), 1)),
+    let short = lines(&|s| trigger(&s.description).to_string());
+    if fits(&short) {
+        return short;
+    }
+    let names: usize = skills.iter().map(|s| format!("- {}/{}: \n", s.domain, s.name).chars().count()).sum();
+    let share = limit.saturating_sub(names) / skills.len();
+    if share >= MIN_TRIGGER {
+        let clipped = lines(&|s| clip(trigger(&s.description), share));
+        if fits(&clipped) {
+            return clipped;
         }
     }
-    domains.iter().map(|(d, n)| format!("- {d}: {n} skill(s)\n")).collect()
+    let mut domains: Vec<(&str, Vec<&str>)> = Vec::new();
+    for s in skills {
+        match domains.iter_mut().find(|(d, _)| *d == s.domain) {
+            Some((_, names)) => names.push(&s.name),
+            None => domains.push((&s.domain, vec![&s.name])),
+        }
+    }
+    domains.iter().map(|(d, names)| format!("- {d}: {}\n", names.join(", "))).collect()
 }
 
 /// Lowercase words of three letters or more, for matching.
@@ -214,10 +263,14 @@ pub fn find(skills: &[Skill], query: &str, limit: usize) -> Vec<(Skill, f64)> {
 /// A skill by `domain/name` or bare `name` (when only one domain has it).
 pub fn lookup<'a>(skills: &'a [Skill], name: &str) -> Result<&'a Skill, String> {
     let name = name.trim().trim_end_matches("/SKILL.md");
-    let found: Vec<&Skill> = match name.split_once('/') {
+    let mut found: Vec<&Skill> = match name.split_once('/') {
         Some((d, n)) => skills.iter().filter(|s| s.domain == d && s.name == n).collect(),
         None => skills.iter().filter(|s| s.name == name).collect(),
     };
+    // A newly installed plugin must not make an existing bare local name ambiguous.
+    if !name.contains('/') && found.iter().any(|s| !s.plugin) {
+        found.retain(|s| !s.plugin);
+    }
     match found.as_slice() {
         [one] => Ok(one),
         [] => Err(format!("no skill `{name}`; use find_skills to see what exists")),
@@ -235,6 +288,9 @@ pub fn load(skill: &Skill, file: Option<&str>) -> Result<String, String> {
         None => skill.dir.join("SKILL.md"),
         Some(f) => {
             let p = skill.dir.join(f);
+            if skill.plugin && !crate::plugins::safe_skill_path(&skill.dir, &p) {
+                return Err("plugin skill file must not traverse symlinks or escape".into());
+            }
             let inside = p.canonicalize().ok().zip(skill.dir.canonicalize().ok()).is_some_and(|(p, d)| p.starts_with(d));
             if !inside {
                 return Err(format!("`{f}` isn't a file of skill {}/{}", skill.domain, skill.name));
@@ -329,8 +385,23 @@ pub fn scan_roots(roots: &[PathBuf]) -> Vec<Skill> {
             }
         }
     }
-    out.sort_by(|a, b| (&a.domain, &a.name).cmp(&(&b.domain, &b.name)));
+    append_plugins(&mut out, &crate::plugins::plugins_dir(), &crate::plugins::skill_roots());
     out
+}
+
+fn append_plugins(out: &mut Vec<Skill>, base: &Path, roots: &[PathBuf]) {
+    for root in roots {
+        if !crate::plugins::safe_skill_path(base, root) { continue; }
+        let Some(plugin) = root.strip_prefix(base).ok().and_then(|p| p.components().next()) else { continue };
+        let plugin = plugin.as_os_str().to_string_lossy();
+        for mut skill in scan_checked(root, true) {
+            skill.domain = format!("plugin-{plugin}-{}", skill.domain);
+            if !out.iter().any(|o| o.domain == skill.domain && o.name == skill.name) {
+                out.push(skill);
+            }
+        }
+    }
+    out.sort_by(|a, b| (&a.domain, &a.name).cmp(&(&b.domain, &b.name)));
 }
 
 /// `find_skills` and `load_skill` over the skills in `roots`: the text and whether it's an error.
@@ -352,7 +423,11 @@ pub async fn run_tool(db: &sqlx::SqlitePool, session: uuid::Uuid, roots: &[PathB
     let file = args["file"].as_str().map(str::trim).filter(|f| !f.is_empty() && *f != "SKILL.md");
     let (path, text) = if let Some(file) = file {
         let read = async {
-            let path = skill.dir.join(file).canonicalize()?;
+            let requested = skill.dir.join(file);
+            if skill.plugin {
+                anyhow::ensure!(crate::plugins::safe_skill_path(&skill.dir, &requested), "plugin skill file must not traverse symlinks or escape");
+            }
+            let path = requested.canonicalize()?;
             anyhow::ensure!(path.starts_with(skill.dir.canonicalize()?), "file is outside this skill");
             let text = tokio::fs::read_to_string(&path).await?;
             Ok((path, text))
@@ -396,6 +471,40 @@ mod tests {
     }
 
     #[test]
+    fn plugin_discovery_preserves_core_and_agent_names_and_rejects_symlinks() {
+        let core = tree();
+        let plugin = tree();
+        let mut all = scan(&core);
+        let base = plugin.parent().unwrap();
+        let domain = format!("plugin-{}-work", plugin.file_name().unwrap().to_string_lossy());
+        append_plugins(&mut all, base, &[plugin.to_path_buf()]);
+        assert_eq!(all.len(), 6, "plugin skills get their own namespace");
+        assert_eq!(lookup(&all, "work/verify").unwrap().dir, core.join("work/verify"));
+        let mut only_plugin = Vec::new();
+        assert_eq!(lookup(&all, "verify").unwrap().dir, core.join("work/verify"), "bare local names retain their meaning");
+        append_plugins(&mut only_plugin, base, &[plugin.to_path_buf()]);
+        assert!(index_text(&only_plugin).contains(&format!("{domain}/verify")));
+        assert_eq!(find(&only_plugin, "verify", 5)[0].0.name, "verify");
+        assert!(load(lookup(&only_plugin, &format!("{domain}/verify")).unwrap(), None).unwrap().contains("Run the tests."));
+        let mut reserved = vec![lookup(&only_plugin, &format!("{domain}/verify")).unwrap().clone()];
+        reserved[0].plugin = false;
+        reserved[0].text = "LOCAL WINS".into();
+        append_plugins(&mut reserved, base, &[plugin.to_path_buf()]);
+        assert_eq!(lookup(&reserved, &format!("{domain}/verify")).unwrap().text, "LOCAL WINS");
+        std::os::unix::fs::symlink(plugin.join("work/brief/references/template.md"), plugin.join("work/brief/references/link.md")).unwrap();
+        assert!(load(lookup(&only_plugin, &format!("{domain}/brief")).unwrap(), Some("references/link.md")).is_err());
+        std::os::unix::fs::symlink(plugin.join("work/verify"), plugin.join("work/linked")).unwrap();
+        assert_eq!(scan_checked(&plugin, true).len(), 3);
+        let symlink_file = plugin.join("work/linked-file");
+        std::fs::create_dir_all(&symlink_file).unwrap();
+        std::os::unix::fs::symlink(plugin.join("work/verify/SKILL.md"), symlink_file.join("SKILL.md")).unwrap();
+        assert_eq!(scan_checked(&plugin, true).len(), 3);
+        only_plugin.clear();
+        append_plugins(&mut only_plugin, &plugin, &[]);
+        assert!(only_plugin.is_empty(), "disabled/uninstalled roots vanish from subsequent catalogs");
+    }
+
+    #[test]
     fn an_agents_own_skill_wins_over_a_shared_one() {
         let shared = tree();
         let own = crate::test_util::TestDir::new("own-skills");
@@ -432,12 +541,39 @@ mod tests {
     }
 
     #[test]
-    fn index_lists_skills_or_only_domains_when_long() {
+    fn index_always_names_every_skill() {
         let all = scan(&tree());
-        assert!(index_text(&all).contains("- work/verify: Check that work is done"));
-        let short = index_within(&all, 50);
-        assert_eq!(short, "- build: 1 skill(s)\n- work: 2 skill(s)\n");
+        let full = index_within(&all, 10_000);
+        assert!(full.contains("- work/verify: Check that work is done"));
+        assert_eq!(full.lines().count(), 3);
+        // Too long for full descriptions: each cut to its trigger, every skill still named.
+        let full_len = full.chars().count();
+        let short = index_within(&all, full_len - 1);
+        assert_eq!(short.lines().count(), 3);
+        assert!(short.chars().count() < full_len);
+        for s in &all {
+            assert!(short.contains(&format!("- {}/{}: {}\n", s.domain, s.name, trigger(&s.description))));
+        }
+        // Tighter: triggers clipped to an equal share, every skill still named.
+        let clipped = index_within(&all, 140);
+        assert!(clipped.chars().count() <= 140 && clipped.contains('…'), "{clipped}");
+        assert!(all.iter().all(|s| clipped.contains(&format!("- {}/{}: ", s.domain, s.name))));
+        // Tightest: names only, by domain. Never counts.
+        let names = index_within(&all, 50);
+        assert_eq!(names, "- build: rust\n- work: brief, verify\n");
+        assert!(!names.contains("skill(s)"));
         assert_eq!(index_text(&[]), "");
+    }
+
+    #[test]
+    fn triggers_and_clips() {
+        assert_eq!(trigger("Frame a big job before changing anything - find the real job. Use when large."), "Frame a big job before changing anything");
+        assert_eq!(trigger("Write the changelog line for a note. Used by zenwrite."), "Write the changelog line for a note");
+        assert_eq!(trigger("One clause only."), "One clause only");
+        assert_eq!(clip("short", 10), "short");
+        assert_eq!(clip("check that work is really done", 16), "check that work…");
+        assert!(clip("check that work is really done", 16).chars().count() <= 16);
+        assert_eq!(clip("unbreakablewordhere", 8), "unbreak…");
     }
 
     #[test]

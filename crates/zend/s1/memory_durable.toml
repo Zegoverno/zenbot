@@ -1,36 +1,49 @@
 # The sleep, for each short-term memory: does it last, so it moves to long-term memory (a file of
 # its own, found through search)? An entry that stays short-term is reconsidered next sleep.
+# `memories` is the agent's whole short-term memory, so a raw remark that a later entry sums up
+# (and the summary promoted) isn't promoted twice.
 name = "memory_durable"
-version = 2
+version = 3
 description = "Will this memory still matter months from now?"
 exposure = "private"
-evidence = []
+evidence = ["memories"]
 item = "memory"
 timeout = "30s"
 unavailable = "keep"
 
 [question.durable]
 type = "yes/no"
-text = "Will {item} still be true and useful months from now: a decision and its reason, a commitment, a preference, a lesson, a project's development? Repetition doesn't make it true; an open task still in progress stays short-term."
+text = "Will {item} still be true and useful months from now: a settled decision and its reason, a commitment, a preference, a lesson, a lasting fact about the owner, a project or how things are set up? Not lasting: a passing task or state, work still in progress, a question or idea still being discussed, or a raw remark that another entry in `memories` already says better."
 yes = "Lasting: worth keeping for good"
-no = "About a passing task, state or moment"
+no = "Passing, still open, or said better by another entry"
 
-# Promoting a passing detail costs 9 times keeping a lasting one short-term one more night:
-# promote from p ≥ 0.9.
+# promote: lasting enough to move now (p ≥ 0.75; at the old 0.9 this model never promoted
+# anything). lasting: leaning lasting (p ≥ 0.3), so when it leaves short-term memory (finished, or
+# to fit the size) it goes to long-term memory instead of the archive, where search no longer finds
+# it (a needless record costs a little search noise; an archived fact is lost to search). keep:
+# stays short-term, or is archived when it leaves.
 [policy]
-kind = "costs"
-question = "durable"
-false_yes = 9
-false_no = 1
-yes = "promote"
-no = "keep"
+kind = "rules"
+else = "keep"
 
-[[test]]
-answers = { durable = 0.95 }
-expect = "promote"
+[[policy.rule]]
+when = "durable >= 0.75"
+decide = "promote"
+
+[[policy.rule]]
+when = "durable >= 0.3"
+decide = "lasting"
 
 [[test]]
 answers = { durable = 0.8 }
+expect = "promote"
+
+[[test]]
+answers = { durable = 0.6 }
+expect = "lasting"
+
+[[test]]
+answers = { durable = 0.2 }
 expect = "keep"
 
 [[test]]
