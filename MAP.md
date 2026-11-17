@@ -268,7 +268,24 @@ Tables: `sessions`, `tape_events`, `tape_exports`, `pending_prompts`, `turns`, `
 `prompt_suggestions`, `memories`, `sleep_runs`, `brain_records`, `brain_aliases`, `brain_links`,
 `brain_skill_uses`, `search_docs` (+ `search_docs_fts`), `search_state`, `search_queue`,
 `searches`, `jobs`, `job_runs`, `decisions`, `s1_states`, `s1_outcomes`, `mcp_interactions`,
-`task_agents`.
+`task_agents`, `session_reviews` (retired `work_*` and `session_scores` retained as history).
+
+## Learning loop
+
+Archiving an owner session with `done`, `partial` or `not-done` queues a serialized,
+background review (`review.rs`); plain archive does not. `ZEN_REVIEW` defaults on and
+`ZEN_REVIEW_MODEL` defaults to the summary model. The review reads session history and
+kernel-counted facts: owner messages exclude kernel prompts; delivered queued steers carry a
+persistent tape marker (older tapes cannot reconstruct deleted pending steers).
+It submits one structured record to `session_reviews`. Nonempty changes/suggestions create
+an event-only, disabled system job and completed `job_runs` entry: the existing jobs feed,
+including Matrix's polling bridge, delivers it. Empty reports are silent.
+
+Reviews can update only their agent's IDENTITY, zenbot's USER, own skills and agent-scoped
+memory through the usual tools. Review writes reject symlink traversal, including dangling links.
+AGENTS/SOUL and role/model changes are suggestions only; model proposals must cite at least two
+reviews of the same kind showing the same pattern. No automated role/model writes are allowed.
+The retired work/session_scores tables remain intact as historical data.
 
 ## Settings
 

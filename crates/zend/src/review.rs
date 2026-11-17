@@ -2,8 +2,7 @@
 //! not-done), the kernel queues a review: a fresh `review` session, as the archived session's
 //! agent, on the review model (`ZEN_REVIEW_MODEL`), that reads the archived session (`history`)
 //! and judges how the work went and how much the owner had to intervene. It may change only two
-//! things: the model for this kind of work (the agent's `roles.toml`, and only when an earlier
-//! review of the same kind of work shows the same pattern), and notes (IDENTITY.md, USER.md for
+//! things: proposals for model changes (never direct roles.toml writes), and notes (IDENTITY.md, USER.md for
 //! zenbot, memory through `remember`, a skill through `save_skill`). AGENTS.md and SOUL.md are the
 //! owner's: a review only suggests changes to them. It ends with `submit_review`, stored in
 //! `session_reviews`; a review that changed something or suggests something is reported.
@@ -77,11 +76,28 @@ async fn run(app: &AppState, session: Uuid) -> Result<()> {
         let changes: Value = serde_json::from_str(&r.get::<String, _>("changes")).unwrap_or(json!([]));
         let suggestions: Value = serde_json::from_str(&r.get::<String, _>("suggestions")).unwrap_or(json!([]));
         if let Some(text) = report(&facts, &changes, &suggestions) {
-            // The report is the review session's last message, and goes to the log the board reads.
+            // Persist in the jobs feed: the board and Matrix already consume completed runs.
+            deliver(&app.db, id, &text).await?;
             crate::tape::append(&app.db, id, "message", &json!({ "role": "assistant", "content": [{ "type": "text", "text": text }] })).await?;
             tracing::info!("review of {session}: {text}");
         }
     }
+    Ok(())
+}
+
+/// Event-only system job: never scheduled, one completed run per nonempty report.
+async fn deliver(db: &SqlitePool, session: Uuid, text: &str) -> Result<()> {
+    let mut tx = crate::storage::begin(db).await?;
+    sqlx::query("INSERT INTO jobs (name, kind, action, schedule, tz, enabled, created_by)
+        SELECT 'session-review', 'system', 'session-review', 'event', 'UTC', 0, 'kernel'
+        WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE kind = 'system' AND action = 'session-review')")
+        .execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO job_runs (job_id, trigger, status, session_id, ended_at, output)
+        SELECT id, 'archive', 'ok', $1, strftime('%Y-%m-%dT%H:%M:%f+00:00','now'), $2 FROM jobs
+        WHERE kind = 'system' AND action = 'session-review'
+        AND NOT EXISTS (SELECT 1 FROM job_runs WHERE session_id = $1)")
+        .bind(session).bind(text).execute(&mut *tx).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -102,12 +118,11 @@ pub(crate) async fn facts(db: &SqlitePool, session: Uuid) -> Result<Value> {
     .bind(session)
     .fetch_one(db)
     .await?;
-    // Owner messages (the kernel's own prompts are role `user` too, but an owner session has none).
-    // Steers aren't counted: their pending prompts are deleted once delivered.
-    let owner_messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tape_events WHERE session_id = $1 AND kind = 'message' AND json_extract(payload, '$.role') = 'user'")
-        .bind(session)
-        .fetch_one(db)
-        .await?;
+    // Kernel prompts have an explicit marker, even in an owner-driven session.
+    let owner_messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tape_events WHERE session_id = $1 AND kind = 'message' AND json_extract(payload, '$.role') = 'user' AND COALESCE(json_extract(payload, '$.kernel'), 0) = 0")
+        .bind(session).fetch_one(db).await?;
+    let steers: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tape_events WHERE session_id = $1 AND kind = 'message' AND json_extract(payload, '$.steer') = 1")
+        .bind(session).fetch_one(db).await?;
     let models: Vec<String> = sqlx::query_scalar("SELECT DISTINCT model FROM turns WHERE session_id = $1 ORDER BY model").bind(session).fetch_all(db).await?;
     let children = sqlx::query("SELECT kind, role, model, COUNT(*) AS n FROM sessions WHERE parent = $1 GROUP BY kind, role, model ORDER BY kind, role, model").bind(session).fetch_all(db).await?;
     let children: Vec<Value> = children
@@ -149,6 +164,7 @@ pub(crate) async fn facts(db: &SqlitePool, session: Uuid) -> Result<Value> {
         "duration_secs": s.get::<Option<i64>, _>("secs"),
         "turns": t.get::<i64, _>("turns"),
         "owner_messages": owner_messages,
+        "steers": steers,
         "aborts": t.get::<i64, _>("aborts"),
         "tool_calls": t.get::<i64, _>("tool_calls"),
         "tool_errors": t.get::<i64, _>("tool_errors"),
@@ -254,22 +270,42 @@ pub async fn submit(app: &AppState, review: Uuid, args: &Value) -> Result<String
 }
 
 /// Why a review session may not write this file, if it may not: it may change only the agent's
-/// IDENTITY.md, USER.md (zenbot only), roles.toml and skill files.
+/// IDENTITY.md, USER.md (zenbot only) and its own skill files. Model changes are proposals.
+fn has_symlink(path: &Path) -> bool {
+    path.ancestors().any(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()))
+}
+
 pub fn write_refusal(home: &Path, agent: &str, skill_roots: &[PathBuf], workspace: &Path, name: &str, args: &Value) -> Option<String> {
+    if name == "save_skill" {
+        let root = skill_roots.first()?;
+        let dir = root.join(args["domain"].as_str().unwrap_or("")).join(args["name"].as_str().unwrap_or(""));
+        let mut paths = vec![dir.join("SKILL.md")];
+        if let Some(files) = args["files"].as_object() {
+            paths.extend(files.keys().map(|p| dir.join(p)));
+        }
+        if paths.iter().any(|p| has_symlink(p) || !crate::agent::real(p).starts_with(root)) {
+            return Some("A review may save skills only inside its own skill home (no escaping symlinks).".into());
+        }
+        return None;
+    }
     if !matches!(name, "edit" | "write") {
         return None;
     }
-    let target = crate::agent::real(&tools::resolve(workspace, args["path"].as_str().unwrap_or("")));
+    let path = tools::resolve(workspace, args["path"].as_str().unwrap_or(""));
+    if has_symlink(&path) {
+        return Some("Review writes must not traverse symlinks; propose the change instead.".into());
+    }
+    let target = crate::agent::real(&path);
     let dir = home.join("agents").join(agent);
-    let mut allowed = vec![dir.join("IDENTITY.md"), dir.join(crate::roles::FILE)];
+    let mut allowed = vec![dir.join("IDENTITY.md")];
     if agent == "zenbot" {
         allowed.push(home.join("USER.md"));
     }
-    if allowed.iter().any(|p| crate::agent::real(p) == target) || skill_roots.iter().any(|r| target.starts_with(crate::agent::real(r))) {
+    if allowed.contains(&target) || skill_roots.iter().any(|r| target.starts_with(r)) {
         return None;
     }
     Some(format!(
-        "A review may change only {}'s IDENTITY.md{}, its roles.toml and skills (prefer save_skill); memory through `remember`. Put anything else (AGENTS.md, SOUL.md, …) in `suggestions`.",
+        "A review may change only {}'s IDENTITY.md{}, skills (prefer save_skill); roles.toml changes must be suggestions backed by at least two reviews; memory through `remember`. Put anything else (AGENTS.md, SOUL.md, …) in `suggestions`.",
         agent,
         if agent == "zenbot" { ", USER.md" } else { "" }
     ))
@@ -320,13 +356,23 @@ mod tests {
         let w = |agent: &str, p: PathBuf| write_refusal(&home, agent, &skills, &home, "write", &json!({ "path": p.display().to_string() }));
         assert!(w("zenbot", home.join("agents/zenbot/IDENTITY.md")).is_none());
         assert!(w("zenbot", home.join("USER.md")).is_none());
-        assert!(w("zenbot", home.join("agents/zenbot/roles.toml")).is_none());
+        assert!(w("zenbot", home.join("agents/zenbot/roles.toml")).is_some());
         assert!(w("zenbot", home.join("global/skills/work/x/SKILL.md")).is_none());
         assert!(w("zenbot", home.join("agents/zenbot/SOUL.md")).is_some());
         assert!(w("zenbot", home.join("AGENTS.md")).is_some());
         assert!(w("zenbot", home.join("agents/zenbot/../garry/IDENTITY.md")).is_some());
         assert!(w("garry", home.join("USER.md")).is_some(), "USER.md is zenbot's");
         assert!(w("zenbot", PathBuf::from("/etc/passwd")).is_some());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(home.join("agents/zenbot/SOUL.md"), home.join("agents/zenbot/IDENTITY.md")).unwrap();
+            assert!(w("zenbot", home.join("agents/zenbot/IDENTITY.md")).is_some(), "dangling links are refused too");
+            std::fs::write(home.join("agents/zenbot/SOUL.md"), "owner").unwrap();
+            assert!(w("zenbot", home.join("agents/zenbot/IDENTITY.md")).is_some());
+            std::os::unix::fs::symlink(home.join("agents"), home.join("global/skills/escape")).unwrap();
+            assert!(w("zenbot", home.join("global/skills/escape/zenbot/SOUL.md")).is_some());
+            assert!(write_refusal(&home, "zenbot", &skills, &home, "save_skill", &json!({"domain":"escape", "name":"zenbot"})).is_some());
+        }
         assert!(write_refusal(&home, "zenbot", &skills, &home, "read", &json!({ "path": "/etc/passwd" })).is_none());
     }
 
@@ -347,7 +393,18 @@ mod tests {
         sqlx::query("INSERT INTO sessions (id, model, parent, kind, role) VALUES ($1, 'claude/haiku', $2, 'subagent', 'scout')").bind(child).bind(id).execute(&db).await.unwrap();
         sqlx::query("INSERT INTO brain_skill_uses (session_id, name, digest) VALUES ($1, 'work/verify', 'x')").bind(id).execute(&db).await.unwrap();
         sqlx::query("INSERT INTO tool_calls (session_id, call_id, name, args, is_error, duration_ms, output_bytes) VALUES ($1, 'c', 'load_skill', '{\"name\":\"writing/plain\"}', 0, 1, 1)").bind(id).execute(&db).await.unwrap();
+        crate::tape::append(&db, id, "message", &json!({"role":"user", "kernel":true, "content":"system"})).await.unwrap();
+        let queued: i64 = sqlx::query_scalar("INSERT INTO pending_prompts(session_id,text,steer) VALUES ($1,'fix',1) RETURNING id").bind(id).fetch_one(&db).await.unwrap();
+        crate::tape::append_owner_queued(&db, id, &json!({"role":"user", "content":"fix"}), Some(queued)).await.unwrap();
         let f = facts(&db, id).await.unwrap();
+        assert_eq!(f["owner_messages"], 1);
+        assert_eq!(f["steers"], 1);
+        deliver(&db, id, "A report").await.unwrap();
+        deliver(&db, id, "A report").await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM job_runs WHERE session_id=$1").bind(id).fetch_one(&db).await.unwrap(), 1);
+        let runs = crate::jobs::runs(&db, None, 10).await.unwrap();
+        assert_eq!(runs[0]["output"], "A report");
+        assert_eq!(runs[0]["status"], "ok");
         assert_eq!(f["outcome"], "done");
         assert_eq!(f["note"], "ok");
         assert_eq!(f["skills"], json!(["work/verify", "writing/plain"]));

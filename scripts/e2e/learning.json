@@ -1,0 +1,56 @@
+[
+  {
+    "when": "You review a session",
+    "tool": "write",
+    "args": {
+      "path": "~/.zenbot/agents/zenbot/roles.toml",
+      "content": "unauthorized"
+    }
+  },
+  {
+    "when": "You review a session",
+    "tool": "save_skill",
+    "args": {
+      "domain": "escape",
+      "name": "forbidden",
+      "description": "Blocked",
+      "body": "Blocked",
+      "reason": "Security regression"
+    }
+  },
+  {
+    "when": "You review a session",
+    "tool": "remember",
+    "args": {
+      "action": "remove",
+      "id": "m90001"
+    }
+  },
+  {
+    "when": "You review a session",
+    "tool": "submit_review",
+    "args": {
+      "kind_of_work": "test",
+      "intervention": "low",
+      "model_verdict": "right",
+      "summary": "Finished with a useful suggestion.",
+      "evidence": "#1",
+      "changes": [],
+      "suggestions": [
+        {
+          "file": "AGENTS.md",
+          "what": "Proposed note",
+          "why": "Test evidence #1"
+        }
+      ]
+    }
+  },
+  {
+    "when": "You review a session",
+    "text": "Recorded."
+  },
+  {
+    "when": "OWNER-LEARNING",
+    "text": "Done."
+  }
+]

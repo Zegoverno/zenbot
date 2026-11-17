@@ -434,7 +434,7 @@ async fn run_tool(app: &AppState, id: Uuid, turn: &CallTurn, name: &str, args: &
         .or_else(|| agent::record_refusal(workspace, name, args))
         .or_else(|| {
             (turn.kind.as_deref() == Some(crate::review::REVIEW))
-                .then(|| crate::review::write_refusal(&crate::zen_home(), &turn.agent.name, &turn.agent.skill_roots(), workspace, name, args))
+                .then(|| crate::review::write_refusal(&crate::zen_home(), &turn.agent.name, &[turn.agent.skill_home()], workspace, name, args))
                 .flatten()
         });
     if let Some(why) = why {

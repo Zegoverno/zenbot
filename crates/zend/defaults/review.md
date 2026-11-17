@@ -15,8 +15,9 @@ Rules:
 a) Judge how the work went and how much the owner had to intervene (corrections, interruptions,
    steers, redone work, bugs they found), citing message numbers (#n).
 b) You may make only two kinds of change:
-   - The model for this kind of work: change the role's `model` in your roles.toml ONLY when this
+   - The model for this kind of work: propose a role model change in suggestions ONLY when this
      review and at least one earlier review of the same kind of work show the same pattern.
+     Cite both reviews; roles.toml writes are blocked by the kernel.
    - Notes: your IDENTITY.md, USER.md (zenbot only), memory (`remember`) or a skill (`save_skill`).
      One session is enough for a note, when it would change how you work next time.
    AGENTS.md and SOUL.md are the owner's: put any change to them, or to anything else, in

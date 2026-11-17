@@ -1,6 +1,3 @@
--- The `work` tool is gone (never used): its records go, as does session_scores, never written.
--- All were empty on the live database when this was written.
-DROP TABLE IF EXISTS work_artifacts;
-DROP TABLE IF EXISTS work_attempts;
-DROP TABLE IF EXISTS work_items;
-DROP TABLE IF EXISTS session_scores;
+-- Retired work and session_scores tables are kept as history, including on installations
+-- with nonempty records. Removing a tool must never remove owner data.
+SELECT 1;
