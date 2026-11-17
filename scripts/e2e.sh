@@ -572,6 +572,7 @@ delegation() {
   local rsid; rsid=$(echo "$r" | jq -r .session_id)
   local rchild; rchild=$(q "SELECT id FROM sessions WHERE parent=X'${rsid//-/}' AND kind='subagent'")
   check "the child records its role" eq "$(q "SELECT role FROM sessions WHERE id=X'${rchild//-/}'")" researcher
+  check "the board shows its role" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/board" | jq -r --arg c "$rchild" '.sessions[] | select(.id == $c) | .role')" researcher
   check "the role's tools: no write, offered or run" eq "$(q "SELECT (SELECT count(*) FROM turns, envelopes e, json_each(e.tools) t WHERE turns.session_id=X'${rchild//-/}' AND e.hash = turns.envelope AND t.value->>'name' IN ('write','edit')) || '|' || (SELECT count(*) FROM tape_events WHERE session_id=X'${rchild//-/}' AND payload->>'toolName'='write' AND payload->'content'->0->>'text' LIKE '%researcher%role%')")" "0|1"
   check "its skill goes with the brief" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id=X'${rchild//-/}' AND kind='message' AND payload->>'role'='user' AND payload LIKE '%skill name=%work/search%'")" 1
   check "an unknown role lists the roles" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id=X'${rsid//-/}' AND payload->>'toolName'='delegate' AND payload->'content'->0->>'text' LIKE '%no role \`poet\`%coder, researcher, reviewer%'")" 1

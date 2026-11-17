@@ -242,7 +242,7 @@ pub(crate) async fn board(State(app): State<AppState>, Query(q): Query<BoardQuer
 }
 
 /// The columns `session_json` reads, without the cost (each query computes it its own way).
-const SESSION_COLUMNS: &str = "id, title, model, effort, archived, created_at, updated_at, kind, parent, agent";
+const SESSION_COLUMNS: &str = "id, title, model, effort, archived, created_at, updated_at, kind, parent, agent, role";
 
 pub(crate) fn session_json(r: &sqlx::sqlite::SqliteRow) -> Value {
     json!({
@@ -256,6 +256,8 @@ pub(crate) fn session_json(r: &sqlx::sqlite::SqliteRow) -> Value {
         "parent": r.get::<Option<Uuid>, _>("parent"),
         // Who the session is (agents.rs): "zenbot" unless the owner picked another agent.
         "agent": r.try_get::<String, _>("agent").unwrap_or_else(|_| crate::agents::DEFAULT.into()),
+        // A subagent's role (roles.rs), named in its delegate call or picked by System One.
+        "role": r.try_get::<Option<String>, _>("role").ok().flatten(),
         "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
         "updated_at": r.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
         "cost": r.try_get::<f64, _>("cost").unwrap_or(0.0),
