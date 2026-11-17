@@ -73,3 +73,42 @@ Plugin AI sampling is on for plugins granted `ai`, with no token cap (the owner'
 2026-11-17): each plugin has an AI switch in Settings → Plugins and every call is recorded.
 Desktop ACP and store shells remain future work; the standalone PWAs and MCP Apps ship now.
 Curated listings and releases are described in [PLUGINS.md](../PLUGINS.md).
+
+# Next: a harness that learns (agreed 2026-11-17)
+
+Phases 4 (work OS: task board, channels, flows) and 5 (ACP, desktop and store shells) wait.
+
+## Phase 0: fixes
+- Plugin AI on: a plugin with the `ai` permission may sample, with no token cap. The assist
+  model by default, every call recorded, a count and an on/off switch per plugin in Settings.
+- The skills index lists each skill with its trigger, not a count per domain.
+- The sleep keeps short-term memory under its budget (it is at about 5x today).
+- The writing skills ship with zenwrite; the stale zensudoku listing; ADRs 0002 and 0003 accepted.
+
+## Phase 1: roles
+- A role is a profile, not an agent: a kind of work, a model, tools and skills
+  (`[roles.<name>]` in `agent.toml`). `delegate` takes `role`; when a task has neither role nor
+  model, System One picks the role from the task.
+- Each agent has a default subagent model (zenbot: Sonnet).
+
+## Phase 2: the learning loop
+A session is one job, done end to end: fixes, reviews and corrections happen inside it. The owner
+ends it when the work shipped, or when it derailed and a fresh start is better.
+- `/archive done | partial | not-done [note]` replaces `/done`; `partial` writes a handoff brief
+  for the next session. The `work` tool and the empty `session_scores` table go.
+- On archive, a review job rereads the session from the tape and records how the work went: the
+  kind of work, the role, model and skills used, the outcome, and how much the owner had to
+  intervene (corrections, steers, interrupts, repeated requests, errors), with message numbers.
+- From the reviews it decides only two things:
+  - a better (or cheaper) model for that kind of work: the role's model;
+  - notes for IDENTITY, USER, memory or a skill (applied and reported in the zen room, revertible).
+    AGENTS.md and SOUL.md are the owner's: changes there are suggested, never made.
+  Model changes need the same pattern in two or more reviews; a single session can add a note.
+
+## Phase 3: one brain for every harness
+- `zen mcp`: the kernel's memory, wiki, records and session search as a local MCP server (owner
+  token, read or read-write scope, every call recorded), so Claude Code, Claude Desktop and Codex
+  share zenbot's second brain.
+- A vault-structure plugin packages the owner's method: Daily, Goals, Projects, Skills, Templates
+  and the wiki (folders, templates, frontmatter types, wiki rules, lint, a UI). Not PARA.
+- Search splits long documents into chunks before embedding.
