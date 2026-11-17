@@ -334,11 +334,14 @@ pub async fn run_tool(app: &AppState, session: Uuid, workspace: &Path, who: &cra
             if bad {
                 return out("Ask 1 to 3 questions, each with 2 to 4 options (your recommended one first).".into(), true);
             }
-            if let Err(e) = tape::append(&app.db, session, "questions", &json!({ "questions": qs })).await {
+            // `wait: false` questions don't block the agent (it takes its recommendation if unanswered),
+            // so the board doesn't count them as waiting on the owner.
+            let wait = args["wait"] != false;
+            if let Err(e) = tape::append(&app.db, session, "questions", &json!({ "questions": qs, "wait": wait })).await {
                 return out(format!("couldn't record the questions: {e}"), true);
             }
             app.emit(session, json!({ "type": "questions", "questions": qs })).await;
-            if args["wait"] == false {
+            if !wait {
                 return out("The questions are shown to the owner. Carry on with what doesn't depend on them; their answers arrive as \
 a later message. Until then, don't act on anything that does."
                     .into(), false);
