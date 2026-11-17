@@ -24,7 +24,7 @@ impl Kernel {
         self.c.new_session(json!({ "title": title, "agent": agent })).await
     }
 
-    /// A channel session for the main room: kept open by the bridge, ended by archive or done.
+    /// A channel session for the main room: kept open by the bridge, ended by archive.
     pub async fn new_channel(&self) -> Result<String> {
         self.c.new_session(json!({ "title": "Matrix", "kind": "channel" })).await
     }

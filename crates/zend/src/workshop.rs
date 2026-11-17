@@ -125,7 +125,7 @@ async fn save_skill(app: &App, session: Uuid, who: &crate::agents::Agent, args: 
     Ok(format!("{what} {domain}/{name} ({}); it is active now.", dir.display()))
 }
 
-/// After the owner accepts a session's work: the skills it loaded get the outcome.
+/// After the owner archives a session as done: the skills it loaded get the outcome.
 pub async fn on_accept(app: &App, session: Uuid) {
     if let Err(e) = sqlx::query("UPDATE brain_skill_uses SET outcome='session accepted by owner' WHERE session_id=$1").bind(session).execute(&app.db).await {
         tracing::warn!("recording skill outcome: {e:#}");
@@ -135,7 +135,9 @@ pub async fn on_accept(app: &App, session: Uuid) {
 pub async fn stats(db: &sqlx::SqlitePool) -> Result<Value> {
     let rows = sqlx::query(
         "WITH loads AS (SELECT args->>'name' AS name, session_id, created_at FROM tool_calls WHERE name = 'load_skill' AND NOT is_error),
-              verdicts AS (SELECT session_id,decision FROM (SELECT session_id,decision,row_number() OVER(PARTITION BY session_id ORDER BY created_at DESC,id DESC) AS rn FROM session_decisions) WHERE rn=1)
+              legacy AS (SELECT session_id,decision FROM (SELECT session_id,decision,row_number() OVER(PARTITION BY session_id ORDER BY created_at DESC,id DESC) AS rn FROM session_decisions) WHERE rn=1),
+              verdicts AS (SELECT id AS session_id, CASE outcome WHEN 'done' THEN 'accept' ELSE outcome END AS decision FROM sessions WHERE outcome IS NOT NULL
+                           UNION ALL SELECT session_id,decision FROM legacy WHERE session_id NOT IN (SELECT id FROM sessions WHERE outcome IS NOT NULL))
          SELECT l.name, count(*) AS loads, max(l.created_at) AS last,
                 count(*) FILTER (WHERE v.decision = 'accept') AS accepted, count(v.decision) AS judged
          FROM loads l LEFT JOIN verdicts v USING (session_id) GROUP BY l.name",

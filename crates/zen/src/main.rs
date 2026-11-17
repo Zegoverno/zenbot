@@ -72,9 +72,8 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Model { model, session } => shared(&c, json, &format!("model {}", model.unwrap_or_default()), session.as_deref()).await?,
         Cmd::Effort { level, session } => shared(&c, json, &format!("effort {}", level.unwrap_or_default()), session.as_deref()).await?,
-        Cmd::Done { decision, note, session } => shared(&c, json, &format!("done {decision} {}", note.join(" ")), Some(&session)).await?,
         Cmd::Rename { title, session } => shared(&c, json, &format!("rename {}", title.join(" ")), Some(&session)).await?,
-        Cmd::Archive { session } => shared(&c, json, "archive", Some(&session)).await?,
+        Cmd::Archive { outcome, note, session } => shared(&c, json, &format!("archive {} {}", outcome.unwrap_or_default(), note.join(" ")), Some(&session)).await?,
         Cmd::Steer { message, session } => shared(&c, json, &format!("steer {}", message.join(" ")), Some(&session)).await?,
         Cmd::Skills => shared(&c, json, "skills", None).await?,
         Cmd::Tasks => shared(&c, json, "tasks", None).await?,

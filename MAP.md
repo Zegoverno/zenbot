@@ -221,11 +221,10 @@ busy turns, commit) needs no token; the rest are under `/api` (`main.rs`):
 
 | Route | What |
 |---|---|
-| `GET/POST /sessions`, `GET/PATCH /sessions/{id}`, `GET /board` | sessions (`agent` picks who a new one is), their messages, the board |
+| `GET/POST /sessions`, `GET/PATCH /sessions/{id}`, `GET /board` | sessions (`agent` picks who a new one is), their messages, the board; `PATCH` with `archived: true` takes the owner's `outcome` (`done`, `partial`, `not-done`) and `note` |
 | `GET/POST /agents` | the agents and what each may use; make one (`name`, `description`) |
 | `GET/PUT/DELETE /agents/{name}` | an agent's files (`soul`, `identity`, `settings` as text) and session count; replace any of them (settings checked first, old files backed up); remove one (not zenbot; its folder moves to `backups/agents/`) |
 | `GET /sessions/{id}/ws` | the session's events; send `{"type":"prompt","text":…,"mode":"steer"?}` or `{"type":"abort"}` |
-| `POST /sessions/{id}/decision` | the owner's verdict: accept, more, reshape, drop |
 | `GET /models`, `GET /version`, `GET/POST /upgrade` | models, update check, self-upgrade |
 | `POST /complete` | one completion without tools (`model`, `system`, `prompt`, `purpose`), for the owner's apps on this machine (including optional writing apps); logged, not on a tape |
 | `POST /search` | the search tool for the owner's apps (`query`, `scope` default `knowledge`, `limit`): words and meaning, reranked by System One, as JSON results (including optional note-finding apps) |
@@ -245,7 +244,7 @@ WebSocket events (`crates/zen-proto/src/client.rs`): `message`, `busy`, `delta`,
 
 `crates/zen-client/src/commands.rs` is the one command table: `/x` in the web chat, `!x` in
 Matrix and `zen x` on the command line are the same command. Shared: `new` (`new @garry` starts
-a session with another agent), `model`, `effort`, `done`, `rename`, `archive`, `steer`, `agents`, `tasks`, `jobs`, `skills`, `memory`, `mcp`, `models`, `suggestions`,
+a session with another agent), `model`, `effort`, `rename`, `archive [done|partial|not-done [note]]` (how the session ended: the learning loop's ground truth), `steer`, `agents`, `tasks`, `jobs`, `skills`, `memory`, `mcp`, `models`, `suggestions`,
 `status`, `upgrade`. The web chat's own (scope `Screen`): `resume`, `board`, `files`, `open`, `close`, `mouse`,
 `restart`, `help`, `exit`; it gets the list from `zen --commands`. The command line's own: `ask`, `sessions`, `brain`, `s1`,
 `login`, `mcp-pending`, `mcp-respond`. Tests keep the command line and the table in step.
@@ -273,7 +272,7 @@ a session with another agent), `model`, `effort`, `done`, `rename`, `archive`, `
 
 `crates/zend/sqlite-migrations/` (run at start by `storage.rs`; sqlite-vec and FTS5 built in).
 Tables: `sessions`, `tape_events`, `tape_exports`, `pending_prompts`, `turns`, `model_calls`,
-`tool_calls`, `envelopes`, `compactions`, `session_decisions`, `session_scores`,
+`tool_calls`, `envelopes`, `compactions`, `session_decisions` (old `/done` verdicts, history only; `sessions.outcome` replaces them), `session_scores`,
 `prompt_suggestions`, `memories`, `sleep_runs`, `brain_records`, `brain_aliases`, `brain_links`,
 `brain_skill_uses`, `search_docs` (+ `search_docs_fts`), `search_state`, `search_queue`,
 `searches`, `jobs`, `job_runs`, `decisions`, `s1_states`, `s1_outcomes`, `mcp_interactions`,

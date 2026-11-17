@@ -299,7 +299,6 @@ async fn serve() -> Result<()> {
         .route("/agents/{name}", get(get_agent).put(update_agent).delete(delete_agent))
         .route("/sessions/{id}", get(get_session).patch(update_session))
         .route("/sessions/{id}/ws", get(session_ws))
-        .route("/sessions/{id}/decision", axum::routing::post(decide))
         .route("/suggestions", get(assist::stats))
         .route("/memory", get(list_memory))
         .route("/brain", axum::routing::post(brain_action))

@@ -45,9 +45,8 @@ pub const COMMANDS: &[Command] = &[
     cmd("board", "", "every session, running or idle, with its subagents", Screen),
     cmd("model", "[model]", "this session's model (no argument: list them)", Session),
     cmd("effort", "[level]", "this session's thinking level (no argument: the model's levels)", Session),
-    cmd("done", "accept|more|reshape|drop [note]", "your verdict on the work so far", Session),
     cmd("rename", "<title>", "rename this session", Session),
-    cmd("archive", "", "archive this session", Session),
+    cmd("archive", "[done|partial|not-done [note]]", "archive this session, saying how it ended (partial: continue in a new session with a handoff)", Session),
     cmd("steer", "<message>", "change direction at the next tool boundary", Session),
     cmd("files", "[dir]", "the side panel's Files view: the folder tree (ctrl+b)", Screen),
     cmd("open", "[path]", "show a file next to the chat", Screen),
@@ -100,9 +99,9 @@ pub enum Cmd {
     AgentRm(String),
     Model(Option<String>),
     Effort(Option<String>),
-    Done { decision: String, note: Option<String> },
     Rename(String),
-    Archive,
+    /// How the session ended (`done`, `partial`, `not-done`), if said, and a note.
+    Archive { outcome: Option<String>, note: Option<String> },
     Steer(String),
     Tasks,
     Jobs,
@@ -129,7 +128,7 @@ pub enum Cmd {
 impl Cmd {
     /// Whether it acts on a session.
     pub fn needs_session(&self) -> bool {
-        matches!(self, Cmd::Model(Some(_)) | Cmd::Effort(Some(_)) | Cmd::Done { .. } | Cmd::Rename(_) | Cmd::Archive | Cmd::Steer(_))
+        matches!(self, Cmd::Model(Some(_)) | Cmd::Effort(Some(_)) | Cmd::Rename(_) | Cmd::Archive { .. } | Cmd::Steer(_))
     }
 }
 
@@ -173,15 +172,15 @@ pub fn parse(text: &str) -> Option<Result<Cmd, String>> {
             0 | 1 => Ok(Cmd::Effort(opt(rest))),
             _ => usage(),
         },
-        "done" => match words.first().map(|w| w.to_ascii_lowercase()) {
-            Some(d) if ["accept", "more", "reshape", "drop"].contains(&d.as_str()) => {
+        "rename" if !rest.is_empty() => Ok(Cmd::Rename(rest.to_string())),
+        "archive" => match words.first().map(|w| w.to_ascii_lowercase()) {
+            None => Ok(Cmd::Archive { outcome: None, note: None }),
+            Some(o) if ["done", "partial", "not-done"].contains(&o.as_str()) => {
                 let note = rest.split_once(char::is_whitespace).map(|(_, n)| n.trim().to_string()).filter(|n| !n.is_empty());
-                Ok(Cmd::Done { decision: d, note })
+                Ok(Cmd::Archive { outcome: Some(o), note })
             }
             _ => usage(),
         },
-        "rename" if !rest.is_empty() => Ok(Cmd::Rename(rest.to_string())),
-        "archive" if rest.is_empty() => Ok(Cmd::Archive),
         "steer" if !rest.is_empty() => Ok(Cmd::Steer(rest.to_string())),
         "jobs" => match (words.first().map(|w| w.to_ascii_lowercase()).as_deref(), &words[words.len().min(1)..]) {
             (None | Some("list"), []) => Ok(Cmd::Jobs),
@@ -284,19 +283,19 @@ pub async fn run(c: &Client, cmd: &Cmd, session: Option<&str>) -> Result<Reply> 
             let s = c.patch(&format!("/api/sessions/{}", enc(&sid()?)), json!({ "effort": level })).await?;
             reply(format!("Thinking level: {}.", s["effort"].as_str().unwrap_or(level)), s)
         }
-        Cmd::Done { decision, note } => {
-            let id = sid()?;
-            let d = c.post(&format!("/api/sessions/{}/decision", enc(&id)), json!({ "decision": decision, "note": note })).await?;
-            reply(format!("Recorded `{decision}` for {}.", short(&id)), d)
-        }
         Cmd::Rename(title) => {
             let s = c.patch(&format!("/api/sessions/{}", enc(&sid()?)), json!({ "title": title })).await?;
             reply(format!("Renamed: {title}."), s)
         }
-        Cmd::Archive => {
+        Cmd::Archive { outcome, note } => {
             let id = sid()?;
-            let s = c.patch(&format!("/api/sessions/{}", enc(&id)), json!({ "archived": true })).await?;
-            reply(format!("Archived {}.", short(&id)), s)
+            let s = c.patch(&format!("/api/sessions/{}", enc(&id)), json!({ "archived": true, "outcome": outcome, "note": note })).await?;
+            let text = match (outcome.as_deref(), s["continued_by"].as_str()) {
+                (Some(o), Some(next)) => format!("Archived {} as {o}; continue in session {} (its handoff is offered as the first prompt).", short(&id), short(next)),
+                (Some(o), None) => format!("Archived {} as {o}.", short(&id)),
+                _ => format!("Archived {}.", short(&id)),
+            };
+            reply(text, s)
         }
         Cmd::Steer(text) => {
             use futures_util::SinkExt;
@@ -839,7 +838,9 @@ mod tests {
         assert_eq!(parse("jobs runs"), Some(Ok(Cmd::JobRuns(None))));
         assert_eq!(parse("model"), Some(Ok(Cmd::Model(None))));
         assert_eq!(parse("model codex/gpt-6-sol"), Some(Ok(Cmd::Model(Some("codex/gpt-6-sol".into())))));
-        assert_eq!(parse("done accept nice work"), Some(Ok(Cmd::Done { decision: "accept".into(), note: Some("nice work".into()) })));
+        assert_eq!(parse("archive"), Some(Ok(Cmd::Archive { outcome: None, note: None })));
+        assert_eq!(parse("archive Partial tests still red"), Some(Ok(Cmd::Archive { outcome: Some("partial".into()), note: Some("tests still red".into()) })));
+        assert_eq!(parse("archive not-done"), Some(Ok(Cmd::Archive { outcome: Some("not-done".into()), note: None })));
         assert_eq!(parse("rename A new title"), Some(Ok(Cmd::Rename("A new title".into()))));
         assert_eq!(parse("steer stop, use the other file"), Some(Ok(Cmd::Steer("stop, use the other file".into()))));
         assert_eq!(parse("memory sleep"), Some(Ok(Cmd::Sleep)));
@@ -865,7 +866,7 @@ mod tests {
         assert!(matches!(parse("plugins add"), Some(Err(_))));
         assert!(matches!(parse("plugins add --yes"), Some(Err(_))));
         assert!(matches!(parse("plugins add a b"), Some(Err(_))));
-        for gone in ["queue", "approve 1", "deny", "trust add docs.rs", "policy", "tools"] {
+        for gone in ["done accept", "queue", "approve 1", "deny", "trust add docs.rs", "policy", "tools"] {
             assert_eq!(parse(gone), None, "{gone} is gone");
         }
         assert_eq!(parse("board"), None, "a screen command is the web chat's own");
@@ -877,7 +878,7 @@ mod tests {
     fn a_wrong_shape_is_usage_never_a_guess() {
         assert!(matches!(parse("jobs run"), Some(Err(u)) if u.starts_with("usage: jobs")));
         assert!(matches!(parse("jobs run a b"), Some(Err(_))));
-        assert!(matches!(parse("done maybe"), Some(Err(_))));
+        assert!(matches!(parse("archive maybe"), Some(Err(_))));
         assert!(matches!(parse("rename"), Some(Err(_))));
         assert!(matches!(parse("archive now"), Some(Err(_))));
         assert!(matches!(parse("memory forever"), Some(Err(_))));
