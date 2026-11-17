@@ -279,7 +279,6 @@ pub fn specs(kind: Option<&str>) -> Value {
     all.push(crate::mcp::load_spec());
     all.push(crate::mcp::call_spec());
     all.push(verify_spec());
-    all.push(crate::work::spec());
     if !subagent {
         all.push(crate::delegate::spec());
         all.push(crate::jobs::spec());
@@ -356,10 +355,6 @@ If a question goes unanswered, take your recommended option and say it was an as
             let (content, is_error) = crate::skills::run_tool(&app.db, session, &who.skill_roots(), name, args).await;
             out(content, is_error)
         }
-        "work" => Some(match crate::work::run(&app.db, session, who, workspace, args).await {
-            Ok(value) => tools::ToolOutput::text(value.to_string(), false),
-            Err(e) => tools::ToolOutput::error(format!("work failed: {e:#}")),
-        }),
         "verify" => Some(verify(app, session, workspace, who, args).await),
         "web_search" | "web_fetch" => crate::web::run_tool(app, name, args).await,
         "search" => crate::search::run_tool(app, session, who, name, args).await,

@@ -29,7 +29,6 @@ mod secrets;
 mod skills;
 mod tape;
 mod tasks;
-mod work;
 mod storage;
 #[cfg(test)]
 mod test_util;
@@ -221,8 +220,6 @@ async fn serve() -> Result<()> {
     if tape::repair(&db).await? > 0 {
         tracing::warn!("numbered tape blocks an older build wrote");
     }
-
-    work::recover(&db).await?;
 
     let updater = Arc::new(update::Updater::new(PathBuf::from(&repo_dir)));
     let harness = std::env::var("ZEN_HARNESS").ok().filter(|h| !h.is_empty()).unwrap_or_else(|| updater.running());

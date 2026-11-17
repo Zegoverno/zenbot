@@ -88,14 +88,6 @@ One list per session, in a fixed order (`agent.rs::specs`):
   duplicates refused, each save a commit in the skills folder).
 - MCP (`mcp.rs`): `find_tools`, `load_tool`, `call_tool` over the servers in `~/.zenbot/mcp.json`
   and the agent's own `agents/<name>/mcp.json`.
-- Work records (`work.rs`): `work create/get/submit` freezes a goal and criteria, starts one
-  session-bound attempt and records submitted answer/file identities. Idempotent writes append
-  `work_created`, `work_submitted`, `work_interrupted` events and update `work_items`,
-  `work_attempts`, `work_artifacts` in one transaction. Submission completes execution, never
-  verification or acceptance. Startup interrupts unfinished attempts before workers start.
-  Reads are agent-scoped (zenbot sees all); writes require the executing session. Files are
-  workspace-relative regular files, descriptor-checked against the sandbox, at most 16 MB each.
-  Contracts have no edit API; retries, assessments and delegation/verify integration are later work.
 - Work: `ask` (questions to the owner), `verify` (`agent.rs`: the kernel runs the checks, a fresh
   verifier session judges the rest), `delegate` (`delegate.rs`: subagents in parallel, each optionally in a `role`
   (`roles.rs`, below; with neither a role nor a model, System One may pick one, `role_pick`); on the task's model, else the role's, else the other agent's, else the roles
@@ -272,7 +264,7 @@ a session with another agent), `model`, `effort`, `rename`, `archive [done|parti
 
 `crates/zend/sqlite-migrations/` (run at start by `storage.rs`; sqlite-vec and FTS5 built in).
 Tables: `sessions`, `tape_events`, `tape_exports`, `pending_prompts`, `turns`, `model_calls`,
-`tool_calls`, `envelopes`, `compactions`, `session_decisions` (old `/done` verdicts, history only; `sessions.outcome` replaces them), `session_scores`,
+`tool_calls`, `envelopes`, `compactions`, `session_decisions` (old `/done` verdicts, history only; `sessions.outcome` replaces them),
 `prompt_suggestions`, `memories`, `sleep_runs`, `brain_records`, `brain_aliases`, `brain_links`,
 `brain_skill_uses`, `search_docs` (+ `search_docs_fts`), `search_state`, `search_queue`,
 `searches`, `jobs`, `job_runs`, `decisions`, `s1_states`, `s1_outcomes`, `mcp_interactions`,
