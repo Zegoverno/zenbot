@@ -722,6 +722,11 @@ try {
   await page.keyboard.press('Control+b');
   await page.locator('.zside').waitFor();
   const sidePane = page.locator('.zside');
+  // The side panel's Sessions leave out the open session but show its own subagents working.
+  await sidePane.getByRole('tab', { name: 'Sessions', exact: true }).click();
+  await sidePane.getByText('THIS SESSION').waitFor();
+  assert.match(await sidePane.locator('.row', { hasText: 'Check the plan' }).innerText(), /verifier:/);
+  assert.equal(await sidePane.locator('.row', { hasText: 'Plan the week' }).count(), 0, 'the open session itself stays out');
   await box.fill('Keep streaming while I read');
   await box.press('Enter');
   await page.getByText('Streaming', { exact: true }).waitFor();
