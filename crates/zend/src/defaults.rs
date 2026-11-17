@@ -12,6 +12,8 @@ const FILES: &[(&str, &str)] = &[
     // project's own instruction file (context.rs).
     ("AGENTS.md", include_str!("../defaults/AGENTS.default.md")),
     ("USER.md", include_str!("../defaults/USER.md")),
+    // zenbot's roles for subagents (roles.rs); the agent keeps them.
+    ("agents/zenbot/roles.toml", crate::roles::DEFAULT),
     ("global/skills/work/brief/SKILL.md", include_str!("../defaults/skills/work/brief/SKILL.md")),
     ("global/skills/work/brief/references/template.md", include_str!("../defaults/skills/work/brief/references/template.md")),
     ("global/skills/work/verify/SKILL.md", include_str!("../defaults/skills/work/verify/SKILL.md")),

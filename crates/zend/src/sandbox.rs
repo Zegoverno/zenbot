@@ -6,7 +6,7 @@
 //! empty tmpfs (so `HOME` stays the owner's path, writable but thrown away after each command:
 //! tools find `~/.gitconfig` and `~/.local/bin` where they expect them and can write caches), and
 //! on top of it only the agent's own folders, the shared instructions and the paths its
-//! `agent.toml` names. Its own folder (`agents/<name>/`) is read-only but for `IDENTITY.md` and its
+//! `agent.toml` names. Its own folder (`agents/<name>/`) is read-only but for `IDENTITY.md`, `roles.toml` and its
 //! default workspace `work/`: the kernel acts on the rest (`agent.toml`, `mcp.json`, `SOUL.md`,
 //! `skills/`), so the agent can't change those or create a missing one. A mount deeper in the tree wins over a shallower one, in bubblewrap (bound
 //! later) and in `check` (the longest match) alike. `/tmp` is private. The PID namespace is the
@@ -506,8 +506,11 @@ pub fn mounts(l: &Layout) -> Vec<Mount> {
     // skills/), so the agent must not create or change those. It keeps only its IDENTITY.md (made
     // before the mount: `Agent::mounts`) and its default workspace `work/`, bound back writable.
     m.push(Mount::new(l.dir, Access::Read));
-    if l.dir.join("IDENTITY.md").is_file() {
-        m.push(Mount::new(l.dir.join("IDENTITY.md"), Access::Write));
+    // Both files it keeps itself: its IDENTITY.md and its roles.toml (roles.rs).
+    for kept in ["IDENTITY.md", crate::roles::FILE] {
+        if l.dir.join(kept).is_file() {
+            m.push(Mount::new(l.dir.join(kept), Access::Write));
+        }
     }
     m.push(Mount::new(l.workspace, Access::Write));
     m.extend(l.read.iter().map(|p| Mount::new(p, Access::Read)));
@@ -706,7 +709,7 @@ mod tests {
         for d in ["global/agents/garry/wiki", "global/agents/other", "global/wiki", "agents/garry/work", "agents/other"] {
             std::fs::create_dir_all(zen.join(d)).unwrap();
         }
-        for f in ["token", "USER.md", "AGENTS.md", "agents/garry/agent.toml", "agents/garry/SOUL.md", "agents/garry/IDENTITY.md", "global/wiki/page.md", "global/agents/other/secret.md"] {
+        for f in ["token", "USER.md", "AGENTS.md", "agents/garry/agent.toml", "agents/garry/SOUL.md", "agents/garry/IDENTITY.md", "agents/garry/roles.toml", "global/wiki/page.md", "global/agents/other/secret.md"] {
             std::fs::write(zen.join(f), "x").unwrap();
         }
         std::fs::create_dir_all(user.join("repo")).unwrap();
@@ -726,7 +729,7 @@ mod tests {
         let s = sandbox(&h, Global::None, &[], &[]);
         let z = &h.zen;
         // Its own folders, writable.
-        for p in ["agents/garry/work/new/file.md", "global/agents/garry/wiki/x.md", "agents/garry/IDENTITY.md"] {
+        for p in ["agents/garry/work/new/file.md", "global/agents/garry/wiki/x.md", "agents/garry/IDENTITY.md", "agents/garry/roles.toml"] {
             assert_eq!(s.check(&z.join(p), true), Ok(()), "{p}");
         }
         // The rest of its folder (settings it has or not, skills, any new file) and the shared
@@ -794,6 +797,7 @@ mod tests {
         }
         assert!(!h.zen.join("agents/garry/mcp.json").exists() && !h.zen.join("agents/garry/skills").exists());
         assert!(!run("edit", serde_json::json!({"path": "../IDENTITY.md", "old_text": "x", "new_text": "y"})).await.is_error);
+        assert!(!run("edit", serde_json::json!({"path": "../roles.toml", "old_text": "x", "new_text": "y"})).await.is_error, "it keeps its roles");
         std::os::unix::fs::symlink(h.zen.join("token"), ws.join("t")).unwrap();
         assert!(run("read", serde_json::json!({"path": "t"})).await.is_error, "a link out");
     }

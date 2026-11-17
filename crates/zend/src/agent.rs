@@ -629,6 +629,7 @@ mod tests {
         let settings = |path: &str| matches!(at("write", path), Some(Protected::AgentSettings(_)));
         assert!(settings("garry/agent.toml") && settings("zenbot/agent.toml") && settings("./garry/../garry/agent.toml"));
         assert!(!settings("garry/skills/agent.toml"), "only the agent's own settings file");
+        assert!(at("write", "garry/roles.toml").is_none() && at("edit", "zenbot/roles.toml").is_none(), "an agent keeps its roles");
         assert!(at("read", "garry/agent.toml").is_none(), "reading is fine");
     }
 

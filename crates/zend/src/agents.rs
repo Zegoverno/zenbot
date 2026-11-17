@@ -5,6 +5,7 @@
 //! agents/<name>/SOUL.md       who it is (the owner's file)
 //! agents/<name>/IDENTITY.md   how it works (the agent keeps it)
 //! agents/<name>/agent.toml    what it may use (optional; the owner's file)
+//! agents/<name>/roles.toml    its roles for subagents (the agent keeps it; roles.rs)
 //! agents/<name>/skills/       its own skills (optional), on top of the shared ones
 //! ```
 //!
@@ -27,7 +28,7 @@
 //! tools refuse other paths, so even with `bash` it reaches only its
 //! workspace (by default `agents/<name>/work`), vault and folder, the system, the shared
 //! instructions, the global vault as `global` allows, and the `read`/`write` paths of `agent.toml`.
-//! Its folder is read-only to it but for `IDENTITY.md` and `work/`: the kernel trusts the rest
+//! Its folder is read-only to it but for `IDENTITY.md`, `roles.toml` and `work/`: the kernel trusts the rest
 //! (settings, soul, skills, which `save_skill` writes for it), so the agent can't create a missing
 //! `mcp.json` or `agent.toml` either; `workspace`/`write` paths inside the folder must be under
 //! `work/`. Its own MCP servers run in its sandbox too (`mcp.rs`).
@@ -148,7 +149,7 @@ impl Agent {
         if self.name != DEFAULT && t["name"] == "bash" {
             if let Some(d) = t["description"].as_str() {
                 let global = match self.global_level() { Global::None => "", Global::Read => ", the shared vault read-only", Global::Write => ", the shared vault" };
-                let here = format!("Runs in a sandbox that sees only your workspace, vault and agent folder (read-only but for IDENTITY.md and work/; plus system and tool folders{global}, and paths your agent.toml adds); the rest of the home is hidden.");
+                let here = format!("Runs in a sandbox that sees only your workspace, vault and agent folder (read-only but for IDENTITY.md, roles.toml and work/; plus system and tool folders{global}, and paths your agent.toml adds); the rest of the home is hidden.");
                 t["description"] = Value::String(d.replace("Runs as the owner on the host.", &here));
             }
         }
@@ -239,6 +240,8 @@ impl Agent {
                 tracing::warn!("creating {}: {e}", identity.display());
             }
         }
+        // Its roles.toml too, which it keeps the same way (roles.rs).
+        crate::roles::ensure(&dir);
         let l = crate::sandbox::Layout {
             user_home, zen: home, global: &global, dir: &dir, vault: &vault, workspace: &workspace,
             global_level: self.global_level(), read: &self.read, write: &self.write,
@@ -536,6 +539,7 @@ fn create_in(home: &Path, name: &str, description: &str) -> Result<Agent> {
     std::fs::write(dir.join("SOUL.md"), soul)?;
     std::fs::write(dir.join("IDENTITY.md"), identity)?;
     std::fs::write(dir.join("agent.toml"), settings)?;
+    std::fs::write(dir.join(crate::roles::FILE), crate::roles::DEFAULT)?;
     write_vault(&vault_in(&home.join("global"), name), name)?;
     load_in(home, name)
 }

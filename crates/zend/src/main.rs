@@ -20,6 +20,7 @@ mod measure;
 mod memory;
 mod brain;
 mod mind;
+mod roles;
 mod s1;
 mod search;
 mod sandbox;
