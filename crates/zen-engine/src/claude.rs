@@ -1,7 +1,8 @@
 //! Claude engine: runs each turn with the official `claude` CLI on the owner's Claude plan.
 //! Built-in tools are off; the only tools are zenbot's (via the MCP bridge), and zenbot's system
 //! prompt replaces Claude Code's. Every run must show its tool list (`system/init`, only notices may come before it), with
-//! nothing but zenbot's tools in it, or it is stopped (`check_init`).
+//! nothing but zenbot's tools in it, or it is stopped (`check_init`). Its MCP tool idle limit is
+//! off, so long tool calls aren't cut (bridge.rs).
 //!
 //! Engine sessions (MAP.md, "Context"): Claude Code caches earlier turns only within its own session,
 //! so each zenbot session keeps a matching Claude Code session, run from one fixed directory. When
@@ -230,6 +231,9 @@ async fn drive(ctx: &TurnCtx, input: &TurnInput, mut abort: watch::Receiver<bool
         (_, Some(id)) => cmd.args(["--session-id", id]),
         _ => cmd.arg("--no-session-persistence"),
     };
+    // zenbot's tools may run for hours (a `delegate` child, `verify`); the kernel bounds them, so
+    // Claude Code's MCP idle limit is off (0 disables it; the bridge's progress also resets it).
+    cmd.env("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", "0");
     let mut child = cmd
         .args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages"])
         .args(["--tools", "", "--strict-mcp-config", "--mcp-config", &mcp, "--setting-sources", ""])
