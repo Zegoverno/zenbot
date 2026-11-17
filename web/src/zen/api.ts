@@ -166,6 +166,10 @@ export interface Plugin {
   contributes: { views?: PluginView[]; openers?: PluginOpener[]; games?: PluginGame[]; commands?: PluginCommand[] };
   permissions: string[];
   enabled: boolean;
+  /** The owner's AI switch (only matters with the `ai` permission): off refuses its completions. */
+  ai_enabled?: boolean;
+  /** Its answered completions (sampling) in the last 30 days. */
+  ai_calls_30d?: number;
 }
 /** `"<pattern>:<mode>"` → `"<plugin>/<opener id>"` or `"builtin"`. */
 export type OpenerDefaults = Record<string, string>;
@@ -193,6 +197,7 @@ export const pluginApi = {
   list: () => call<{ plugins: Plugin[]; defaults: OpenerDefaults }>('GET', '/api/zen/plugins'),
   setDefault: (key: string, value: string) => call<unknown>('PUT', '/api/zen/plugins/defaults', { key, value }),
   setEnabled: (name: string, enabled: boolean) => call<unknown>('PATCH', `/api/zen/plugins/${enc(name)}`, { enabled }),
+  setAi: (name: string, ai: boolean) => call<unknown>('PATCH', `/api/zen/plugins/${enc(name)}`, { ai }),
   remove: (name: string) => call<unknown>('DELETE', `/api/zen/plugins/${enc(name)}`),
   /** The entries; the kernel may answer with the list itself or `{ plugins }` / `{ entries }`. */
   marketplace: async () => {

@@ -31,8 +31,15 @@ plugins_host() {
   r=$(plugin_call hello_dial "$(jq -nc --argjson port "$PORT" '{host:"127.0.0.1",port:$port}')")
   check "no host loopback" eq "$(jq -r '.content[0].text == "connected"' <<<"$r")" false
   r=$(plugin_call hello_ask '{"prompt":"FACT: sampling works","maxTokens":8}')
-  check "sampling fails closed without a native cap" eq "$(jq -r .isError <<<"$r")" true
-  check "sampling refusal audited without generation" eq "$(q "SELECT count(*) FROM plugin_calls WHERE caller='sampling' AND is_error=1 AND output_bytes=0 AND model IS NULL")" 1
+  check "sampling answered with ai" eq "$(jq -r '[.isError, (.content[0].text|contains("FACT: sampling works"))]|join("|")' <<<"$r")" 'false|true'
+  check "sampling audited with its model" eq "$(q "SELECT count(*) FROM plugin_calls WHERE caller='sampling' AND is_error=0 AND output_bytes>0 AND model='faux/smoke'")" 1
+  check "AI calls counted" eq "$(plugin_api "$URL/api/plugins" | jq -r '.plugins[0]|[.ai_enabled,.ai_calls_30d]|join("|")')" 'true|1'
+  r=$(plugin_api -X PATCH -d '{"ai":false}' "$URL/api/plugins/hello")
+  check "AI switched off" eq "$(jq -r .ai_enabled <<<"$r")" false
+  r=$(plugin_call hello_ask '{"prompt":"FACT: switched off"}')
+  check "sampling refused when AI is off" eq "$(jq -r '[.isError, (.content[0].text|contains("AI is turned off for this plugin"))]|join("|")' <<<"$r")" 'true|true'
+  check "refusal audited without generation" eq "$(q "SELECT count(*) FROM plugin_calls WHERE caller='sampling' AND is_error=1 AND model IS NULL")" 1
+  plugin_api -X PATCH -d '{"ai":true}' "$URL/api/plugins/hello" >/dev/null
   plugin_api -X PUT -d '{"key":"*.hello:read","value":"hello/open"}' "$URL/api/plugins/defaults" >/dev/null
   plugin_api -X PATCH -d '{"enabled":false}' "$URL/api/plugins/hello" >/dev/null
   check "disabled server refused" eq "$(plugin_api -o /dev/null -w '%{http_code}' -d '{"tool":"hello_greet"}' "$URL/api/plugins/hello/call")" 409

@@ -119,14 +119,14 @@ pub struct Complete {
     pub max_output_tokens: Option<u32>,
 }
 
-/// No bypass: sampling requires verified native caps and durable request/spend budgets.
-pub const PLUGIN_SAMPLING_UNAVAILABLE: &str = "plugin sampling unavailable: native output-token limits and per-plugin/session request/spend budgets are not supported; no completion was started";
+/// The answer to a completion asking for an output cap: no engine fakes one it can't enforce.
+pub const OUTPUT_CAP_UNSUPPORTED: &str = "output-token caps are not supported by the CLI engines; no completion was started";
 
 impl Complete {
     /// No current CLI adapter supports a verified native output-token cap.
     pub fn check_output_limit(&self) -> Result<(), &'static str> {
         if self.max_output_tokens.is_some() {
-            Err(PLUGIN_SAMPLING_UNAVAILABLE)
+            Err(OUTPUT_CAP_UNSUPPORTED)
         } else {
             Ok(())
         }
@@ -458,7 +458,7 @@ mod tests {
             } }));
             let Request::Complete(req) = req else { panic!() };
             assert_eq!(req.max_output_tokens, Some(max));
-            assert_eq!(req.check_output_limit(), Err(PLUGIN_SAMPLING_UNAVAILABLE));
+            assert_eq!(req.check_output_limit(), Err(OUTPUT_CAP_UNSUPPORTED));
         }
         for invalid in [json!(-1), json!("1024"), json!(1.5), json!(u64::MAX)] {
             assert!(Request::parse("complete", json!({ "max_output_tokens": invalid })).is_err());

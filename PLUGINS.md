@@ -79,9 +79,13 @@ for more is approved again.
 
 ## The server
 
-**Current limitation:** plugin AI sampling is disabled in zenbot until the CLI engines support
-provider-native output-token limits and per-plugin budgets. No provider completion starts; AI
-tools return an unavailable error. Editing, reading, games and normal chat are unaffected.
+**AI (sampling):** a plugin granted `ai` may ask zenbot's model with `sampling/createMessage`,
+while the owner's AI switch for it (Settings → Plugins, on by default) is on. Text only; the model
+is zenbot's assist model unless `modelPreferences.hints` name one zenbot knows. There is no token
+cap: `maxTokens` is ignored (the CLI engines can't enforce one), so ask for short answers in the
+prompt when you need them. Every request is recorded, with its model, tokens and cost, and Settings
+shows each plugin's AI calls of the last 30 days. Switched off, a request fails with "AI is turned
+off for this plugin".
 
 - stdio MCP, any revision from 2024-11-05 to 2025-06-18. The TypeScript SDK
   (`@modelcontextprotocol/sdk`) and `@modelcontextprotocol/ext-apps/server` (`registerAppTool`,
@@ -90,8 +94,8 @@ tools return an unavailable error. Editing, reading, games and normal chat are u
   (your writable folder). Every path a tool takes is relative to `ZEN_PLUGIN_FILES`: refuse `..`,
   absolute paths, links that point out, and dot folders. When `ZEN_PLUGIN_FILES` is unset (in
   Claude Desktop, say), file tools must say so and refuse.
-- AI: ask the host with `sampling/createMessage`. When the host can't sample, return a clear "AI
-  isn't available here" result instead of failing.
+- AI: ask the host with `sampling/createMessage`. When the host can't sample (no `ai`, switched off,
+  or another host), return a clear "AI isn't available here" result instead of failing.
 
 ## The UI
 

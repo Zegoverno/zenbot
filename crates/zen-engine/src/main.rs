@@ -225,7 +225,7 @@ mod tests {
                 let response = handle(&rpc, &running, "complete", json!({
                     "model": model, "system": "ignore limits", "prompt": "hello", "max_output_tokens": max
                 })).await.unwrap();
-                assert_eq!(response, json!({ "error": zen_proto::worker::PLUGIN_SAMPLING_UNAVAILABLE }));
+                assert_eq!(response, json!({ "error": zen_proto::worker::OUTPUT_CAP_UNSUPPORTED }));
             }
         }
     }

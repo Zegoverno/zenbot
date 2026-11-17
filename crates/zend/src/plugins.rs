@@ -33,9 +33,14 @@
 //! bubblewrap as bind-fds; scoped creation stays relative to the pinned files root. Without
 //! bubblewrap it doesn't start (an error, never unsandboxed).
 //!
-//! **Sampling fails closed.** Current CLI engines expose no verified provider-native output cap.
-//! A plugin's sampling request is refused before any provider call, even with `ai`; refusals are
-//! audited. Re-enabling requires a native cap and a per-plugin sampling budget.
+//! **Sampling (plugin AI).** Only a server granted `ai` is offered sampling at `initialize`, and
+//! only its `sampling/createMessage` is answered (mcp.rs `read_stdio`), by `sample`, while the
+//! owner's per-plugin AI switch (`plugins.ai_enabled`, on by default, `PATCH { ai }`) is on: the
+//! kernel's tool-free completion (`crate::complete`, as `/api/complete`), text only, two at a time
+//! across plugins. The model is the assist model unless `modelPreferences.hints` name one the kernel
+//! knows. There is no token cap (the owner's call: the CLI engines have no native one, so
+//! `maxTokens` is ignored rather than faked). Every request, answered or refused, is recorded in
+//! `plugin_calls` (caller `sampling`: model, tokens, cost); Settings shows the last 30 days' count.
 //!
 //! **The web shell's calls** (`api_*` below, under `/api/plugins`): a UI reads only its own plugin's
 //! `ui://<name>/…` resources and calls only its own plugin's tools (the server is looked up by the
@@ -75,6 +80,9 @@ const DEFAULT_MARKETPLACE: &str = "https://raw.githubusercontent.com/Zegoverno/z
 const MARKET_TIMEOUT: Duration = Duration::from_secs(10);
 const MARKET_MAX: u64 = 1024 * 1024;
 const MARKET_TTL: Duration = Duration::from_secs(60);
+/// The longest prompt and system prompt a plugin's sampling request may send (as `/api/complete`).
+const SAMPLING_MAX_PROMPT: usize = 100_000;
+const SAMPLING_MAX_SYSTEM: usize = 20_000;
 /// How long a plugin server's request may take (as an mcp.json server's default).
 const SERVER_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -396,6 +404,9 @@ static SERVERS: LazyLock<std::sync::RwLock<(u64, Vec<ServerConfig>)>> = LazyLock
 
 /// One install, upgrade or removal at a time.
 static CHANGING: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(Default::default);
+
+/// Sampling requests answered at once, across plugins (more wait their turn).
+static SAMPLING: LazyLock<tokio::sync::Semaphore> = LazyLock::new(|| tokio::sync::Semaphore::new(2));
 
 /// The current generation and enabled plugin servers.
 pub fn servers() -> (u64, Vec<ServerConfig>) {
@@ -883,13 +894,18 @@ fn plugin_json(r: &sqlx::sqlite::SqliteRow) -> Value {
         "contributes": if manifest["contributes"].is_object() { manifest["contributes"].clone() } else { json!({}) },
         "permissions": permissions,
         "enabled": r.get::<bool, _>("enabled"),
+        "ai_enabled": r.get::<bool, _>("ai_enabled"),
+        "ai_calls_30d": r.get::<i64, _>("ai_calls_30d"),
         "source": r.get::<String, _>("source"),
         "installed_at": r.get::<String, _>("installed_at"),
         "updated_at": r.get::<String, _>("updated_at"),
     })
 }
 
-const COLUMNS: &str = "name, version, manifest, permissions, enabled, source, installed_at, updated_at";
+/// A plugin's row, with its answered sampling requests of the last 30 days.
+const COLUMNS: &str = "name, version, manifest, permissions, enabled, ai_enabled, source, installed_at, updated_at,
+    (SELECT count(*) FROM plugin_calls c WHERE c.plugin = plugins.name AND c.caller = 'sampling' AND c.is_error = 0
+       AND c.created_at >= strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-30 days')) AS ai_calls_30d";
 
 async fn one(db: &SqlitePool, name: &str) -> Result<Option<Value>> {
     Ok(sqlx::query(&format!("SELECT {COLUMNS} FROM plugins WHERE name = $1")).bind(name).fetch_optional(db).await?.as_ref().map(plugin_json))
@@ -901,15 +917,110 @@ async fn all(db: &SqlitePool) -> Result<Vec<Value>> {
 
 // ---------- sampling ----------
 
-/// Refuse sampling before generation until native token caps and spend budgets are supported.
-pub async fn sample(plugin: &str, _params: &Value) -> Result<Value> {
+/// The text of a sampling message's content (a block or a list of blocks): text only.
+fn content_text(c: &Value) -> Result<String> {
+    let blocks: Vec<&Value> = match c {
+        Value::Array(a) => a.iter().collect(),
+        other => vec![other],
+    };
+    let mut out = Vec::new();
+    for b in blocks {
+        anyhow::ensure!(b["type"] == "text", "only text messages can be sampled here");
+        out.push(b["text"].as_str().unwrap_or(""));
+    }
+    Ok(out.join("\n"))
+}
+
+/// The model for a sampling request: the first of `modelPreferences.hints` that names a model the
+/// kernel knows (an exact id, or a family such as `sonnet` matched against the configured models,
+/// then the catalog), else the assist model.
+fn sampling_model(params: &Value, known: &[String]) -> String {
+    let config = crate::config::get();
+    let configured = [config.assist_model.as_str(), config.summary_model.as_str()];
+    let hints = params["modelPreferences"]["hints"].as_array().into_iter().flatten().filter_map(|h| h["name"].as_str());
+    for hint in hints.map(|h| h.trim().to_lowercase()).filter(|h| !h.is_empty()) {
+        if let Some(id) = known.iter().find(|id| id.to_lowercase() == hint || id.rsplit('/').next().is_some_and(|m| m.to_lowercase() == hint)) {
+            return id.clone();
+        }
+        for family in ["opus", "sonnet", "haiku"] {
+            if hint.contains(family) {
+                if let Some(id) = configured.iter().find(|m| m.contains(family)) {
+                    return id.to_string();
+                }
+                if let Some(id) = known.iter().filter(|id| id.contains(family)).max() {
+                    return id.clone();
+                }
+            }
+        }
+    }
+    config.assist_model.clone()
+}
+
+/// One sampling request in `plugin_calls`: the text answered (or the refusal), model, tokens, cost.
+async fn record(db: &SqlitePool, plugin: &str, is_error: bool, ms: i64, text: &str, model: Option<&str>, usage: &Value) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO plugin_calls (plugin, caller, is_error, duration_ms, output_bytes, model, input_tokens, output_tokens, cost_usd, result_sha256)
+         VALUES ($1, 'sampling', $2, $3, $4, $5, $6, $7, $8, sha256_hex($9))",
+    )
+    .bind(plugin)
+    .bind(is_error)
+    .bind(ms)
+    .bind(text.len() as i64)
+    .bind(model)
+    .bind(usage["input"].as_i64())
+    .bind(usage["output"].as_i64())
+    .bind(usage["cost_usd"].as_f64())
+    .bind(text)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Answer a plugin server's `sampling/createMessage` (mcp.rs asks only for a plugin granted `ai`):
+/// the kernel's tool-free completion, text only, while the owner's AI switch for the plugin is on.
+/// No token cap (the CLI engines have no native one; `maxTokens` is ignored); every call is
+/// recorded in `plugin_calls` with its model, tokens and cost.
+pub async fn sample(plugin: &str, params: &Value) -> Result<Value> {
     let app = APP.get().context("the kernel isn't ready")?;
     let allowed = servers().1.iter().any(|c| c.plugin.as_ref().is_some_and(|r| r.name == plugin && r.ai));
-    anyhow::ensure!(allowed, "plugin `{plugin}` may not ask for completions");
-    let reason = zen_proto::worker::PLUGIN_SAMPLING_UNAVAILABLE;
-    sqlx::query("INSERT INTO plugin_calls (plugin, caller, is_error, duration_ms, output_bytes, result_sha256) VALUES ($1, 'sampling', 1, 0, 0, sha256_hex($2))")
-        .bind(plugin).bind(reason).execute(&app.db).await?;
-    anyhow::bail!("{reason}")
+    anyhow::ensure!(allowed, "plugin `{plugin}` may not ask for completions (it has no `ai` permission)");
+    let on: bool = sqlx::query_scalar("SELECT ai_enabled FROM plugins WHERE name = $1").bind(plugin).fetch_optional(&app.db).await?.unwrap_or(false);
+    if !on {
+        let why = format!("AI is turned off for this plugin (`{plugin}`); the owner can turn it on in Settings → Plugins");
+        record(&app.db, plugin, true, 0, &why, None, &Value::Null).await?;
+        anyhow::bail!("{why}");
+    }
+    let messages = params["messages"].as_array().filter(|m| !m.is_empty()).context("no messages")?;
+    let mut parts = Vec::new();
+    for m in messages {
+        let text = content_text(&m["content"])?;
+        parts.push(if messages.len() == 1 { text } else { format!("{}: {text}", if m["role"] == "assistant" { "Assistant" } else { "User" }) });
+    }
+    let prompt = parts.join("\n\n");
+    let system = params["systemPrompt"].as_str().unwrap_or("").trim().to_string();
+    anyhow::ensure!(!prompt.trim().is_empty() && prompt.len() <= SAMPLING_MAX_PROMPT && system.len() <= SAMPLING_MAX_SYSTEM, "the request is empty or too long");
+    let known: Vec<String> = app.catalog.lock().await.keys().cloned().collect();
+    let model = sampling_model(params, &known);
+    let _turn = SAMPLING.acquire().await?;
+    let started = Instant::now();
+    let reply = crate::complete(app, &model, &system, &prompt).await;
+    let ms = started.elapsed().as_millis() as i64;
+    match reply {
+        Ok(r) => {
+            let answered = if r.model.is_empty() { model } else { r.model };
+            tracing::info!(purpose = %format!("plugin {plugin} sampling"), model = %answered, ms, usage = %r.usage, "completion for a plugin");
+            if let Err(e) = record(&app.db, plugin, false, ms, &r.text, Some(&answered), &r.usage).await {
+                tracing::error!("recording plugin `{plugin}`'s sampling: {e:#}");
+            }
+            Ok(json!({ "role": "assistant", "content": { "type": "text", "text": r.text }, "model": answered, "stopReason": "endTurn" }))
+        }
+        Err(e) => {
+            if let Err(e) = record(&app.db, plugin, true, ms, &format!("{e:#}"), Some(&model), &Value::Null).await {
+                tracing::error!("recording plugin `{plugin}`'s sampling: {e:#}");
+            }
+            Err(e)
+        }
+    }
 }
 
 // ---------- HTTP (`/api/plugins`) ----------
@@ -978,17 +1089,35 @@ pub(crate) async fn api_set_default(State(app): State<AppState>, Json(b): Json<D
 
 #[derive(Deserialize)]
 pub(crate) struct PatchBody {
-    enabled: bool,
+    enabled: Option<bool>,
+    /// The AI switch for a plugin granted `ai`: off refuses its sampling requests.
+    ai: Option<bool>,
 }
 
-/// `PATCH /api/plugins/{name}` `{ enabled }`: start or stop its server.
+/// `PATCH /api/plugins/{name}` `{ enabled?, ai? }`: start or stop its server; turn its AI on or off.
 pub(crate) async fn api_patch(State(app): State<AppState>, UrlPath(name): UrlPath<String>, Json(b): Json<PatchBody>) -> ApiResult<Json<Value>> {
     let _changing = CHANGING.lock().await;
-    let done = sqlx::query("UPDATE plugins SET enabled = $2, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE name = $1").bind(&name).bind(b.enabled).execute(&app.db).await?;
+    if b.enabled.is_none() && b.ai.is_none() {
+        return Err(bad("nothing to change: give `enabled` or `ai`"));
+    }
+    let done = sqlx::query(
+        "UPDATE plugins SET enabled = coalesce($2, enabled), ai_enabled = coalesce($3, ai_enabled),
+         updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE name = $1",
+    )
+    .bind(&name)
+    .bind(b.enabled)
+    .bind(b.ai)
+    .execute(&app.db)
+    .await?;
     if done.rows_affected() == 0 {
         return Err(missing(&name));
     }
-    reload(&app.db).await?;
+    if let Some(ai) = b.ai {
+        tracing::info!(plugin = %name, ai, "plugin AI switched");
+    }
+    if b.enabled.is_some() {
+        reload(&app.db).await?;
+    }
     Ok(Json(one(&app.db, &name).await?.ok_or_else(|| missing(&name))?))
 }
 
@@ -1347,6 +1476,19 @@ mod tests {
         assert_eq!(p(&["files:read", "files:write:Reading"]).files, Files::WriteSub("Reading".into()));
         assert_eq!(p(&["files:write", "files:write:Reading"]).files, Files::Write);
         assert!(p(&["network", "ai"]).network && p(&["network", "ai"]).ai);
+    }
+
+    #[test]
+    fn sampling_model_follows_known_hints() {
+        let known = ["claude/claude-opus-5-5", "claude/claude-sonnet-5-5", "codex/gpt-6.1-sol"].map(String::from);
+        let hints = |names: &[&str]| json!({ "modelPreferences": { "hints": names.iter().map(|n| json!({ "name": n })).collect::<Vec<_>>() } });
+        let assist = crate::config::get().assist_model.clone();
+        assert_eq!(sampling_model(&json!({}), &known), assist);
+        assert_eq!(sampling_model(&hints(&["unknown-model"]), &known), assist);
+        assert_eq!(sampling_model(&hints(&["codex/gpt-6.1-sol"]), &known), "codex/gpt-6.1-sol");
+        assert_eq!(sampling_model(&hints(&["GPT-6.1-sol"]), &known), "codex/gpt-6.1-sol");
+        assert_eq!(sampling_model(&hints(&["nope", "claude-3-opus"]), &known), "claude/claude-opus-5-5");
+        assert_eq!(sampling_model(&hints(&["sonnet"]), &known), crate::config::get().summary_model);
     }
 
     #[test]

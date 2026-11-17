@@ -144,12 +144,13 @@ or archive can be added too, for development.
   `network` (through pasta, as agents), otherwise none. Env `ZEN_PLUGIN_FILES`, `ZEN_PLUGIN_DATA`.
   Without bubblewrap the plugin doesn't run (an error, never unsandboxed). Agents see its tools
   through `find_tools`/`call_tool` like any MCP server.
-- **Sampling:** currently fails closed, even with `ai`: the Claude/Codex CLI adapters have no
-  verified provider-native output cap. Refusals are audited; no provider request starts. Re-enabling
-  requires a native cap plus per-plugin request/spend budgets. Normal chat is unchanged.
+- **Sampling:** a plugin granted `ai` may ask for tool-free completions while the owner's per-plugin
+  AI switch is on (default on). No token cap (the owner's decision, 2026-11-17: the CLI adapters
+  have no native one, so `maxTokens` is ignored); the model is the assist model unless the request's
+  hints name a known one. Every request is recorded in `plugin_calls` (model, tokens, cost).
 - HTTP (owner token, like the rest of the API):
-  - `GET /api/plugins` → `{ plugins: [{ name, version, title, description, contributes, permissions, enabled }], defaults: { "<pattern>:<mode>": "<plugin>/<opener id>" | "builtin" } }`.
-  - `PUT /api/plugins/defaults` `{ key, value }`; `PATCH /api/plugins/{name}` `{ enabled }`.
+  - `GET /api/plugins` → `{ plugins: [{ name, version, title, description, contributes, permissions, enabled, ai_enabled, ai_calls_30d }], defaults: { "<pattern>:<mode>": "<plugin>/<opener id>" | "builtin" } }`.
+  - `PUT /api/plugins/defaults` `{ key, value }`; `PATCH /api/plugins/{name}` `{ enabled?, ai? }`.
   - `GET /api/plugins/marketplace` → the entries, each with `installed` (version or null).
   - `POST /api/plugins/install` `{ name, approve? }`: without `approve`, `{ needs_approval: true, permissions }`
     (nothing installed); with `approve: true` (and the same permissions), installs and returns the plugin.

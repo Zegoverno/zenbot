@@ -90,6 +90,7 @@ const fxPlugin = {
 };
 const cardsPlugin = {
   name: 'zencards', version: '0.2.0', title: 'Cards', description: 'Card games.', permissions: ['network', 'ai'], enabled: true,
+  ai_enabled: true, ai_calls_30d: 3,
   contributes: { games: [{ id: 'solitaire', title: 'Solitaire', description: 'Patience.', ui: 'ui://zencards/app' }] },
 };
 const installedPlugins = [fxPlugin];
@@ -207,7 +208,8 @@ const kernel = createServer(async (req, res) => {
     if (!plugin) return json(res, { error: `no plugin ${name}` }, 404);
     if (method === 'PATCH' && !sub) {
       toggles.push({ name, ...body });
-      plugin.enabled = body.enabled;
+      if ('enabled' in body) plugin.enabled = body.enabled;
+      if ('ai' in body) plugin.ai_enabled = body.ai;
       return json(res, plugin);
     }
     if (method === 'DELETE' && !sub) { installedPlugins.splice(installedPlugins.indexOf(plugin), 1); return json(res, { ok: true }); }
@@ -492,6 +494,15 @@ try {
   assert.deepEqual(installs.at(-1), { name: 'zencards', approve: true, permissions: ['network', 'ai', 'files:read'] });
   await page.getByRole('tab', { name: 'Plugins', exact: true }).click();
   await page.locator('section[aria-label="Cards"]').getByText('Reach the internet').waitFor();
+  // A plugin granted `ai` shows its AI switch and last 30 days' AI calls; one without has neither.
+  await page.locator('section[aria-label="Cards"]').getByText('3 AI calls in the last 30 days').waitFor();
+  assert.equal(await page.getByLabel('AI for Fixture').count(), 0);
+  await page.getByLabel('AI for Cards').uncheck();
+  await until(() => toggles.at(-1)?.ai === false, 'AI switched off');
+  assert.deepEqual(toggles.at(-1), { name: 'zencards', ai: false });
+  assert.equal(await page.getByLabel('AI for Cards').isChecked(), false);
+  await page.getByLabel('AI for Cards').check();
+  await until(() => toggles.at(-1)?.ai === true, 'AI switched on');
   if (shots) await page.screenshot({ path: 'tests/shots/zen-settings.png' });
 
   // A plugin's view is a tab after the built-ins; its UI runs sandboxed, with no same origin.

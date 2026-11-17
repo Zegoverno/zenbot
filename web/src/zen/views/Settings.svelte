@@ -1,6 +1,6 @@
 <script lang="ts">
   // Settings (a board page off the top bar). Plugins: the installed ones (version, permissions,
-  // enable or disable, remove) and the default opener per file pattern and mode. Marketplace: the
+  // enable or disable, remove; for one granted `ai`, its AI switch and last 30 days' AI calls) and the default opener per file pattern and mode. Marketplace: the
   // kernel's marketplace entries, with Install / Update; installing first asks the kernel what the
   // plugin needs and shows those permissions in plain words before anything is installed
   // (ADR 0001, Host API).
@@ -21,6 +21,17 @@
       p.enabled = !p.enabled;
     } catch (e) {
       notice(`couldn't ${p.enabled ? 'disable' : 'enable'} ${p.title || p.name}: ${(e as Error).message}`);
+    }
+    await loadPlugins();
+  }
+
+  async function toggleAi(p: Plugin) {
+    const on = p.ai_enabled !== false;
+    try {
+      await pluginApi.setAi(p.name, !on);
+      p.ai_enabled = !on;
+    } catch (e) {
+      notice(`couldn't turn AI ${on ? 'off' : 'on'} for ${p.title || p.name}: ${(e as Error).message}`);
     }
     await loadPlugins();
   }
@@ -143,6 +154,12 @@
         </div>
         {#if p.description}<p class="dim desc">{p.description}</p>{/if}
         <p class="dim perms">{p.permissions.length ? p.permissions.map(permissionWords).join(' · ') : 'No permissions beyond its own data'}</p>
+        {#if p.permissions.includes('ai')}
+          <p class="dim perms ai">
+            <label class="switch"><input type="checkbox" checked={p.ai_enabled !== false} onchange={() => toggleAi(p)} aria-label={`AI for ${p.title || p.name}`} /> AI</label>
+            <span>{p.ai_calls_30d ?? 0} AI call{(p.ai_calls_30d ?? 0) === 1 ? '' : 's'} in the last 30 days</span>
+          </p>
+        {/if}
         {#if removing === p.name}
           <p class="confirm">
             Remove {p.title || p.name}? Its data stays.
@@ -223,6 +240,7 @@
   .title { font-weight: 600; }
   .grow { flex: 1; }
   .desc, .perms { margin: 4px 0 0; font-size: 13px; }
+  .ai { display: flex; gap: 12px; align-items: center; }
   .switch { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; cursor: pointer; }
   .act { font-size: 13px; }
   .act:hover { color: var(--ink); }

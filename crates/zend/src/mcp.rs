@@ -325,7 +325,7 @@ async fn read_stdio(conn: std::sync::Weak<StdioConn>, mut stdout: BufReader<Chil
                     let _ = io.write(&reply).await;
                 });
             }
-            // Sampling (but for a plugin with `ai`) and filesystem roots remain unsupported.
+            // Sampling (but for a plugin granted `ai`) and filesystem roots are unsupported.
             (Some(_), Some(id)) => {
                 let reply = json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": "not supported by zenbot" } });
                 let _ = conn.write(&reply).await;

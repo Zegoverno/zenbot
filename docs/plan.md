@@ -69,6 +69,7 @@ Removed: `crates/zen/src/tui`, `editor.rs`, `md.rs`, `tex.rs`, `screen.rs`, `zen
 - Anything that spends money: hosting beyond free tiers, store accounts.
 
 ## Current release limits
-Plugin AI sampling is disabled until provider-native output caps and per-plugin budgets exist.
+Plugin AI sampling is on for plugins granted `ai`, with no token cap (the owner's decision,
+2026-11-17): each plugin has an AI switch in Settings → Plugins and every call is recorded.
 Desktop ACP and store shells remain future work; the standalone PWAs and MCP Apps ship now.
 Curated listings and releases are described in [PLUGINS.md](../PLUGINS.md).

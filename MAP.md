@@ -315,5 +315,7 @@ release archives and serves `/api/plugins`. `sandbox.rs` pins grants with file d
 bubblewrap binds them; servers join MCP discovery through `mcp.rs`. Installed state and opener
 defaults live in migration `0007_plugins.sql`. UI slots, Games and Settings live in
 `web/src/zen/`; `PluginFrame.svelte` hosts opaque-origin MCP Apps. Plugin messages create drafts,
-never autonomous chat turns. Sampling currently fails closed (native token caps are unavailable).
+never autonomous chat turns. A plugin granted `ai` may sample (`sample`: the kernel's tool-free completion, assist model unless
+its hints name a known one, no token cap) while its AI switch (`plugins.ai_enabled`, migration
+`0008_plugin_ai.sql`, `PATCH { ai }`) is on; each request goes in `plugin_calls`.
 See [PLUGINS.md](PLUGINS.md) for authoring and the curated marketplace workflow.
