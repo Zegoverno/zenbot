@@ -96,6 +96,31 @@
     }
   },
   {
+    "when": "role play",
+    "tool": "delegate",
+    "args": {
+      "task": "research quietly",
+      "role": "researcher",
+      "model": "faux/smoke"
+    }
+  },
+  {
+    "when": "role play",
+    "tool": "delegate",
+    "args": {
+      "task": "rhyme it",
+      "role": "poet"
+    }
+  },
+  {
+    "when": "research quietly",
+    "tool": "write",
+    "args": {
+      "path": "notes.md",
+      "content": "x"
+    }
+  },
+  {
     "when": "hand off a doze",
     "tool": "delegate",
     "args": {

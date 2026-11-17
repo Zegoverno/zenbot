@@ -97,18 +97,29 @@ One list per session, in a fixed order (`agent.rs::specs`):
   workspace-relative regular files, descriptor-checked against the sandbox, at most 16 MB each.
   Contracts have no edit API; retries, assessments and delegation/verify integration are later work.
 - Work: `ask` (questions to the owner), `verify` (`agent.rs`: the kernel runs the checks, a fresh
-  verifier session judges the rest), `delegate` (`delegate.rs`: subagents in parallel, on the named
-  model or the parent's; zenbot may hand a task to another agent), `schedule` (`jobs/`), `judge` (System One over many items; when System
+  verifier session judges the rest), `delegate` (`delegate.rs`: subagents in parallel, each optionally in a `role`
+  (`roles.rs`, below); on the task's model, else the role's, else the other agent's, else the roles
+  file's `default_model` when served, else the parent's; zenbot may hand a task to another agent), `schedule` (`jobs/`), `judge` (System One over many items; when System
   One is on).
 
 Subagents and job runs get no `ask`, `delegate` or `schedule`; a verifier gets `bash`, `read` and
-`submit_verdict`. A session's agent narrows the list further (Agents).
+`submit_verdict`. A session's agent narrows the list further (Agents), and a subagent's role
+further still.
+
+Roles (`roles.rs`) are profiles for subagents, not agents: each agent's `agents/<name>/roles.toml`
+(the agent keeps it, so a learning loop can tune it; written from `defaults/agent/roles.toml` when
+missing: researcher, coder, reviewer) holds `default_model` and `[roles.<name>]` with
+`description`, `model`, `effort`, `tools` (narrows, never widens: `Agent::in_role`, enforced at
+each of the child's turns by the tool list and `dispatch.rs`) and `skills` (each SKILL.md attached
+to the brief, not the instructions). The role is the delegating agent's; the child records it in
+`sessions.role`. `delegate`'s description lists the roles as the session's first tool list had them
+(the prefix stays fixed); a call checks the current file, and a broken file or unknown role fails it.
 
 ## Agents
 
 Every session is one agent's (`agents.rs`, `sessions.agent`): zenbot by default, or one the owner
 made (`agents new <name>`, `POST /api/agents`). An agent is a folder `agents/<name>/`: `SOUL.md`
-(the owner's), `IDENTITY.md` (the agent keeps it), an optional `agent.toml` and `skills/`. Each agent
+(the owner's), `IDENTITY.md` and `roles.toml` (the agent keeps them), an optional `agent.toml` and `skills/`. Each agent
 has a vault (`Agent::vault`): zenbot's is `global/`; another's is private, `global/agents/<name>/`
 (`AGENTS.md`, `MEMORY.md`, `wiki/`, `memory/`, `entities/`; written by `agents new`, or at its next
 turn), moved to its backup on `agents rm`. Its short-term memory (`memories.agent`), `remember`,
@@ -122,7 +133,7 @@ documents, plus the global memories, pages and records when `global` allows (`se
 `AGENTS.md` and `USER.md` are shared. zenbot can hand a task to another agent (`delegate` with
 `agent`, per task or for all; no other agent can): the child `subagent` session is that agent's,
 with its instructions, tools, limits and vault, in its workspace (else the kernel's), on the task's
-model, else the agent's, else the parent's. An agent may have its own MCP servers
+model, else its role's, else the agent's, else zenbot's `default_model`, else the parent's. An agent may have its own MCP servers
 (`agents/<name>/mcp.json`, no OAuth), seen only by it and winning a name clash with a global one;
 its stdio servers run in its sandbox (not at all without bubblewrap and pasta), global ones as the owner.
 `agent.toml` otherwise only narrows what zenbot has:
@@ -137,7 +148,7 @@ agent that scheduled it (the owner may pick one), never another, and an agent ot
 changes, runs or removes only its own jobs and makes a script job only if it has `bash`. With `bash` an agent can still
 Every agent but zenbot is sandboxed (`sandbox.rs`): `Agent::mounts` lists what it reaches, read-write
 its workspace (`workspace`, else its own `agents/<name>/work`, never the owner's home), its vault, its
-`IDENTITY.md` and extra `write` paths; read-only the rest of its folder (it can't change or create
+`IDENTITY.md`, `roles.toml` and extra `write` paths; read-only the rest of its folder (it can't change or create
 `agent.toml`, `mcp.json`, `SOUL.md`, `skills/`), the system folders, `USER.md`, `AGENTS.md`, `~/.local/{node,bin}`, `~/.cargo/bin`, `~/.gitconfig`, extra `read`
 paths and the global vault when `global` allows (writable when write; other agents' vaults hidden).
 The owner's home is an empty tmpfs, `/tmp` private. `bash`, `verify` checks and its script jobs run
@@ -247,6 +258,7 @@ a session with another agent), `model`, `effort`, `done`, `rename`, `archive`, `
 | `sessions/` | the tape mirrored as JSONL, one file per session |
 | `agents/<name>/SOUL.md`, `IDENTITY.md`, `AGENTS.md`, `USER.md` | prompt files (backups in `backups/prompt-files/`) |
 | `agents/<name>/agent.toml`, `agents/<name>/skills/` | what an agent may use (the owner's), its own skills |
+| `agents/<name>/roles.toml` | its roles for subagents (the agent's; `roles.rs`) |
 | `global/MEMORY.md`, `global/memory/`, `global/entities/`, `global/wiki/`, `global/skills/` | memory, records, wiki pages, skills |
 | `global/Projects/<project>/tasks.md` | the owner's tasks (Obsidian Tasks format); the kernel only reads them |
 | `mcp.json`, `mcp-auth/` | MCP servers and their sign-ins |

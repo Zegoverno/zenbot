@@ -3,14 +3,23 @@
 //! `delegate` hands a subtask to a subagent: a child session (kind `subagent`) with a fresh context
 //! and the same instructions, memory and tools, except that it can't delegate further or ask the
 //! owner. One call can hand out several tasks (`tasks`), which the kernel runs at the same time.
-//! The parent gets each subagent's final answer. A subagent runs on the model the call names, else
-//! on its parent's.
+//! The parent gets each subagent's final answer.
+//!
+//! A task may name a `role` (per task, or for all): a profile from the caller's
+//! `agents/<name>/roles.toml` (roles.rs) giving the subagent a model, an effort, a narrower tool list
+//! (applied at each of its turns, never wider than it gets anyway) and skills, whose SKILL.md is
+//! attached to its brief (its first prompt, not its instructions). The child session records the
+//! role (`sessions.role`). An unknown role, or a broken roles file, fails the call. The tool's
+//! description lists the roles as they were when the session's tools were first fixed, so a later
+//! change to the file doesn't move the prompt prefix; a call always checks the current file.
+//!
+//! A subagent's model: the task's `model`, else its role's, else (handed to another agent) that
+//! agent's, else the roles file's `default_model` (when a worker serves it), else the parent's.
 //!
 //! zenbot can hand a task to another agent (`agent`, per task or for all): the child is that
 //! agent's session, with its instructions, tools, limits and vault, in its workspace (`agent.toml`
-//! `workspace`, else the kernel's; a task's `dir` is taken relative to it), on the task's model,
-//! else the agent's, else the parent's. Only a zenbot session may name another agent; a sandboxed
-//! agent's `dir` must lie inside its mounts.
+//! `workspace`, else the kernel's; a task's `dir` is taken relative to it). Only a zenbot session
+//! may name another agent; a sandboxed agent's `dir` must lie inside its mounts.
 
 use std::time::Duration;
 
@@ -65,23 +74,27 @@ async fn delegate_all(app: &AppState, session: Uuid, workspace: &std::path::Path
     if let Some(t) = args["task"].as_str() {
         jobs.insert(0, json!({ "task": t, "model": args["model"], "dir": args["dir"] }));
     }
-    // A top-level `agent` is every task's that doesn't name one.
+    // A top-level `agent` or `role` is every task's that doesn't name one.
     let jobs: Vec<Value> = jobs
         .into_iter()
         .map(|j| if j.is_string() { json!({ "task": j }) } else { j })
         .map(|mut j| {
-            if j["agent"].as_str().is_none() && args["agent"].is_string() {
-                j["agent"] = args["agent"].clone();
+            for key in ["agent", "role"] {
+                if j[key].as_str().is_none() && args[key].is_string() {
+                    j[key] = args[key].clone();
+                }
             }
             j
         })
         .collect();
     anyhow::ensure!(!jobs.is_empty(), "delegate needs a `task` (or `tasks`): the goal, what to read first, and when it's done");
     anyhow::ensure!(jobs.len() <= 8, "at most 8 tasks at a time");
+    // The caller's roles: a broken file fails the call (it also holds the default model).
+    let roles = crate::roles::load(&who.name).context("delegate needs a valid roles file; fix it")?;
     // One model refresh for the whole call, not one per task.
     crate::collect_models(app).await;
     let served: Vec<String> = app.routes.lock().await.keys().cloned().collect();
-    let runs = jobs.iter().map(|j| delegate(app, session, workspace, who, j, &served));
+    let runs = jobs.iter().map(|j| delegate(app, session, workspace, who, j, &served, &roles));
     let results = futures_util::future::join_all(runs).await;
     let mut out = Vec::new();
     let mut any_error = false;
@@ -100,17 +113,30 @@ async fn delegate_all(app: &AppState, session: Uuid, workspace: &std::path::Path
     Ok((out.join("\n\n"), any_error))
 }
 
-async fn delegate(app: &AppState, session: Uuid, workspace: &std::path::Path, who: &crate::agents::Agent, args: &Value, served: &[String]) -> Result<(String, bool)> {
+async fn delegate(app: &AppState, session: Uuid, workspace: &std::path::Path, who: &crate::agents::Agent, args: &Value, served: &[String], roles: &crate::roles::Roles) -> Result<(String, bool)> {
     let task = args["task"].as_str().map(str::trim).filter(|t| !t.is_empty()).context("each task needs its text: the goal, what to read first, and when it's done")?;
     let row = sqlx::query("SELECT model, kind FROM sessions WHERE id = $1").bind(session).fetch_one(&app.db).await?;
     anyhow::ensure!(row.get::<Option<String>, _>("kind").as_deref() != Some(SUBAGENT), "a subagent can't delegate further");
     let agent = named_agent(who, args["agent"].as_str())?;
-    let model = match args["model"].as_str().map(str::trim).filter(|m| !m.is_empty()).or(agent.as_ref().and_then(|a| a.model.as_deref())) {
-        Some(m) => {
-            anyhow::ensure!(served.iter().any(|s| s == m), "no worker serves `{m}`");
-            m.to_string()
-        }
-        None => row.get("model"),
+    let role_name = args["role"].as_str().map(str::trim).filter(|r| !r.is_empty());
+    let role = role_name.map(|r| roles.get(r)).transpose()?;
+    let parent: String = row.get("model");
+    // The roles file's default is a soft one: when no worker serves it, the parent's model.
+    let default = roles.default_model.as_deref().filter(|m| served.iter().any(|s| s == m));
+    let task_model = args["model"].as_str().map(str::trim).filter(|m| !m.is_empty());
+    let model = crate::roles::resolve_model(task_model, role, agent.as_ref().and_then(|a| a.model.as_deref()), default, &parent);
+    if model != parent {
+        anyhow::ensure!(served.contains(&model), "no worker serves `{model}`");
+    }
+    // A role's effort, when the model takes it (else the model's default).
+    let effort = match role.and_then(|r| r.effort.as_deref()) {
+        Some(e) if crate::workers::efforts(&crate::workers::model_info(app, &model).await.unwrap_or(Value::Null)).contains(&e) => Some(e),
+        _ => None,
+    };
+    // The role's skills go with the brief, from the skills the subagent's agent sees.
+    let brief = match role {
+        Some(r) if !r.skills.is_empty() => with_skills(task, &r.skills, &agent.as_ref().unwrap_or(who).skill_roots())?,
+        _ => task.to_string(),
     };
     // Another agent works in its own workspace (else the kernel's), never the caller's.
     let base = match &agent {
@@ -121,10 +147,15 @@ async fn delegate(app: &AppState, session: Uuid, workspace: &std::path::Path, wh
     if let Some(a) = &agent {
         dir_in_reach(a.sandbox().as_ref(), &dir)?;
     }
-    let label = agent.as_ref().map(|a| format!(" ({})", a.name)).unwrap_or_default();
+    let label = match (&agent, role_name) {
+        (Some(a), Some(r)) => format!(" ({}, {r})", a.name),
+        (Some(a), None) => format!(" ({})", a.name),
+        (None, Some(r)) => format!(" ({r})"),
+        (None, None) => String::new(),
+    };
     app.emit(session, json!({ "type": "status", "text": format!("delegating to a subagent{label} on {model}") })).await;
     let started = std::time::Instant::now();
-    let child = tokio::time::timeout(Duration::from_secs(1900), crate::run_child(app, session, SUBAGENT, task, &dir, Some(&model), agent.as_ref().map(|a| a.name.as_str())))
+    let child = tokio::time::timeout(Duration::from_secs(1900), crate::run_child(app, session, SUBAGENT, &brief, &dir, crate::turns::Child { model: Some(&model), agent: agent.as_ref().map(|a| a.name.as_str()), role: role_name, effort }))
         .await
         .context("the subagent took too long")??;
     let answer = final_answer(&app.db, child).await;
@@ -140,18 +171,53 @@ async fn delegate(app: &AppState, session: Uuid, workspace: &std::path::Path, wh
     Ok((format!("{head}{body}"), error.is_some()))
 }
 
+/// A brief with the SKILL.md of each named skill after it; an unknown skill is an error.
+fn with_skills(task: &str, names: &[String], roots: &[std::path::PathBuf]) -> Result<String> {
+    let skills = crate::skills::scan_roots(roots);
+    let mut out = task.to_string();
+    for name in names {
+        let skill = crate::skills::lookup(&skills, name).map_err(|e| anyhow::anyhow!("the role's skill: {e}"))?;
+        let text = crate::skills::load(skill, None).map_err(|e| anyhow::anyhow!("the role's skill {name}: {e}"))?;
+        out.push_str(&format!("\n\n<skill name=\"{}/{}\">\nYour role uses this skill; follow it.\n\n{}\n</skill>", skill.domain, skill.name, text.trim_end()));
+    }
+    Ok(out)
+}
+
+/// A tool list whose `delegate` lists `agent`'s roles. The listing the session's tools already
+/// had is kept (the prefix stays fixed when roles.toml changes); a new session, or a new
+/// description of the tool, lists the file as it is now.
+pub fn with_roles(mut tools: Value, agent: &str, current: Option<&Value>) -> Value {
+    let base = spec()["description"].as_str().unwrap_or_default().to_string();
+    let of = |list: &Value| list.as_array().and_then(|a| a.iter().find(|t| t["name"] == "delegate")).and_then(|t| t["description"].as_str()).map(String::from);
+    let kept = current.and_then(of).filter(|d| d.starts_with(&base));
+    let description = kept.unwrap_or_else(|| described(&base, crate::roles::load(agent)));
+    if let Some(t) = tools.as_array_mut().and_then(|a| a.iter_mut().find(|t| t["name"] == "delegate")) {
+        t["description"] = json!(description);
+    }
+    tools
+}
+
+fn described(base: &str, roles: Result<crate::roles::Roles>) -> String {
+    match roles {
+        Ok(r) if r.roles.is_empty() => base.to_string(),
+        Ok(r) => format!("{base}\n\nRoles (name, model: what it's for):\n{}", r.listing()),
+        Err(e) => format!("{base}\n\nRoles: your roles file is broken ({e:#}); fix it before delegating."),
+    }
+}
+
 pub fn spec() -> Value {
     json!({
         "name": "delegate",
         "description": "Give a well-defined subtask to a subagent: a fresh session with your instructions, memory and tools, \
 without ask or delegate. Use it to keep your context clean or, with several `tasks`, to work in parallel. Brief each task: goal, \
-what to read first, what to avoid, what to report. Returns each final answer; a subagent runs on your model unless you name one. Name an `agent` to hand the task to that agent (zenbot only): it works as itself, with its own tools, vault and workspace.",
+what to read first, what to avoid, what to report. Returns each final answer. A `role` gives the subagent a profile: model, tools, skills. Name an `agent` to hand the task to that agent (zenbot only): it works as itself, with its own tools, vault and workspace.",
         "parameters": { "type": "object", "properties": {
             "task": { "type": "string", "description": "The subtask, self-contained: the subagent sees nothing of this conversation" },
-            "tasks": { "type": "array", "description": "Several subtasks to run at the same time, each {task, model?, dir?, agent?}", "items": { "type": "object", "properties": {
-                "task": { "type": "string" }, "model": { "type": "string" }, "dir": { "type": "string" }, "agent": { "type": "string" } }, "required": ["task"] } },
+            "tasks": { "type": "array", "description": "Several subtasks to run at the same time, each {task, role?, model?, dir?, agent?}", "items": { "type": "object", "properties": {
+                "task": { "type": "string" }, "role": { "type": "string" }, "model": { "type": "string" }, "dir": { "type": "string" }, "agent": { "type": "string" } }, "required": ["task"] } },
+            "role": { "type": "string", "description": "Optional: one of your roles, below" },
             "agent": { "type": "string", "description": "Optional: the agent to hand the task(s) to (default: you)" },
-            "model": { "type": "string", "description": "Optional: a model id (default: yours)" },
+            "model": { "type": "string", "description": "Optional: a model id (default: the role's)" },
             "dir": { "type": "string", "description": "Optional: the directory to work in (default: your workspace)" } },
           "required": [] }
     })
@@ -183,6 +249,34 @@ mod tests {
         assert!(e.contains("only zenbot"), "{e}");
         let e = named_agent(&zenbot, Some("no-such-agent")).unwrap_err().to_string();
         assert!(e.contains("no agent `no-such-agent`") && e.contains("zenbot"), "{e}");
+    }
+
+    #[test]
+    fn the_roles_listed_stay_as_the_session_first_had_them() {
+        let roles = crate::roles::parse(crate::roles::DEFAULT).unwrap();
+        let base = spec()["description"].as_str().unwrap().to_string();
+        let listed = described(&base, Ok(roles));
+        assert!(listed.starts_with(&base) && listed.contains("- researcher (claude/claude-haiku-5-5): Find"), "{listed}");
+        assert_eq!(described(&base, Ok(crate::roles::Roles::default())), base, "no roles, no list");
+        assert!(described(&base, Err(anyhow::anyhow!("bad toml"))).contains("broken (bad toml)"));
+        // An earlier listing is kept; one from an older description of the tool isn't.
+        let tools = json!([{ "name": "read" }, spec()]);
+        let earlier = json!([{ "name": "delegate", "description": format!("{base}\n\nRoles: the earlier list") }]);
+        let kept = with_roles(tools.clone(), "zenbot", Some(&earlier));
+        assert_eq!(kept[1]["description"], earlier[0]["description"]);
+        let stale = json!([{ "name": "delegate", "description": "an old description" }]);
+        assert!(with_roles(tools, "zenbot", Some(&stale))[1]["description"].as_str().unwrap().starts_with(&base));
+    }
+
+    #[test]
+    fn a_role_brief_carries_its_skills() {
+        let root = crate::test_util::TestDir::new("delegate-skills");
+        std::fs::create_dir_all(root.join("work/verify")).unwrap();
+        std::fs::write(root.join("work/verify/SKILL.md"), "---\nname: verify\ndescription: Check work.\n---\n\nRun the checks.\n").unwrap();
+        let brief = with_skills("review it", &["work/verify".into()], &[root.to_path_buf()]).unwrap();
+        assert!(brief.starts_with("review it\n\n<skill name=\"work/verify\">") && brief.contains("Run the checks.") && brief.ends_with("</skill>"), "{brief}");
+        let e = with_skills("x", &["nope".into()], &[root.to_path_buf()]).unwrap_err().to_string();
+        assert!(e.contains("no skill `nope`"), "{e}");
     }
 
     #[test]

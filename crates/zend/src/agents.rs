@@ -122,18 +122,33 @@ pub struct Agent {
     /// Extra paths of its sandbox (`read`, `write` in agent.toml).
     read: Vec<PathBuf>,
     write: Vec<PathBuf>,
+    /// A subagent's role and the tools it narrows the list to (roles.rs; never widens it).
+    role: Option<(String, BTreeSet<String>)>,
 }
 
 impl Agent {
+    /// This agent working in the role `name`, which allows only `tools` of what it may use.
+    pub fn in_role(mut self, name: &str, tools: &[String]) -> Agent {
+        self.role = Some((name.to_string(), tools.iter().cloned().collect()));
+        self
+    }
+
     /// Whether this agent may use the tool `name`. `submit_verdict` belongs to the verifier's
     /// role, not to an agent, and is left to `agent::refusal`.
     pub fn allows(&self, name: &str) -> bool {
-        name == "submit_verdict" || (self.tools.as_ref().is_none_or(|t| t.contains(name)) && !self.deny.contains(name))
+        name == "submit_verdict"
+            || (self.tools.as_ref().is_none_or(|t| t.contains(name)) && !self.deny.contains(name) && self.role.as_ref().is_none_or(|(_, t)| t.contains(name)))
     }
 
     /// Why this agent may not call `name`, if it may not.
     pub fn refusal(&self, name: &str) -> Option<String> {
-        (!self.allows(name)).then(|| format!("`{name}` isn't one of {}'s tools (agents/{}/agent.toml)", self.name, self.name))
+        if self.allows(name) {
+            return None;
+        }
+        Some(match &self.role {
+            Some((role, t)) if !t.contains(name) => format!("`{name}` isn't one of the `{role}` role's tools (agents/{}/roles.toml)", self.name),
+            _ => format!("`{name}` isn't one of {}'s tools (agents/{}/agent.toml)", self.name, self.name),
+        })
     }
 
     /// A tool list (`agent::specs`) with only the tools this agent may use, in the same order. A
@@ -481,6 +496,7 @@ fn from_settings(name: &str, s: Settings) -> Result<Agent> {
         global,
         read: s.read.iter().map(|p| expand_home(p)).collect(),
         write: s.write.iter().map(|p| expand_home(p)).collect(),
+        role: None,
     })
 }
 
@@ -659,6 +675,19 @@ mod tests {
 
     fn settings(text: &str) -> Result<Agent> {
         from_settings("garry", toml::from_str(text)?)
+    }
+
+    #[test]
+    fn a_role_narrows_the_tools_and_never_widens_them() {
+        let garry = settings("tools = [\"read\", \"bash\", \"write\"]").unwrap();
+        let researcher = garry.clone().in_role("researcher", &["read".into(), "bash".into(), "web_fetch".into()]);
+        assert!(researcher.allows("read") && researcher.allows("bash"));
+        assert!(!researcher.allows("web_fetch"), "agent.toml still wins");
+        let e = researcher.refusal("write").unwrap();
+        assert!(e.contains("`researcher` role") && e.contains("roles.toml"), "{e}");
+        assert!(researcher.refusal("web_fetch").unwrap().contains("agent.toml"));
+        let names: Vec<String> = researcher.filter(crate::agent::specs(Some(crate::delegate::SUBAGENT))).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        assert_eq!(names, ["bash", "read"]);
     }
 
     #[test]

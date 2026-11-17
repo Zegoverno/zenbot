@@ -59,6 +59,10 @@ start_kernel() {
     unset ZEN_S1_MODEL OPENROUTER_API_KEY ZEN_TZ # the owner's settings stay out when run from a session
     for kv in "$@"; do export "$kv"; done
     mkdir -p "$HOME"
+    # The shipped roles without their default model (a claude one), so a subagent given no model
+    # runs on its parent's faux one.
+    local roles="$HOME/.zenbot/agents/zenbot/roles.toml"
+    [ -e "$roles" ] || { mkdir -p "${roles%/*}"; grep -v '^default_model' "$REPO/crates/zend/defaults/agent/roles.toml" >"$roles"; }
     exec "$BIN/zend"
   ) >"$TMP/kernel.log" 2>&1 &
   KERNEL_PID=$!
@@ -561,6 +565,17 @@ delegation() {
   local child; child=$(q "SELECT id FROM sessions WHERE parent=X'${sid//-/}' AND kind='subagent' LIMIT 1")
   local tools; tools=$(q "SELECT group_concat(t.value->>'name', ',') FROM turns, envelopes e, json_each(e.tools) t WHERE turns.session_id=X'${child//-/}' AND e.hash = turns.envelope")
   check "a subagent can't ask or delegate" bash -c '! grep -qE "(^|,)(ask|delegate)(,|$)" <<<"$1" && grep -q "save_skill" <<<"$1"' _ "$tools"
+  # A role: recorded on the child, its tools narrowed (the researcher can't write), its skills in
+  # the brief; an unknown role is refused with the list.
+  r=$(zen ask --json -m faux/smoke "role play")
+  check "a role delegates; an unknown one is refused" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" delegate:false,delegate:true
+  local rsid; rsid=$(echo "$r" | jq -r .session_id)
+  local rchild; rchild=$(q "SELECT id FROM sessions WHERE parent=X'${rsid//-/}' AND kind='subagent'")
+  check "the child records its role" eq "$(q "SELECT role FROM sessions WHERE id=X'${rchild//-/}'")" researcher
+  check "the role's tools: no write, offered or run" eq "$(q "SELECT (SELECT count(*) FROM turns, envelopes e, json_each(e.tools) t WHERE turns.session_id=X'${rchild//-/}' AND e.hash = turns.envelope AND t.value->>'name' IN ('write','edit')) || '|' || (SELECT count(*) FROM tape_events WHERE session_id=X'${rchild//-/}' AND payload->>'toolName'='write' AND payload->'content'->0->>'text' LIKE '%researcher%role%')")" "0|1"
+  check "its skill goes with the brief" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id=X'${rchild//-/}' AND kind='message' AND payload->>'role'='user' AND payload LIKE '%skill name=%work/search%'")" 1
+  check "an unknown role lists the roles" eq "$(q "SELECT count(*) FROM tape_events WHERE session_id=X'${rsid//-/}' AND payload->>'toolName'='delegate' AND payload->'content'->0->>'text' LIKE '%no role \`poet\`%coder, researcher, reviewer%'")" 1
+  check "the parent's delegate lists its roles" bash -c '[ "$1" -ge 1 ]' _ "$(q "SELECT count(*) FROM turns, envelopes e, json_each(e.tools) t WHERE turns.session_id=X'${rsid//-/}' AND e.hash = turns.envelope AND t.value->>'name'='delegate' AND t.value->>'description' LIKE '%- researcher (claude/claude-haiku-5-5)%'")"
   r=$(zen ask --json -m faux/smoke "waitless")
   check "ask with wait=false keeps working" eq "$(echo "$r" | jq -r '[.tools[] | "\(.name):\(.is_error)"] | join(",")')" ask:false,bash:false
   # The sessions board: a session whose questions the owner hasn't answered is waiting on them,

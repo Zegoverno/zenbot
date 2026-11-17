@@ -123,9 +123,9 @@ impl Roles {
 }
 
 /// A subagent's model: the task's, else the role's, else the other agent's (handed to one), else
-/// the roles file's default, else the parent's.
-pub fn resolve_model(task: Option<&str>, role: Option<&Role>, agent: Option<&str>, roles: &Roles, parent: &str) -> String {
-    task.or(role.and_then(|r| r.model.as_deref())).or(agent).or(roles.default_model.as_deref()).unwrap_or(parent).to_string()
+/// `default` (the roles file's `default_model`), else the parent's.
+pub fn resolve_model(task: Option<&str>, role: Option<&Role>, agent: Option<&str>, default: Option<&str>, parent: &str) -> String {
+    task.or(role.and_then(|r| r.model.as_deref())).or(agent).or(default).unwrap_or(parent).to_string()
 }
 
 #[cfg(test)]
@@ -170,12 +170,12 @@ mod tests {
     #[test]
     fn model_resolution_order() {
         let roles = parse("default_model = \"d/default\"\n[roles.r]\nmodel = \"r/role\"\n[roles.plain]\n").unwrap();
-        let (r, plain) = (roles.get("r").ok(), roles.get("plain").ok());
-        assert_eq!(resolve_model(Some("t/task"), r, Some("a/agent"), &roles, "p/parent"), "t/task");
-        assert_eq!(resolve_model(None, r, Some("a/agent"), &roles, "p/parent"), "r/role");
-        assert_eq!(resolve_model(None, plain, Some("a/agent"), &roles, "p/parent"), "a/agent");
-        assert_eq!(resolve_model(None, plain, None, &roles, "p/parent"), "d/default");
-        assert_eq!(resolve_model(None, None, None, &Roles::default(), "p/parent"), "p/parent");
+        let (r, plain, d) = (roles.get("r").ok(), roles.get("plain").ok(), roles.default_model.as_deref());
+        assert_eq!(resolve_model(Some("t/task"), r, Some("a/agent"), d, "p/parent"), "t/task");
+        assert_eq!(resolve_model(None, r, Some("a/agent"), d, "p/parent"), "r/role");
+        assert_eq!(resolve_model(None, plain, Some("a/agent"), d, "p/parent"), "a/agent");
+        assert_eq!(resolve_model(None, plain, None, d, "p/parent"), "d/default");
+        assert_eq!(resolve_model(None, None, None, None, "p/parent"), "p/parent");
     }
 
     #[test]

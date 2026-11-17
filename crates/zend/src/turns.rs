@@ -402,15 +402,27 @@ pub(crate) async fn prompt_loop(app: AppState) {
     }
 }
 
-/// Run a child session of `kind` (a verifier, a subagent) with one kernel prompt, on `model` (the
-/// parent's when None), as `agent` (the parent's when None; its instructions, tools and limits come
-/// with it), and wait for it to end (30 minutes at most). Returns the child's id; the caller reads
-/// what it needs from its tape.
-pub(crate) async fn run_child(app: &AppState, parent: Uuid, kind: &str, prompt: &str, dir: &std::path::Path, model: Option<&str>, agent: Option<&str>) -> Result<Uuid> {
+/// Who a child session is, besides its parent's: its model, agent, role and effort (each the
+/// parent's, or none, when None).
+#[derive(Default)]
+pub(crate) struct Child<'a> {
+    pub model: Option<&'a str>,
+    pub agent: Option<&'a str>,
+    /// A subagent's role (roles.rs), recorded on the session.
+    pub role: Option<&'a str>,
+    pub effort: Option<&'a str>,
+}
+
+/// Run a child session of `kind` (a verifier, a subagent) with one kernel prompt, on `who.model`
+/// (the parent's when None; then the parent's effort too, unless `who.effort` names one), as
+/// `who.agent` (the parent's when None; its instructions, tools and limits come with it), in
+/// `who.role`, and wait for it to end (30 minutes at most). Returns the child's id; the caller
+/// reads what it needs from its tape.
+pub(crate) async fn run_child(app: &AppState, parent: Uuid, kind: &str, prompt: &str, dir: &std::path::Path, who: Child<'_>) -> Result<Uuid> {
     let child = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO sessions (id, title, model, effort, parent, kind, workspace, agent)
-         SELECT $1, $2 || ': ' || title, COALESCE($6, model), CASE WHEN $6 IS NULL THEN effort END, id, $3, $5, COALESCE($7, agent)
+        "INSERT INTO sessions (id, title, model, effort, parent, kind, workspace, agent, role)
+         SELECT $1, $2 || ': ' || title, COALESCE($6, model), COALESCE($9, CASE WHEN $6 IS NULL THEN effort END), id, $3, $5, COALESCE($7, agent), $8
          FROM sessions WHERE id = $4",
     )
     .bind(child)
@@ -418,8 +430,10 @@ pub(crate) async fn run_child(app: &AppState, parent: Uuid, kind: &str, prompt: 
     .bind(kind)
     .bind(parent)
     .bind(dir.display().to_string())
-    .bind(model)
-    .bind(agent)
+    .bind(who.model)
+    .bind(who.agent)
+    .bind(who.role)
+    .bind(who.effort)
     .execute(&app.db)
     .await?;
     run_and_wait(app, child, kind, prompt).await?;
@@ -498,16 +512,27 @@ pub(crate) async fn begin_turn(app: &AppState, id: Uuid, text: String, origin: O
 
 async fn begin_queued(app: &AppState, id: Uuid, text: String, origin: Origin, queued: Option<i64>) -> Result<()> {
     anyhow::ensure!(!app.finishing.lock().await.contains(&id), "this session is already working; wait or abort");
-    let row = sqlx::query("SELECT model, effort, title, workspace, kind, agent FROM sessions WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&app.db)
-        .await?;
+    let row = sqlx::query(
+        "SELECT s.model, s.effort, s.title, s.workspace, s.kind, s.agent, s.role, p.agent AS parent_agent
+         FROM sessions s LEFT JOIN sessions p ON p.id = s.parent WHERE s.id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&app.db)
+    .await?;
     let Some(row) = row else { anyhow::bail!("session not found") };
     let model: String = row.get("model");
     let kind: Option<String> = row.get("kind");
     let title: String = row.get("title");
     // A broken agent.toml stops the turn: never run with tools the owner meant to take away.
-    let who = crate::agents::load(&row.get::<String, _>("agent"))?;
+    let mut who = crate::agents::load(&row.get::<String, _>("agent"))?;
+    // A subagent's role narrows its tools further. The role is the delegating agent's (zenbot's when
+    // it handed the task to another agent); a broken roles file stops the turn too.
+    if let Some(role) = row.get::<Option<String>, _>("role") {
+        let from = row.get::<Option<String>, _>("parent_agent").unwrap_or_else(|| who.name.clone());
+        if let Some(tools) = crate::roles::load(&from)?.get(&role)?.tools.clone() {
+            who = who.in_role(&role, &tools);
+        }
+    }
     // A session without a workspace runs in its agent's (another agent's own, never the owner's home).
     let workspace = row.get::<Option<String>, _>("workspace").map(PathBuf::from).or_else(|| who.workspace_dir()).unwrap_or_else(|| app.workspace.clone());
     // An agent from before vaults gets its own at its next turn.
@@ -614,6 +639,7 @@ async fn begin_queued(app: &AppState, id: Uuid, text: String, origin: Origin, qu
         let instructions_from = if who.name == crate::agents::DEFAULT { &app.workspace } else { &workspace };
         let base = compile::base_prompt(&app.db, id, &blocks, instructions_from, &app.repo, &who).await?;
         let tools = agent::specs_for(kind.as_deref(), &who);
+        let tools = crate::delegate::with_roles(tools, &who.name, compile::current_tools(&app.db, &blocks).await?.as_ref());
         let system = agent::system_for(&base, kind.as_deref());
         let (envelope, new_envelope) = compile::envelope(&app.db, id, &blocks, &system, &tools).await?;
         let resume = match (&last, new_envelope) {

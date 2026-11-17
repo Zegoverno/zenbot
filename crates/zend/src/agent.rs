@@ -573,7 +573,7 @@ async fn verify(app: &AppState, session: Uuid, workspace: &Path, who: &crate::ag
             dir.display(),
             diff_from(&dir, &base, sandbox.as_ref()).await
         );
-        match crate::run_child(app, session, VERIFIER, &prompt, &dir, None, None).await {
+        match crate::run_child(app, session, VERIFIER, &prompt, &dir, crate::turns::Child::default()).await {
             Ok(child) => crate::tape::load(&app.db, child, &["verdict"]).await.ok().and_then(|b| b.last().map(|b| b.payload.clone())).unwrap_or(Value::Null),
             Err(e) => {
                 tracing::warn!("verifier for {session}: {e:#}");
