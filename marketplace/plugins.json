@@ -48,9 +48,9 @@
       "author": "Zegoverno",
       "repository": "https://github.com/Zegoverno/zenwrite",
       "license": "MIT",
-      "version": "0.1.0",
-      "archive": "https://github.com/Zegoverno/zenwrite/releases/download/v0.1.0/zenwrite-0.1.0.tgz",
-      "sha256": "5569ab24e0912a16e7835e91c9d88ccd51c1defb800230f56dedb15b3a632166",
+      "version": "0.2.0",
+      "archive": "https://github.com/Zegoverno/zenwrite/releases/download/v0.2.0/zenwrite-0.2.0.tgz",
+      "sha256": "1234d9957bffb94d91944d37973d6d4952d94d230d6992452090b37125ade0bd",
       "kernel": [
         "files:read",
         "files:write",
