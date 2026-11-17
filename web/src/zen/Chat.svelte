@@ -5,11 +5,11 @@
   // and the footer. 'new' is a chat whose session starts with its first prompt; that prompt is
   // handed to the chat re-created with the session's id (Shell keys Chat on the session).
   // Plugins: a plugin's slash command calls its tool and shows its UI in the side panel; a plugin
-  // UI's `sendMessage` queues an owner-reviewed draft here (`chat.queue`), and what plugin UIs put in the model context goes
-  // with the next prompt (plugins.svelte.ts).
+  // UI's `sendMessage` queues an owner-reviewed draft here (`chat.queue`), and what plugin UIs put in the model context shows
+  // as a removable chip above the box and goes with the next prompt (plugins.svelte.ts).
   import { onMount, tick } from 'svelte';
   import { zen, files, commands, upload, toolSummary, short, readOnly, agentTag, AGENT_NAME, pluginApi, type Command, type Message, type Models, type Outcome, type SessionDetail, type ZenEvent } from './api.ts';
-  import { chat, plugins, resultText, showPanel, takeContext, toolArgs, uiOf } from './plugins.svelte.ts';
+  import { chat, contexts, contextSaving, dropContext, plugins, resultText, showPanel, takeContext, toolArgs, uiOf } from './plugins.svelte.ts';
   import { app, board, openSession, sessionStarted, openFile, openDir, toggleSide, settings, notice, typing, tilde } from './app.svelte.ts';
   import { render as mdRender } from './md.ts';
   import * as M from './chat/model.ts';
@@ -449,6 +449,9 @@
     aborting = true;
   }
 
+  // What plugin UIs on screen want to go with the next prompt: one chip each, removable.
+  const pluginContext = $derived(Object.entries(contexts[sid ?? 'new'] ?? {}));
+
   let pluginDrafts = $state<{ plugin: string; text: string }[]>([]);
 
   function sendPluginDraft(draft: { plugin: string; text: string }) {
@@ -463,6 +466,7 @@
     const raw = input.trim();
     if ((!raw && !ready.length) || creating) return;
     if (uploading) return notice('still sending the attachments; send when they show ✓');
+    if (contextSaving(sid ?? 'new')) return notice("still saving a plugin's images; send when they show ✓");
     const steer = raw.startsWith('/steer ');
     let text = steer ? raw.slice(7).trim() : raw;
     if (!text && !ready.length) return;
@@ -1275,6 +1279,21 @@
       </div>
     {/if}
 
+    {#if pluginContext.length}
+      <div class="zc-atts" aria-label="plugin context">
+        {#each pluginContext as [name, c] (name)}
+          <span class="zc-att zc-ctx" title={c.text} aria-label={`context from ${name}`}>
+            {#each c.images as im (im.name)}
+              <img class="zc-ctx-img" class:zc-att-err={im.error} src={im.thumb} alt={`image from ${name}`} title={im.error ?? (im.path ? tilde(im.path) : 'saving…')} />
+            {/each}
+            <span class="zc-att-name">{name}: {c.text.split('\n')[0] || `${c.images.length} image${c.images.length === 1 ? '' : 's'}`}</span>
+            {#if c.images.some((im) => !im.path && !im.error)}<span class="zc-dim">saving…</span>{/if}
+            <button class="zc-att-x" onclick={() => dropContext(sid ?? 'new', name)} aria-label={`remove context from ${name}`} title="don't send this">×</button>
+          </span>
+        {/each}
+      </div>
+    {/if}
+
     {#each pluginDrafts as draft}
       <section aria-label="plugin draft">
         <strong>DRAFT · plugin: {draft.plugin}</strong>
@@ -1383,6 +1402,8 @@
   .zc-att { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; font-size: 12.5px; border: 1px solid var(--faint); border-radius: 14px; padding: 2px 4px 2px 10px; background: var(--paper); }
   .zc-att-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
   .zc-att-err { border-color: var(--err); color: var(--err); }
+  .zc-ctx { border-style: dashed; }
+  .zc-ctx-img { width: 22px; height: 22px; object-fit: cover; border-radius: 4px; border: 1px solid var(--faint); }
   .zc-att-x { width: 20px; height: 20px; border-radius: 50%; line-height: 18px; text-align: center; }
   .zc-att-x:hover { background: color-mix(in srgb, var(--ink) 10%, transparent); }
   .zc-send { flex: none; width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: var(--paper); font-size: 14px; line-height: 28px; text-align: center; }

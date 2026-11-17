@@ -6,7 +6,7 @@
 // plugin sees vault-relative paths and openers apply only to vault files.
 
 import { pluginApi, type OpenerDefaults, type Plugin, type PluginGame, type PluginOpener, type PluginView, type ToolResult } from './api.ts';
-import { app } from './app.svelte.ts';
+import { app, tilde } from './app.svelte.ts';
 
 export const plugins = $state({
   list: [] as Plugin[],
@@ -109,16 +109,77 @@ export function permissionWords(p: string): string {
 }
 
 // ---- what plugin UIs tell the chat (updateModelContext), kept per session ----
+//
+// Each plugin's latest context shows as a chip above the chat box, so the owner sees what will go
+// with the next prompt and can remove it. Images in an update (a screenshot of what the owner
+// pointed at) are saved to ~/inbox as they arrive, as chat attachments are, and the block names
+// them by path: zenbot reads them with its own tools. Plugin content is untrusted: it travels only
+// inside the delimited block, and only when the owner sends.
 
-/** Session id ('new' for a chat not started) → plugin → the latest context, unsent. */
-const contexts = new Map<string, Map<string, string>>();
+export type ContextImage = { name: string; thumb: string; path?: string; error?: string };
+export type PluginContext = { id: number; text: string; images: ContextImage[] };
 
-export function keepContext(session: string | null, plugin: string, text: string) {
-  if (!session) return;
-  let m = contexts.get(session);
-  if (!m) contexts.set(session, (m = new Map()));
-  if (text) m.set(plugin, text);
-  else m.delete(plugin);
+const IMAGE_TYPES: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' };
+export const MAX_CONTEXT_IMAGES = 8;
+export const MAX_CONTEXT_IMAGE_BYTES = 5 * 1024 * 1024;
+export const MAX_CONTEXT_TEXT = 20_000;
+
+/** Session id ('new' for a chat not started) → plugin → its latest context, unsent. */
+export const contexts = $state<Record<string, Record<string, PluginContext>>>({});
+let contextIds = 0;
+
+/** The images of an update: base64 PNG, JPEG, WebP or GIF, each under the size cap, at most 8. */
+export function contextImages(content: unknown): { mimeType: string; data: string; bytes: Uint8Array }[] {
+  if (!Array.isArray(content)) return [];
+  const out: { mimeType: string; data: string; bytes: Uint8Array }[] = [];
+  for (const c of content as { type?: unknown; mimeType?: unknown; data?: unknown }[]) {
+    if (out.length >= MAX_CONTEXT_IMAGES) break;
+    if (c?.type !== 'image' || typeof c.data !== 'string' || typeof c.mimeType !== 'string' || !IMAGE_TYPES[c.mimeType]) continue;
+    if ((c.data.length * 3) / 4 > MAX_CONTEXT_IMAGE_BYTES) continue;
+    try {
+      out.push({ mimeType: c.mimeType, data: c.data, bytes: Uint8Array.from(atob(c.data), (ch) => ch.charCodeAt(0)) });
+    } catch {
+      // Not base64: skip it rather than send a broken file.
+    }
+  }
+  return out;
+}
+
+/**
+ * Keep a plugin's latest context for a session, replacing the one before (empty clears it).
+ * Returns the kept context's id, or null when nothing was kept.
+ */
+export function keepContext(session: string | null, plugin: string, text: string, images: { mimeType: string; data: string }[] = []): number | null {
+  if (!session) return null;
+  text = text.slice(0, MAX_CONTEXT_TEXT);
+  const m = (contexts[session] ??= {});
+  if (!text && !images.length) {
+    delete m[plugin];
+    return null;
+  }
+  const id = ++contextIds;
+  const stem = plugin.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'plugin';
+  m[plugin] = {
+    id,
+    text,
+    images: images.map((im, k) => ({ name: `${stem}-${id}-${k + 1}.${IMAGE_TYPES[im.mimeType]}`, thumb: `data:${im.mimeType};base64,${im.data}` })),
+  };
+  return id;
+}
+
+/** Record where an image was saved (or why it wasn't), if its context is still the current one. */
+export function settleImage(session: string, plugin: string, id: number, k: number, patch: { path?: string; error?: string }) {
+  const c = contexts[session]?.[plugin];
+  if (c?.id === id && c.images[k]) Object.assign(c.images[k], patch);
+}
+
+export function dropContext(session: string, plugin: string) {
+  if (contexts[session]) delete contexts[session][plugin];
+}
+
+/** Whether a session's context still has images being saved. */
+export function contextSaving(session: string): boolean {
+  return Object.values(contexts[session] ?? {}).some((c) => c.images.some((im) => !im.path && !im.error));
 }
 
 /**
@@ -127,10 +188,13 @@ export function keepContext(session: string | null, plugin: string, text: string
  * field yet, so the block travels at the head of the prompt text.
  */
 export function takeContext(session: string): string {
-  const m = contexts.get(session);
-  if (!m?.size) return '';
-  contexts.delete(session);
-  const parts = [...m].map(([plugin, text]) => `<plugin name="${plugin}">\n${text}\n</plugin>`);
+  const m = contexts[session];
+  if (!m || !Object.keys(m).length) return '';
+  delete contexts[session];
+  const parts = Object.entries(m).map(([plugin, c]) => {
+    const images = c.images.map((im) => (im.path ? `(attached ${tilde(im.path)})` : `(image not saved: ${im.error ?? 'unknown error'})`));
+    return `<plugin name="${plugin}">\n${[c.text, ...images].filter(Boolean).join('\n')}\n</plugin>`;
+  });
   return `<app_context>\n${parts.join('\n')}\n</app_context>\n\n`;
 }
 

@@ -10,13 +10,14 @@
   //   `zen://close` returns this pane to the core Files tree,
   //   http(s) opens a new tab (noopener), anything else is refused;
   // - `sendMessage` queues a visible, attributed draft; only the owner can send it;
-  // - `updateModelContext` is kept for the open session and goes with its next prompt.
+  // - `updateModelContext` is kept for the open session, shown as a chip above the chat box, and
+  //   goes with its next prompt; its images are saved to ~/inbox and named by path.
   import { onMount } from 'svelte';
   import { AppBridge, PostMessageTransport, type McpUiHostContext } from '@modelcontextprotocol/ext-apps/app-bridge';
   import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-  import { pluginApi, type ToolResult } from './api.ts';
+  import { pluginApi, upload, type ToolResult } from './api.ts';
   import { app, openFile, closeFile, setView, notice, type Pane } from './app.svelte.ts';
-  import { chat, keepContext, resultText } from './plugins.svelte.ts';
+  import { chat, contextImages, contexts, keepContext, resultText, settleImage } from './plugins.svelte.ts';
   import { SANDBOX, webLink, withCsp, zenNavigation } from './frame.ts';
 
   let {
@@ -96,7 +97,7 @@
         const b = new AppBridge(
           null,
           { name: 'zen', version: '0' },
-          { openLinks: {}, serverTools: {}, logging: {}, message: { text: {} }, updateModelContext: { text: {}, structuredContent: {} }, sandbox: { csp } },
+          { openLinks: {}, serverTools: {}, logging: {}, message: { text: {} }, updateModelContext: { text: {}, image: {}, structuredContent: {} }, sandbox: { csp } },
           { hostContext: context() },
         );
         b.oncalltool = async (p) => {
@@ -131,7 +132,20 @@
           return { isError: true };
         };
         b.onupdatemodelcontext = async (p) => {
-          keepContext(app.session, title, resultText(p as { content?: { type: string; text?: string }[]; structuredContent?: unknown }));
+          const sid = app.session;
+          const images = contextImages(p.content);
+          const id = keepContext(sid, title, resultText(p as { content?: { type: string; text?: string }[]; structuredContent?: unknown }), images);
+          if (sid && id !== null) {
+            const kept = contexts[sid]?.[title]?.images ?? [];
+            images.forEach((im, k) => {
+              const name = kept[k]?.name ?? `context-${id}-${k + 1}`;
+              const file = new File([im.bytes as BlobPart], name, { type: im.mimeType });
+              upload(file, () => {}).done.then(
+                (r) => settleImage(sid, title, id, k, { path: r.path }),
+                (e) => settleImage(sid, title, id, k, { error: (e as Error).message }),
+              );
+            });
+          }
           return {};
         };
         b.onloggingmessage = (m) => console.debug(`[${plugin}]`, m.level, m.data);
