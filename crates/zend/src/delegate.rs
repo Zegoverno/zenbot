@@ -13,6 +13,12 @@
 //! description lists the roles as they were when the session's tools were first fixed, so a later
 //! change to the file doesn't move the prompt prefix; a call always checks the current file.
 //!
+//! A task that names neither a `role` nor a `model` (nor another agent) may get a role from System
+//! One (`s1/role_pick.toml`, when it's on): the caller's roles and their descriptions are the
+//! options; a role is taken only when it clearly fits and a worker serves its model, else the default
+//! model, as without System One. The picked role is recorded like a named one and shown in the result
+//! (`role: researcher (picked by System One, p=0.82)`).
+//!
 //! A subagent's model: the task's `model`, else its role's, else (handed to another agent) that
 //! agent's, else the roles file's `default_model` (when a worker serves it), else the parent's.
 //!
@@ -118,12 +124,23 @@ async fn delegate(app: &AppState, session: Uuid, workspace: &std::path::Path, wh
     let row = sqlx::query("SELECT model, kind FROM sessions WHERE id = $1").bind(session).fetch_one(&app.db).await?;
     anyhow::ensure!(row.get::<Option<String>, _>("kind").as_deref() != Some(SUBAGENT), "a subagent can't delegate further");
     let agent = named_agent(who, args["agent"].as_str())?;
-    let role_name = args["role"].as_str().map(str::trim).filter(|r| !r.is_empty());
+    let task_model = args["model"].as_str().map(str::trim).filter(|m| !m.is_empty());
+    let mut role_name = args["role"].as_str().map(str::trim).filter(|r| !r.is_empty()).map(String::from);
+    // Neither a role nor a model: System One may pick a role from the task (s1/role_pick.toml).
+    let mut picked = None;
+    if role_name.is_none() && task_model.is_none() && agent.is_none() && !roles.roles.is_empty() && crate::s1::on() {
+        // A pick whose model no worker serves would fail the task: the default model instead.
+        let servable = |n: &str| roles.roles.get(n).and_then(|r| r.model.as_deref()).is_none_or(|m| served.iter().any(|s| s == m));
+        if let Some((name, p)) = pick_role(app, session, task, roles).await.filter(|(n, _)| servable(n)) {
+            role_name = Some(name);
+            picked = Some(p);
+        }
+    }
+    let role_name = role_name.as_deref();
     let role = role_name.map(|r| roles.get(r)).transpose()?;
     let parent: String = row.get("model");
     // The roles file's default is a soft one: when no worker serves it, the parent's model.
     let default = roles.default_model.as_deref().filter(|m| served.iter().any(|s| s == m));
-    let task_model = args["model"].as_str().map(str::trim).filter(|m| !m.is_empty());
     let model = crate::roles::resolve_model(task_model, role, agent.as_ref().and_then(|a| a.model.as_deref()), default, &parent);
     if model != parent {
         anyhow::ensure!(served.contains(&model), "no worker serves `{model}`");
@@ -168,7 +185,40 @@ async fn delegate(app: &AppState, session: Uuid, workspace: &std::path::Path, wh
         error.as_deref().map(|e| format!(", with an error: {e}")).unwrap_or_default()
     );
     let body = if answer.trim().is_empty() { "(no answer)".to_string() } else { answer };
-    Ok((format!("{head}{body}"), error.is_some()))
+    let note = match (role_name, picked) {
+        (Some(r), Some(p)) => format!("role: {r} (picked by System One, p={p:.2})\n"),
+        _ => String::new(),
+    };
+    Ok((format!("{head}{note}{body}"), error.is_some()))
+}
+
+/// The role System One picks for a task that names none, with its probability; None: no role
+/// fits clearly, or System One didn't answer (the default model, as without System One).
+async fn pick_role(app: &AppState, session: Uuid, task: &str, roles: &crate::roles::Roles) -> Option<(String, f64)> {
+    let facts = crate::s1::Facts::new(Some(session)).with("task", zen_proto::head(task, 6000)).with("roles", role_options(roles));
+    let d = crate::s1::decide(&app.db, "role_pick", facts).await;
+    picked_role(&d, roles)
+}
+
+/// The options `role_pick` chooses among: each role and what it's for, and `none`.
+fn role_options(roles: &crate::roles::Roles) -> Value {
+    let mut options = serde_json::Map::new();
+    for (name, r) in &roles.roles {
+        options.insert(name.clone(), json!(r.description.trim()));
+    }
+    options.insert("none".into(), json!("None of them clearly fits: no role, the default model"));
+    Value::Object(options)
+}
+
+/// A `pick` outcome naming one of the roles, with the probability of the choice.
+fn picked_role(d: &crate::s1::Decision, roles: &crate::roles::Roles) -> Option<(String, f64)> {
+    if !d.is("pick") {
+        return None;
+    }
+    let name = d.choice("role").filter(|c| roles.roles.contains_key(*c))?;
+    let a = &d.answers["role"];
+    let p = a["probabilities"][name].as_f64().or(a["p"].as_f64()).or(a["confidence"].as_f64()).unwrap_or(0.0);
+    Some((name.to_string(), p))
 }
 
 /// A brief with the SKILL.md of each named skill after it; an unknown skill is an error.
@@ -266,6 +316,24 @@ mod tests {
         assert_eq!(kept[1]["description"], earlier[0]["description"]);
         let stale = json!([{ "name": "delegate", "description": "an old description" }]);
         assert!(with_roles(tools, "zenbot", Some(&stale))[1]["description"].as_str().unwrap().starts_with(&base));
+    }
+
+    #[test]
+    fn system_one_picks_only_a_known_role_on_pick() {
+        let roles = crate::roles::parse(crate::roles::DEFAULT).unwrap();
+        let options = role_options(&roles);
+        assert_eq!(options.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(), ["coder", "none", "researcher", "reviewer"]);
+        let d = |outcome: Option<&str>, choice: &str| crate::s1::Decision {
+            outcome: outcome.map(String::from),
+            answers: json!({ "role": { "type": "choice", "choice": choice, "probabilities": { choice: 0.82 } } }),
+            answered: outcome.is_some(),
+            ..Default::default()
+        };
+        assert_eq!(picked_role(&d(Some("pick"), "researcher"), &roles), Some(("researcher".into(), 0.82)));
+        assert_eq!(picked_role(&d(Some("default"), "researcher"), &roles), None, "unsure: the default model");
+        assert_eq!(picked_role(&d(Some("pick"), "poet"), &roles), None, "a role the file doesn't have");
+        assert_eq!(picked_role(&d(None, "researcher"), &roles), None, "unavailable: the default model");
+        assert_eq!(picked_role(&crate::s1::Decision::default(), &roles), None, "System One off");
     }
 
     #[test]

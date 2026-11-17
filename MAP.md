@@ -98,7 +98,7 @@ One list per session, in a fixed order (`agent.rs::specs`):
   Contracts have no edit API; retries, assessments and delegation/verify integration are later work.
 - Work: `ask` (questions to the owner), `verify` (`agent.rs`: the kernel runs the checks, a fresh
   verifier session judges the rest), `delegate` (`delegate.rs`: subagents in parallel, each optionally in a `role`
-  (`roles.rs`, below); on the task's model, else the role's, else the other agent's, else the roles
+  (`roles.rs`, below; with neither a role nor a model, System One may pick one, `role_pick`); on the task's model, else the role's, else the other agent's, else the roles
   file's `default_model` when served, else the parent's; zenbot may hand a task to another agent), `schedule` (`jobs/`), `judge` (System One over many items; when System
   One is on).
 
