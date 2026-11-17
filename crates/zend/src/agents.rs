@@ -137,6 +137,7 @@ impl Agent {
     /// role, not to an agent, and is left to `agent::refusal`.
     pub fn allows(&self, name: &str) -> bool {
         name == "submit_verdict"
+            || name == "submit_review"
             || (self.tools.as_ref().is_none_or(|t| t.contains(name)) && !self.deny.contains(name) && self.role.as_ref().is_none_or(|(_, t)| t.contains(name)))
     }
 

@@ -44,8 +44,9 @@ pub fn refusal(kind: Option<&str>, name: &str) -> Option<String> {
         return Some("This tool is retired: write wiki pages (~/.zenbot/global/wiki) for knowledge, or a reviewed skill with supporting scripts.".into());
     }
     match kind {
-        None | Some(CHANNEL) => (name == "submit_verdict").then(|| "`submit_verdict` is only for a verifier session".into()),
+        None | Some(CHANNEL) => matches!(name, "submit_verdict" | "submit_review").then(|| format!("`{name}` is only for a verifier or review session")),
         Some(VERIFIER) => (!matches!(name, "bash" | "read" | "submit_verdict")).then(|| format!("`{name}` isn't available to a verifier")),
+        Some(crate::review::REVIEW) => (!crate::review::TOOLS.contains(&name)).then(|| format!("`{name}` isn't available to a review")),
         // A subagent (also the sleep's kernel sessions) or a scheduled job can't ask the owner,
         // delegate or schedule.
         Some(crate::delegate::SUBAGENT) if matches!(name, "ask" | "delegate" | "schedule") => {
@@ -54,14 +55,14 @@ pub fn refusal(kind: Option<&str>, name: &str) -> Option<String> {
         Some(crate::jobs::JOB) if matches!(name, "ask" | "delegate" | "schedule") => {
             Some(format!("`{name}` isn't available in a scheduled job: no one is in the conversation; decide yourself and say what you assumed in the report"))
         }
-        Some(crate::delegate::SUBAGENT | crate::jobs::JOB) => (name == "submit_verdict").then(|| "`submit_verdict` is only for a verifier session".into()),
+        Some(crate::delegate::SUBAGENT | crate::jobs::JOB) => matches!(name, "submit_verdict" | "submit_review").then(|| format!("`{name}` is only for a verifier or review session")),
         Some(other) => Some(format!("a `{other}` session has no tools")),
     }
 }
 
 /// Whether the kernel knows this kind of session (an unknown kind is offered no tools).
 fn known(kind: Option<&str>) -> bool {
-    owner_driven(kind) || matches!(kind, Some(VERIFIER | crate::delegate::SUBAGENT | crate::jobs::JOB))
+    owner_driven(kind) || matches!(kind, Some(VERIFIER | crate::delegate::SUBAGENT | crate::jobs::JOB | crate::review::REVIEW))
 }
 
 /// A file an `edit` or `write` call treats specially.
@@ -260,6 +261,17 @@ pub fn specs(kind: Option<&str>) -> Value {
         picked.push(verdict_spec());
         return Value::Array(picked);
     }
+    if kind == Some(crate::review::REVIEW) {
+        let mut all = builtins;
+        all.push(crate::search::spec());
+        all.push(crate::memory::spec());
+        all.push(crate::skills::find_spec());
+        all.push(crate::skills::load_spec());
+        all.push(crate::workshop::save_skill_spec());
+        let mut picked: Vec<Value> = all.into_iter().filter(|t| t["name"].as_str().is_some_and(|n| crate::review::TOOLS.contains(&n))).collect();
+        picked.push(crate::review::submit_spec());
+        return Value::Array(picked);
+    }
     // A subagent or a scheduled job can't ask the owner, delegate or schedule.
     let subagent = kind == Some(crate::delegate::SUBAGENT) || kind == Some(crate::jobs::JOB);
     let mut all = builtins;
@@ -343,6 +355,13 @@ If a question goes unanswered, take your recommended option and say it was an as
             *ending = Some("verdict given");
             out("Verdict recorded. End your turn now.".into(), false)
         }
+        "submit_review" => match crate::review::submit(app, session, args).await {
+            Ok(text) => {
+                *ending = Some("review submitted");
+                out(text, false)
+            }
+            Err(e) => out(format!("couldn't record the review: {e:#}"), true),
+        },
         "brain" => {
             let (content, is_error) = crate::brain::run_tool(app, session, args).await;
             out(content,is_error)

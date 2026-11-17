@@ -22,6 +22,7 @@ mod memory;
 mod brain;
 mod mind;
 mod roles;
+mod review;
 mod s1;
 mod search;
 mod sandbox;
@@ -284,6 +285,7 @@ async fn serve() -> Result<()> {
 
     let api = Router::new()
         .route("/models", get(list_models))
+        .route("/reviews", get(review::list))
         .route("/complete", axum::routing::post(complete_once))
         .route("/search", axum::routing::post(search_once))
         .route("/s1", get(s1::api::stats))

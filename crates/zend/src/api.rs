@@ -446,6 +446,10 @@ pub(crate) async fn update_session(State(app): State<AppState>, Path(id): Path<U
         Some("partial") => out["continued_by"] = json!(crate::handoff::start(&app, id).await?),
         _ => {}
     }
+    // An outcome is the learning loop's signal: review how the session went (review.rs).
+    if body.outcome.is_some() {
+        crate::review::queue(&app, id).await;
+    }
     Ok(Json(out))
 }
 
