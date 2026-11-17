@@ -139,7 +139,7 @@ mod tests {
         assert_eq!(r.roles.keys().map(String::as_str).collect::<Vec<_>>(), ["coder", "researcher", "reviewer"]);
         let researcher = r.get("researcher").unwrap();
         assert_eq!(researcher.model.as_deref(), Some("claude/claude-haiku-5-5"));
-        assert!(researcher.tools.as_ref().unwrap().iter().all(|t| !matches!(t.as_str(), "write" | "edit")));
+        assert!(researcher.tools.as_ref().unwrap().iter().all(|t| !matches!(t.as_str(), "write" | "edit" | "bash")));
         assert_eq!(r.get("reviewer").unwrap().skills, ["work/verify"]);
         assert!(r.get("coder").unwrap().tools.is_none(), "the coder gets every tool");
         assert!(r.listing().contains("- researcher (claude/claude-haiku-5-5): Find"));

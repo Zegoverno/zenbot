@@ -5,7 +5,8 @@
 //! session's fixed prefix carries only an index (`index_text`); the model finds skills with
 //! `find_skills` and loads one with `load_skill`, whose text arrives as a tool result, so the prefix
 //! and the prompt cache never change mid-session. Loads are recorded like any tool call
-//! (`tool_calls`), which is how unused and overused skills are measured.
+//! (`tool_calls`), which is how unused and overused skills are measured. Enabled installed plugin
+//! skill roots join after agent/global skills; lifecycle changes affect subsequent discovery.
 
 use std::path::{Path, PathBuf};
 
@@ -22,6 +23,7 @@ pub struct Skill {
     pub dir: PathBuf,
     /// Exact SKILL.md bytes used for validation, search and source ratings.
     pub text: String,
+    plugin: bool,
 }
 
 /// Where skills live: `ZEN_SKILLS_DIR`, else `~/.zenbot/global/skills` (shared by every agent).
@@ -108,10 +110,15 @@ fn validate_text(dir: &Path, text: &str) -> Vec<String> {
 /// Every valid skill under `root`, sorted by domain and name. Invalid folders are skipped (and
 /// logged), so one broken skill doesn't hide the rest.
 pub fn scan(root: &Path) -> Vec<Skill> {
+    scan_checked(root, false)
+}
+
+fn scan_checked(root: &Path, plugin: bool) -> Vec<Skill> {
     let mut out = Vec::new();
     let Ok(domains) = std::fs::read_dir(root) else { return out };
     for d in domains.flatten() {
         let dpath = d.path();
+        if plugin && !crate::plugins::safe_skill_path(root, &dpath) { continue; }
         let domain = d.file_name().to_string_lossy().to_string();
         // `_archived` isn't a domain (workshop.rs).
         if !dpath.is_dir() || domain.starts_with('.') || domain.starts_with('_') {
@@ -120,6 +127,7 @@ pub fn scan(root: &Path) -> Vec<Skill> {
         let Ok(skills) = std::fs::read_dir(&dpath) else { continue };
         for s in skills.flatten() {
             let dir = s.path();
+            if plugin && !crate::plugins::safe_skill_path(root, &dir.join("SKILL.md")) { continue; }
             if !dir.join("SKILL.md").is_file() {
                 continue;
             }
@@ -131,6 +139,7 @@ pub fn scan(root: &Path) -> Vec<Skill> {
             }
             let (fields, _) = frontmatter(&text);
             out.push(Skill {
+                plugin,
                 domain: domain.clone(),
                 name: field(&fields, "name").unwrap_or("").to_string(),
                 description: field(&fields, "description").unwrap_or("").to_string(),
@@ -254,10 +263,14 @@ pub fn find(skills: &[Skill], query: &str, limit: usize) -> Vec<(Skill, f64)> {
 /// A skill by `domain/name` or bare `name` (when only one domain has it).
 pub fn lookup<'a>(skills: &'a [Skill], name: &str) -> Result<&'a Skill, String> {
     let name = name.trim().trim_end_matches("/SKILL.md");
-    let found: Vec<&Skill> = match name.split_once('/') {
+    let mut found: Vec<&Skill> = match name.split_once('/') {
         Some((d, n)) => skills.iter().filter(|s| s.domain == d && s.name == n).collect(),
         None => skills.iter().filter(|s| s.name == name).collect(),
     };
+    // A newly installed plugin must not make an existing bare local name ambiguous.
+    if !name.contains('/') && found.iter().any(|s| !s.plugin) {
+        found.retain(|s| !s.plugin);
+    }
     match found.as_slice() {
         [one] => Ok(one),
         [] => Err(format!("no skill `{name}`; use find_skills to see what exists")),
@@ -275,6 +288,9 @@ pub fn load(skill: &Skill, file: Option<&str>) -> Result<String, String> {
         None => skill.dir.join("SKILL.md"),
         Some(f) => {
             let p = skill.dir.join(f);
+            if skill.plugin && !crate::plugins::safe_skill_path(&skill.dir, &p) {
+                return Err("plugin skill file must not traverse symlinks or escape".into());
+            }
             let inside = p.canonicalize().ok().zip(skill.dir.canonicalize().ok()).is_some_and(|(p, d)| p.starts_with(d));
             if !inside {
                 return Err(format!("`{f}` isn't a file of skill {}/{}", skill.domain, skill.name));
@@ -369,8 +385,23 @@ pub fn scan_roots(roots: &[PathBuf]) -> Vec<Skill> {
             }
         }
     }
-    out.sort_by(|a, b| (&a.domain, &a.name).cmp(&(&b.domain, &b.name)));
+    append_plugins(&mut out, &crate::plugins::plugins_dir(), &crate::plugins::skill_roots());
     out
+}
+
+fn append_plugins(out: &mut Vec<Skill>, base: &Path, roots: &[PathBuf]) {
+    for root in roots {
+        if !crate::plugins::safe_skill_path(base, root) { continue; }
+        let Some(plugin) = root.strip_prefix(base).ok().and_then(|p| p.components().next()) else { continue };
+        let plugin = plugin.as_os_str().to_string_lossy();
+        for mut skill in scan_checked(root, true) {
+            skill.domain = format!("plugin-{plugin}-{}", skill.domain);
+            if !out.iter().any(|o| o.domain == skill.domain && o.name == skill.name) {
+                out.push(skill);
+            }
+        }
+    }
+    out.sort_by(|a, b| (&a.domain, &a.name).cmp(&(&b.domain, &b.name)));
 }
 
 /// `find_skills` and `load_skill` over the skills in `roots`: the text and whether it's an error.
@@ -392,7 +423,11 @@ pub async fn run_tool(db: &sqlx::SqlitePool, session: uuid::Uuid, roots: &[PathB
     let file = args["file"].as_str().map(str::trim).filter(|f| !f.is_empty() && *f != "SKILL.md");
     let (path, text) = if let Some(file) = file {
         let read = async {
-            let path = skill.dir.join(file).canonicalize()?;
+            let requested = skill.dir.join(file);
+            if skill.plugin {
+                anyhow::ensure!(crate::plugins::safe_skill_path(&skill.dir, &requested), "plugin skill file must not traverse symlinks or escape");
+            }
+            let path = requested.canonicalize()?;
             anyhow::ensure!(path.starts_with(skill.dir.canonicalize()?), "file is outside this skill");
             let text = tokio::fs::read_to_string(&path).await?;
             Ok((path, text))
@@ -433,6 +468,40 @@ mod tests {
         std::fs::create_dir_all(&bad).unwrap();
         std::fs::write(bad.join("SKILL.md"), "---\nname: other\ndescription: x\n---\nbody\n").unwrap();
         root
+    }
+
+    #[test]
+    fn plugin_discovery_preserves_core_and_agent_names_and_rejects_symlinks() {
+        let core = tree();
+        let plugin = tree();
+        let mut all = scan(&core);
+        let base = plugin.parent().unwrap();
+        let domain = format!("plugin-{}-work", plugin.file_name().unwrap().to_string_lossy());
+        append_plugins(&mut all, base, &[plugin.to_path_buf()]);
+        assert_eq!(all.len(), 6, "plugin skills get their own namespace");
+        assert_eq!(lookup(&all, "work/verify").unwrap().dir, core.join("work/verify"));
+        let mut only_plugin = Vec::new();
+        assert_eq!(lookup(&all, "verify").unwrap().dir, core.join("work/verify"), "bare local names retain their meaning");
+        append_plugins(&mut only_plugin, base, &[plugin.to_path_buf()]);
+        assert!(index_text(&only_plugin).contains(&format!("{domain}/verify")));
+        assert_eq!(find(&only_plugin, "verify", 5)[0].0.name, "verify");
+        assert!(load(lookup(&only_plugin, &format!("{domain}/verify")).unwrap(), None).unwrap().contains("Run the tests."));
+        let mut reserved = vec![lookup(&only_plugin, &format!("{domain}/verify")).unwrap().clone()];
+        reserved[0].plugin = false;
+        reserved[0].text = "LOCAL WINS".into();
+        append_plugins(&mut reserved, base, &[plugin.to_path_buf()]);
+        assert_eq!(lookup(&reserved, &format!("{domain}/verify")).unwrap().text, "LOCAL WINS");
+        std::os::unix::fs::symlink(plugin.join("work/brief/references/template.md"), plugin.join("work/brief/references/link.md")).unwrap();
+        assert!(load(lookup(&only_plugin, &format!("{domain}/brief")).unwrap(), Some("references/link.md")).is_err());
+        std::os::unix::fs::symlink(plugin.join("work/verify"), plugin.join("work/linked")).unwrap();
+        assert_eq!(scan_checked(&plugin, true).len(), 3);
+        let symlink_file = plugin.join("work/linked-file");
+        std::fs::create_dir_all(&symlink_file).unwrap();
+        std::os::unix::fs::symlink(plugin.join("work/verify/SKILL.md"), symlink_file.join("SKILL.md")).unwrap();
+        assert_eq!(scan_checked(&plugin, true).len(), 3);
+        only_plugin.clear();
+        append_plugins(&mut only_plugin, &plugin, &[]);
+        assert!(only_plugin.is_empty(), "disabled/uninstalled roots vanish from subsequent catalogs");
     }
 
     #[test]

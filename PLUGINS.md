@@ -46,6 +46,26 @@ and [zensudoku](https://github.com/Zegoverno/zensudoku).
   your dependencies. The installed plugin has no `node_modules`, and zenbot never runs `npm` for
   you.
 
+### Packaged skills
+
+Optional `skills` names a directory relative to the plugin root (for example `skills/`),
+containing `<domain>/<name>/SKILL.md` folders. Absolute paths, traversal, hidden components,
+node_modules and symlink paths are refused. Installed, enabled plugins with approved manifest
+permissions and readable skill files participate in the prompt index, `find_skills` and
+`load_skill`. Disable or uninstall removes them from subsequent discovery; an existing session's
+fixed prompt and already-loaded text are not rewritten.
+
+Plugin skills are exposed as `plugin-<plugin>-<domain>/<name>` (for example,
+`plugin-zenwrite-writing/shrink`), so packaged and original global skills can be compared without
+deleting either. Agent/global skills win even if they use that exact namespace. Bare local skill
+names retain their meaning when a plugin adds the same short name; use the qualified plugin name
+to load the packaged version. Between plugins installation names sort lexically (first wins for
+a collision). Skills are instructions, not a permission grant; they cannot widen the session's tools. Files are trusted owner-managed installed artifacts: path checks reject
+symlinks, but are not a sandbox against concurrent filesystem mutation by the owner.
+
+Original global writing skills must remain until installed plugin parity has been verified;
+packaging a release alone does not prove parity on the running installation.
+
 ### Slots (`contributes`)
 
 zenbot draws the shell. A plugin fills these slots:

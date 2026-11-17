@@ -93,6 +93,7 @@ pub const PERMISSIONS: &[&str] = &["files:read", "files:write", "network", "ai"]
 /// A validated `plugin.json`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Manifest {
+    pub skills: Option<String>,
     pub name: String,
     pub version: String,
     pub title: String,
@@ -146,6 +147,11 @@ pub fn validate(v: &Value) -> Result<Manifest, String> {
             return Err(format!("`{k}` must be a string of at most 1000 bytes"));
         }
     }
+    let skills = match &v["skills"] {
+        Value::Null => None,
+        Value::String(p) if plain_relative(p) => Some(p.clone()),
+        _ => return Err("skills must be a relative directory inside the plugin".into()),
+    };
     let server = &v["server"];
     if server["command"] != "node" {
         return Err("server.command must be `node`".into());
@@ -261,7 +267,7 @@ pub fn validate(v: &Value) -> Result<Manifest, String> {
     if permissions.iter().filter(|p| p.starts_with("files:write:")).count() > 1 {
         return Err("at most one files:write:<subfolder>".into());
     }
-    Ok(Manifest { title: if v["title"].is_string() { s("title") } else { name.clone() }, description: s("description"), name, version, args, contributes, permissions })
+    Ok(Manifest { skills, title: if v["title"].is_string() { s("title") } else { name.clone() }, description: s("description"), name, version, args, contributes, permissions })
 }
 
 // ---------- what runs ----------
@@ -399,6 +405,13 @@ pub fn command(run: &Run, args: &[String]) -> Result<tokio::process::Command> {
 /// The kernel, for the sampling requests that arrive on a server's own reader task.
 static APP: OnceLock<AppState> = OnceLock::new();
 
+/// Enabled installed plugins' skill roots, refreshed with every plugin lifecycle change.
+static SKILL_ROOTS: LazyLock<std::sync::RwLock<Vec<PathBuf>>> = LazyLock::new(Default::default);
+
+pub fn skill_roots() -> Vec<PathBuf> {
+    SKILL_ROOTS.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 /// The enabled plugins' servers and a generation that changes with them (`mcp.rs` reloads on it).
 static SERVERS: LazyLock<std::sync::RwLock<(u64, Vec<ServerConfig>)>> = LazyLock::new(Default::default);
 
@@ -424,6 +437,7 @@ pub async fn init(app: &AppState) -> Result<()> {
 async fn reload(db: &SqlitePool) -> Result<()> {
     let rows = sqlx::query("SELECT name, manifest, permissions FROM plugins WHERE enabled = 1 ORDER BY name").fetch_all(db).await?;
     let mut cfgs = Vec::new();
+    let skill_roots = enabled_skill_roots(db, &plugins_dir()).await?;
     for r in rows {
         let name: String = r.get("name");
         let manifest: Value = serde_json::from_str(&r.get::<String, _>("manifest")).unwrap_or_default();
@@ -447,6 +461,7 @@ async fn reload(db: &SqlitePool) -> Result<()> {
         let mut s = SERVERS.write().unwrap_or_else(|e| e.into_inner());
         *s = (s.0 + 1, cfgs);
     }
+    *SKILL_ROOTS.write().unwrap_or_else(|e| e.into_inner()) = skill_roots;
     crate::mcp::reload_plugins().await;
     Ok(())
 }
@@ -649,6 +664,38 @@ pub fn check_sha256(bytes: &[u8], want: &str) -> Result<()> {
     Ok(())
 }
 
+async fn enabled_skill_roots(db: &SqlitePool, base: &Path) -> Result<Vec<PathBuf>> {
+    let rows = sqlx::query("SELECT name, manifest, permissions FROM plugins WHERE enabled = 1 ORDER BY name").fetch_all(db).await?;
+    Ok(rows.into_iter().filter_map(|r| {
+        let manifest: Value = serde_json::from_str(&r.get::<String, _>("manifest")).ok()?;
+        let permissions: Vec<String> = serde_json::from_str(&r.get::<String, _>("permissions")).ok()?;
+        installed_skill_root(base, &r.get::<String, _>("name"), &manifest, &permissions)
+    }).collect())
+}
+
+fn installed_skill_root(base: &Path, name: &str, manifest: &Value, permissions: &[String]) -> Option<PathBuf> {
+    if !valid_name(name) { return None; }
+    let m = validate(manifest).ok()?;
+    if m.name != name || !m.permissions.iter().all(|p| permissions.contains(p)) { return None; }
+    let root = base.join(name);
+    let dir = root.join(m.skills?);
+    (safe_skill_path(base, &dir) && dir.is_dir() && std::fs::read_dir(&dir).is_ok()).then_some(dir)
+}
+
+/// Reject symlinks in every component. These are trusted installed files, not a sandbox
+/// against concurrent mutation by another process running as the owner.
+pub(crate) fn safe_skill_path(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else { return false };
+    let mut current = root.to_path_buf();
+    if std::fs::symlink_metadata(&current).map_or(true, |m| m.file_type().is_symlink()) { return false; }
+    for component in relative.components() {
+        if !matches!(component, Component::Normal(_)) { return false; }
+        current.push(component);
+        if std::fs::symlink_metadata(&current).map_or(true, |m| m.file_type().is_symlink()) { return false; }
+    }
+    true
+}
+
 /// Read the staged plugin's manifest and check it, with its server's script.
 fn staged_manifest(dir: &Path) -> Result<Manifest> {
     let path = dir.join("plugin.json");
@@ -660,6 +707,12 @@ fn staged_manifest(dir: &Path) -> Result<Manifest> {
     let m = validate(&v).map_err(|e| Refused(format!("plugin.json: {e}")))?;
     if !dir.join(&m.args[0]).is_file() {
         return refuse(format!("plugin.json: the server's script {} isn't in the plugin", m.args[0]));
+    }
+    if let Some(path) = &m.skills {
+        let skills = dir.join(path);
+        if !safe_skill_path(dir, &skills) || !skills.is_dir() {
+            return refuse("plugin.json: skills must be a non-symlink directory inside the plugin");
+        }
     }
     Ok(m)
 }
@@ -1406,6 +1459,38 @@ mod tests {
         }
         at[*parts.last().unwrap()] = v;
         m
+    }
+
+    #[tokio::test]
+    async fn installed_skills_follow_enable_permissions_and_uninstall() {
+        let tmp = crate::test_util::TestDir::new("plugin-skills");
+        let db = crate::storage::connect(&format!("sqlite:{}", tmp.join("db.sqlite3").display())).await.unwrap();
+        let mut m = manifest();
+        m["skills"] = json!("skills/");
+        std::fs::create_dir_all(tmp.join("hello/skills")).unwrap();
+        sqlx::query("INSERT INTO plugins(name,version,manifest,permissions,enabled,source) VALUES('hello','0.1.0',$1,$2,1,'local')")
+            .bind(m.to_string()).bind(json!(["ai","files:read"]).to_string()).execute(&db).await.unwrap();
+        assert_eq!(enabled_skill_roots(&db, &tmp).await.unwrap(), [tmp.join("hello/skills/")]);
+        sqlx::query("UPDATE plugins SET enabled=0").execute(&db).await.unwrap();
+        assert!(enabled_skill_roots(&db, &tmp).await.unwrap().is_empty());
+        sqlx::query("UPDATE plugins SET enabled=1, permissions='[]'").execute(&db).await.unwrap();
+        assert!(enabled_skill_roots(&db, &tmp).await.unwrap().is_empty(), "unapproved manifests stay invisible");
+        sqlx::query("DELETE FROM plugins").execute(&db).await.unwrap();
+        assert!(enabled_skill_roots(&db, &tmp).await.unwrap().is_empty(), "leftover disk folders are not installed");
+    }
+
+    #[test]
+    fn skill_paths_reject_escapes_and_links() {
+        for path in ["../skills", "/skills", "a/../../skills", "./skills", ".hidden", "node_modules/x"] {
+            assert!(validate(&with("skills", json!(path))).is_err(), "{path}");
+        }
+        let tmp = crate::test_util::TestDir::new("skill-paths");
+        std::fs::create_dir_all(tmp.join("skills/work")).unwrap();
+        assert!(safe_skill_path(&tmp, &tmp.join("skills/work")));
+        std::os::unix::fs::symlink(tmp.join("skills"), tmp.join("link")).unwrap();
+        assert!(!safe_skill_path(&tmp, &tmp.join("link/work")));
+        assert!(!safe_skill_path(&tmp, &tmp.join("skills/../skills")));
+        assert!(!safe_skill_path(&tmp, &tmp.join("missing")));
     }
 
     #[test]
