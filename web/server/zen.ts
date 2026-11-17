@@ -35,7 +35,6 @@ const ROUTES: [string, RegExp][] = [
   ['POST', /^(sessions|upgrade|memory\/sleep|search|mcp\/login|agents)$/],
   ['GET', new RegExp(`^sessions/${ID}$`)],
   ['PATCH', new RegExp(`^sessions/${ID}$`)],
-  ['POST', new RegExp(`^sessions/${ID}/decision$`)],
   ['POST', new RegExp(`^tasks/${ID}/agent$`)],
   ['POST', new RegExp(`^mcp/login/${ID}$`)],
   ['PATCH', new RegExp(`^jobs/${NAME}$`)],
