@@ -131,8 +131,12 @@ off for this plugin".
 - Open another file: `app.openLink({ url: "zen://open?path=<urlencoded relative path>" })`. zenbot
   sends it to that file's opener. Plugins never talk to each other directly.
 - Follow the host's `theme` (light or dark) and its CSS variables.
-- `app.updateModelContext(...)` tells the chat what's on screen. `app.sendMessage(...)` posts into the
-  chat when the user asks for help.
+- `app.updateModelContext(...)` tells the chat what's on screen. It shows as a chip above the chat
+  box, which the owner can remove, and goes with the next prompt, once; each update replaces your
+  previous one. Text up to 20,000 characters, plus up to 8 images (`{ type: "image", mimeType, data }`,
+  base64 PNG, JPEG, WebP or GIF, 5 MB each): zenbot saves them as files and the agent reads them, so
+  a screenshot of what the user pointed at reaches it. `app.sendMessage(...)` posts into the chat
+  when the user asks for help.
 
 ## Releasing
 

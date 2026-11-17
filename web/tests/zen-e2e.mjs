@@ -62,7 +62,7 @@ const bundle = readFileSync(path.join(ROOT, 'node_modules/@modelcontextprotocol/
   .replace(/export\s*\{([^}]*)\};?\s*$/, (_, list) => `window.__ext={${list.split(',').map((x) => { const [a, b] = x.trim().split(/\s+as\s+/); return `${b ?? a}:${a}`; }).join(',')}};`);
 const FIXTURE = `<!doctype html><script>window.earlyBlocked = false; addEventListener('securitypolicyviolation', (e) => { if (e.blockedURI === 'https://forbidden.example/early.js') window.earlyBlocked = true; });</script><script src="https://forbidden.example/early.js"></script><!-- <head> --><html><head><meta charset="utf-8"><title>fx</title></head><body>
 <p id="ctx">starting</p><p id="out"></p>
-<button id="edit">Edit Grace</button> <button id="close">Close file</button> <button id="roll">Roll</button> <button id="open">Open Grace</button> <button id="say">Say</button>
+<button id="edit">Edit Grace</button> <button id="close">Close file</button> <button id="roll">Roll</button> <button id="open">Open Grace</button> <button id="say">Say</button> <button id="pin">Pin</button>
 <script type="module">${bundle}
 const { App } = window.__ext;
 const app = new App({ name: 'fx', version: '1.0.0' });
@@ -77,6 +77,7 @@ $('open').onclick = () => app.openLink({ url: 'zen://open?path=wiki%2FGrace.md' 
 $('edit').onclick = () => app.openLink({ url: 'zen://open?path=wiki%2FGrace.md&mode=edit' });
 $('close').onclick = () => app.openLink({ url: 'zen://close' });
 $('say').onclick = async () => { await app.updateModelContext({ content: [{ type: 'text', text: 'Board shows 4' }] }); $('out').textContent = 'told'; };
+$('pin').onclick = async () => { await app.updateModelContext({ content: [{ type: 'text', text: '#1 button.hero' }, { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==' }, { type: 'image', mimeType: 'text/html', data: 'PGI+' }] }); $('out').textContent = 'pinned'; };
 </script></body></html>`;
 let maliciousInit = false;
 const fxPlugin = {
@@ -828,6 +829,29 @@ try {
   await box.fill('And now?');
   await box.press('Enter');
   await until(() => prompts.at(-1) === 'And now?', 'the context went once');
+  // Plugin context shows as a chip before it goes; its images are saved to ~/inbox and named by path.
+  await sideFx.getByRole('button', { name: 'Pin' }).click();
+  await sideFx.locator('#out', { hasText: 'pinned' }).waitFor();
+  const chip = page.getByLabel('context from Fixture', { exact: true });
+  await chip.getByText('Fixture: #1 button.hero').waitFor();
+  assert.equal(await chip.locator('img').count(), 1, 'only the PNG is kept, not the text/html "image"');
+  await chip.getByText('saving…').waitFor({ state: 'detached' });
+  await box.fill('Fix #1');
+  await box.press('Enter');
+  await until(() => prompts.at(-1)?.endsWith('Fix #1'), 'the pinned prompt reaches the kernel');
+  const pinned = prompts.at(-1).match(/^<app_context>\n<plugin name="Fixture">\n#1 button\.hero\n\(attached ~\/inbox\/(\d{4}-\d{2}-\d{2}\/fixture-\d+-1\.png)\)\n<\/plugin>\n<\/app_context>\n\nFix #1$/);
+  assert.ok(pinned, `pinned prompt: ${prompts.at(-1)}`);
+  assert.equal(readFileSync(path.join(HOME, 'inbox', pinned[1])).toString('base64'), 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==');
+  assert.equal(await page.getByLabel('context from Fixture', { exact: true }).count(), 0, 'the chip goes with the prompt');
+  await page.getByText('Streaming answer, done.').last().waitFor();
+  // Removing the chip keeps the context out of the prompt.
+  await sideFx.getByRole('button', { name: 'Say' }).click();
+  await page.getByLabel('context from Fixture', { exact: true }).waitFor();
+  await page.getByRole('button', { name: 'remove context from Fixture' }).click();
+  await box.fill('Nothing attached');
+  await box.press('Enter');
+  await until(() => prompts.at(-1) === 'Nothing attached', 'a removed chip is not sent');
+  await page.getByText('Streaming answer, done.').last().waitFor();
 
   await page.locator('.chat-pane').getByRole('button', { name: 'Settings', exact: true }).click();
   await page.locator('.zside').getByRole('tab', { name: 'Plugins', exact: true }).waitFor();
