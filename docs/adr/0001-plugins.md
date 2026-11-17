@@ -1,6 +1,6 @@
 # ADR 0001: Plugins are MCP servers with an optional MCP App UI
 
-Status: proposed (2026-11-14)
+Status: accepted (2026-11-17); implemented: the plugin host (Host API v0), the marketplace and the first three plugins ship (proposed 2026-11-14)
 
 ## Context
 

@@ -1,6 +1,6 @@
 # ADR 0003: Plugin apps stay Svelte; thin shells per platform
 
-Status: proposed (2026-11-14)
+Status: accepted (2026-11-17); the open points below are still open (proposed 2026-11-14)
 
 ## Context
 

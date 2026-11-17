@@ -1,6 +1,6 @@
 # ADR 0002: The web app joins zenbot; the TUI goes
 
-Status: proposed (2026-11-14)
+Status: accepted (2026-11-17); implemented: the web app lives in `web/` and the TUI is gone (proposed 2026-11-14)
 
 ## Context
 
