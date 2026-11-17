@@ -2,7 +2,8 @@
   // The Sessions view (the TUI's board.rs): every session in sections (Channels, Sessions, Jobs,
   // Archived), whether it runs, idles or waits on the owner, with the subagents and verifiers
   // working under it. Polled from the kernel every 2s while shown. In the side panel `hide` leaves
-  // out the session open next to it.
+  // out the session open next to it, and This session lists that session's own subagents, so you
+  // can see them work.
   import { onMount } from 'svelte';
   import type { Pane } from '../app.svelte.ts';
   import { openSession, typing } from '../app.svelte.ts';
@@ -14,7 +15,7 @@
   /** Finished children shown under their parent (the newest); running ones always show. */
   const FINISHED_CHILDREN = 3;
   const SECTIONS = ['Channels', 'Sessions', 'Jobs', 'Archived'] as const;
-  type Section = (typeof SECTIONS)[number];
+  type Section = (typeof SECTIONS)[number] | 'This session';
 
   let sessions = $state<BoardSession[] | null>(null);
   let archivedCount = $state(0);
@@ -100,6 +101,13 @@
     const hit = (s: BoardSession) => !needle || title(s).toLowerCase().includes(needle) || task(s).toLowerCase().includes(needle) || (needle.startsWith('@') && s.agent === needle.slice(1));
     const top = all.filter((s) => !s.parent && (showJobs || !archivedJob(s)));
     const out: Group[] = [];
+    // The open session's own children (the session itself is in the chat next to it).
+    const mine = hide ? kids({ id: hide } as BoardSession).filter(hit) : [];
+    if (mine.length) {
+      const run = mine.filter((c) => c.busy);
+      const shown = [...run, ...mine.filter((c) => !c.busy).slice(0, FINISHED_CHILDREN)];
+      out.push({ name: 'This session', count: mine.length, hidden: false, rows: shown.map((c) => ({ id: c.id, s: c, child: true, runningKids: 0, kids: 0, more: 0 })) });
+    }
     for (const name of SECTIONS) {
       const group = top.filter((s) => section(s) === name && (hit(s) || kids(s).some(hit)));
       // Waiting on the owner first, then running; otherwise the kernel's order (latest first).
@@ -289,7 +297,7 @@
               <span class="text" class:bold={r.s.busy || r.s.waiting || r.runningKids > 0}>{title(r.s)}</span>
               {#if r.s.archived && r.s.outcome}<span class="outcome {r.s.outcome}" title={r.s.outcome_note ?? r.s.outcome}>{r.s.outcome}</span>{/if}
             {/if}
-            {#if r.s.waiting}<span class="warn nowrap"> · waiting on you</span>{/if}
+            {#if r.s.waiting && !r.s.busy}<span class="warn nowrap"> · waiting on you</span>{/if}
             <span class="dim meta">{meta(r)}</span>
           </span>
         </div>

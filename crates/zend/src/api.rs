@@ -178,7 +178,7 @@ const BOARD_CHILDREN: i64 = 20;
 /// its child sessions (subagents, verifiers): the latest `BOARD_CHILDREN` and any running, each
 /// with the task it was given; `children` says how many a session has in all. Each says whether
 /// a turn is running in it right now, and whether it's waiting on the owner: its latest `ask`
-/// questions came after the owner's latest message (a message the kernel sent in the owner's
+/// questions that end the turn (`wait` not false) came after the owner's latest message (a message the kernel sent in the owner's
 /// place, `kernel: true`, isn't an answer), or an MCP form awaits an explicit response.
 /// The client nests children under their parent.
 /// No costs: the board polls this, and they'd double its time.
@@ -205,7 +205,7 @@ pub(crate) async fn board(State(app): State<AppState>, Query(q): Query<BoardQuer
              WHERE m.session_id = s.id AND m.kind = 'message' AND m.seq > q.last
                AND m.payload->>'role' = 'user' AND m.payload->>'kernel' IS NULL)) OR EXISTS (SELECT 1 FROM mcp_interactions i WHERE i.session_id=s.id AND i.status='pending' AND i.expires_at>strftime('%Y-%m-%dT%H:%M:%f+00:00','now')) AS waiting
          FROM sessions s
-         LEFT JOIN (SELECT session_id,max(seq) AS last FROM tape_events WHERE kind='questions' AND payload->>'mcp_request' IS NULL GROUP BY session_id) q ON q.session_id=s.id
+         LEFT JOIN (SELECT session_id,max(seq) AS last FROM tape_events WHERE kind='questions' AND payload->>'mcp_request' IS NULL AND (payload->>'wait') IS NOT 0 GROUP BY session_id) q ON q.session_id=s.id
          WHERE s.id IN (SELECT id FROM top UNION ALL SELECT id FROM kids)
          ORDER BY s.updated_at DESC"
     ))
@@ -697,7 +697,7 @@ async fn task_agents(app: &AppState) -> ApiResult<HashMap<String, Value>> {
              WHERE m.session_id = s.id AND m.kind = 'message' AND m.seq > q.last
                AND m.payload->>'role' = 'user' AND m.payload->>'kernel' IS NULL)) AS waiting
          FROM task_agents t JOIN sessions s ON s.id = t.session_id
-         LEFT JOIN (SELECT session_id, max(seq) AS last FROM tape_events WHERE kind='questions' AND payload->>'mcp_request' IS NULL GROUP BY session_id) q ON q.session_id = s.id
+         LEFT JOIN (SELECT session_id, max(seq) AS last FROM tape_events WHERE kind='questions' AND payload->>'mcp_request' IS NULL AND (payload->>'wait') IS NOT 0 GROUP BY session_id) q ON q.session_id = s.id
          WHERE NOT s.archived",
     )
     .fetch_all(&app.db)

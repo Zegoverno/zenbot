@@ -96,6 +96,21 @@
     }
   },
   {
+    "when": "blocking",
+    "tool": "ask",
+    "args": {
+      "questions": [
+        {
+          "question": "Which name?",
+          "options": [
+            "a",
+            "b"
+          ]
+        }
+      ]
+    }
+  },
+  {
     "when": "role play",
     "tool": "delegate",
     "args": {
