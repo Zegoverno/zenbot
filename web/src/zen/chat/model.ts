@@ -158,11 +158,12 @@ export function takeHandoff(id: string): Handoff | null {
   return h;
 }
 
-export const DECISIONS: [string, string][] = [
-  ['accept', 'done, and good as it is'],
-  ['more', 'same goal, keep working'],
-  ['reshape', 'the approach was wrong, rethink it'],
-  ['drop', 'stop, not worth continuing'],
+/** How a session can end (`/archive <outcome> [note]`); `-` archives without saying. */
+export const OUTCOMES: [string, string][] = [
+  ['done', 'the job is done'],
+  ['partial', 'part done: continue in a new session with a handoff'],
+  ['not-done', 'not done: stop here'],
+  ['-', 'just archive'],
 ];
 
 export const KEYS: [string, string][] = [

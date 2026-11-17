@@ -29,6 +29,11 @@ export interface Session {
   parent: string | null;
   /** Who the session is (agents.rs): 'zenbot' unless the owner picked another agent. */
   agent?: string;
+  /** How it ended, the owner's call when archiving: 'done', 'partial', 'not-done' or null. */
+  outcome?: Outcome | null;
+  outcome_note?: string | null;
+  /** The partial session this one continues. */
+  continues?: string | null;
   created_at: string;
   updated_at: string;
   cost?: number;
@@ -74,6 +79,8 @@ export interface SessionDetail extends Session {
   message_count: number;
   tokens: number;
   busy: boolean;
+  /** The open suggested prompt (a partial session's handoff brief arrives before anyone watches). */
+  suggestion?: { id: number; text: string } | null;
 }
 
 /** An agent (agents.rs): what it may use, or `error` when its agent.toml is broken. */
@@ -135,7 +142,7 @@ export type ZenEvent =
   | { type: 'error'; error: string }
   | { type: 'resync'; skipped: number; busy: boolean };
 
-export type Decision = 'accept' | 'more' | 'reshape' | 'drop';
+export type Outcome = 'done' | 'partial' | 'not-done';
 
 export interface Entry { name: string; path: string; dir: boolean; hidden: boolean; size: number; mtime: number }
 export interface FileRead { path: string; mtime: number; size: number; text?: string; binary?: boolean; tooBig?: boolean; dir?: boolean; vault?: string | null }
@@ -216,8 +223,7 @@ export const zen = {
   sessions: (archived = false) => call<Session[]>('GET', `/api/zen/sessions?archived=${archived}`),
   session: (id: string, last = 40) => call<SessionDetail>('GET', `/api/zen/sessions/${enc(id)}?last=${last}`),
   create: (b: { title?: string; model?: string; effort?: string; agent?: string } = {}) => call<Session>('POST', '/api/zen/sessions', b),
-  update: (id: string, b: { title?: string; model?: string; effort?: string; archived?: boolean }) => call<Session>('PATCH', `/api/zen/sessions/${enc(id)}`, b),
-  decide: (id: string, decision: Decision, note?: string) => call<unknown>('POST', `/api/zen/sessions/${enc(id)}/decision`, { decision, ...(note ? { note } : {}) }),
+  update: (id: string, b: { title?: string; model?: string; effort?: string; archived?: boolean; outcome?: Outcome; note?: string }) => call<Session & { continued_by?: string }>('PATCH', `/api/zen/sessions/${enc(id)}`, b),
   models: () => call<Models>('GET', '/api/zen/models'),
   agents: () => call<Agent[]>('GET', '/api/zen/agents'),
   agent: (name: string) => call<AgentDetail>('GET', `/api/zen/agents/${enc(name)}`),

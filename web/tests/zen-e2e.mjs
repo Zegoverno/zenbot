@@ -133,7 +133,7 @@ const kernel = createServer(async (req, res) => {
   if (r === 'GET /api/board') {
     // Archived sessions (a plain one and a job, like vault-sync) come only when asked for.
     const old = u.searchParams.get('archived') === 'true' ? [
-      { ...session('a1', 'Old chat', { archived: true }), busy: false, waiting: false },
+      { ...session('a1', 'Old chat', { archived: true, outcome: 'partial', outcome_note: 'tests red' }), busy: false, waiting: false },
       { ...session('a2', 'vault-sync', { archived: true, kind: 'job' }), busy: false, waiting: false },
     ] : [];
     return json(res, { sessions: [
@@ -343,6 +343,9 @@ try {
   assert.equal(await page.getByText('vault-sync').count(), 0, 'archived jobs are hidden by default');
   const archivedHead = page.locator('.head', { hasText: 'ARCHIVED' });
   assert.match((await archivedHead.innerText()).replace(/\s+/g, ' '), /ARCHIVED 1 · a hides · J shows jobs \(1\)/);
+  const badge = page.locator('.outcome.partial');
+  assert.equal(await badge.innerText(), 'partial', 'an archived session shows how it ended');
+  assert.equal(await badge.getAttribute('title'), 'tests red', 'the badge carries the note');
   await page.keyboard.press('J');
   await page.getByText('vault-sync').waitFor();
   assert.match((await archivedHead.innerText()).replace(/\s+/g, ' '), /ARCHIVED 2 · a hides · J hides jobs/);

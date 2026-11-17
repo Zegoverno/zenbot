@@ -287,6 +287,7 @@
               <span class="text"><span class="dim">{r.s.kind ?? 'child'}:</span> {task(r.s)}</span>
             {:else}
               <span class="text" class:bold={r.s.busy || r.s.waiting || r.runningKids > 0}>{title(r.s)}</span>
+              {#if r.s.archived && r.s.outcome}<span class="outcome {r.s.outcome}" title={r.s.outcome_note ?? r.s.outcome}>{r.s.outcome}</span>{/if}
             {/if}
             {#if r.s.waiting}<span class="warn nowrap"> · waiting on you</span>{/if}
             <span class="dim meta">{meta(r)}</span>
@@ -336,4 +337,15 @@
     .meta { display: block; white-space: nowrap; }
   }
   @media (pointer: coarse) { .row { min-height: 40px; padding-top: 8px; padding-bottom: 8px; } }
+  .outcome {
+    font-size: 0.75em;
+    padding: 0 0.4em;
+    border-radius: 0.6em;
+    border: 1px solid currentColor;
+    opacity: 0.8;
+    margin-left: 0.4em;
+  }
+  .outcome.done { color: var(--ok, #3a3); }
+  .outcome.partial { color: var(--warn, #c90); }
+  .outcome.not-done { color: var(--err, #c44); }
 </style>
