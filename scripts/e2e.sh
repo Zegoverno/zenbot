@@ -731,7 +731,8 @@ system_one_direct() {
 }
 
 # The sleep with System One (stub): a lasting memory moves to long-term memory, a finished one is
-# archived, an open one stays; a memory changed while the sleep runs is left as it is now. The stub holds the questions about a HOLD
+# archived, an open one stays; a memory changed while the sleep runs is left as it is now; past its
+# size the least active leave until it fits. The stub holds the questions about a HOLD
 # entry until the scenario has changed it.
 memory_sleep_judged() {
   local ws; ws=$(new_workspace sleep-judged)
@@ -754,6 +755,14 @@ memory_sleep_judged() {
   touch "$release"; wait "$sleeper"
   check "a memory changed during the sleep is left as it is now" eq "$(q "SELECT text || '/' || tier FROM memories WHERE id=$mid")" 'a corrected pending decision/short'
   check "and the sleep says so" eq "$(jq -r .changed "$TMP/sleep-concurrent.json")" 1
+  # Over its size with every entry still current: the oldest leave (to the archive, none is
+  # lasting) until it fits with room to spare; the newest stay.
+  q "DELETE FROM memories; INSERT INTO memories (text, source, created_at) SELECT 'current entry ' || i || ' ' || replace(hex(zeroblob(70)), '00', 'y'), 'inferred', strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-' || (41-i) || ' hours') FROM (WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<40) SELECT i FROM n)" >/dev/null
+  r=$(zen memory sleep --json)
+  check "past its size, the sleep brings memory under it" test "$(q "SELECT SUM(length(text) + 10) FROM memories WHERE tier='short'")" -le 3200
+  check "the oldest leave first, archived and not deleted" eq "$(q "SELECT tier || '/' || reason FROM memories WHERE text LIKE 'current entry 1 %'")" "archived/the sleep: to fit the size"
+  check "the newest stay" eq "$(q "SELECT tier FROM memories WHERE text LIKE 'current entry 40 %'")" short
+  check "and the report counts them" eq "$(echo "$r" | jq -r '.fitted == .archived and .fitted > 0 and .entries == .kept + .promoted + .archived + .changed')" true
   kill "$srv"; wait "$srv" 2>/dev/null || true
 }
 

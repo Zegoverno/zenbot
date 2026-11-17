@@ -1,33 +1,39 @@
-# The sleep, for each short-term memory it doesn't promote: still active, or finished and safe to
-# archive (archived entries are kept, never deleted)?
+# The sleep, for each short-term memory it doesn't promote: still current, or finished and safe to
+# archive (archived entries are kept, never deleted)? `memories` is the agent's whole short-term
+# memory: what a later entry settled, superseded or repeats is finished. The chance it is finished
+# also orders what leaves first when memory is still over its size.
 name = "memory_disposition"
-version = 2
-description = "Is this memory still active, or finished?"
+version = 3
+description = "Is this memory still current, or finished?"
 exposure = "private"
-evidence = []
+evidence = ["memories"]
 item = "memory"
 timeout = "30s"
 unavailable = "keep"
 
 [question.disposition]
 type = "choice"
-text = "Is {item} still active, or clearly finished or obsolete? An unresolved commitment, a standing instruction or an uncertain case is active."
-options = { keep = "Still useful, unresolved or uncertain", archive = "Clearly finished or obsolete" }
+text = "Short-term memory holds only what is current: work under way, an open commitment or question, a standing instruction. Is {item} still current, or clearly finished or obsolete: done, settled or superseded by a later entry in `memories`, a repeat of another entry, or a remark or question from a discussion whose session has ended and that a later entry settled?"
+options = { keep = "Still current, unresolved or uncertain", archive = "Finished, settled, superseded or repeated" }
 
 [policy]
 kind = "rules"
 else = "keep"
 
 [[policy.rule]]
-when = "disposition = archive and disposition.p >= 0.95"
+when = "disposition = archive and disposition.p >= 0.8"
 decide = "archive"
 
 [[test]]
-answers = { disposition = { choice = "archive", p = 0.97 } }
+answers = { disposition = { choice = "archive", p = 0.85 } }
 expect = "archive"
 
 [[test]]
-answers = { disposition = { choice = "archive", p = 0.8 } }
+answers = { disposition = { choice = "archive", p = 0.7 } }
+expect = "keep"
+
+[[test]]
+answers = { disposition = { choice = "keep", p = 0.9 } }
 expect = "keep"
 
 [[test]]

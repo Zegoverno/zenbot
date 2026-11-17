@@ -175,7 +175,9 @@ caller sends and accepts; `check.rs` validates files (`zen s1 check`); every cal
   truth, `brain_*` tables an index rebuilt from them. `brain put` refuses new knowledge records;
   old ones (kind folders under `wiki/`) are still indexed, read and linted.
 - The sleep (`brain/sleep.rs`; nightly, when memory passes its size, or `zen memory sleep`):
-  System One moves lasting memories to records and archives finished ones. Nothing is deleted.
+  System One judges each entry against the whole short-term memory; lasting ones move to records,
+  finished ones (settled, superseded, repeated) leave too, to records when lasting, else to the
+  archive. Still over its size, the least active leave until it fits. Nothing is deleted.
 
 ## Jobs
 
