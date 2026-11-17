@@ -1,0 +1,45 @@
+# `delegate` for a task that names neither a role nor a model: which of the delegating agent's
+# roles (agents/<name>/roles.toml) fits the task? The caller passes the roles with their
+# descriptions, plus `none`; `pick` runs the subagent in the chosen role, `default` runs it on the
+# roles file's default model with no role, as without System One.
+name = "role_pick"
+version = 1
+description = "Which role should a subagent take for this task?"
+exposure = "private"
+evidence = ["task"]
+timeout = "20s"
+unavailable = "default"
+
+[question.role]
+type = "choice"
+text = "Which role fits the subagent's `task` best? Pick `none` when no role clearly fits."
+options_from = "roles"
+
+# A wrong role narrows the subagent's tools or model for the whole task, while the default only
+# costs some efficiency: take a role only when it's clearly the one.
+[policy]
+kind = "rules"
+else = "default"
+
+[[policy.rule]]
+when = "role != none and role.p >= 0.6"
+decide = "pick"
+
+[[test]]
+name = "a clear role is picked"
+answers = { role = { choice = "researcher", p = 0.82 } }
+expect = "pick"
+
+[[test]]
+name = "an unsure pick falls back to the default model"
+answers = { role = { choice = "coder", p = 0.5 } }
+expect = "default"
+
+[[test]]
+name = "none is the default model"
+answers = { role = { choice = "none", p = 0.95 } }
+expect = "default"
+
+[[test]]
+name = "no answer is the default model"
+expect = "default"

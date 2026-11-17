@@ -31,6 +31,7 @@ pub const KINDS: &[Kind] = &[
     Kind { name: "web_rerank", exposure: Exposure::Outside, mode: Mode::Items, facts: &["query"], outcomes: None },
     Kind { name: "search_rerank", exposure: Exposure::Private, mode: Mode::Items, facts: &["query"], outcomes: Some(&["keep", "drop"]) },
     Kind { name: "skill_duplicate", exposure: Exposure::Private, mode: Mode::Single, facts: &["new_skill", "skills"], outcomes: Some(&["duplicate", "new"]) },
+    Kind { name: "role_pick", exposure: Exposure::Private, mode: Mode::Single, facts: &["task", "roles"], outcomes: Some(&["pick", "default"]) },
     Kind { name: "judge", exposure: Exposure::Information, mode: Mode::Items, facts: &["context"], outcomes: None },
 ];
 

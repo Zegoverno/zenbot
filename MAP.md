@@ -165,7 +165,8 @@ Fast, cheap decisions (`s1/`): each is a TOML file in `crates/zend/s1/` (owner o
 outcome, a ladder of approved OpenRouter models and test cases. `catalog.rs` fixes what each
 caller sends and accepts; `check.rs` validates files (`zen s1 check`); every call is recorded in
 `decisions`. Decisions: `memory_capture`, `memory_durable`, `memory_disposition`, `memory_long`,
-`search_rerank`, `web_rerank`, `web_focus`, `skill_duplicate`, `judge`. Off unless
+`search_rerank`, `web_rerank`, `web_focus`, `skill_duplicate`, `role_pick` (a delegated task's
+role when it names none), `judge`. Off unless
 `ZEN_S1_MODEL` (or `~/.zenbot/s1/models.toml`) and `OPENROUTER_API_KEY` are set.
 
 ## Memory and knowledge
