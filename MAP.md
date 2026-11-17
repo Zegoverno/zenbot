@@ -221,7 +221,7 @@ busy turns, commit) needs no token; the rest are under `/api` (`main.rs`):
 
 | Route | What |
 |---|---|
-| `GET/POST /sessions`, `GET/PATCH /sessions/{id}`, `GET /board` | sessions (`agent` picks who a new one is), their messages, the board; `PATCH` with `archived: true` takes the owner's `outcome` (`done`, `partial`, `not-done`) and `note` |
+| `GET/POST /sessions`, `GET/PATCH /sessions/{id}`, `GET /board` | sessions (`agent` picks who a new one is), their messages, the board; `PATCH` with `archived: true` takes the owner's `outcome` (`done`, `partial`, `not-done`) and `note`, and returns `continued_by` (the new session) after `partial`; `GET /sessions/{id}` includes the open `suggestion` |
 | `GET/POST /agents` | the agents and what each may use; make one (`name`, `description`) |
 | `GET/PUT/DELETE /agents/{name}` | an agent's files (`soul`, `identity`, `settings` as text) and session count; replace any of them (settings checked first, old files backed up); remove one (not zenbot; its folder moves to `backups/agents/`) |
 | `GET /sessions/{id}/ws` | the session's events; send `{"type":"prompt","text":…,"mode":"steer"?}` or `{"type":"abort"}` |
@@ -244,7 +244,7 @@ WebSocket events (`crates/zen-proto/src/client.rs`): `message`, `busy`, `delta`,
 
 `crates/zen-client/src/commands.rs` is the one command table: `/x` in the web chat, `!x` in
 Matrix and `zen x` on the command line are the same command. Shared: `new` (`new @garry` starts
-a session with another agent), `model`, `effort`, `rename`, `archive [done|partial|not-done [note]]` (how the session ended: the learning loop's ground truth), `steer`, `agents`, `tasks`, `jobs`, `skills`, `memory`, `mcp`, `models`, `suggestions`,
+a session with another agent), `model`, `effort`, `rename`, `archive [done|partial|not-done [note]]` (how the session ended: the learning loop's ground truth; `partial` starts a linked "Continue:" session for the same agent whose suggested first prompt is a handoff brief from the summary model, `handoff.rs`), `steer`, `agents`, `tasks`, `jobs`, `skills`, `memory`, `mcp`, `models`, `suggestions`,
 `status`, `upgrade`. The web chat's own (scope `Screen`): `resume`, `board`, `files`, `open`, `close`, `mouse`,
 `restart`, `help`, `exit`; it gets the list from `zen --commands`. The command line's own: `ask`, `sessions`, `brain`, `s1`,
 `login`, `mcp-pending`, `mcp-respond`. Tests keep the command line and the table in step.

@@ -13,6 +13,7 @@ mod layout;
 mod delegate;
 mod dispatch;
 mod git;
+mod handoff;
 mod jobs;
 mod mcp;
 mod mcp_interaction;

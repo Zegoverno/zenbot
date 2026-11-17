@@ -438,10 +438,12 @@ pub(crate) async fn update_session(State(app): State<AppState>, Path(id): Path<U
     .fetch_optional(&app.db)
     .await?
     .ok_or_else(not_found)?;
-    let out = session_json(&row);
+    let mut out = session_json(&row);
     match body.outcome.as_deref() {
         // Finished work vouches for the draft skills it used (workshop.rs).
         Some("done") => workshop::on_accept(&app, id).await,
+        // Partial work goes on in a new session, offered a handoff brief (handoff.rs).
+        Some("partial") => out["continued_by"] = json!(crate::handoff::start(&app, id).await?),
         _ => {}
     }
     Ok(Json(out))
@@ -505,6 +507,13 @@ pub(crate) async fn get_session(State(app): State<AppState>, Path(id): Path<Uuid
     session["message_count"] = json!(totals.get::<i64, _>("messages"));
     session["tokens"] = json!(totals.get::<i64, _>("tokens"));
     session["busy"] = json!(app.is_busy(id).await);
+    // The open suggested prompt, for a client that opens the session after it was offered (a
+    // partial session's handoff brief arrives before anyone is watching).
+    let open: Option<(i64, String)> = sqlx::query_as("SELECT id, suggested FROM prompt_suggestions WHERE session_id = $1 AND outcome IS NULL ORDER BY id DESC LIMIT 1")
+        .bind(id)
+        .fetch_optional(&app.db)
+        .await?;
+    session["suggestion"] = open.map_or(Value::Null, |(sid, text)| json!({ "id": sid, "text": text }));
     Ok(Json(session))
 }
 
@@ -607,6 +616,8 @@ mod tests {
         let s = patch(json!({ "archived": true, "outcome": "not-done", "note": " wrong approach " })).await.ok().unwrap().0;
         assert_eq!((s["outcome"].as_str(), s["outcome_note"].as_str(), s["archived"].as_bool()), (Some("not-done"), Some("wrong approach"), Some(true)));
         assert!(s["ended_at"].is_string() && s.get("continued_by").is_none());
+        let s = patch(json!({ "archived": true, "outcome": "partial" })).await.ok().unwrap().0;
+        assert!(s["continued_by"].is_string(), "partial continues in a new session");
         let s = patch(json!({ "archived": false })).await.ok().unwrap().0;
         assert!(s["outcome"].is_null() && s["ended_at"].is_null());
         let s = patch(json!({ "archived": true })).await.ok().unwrap().0;
