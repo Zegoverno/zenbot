@@ -1,8 +1,8 @@
 <script lang="ts">
   // The zen app: the board (Sessions · Files · Tasks · Agents · Games, then the plugins' views) or a
-  // session's chat with the side panel, as the terminal app lays them out; Settings off the board's
-  // top bar. Keys that act everywhere live here; each view handles its own when its pane has the
-  // keys (`active`).
+  // session's chat with the side panel (the same, plus Preview: a dev server beside the chat), as
+  // the terminal app lays them out; Settings off the board's top bar. Keys that act everywhere live
+  // here; each view handles its own when its pane has the keys (`active`).
   import { onMount } from 'svelte';
   import { app, start, board, setView, openSession, toggleSide, settings, VIEWS, typing, type View, type Pane } from './app.svelte.ts';
   import { findView, loadPlugins, panel, views as pluginViews } from './plugins.svelte.ts';
@@ -14,6 +14,7 @@
   import Files from './views/Files.svelte';
   import Tasks from './views/Tasks.svelte';
   import Agents from './views/Agents.svelte';
+  import Preview from './views/Preview.svelte';
   import { zen, type BoardSession } from './api.ts';
 
   const LABEL: Record<string, string> = { sessions: 'Sessions', files: 'Files', tasks: 'Tasks', agents: 'Agents', games: 'Games' };
@@ -128,6 +129,9 @@
     {#each tabList as t, i (t.key)}
       <button role="tab" class:on={current === t.key} aria-selected={current === t.key} onclick={() => setView(pane, t.key)} title={i < 9 ? String(i + 1) : undefined}>{t.label}</button>
     {/each}
+    {#if pane === 'side'}
+      <button role="tab" class:on={current === 'preview'} aria-selected={current === 'preview'} onclick={() => setView(pane, 'preview')}>Preview</button>
+    {/if}
     {#if pane === 'side' && panel.current}
       <button role="tab" class:on={current === 'panel'} aria-selected={current === 'panel'} onclick={() => setView(pane, 'panel')}>{panel.current.title}</button>
     {/if}
@@ -145,6 +149,8 @@
     <Agents {pane} {active} />
   {:else if v === 'games'}
     <Games {pane} {active} />
+  {:else if v === 'preview'}
+    <Preview />
   {:else if v === 'settings'}
     <Settings />
   {:else if v === 'panel' && panel.current}

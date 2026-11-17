@@ -13,8 +13,8 @@
 
 import { files } from './api.ts';
 
-/** The built-in views, Games, Settings (the board's), a plugin command's panel (the side's) and plugin views. */
-export type View = 'sessions' | 'files' | 'tasks' | 'agents' | 'games' | 'settings' | 'panel' | `plugin:${string}`;
+/** The built-in views, Games, Settings (the board's), Preview and a plugin command's panel (the side's) and plugin views. */
+export type View = 'sessions' | 'files' | 'tasks' | 'agents' | 'games' | 'settings' | 'panel' | 'preview' | `plugin:${string}`;
 export type Pane = 'home' | 'side';
 /** The built-in tabs, in order; plugin views come after them. */
 export const VIEWS: View[] = ['sessions', 'files', 'tasks', 'agents', 'games'];

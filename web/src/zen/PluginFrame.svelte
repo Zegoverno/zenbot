@@ -15,9 +15,9 @@
   import { onMount } from 'svelte';
   import { AppBridge, PostMessageTransport, type McpUiHostContext } from '@modelcontextprotocol/ext-apps/app-bridge';
   import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-  import { pluginApi, upload, type ToolResult } from './api.ts';
+  import { pluginApi, type ToolResult } from './api.ts';
   import { app, openFile, closeFile, setView, notice, type Pane } from './app.svelte.ts';
-  import { chat, contextImages, contexts, keepContext, resultText, settleImage } from './plugins.svelte.ts';
+  import { chat, contextImages, keepContextSaving, resultText } from './plugins.svelte.ts';
   import { SANDBOX, webLink, withCsp, zenNavigation } from './frame.ts';
 
   let {
@@ -132,20 +132,8 @@
           return { isError: true };
         };
         b.onupdatemodelcontext = async (p) => {
-          const sid = app.session;
-          const images = contextImages(p.content);
-          const id = keepContext(sid, title, resultText(p as { content?: { type: string; text?: string }[]; structuredContent?: unknown }), images);
-          if (sid && id !== null) {
-            const kept = contexts[sid]?.[title]?.images ?? [];
-            images.forEach((im, k) => {
-              const name = kept[k]?.name ?? `context-${id}-${k + 1}`;
-              const file = new File([im.bytes as BlobPart], name, { type: im.mimeType });
-              upload(file, () => {}).done.then(
-                (r) => settleImage(sid, title, id, k, { path: r.path }),
-                (e) => settleImage(sid, title, id, k, { error: (e as Error).message }),
-              );
-            });
-          }
+          const text = resultText(p as { content?: { type: string; text?: string }[]; structuredContent?: unknown });
+          keepContextSaving(app.session, title, text, contextImages(p.content));
           return {};
         };
         b.onloggingmessage = (m) => console.debug(`[${plugin}]`, m.level, m.data);
