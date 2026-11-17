@@ -59,7 +59,8 @@ pub struct Config {
     pub identity_chars: usize,
     pub agents_chars: usize,
     pub user_chars: usize,
-    /// `ZEN_SKILL_INDEX_CHARS` (2500): above this the skills index lists domains only.
+    /// `ZEN_SKILL_INDEX_CHARS` (2500): the skills index's budget; past it each skill keeps only its
+    /// trigger (first clause), then only its name (skills.rs `index_within`).
     pub skill_index_chars: usize,
     /// `ZEN_JUDGE_TOOL` (on): off hides the `judge` tool (s1/run.rs).
     pub judge_tool: bool,

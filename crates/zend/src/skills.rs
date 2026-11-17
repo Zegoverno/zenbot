@@ -143,30 +143,70 @@ pub fn scan(root: &Path) -> Vec<Skill> {
     out
 }
 
-/// The skills index for the system prompt: every skill's name and description while that fits
-/// in `ZEN_SKILL_INDEX_CHARS` (default 2500), else the domains with their skill counts. Empty
-/// when there are no skills.
+/// The skills index for the system prompt: every skill by name with what it's for, in
+/// `ZEN_SKILL_INDEX_CHARS` (default 2500) when it can be (`index_within`). Empty when there are no
+/// skills.
 pub fn index_text(skills: &[Skill]) -> String {
     index_within(skills, crate::config::get().skill_index_chars)
 }
 
-/// The skills index in at most `limit` characters (domains only above it).
+/// The shortest description that still says when to use a skill: its first sentence or clause
+/// (up to the first `. `, ` - `, ` — ` or `; `), without the closing full stop.
+fn trigger(description: &str) -> &str {
+    let d = description.trim();
+    let cut = [". ", " - ", " — ", "; "].iter().filter_map(|sep| d.find(sep)).min().unwrap_or(d.len());
+    d[..cut].trim_end_matches('.').trim_end()
+}
+
+/// `text` in at most `max` characters, cut at a word with `…` when longer.
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    // The last whole word that leaves room for the `…`.
+    let head: String = text.chars().take(max).collect();
+    let head = match head.rfind(' ').filter(|&i| i > 0) {
+        Some(i) => head[..i].to_string(),
+        None => head.chars().take(max.saturating_sub(1)).collect(),
+    };
+    format!("{}…", head.trim_end_matches([',', ';', ':', ' ']))
+}
+
+/// The skills index in `limit` characters, always naming every skill (never just counts), in the
+/// first form that fits: full descriptions; each cut to its trigger (`trigger`); the triggers
+/// clipped to an equal share of what's left; names only, grouped by domain (even past `limit`).
 fn index_within(skills: &[Skill], limit: usize) -> String {
+    /// Below this a clipped trigger says too little to choose by; names alone are clearer.
+    const MIN_TRIGGER: usize = 24;
     if skills.is_empty() {
         return String::new();
     }
-    let full: String = skills.iter().map(|s| format!("- {}/{}: {}\n", s.domain, s.name, s.description)).collect();
-    if full.len() <= limit {
+    let lines = |describe: &dyn Fn(&Skill) -> String| -> String { skills.iter().map(|s| format!("- {}/{}: {}\n", s.domain, s.name, describe(s))).collect() };
+    let fits = |text: &String| text.chars().count() <= limit;
+    let full = lines(&|s| s.description.trim().to_string());
+    if fits(&full) {
         return full;
     }
-    let mut domains: Vec<(String, usize)> = Vec::new();
-    for s in skills {
-        match domains.iter_mut().find(|(d, _)| d == &s.domain) {
-            Some((_, n)) => *n += 1,
-            None => domains.push((s.domain.clone(), 1)),
+    let short = lines(&|s| trigger(&s.description).to_string());
+    if fits(&short) {
+        return short;
+    }
+    let names: usize = skills.iter().map(|s| format!("- {}/{}: \n", s.domain, s.name).chars().count()).sum();
+    let share = limit.saturating_sub(names) / skills.len();
+    if share >= MIN_TRIGGER {
+        let clipped = lines(&|s| clip(trigger(&s.description), share));
+        if fits(&clipped) {
+            return clipped;
         }
     }
-    domains.iter().map(|(d, n)| format!("- {d}: {n} skill(s)\n")).collect()
+    let mut domains: Vec<(&str, Vec<&str>)> = Vec::new();
+    for s in skills {
+        match domains.iter_mut().find(|(d, _)| *d == s.domain) {
+            Some((_, names)) => names.push(&s.name),
+            None => domains.push((&s.domain, vec![&s.name])),
+        }
+    }
+    domains.iter().map(|(d, names)| format!("- {d}: {}\n", names.join(", "))).collect()
 }
 
 /// Lowercase words of three letters or more, for matching.
@@ -432,12 +472,39 @@ mod tests {
     }
 
     #[test]
-    fn index_lists_skills_or_only_domains_when_long() {
+    fn index_always_names_every_skill() {
         let all = scan(&tree());
-        assert!(index_text(&all).contains("- work/verify: Check that work is done"));
-        let short = index_within(&all, 50);
-        assert_eq!(short, "- build: 1 skill(s)\n- work: 2 skill(s)\n");
+        let full = index_within(&all, 10_000);
+        assert!(full.contains("- work/verify: Check that work is done"));
+        assert_eq!(full.lines().count(), 3);
+        // Too long for full descriptions: each cut to its trigger, every skill still named.
+        let full_len = full.chars().count();
+        let short = index_within(&all, full_len - 1);
+        assert_eq!(short.lines().count(), 3);
+        assert!(short.chars().count() < full_len);
+        for s in &all {
+            assert!(short.contains(&format!("- {}/{}: {}\n", s.domain, s.name, trigger(&s.description))));
+        }
+        // Tighter: triggers clipped to an equal share, every skill still named.
+        let clipped = index_within(&all, 140);
+        assert!(clipped.chars().count() <= 140 && clipped.contains('…'), "{clipped}");
+        assert!(all.iter().all(|s| clipped.contains(&format!("- {}/{}: ", s.domain, s.name))));
+        // Tightest: names only, by domain. Never counts.
+        let names = index_within(&all, 50);
+        assert_eq!(names, "- build: rust\n- work: brief, verify\n");
+        assert!(!names.contains("skill(s)"));
         assert_eq!(index_text(&[]), "");
+    }
+
+    #[test]
+    fn triggers_and_clips() {
+        assert_eq!(trigger("Frame a big job before changing anything - find the real job. Use when large."), "Frame a big job before changing anything");
+        assert_eq!(trigger("Write the changelog line for a note. Used by zenwrite."), "Write the changelog line for a note");
+        assert_eq!(trigger("One clause only."), "One clause only");
+        assert_eq!(clip("short", 10), "short");
+        assert_eq!(clip("check that work is really done", 16), "check that work…");
+        assert!(clip("check that work is really done", 16).chars().count() <= 16);
+        assert_eq!(clip("unbreakablewordhere", 8), "unbreak…");
     }
 
     #[test]
