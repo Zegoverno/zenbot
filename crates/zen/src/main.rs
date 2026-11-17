@@ -2,6 +2,7 @@
 //! Designed for agents first: every command supports --json and exits non-zero on failure.
 
 mod cli;
+mod mcp_serve;
 mod client;
 mod print;
 mod setup;
@@ -229,7 +230,14 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::S1 { cmd } => s1(&c, cmd, json).await?,
-        Cmd::Mcp { args } => match args.as_slice() {
+        Cmd::Mcp { args, agent, write } => match args.as_slice() {
+            [verb] if verb == "serve" => {
+                let mut options = Vec::new();
+                if let Some(agent) = agent { options.extend(["--agent".into(), agent]); }
+                if write { options.push("--write".into()); }
+                mcp_serve::serve(&c, &options).await?;
+            }
+            _ if agent.is_some() || write => anyhow::bail!("--agent and --write require mcp serve"),
             [login, server] if login == "login" => {
                 let r = c.post("/api/mcp/login", json!({ "server": server })).await?;
                 println!("{}", commands::login_instructions(&r));

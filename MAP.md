@@ -80,6 +80,7 @@ One list per session, in a fixed order (`agent.rs::specs`):
 
 - Files and shell (`tools.rs`): `bash` (on the host, as the owner, in the workspace; the kernel's
   secret variables removed), `read` (text, images, PDF pages), `write`, `edit`.
+- External harnesses: `zen mcp serve --agent <name>` exports the read-only shared brain over stdio MCP; `--write` opts in to memory/record writes. Agent-bound synthetic sessions, allowlisted authenticated routes and kernel tool auditing live in `shared_brain.rs`; see [docs/shared-brain.md](docs/shared-brain.md).
 - Recall: `history` (the session's messages, or another of the same agent's), `search` (`search.rs`: memories, wiki pages, records and sessions, scoped by agent; exact
   names, FTS5 and sqlite-vec merged, reranked by System One, following typed links between
   records), `remember` (`memory.rs`), `brain` (`brain/`: record files).

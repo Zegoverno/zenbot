@@ -12,6 +12,7 @@ mod defaults;
 mod layout;
 mod delegate;
 mod dispatch;
+mod shared_brain;
 mod git;
 mod handoff;
 mod jobs;
@@ -302,6 +303,8 @@ async fn serve() -> Result<()> {
         .route("/suggestions", get(assist::stats))
         .route("/memory", get(list_memory))
         .route("/brain", axum::routing::post(brain_action))
+        .route("/shared-brain/sessions", axum::routing::post(shared_brain::open))
+        .route("/shared-brain/sessions/{id}/tools", get(shared_brain::list).post(shared_brain::call))
         .route("/mcp", get(mcp_status))
         .route("/mcp/login", axum::routing::post(mcp_login))
         .route("/mcp/login/{flow}", axum::routing::post(mcp_login_finish))

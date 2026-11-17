@@ -156,6 +156,12 @@ pub(crate) enum Cmd {
     /// MCP servers; `zen mcp login <server>` signs in to one (open the link, paste the address your browser ended on)
     Mcp {
         args: Vec<String>,
+        /// Explicit agent scope for mcp serve
+        #[arg(long)]
+        agent: Option<String>,
+        /// Allow memory and record writes in mcp serve
+        #[arg(long)]
+        write: bool,
     },
     /// List MCP forms awaiting an explicit owner response
     McpPending,
