@@ -31,8 +31,9 @@ create replacements.
 ## The web app
 
 `web/` is zen in the browser: a Svelte page (`src/zen/`: the board with Sessions · Files · Tasks ·
-Agents, a session's chat with the side panel, and Files with a safe Markdown preview and plain
-textarea edit/save fallback; rich reader/writer features are optional plugins) and a
+Agents, a session's chat with the side panel, and Files, which opens in the vault with a search
+field (names under the folder, then the kernel's `notes` search with snippets) and a safe Markdown
+preview and plain textarea edit/save fallback; rich reader/writer features are optional plugins) and a
 Node server (`server/`) that serves it on 127.0.0.1:4400 and relays the kernel with the owner token
 added on the server, so the token never reaches the page. It also shows the home folder
 (`home.ts`), takes chat attachments into `~/inbox` (`uploads.ts`) and runs the shared commands
@@ -81,7 +82,7 @@ One list per session, in a fixed order (`agent.rs::specs`):
 - Files and shell (`tools.rs`): `bash` (on the host, as the owner, in the workspace; the kernel's
   secret variables removed), `read` (text, images, PDF pages), `write`, `edit`.
 - External harnesses: `zen mcp serve --agent <name>` exports the read-only shared brain over stdio MCP; `--write` opts in to memory/record writes. Agent-bound synthetic sessions, allowlisted authenticated routes and kernel tool auditing live in `shared_brain.rs`; see [docs/shared-brain.md](docs/shared-brain.md).
-- Recall: `history` (the session's messages, or another of the same agent's), `search` (`search.rs`: memories, wiki pages, records and sessions, scoped by agent; exact
+- Recall: `history` (the session's messages, or another of the same agent's), `search` (`search.rs`: memories, wiki pages, vault notes, records and sessions, scoped by agent; exact
   names, FTS5 and sqlite-vec merged, reranked by System One, following typed links between
   records), `remember` (`memory.rs`), `brain` (`brain/`: record files).
 - Web (`web.rs`): `web_search` (SearXNG, or Brave/Tavily with a key), `web_fetch`.
@@ -175,7 +176,13 @@ role when it names none), `judge`. Off unless
   (`wiki.rs`): flat pages in `global/wiki/` named by their title (`Bayes' theorem.md`), YAML
   frontmatter (`type`, `aliases`), inline `[[links]]`; the owner writes them in Obsidian and the
   agent with read/write/edit, following the vault's `AGENTS.md`. The kernel only reads them: search
-  indexes each page's whole body by its file name.
+  indexes each page's whole body by its file name (kind `wiki`). Every other Markdown note of a
+  vault (`Daily/`, `Goals/`, `Projects/**`, `Templates/`, wiki subfolders…) is indexed too, as kind
+  `note` by its path in the vault (`<agent>:<path>` for another agent's vault), with the same
+  mtime check, agent tag and reach as pages; not dot folders, `skills/`, `memory/`, `entities/`
+  (records, indexed as such), `MEMORY.md`, symlinks, nor, in zenbot's vault, `agents/<name>/`
+  (each agent's vault is indexed as its own). Scopes: `notes` = wiki pages and notes;
+  `knowledge` (and `all`) = those plus records.
 - Tasks (`tasks.rs`): the open `- [ ]` lines of each `global/Projects/<project>/tasks.md`, in the
   Obsidian Tasks emoji format, parsed and sorted for `GET /api/tasks` and the `tasks` command. The
   owner ticks and edits them in Obsidian; the kernel never writes them. A task handed to an agent
@@ -225,7 +232,7 @@ busy turns, commit) needs no token; the rest are under `/api` (`main.rs`):
 | `GET /sessions/{id}/ws` | the session's events; send `{"type":"prompt","text":…,"mode":"steer"?}` or `{"type":"abort"}` |
 | `GET /models`, `GET /version`, `GET/POST /upgrade` | models, update check, self-upgrade |
 | `POST /complete` | one completion without tools (`model`, `system`, `prompt`, `purpose`), for the owner's apps on this machine (including optional writing apps); logged, not on a tape |
-| `POST /search` | the search tool for the owner's apps (`query`, `scope` default `knowledge`, `limit`): words and meaning, reranked by System One, as JSON results (including optional note-finding apps) |
+| `POST /search` | the search tool for the owner's apps (`query`, `scope` default `knowledge`; `notes` for the vault's pages and notes; `limit`): words and meaning, reranked by System One, as JSON results (including optional note-finding apps) |
 | `GET /memory`, `POST /memory/sleep`, `POST /brain` | memory and records |
 | `GET /skills`, `GET /suggestions` | skill use, next-prompt suggestions |
 | `GET /tasks` | the owner's open vault tasks, grouped by project, most pressing first (`tasks.rs`, read-only), each with its agent's session and state |

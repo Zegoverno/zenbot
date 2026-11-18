@@ -9,7 +9,7 @@ with a minimal Markdown preview and plain text editor in Files.
 The same screens as the terminal app, with its keys, and a mouse and a phone way to everything:
 
 - **The board** (`/`): Sessions (channels, sessions, jobs, archived; waiting first; subagents
-  under their session; another agent's session shows `@name`), Files (the home folder: read, and
+  under their session; another agent's session shows `@name`), Files (the vault, with the home folder one step up: read, and
   `a` new file, `A` new folder, `R` rename, asked inline, never over anything), Tasks (the vault's open tasks by project, most pressing first; hand one to an agent
   with `a a`) and Agents (each agent with what it may use, a broken `agent.toml` with its error;
   Enter opens its `SOUL.md`, `IDENTITY.md` and `agent.toml` to edit, save (`ctrl+s`; a refused
@@ -27,6 +27,14 @@ The same screens as the terminal app, with its keys, and a mouse and a phone way
   commands (zenbot's own table; kernel commands run through the `zen` command line, so they answer
   as everywhere). `ctrl+b` opens the side panel with the same views, `shift+tab` gives it
   the keys. A link or a path in the chat opens there.
+- **Files search**: Files opens in the vault (`ZEN_WEB_ROOT`; the `vault` and `home` buttons, the
+  `~` crumb and `..` reach the home folder). The field at its top (`/` focuses it) searches as you
+  type: file and folder names under the shown folder at once (`GET /api/fs/find`, which keeps home's
+  rules: no secrets, dot entries or symlinks, bounded), and after a short pause (3+ characters) or
+  Enter the kernel's `notes` search (`POST /api/zen/search`: words and meaning over wiki pages and
+  every other vault note) with a snippet each, listed after the names. ↑↓ and Enter pick a result,
+  a click opens it through the normal opener (plugins included), Esc clears. Without the kernel's
+  answer the name matches still show.
 - **Files fallback** renders Markdown safely using text nodes, and previews text/code verbatim.
   Vault Markdown has Edit (`e`), a plain textarea, explicit Save (`Ctrl+S`) and Read
   (`Alt+W`). Saves are atomic with an optimistic hash; conflicts retain your local edits.
