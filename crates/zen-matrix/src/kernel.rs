@@ -73,6 +73,13 @@ impl Kernel {
         }
     }
 
+    /// An installed plugin's command (`!vault …`; `zen_client::commands::run_plugin`) run for the
+    /// room's `session`: its answer, or the menu of its declared choices when typed with no
+    /// argument. `None` when no enabled plugin has that command.
+    pub async fn plugin_command(&self, text: &str, session: Option<&str>) -> Result<Option<String>> {
+        Ok(commands::run_plugin(&self.c, text, session).await?.map(|r| r.text))
+    }
+
     /// The session's event stream.
     pub async fn connect(&self, id: &str) -> Result<Ws> {
         self.c.connect(id).await
