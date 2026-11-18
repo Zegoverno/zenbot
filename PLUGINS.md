@@ -75,7 +75,32 @@ zenbot draws the shell. A plugin fills these slots:
 | `views` | a tab on the board and in the side panel, after Sessions, Files, Tasks and Agents | `id`, `title`, `ui` |
 | `openers` | "open with" for matching files in Files | `id`, `title`, `ui`, `patterns` (globs on the file name), `mode` (`read` or `edit`) |
 | `games` | an entry in the **Games** tab's game picker | `id`, `title`, `ui`, `description` |
-| `commands` | a slash command in the web chat and in Matrix, and `zen <plugin> …` | `name`, `tool`, `args`, `description` |
+| `commands` | a slash command in the web chat and in Matrix, and `zen <plugin> …` | `name`, `tool`, `args`, `description`, optional `choices` (below) |
+
+#### Command choices
+
+A command may declare `choices`: the values of its **first** argument, so typed with no argument it
+offers a menu instead of calling the tool blank. Each choice is `{ "value", "description", "then"? }`.
+`value` is one word of `[a-z0-9_-]{1,32}` and unique, `description` at most 120 bytes, `then` (at
+most 60) an `args`-style hint that this choice needs more input; at most 20 choices, no other keys,
+and `args` needs at least one `<name>` or `[name]` placeholder for the value to fill.
+
+```json
+"commands": [{
+  "name": "vault", "tool": "zenvault_command", "args": "<action> [rest]", "description": "Work on the vault.",
+  "choices": [
+    { "value": "lint", "description": "Check the vault against its method" },
+    { "value": "find", "description": "Search the notes", "then": "<words>" }
+  ]
+}]
+```
+
+- **Web chat**: `/vault` alone opens a picker (the one `/archive` uses). A choice without `then`
+  runs the command with that value (`/vault lint`); one with `then` puts `/vault find ` in the
+  composer for the owner to finish. `/vault find notes` or any typed argument runs as always.
+- **Matrix and the command line**: `!vault` and `zen vault` with no argument answer with the list
+  (`value — description`, plus `(then <hint>)`) and call nothing.
+- Commands without `choices` behave as before.
 
 Installing a new plugin makes its openers the defaults for each declared pattern and mode,
 replacing previous choices (including another plugin). Upgrades preserve the owner's choices.

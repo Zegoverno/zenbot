@@ -560,7 +560,17 @@ impl Bridge {
         let MessageType::Text(text) = &ev.content.msgtype else { return Ok(()) };
         let rid = room.room_id().to_owned();
         match relay::parse(&text.body) {
-            Input::Help => self.note(&room, &relay::help()).await,
+            // An unknown `!word` may be an installed plugin's command: it runs (or lists its choices).
+            Input::Help => {
+                let cmd = text.body.trim().strip_prefix('!').unwrap_or("").trim();
+                let session = self.state.lock().await.rooms.get(rid.as_str()).cloned();
+                let plugged = if cmd.is_empty() || cmd.eq_ignore_ascii_case("help") {
+                    None
+                } else {
+                    self.kernel.plugin_command(cmd, session.as_deref()).await.unwrap_or_else(|e| Some(format!("⚠️ {e:#}")))
+                };
+                self.note(&room, &plugged.unwrap_or_else(relay::help)).await
+            }
             Input::New { agent, title } => {
                 let name = title.clone().or_else(|| agent.clone()).unwrap_or_else(|| "zen".into());
                 let session = self.kernel.new_session(title.as_deref(), agent.as_deref()).await?;

@@ -33,6 +33,8 @@ const REAL_ZEN = process.env.ZEN_BIN ?? (() => {
 // `zen --commands` as the kernel lists it with a plugin enabled: the shared table plus its command.
 const table = JSON.parse(execFileSync(REAL_ZEN, ['--commands'], { encoding: 'utf8' }));
 table.commands.push({ name: 'roll', args: '<sides>', description: 'Roll a die.', scope: 'kernel', plugin: 'zenfx', tool: 'zenfx_roll' });
+table.commands.push({ name: 'desk', args: '<action> [rest]', description: 'Work on the desk.', scope: 'plugin', plugin: 'zenfx', tool: 'zenfx_desk',
+  choices: [{ value: 'lint', description: 'Check the desk.' }, { value: 'find', description: 'Search the desk.', then: '<words>' }] });
 writeFileSync(path.join(HOME, 'commands.json'), JSON.stringify(table));
 const ZEN_BIN = path.join(HOME, 'zen');
 writeFileSync(ZEN_BIN, `#!/bin/sh\nif [ "$1" = --commands ]; then cat '${path.join(HOME, 'commands.json')}'; else exec '${REAL_ZEN}' "$@"; fi\n`, { mode: 0o755 });
@@ -88,7 +90,8 @@ const fxPlugin = {
     views: [{ id: 'board', title: 'Fx board', ui: 'ui://zenfx/app' }],
     openers: [{ id: 'read', title: 'Fx read', ui: 'ui://zenfx/app', patterns: ['*.fx'], mode: 'read' }],
     games: [{ id: 'dice', title: 'Dice', description: 'Roll a die.', ui: 'ui://zenfx/app' }],
-    commands: [{ name: 'roll', tool: 'zenfx_roll', args: '<sides>', description: 'Roll a die.' }],
+    commands: [{ name: 'roll', tool: 'zenfx_roll', args: '<sides>', description: 'Roll a die.' },
+      { name: 'desk', tool: 'zenfx_desk', args: '<action> [rest]', description: 'Work on the desk.', choices: [{ value: 'lint', description: 'Check the desk.' }, { value: 'find', description: 'Search the desk.', then: '<words>' }] }],
   },
 };
 const cardsPlugin = {
@@ -228,6 +231,7 @@ const kernel = createServer(async (req, res) => {
     }
     if (method === 'POST' && sub === '/call') {
       calls.push({ plugin: name, ...body });
+      if (body.tool === 'zenfx_desk') return json(res, { content: [{ type: 'text', text: `desk ${body.arguments?.action ?? 'blank'}${body.arguments?.rest ? ' ' + body.arguments.rest : ''}: done` }] });
       return json(res, { content: [{ type: 'text', text: `rolled ${body.arguments?.sides ?? 6}: 4` }], _meta: { ui: { resourceUri: 'ui://zenfx/app' } } });
     }
   }
@@ -834,6 +838,40 @@ try {
   await page.getByText('interrupted', { exact: true }).waitFor();
   await until(() => aborts.length >= 1, 'Esc sends an abort');
   assert.equal(aborts.length, 1, 'Esc sends one abort');
+
+  // A plugin command with declared choices: with no argument it opens a picker; a choice runs the
+  // tool with that value, one with `then` goes to the composer and calls nothing; with an argument
+  // typed, the picker stays out of the way.
+  const deskCalls = () => calls.filter((c) => c.tool === 'zenfx_desk');
+  await box.fill('/desk');
+  await box.press('Enter');
+  const choicePick = page.getByRole('listbox', { name: 'Work on the desk.' });
+  await choicePick.waitFor();
+  await choicePick.getByRole('option', { name: /find\s+Search the desk\.\s+<words>/ }).waitFor();
+  assert.equal(deskCalls().length, 0, 'the picker opening calls nothing');
+  await box.press('Escape');
+  await choicePick.waitFor({ state: 'detached' });
+  await box.fill('/desk');
+  await box.press('Enter');
+  await choicePick.getByRole('option', { name: /lint\s+Check the desk\./ }).click();
+  await until(() => deskCalls().length === 1, 'a choice runs the tool');
+  assert.deepEqual(deskCalls()[0], { plugin: 'zenfx', tool: 'zenfx_desk', arguments: { action: 'lint' }, session: 's1' });
+  await page.getByText('desk lint: done').waitFor();
+  await box.fill('/desk');
+  await box.press('Enter');
+  await choicePick.waitFor();
+  await box.press('ArrowDown');
+  await box.press('Enter');
+  await choicePick.waitFor({ state: 'detached' });
+  await until(async () => (await box.inputValue()) === '/desk find ', 'a choice with `then` fills the composer');
+  assert.equal(await box.evaluate((el) => document.activeElement === el), true, 'the composer has focus');
+  await page.waitForTimeout(300);
+  assert.equal(deskCalls().length, 1, 'a choice that needs more input calls nothing');
+  await box.fill('/desk find sunday notes');
+  await box.press('Enter');
+  await until(() => deskCalls().length === 2, 'the finished command runs');
+  assert.deepEqual(deskCalls()[1].arguments, { action: 'find', rest: 'sunday notes' });
+  assert.equal(await choicePick.count(), 0, 'typed with an argument, no picker');
 
   // Even a zero-permission plugin sending on initialization cannot prompt the agent.
   maliciousInit = true;

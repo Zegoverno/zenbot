@@ -254,6 +254,12 @@ a session with another agent), `model`, `effort`, `rename`, `archive [done|parti
 `restart`, `help`, `exit`; it gets the list from `zen --commands`. The command line's own: `ask`, `sessions`, `brain`, `s1`,
 `login`, `mcp-pending`, `mcp-respond`. Tests keep the command line and the table in step.
 
+Plugin commands (`contributes.commands`) join the table at run time (`plugin_commands`, `run_plugin`).
+One may declare `choices` for its first argument (validated in `plugins.rs`, carried in
+`zen --commands`): typed with no argument, the web chat opens a picker of them (`plugin-choice`; a
+choice with `then` fills the composer instead of running) and Matrix and `zen` answer with the list
+(`choices_menu`) rather than calling the tool blank.
+
 ## Files under `~/.zenbot`
 
 | Path | What |
@@ -349,7 +355,7 @@ In `~/.zenbot/env`. Read once in `config.rs` (default in brackets):
 `crates/zend/src/plugins.rs` validates manifests, approves permissions, installs SHA256-pinned
 release archives and serves `/api/plugins`. `sandbox.rs` pins grants with file descriptors before
 bubblewrap binds them; servers join MCP discovery through `mcp.rs`. Installed state and opener
-defaults live in migration `0007_plugins.sql`. UI slots, Games and Settings live in
+defaults live in migration `0007_plugins.sql`. A manifest command's optional `choices` (the first argument's declared values) is validated there too. UI slots, Games and Settings live in
 `web/src/zen/`; `PluginFrame.svelte` hosts opaque-origin MCP Apps. Plugin messages create drafts,
 never autonomous chat turns. A plugin granted `ai` may sample (`sample`: the kernel's tool-free completion, assist model unless
 its hints name a known one, no token cap) while its AI switch (`plugins.ai_enabled`, migration
