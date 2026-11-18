@@ -1,7 +1,8 @@
 // zen's web server: serves the page, reads and writes notes in one folder (the vault), shows the
 // home folder (`home.ts`: reads, plus new files and folders and renames, never over anything),
 // relays the zen kernel (`zen.ts`), runs zen's kernel commands (`commands.ts`) and takes chat
-// attachments into `~/inbox` (`uploads.ts`), and runs the Preview tab's gateway (`preview.ts`).
+// attachments into `~/inbox` (`uploads.ts`), and shows dev servers under `/preview/<port>/` for the
+// Preview tab (`preview.ts`).
 //
 // Security, in layers:
 // - It listens on loopback only; a signing-in proxy in front is the way in.
@@ -15,7 +16,6 @@
 //
 // Run with Node's own type stripping: `node server/main.ts` (`--dev` serves the page from Vite;
 // `ZEN_WEB_DEV_HOSTS`, comma-separated, are the host names Vite accepts besides localhost).
-// `ZEN_WEB_PREVIEW_PORT` (default 4490, 0 off) runs the preview gateway beside it (preview.ts).
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { promises as fs } from 'node:fs';
@@ -31,8 +31,6 @@ import * as preview from './preview.ts';
 const HOME = os.homedir();
 const ROOT = path.resolve(process.env.ZEN_WEB_ROOT ?? path.join(HOME, '.zenbot/global'));
 const PORT = Number(process.env.ZEN_WEB_PORT ?? 4400);
-/** The preview gateway's port (preview.ts); 0 turns it off. */
-const PREVIEW_PORT = Number(process.env.ZEN_WEB_PREVIEW_PORT ?? 4490);
 const AUTH = process.env.ZEN_WEB_AUTH !== 'off';
 const AUTH_HEADER = (process.env.ZEN_WEB_AUTH_HEADER || 'X-ExeDev-UserID').toLowerCase();
 const DEV_HOSTS = (process.env.ZEN_WEB_DEV_HOSTS ?? '').split(',').map((h) => h.trim()).filter(Boolean);
@@ -79,7 +77,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
     case 'GET /api/fs/locate':
       return send(res, 200, { found: await home.locate(q('ref'), q('from')) });
     case 'GET /api/fs/home':
-      return send(res, 200, { home: home.HOME, vault: home.VAULT, preview: PREVIEW_PORT || null });
+      return send(res, 200, { home: home.HOME, vault: home.VAULT });
     case 'POST /api/fs/create':
     case 'POST /api/fs/mkdir':
     case 'POST /api/fs/rename': {
@@ -160,12 +158,14 @@ const SECURITY_HEADERS = {
 async function main() {
   await fs.mkdir(ROOT, { recursive: true });
   let vite: { middlewares: (req: IncomingMessage, res: ServerResponse, next: () => void) => void } | null = null;
+  const previewOptions = { authHeader: AUTH_HEADER, blocked: [PORT, zen.KERNEL_PORT] };
   const server = createServer(async (req, res) => {
     for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
     try {
       if (AUTH && !req.headers[AUTH_HEADER]) throw new HttpError(401, 'sign in first');
       const url = new URL(req.url ?? '/', 'http://local');
       if (url.pathname.startsWith('/api/')) return await api(req, res, url);
+      if (url.pathname.startsWith(preview.PREFIX) || url.pathname === preview.PREFIX.slice(0, -1)) return preview.handle(req, res, previewOptions);
       if (vite) return vite.middlewares(req, res, () => send(res, 404, { error: 'not found' }));
       return await serveStatic(res, url.pathname);
     } catch (e) {
@@ -178,15 +178,13 @@ async function main() {
   // The session sockets, relayed to the kernel; Vite's hot reload handles its own path.
   server.on('upgrade', (req, socket, head) => {
     const authed = !AUTH || Boolean(req.headers[AUTH_HEADER]);
+    if ((req.url ?? '').startsWith(preview.PREFIX)) return authed ? preview.upgrade(req, socket, head, previewOptions) : socket.destroy();
     if (!zen.relay(req, socket, head, authed) && !DEV) socket.destroy();
   });
   if (DEV) {
     // Hot reload rides on the same server and port, so it works through the proxy too.
     const { createServer: createVite } = await import('vite');
     vite = await createVite({ server: { middlewareMode: true, hmr: { server }, allowedHosts: [...DEV_HOSTS, 'localhost', '127.0.0.1'] }, appType: 'spa' });
-  }
-  if (PREVIEW_PORT) {
-    preview.start({ port: PREVIEW_PORT, auth: AUTH, authHeader: AUTH_HEADER, blocked: [PORT, zen.KERNEL_PORT], script: path.resolve(import.meta.dirname, '../public/zen-preview.js') });
   }
   server.listen(PORT, '127.0.0.1', () => console.log(`zen web on http://127.0.0.1:${PORT} (root ${ROOT}${DEV ? ', dev' : ''}${AUTH ? '' : ', auth OFF'})`));
 }

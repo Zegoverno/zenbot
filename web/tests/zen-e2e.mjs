@@ -38,7 +38,6 @@ const ZEN_BIN = path.join(HOME, 'zen');
 writeFileSync(ZEN_BIN, `#!/bin/sh\nif [ "$1" = --commands ]; then cat '${path.join(HOME, 'commands.json')}'; else exec '${REAL_ZEN}' "$@"; fi\n`, { mode: 0o755 });
 const PORT = Number(process.env.ZEN_E2E_PORT ?? 4412);
 const KERNEL = Number(process.env.ZEN_E2E_KERNEL_PORT ?? 4413);
-const GATEWAY = Number(process.env.ZEN_E2E_PREVIEW_PORT ?? 4414);
 const shots = process.argv.includes('--shots');
 const now = new Date().toISOString();
 const session = (id, title, extra = {}) => ({ id, title, model: 'faux/smoke', effort: null, archived: false, kind: null, parent: null, created_at: now, updated_at: now, ...extra });
@@ -308,7 +307,7 @@ kernel.on('upgrade', (req, socket) => {
 kernel.listen(KERNEL, '127.0.0.1');
 
 const server = spawn(process.execPath, ['server/main.ts', '--dev'], {
-  env: { ...process.env, ZEN_WEB_HOME: HOME, ZEN_WEB_ROOT: VAULT, ZEN_WEB_PORT: String(PORT), ZEN_WEB_PREVIEW_PORT: String(GATEWAY), ZEN_WEB_AUTH: 'off', ZEN_URL: `http://127.0.0.1:${KERNEL}`, ZEN_TOKEN_FILE: path.join(HOME, '.zenbot/token'), ZEN_BIN },
+  env: { ...process.env, ZEN_WEB_HOME: HOME, ZEN_WEB_ROOT: VAULT, ZEN_WEB_PORT: String(PORT), ZEN_WEB_AUTH: 'off', ZEN_URL: `http://127.0.0.1:${KERNEL}`, ZEN_TOKEN_FILE: path.join(HOME, '.zenbot/token'), ZEN_BIN },
   stdio: ['ignore', 'pipe', 'inherit'],
 });
 await new Promise((ok, fail) => {
@@ -921,26 +920,34 @@ try {
     await addr.press('Enter');
     const devFrame = page.frameLocator('.zside iframe[title="preview"]');
     await devFrame.locator('#hero').waitFor();
-    assert.match(await page.locator('.zside iframe[title="preview"]').getAttribute('src'), new RegExp(`^http://127\\.0\\.0\\.1:${GATEWAY}/__zen/open\\?port=${APP_PORT}&`), 'the frame goes through the gateway');
-    // The gateway refuses zen's own ports, and forwards no login header.
-    assert.equal((await fetch(`http://127.0.0.1:${GATEWAY}/__zen/open?port=${PORT}`)).status, 400);
-    assert.equal((await fetch(`http://127.0.0.1:${GATEWAY}/__zen/open?port=${KERNEL}`)).status, 400);
+    assert.equal(await page.locator('.zside iframe[title="preview"]').getAttribute('src'), `/preview/${APP_PORT}/`, 'the frame loads under zen\'s own address');
+    // zen's own ports are never shown.
+    assert.equal((await fetch(`${base}/preview/${PORT}/`)).status, 400);
+    assert.equal((await fetch(`${base}/preview/${KERNEL}/`)).status, 400);
     const point = page.locator('.zside').getByRole('button', { name: 'Point', exact: true });
     for (let i = 0; i < 100 && !(await point.isEnabled()); i++) await page.waitForTimeout(50);
     assert.ok(await point.isEnabled(), 'the app loaded zen-preview.js and answered');
     // The app can't send pins by itself: only while the owner points.
-    const appFrame = () => page.frames().find((f) => f.url().includes(`:${GATEWAY}`));
-    // The framed app can't pick another dev server for itself.
-    assert.equal(await appFrame().evaluate(() => fetch('/__zen/open?port=5180').then((r) => r.status)), 403);
-    // A broken page from a dev server answers 502; the gateway (and zen web) stay up.
+    const appFrame = () => page.frames().find((f) => f.url().includes(`/preview/${APP_PORT}/`));
+    // A broken page from a dev server answers 502, and zen's web server stays up.
     const broken = createServer((_, res) => { res.writeHead(200, { 'content-type': 'text/html', 'content-encoding': 'gzip' }); res.end('not gzip'); }).listen(APP_PORT + 1, '127.0.0.1');
+    // A static page that lives at / (no base): served without the prefix, its links kept inside.
+    const plain = createServer((req, res) => {
+      if (req.url === '/') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end('<html><head></head><body>plain</body></html>'); }
+      if (req.url === '/go') { res.writeHead(302, { location: '/' }); return res.end(); }
+      res.writeHead(404); res.end();
+    }).listen(APP_PORT + 2, '127.0.0.1');
     try {
-      const opened = await fetch(`http://127.0.0.1:${GATEWAY}/__zen/open?port=${APP_PORT + 1}`, { redirect: 'manual' });
-      const jar = opened.headers.get('set-cookie').split(';')[0];
-      assert.equal((await fetch(`http://127.0.0.1:${GATEWAY}/`, { headers: { cookie: jar } })).status, 502);
-      assert.equal((await fetch(`http://127.0.0.1:${GATEWAY}/__zen/ping`)).status, 200, 'the gateway survives a broken page');
+      assert.equal((await fetch(`${base}/preview/${APP_PORT + 1}/`)).status, 502);
+      assert.equal((await fetch(`${base}/api/fs/home`)).status, 200, 'zen web survives a broken page');
+      const plainPage = await fetch(`${base}/preview/${APP_PORT + 2}/`);
+      assert.equal(plainPage.status, 200);
+      assert.match(await plainPage.text(), /<head><script src="\/zen-preview\.js"><\/script><\/head><body>plain/);
+      const go = await fetch(`${base}/preview/${APP_PORT + 2}/go`, { redirect: 'manual' });
+      assert.equal(go.headers.get('location'), `/preview/${APP_PORT + 2}/`, 'redirects stay inside the preview');
     } finally {
       broken.close();
+      plain.close();
     }
     await appFrame().evaluate((png) => parent.postMessage({ zen: 'preview', type: 'pin', pin: { tag: 'div', image: png } }, '*'), 'data:image/png;base64,iVBORw0KGgo=');
     await page.waitForTimeout(300);
@@ -950,7 +957,7 @@ try {
     const pinChip = page.getByLabel('context from Preview (zen)', { exact: true });
     await pinChip.waitFor();
     assert.equal(await pinChip.locator('img').count(), 1, 'the pin carries a screenshot');
-    assert.notEqual(await page.frames().find((f) => f.url().includes(`:${GATEWAY}`)).title(), 'clicked', 'pointing does not click the app');
+    assert.notEqual(await appFrame().title(), 'clicked', 'pointing does not click the app');
     await pinChip.getByText('saving…').waitFor({ state: 'detached' });
     assert.equal(await page.evaluate(() => document.activeElement?.tagName), 'TEXTAREA', 'the cursor goes to the chat box');
     await box.fill('Make #1 calmer');
@@ -967,8 +974,8 @@ try {
     // Pointing off, the app works as usual.
     await point.click();
     await devFrame.locator('#hero').click();
-    for (let i = 0; i < 40 && (await page.frames().find((f) => f.url().includes(`:${GATEWAY}`)).title()) !== 'clicked'; i++) await page.waitForTimeout(50);
-    assert.equal(await page.frames().find((f) => f.url().includes(`:${GATEWAY}`)).title(), 'clicked', 'with Point off, clicks reach the app');
+    for (let i = 0; i < 40 && (await appFrame().title()) !== 'clicked'; i++) await page.waitForTimeout(50);
+    assert.equal(await appFrame().title(), 'clicked', 'with Point off, clicks reach the app');
     await page.locator('.zside').getByRole('tab', { name: 'Files', exact: true }).click();
   } finally {
     devApp.close();

@@ -11,10 +11,9 @@
   // ("Preview"), numbered #1, #2… so the owner's comment can refer to them; they go with the next
   // prompt. The rules (which addresses, what a pin may say) are in ../preview.ts.
   //
-  // The frame loads through the preview gateway (web/server/preview.ts, one port on this host): it
-  // forwards to the chosen dev server and adds public/zen-preview.js to its pages, so any app can be
-  // pointed at, and the proxy's sign-in happens once, for that port. When the gateway doesn't answer
-  // (not signed in there yet), the page bounces through it at the top level and comes back here.
+  // The frame loads `/preview/<port>/…` on zen's own address (web/server/preview.ts): zen's web
+  // server forwards it to the dev server and adds public/zen-preview.js to its pages, so any app
+  // can be pointed at, and it works wherever zen does (no other port to sign in to or be blocked).
   import { onMount } from 'svelte';
   import { app, notice } from '../app.svelte.ts';
   import { upload } from '../api.ts';
@@ -39,48 +38,10 @@
   let n = $state(0);
   let frame: HTMLIFrameElement | undefined = $state();
   let boxWidth = $state(0);
-  /** Whether the gateway knows the owner: checking, yes, or a sign-in is needed. */
-  let signin = $state<'checking' | 'ok' | 'needed'>('checking');
-  const BOUNCED = 'zen.preview.bounced';
-
-  /** The gateway's origin, or null when it's off (then the frame loads the dev server directly). */
-  const gateway = $derived(app.preview ? `${location.protocol}//${location.hostname}:${app.preview}` : null);
-  /** The origin the framed page has, the only one heard. */
-  const frameOrigin = $derived(gateway ?? target?.origin ?? '');
-  const frameSrc = $derived(
-    !target ? '' : gateway ? `${gateway}/__zen/open?port=${target.port}&path=${encodeURIComponent(target.pathname + target.search + target.hash)}` : target.href,
-  );
+  /** The frame's address: zen's own, under /preview/<port>. */
+  const frameSrc = $derived(target ? `/preview/${target.port}${target.pathname}${target.search}${target.hash}` : '');
+  const frameOrigin = location.origin;
   const label = $derived(target ? `localhost:${target.port}` : '');
-
-  /** Sign in to the gateway's port: a top-level visit through it, back to this page. */
-  function signIn() {
-    if (!gateway) return;
-    localStorage.setItem('zen.preview.reopen', '1');
-    localStorage.setItem(BOUNCED, String(Date.now()));
-    const back = `${gateway}/__zen/back?to=${encodeURIComponent(location.pathname + location.search)}${location.port ? `&port=${location.port}` : ''}`;
-    location.assign(back);
-  }
-
-  // Before showing a page, ask the gateway whether it knows the owner; if not, sign in once by
-  // itself.
-  $effect(() => {
-    if (!gateway || !target) return void (signin = 'ok');
-    let gone = false;
-    signin = 'checking';
-    fetch(`${gateway}/__zen/ping`, { credentials: 'include', cache: 'no-store' })
-      .then((r) => r.ok)
-      .catch(() => false)
-      .then((ok) => {
-        if (gone) return;
-        if (ok) return void (signin = 'ok');
-        signin = 'needed';
-        // A failed ping may also be the gateway down or the network: sign in by itself at most once
-        // in ten minutes, and never over an unsent draft; otherwise the button does it.
-        const draft = (document.querySelector('.zc-compose textarea') as HTMLTextAreaElement | null)?.value.trim();
-        if (!draft && Date.now() - Number(localStorage.getItem(BOUNCED) ?? 0) > 600_000) signIn();
-      });
-    return () => (gone = true);
-  });
 
   const dims = $derived(SIZES[size]);
   const scale = $derived(dims && boxWidth ? Math.min(1, boxWidth / dims[0]) : 1);
@@ -185,15 +146,11 @@
     <button type="button" class="pv-point" class:on={point} onclick={togglePoint} disabled={!linked} aria-pressed={point} title={linked ? 'click an element in the app to pin it' : 'waiting for the page'}>Point</button>
     {#if target}<a class="dim" href={frameSrc} target="_blank" rel="noopener noreferrer" title="open in a tab">↗</a>{/if}
   </form>
-  {#if target && signin === 'ok' && loadedOnce && !linked}
-    <p class="pv-hint dim">Point works on the app's pages (HTML); this one hasn't answered yet.</p>
+  {#if target && loadedOnce && !linked}
+    <p class="pv-hint dim">Point works on the app's pages (HTML). A blank or broken page? Start the dev server with the base <code>/preview/{target.port}/</code> (Vite: <code>--base /preview/{target.port}/</code>).</p>
   {/if}
   <div class="pv-box" bind:clientWidth={boxWidth}>
-    {#if target && signin === 'checking'}
-      <p class="dim pv-empty">Connecting to the preview…</p>
-    {:else if target && signin === 'needed'}
-      <p class="pv-empty">The preview needs you signed in once. <button class="pv-signin" onclick={signIn}>Sign in to preview</button></p>
-    {:else if target}
+    {#if target}
       {#key n}
         <div class="pv-stage" style:width={dims ? `${dims[0] * scale}px` : '100%'} style:height={dims ? `${dims[1] * scale}px` : '100%'}>
           <iframe
@@ -227,5 +184,4 @@
   .pv-stage { flex: none; overflow: hidden; }
   .pv-stage iframe { border: 0; background: white; transform-origin: 0 0; display: block; }
   .pv-empty { padding: 16px; margin: 0; }
-  .pv-signin { color: var(--accent); text-decoration: underline; }
 </style>
