@@ -4,7 +4,9 @@
   // of the list (as the file viewer opens in place of Files): SOUL.md (who it is), IDENTITY.md (how
   // it works), agent.toml (what it may use). Save sends only the files changed; the kernel checks
   // the settings first and writes nothing when they're refused, so its reason shows here. Delete
-  // asks first (never zenbot); the kernel moves the folder to its backups.
+  // asks first (never zenbot); the kernel moves the folder to its backups. Below the agents, a
+  // read-only Roles section: the subagent profiles of each agent's roles.toml (roles.rs), grouped
+  // by agent when more than one has roles.
   import { onMount, tick } from 'svelte';
   import type { Pane } from '../app.svelte.ts';
   import { openSession, notice, typing, tilde } from '../app.svelte.ts';
@@ -40,6 +42,8 @@
   let nameInput: HTMLInputElement | undefined = $state();
 
   const at = $derived(Math.max(0, agents?.findIndex((a) => a.name === sel) ?? 0));
+  /** The agents with roles to show (or a roles file to complain about). */
+  const withRoles = $derived((agents ?? []).filter((a) => a.roles && (a.roles.error || a.roles.roles?.length)));
   const changed = $derived(open ? FILES.filter((f) => draft[f.k] !== open![f.k]).map((f) => f.k) : []);
 
   async function load() {
@@ -292,6 +296,29 @@
         </div>
       {/each}
     </div>
+
+    {#if withRoles.length}
+      <section class="roles" aria-label="roles">
+        <h3>Roles</h3>
+        <p class="dim pad">Profiles for subagents (<code>delegate</code> with a role), from each agent's roles.toml.</p>
+        {#each withRoles as a (a.name)}
+          {@const r = a.roles!}
+          {#if withRoles.length > 1}<div class="group dim"><b>@{a.name}</b>{#if r.default_model}{" · default "}{r.default_model}{/if}</div>
+          {:else if r.default_model}<div class="group dim">default model {r.default_model}</div>{/if}
+          {#if r.error}<div class="refused small">⚠ {r.error}</div>{/if}
+          {#each r.roles ?? [] as role (role.name)}
+            <div class="role" data-role={role.name}>
+              <div class="line">
+                <b>{role.name}</b>
+                <span class="dim">{role.model ?? 'default model'}{role.effort ? ` · ${role.effort}` : ''}</span>
+              </div>
+              {#if role.description}<div class="small">{role.description}</div>{/if}
+              <div class="dim small">{role.tools ? `tools: ${role.tools.join(', ') || 'none'}` : 'all tools'}{role.skills.length ? ` · skills: ${role.skills.join(', ')}` : ''}</div>
+            </div>
+          {/each}
+        {/each}
+      </section>
+    {/if}
   {/if}
 </div>
 
@@ -326,6 +353,10 @@
   .file { display: block; padding: 6px 14px; }
   .fname { display: block; font-size: 13px; margin-bottom: 4px; }
   .file textarea { display: block; box-sizing: border-box; width: 100%; resize: vertical; font-family: var(--mono); font-size: 13px; line-height: 1.45; color: var(--ink); background: transparent; border: 1px solid var(--faint); border-radius: 6px; padding: 8px 10px; }
+  .roles { margin-top: 14px; }
+  .roles h3 { margin: 0; padding: 4px 14px; font-size: 14px; }
+  .group { padding: 6px 14px 2px; font-size: 13px; }
+  .role { padding: 5px 14px; margin: 0 6px; }
   .dim { color: var(--dim); }
   .err { color: var(--err); }
   .accent { color: var(--accent); }

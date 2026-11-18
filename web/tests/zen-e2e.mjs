@@ -118,9 +118,14 @@ const agents = new Map([
   ['rex', { soul: '# Rex\n\nAn advisor.\n', identity: '', settings: 'description = "tests ideas"\ntools = ["read", "web_search"]\nmcp = []\n', summary: { description: 'tests ideas', tools: ['read', 'web_search'], all_tools: false, mcp: [], shared_skills: false, model: 'claude/opus', workspace: null, context: [] } }],
   ['broken', { soul: '# x\n', identity: '', settings: 'tools = [\n', error: 'agent `broken`: agent.toml: expected a value' }],
 ]);
+// Subagent roles (roles.rs) as GET /api/agents gives them, by agent.
+const agentRoles = {
+  zenbot: { default_model: 'claude/sonnet', roles: [{ name: 'scout', description: 'Reads and reports.', model: 'claude/haiku', effort: null, tools: ['read', 'web_search'], skills: ['work/search'] }, { name: 'builder', description: 'Writes code.', model: null, effort: 'high', tools: null, skills: [] }] },
+  rex: { error: '/home/x/roles.toml: unknown field `nope`' },
+};
 const agentSummary = (name) => {
   const a = agents.get(name);
-  return a.error ? { name, error: a.error } : { name, ...a.summary };
+  return a.error ? { name, error: a.error, roles: agentRoles[name] } : { name, ...a.summary, roles: agentRoles[name] };
 };
 const agentDetail = (name) => ({ ...agentSummary(name), soul: agents.get(name).soul, identity: agents.get(name).identity, settings: agents.get(name).settings, dir: `${HOME}/.zenbot/agents/${name}`, sessions: name === 'rex' ? 1 : 0 });
 
@@ -648,12 +653,20 @@ try {
   assert.match(await page.locator('.row', { hasText: 'Pitch practice' }).innerText(), /@rex · smoke/);
   assert.doesNotMatch(await page.locator('.row', { hasText: 'Plan the week' }).innerText(), /@zenbot/);
   await page.keyboard.press('4');
-  await page.getByText('@rex').waitFor();
+  await page.locator('[aria-label="agents"]').getByText('@rex').waitFor();
   assert.match(page.url(), /view=agents/);
   const rowOf = (name) => page.locator('[aria-label="agents"] .row', { hasText: `@${name}` });
   assert.match(await rowOf('zenbot').innerText(), /all tools/);
   assert.match(await rowOf('rex').innerText(), /read, web_search · no MCP · claude\/opus/);
   assert.match(await rowOf('broken').innerText(), /⚠ agent `broken`: agent.toml: expected a value/);
+  // Roles: their own read-only section under the agents, grouped by agent, a broken file says why.
+  const roles = page.locator('[aria-label="roles"]');
+  await roles.getByRole('heading', { name: 'Roles' }).waitFor();
+  assert.match(await roles.locator('[data-role="scout"]').innerText(), /claude\/haiku[\s\S]*Reads and reports\.[\s\S]*tools: read, web_search · skills: work\/search/);
+  assert.match(await roles.locator('[data-role="builder"]').innerText(), /high[\s\S]*all tools/);
+  assert.match(await roles.innerText(), /@zenbot · default claude\/sonnet/);
+  assert.match(await roles.innerText(), /@rex[\s\S]*⚠ .*unknown field `nope`/);
+  assert.equal(await page.locator('[aria-label="agents"] [data-role]').count(), 0, 'roles stay out of the agents list');
   if (shots) await page.screenshot({ path: 'tests/shots/zen-agents.png' });
 
   // Create one: a bad name is refused before the kernel; a good one opens its files.
@@ -689,7 +702,7 @@ try {
   await page.getByText(/Delete @scout\? Its folder moves/).waitFor();
   assert.ok(agents.has('scout'), 'nothing removed before the confirm');
   await page.getByRole('button', { name: 'Yes, delete @scout' }).click();
-  await page.getByText('@rex').waitFor();
+  await page.locator('[aria-label="agents"]').getByText('@rex').waitFor();
   assert.equal(agents.has('scout'), false);
   assert.equal(await rowOf('scout').count(), 0);
   await rowOf('zenbot').getByRole('button', { name: 'edit' }).click(); // the first, chosen again

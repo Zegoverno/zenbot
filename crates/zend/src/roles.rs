@@ -9,6 +9,9 @@
 //! `agents new` and before its sandbox is built, which binds it writable like `IDENTITY.md`). A
 //! missing file means no roles; a broken one fails the delegate call that needs it.
 //!
+//! The web app's Agents tab lists them read-only: `summary_from` is the JSON `GET /api/agents` puts
+//! on each agent as `roles`.
+//!
 //! A subagent's model: the task's `model`, else the role's, else (handed to another agent) that
 //! agent's, else `default_model`, else the parent's (`resolve_model`).
 
@@ -99,7 +102,25 @@ pub fn parse(text: &str) -> Result<Roles> {
     Ok(roles)
 }
 
+/// An agent's roles for the API: `{default_model, roles: [{name, description, model, effort, tools,
+/// skills}]}` (`tools` null = all), or `{error}` when the file is broken; no file is no roles.
+pub fn summary_from(p: &Path) -> serde_json::Value {
+    match load_from(p) {
+        Ok(r) => r.summary(),
+        Err(e) => serde_json::json!({ "error": format!("{e:#}") }),
+    }
+}
+
 impl Roles {
+    pub fn summary(&self) -> serde_json::Value {
+        let roles: Vec<_> = self
+            .roles
+            .iter()
+            .map(|(n, r)| serde_json::json!({ "name": n, "description": r.description.trim(), "model": r.model, "effort": r.effort, "tools": r.tools, "skills": r.skills }))
+            .collect();
+        serde_json::json!({ "default_model": self.default_model, "roles": roles })
+    }
+
     /// The role `name`; an unknown one is an error listing the roles.
     pub fn get(&self, name: &str) -> Result<&Role> {
         self.roles.get(name).ok_or_else(|| {
@@ -190,5 +211,24 @@ mod tests {
         std::fs::write(dir.join(FILE), "nope = 1").unwrap();
         let e = load_from(&dir.join(FILE)).unwrap_err().to_string();
         assert!(e.contains("roles.toml") && e.contains("nope"), "{e}");
+    }
+
+    #[test]
+    fn the_summary_lists_roles_and_a_broken_file_is_an_error_string() {
+        let dir = crate::test_util::TestDir::new("roles-summary");
+        let none = summary_from(&dir.join(FILE));
+        assert_eq!(none, serde_json::json!({ "default_model": null, "roles": [] }));
+        std::fs::write(
+            dir.join(FILE),
+            "default_model = \"x/y\"\n[roles.a]\ndescription = \" does a \"\nmodel = \"x/z\"\ntools = [\"read\"]\nskills = [\"work/verify\"]\n[roles.b]\n",
+        )
+        .unwrap();
+        let s = summary_from(&dir.join(FILE));
+        assert_eq!(s["default_model"], "x/y");
+        assert_eq!(s["roles"][0], serde_json::json!({ "name": "a", "description": "does a", "model": "x/z", "effort": null, "tools": ["read"], "skills": ["work/verify"] }));
+        assert!(s["roles"][1]["tools"].is_null() && s["roles"][1]["skills"] == serde_json::json!([]));
+        std::fs::write(dir.join(FILE), "nope = 1").unwrap();
+        let e = summary_from(&dir.join(FILE));
+        assert!(e["error"].as_str().unwrap().contains("nope") && e.get("roles").is_none(), "{e}");
     }
 }
