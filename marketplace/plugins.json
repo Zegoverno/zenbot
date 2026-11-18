@@ -42,6 +42,27 @@
       ]
     },
     {
+      "name": "zenvault",
+      "title": "zenvault",
+      "description": "A vault method for Markdown notes: daily plan, SMART goals, projects, tasks and a wiki, with templates, a linter, a /vault command and agent skills.",
+      "author": "Zegoverno",
+      "repository": "https://github.com/Zegoverno/zenvault",
+      "license": "MIT",
+      "version": "0.1.0",
+      "archive": "https://github.com/Zegoverno/zenvault/releases/download/v0.1.0/zenvault-0.1.0.tgz",
+      "sha256": "6360ee8073ca9817edab250a0ad0908fbe8d118c46fe2b2d5ac04bf706cd1cf6",
+      "kernel": [
+        "files:read",
+        "files:write"
+      ],
+      "contributes": [
+        "commands"
+      ],
+      "categories": [
+        "knowledge"
+      ]
+    },
+    {
       "name": "zenwrite",
       "title": "zenwrite",
       "description": "A calm Markdown writing app: live preview, alternatives, ghosts, versions, AI proofreading and shrink. Notes stay plain files.",
