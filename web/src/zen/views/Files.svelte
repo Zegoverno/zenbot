@@ -6,10 +6,15 @@
   // per pane for the page's life (tree.svelte.ts).
   // `a` makes a file (a name ending in `/` a folder), `A` a folder and `R` renames the selected row,
   // asked with a small input over the tree; the server never overwrites (server/home.ts).
+  // The search field (`/`) replaces the tree with results: names under the root at once (the
+  // server's `find`, no secrets, dot entries or symlinks), then, after a pause (3+ characters) or
+  // Enter, the kernel's search of the vault's notes (words and meaning) with a snippet each. A result
+  // opens through the normal opener (plugins included); Esc clears.
   import { onMount } from 'svelte';
   import type { Pane } from '../app.svelte.ts';
   import { app, openFile, openDir, tilde, typing, notice } from '../app.svelte.ts';
-  import { files } from '../api.ts';
+  import { files, zen } from '../api.ts';
+  import type { Found, SearchHit } from '../api.ts';
   import Opened from '../Opened.svelte';
   import { trees } from './tree.svelte.ts';
   import { pageRows, follow, plain, human } from './list.ts';
@@ -145,6 +150,152 @@
     } else openFile(r.path, pane);
   }
 
+  // ---- search ----
+
+  interface Result {
+    key: string;
+    path: string;
+    name: string;
+    sub: string;
+    dir: boolean;
+    snippet?: string;
+  }
+
+  let q = $state('');
+  let input: HTMLInputElement | undefined = $state();
+  let names = $state<Found[]>([]);
+  let hits = $state<SearchHit[]>([]);
+  let nameBusy = $state(false);
+  let contentBusy = $state(false);
+  let contentErr = $state('');
+  let hit = $state(-1);
+  let nameSeq = 0;
+  let contentSeq = 0;
+  let nameTimer: ReturnType<typeof setTimeout> | undefined;
+  let contentTimer: ReturnType<typeof setTimeout> | undefined;
+  const searching = $derived(q.trim() !== '');
+
+  const base = (p: string) => p.slice(p.lastIndexOf('/') + 1);
+  /** A path shown shortly: in the vault, from it; else `~/…`. */
+  const shown = (p: string) => (app.vault && p.startsWith(app.vault + '/') ? p.slice(app.vault.length + 1) : tilde(p));
+
+  /** Names first, then content matches (their snippet), each file once. */
+  const results = $derived.by((): Result[] => {
+    const out: Result[] = names.map((f) => ({ key: 'n:' + f.path, path: f.path, name: f.name, sub: shown(f.path), dir: f.dir }));
+    const seen = new Set(out.map((r) => r.path));
+    for (const h of hits) {
+      if (!h.path || seen.has(h.path)) continue;
+      seen.add(h.path);
+      out.push({ key: 'c:' + h.path, path: h.path, name: h.title || base(h.path), sub: shown(h.path), dir: false, snippet: h.snippet });
+    }
+    return out;
+  });
+
+  function clearSearch() {
+    clearTimeout(nameTimer);
+    clearTimeout(contentTimer);
+    nameSeq++;
+    contentSeq++;
+    q = '';
+    names = [];
+    hits = [];
+    nameBusy = contentBusy = false;
+    contentErr = '';
+    hit = -1;
+  }
+
+  async function findNames(text: string, root: string) {
+    const seq = ++nameSeq;
+    nameBusy = true;
+    try {
+      const r = await files.find(root, text);
+      if (seq === nameSeq) names = r.results;
+    } catch {
+      if (seq === nameSeq) names = [];
+    } finally {
+      if (seq === nameSeq) nameBusy = false;
+    }
+  }
+
+  async function findContent(text: string) {
+    const seq = ++contentSeq;
+    contentBusy = true;
+    contentErr = '';
+    try {
+      const r = await zen.search(text, 'notes', 10);
+      if (seq === contentSeq) hits = r.results;
+    } catch (e) {
+      if (seq === contentSeq) {
+        hits = [];
+        contentErr = (e as Error).message;
+      }
+    } finally {
+      if (seq === contentSeq) contentBusy = false;
+    }
+  }
+
+  // Typing: names after a moment, content after a longer one (3+ characters); a new text drops what an earlier one found.
+  $effect(() => {
+    const text = q.trim();
+    const root = t.root;
+    clearTimeout(nameTimer);
+    clearTimeout(contentTimer);
+    hit = -1;
+    if (!text) return;
+    nameTimer = setTimeout(() => findNames(text, root), 120);
+    if (text.length >= 3) contentTimer = setTimeout(() => findContent(text), 600);
+    else {
+      contentSeq++;
+      hits = [];
+      contentBusy = false;
+    }
+    return () => {
+      clearTimeout(nameTimer);
+      clearTimeout(contentTimer);
+    };
+  });
+
+  function searchNow() {
+    const text = q.trim();
+    if (!text) return;
+    clearTimeout(nameTimer);
+    clearTimeout(contentTimer);
+    findNames(text, t.root);
+    findContent(text);
+  }
+
+  function pick(i: number) {
+    if (!results.length) return;
+    hit = Math.min(results.length - 1, Math.max(0, i));
+    follow(list);
+  }
+
+  function open(r: Result | undefined) {
+    if (!r) return;
+    if (r.dir) {
+      clearSearch();
+      openDir(r.path, pane);
+    } else openFile(r.path, pane);
+  }
+
+  function searchKey(e: KeyboardEvent) {
+    if (e.isComposing) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      if (q) clearSearch();
+      else input?.blur();
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      pick(hit < 0 ? 0 : hit + (e.key === 'ArrowDown' ? 1 : -1));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      if (hit >= 0 && results[hit]) open(results[hit]);
+      else searchNow();
+    }
+  }
+
   // ---- new file, new folder, rename ----
 
   type Ask = { kind: 'file' | 'folder' | 'rename'; dir: string; from?: string; value: string };
@@ -253,6 +404,26 @@
 
   function key(e: KeyboardEvent) {
     if (!active || app.file[pane] || !plain(e) || typing(e)) return;
+    if (e.key === '/') {
+      e.preventDefault();
+      input?.focus();
+      return;
+    }
+    if (searching) {
+      const move: Record<string, () => void> = {
+        ArrowUp: () => pick(hit - 1),
+        k: () => pick(hit - 1),
+        ArrowDown: () => pick(hit + 1),
+        j: () => pick(hit + 1),
+        Enter: () => open(results[hit]),
+        Escape: clearSearch,
+      };
+      if (move[e.key]) {
+        e.preventDefault();
+        move[e.key]();
+      }
+      return;
+    }
     const r = rows[at];
     const page = pageRows(list);
     const acts: Record<string, () => void> = {
@@ -306,6 +477,48 @@
   <Opened path={app.file[pane]} {pane} {active} />
 {:else}
   <div class="view" bind:this={list}>
+    <div class="searchbar">
+      <input
+        bind:this={input}
+        bind:value={q}
+        onkeydown={searchKey}
+        type="search"
+        placeholder="/ search files and notes"
+        aria-label="search files"
+        spellcheck="false"
+        autocomplete="off"
+        autocapitalize="off"
+      />
+      {#if app.vault && t.root !== app.vault}<button class="chip" onclick={() => { clearSearch(); openDir(app.vault, pane); }} title="the vault">vault</button>{/if}
+      {#if app.home && t.root !== app.home}<button class="chip" onclick={() => { clearSearch(); openDir(app.home, pane); }} title="your home folder">home</button>{/if}
+    </div>
+    {#if searching}
+      <div class="results" role="listbox" aria-label="search results">
+        {#each results as r, i (r.key)}
+          <div
+            class="result"
+            class:sel={i === hit}
+            class:active
+            data-sel={i === hit ? '1' : '0'}
+            role="option"
+            tabindex="-1"
+            aria-selected={i === hit}
+            onclick={() => {
+              pick(i);
+              open(r);
+            }}
+            onkeydown={() => {}}
+          >
+            <span class="rname">{r.name}{r.dir ? '/' : ''}</span>
+            <span class="rsub">{r.sub}</span>
+            {#if r.snippet}<span class="snip">{r.snippet}</span>{/if}
+          </div>
+        {/each}
+        {#if nameBusy || contentBusy}<p class="dim pad">searching…</p>{/if}
+        {#if contentErr}<p class="dim pad">notes search unavailable: {contentErr}</p>{/if}
+        {#if !results.length && !nameBusy && !contentBusy}<p class="dim pad">nothing found · Enter searches the notes' words and meaning</p>{/if}
+      </div>
+    {:else}
     <div class="tools">
       <nav class="crumbs" aria-label="folder">
         {#each crumbs as c, i}
@@ -368,11 +581,22 @@
         </div>
       {/each}
     </div>
+    {/if}
   </div>
 {/if}
 
 <style>
   .view { container-type: inline-size; padding: 6px 0 24px; font-family: var(--sans); font-size: 14px; }
+  .searchbar { display: flex; gap: 8px; align-items: center; padding: 2px 14px 6px; }
+  .searchbar input { flex: 1; max-width: 420px; min-width: 0; font: inherit; font-size: 13px; color: var(--ink); background: transparent; border: 1px solid var(--faint); border-radius: 6px; padding: 4px 8px; }
+  .searchbar input:focus { outline: none; border-color: var(--accent); }
+  .result { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 6px 14px; margin: 0 6px; border-radius: 6px; cursor: pointer; outline-offset: -1px; }
+  .result:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
+  .result.sel { outline: 1px solid var(--faint); }
+  .result.sel.active { outline: none; background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .rname { min-width: 0; overflow-wrap: anywhere; }
+  .rsub { color: var(--dim); font-size: 12px; min-width: 0; overflow-wrap: anywhere; }
+  .snip { flex-basis: 100%; color: var(--dim); font-size: 12px; line-height: 1.4; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; }
   .tools { display: flex; gap: 8px; align-items: center; padding: 4px 14px 8px; }
   .crumbs { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px; min-width: 0; font-size: 13px; }
   .crumbs button { color: var(--dim); padding: 2px 3px; border-radius: 4px; }

@@ -70,6 +70,8 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
       return send(res, 200, await home.read(q('path')));
     case 'GET /api/fs/stat':
       return send(res, 200, await home.stat(q('path')));
+    case 'GET /api/fs/find':
+      return send(res, 200, await home.find(q('root'), q('q')));
     case 'GET /api/fs/locate':
       return send(res, 200, { found: await home.locate(q('ref'), q('from')) });
     case 'GET /api/fs/home':

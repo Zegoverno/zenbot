@@ -142,4 +142,29 @@ describe('home folder writes', () => {
     // Renaming to the same name changes nothing.
     expect(await home.rename(path.join(dir, 'work/c.md'), 'c.md')).toEqual({ path: path.join(dir, 'work/c.md') });
   });
+
+  it('finds names under a folder: no dot entries, secrets, symlinks out or generated folders', async () => {
+    const { dir, home } = await scratch();
+    const outside = await fs.realpath(await tmp());
+    await fs.writeFile(path.join(outside, 'moat-secret.md'), 'x');
+    await fs.mkdir(path.join(dir, 'work/Notes/deep'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'work/Moat.md'), 'x');
+    await fs.writeFile(path.join(dir, 'work/Notes/deep/moat-two.md'), 'x');
+    await fs.mkdir(path.join(dir, 'work/node_modules'));
+    await fs.writeFile(path.join(dir, 'work/node_modules/moat.js'), 'x');
+    await fs.mkdir(path.join(dir, 'work/.hidden'));
+    await fs.writeFile(path.join(dir, 'work/.hidden/moat.md'), 'x');
+    await fs.writeFile(path.join(dir, 'work/moat.pem'), 'x');
+    await fs.symlink(path.join(outside, 'moat-secret.md'), path.join(dir, 'work/moat-link.md'));
+    await fs.symlink(outside, path.join(dir, 'work/linked'));
+    const found = await home.find(path.join(dir, 'work'), ' MOAT ');
+    expect(found.results.map((r: { rel: string }) => r.rel)).toEqual(['Moat.md', 'Notes/deep/moat-two.md']);
+    expect(found.results[0]).toEqual({ name: 'Moat.md', path: path.join(dir, 'work/Moat.md'), rel: 'Moat.md', dir: false });
+    expect((await home.find(path.join(dir, 'work'), 'deep')).results.map((r: { dir: boolean }) => r.dir)).toEqual([true]);
+    expect((await home.find(path.join(dir, 'work'), '')).results).toEqual([]);
+    expect(await status(home.find(outside, 'moat'))).toBe(403);
+    expect(await status(home.find(path.join(dir, '.ssh'), 'x'))).toBe(403);
+    expect(await status(home.find(path.join(dir, 'missing'), 'x'))).toBe(404);
+    expect((await home.find(path.join(dir, 'work'), 'o', 1)).truncated).toBe(true);
+  });
 });
