@@ -180,7 +180,7 @@ The archive must not contain links, absolute paths, `..`, `node_modules` or dot 
 downloads it, checks its sha256 against the marketplace entry, unpacks it and runs it. Nothing is
 built or installed on the owner's machine.
 
-Try it locally before releasing: `zen plugins add ./my-plugin-0.1.0.tgz` (or a folder holding the
+Try it locally before releasing: `zen plugins add ./my-plugin-0.1.0.tgz` (or `./my-plugin`, a folder holding the
 built plugin), then open zenbot's web app.
 
 ## Listing in the marketplace
