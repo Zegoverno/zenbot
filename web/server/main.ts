@@ -2,7 +2,7 @@
 // home folder (`home.ts`: reads, plus new files and folders and renames, never over anything),
 // relays the zen kernel (`zen.ts`), runs zen's kernel commands (`commands.ts`) and takes chat
 // attachments into `~/inbox` (`uploads.ts`), and shows dev servers under `/preview/<port>/` for the
-// Preview tab (`preview.ts`).
+// Preview tab (`preview.ts`), with its pins' screenshots taken here (`shot.ts`).
 //
 // Security, in layers:
 // - It listens on loopback only; a signing-in proxy in front is the way in.
@@ -27,6 +27,7 @@ import * as home from './home.ts';
 import * as commands from './commands.ts';
 import * as uploads from './uploads.ts';
 import * as preview from './preview.ts';
+import * as shot from './shot.ts';
 
 const HOME = os.homedir();
 const ROOT = path.resolve(process.env.ZEN_WEB_ROOT ?? path.join(HOME, '.zenbot/global'));
@@ -85,6 +86,19 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
       if (!b || typeof b !== 'object') throw new HttpError(400, 'bad json');
       const act = url.pathname.slice('/api/fs/'.length);
       return send(res, 200, act === 'rename' ? await home.rename(b.path, b.name) : await home[act as 'create' | 'mkdir'](b.dir, b.name));
+    }
+    case 'POST /api/preview/shot': {
+      // A Preview pin's screenshot, taken here (shot.ts) and saved to ~/inbox like an attachment.
+      const r = shot.readShot(await readBody(req));
+      if (!r) throw new HttpError(400, 'bad shot request');
+      const png = await shot.shoot(r, `http://127.0.0.1:${PORT}`, AUTH_HEADER).catch((e) => {
+        throw new HttpError(502, `screenshot failed: ${(e as Error).message}`);
+      });
+      const dir = path.join(home.HOME, 'inbox', new Date().toISOString().slice(0, 10));
+      await fs.mkdir(dir, { recursive: true });
+      const file = path.join(dir, `preview-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.png`);
+      await fs.writeFile(file, png, { flag: 'wx' });
+      return send(res, 200, { path: file, data: png.toString('base64') });
     }
     case 'POST /api/upload':
       return send(res, 200, await uploads.save(path.join(home.HOME, 'inbox'), q('name'), req));

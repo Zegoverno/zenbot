@@ -16,7 +16,7 @@
   // can be pointed at, and it works wherever zen does (no other port to sign in to or be blocked).
   import { onMount } from 'svelte';
   import { app, notice } from '../app.svelte.ts';
-  import { upload } from '../api.ts';
+  import { files, upload } from '../api.ts';
   import { chat, contexts, dropContext, keepContext } from '../plugins.svelte.ts';
   import { pinsText, previewTarget, readPin, where } from '../preview.ts';
 
@@ -24,6 +24,8 @@
   /** The chip's key: unlike a plugin's title, never ends in a plugin's name. */
   const NAME = 'Preview (zen)';
   const MAX_PINS = 8;
+  /** A screenshot on its way: a blank 1×1 PNG, so the chip shows it saving and sending waits. */
+  const PENDING = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
   const SIZES = { fit: null, phone: [390, 844], tablet: [820, 1180], desktop: [1280, 800] } as const;
   type Size = keyof typeof SIZES;
 
@@ -96,19 +98,33 @@
     // A chip sent or removed starts the list again.
     const entry = contexts[sid]?.[NAME] && pinned.get(sid)?.origin === origin ? pinned.get(sid)! : { origin, pins: [] };
     if (entry.pins.length >= MAX_PINS) return notice(`${MAX_PINS} pins at most: send these first`);
+    // The screenshot is taken on this machine (server/shot.ts): nothing is uploaded from the
+    // browser, which some networks refuse. Until it's back the chip shows it saving; if it fails,
+    // the browser's own capture is uploaded instead.
+    const own = pin.image;
+    pin.image = own ?? PENDING;
     entry.pins = [...entry.pins, pin];
     pinned.set(sid, entry);
     showPins(sid, origin, entry.pins);
-    // Each screenshot is saved once; the chip updates when it is.
-    if (pin.image) {
-      const bytes = Uint8Array.from(atob(pin.image.split(',')[1]), (ch) => ch.charCodeAt(0));
-      upload(new File([bytes as BlobPart], `preview-${Date.now()}.png`, { type: 'image/png' }), () => {}).done.then(
-        (r) => (pin.saved = { path: r.path }),
-        (e) => (pin.saved = { error: (e as Error).message }),
-      ).then(() => {
-        if (pinned.get(sid) === entry && entry.pins.includes(pin) && contexts[sid]?.[NAME]) showPins(sid, origin, entry.pins);
-      });
-    }
+    const refresh = () => {
+      if (pinned.get(sid) === entry && entry.pins.includes(pin) && contexts[sid]?.[NAME]) showPins(sid, origin, entry.pins);
+    };
+    files
+      .previewShot({ url: pin.url, selector: pin.selector, width: pin.viewport.w, height: pin.viewport.h })
+      .then((r) => {
+        pin.image = `data:image/png;base64,${r.data}`;
+        pin.saved = { path: r.path };
+      })
+      .catch(async (e) => {
+        if (!own) return void ((pin.image = null), (pin.saved = undefined), notice(`no screenshot: ${(e as Error).message}`));
+        pin.image = own;
+        const bytes = Uint8Array.from(atob(own.split(',')[1]), (ch) => ch.charCodeAt(0));
+        await upload(new File([bytes as BlobPart], `preview-${Date.now()}.png`, { type: 'image/png' }), () => {}).done.then(
+          (r) => (pin.saved = { path: r.path }),
+          (err) => (pin.saved = { error: (err as Error).message }),
+        );
+      })
+      .then(refresh);
     notice(`#${entry.pins.length} ${pin.tag}${pin.source ? ` · ${where(pin.source)}` : ''}: write your comment`, 3000);
     chat.focus?.();
   }
