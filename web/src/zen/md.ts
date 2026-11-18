@@ -76,7 +76,7 @@ const MathExt: MarkdownConfig = {
   ],
 };
 
-const parser = base.configure([GFM, WikiLink, MathExt]);
+export const parser = base.configure([GFM, WikiLink, MathExt]);
 
 let katex: typeof import('katex').default | null = null;
 let loading: Promise<unknown> | null = null;
@@ -240,15 +240,36 @@ function quote(n: SyntaxNode, src: string, q: HTMLElement) {
   for (let c = first!.nextSibling; c; c = c.nextSibling) if (c.name !== 'QuoteMark') block(c, src, q);
 }
 
+/**
+ * A table row's cells in order, null for an empty one. The parser gives an empty cell no node of
+ * its own (`| | A |` has two delimiters in a row), so the cells are read off the delimiters: each
+ * gap between two is a cell, and so is text before the first or after the last.
+ */
+export function rowCells(r: SyntaxNode, src: string): (SyntaxNode | null)[] {
+  const out: (SyntaxNode | null)[] = [];
+  let cell: SyntaxNode | null = null;
+  let seenDelimiter = false;
+  for (let c = r.firstChild; c; c = c.nextSibling) {
+    if (c.name === 'TableCell') cell = c;
+    else if (c.name === 'TableDelimiter') {
+      // A leading pipe opens the row; it closes no cell.
+      if (seenDelimiter || cell || src.slice(r.from, c.from).trim()) out.push(cell);
+      seenDelimiter = true;
+      cell = null;
+    }
+  }
+  if (cell) out.push(cell);
+  return out;
+}
+
 function table(n: SyntaxNode, src: string, t: HTMLElement) {
   const body = el('tbody');
   for (let r = n.firstChild; r; r = r.nextSibling) {
     if (r.name !== 'TableHeader' && r.name !== 'TableRow') continue;
     const tr = el('tr');
-    for (let c = r.firstChild; c; c = c.nextSibling) {
-      if (c.name !== 'TableCell') continue;
+    for (const c of rowCells(r, src)) {
       const td = el(r.name === 'TableHeader' ? 'th' : 'td');
-      inline(c, src, td, new Set());
+      if (c) inline(c, src, td, new Set());
       tr.append(td);
     }
     if (r.name === 'TableHeader') {
