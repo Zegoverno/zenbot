@@ -82,6 +82,12 @@ function upstreamHeaders(req: IncomingMessage, port: number, authHeader: string)
   const h: OutgoingHttpHeaders = { ...req.headers, host: `localhost:${port}` };
   for (const k of Object.keys(h)) if (k === authHeader || k.startsWith('x-exedev-') || k.startsWith('x-forwarded-')) delete h[k];
   if (h.origin) h.origin = `http://localhost:${port}`;
+  // The gateway's own cookie is not the app's.
+  if (typeof h.cookie === 'string') {
+    const kept = h.cookie.split(';').map((c) => c.trim()).filter((c) => c && !c.startsWith(`${COOKIE}=`)).join('; ');
+    if (kept) h.cookie = kept;
+    else delete h.cookie;
+  }
   if (typeof h.referer === 'string') {
     try {
       const r = new URL(h.referer);
@@ -110,6 +116,7 @@ function zenOrigin(req: IncomingMessage, port: number): string | null {
 }
 
 function page(res: ServerResponse, status: number, text: string) {
+  if (res.headersSent) return void res.destroy();
   res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
   const esc = text.replace(/&/g, '&amp;').replace(/</g, '&lt;');
   res.end(`<!doctype html><html><head>${SCRIPT}<meta charset="utf-8"></head><body style="font:15px system-ui;padding:24px;color:#555">${esc}</body></html>`);
@@ -144,10 +151,18 @@ export function start(o: Options) {
       }
       if (url.pathname === '/__zen/preview.js') {
         script ??= readFile(o.script);
+        const js = await script.catch((e) => {
+          script = null;
+          throw e;
+        });
         res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-cache' });
-        return res.end(await script);
+        return res.end(js);
       }
       if (url.pathname === '/__zen/open') {
+        // Only zen's page picks the dev server (it frames this from another port: same-site), or
+        // the owner typing it (none); never the framed app itself (same-origin), never another site.
+        const site = req.headers['sec-fetch-site'];
+        if (site !== undefined && site !== 'same-site' && site !== 'none') return page(res, 403, 'Only zen\'s Preview tab picks the dev server.');
         const port = targetPort(url.searchParams.get('port'), blocked);
         if (!port) return page(res, 400, `Preview shows dev servers on ports ${MIN_PORT}–${MAX_PORT}, not zen's own.`);
         const secure = req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
@@ -167,9 +182,14 @@ export function start(o: Options) {
       const headers = framable(r.headers);
       // Redirects to the dev server's own address stay on the gateway.
       if (typeof headers.location === 'string') headers.location = headers.location.replace(new RegExp(`^https?://(localhost|127\\.0\\.0\\.1):${port}(?=/|$)`), '') || '/';
-      const html = /^text\/html/i.test(String(r.headers['content-type'] ?? '')) && req.method !== 'HEAD';
+      const type = String(r.headers['content-type'] ?? '');
+      const encoding = String(r.headers['content-encoding'] ?? 'identity').toLowerCase();
+      // Pages it can rewrite safely: HTML in UTF-8 (or no charset), plain or gzip; others pass as they are.
+      const html = /^text\/html/i.test(type) && req.method !== 'HEAD' && ['identity', 'gzip'].includes(encoding) && (!/charset=/i.test(type) || /charset="?utf-?8/i.test(type));
       if (!html) {
         res.writeHead(r.statusCode ?? 502, headers);
+        r.on('error', () => res.destroy());
+        r.on('aborted', () => res.destroy());
         return void r.pipe(res);
       }
       const chunks: Buffer[] = [];
@@ -179,20 +199,28 @@ export function start(o: Options) {
         if (size <= MAX_HTML) chunks.push(c);
       });
       r.on('end', () => {
-        if (size > MAX_HTML) return page(res, 502, 'The page is too large to preview.');
-        let body = Buffer.concat(chunks);
-        if (/gzip/i.test(String(r.headers['content-encoding'] ?? ''))) body = gunzipSync(body);
-        const out = Buffer.from(inject(body.toString('utf8')));
-        delete headers['content-length'];
-        delete headers['content-encoding'];
-        delete headers['transfer-encoding'];
-        headers['content-length'] = out.length;
-        res.writeHead(r.statusCode ?? 200, headers);
-        res.end(out);
+        // Outside the request's try: a bad body must answer 502, never take the server down.
+        try {
+          if (size > MAX_HTML) return page(res, 502, 'The page is too large to preview.');
+          let body = Buffer.concat(chunks);
+          if (encoding === 'gzip') body = gunzipSync(body);
+          const out = Buffer.from(inject(body.toString('utf8')));
+          delete headers['content-length'];
+          delete headers['content-encoding'];
+          delete headers['transfer-encoding'];
+          headers['content-length'] = out.length;
+          res.writeHead(r.statusCode ?? 200, headers);
+          res.end(out);
+        } catch (e) {
+          page(res, 502, `The dev server's page couldn't be read: ${(e as Error).message}`);
+        }
       });
       r.on('error', () => res.destroy());
+      r.on('aborted', () => res.destroy());
     });
     up.on('error', () => page(res, 502, `Nothing answers on localhost:${port}. Is the dev server running?`));
+    // The browser gone: stop the dev server's answer too (long streams would leak).
+    res.on('close', () => { if (!res.writableFinished) up.destroy(); });
     req.pipe(up);
   }
 

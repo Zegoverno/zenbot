@@ -264,10 +264,15 @@ export function rowCells(r: SyntaxNode, src: string): (SyntaxNode | null)[] {
 
 function table(n: SyntaxNode, src: string, t: HTMLElement) {
   const body = el('tbody');
+  // As GFM: every row has the header's cells, cut or padded.
+  let width = 0;
   for (let r = n.firstChild; r; r = r.nextSibling) {
     if (r.name !== 'TableHeader' && r.name !== 'TableRow') continue;
     const tr = el('tr');
-    for (const c of rowCells(r, src)) {
+    const cells = rowCells(r, src);
+    if (r.name === 'TableHeader') width = cells.length;
+    if (width) cells.length = width;
+    for (const c of Array.from(cells, (x) => x ?? null)) {
       const td = el(r.name === 'TableHeader' ? 'th' : 'td');
       if (c) inline(c, src, td, new Set());
       tr.append(td);

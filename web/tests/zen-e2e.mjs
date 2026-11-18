@@ -930,6 +930,18 @@ try {
     assert.ok(await point.isEnabled(), 'the app loaded zen-preview.js and answered');
     // The app can't send pins by itself: only while the owner points.
     const appFrame = () => page.frames().find((f) => f.url().includes(`:${GATEWAY}`));
+    // The framed app can't pick another dev server for itself.
+    assert.equal(await appFrame().evaluate(() => fetch('/__zen/open?port=5180').then((r) => r.status)), 403);
+    // A broken page from a dev server answers 502; the gateway (and zen web) stay up.
+    const broken = createServer((_, res) => { res.writeHead(200, { 'content-type': 'text/html', 'content-encoding': 'gzip' }); res.end('not gzip'); }).listen(APP_PORT + 1, '127.0.0.1');
+    try {
+      const opened = await fetch(`http://127.0.0.1:${GATEWAY}/__zen/open?port=${APP_PORT + 1}`, { redirect: 'manual' });
+      const jar = opened.headers.get('set-cookie').split(';')[0];
+      assert.equal((await fetch(`http://127.0.0.1:${GATEWAY}/`, { headers: { cookie: jar } })).status, 502);
+      assert.equal((await fetch(`http://127.0.0.1:${GATEWAY}/__zen/ping`)).status, 200, 'the gateway survives a broken page');
+    } finally {
+      broken.close();
+    }
     await appFrame().evaluate((png) => parent.postMessage({ zen: 'preview', type: 'pin', pin: { tag: 'div', image: png } }, '*'), 'data:image/png;base64,iVBORw0KGgo=');
     await page.waitForTimeout(300);
     assert.equal(await page.getByLabel('context from Preview (zen)', { exact: true }).count(), 0, 'no pin while Point is off');

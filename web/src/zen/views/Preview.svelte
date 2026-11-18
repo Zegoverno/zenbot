@@ -62,7 +62,7 @@
   }
 
   // Before showing a page, ask the gateway whether it knows the owner; if not, sign in once by
-  // itself (a second time in a minute would be a loop: then the owner presses the button).
+  // itself.
   $effect(() => {
     if (!gateway || !target) return void (signin = 'ok');
     let gone = false;
@@ -74,7 +74,10 @@
         if (gone) return;
         if (ok) return void (signin = 'ok');
         signin = 'needed';
-        if (Date.now() - Number(localStorage.getItem(BOUNCED) ?? 0) > 60_000) signIn();
+        // A failed ping may also be the gateway down or the network: sign in by itself at most once
+        // in ten minutes, and never over an unsent draft; otherwise the button does it.
+        const draft = (document.querySelector('.zc-compose textarea') as HTMLTextAreaElement | null)?.value.trim();
+        if (!draft && Date.now() - Number(localStorage.getItem(BOUNCED) ?? 0) > 600_000) signIn();
       });
     return () => (gone = true);
   });
