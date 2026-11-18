@@ -48,9 +48,9 @@
       "author": "Zegoverno",
       "repository": "https://github.com/Zegoverno/zenvault",
       "license": "MIT",
-      "version": "0.1.1",
-      "archive": "https://github.com/Zegoverno/zenvault/releases/download/v0.1.1/zenvault-0.1.1.tgz",
-      "sha256": "e161c465a14ef1ef476f7881321af12b278b1772c9f79a59119e4ecbaff26621",
+      "version": "0.1.2",
+      "archive": "https://github.com/Zegoverno/zenvault/releases/download/v0.1.2/zenvault-0.1.2.tgz",
+      "sha256": "b539326d6322e648163bb6fa9bb45acd2cf6a9e358d792d381197532f06359a1",
       "kernel": [
         "files:read",
         "files:write"
