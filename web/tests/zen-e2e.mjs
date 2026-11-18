@@ -900,6 +900,62 @@ try {
   await until(() => prompts.at(-1) === 'Nothing attached', 'a removed chip is not sent');
   await page.getByText('Streaming answer, done.').last().waitFor();
 
+  // Preview: a dev server on another port of this host, beside the chat. Pointing at an element
+  // pins it, with its source line, styles, console errors and a screenshot, for the next prompt.
+  const APP_PORT = Number(process.env.ZEN_E2E_APP_PORT ?? 4419);
+  const devApp = createServer((_, res) => {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(`<!doctype html><html><head><script src="${base}/zen-preview.js"></script></head><body style="margin:0"><main><button id="hero" style="font-size:20px;padding:8px 14px;background:#fc0;border:0">Get started</button></main>
+<script>document.getElementById('hero').__svelte_meta = { loc: { file: 'src/Hero.svelte', line: 7, column: 2 } }; document.getElementById('hero').onclick = () => { document.title = 'clicked'; }; console.error('fixture boom');</script></body></html>`);
+  }).listen(APP_PORT, '127.0.0.1');
+  try {
+    await page.locator('.zside').getByRole('tab', { name: 'Preview', exact: true }).click();
+    const addr = page.getByLabel('preview address');
+    await addr.fill('http://example.com:5173/');
+    await addr.press('Enter');
+    await page.getByText("Preview shows this host's own ports").waitFor();
+    assert.equal(await page.locator('.zside iframe[title="preview"]').count(), 0, 'another host is never framed');
+    await addr.fill(String(APP_PORT));
+    await addr.press('Enter');
+    const devFrame = page.frameLocator('.zside iframe[title="preview"]');
+    await devFrame.locator('#hero').waitFor();
+    const point = page.locator('.zside').getByRole('button', { name: 'Point', exact: true });
+    for (let i = 0; i < 100 && !(await point.isEnabled()); i++) await page.waitForTimeout(50);
+    assert.ok(await point.isEnabled(), 'the app loaded zen-preview.js and answered');
+    // The app can't send pins by itself: only while the owner points.
+    const appFrame = () => page.frames().find((f) => f.url().includes(`:${APP_PORT}`));
+    await appFrame().evaluate((png) => parent.postMessage({ zen: 'preview', type: 'pin', pin: { tag: 'div', image: png } }, '*'), 'data:image/png;base64,iVBORw0KGgo=');
+    await page.waitForTimeout(300);
+    assert.equal(await page.getByLabel('context from Preview (zen)', { exact: true }).count(), 0, 'no pin while Point is off');
+    await point.click();
+    await devFrame.locator('#hero').click();
+    const pinChip = page.getByLabel('context from Preview (zen)', { exact: true });
+    await pinChip.waitFor();
+    assert.equal(await pinChip.locator('img').count(), 1, 'the pin carries a screenshot');
+    assert.notEqual(await page.frames().find((f) => f.url().includes(`:${APP_PORT}`)).title(), 'clicked', 'pointing does not click the app');
+    await pinChip.getByText('saving…').waitFor({ state: 'detached' });
+    assert.equal(await page.evaluate(() => document.activeElement?.tagName), 'TEXTAREA', 'the cursor goes to the chat box');
+    await box.fill('Make #1 calmer');
+    await box.press('Enter');
+    await until(() => prompts.at(-1)?.endsWith('Make #1 calmer'), 'the pinned prompt reaches the kernel');
+    const sent = prompts.at(-1);
+    assert.match(sent, /^<app_context>\n<plugin name="Preview \(zen\)">\nPreview of http:\/\/127\.0\.0\.1:\d+: the owner pointed at one element\.\n#1 button "Get started" at src\/Hero\.svelte:7:2\n/);
+    assert.match(sent, /styles .*font-size: 20px/);
+    assert.match(sent, /console errors: fixture boom/);
+    const shotPath = sent.match(/\(attached ~\/inbox\/(\d{4}-\d{2}-\d{2}\/preview-\d+\.png)\)/);
+    assert.ok(shotPath, `screenshot path in: ${sent}`);
+    assert.equal(readFileSync(path.join(HOME, 'inbox', shotPath[1])).subarray(1, 4).toString(), 'PNG');
+    await page.getByText('Streaming answer, done.').last().waitFor();
+    // Pointing off, the app works as usual.
+    await point.click();
+    await devFrame.locator('#hero').click();
+    for (let i = 0; i < 40 && (await page.frames().find((f) => f.url().includes(`:${APP_PORT}`)).title()) !== 'clicked'; i++) await page.waitForTimeout(50);
+    assert.equal(await page.frames().find((f) => f.url().includes(`:${APP_PORT}`)).title(), 'clicked', 'with Point off, clicks reach the app');
+    await page.locator('.zside').getByRole('tab', { name: 'Files', exact: true }).click();
+  } finally {
+    devApp.close();
+  }
+
   await page.locator('.chat-pane').getByRole('button', { name: 'Settings', exact: true }).click();
   await page.locator('.zside').getByRole('tab', { name: 'Plugins', exact: true }).waitFor();
   assert.match(page.url(), /s=s1/);

@@ -5,7 +5,7 @@
 // Plugins reach the owner's files through the kernel, under the vault (`ZEN_PLUGIN_FILES`), so a
 // plugin sees vault-relative paths and openers apply only to vault files.
 
-import { pluginApi, type OpenerDefaults, type Plugin, type PluginGame, type PluginOpener, type PluginView, type ToolResult } from './api.ts';
+import { pluginApi, upload, type OpenerDefaults, type Plugin, type PluginGame, type PluginOpener, type PluginView, type ToolResult } from './api.ts';
 import { app, tilde } from './app.svelte.ts';
 
 export const plugins = $state({
@@ -149,7 +149,7 @@ export function contextImages(content: unknown): { mimeType: string; data: strin
  * Keep a plugin's latest context for a session, replacing the one before (empty clears it).
  * Returns the kept context's id, or null when nothing was kept.
  */
-export function keepContext(session: string | null, plugin: string, text: string, images: { mimeType: string; data: string }[] = []): number | null {
+export function keepContext(session: string | null, plugin: string, text: string, images: { mimeType: string; data: string; path?: string; error?: string }[] = []): number | null {
   if (!session) return null;
   text = text.slice(0, MAX_CONTEXT_TEXT);
   const m = (contexts[session] ??= {});
@@ -162,8 +162,27 @@ export function keepContext(session: string | null, plugin: string, text: string
   m[plugin] = {
     id,
     text,
-    images: images.map((im, k) => ({ name: `${stem}-${id}-${k + 1}.${IMAGE_TYPES[im.mimeType]}`, thumb: `data:${im.mimeType};base64,${im.data}` })),
+    images: images.map((im, k) => ({ name: `${stem}-${id}-${k + 1}.${IMAGE_TYPES[im.mimeType]}`, thumb: `data:${im.mimeType};base64,${im.data}`, ...(im.path ? { path: im.path } : {}), ...(im.error ? { error: im.error } : {}) })),
   };
+  return id;
+}
+
+/**
+ * keepContext, then save its images to ~/inbox (those not saved before: an image that carries its
+ * `path` is kept as it is). The chip shows each as saving until it is.
+ */
+export function keepContextSaving(session: string | null, plugin: string, text: string, images: { mimeType: string; data: string; path?: string }[] = []): number | null {
+  const id = keepContext(session, plugin, text, images);
+  if (!session || id === null) return id;
+  const kept = contexts[session]?.[plugin]?.images ?? [];
+  images.forEach((im, k) => {
+    if (im.path || !kept[k]) return;
+    const bytes = Uint8Array.from(atob(im.data), (ch) => ch.charCodeAt(0));
+    upload(new File([bytes as BlobPart], kept[k].name, { type: im.mimeType }), () => {}).done.then(
+      (r) => settleImage(session, plugin, id, k, { path: r.path }),
+      (e) => settleImage(session, plugin, id, k, { error: (e as Error).message }),
+    );
+  });
   return id;
 }
 
@@ -182,6 +201,10 @@ export function contextSaving(session: string): boolean {
   return Object.values(contexts[session] ?? {}).some((c) => c.images.some((im) => !im.path && !im.error));
 }
 
+/** Untrusted text can't close or open the block it travels in: its tags lose their `<`. */
+export const blockText = (t: string) => t.replace(/<(\/?\s*(?:app_context|plugin)\b)/gi, '‹$1');
+const attrText = (t: string) => t.replace(/[<>"&]/g, '_');
+
 /**
  * The context to send with a session's next prompt, as one delimited block, and forget it (it
  * goes once; a plugin that updates it again sends again). The kernel's prompt has no context
@@ -193,7 +216,7 @@ export function takeContext(session: string): string {
   delete contexts[session];
   const parts = Object.entries(m).map(([plugin, c]) => {
     const images = c.images.map((im) => (im.path ? `(attached ${tilde(im.path)})` : `(image not saved: ${im.error ?? 'unknown error'})`));
-    return `<plugin name="${plugin}">\n${[c.text, ...images].filter(Boolean).join('\n')}\n</plugin>`;
+    return `<plugin name="${attrText(plugin)}">\n${[blockText(c.text), ...images].filter(Boolean).join('\n')}\n</plugin>`;
   });
   return `<app_context>\n${parts.join('\n')}\n</app_context>\n\n`;
 }
@@ -231,7 +254,11 @@ export function uiOf(r: ToolResult): string | null {
 // ---- untrusted plugin drafts for the open chat ----
 
 /** Queue only. This callback must never submit a prompt or execute a command. */
-export const chat = { queue: null as ((plugin: string, text: string) => boolean) | null };
+export const chat = {
+  queue: null as ((plugin: string, text: string) => boolean) | null,
+  /** Puts the cursor in the open chat's box (after the owner pointed at something to comment on). */
+  focus: null as (() => void) | null,
+};
 
 // ---- the side panel a plugin command fills ----
 

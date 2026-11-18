@@ -1152,8 +1152,11 @@
       return true;
     };
     chat.queue = queue;
+    const focusBox = () => { if (!ro) ta?.focus(); };
+    chat.focus = focusBox;
     return () => {
       if (chat.queue === queue) chat.queue = null;
+      if (chat.focus === focusBox) chat.focus = null;
       alive = false;
       gen++;
       conn?.close();
