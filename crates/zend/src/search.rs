@@ -12,7 +12,12 @@
 //! results when it's configured. A memory a search returns counts as used (the sleep's recency).
 //! Every search is logged in `searches`.
 //!
-//! Every document is an agent's (`search_docs.agent`: a turn its session's, a memory, page or record
+//! The vault's Markdown is indexed whole: wiki pages as kind `wiki` (by name), every other note of a
+//! vault (daily notes, goals, projects, templates, …) as kind `note` (by its path in the vault; not
+//! dot folders, `skills/`, `memory/`, `entities/`, `MEMORY.md`, symlinks, or in zenbot's vault the
+//! other agents' vaults, which are indexed as their own). The scope `notes` searches both kinds.
+//!
+//! Every document is an agent's (`search_docs.agent`: a turn its session's, a memory, page, note or record
 //! the vault it sits in), and a search sees only what its `Reach` allows: zenbot and the owner see
 //! everything; another agent its own documents, plus zenbot's memories, wiki pages and records (never
 //! its sessions) when its `global` setting is read or write.
@@ -392,6 +397,119 @@ async fn index_wiki_dir(db: &SqlitePool, agent: &str, dir: &std::path::Path) -> 
     Ok(changed)
 }
 
+/// A vault note's search reference (kind `note`): its path in the vault for zenbot's, `<agent>:<path>`
+/// for an agent's. A path of zenbot's with a `:` in it gets `zenbot:` too, so a reference splits
+/// the one way.
+fn note_ref(agent: &str, rel: &str) -> String {
+    if agent != crate::agents::DEFAULT || rel.contains(':') { format!("{agent}:{rel}") } else { rel.to_string() }
+}
+
+/// The file behind a note's search reference.
+pub(crate) fn note_file(reference: &str) -> std::path::PathBuf {
+    match reference.split_once(':') {
+        Some((agent, rel)) if crate::agents::valid_name(agent) => crate::agents::vault(agent).join(rel),
+        _ => crate::layout::global_dir().join(reference),
+    }
+}
+
+/// What a vault note's file name and folders may be, and its size, to be indexed.
+const NOTE_MAX_BYTES: u64 = 1 << 20;
+const NOTE_MAX_DEPTH: usize = 12;
+
+/// The Markdown notes of a vault, as (path in the vault, modified time), for `index_notes`: every
+/// `.md` file except those in dot folders, `skills/`, `memory/` and `entities/` (skills and records
+/// have their own tools and indexing), `MEMORY.md`, the wiki's pages (kind `wiki`), and, in zenbot's
+/// vault, the other agents' vaults under `agents/` (each is indexed as its own). Never follows a
+/// symlink: a link in the vault, to a file or a folder, is skipped.
+fn note_files(vault: &std::path::Path, is_default: bool) -> Vec<(String, std::time::SystemTime)> {
+    fn walk(root: &std::path::Path, rel: &std::path::Path, depth: usize, is_default: bool, out: &mut Vec<(String, std::time::SystemTime)>) {
+        for e in std::fs::read_dir(root.join(rel)).into_iter().flatten().flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            // `symlink_metadata`: a link is neither a file nor a folder here.
+            let Ok(meta) = std::fs::symlink_metadata(e.path()) else { continue };
+            let rel = rel.join(&name);
+            if name.starts_with('.') {
+                continue;
+            }
+            if meta.is_dir() {
+                let top = depth == 0;
+                if depth >= NOTE_MAX_DEPTH || (top && (matches!(name.as_str(), "skills" | "memory" | "entities") || (is_default && name == "agents"))) {
+                    continue;
+                }
+                walk(root, &rel, depth + 1, is_default, out);
+            } else if meta.is_file() && name.ends_with(".md") && name.len() > 3 && meta.len() <= NOTE_MAX_BYTES {
+                // The top level's MEMORY.md is the memory index, and the wiki's own pages are `wiki` documents.
+                let wiki_page = rel.parent().is_some_and(|p| p == std::path::Path::new("wiki"));
+                if (depth == 0 && name == "MEMORY.md") || wiki_page {
+                    continue;
+                }
+                out.push((rel.to_string_lossy().to_string(), meta.modified().unwrap_or(std::time::UNIX_EPOCH)));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(vault, std::path::Path::new(""), 0, is_default, &mut out);
+    out.sort();
+    out
+}
+
+/// Index the notes of zenbot's vault and of every agent's (`note_files`), the way `index_wiki`
+/// does: a changed file (by its own time) is read and indexed, `search_docs.agent` its vault's
+/// owner, and a note that is gone is taken out. A note's title is its first heading, else its file name.
+async fn index_notes(db: &SqlitePool) -> Result<usize> {
+    let mut vaults = vec![(crate::agents::DEFAULT.to_string(), crate::layout::global_dir())];
+    vaults.extend(crate::agents::vaults());
+    index_notes_in(db, &vaults).await
+}
+
+async fn index_notes_in(db: &SqlitePool, vaults: &[(String, std::path::PathBuf)]) -> Result<usize> {
+    let vaults: Vec<_> = vaults.iter().filter(|(_, dir)| dir.is_dir()).collect();
+    let found: Vec<_> = vaults.iter().map(|(a, d)| (a, d, note_files(d, a == crate::agents::DEFAULT))).collect();
+    let all: Vec<String> = found.iter().flat_map(|(a, _, files)| files.iter().map(|(rel, _)| note_ref(a, rel))).collect();
+    sqlx::query("DELETE FROM search_docs WHERE kind = 'note' AND NOT (ref IN (SELECT value FROM json_each($1)))").bind(json!(all)).execute(db).await?;
+    let mut changed = 0;
+    for (agent, dir, files) in &found {
+        let indexed: HashMap<String, chrono::DateTime<chrono::Utc>> = sqlx::query("SELECT ref, at FROM search_docs WHERE kind = 'note' AND agent = $1")
+            .bind(agent.as_str())
+            .fetch_all(db)
+            .await?
+            .iter()
+            .map(|r| (r.get("ref"), r.get("at")))
+            .collect();
+        // Stored times are microseconds; compare at that precision.
+        let micros = |t: std::time::SystemTime| chrono::DateTime::<chrono::Utc>::from(t).timestamp_micros();
+        for (rel, modified) in files {
+            let reference = note_ref(agent, rel);
+            if indexed.get(&reference).is_some_and(|at| at.timestamp_micros() == micros(*modified)) {
+                continue;
+            }
+            // Through `read_vault_file`: a note linked in from outside its vault is never read.
+            let Ok(text) = crate::sandbox::read_vault_file(&dir.join(rel)) else { continue };
+            let stem = std::path::Path::new(rel).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let page = crate::wiki::parse(&stem, &text);
+            let at = chrono::DateTime::<chrono::Utc>::from(*modified);
+            // The path is what an exact search matches (its name and its folders).
+            let ident = std::iter::once(rel.clone()).chain(page.aliases.iter().cloned()).collect::<Vec<_>>().join(" ");
+            sqlx::query(
+                "INSERT INTO search_docs (kind, ref, ident, title, body, at, agent) VALUES ('note', $1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (kind, ref) DO UPDATE SET ident = EXCLUDED.ident, title = EXCLUDED.title, body = EXCLUDED.body, at = EXCLUDED.at, agent = EXCLUDED.agent,
+                     embedding = CASE WHEN search_docs.body = EXCLUDED.body THEN search_docs.embedding END,
+                     embed_attempts = CASE WHEN search_docs.body = EXCLUDED.body THEN search_docs.embed_attempts ELSE 0 END, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')",
+            )
+            .bind(&reference)
+            .bind(&ident)
+            .bind(&page.title)
+            .bind(&page.body)
+            .bind(at)
+            .bind(agent.as_str())
+            .execute(db)
+            .await?;
+            changed += 1;
+        }
+    }
+    Ok(changed)
+}
+
 /// Embed documents that have none yet, a batch at a time. Runs outside the indexing lock: the
 /// provider can take a minute, and a document that changes meanwhile isn't given the old text's
 /// embedding (it's stored only while `updated_at` is the one read).
@@ -479,7 +597,7 @@ static INDEXING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 pub async fn index_once(db: &SqlitePool) -> Result<(usize, usize, usize)> {
     let (t, m) = {
         let _one = INDEXING.lock().await;
-        (index_turns(db).await?, index_memories(db).await? + index_wiki(db).await? + crate::brain::index(db).await?)
+        (index_turns(db).await?, index_memories(db).await? + index_wiki(db).await? + index_notes(db).await? + crate::brain::index(db).await?)
     };
     let e = match embed_pending(db).await {
         Ok(n) => n,
@@ -787,6 +905,10 @@ fn render(found: &[(Found, Option<f64>)], via: &std::collections::HashMap<String
                 let title = if f.title.is_empty() { String::new() } else { format!(" \"{}\"", zen_proto::head(&f.title, 60)) };
                 format!("session {}{title}, message #{seq} ({when})", &s[..s.len().min(8)])
             }
+            "note" => {
+                let name = f.reference.split_once(':').filter(|(a, _)| crate::agents::valid_name(a)).map_or(f.reference.as_str(), |(_, n)| n);
+                format!("vault note \"{}\" (updated {when}): {}", if f.title.is_empty() { name } else { &f.title }, note_file(&f.reference).display())
+            }
             other => format!("{other} {}", f.reference),
         };
         out.push_str(&format!("[{}] {head}{}\n    {}\n", i + 1, if f.exact { " (exact match)" } else { "" }, zen_proto::head(&f.snippet, 600)));
@@ -814,12 +936,12 @@ fn render(found: &[(Found, Option<f64>)], via: &std::collections::HashMap<String
 pub fn spec() -> Value {
     json!({
         "name": "search",
-        "description": "Search memories, the owner's wiki (Obsidian pages: concepts, sources, facts, solutions, decisions, ideas), linked people/organization/project records and past sessions. Search before answering about people, past decisions, preferences or ongoing work, asking again, or claiming ignorance. Quoted names/paths match first, then words and meaning (English/Portuguese). Results include dates and sources; read wiki pages with read at the path shown, records with brain get, sessions with history.",
+        "description": "Search memories, the owner's wiki (Obsidian pages: concepts, sources, facts, solutions, decisions, ideas) and other vault notes (daily notes, goals, projects), linked people/organization/project records and past sessions. Search before answering about people, past decisions, preferences or ongoing work, asking again, or claiming ignorance. Quoted names/paths match first, then words and meaning (English/Portuguese). Results include dates and sources; read wiki pages and notes with read at the path shown, records with brain get, sessions with history.",
         "parameters": {
             "type": "object",
             "properties": {
                 "query": { "type": "string", "description": "What you're looking for: words, a question, or an exact name or path (quote it)" },
-                "scope": { "type": "string", "enum": ["all", "memories", "knowledge", "entities", "sessions", "this_session"], "description": "Where to look (default all)" },
+                "scope": { "type": "string", "enum": ["all", "memories", "knowledge", "notes", "entities", "sessions", "this_session"], "description": "Where to look (default all); notes: the vault's wiki pages and other Markdown notes (daily notes, goals, projects)" },
                 "limit": { "type": "integer", "description": "How many results (default 8, at most 20)" }
             },
             "required": ["query"]
@@ -849,15 +971,20 @@ pub async fn find(app: &App, session: Option<Uuid>, reach: &Reach, q: &str, scop
     let (kinds, only): (Vec<&str>, Option<Uuid>) = match scope {
         "sessions" => (vec!["turn"], None),
         "memories" => (vec!["memory", "record:memory"], None),
-        "knowledge" | "wiki" => (vec!["wiki", "record:knowledge", "record:entity"], None),
+        "knowledge" => (vec!["wiki", "note", "record:knowledge", "record:entity"], None),
+        "wiki" => (vec!["wiki", "record:knowledge", "record:entity"], None),
+        "notes" => (vec!["wiki", "note"], None),
         "entities" => (vec!["record:entity"], None),
         "this_session" => (vec!["turn"], Some(session.context("this_session needs a session")?)),
-        _ => (vec!["turn", "memory", "wiki", "record:memory", "record:knowledge", "record:entity"], None),
+        _ => (vec!["turn", "memory", "wiki", "note", "record:memory", "record:knowledge", "record:entity"], None),
     };
     // Make sure the latest turns, memories and files are in (a pass is cheap when nothing changed).
     let indexed = {
         let _one = INDEXING.lock().await;
-        index_turns(&app.db).await.and(index_memories(&app.db).await).and(index_wiki(&app.db).await).and(crate::brain::index(&app.db).await)
+        index_turns(&app.db).await.and(index_memories(&app.db).await)
+            .and(index_wiki(&app.db).await)
+            .and(index_notes(&app.db).await)
+            .and(crate::brain::index(&app.db).await)
     };
     indexed.context("search withheld: indexing failed")?;
     let found = query(&app.db, q, &kinds, only, reach, (limit * 2).max(12)).await?;
@@ -975,6 +1102,125 @@ mod tests {
         assert_eq!(refs(records_found(&db,&["zen-record".into()],&read).await?),["zen-record"]);
         let zenbot=Reach::of(&crate::agents::tests_agent("zenbot","none"));
         assert_eq!(query_candidates(&db,"moat",&kinds,None,&zenbot,20,None).await?.len(),8);
+        db.close().await;
+        Ok(())
+    }
+
+    /// A scratch vault inside the test home's `global/` (the kernel reads vault files only there).
+    struct Vault(std::path::PathBuf);
+    impl Vault {
+        fn new() -> Self {
+            let dir = crate::layout::global_dir().join(format!("notes-test-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Vault(dir)
+        }
+        fn put(&self, rel: &str, text: &str) {
+            let p = self.0.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        }
+    }
+    impl Drop for Vault {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    async fn notes(db: &SqlitePool) -> Vec<(String, String, String)> {
+        sqlx::query("SELECT ref, title, agent FROM search_docs WHERE kind = 'note' ORDER BY ref")
+            .fetch_all(db).await.unwrap().iter().map(|r| (r.get("ref"), r.get("title"), r.get("agent"))).collect()
+    }
+
+    #[tokio::test]
+    async fn every_note_of_a_vault_is_indexed_but_what_has_its_own_tools() -> Result<()> {
+        let (_dir, db) = crate::test_util::database().await;
+        let v = Vault::new();
+        v.put("Daily/2026-11-17.md", "# Tuesday\n\nTrained at five.\n");
+        v.put("Goals/Year.md", "---\naliases: [Plan]\n---\nNo heading, only words.\n");
+        v.put("Projects/zenfinance/Roadmap.md", "# Roadmap\nQuarter two.\n");
+        v.put("Templates/Daily.md", "# Template\n");
+        v.put("wiki/Moat.md", "# Moat\nA wiki page, indexed as wiki.\n");
+        v.put("wiki/Sub/Deep.md", "# Deep\nA wiki subfolder is a note.\n");
+        v.put("skills/work/verify/SKILL.md", "# Skill\n");
+        v.put("memory/m1.md", "# Memory\n");
+        v.put("entities/Ana.md", "# Ana\n");
+        v.put("MEMORY.md", "# Memory index\n");
+        v.put(".obsidian/notes.md", "# Config\n");
+        v.put(".git/info.md", "# Git\n");
+        v.put("agents/garry/Journal.md", "# Garry's, not zenbot's\n");
+        v.put("Projects/not-markdown.txt", "plain");
+        let g = Vault::new();
+        g.put("Journal.md", "# Garry's journal\nPrivate.\n");
+        g.put("wiki/Page.md", "# Page\n");
+        g.put("skills/s/SKILL.md", "# Skill\n");
+        let vaults = vec![("zenbot".to_string(), v.0.clone()), ("garry".to_string(), g.0.clone())];
+        assert_eq!(index_notes_in(&db, &vaults).await?, 6);
+        let got = notes(&db).await;
+        let t = |r: &str, title: &str, a: &str| (r.to_string(), title.to_string(), a.to_string());
+        assert_eq!(got, [
+            t("Daily/2026-11-17.md", "Tuesday", "zenbot"),
+            t("Goals/Year.md", "Year", "zenbot"),
+            t("Projects/zenfinance/Roadmap.md", "Roadmap", "zenbot"),
+            t("Templates/Daily.md", "Template", "zenbot"),
+            t("garry:Journal.md", "Garry's journal", "garry"),
+            t("wiki/Sub/Deep.md", "Deep", "zenbot"),
+        ]);
+        // Found by its words, and by the scope `notes`, not by `sessions`.
+        let found = query_candidates(&db, "Trained", &["wiki", "note"], None, &Reach::all(), 8, None).await?;
+        assert_eq!(found.iter().map(|f| (f.kind.as_str(), f.reference.as_str())).collect::<Vec<_>>(), [("note", "Daily/2026-11-17.md")]);
+        assert!(query_candidates(&db, "Trained", &["turn"], None, &Reach::all(), 8, None).await?.is_empty());
+        // The file behind a reference.
+        assert_eq!(note_file("Goals/Year.md"), crate::layout::global_dir().join("Goals/Year.md"));
+        assert_eq!(note_file("garry:Journal.md"), crate::agents::vault("garry").join("Journal.md"));
+        assert_eq!(note_ref("zenbot", "Daily/12:30.md"), "zenbot:Daily/12:30.md");
+        assert_eq!(note_file("zenbot:Daily/12:30.md"), crate::layout::global_dir().join("Daily/12:30.md"));
+        db.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_changed_note_is_reindexed_an_unchanged_one_keeps_its_embedding_and_a_deleted_one_goes() -> Result<()> {
+        let (_dir, db) = crate::test_util::database().await;
+        let v = Vault::new();
+        v.put("Daily/a.md", "# A\nfirst\n");
+        v.put("Daily/b.md", "# B\nsecond\n");
+        let vaults = vec![("zenbot".to_string(), v.0.clone())];
+        assert_eq!(index_notes_in(&db, &vaults).await?, 2);
+        assert_eq!(index_notes_in(&db, &vaults).await?, 0, "nothing changed, nothing read");
+        let mut vec = vec![0.0_f32; 1536];
+        vec[0] = 1.0;
+        let bytes: Vec<u8> = vec.iter().flat_map(|n| n.to_le_bytes()).collect();
+        sqlx::query("UPDATE search_docs SET embedding = $1, embed_model = $2 WHERE kind = 'note'").bind(bytes).bind(embed_model()).execute(&db).await?;
+        // Edited with a newer time: a is read again (its text changed, so its embedding goes); b stays.
+        v.put("Daily/a.md", "# A\nedited\n");
+        let later = std::time::SystemTime::now() + Duration::from_secs(5);
+        std::fs::File::options().write(true).open(v.0.join("Daily/a.md"))?.set_modified(later)?;
+        assert_eq!(index_notes_in(&db, &vaults).await?, 1);
+        let rows = sqlx::query("SELECT ref, body, embedding IS NOT NULL AS embedded FROM search_docs WHERE kind = 'note' ORDER BY ref").fetch_all(&db).await?;
+        let got: Vec<(String, bool)> = rows.iter().map(|r| (r.get::<String, _>("body"), r.get("embedded"))).collect();
+        assert_eq!(got, [("# A\nedited".to_string(), false), ("# B\nsecond".to_string(), true)]);
+        // Deleted: gone from the index.
+        std::fs::remove_file(v.0.join("Daily/b.md"))?;
+        index_notes_in(&db, &vaults).await?;
+        assert_eq!(notes(&db).await.into_iter().map(|n| n.0).collect::<Vec<_>>(), ["Daily/a.md"]);
+        db.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_symlink_out_of_the_vault_is_not_indexed() -> Result<()> {
+        let (_dir, db) = crate::test_util::database().await;
+        let v = Vault::new();
+        let outside = crate::test_util::TestDir::new("outside");
+        std::fs::write(outside.join("Secret.md"), "# Secret\nnot in the vault\n")?;
+        std::fs::create_dir_all(outside.join("dir"))?;
+        std::fs::write(outside.join("dir/Hidden.md"), "# Hidden\n")?;
+        v.put("Inside.md", "# Inside\n");
+        std::os::unix::fs::symlink(outside.join("Secret.md"), v.0.join("Link.md"))?;
+        std::os::unix::fs::symlink(outside.join("dir"), v.0.join("Folder"))?;
+        let vaults = vec![("zenbot".to_string(), v.0.clone())];
+        index_notes_in(&db, &vaults).await?;
+        assert_eq!(notes(&db).await.into_iter().map(|n| n.0).collect::<Vec<_>>(), ["Inside.md"]);
         db.close().await;
         Ok(())
     }

@@ -124,7 +124,7 @@ pub(crate) struct SearchBody {
 pub(crate) async fn search_once(State(app): State<AppState>, Json(body): Json<SearchBody>) -> ApiResult<Json<Value>> {
     let q = body.query.trim();
     let scope = body.scope.as_deref().unwrap_or("knowledge");
-    if q.is_empty() || q.len() > 2_000 || !["all", "memories", "knowledge", "wiki", "entities", "sessions"].contains(&scope) {
+    if q.is_empty() || q.len() > 2_000 || !["all", "memories", "knowledge", "notes", "wiki", "entities", "sessions"].contains(&scope) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "query empty or too long, or unknown scope".into()));
     }
     let found = crate::search::find(&app, None, &crate::search::Reach::all(), q, scope, body.limit.unwrap_or(8).clamp(1, 20))
@@ -134,7 +134,11 @@ pub(crate) async fn search_once(State(app): State<AppState>, Json(body): Json<Se
         .listed
         .iter()
         .map(|(f, p)| {
-            let path = (f.kind == "wiki").then(|| crate::search::wiki_file(&f.reference).display().to_string());
+            let path = match f.kind.as_str() {
+                "wiki" => Some(crate::search::wiki_file(&f.reference).display().to_string()),
+                "note" => Some(crate::search::note_file(&f.reference).display().to_string()),
+                _ => None,
+            };
             json!({ "kind": f.kind, "ref": f.reference, "title": f.title, "snippet": f.snippet, "at": f.at, "exact": f.exact, "relevance": p, "path": path })
         })
         .collect();
