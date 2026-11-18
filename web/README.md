@@ -36,15 +36,16 @@ The same screens as the terminal app, with its keys, and a mouse and a phone way
   a click opens it through the normal opener (plugins included), Esc clears. Without the kernel's
   answer the name matches still show.
 - **Preview** (side panel): any dev server on this machine (a port, 3000–9999), at a screen size,
-  through the preview gateway (`server/preview.ts`, `ZEN_WEB_PREVIEW_PORT`, default 4490): one port
-  that forwards to the chosen dev server (hot reload included), adds `/zen-preview.js` to its pages
-  and drops frame-blocking headers. Behind exe.dev that's one sign-in for every dev server; when the
-  gateway doesn't know the owner yet, the page signs in through it at the top level and comes back
-  to Preview. With Point on, a click pins the element (source file and line from Svelte's or React
-  18's dev build, or a `data-source` attribute; box, key styles, console errors, a screenshot) to the
-  chat as a chip, numbered #1, #2… for the comment. The gateway refuses zen's own ports and strips the
-  proxy's login headers, so zen's web server behind it refuses its requests; the framed page is
-  another origin than zen's.
+  under zen's own address: `/preview/<port>/…` (`server/preview.ts`) forwards to `localhost:<port>`
+  (hot reload included), adds `/zen-preview.js` to its pages and drops frame-blocking headers, so it
+  works wherever zen does (one port, no other sign-in, nothing a firewall drops). An app started with
+  the base `/preview/<port>/` (Vite: `--base /preview/5173/`) gets paths as they are; a static page
+  gets them without the prefix (learnt per port from its first page). With Point on, a click pins the
+  element (source file and line from Svelte's or React 18's dev build, or a `data-source`
+  attribute; box, key styles, console errors, a screenshot) to the chat as a chip, numbered #1, #2…
+  for the comment. **The previewed app runs on zen's origin** (the owner's choice): its code, its
+  packages included, can act as zen's page, so preview only apps you trust. zen's own ports are
+  refused, and the proxy's login headers are stripped before forwarding.
 - **Files fallback** renders Markdown safely using text nodes, and previews text/code verbatim.
   Vault Markdown has Edit (`e`), a plain textarea, explicit Save (`Ctrl+S`) and Read
   (`Alt+W`). Saves are atomic with an optimistic hash; conflicts retain your local edits.

@@ -1,12 +1,11 @@
 // The Preview tab's rules (views/Preview.svelte): which addresses it may show, and what a pin from
 // the app inside may say.
 //
-// It shows a dev server on this page's own host, on a port the proxy forwards (3000–9999), e.g.
-// `https://zenbot.exe.xyz:5173/` beside `https://zenbot.exe.xyz/`: the same login, nothing served
-// through zenbot. The frame is drawn here, not in a plugin's sandbox, because a frame inside an
-// opaque-origin sandbox inherits it and a dev server's own scripts then fail CORS (and the proxy's
-// login cookie isn't sent). Another port is another origin, so the app can't reach this page; its
-// requests to this server's API carry no `X-Zen-Web` header and can't write (main.ts).
+// The owner names a dev server on this machine by its port (3000–9999); the tab shows it under
+// zen's own address, `/preview/<port>/…` (web/server/preview.ts forwards it), so it works wherever
+// zen does. The frame is drawn here, not in a plugin's sandbox: a dev server can't run in an
+// opaque-origin frame. The previewed app runs on zen's origin, by the owner's choice: its code can
+// act as zen's page, so preview only apps you trust.
 //
 // The app reports what the owner points at by `postMessage` (public/zen-preview.js). Its messages are
 // untrusted: only the framed window at the shown origin is heard, every field is checked and cut to
