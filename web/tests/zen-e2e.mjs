@@ -489,6 +489,16 @@ try {
   await page.getByText(/couldn't rename plain\.txt: already exists/).waitFor();
   await page.keyboard.press('Escape');
   rmSync(path.join(HOME, 'renamed.txt'));
+  // An image opens as a picture; an SVG (it can carry scripts) and a secret are refused by the image route.
+  mkdirSync(path.join(HOME, 'inbox'), { recursive: true });
+  writeFileSync(path.join(HOME, 'inbox', 'shot.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==', 'base64'));
+  writeFileSync(path.join(HOME, 'inbox', 'x.svg'), '<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>');
+  await page.goto(`${base}/?view=files&file=${encodeURIComponent(path.join(HOME, 'inbox', 'shot.png'))}`);
+  const pic = page.locator('.reader img');
+  await pic.waitFor();
+  await page.waitForFunction(() => document.querySelector(".reader img")?.naturalWidth === 1);
+  assert.equal(await page.evaluate((p) => fetch(`/api/fs/image?path=${encodeURIComponent(p)}`).then((r) => r.status), path.join(HOME, 'inbox', 'x.svg')), 415);
+  assert.equal(await page.evaluate((p) => fetch(`/api/fs/image?path=${encodeURIComponent(p)}`).then((r) => r.status), '/etc/hostname.png'), 403);
   await page.goto(`${base}/?view=files&file=${encodeURIComponent(path.join(VAULT, 'wiki/God.md'))}`);
   await page.getByRole('heading', { name: 'God' }).waitFor();
   // Minimal core fallback, with no rich reader/editor tools.

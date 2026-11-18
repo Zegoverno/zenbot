@@ -4,7 +4,8 @@
 // - Secrets are never listed or read: zen's token, settings and database, the engines' sign-ins,
 //   ssh, gpg and cloud credentials (the terminal app's list, and more, since a web page is easier
 //   to reach than a terminal). Anything under a denied folder is denied too.
-// - Reads stop at 2 MB; a binary file says so instead of its bytes.
+// - Reads stop at 2 MB; a binary file says so instead of its bytes. Images (not SVG) are served as
+//   they are, up to 25 MB, for the viewer to show.
 // - Writes are only these: create an empty file, make a folder, rename. The new name is one plain
 //   segment (no `/`, `\`, NUL, `.` or `..`, at most 255 bytes) and never a denied one (no new
 //   `.env` or `id_rsa`); the parent must be a folder inside home. Nothing is overwritten (a taken
@@ -192,6 +193,21 @@ export async function read(p: unknown): Promise<FileRead> {
   const buf = await fs.readFile(full);
   const binary = buf.subarray(0, 8192).includes(0);
   return { path: full, mtime: st.mtimeMs, size: st.size, ...(binary ? { binary: true } : { text: buf.toString('utf8') }), vault: vaultPath(full) };
+}
+
+/** Image types the viewer shows as pictures (no SVG: it can carry scripts). */
+export const IMAGES: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.avif': 'image/avif', '.bmp': 'image/bmp', '.ico': 'image/x-icon' };
+const MAX_IMAGE = 25 * 1024 * 1024;
+
+/** An image's bytes and type, under the same rules as read(); anything else is refused. */
+export async function image(p: unknown): Promise<{ type: string; data: Buffer; mtime: number }> {
+  const full = await resolve(p);
+  const type = IMAGES[path.extname(full).toLowerCase()];
+  if (!type) throw new HttpError(415, 'not an image');
+  const st = await fs.stat(full);
+  if (!st.isFile()) throw new HttpError(400, 'not a file');
+  if (st.size > MAX_IMAGE) throw new HttpError(413, 'image too large');
+  return { type, data: await fs.readFile(full), mtime: st.mtimeMs };
 }
 
 export async function stat(p: unknown) {
