@@ -46,6 +46,8 @@ export const app = $state({
   notice: '',
   /** Sessions waiting on the owner, for the tab title. */
   waiting: 0,
+  /** The preview gateway's port (web/server/preview.ts), or null when it is off. */
+  preview: null as number | null,
 });
 
 let noticeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -117,6 +119,13 @@ export async function start() {
     const h = await files.home();
     app.home = h.home;
     app.vault = h.vault;
+    app.preview = h.preview ?? null;
+    // Back from signing in to the preview gateway: the Preview tab opens again where it was.
+    if (localStorage.getItem('zen.preview.reopen') && app.session) {
+      app.side.open = true;
+      app.side.view = 'preview';
+    }
+    localStorage.removeItem('zen.preview.reopen');
     // Files opens in the shared workspace (the vault, ~/.zenbot/global); `..` climbs to home.
     app.root.home ||= h.vault || h.home;
     app.root.side ||= h.vault || h.home;

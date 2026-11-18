@@ -28,7 +28,7 @@ const kernel = createServer((req, res) => {
 }).listen(KERNEL, '127.0.0.1');
 
 const server = spawn(process.execPath, ['server/main.ts', '--dev'], {
-  env: { ...process.env, ZEN_WEB_HOME: ROOT, ZEN_WEB_ROOT: ROOT, ZEN_WEB_PORT: String(PORT), ZEN_WEB_AUTH: 'off', ZEN_URL: `http://127.0.0.1:${KERNEL}`, ZEN_TOKEN_FILE: TOKEN },
+  env: { ...process.env, ZEN_WEB_HOME: ROOT, ZEN_WEB_ROOT: ROOT, ZEN_WEB_PORT: String(PORT), ZEN_WEB_PREVIEW_PORT: '0', ZEN_WEB_AUTH: 'off', ZEN_URL: `http://127.0.0.1:${KERNEL}`, ZEN_TOKEN_FILE: TOKEN },
   stdio: ['ignore', 'pipe', 'inherit'],
 });
 await new Promise((ok, fail) => {
