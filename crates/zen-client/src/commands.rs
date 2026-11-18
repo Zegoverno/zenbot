@@ -5,6 +5,10 @@
 //! are parsed ([`parse`]) and run ([`run`]) here, so every client does the same thing; a client
 //! adds only what is its own (the web chat's panels and pickers, `zen ask`). The client reads
 //! a command before anything reaches the agent and calls the kernel itself with the owner's token.
+//!
+//! Plugin commands (`contributes.commands`) join the table at run time: [`plugin_commands`] lists
+//! them (with their declared `choices`) and [`run_plugin`] runs one; with no argument a command
+//! that has choices answers with [`choices_menu`] instead of calling its tool.
 
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
@@ -508,6 +512,11 @@ pub async fn run_plugin(c: &Client, text: &str, session: Option<&str>) -> Result
     let (name, rest) = text.trim().split_once(char::is_whitespace).unwrap_or((text.trim(), ""));
     let plugins = c.get("/api/plugins").await?;
     let Some(cmd) = plugin_commands(&plugins).into_iter().find(|x| x["name"] == name) else { return Ok(None) };
+    if rest.trim().is_empty() {
+        if let Some(menu) = choices_menu(&cmd) {
+            return Ok(Some(reply(menu, cmd)));
+        }
+    }
     let spec = cmd["args"].as_str().unwrap_or("");
     let names: Vec<&str> = spec.split(['<', '[']).skip(1)
         .filter_map(|s| s.split(['>', ']']).next())
@@ -525,8 +534,25 @@ pub async fn run_plugin(c: &Client, text: &str, session: Option<&str>) -> Result
     Ok(Some(reply(text, result)))
 }
 
+/// What a plugin command with declared `choices` answers when run with no argument, instead of
+/// calling its tool: the choices as a list (`value — description`, plus what a choice needs next),
+/// a menu in text for clients with no picker. `None` when the command has no choices.
+pub fn choices_menu(cmd: &Value) -> Option<String> {
+    let choices = cmd["choices"].as_array().filter(|c| !c.is_empty())?;
+    let name = cmd["name"].as_str().unwrap_or("?");
+    let lines: Vec<String> = choices
+        .iter()
+        .map(|c| {
+            let then = c["then"].as_str().map(|t| format!(" (then `{t}`)")).unwrap_or_default();
+            format!("- `{}` — {}{then}", c["value"].as_str().unwrap_or("?"), c["description"].as_str().unwrap_or(""))
+        })
+        .collect();
+    Some(format!("`{name}` takes one of:\n{}\nRun `{name} <choice>`.", lines.join("\n")))
+}
+
 /// The enabled plugins' slash commands (`contributes.commands`), as `zen --commands` lists them:
 /// a plugin's command never hides a core one, and the first plugin (by name) to claim a name has it.
+/// A command's declared `choices` ride along.
 pub fn plugin_commands(p: &Value) -> Vec<Value> {
     let mut seen: Vec<String> = COMMANDS.iter().map(|c| c.name.to_string()).collect();
     let mut out = Vec::new();
@@ -538,10 +564,14 @@ pub fn plugin_commands(p: &Value) -> Vec<Value> {
             }
             seen.push(name.to_string());
             let description = c["description"].as_str().unwrap_or("");
-            out.push(json!({
+            let mut entry = json!({
                 "name": name, "args": c["args"].as_str().unwrap_or(""), "description": description, "help": description,
                 "scope": "plugin", "plugin": x["name"], "tool": c["tool"],
-            }));
+            });
+            if c["choices"].as_array().is_some_and(|a| !a.is_empty()) {
+                entry["choices"] = c["choices"].clone();
+            }
+            out.push(entry);
         }
     }
     out
@@ -912,6 +942,20 @@ mod tests {
         let c = plugin_commands(&p);
         assert_eq!(c.len(), 1, "core names and later claims are left out, disabled plugins too: {c:?}");
         assert_eq!(c[0], json!({ "name": "hello", "args": "<name>", "description": "Say hello.", "help": "Say hello.", "scope": "plugin", "plugin": "hello", "tool": "hello_greet" }));
+        // Declared choices ride along, and with no argument they are the answer, as a menu.
+        let p = json!({ "plugins": [{ "name": "zenvault", "enabled": true, "contributes": { "commands": [
+            { "name": "vault", "tool": "zenvault_run", "args": "<action> [rest]", "description": "The vault.", "choices": [
+                { "value": "lint", "description": "Check the vault" },
+                { "value": "find", "description": "Search it", "then": "<words>" }] },
+            { "name": "empty", "tool": "zenvault_e", "choices": [] }] } }] });
+        let c = plugin_commands(&p);
+        assert_eq!(c[0]["choices"][1]["then"], "<words>");
+        assert!(c[1].get("choices").is_none(), "no choices, no key: {:?}", c[1]);
+        assert_eq!(
+            choices_menu(&c[0]).unwrap(),
+            "`vault` takes one of:\n- `lint` — Check the vault\n- `find` — Search it (then `<words>`)\nRun `vault <choice>`."
+        );
+        assert_eq!(choices_menu(&c[1]), None);
         let ask = json!({ "needs_approval": true, "name": "hello", "version": "0.2.0", "permissions": ["files:write:Reading", "network"], "upgrade": true });
         assert_eq!(approval_text(&ask), "This upgrade of `hello` 0.2.0 asks for: `files:write:Reading` (read your vault, write only Reading/), `network` (the internet).");
         assert_eq!(install_body("zenread").unwrap(), json!({ "name": "zenread" }));

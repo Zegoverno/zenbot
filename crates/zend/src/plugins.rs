@@ -11,7 +11,8 @@
 //! refused (a development checkout has `.git`), and links still refuse it. Then `plugin.json` is
 //! validated (`validate`): the name `[a-z0-9-]{2,40}` (for a marketplace install, the name and the
 //! version equal to the entry's), every `ui` a `ui://<name>/…` URI, only the known slots with their
-//! fields, only the known permissions, `server.command` `node` with a script inside the plugin.
+//! fields (a command's optional `choices`, its first argument's declared values, included), only
+//! the known permissions, `server.command` `node` with a script inside the plugin.
 //! Nothing is run, and `npm` never is.
 //!
 //! **Permissions are the owner's.** An install shows what the manifest asks for (`kernel`) and goes
@@ -238,6 +239,7 @@ pub fn validate(v: &Value) -> Result<Manifest, String> {
                     if tool.is_empty() || tool.len() > 128 || !tool.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
                         return Err(at("`tool` must name one of the plugin's tools".into()));
                     }
+                    validate_choices(x).map_err(at)?;
                     x["name"].clone()
                 }
                 _ => unreachable!("slots are checked above"),
@@ -268,6 +270,48 @@ pub fn validate(v: &Value) -> Result<Manifest, String> {
         return Err("at most one files:write:<subfolder>".into());
     }
     Ok(Manifest { skills, title: if v["title"].is_string() { s("title") } else { name.clone() }, description: s("description"), name, version, args, contributes, permissions })
+}
+
+/// A command's optional `choices`: `{ value, description, then? }` entries (at most 20) that fill the
+/// command's first positional argument, so a client with no argument can offer a menu. `value` is
+/// one word `[a-z0-9_-]{1,32}`, unique; `description` at most 120 bytes; `then` (at most 60) says the
+/// choice needs more input and is an `args` hint. Unknown keys are refused. The command's `args`
+/// needs a `<name>` or `[name]` placeholder for the value to fill.
+fn validate_choices(x: &Value) -> Result<(), String> {
+    let list = match &x["choices"] {
+        Value::Null => return Ok(()),
+        Value::Array(a) => a,
+        _ => return Err("`choices` must be a list".into()),
+    };
+    if list.is_empty() || list.len() > 20 {
+        return Err("`choices` must have 1 to 20 entries".into());
+    }
+    if !x["args"].as_str().is_some_and(|a| a.contains(['<', '['])) {
+        return Err("`choices` need `args` with a <placeholder> for the value to fill".into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for (i, c) in list.iter().enumerate() {
+        let at = |e: String| format!("choices[{i}]: {e}");
+        let Some(o) = c.as_object() else { return Err(at("must be an object".into())) };
+        if let Some(k) = o.keys().find(|k| !["value", "description", "then"].contains(&k.as_str())) {
+            return Err(at(format!("unknown key `{k}` (value, description, then)")));
+        }
+        let v = c["value"].as_str().unwrap_or("");
+        if v.is_empty() || v.len() > 32 || !v.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-') {
+            return Err(at(format!("`value` `{v}`: one word of 1 to 32 lowercase letters, digits, _ and -")));
+        }
+        for (k, max, need) in [("description", 120, true), ("then", 60, false)] {
+            match &c[k] {
+                Value::Null if !need => {}
+                Value::String(t) if !t.trim().is_empty() && t.len() <= max => {}
+                _ => return Err(at(format!("`{k}` must be a non-empty string of at most {max} bytes"))),
+            }
+        }
+        if !seen.insert(v) {
+            return Err(at(format!("`value` {v} is listed twice")));
+        }
+    }
+    Ok(())
 }
 
 // ---------- what runs ----------
@@ -1524,6 +1568,17 @@ mod tests {
             ("contributes.openers.0.patterns", json!(["a/b.md"]), "patterns"),
             ("contributes.openers.0.patterns", json!([]), "patterns"),
             ("contributes.commands.0.tool", json!("x y"), "tool"),
+            ("contributes.commands.0.choices", json!("a"), "choices"),
+            ("contributes.commands.0.choices", json!([]), "1 to 20"),
+            ("contributes.commands.0.choices", json!([{ "value": "Go", "description": "d" }]), "value"),
+            ("contributes.commands.0.choices", json!([{ "value": "a b", "description": "d" }]), "value"),
+            ("contributes.commands.0.choices", json!([{ "value": "x".repeat(33), "description": "d" }]), "value"),
+            ("contributes.commands.0.choices", json!([{ "value": "a" }]), "description"),
+            ("contributes.commands.0.choices", json!([{ "value": "a", "description": "d".repeat(121) }]), "description"),
+            ("contributes.commands.0.choices", json!([{ "value": "a", "description": "d", "then": "t".repeat(61) }]), "then"),
+            ("contributes.commands.0.choices", json!([{ "value": "a", "description": "d", "extra": 1 }]), "unknown key"),
+            ("contributes.commands.0.choices", json!(["a"]), "object"),
+            ("contributes.commands.0.choices", json!([{ "value": "a", "description": "d" }, { "value": "a", "description": "e" }]), "twice"),
             ("contributes.views.0.id", json!("Main"), "id"),
             ("kernel", json!(["files:read", "shell"]), "permission `shell`"),
             ("kernel", json!(["files:write:../x"]), "permission"),
@@ -1540,6 +1595,25 @@ mod tests {
         twice["contributes"]["views"] = json!([{ "id": "a", "title": "A", "ui": "ui://hello/a" }, { "id": "a", "title": "B", "ui": "ui://hello/b" }]);
         assert!(validate(&twice).unwrap_err().contains("twice"));
         assert!(validate(&with("kernel", json!(["files:write:Reading/notes", "network"]))).is_ok());
+    }
+
+    #[test]
+    fn command_choices() {
+        let ok = json!([{ "value": "list", "description": "All of them" }, { "value": "open", "description": "One note", "then": "<note>" }]);
+        let m = validate(&with("contributes.commands.0.choices", ok.clone())).unwrap();
+        assert_eq!(m.contributes["commands"][0]["choices"], ok);
+        let many: Vec<Value> = (0..21).map(|i| json!({ "value": format!("c{i}"), "description": "d" })).collect();
+        assert!(validate(&with("contributes.commands.0.choices", json!(many[..20]))).is_ok());
+        assert!(validate(&with("contributes.commands.0.choices", json!(many))).unwrap_err().contains("1 to 20"));
+        // The value fills a positional argument: without a placeholder there is none.
+        let mut bare = with("contributes.commands.0.choices", ok.clone());
+        bare["contributes"]["commands"][0]["args"] = json!("name");
+        assert!(validate(&bare).unwrap_err().contains("placeholder"));
+        bare["contributes"]["commands"][0]["args"] = json!("[action] [rest]");
+        assert!(validate(&bare).is_ok());
+        bare["contributes"]["commands"][0].as_object_mut().unwrap().remove("args");
+        assert!(validate(&bare).unwrap_err().contains("placeholder"));
+        assert!(validate(&manifest()).is_ok(), "choices are optional");
     }
 
     #[test]
