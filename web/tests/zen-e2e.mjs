@@ -922,9 +922,14 @@ try {
     const point = page.locator('.zside').getByRole('button', { name: 'Point', exact: true });
     for (let i = 0; i < 100 && !(await point.isEnabled()); i++) await page.waitForTimeout(50);
     assert.ok(await point.isEnabled(), 'the app loaded zen-preview.js and answered');
+    // The app can't send pins by itself: only while the owner points.
+    const appFrame = () => page.frames().find((f) => f.url().includes(`:${APP_PORT}`));
+    await appFrame().evaluate((png) => parent.postMessage({ zen: 'preview', type: 'pin', pin: { tag: 'div', image: png } }, '*'), 'data:image/png;base64,iVBORw0KGgo=');
+    await page.waitForTimeout(300);
+    assert.equal(await page.getByLabel('context from Preview (zen)', { exact: true }).count(), 0, 'no pin while Point is off');
     await point.click();
     await devFrame.locator('#hero').click();
-    const pinChip = page.getByLabel('context from Preview', { exact: true });
+    const pinChip = page.getByLabel('context from Preview (zen)', { exact: true });
     await pinChip.waitFor();
     assert.equal(await pinChip.locator('img').count(), 1, 'the pin carries a screenshot');
     assert.notEqual(await page.frames().find((f) => f.url().includes(`:${APP_PORT}`)).title(), 'clicked', 'pointing does not click the app');
@@ -934,10 +939,10 @@ try {
     await box.press('Enter');
     await until(() => prompts.at(-1)?.endsWith('Make #1 calmer'), 'the pinned prompt reaches the kernel');
     const sent = prompts.at(-1);
-    assert.match(sent, /^<app_context>\n<plugin name="Preview">\nPreview of http:\/\/127\.0\.0\.1:\d+: the owner pointed at one element\.\n#1 button "Get started" at src\/Hero\.svelte:7:2\n/);
+    assert.match(sent, /^<app_context>\n<plugin name="Preview \(zen\)">\nPreview of http:\/\/127\.0\.0\.1:\d+: the owner pointed at one element\.\n#1 button "Get started" at src\/Hero\.svelte:7:2\n/);
     assert.match(sent, /styles .*font-size: 20px/);
     assert.match(sent, /console errors: fixture boom/);
-    const shotPath = sent.match(/\(attached ~\/inbox\/(\d{4}-\d{2}-\d{2}\/preview-\d+-1\.png)\)/);
+    const shotPath = sent.match(/\(attached ~\/inbox\/(\d{4}-\d{2}-\d{2}\/preview-\d+\.png)\)/);
     assert.ok(shotPath, `screenshot path in: ${sent}`);
     assert.equal(readFileSync(path.join(HOME, 'inbox', shotPath[1])).subarray(1, 4).toString(), 'PNG');
     await page.getByText('Streaming answer, done.').last().waitFor();

@@ -46,11 +46,14 @@ export type Pin = {
   styles: Record<string, string>;
   errors: string[];
   image: string | null;
+  /** Where its screenshot was saved, or why it wasn't (set by the Preview tab). */
+  saved?: { path?: string; error?: string };
 };
 
 const str = (v: unknown, max: number): string => (typeof v === 'string' ? v.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').slice(0, max) : '');
 const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : 0);
-const PNG = /^data:image\/png;base64,([A-Za-z0-9+/]+={0,2})$/;
+/** A PNG data URL: its bytes must start with PNG's signature (base64 `iVBORw0KGgo`). */
+const PNG = /^data:image\/png;base64,(iVBORw0KGgo[A-Za-z0-9+/]*={0,2})$/;
 export const MAX_PIN_IMAGE = 4 * 1024 * 1024;
 
 /** A pin from the app, checked and cut to size, or null when the message isn't one. */

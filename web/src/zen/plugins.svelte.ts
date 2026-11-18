@@ -149,7 +149,7 @@ export function contextImages(content: unknown): { mimeType: string; data: strin
  * Keep a plugin's latest context for a session, replacing the one before (empty clears it).
  * Returns the kept context's id, or null when nothing was kept.
  */
-export function keepContext(session: string | null, plugin: string, text: string, images: { mimeType: string; data: string; path?: string }[] = []): number | null {
+export function keepContext(session: string | null, plugin: string, text: string, images: { mimeType: string; data: string; path?: string; error?: string }[] = []): number | null {
   if (!session) return null;
   text = text.slice(0, MAX_CONTEXT_TEXT);
   const m = (contexts[session] ??= {});
@@ -162,7 +162,7 @@ export function keepContext(session: string | null, plugin: string, text: string
   m[plugin] = {
     id,
     text,
-    images: images.map((im, k) => ({ name: `${stem}-${id}-${k + 1}.${IMAGE_TYPES[im.mimeType]}`, thumb: `data:${im.mimeType};base64,${im.data}`, ...(im.path ? { path: im.path } : {}) })),
+    images: images.map((im, k) => ({ name: `${stem}-${id}-${k + 1}.${IMAGE_TYPES[im.mimeType]}`, thumb: `data:${im.mimeType};base64,${im.data}`, ...(im.path ? { path: im.path } : {}), ...(im.error ? { error: im.error } : {}) })),
   };
   return id;
 }
@@ -201,6 +201,10 @@ export function contextSaving(session: string): boolean {
   return Object.values(contexts[session] ?? {}).some((c) => c.images.some((im) => !im.path && !im.error));
 }
 
+/** Untrusted text can't close or open the block it travels in: its tags lose their `<`. */
+export const blockText = (t: string) => t.replace(/<(\/?\s*(?:app_context|plugin)\b)/gi, '‹$1');
+const attrText = (t: string) => t.replace(/[<>"&]/g, '_');
+
 /**
  * The context to send with a session's next prompt, as one delimited block, and forget it (it
  * goes once; a plugin that updates it again sends again). The kernel's prompt has no context
@@ -212,7 +216,7 @@ export function takeContext(session: string): string {
   delete contexts[session];
   const parts = Object.entries(m).map(([plugin, c]) => {
     const images = c.images.map((im) => (im.path ? `(attached ${tilde(im.path)})` : `(image not saved: ${im.error ?? 'unknown error'})`));
-    return `<plugin name="${plugin}">\n${[c.text, ...images].filter(Boolean).join('\n')}\n</plugin>`;
+    return `<plugin name="${attrText(plugin)}">\n${[blockText(c.text), ...images].filter(Boolean).join('\n')}\n</plugin>`;
   });
   return `<app_context>\n${parts.join('\n')}\n</app_context>\n\n`;
 }

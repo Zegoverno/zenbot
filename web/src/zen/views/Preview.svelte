@@ -1,3 +1,9 @@
+<script lang="ts" module>
+  import type { Pin } from '../preview.ts';
+  /** Pins per session, kept while the tab is closed: the chip shows them all until it is sent or removed. */
+  const pinned = new Map<string, { origin: string; pins: Pin[] }>();
+</script>
+
 <script lang="ts">
   // The Preview tab (side panel): a dev server on this host's own port, in a frame beside the chat,
   // at a screen size. With "Point" on, a click in the app pins that element: its source file and
@@ -7,11 +13,13 @@
   // public/zen-preview.js, which the app loads in development.
   import { onMount } from 'svelte';
   import { app, notice } from '../app.svelte.ts';
-  import { chat, contexts, keepContextSaving } from '../plugins.svelte.ts';
-  import { pinsText, previewTarget, readPin, where, type Pin } from '../preview.ts';
+  import { upload } from '../api.ts';
+  import { chat, contexts, dropContext, keepContext } from '../plugins.svelte.ts';
+  import { pinsText, previewTarget, readPin, where } from '../preview.ts';
 
   const KEY = 'zen.preview.url';
-  const NAME = 'Preview';
+  /** The chip's key: unlike a plugin's title, never ends in a plugin's name. */
+  const NAME = 'Preview (zen)';
   const MAX_PINS = 8;
   const SIZES = { fit: null, phone: [390, 844], tablet: [820, 1180], desktop: [1280, 800] } as const;
   type Size = keyof typeof SIZES;
@@ -36,6 +44,12 @@
     const t = previewTarget(address, location);
     if (!t) return notice(`Preview shows this host's own ports ${location.hostname}:3000–9999, e.g. 5173`);
     localStorage.setItem(KEY, address.trim());
+    // Pins name the app they came from: another app starts again.
+    const sid = app.session;
+    if (sid && pinned.get(sid)?.origin !== t.origin && contexts[sid]?.[NAME]) {
+      dropContext(sid, NAME);
+      pinned.delete(sid);
+    }
     target = t;
     linked = false;
     loadedOnce = false;
@@ -53,6 +67,7 @@
 
   function loaded() {
     loadedOnce = true;
+    linked = false;
     post({ type: 'hello' });
     if (point) post({ type: 'pick', on: true });
   }
@@ -62,22 +77,33 @@
     post({ type: 'pick', on: point });
   }
 
-  // Pins per session: the chip shows them all; it starts again once the chip is sent or removed.
-  const pinned = new Map<string, Pin[]>();
+  /** Show a session's pins as its chip; a screenshot not yet saved shows as saving. */
+  function showPins(sid: string, origin: string, pins: Pin[]) {
+    const images = pins.filter((p) => p.image).map((p) => ({ mimeType: 'image/png', data: p.image!.split(',')[1], ...p.saved }));
+    keepContext(sid, NAME, pinsText(origin, pins), images);
+  }
 
   function addPin(pin: Pin) {
     const sid = app.session;
     if (!sid || !target) return notice('open a session to send what you point at');
-    const current = contexts[sid]?.[NAME];
-    let pins = current ? (pinned.get(sid) ?? []) : [];
-    if (pins.length >= MAX_PINS) return notice(`${MAX_PINS} pins at most: send these first`);
-    pins = [...pins, pin];
-    pinned.set(sid, pins);
-    // Screenshots already saved keep their paths, so each is saved once.
-    const saved = current?.images ?? [];
-    const images = pins.filter((p) => p.image).map((p, k) => ({ mimeType: 'image/png', data: p.image!.split(',')[1], path: saved[k]?.path }));
-    keepContextSaving(sid, NAME, pinsText(target.origin, pins), images);
-    notice(`#${pins.length} ${pin.tag}${pin.source ? ` · ${where(pin.source)}` : ''}: write your comment`, 3000);
+    const origin = target.origin;
+    // A chip sent or removed starts the list again.
+    const entry = contexts[sid]?.[NAME] && pinned.get(sid)?.origin === origin ? pinned.get(sid)! : { origin, pins: [] };
+    if (entry.pins.length >= MAX_PINS) return notice(`${MAX_PINS} pins at most: send these first`);
+    entry.pins = [...entry.pins, pin];
+    pinned.set(sid, entry);
+    showPins(sid, origin, entry.pins);
+    // Each screenshot is saved once; the chip updates when it is.
+    if (pin.image) {
+      const bytes = Uint8Array.from(atob(pin.image.split(',')[1]), (ch) => ch.charCodeAt(0));
+      upload(new File([bytes as BlobPart], `preview-${Date.now()}.png`, { type: 'image/png' }), () => {}).done.then(
+        (r) => (pin.saved = { path: r.path }),
+        (e) => (pin.saved = { error: (e as Error).message }),
+      ).then(() => {
+        if (pinned.get(sid) === entry && entry.pins.includes(pin) && contexts[sid]?.[NAME]) showPins(sid, origin, entry.pins);
+      });
+    }
+    notice(`#${entry.pins.length} ${pin.tag}${pin.source ? ` · ${where(pin.source)}` : ''}: write your comment`, 3000);
     chat.focus?.();
   }
 
@@ -89,7 +115,8 @@
       if (!d || d.zen !== 'preview') return;
       if (d.type === 'ready') linked = true;
       else if (d.type === 'pick') point = d.on === true;
-      else {
+      else if (point) {
+        // Only while the owner is pointing: the app can't send pins (or files) on its own.
         const pin = readPin(d);
         if (pin) addPin(pin);
       }
