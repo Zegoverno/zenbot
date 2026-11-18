@@ -4,7 +4,9 @@
   // into one line), the composer with its / menu and pickers, the status line while zenbot works,
   // and the footer. 'new' is a chat whose session starts with its first prompt; that prompt is
   // handed to the chat re-created with the session's id (Shell keys Chat on the session).
-  // Plugins: a plugin's slash command calls its tool and shows its UI in the side panel; a plugin
+  // Plugins: a plugin's slash command calls its tool and shows its UI in the side panel (typed with
+  // no argument and with declared `choices`, it opens a picker of them first: a choice runs it, one
+  // with `then` goes to the composer to finish); a plugin
   // UI's `sendMessage` queues an owner-reviewed draft here (`chat.queue`), and what plugin UIs put in the model context shows
   // as a removable chip above the box and goes with the next prompt (plugins.svelte.ts).
   import { onMount, tick } from 'svelte';
@@ -93,7 +95,8 @@
   let content = $state<HTMLElement>();
   let menuSel = $state(0);
   let creating = $state(false);
-  type Pick = { title: string; items: { label: string; value: string }[]; sel: number; kind: 'session' | 'model' | 'effort' | 'outcome' | 'agent' };
+  // `then` (plugin-choice only): the args hint of a choice that needs more input.
+  type Pick = { title: string; items: { label: string; value: string; then?: string }[]; sel: number; kind: 'session' | 'model' | 'effort' | 'outcome' | 'agent' | 'plugin-choice'; command?: Command };
   let picker = $state<Pick | null>(null);
   let hist: string[] = [];
   let hi = $state(-1);
@@ -574,7 +577,7 @@
     }
     const name = resolve(word);
     const plugged = cmds.find((c) => c.name === name && c.plugin && c.tool);
-    if (plugged) return await pluginCommand(plugged, arg);
+    if (plugged) return arg || !plugged.choices?.length ? await pluginCommand(plugged, arg) : choicePicker(plugged);
     const needSession = () => {
       if (sid) return false;
       notice('send a message first: this works on the session');
@@ -821,12 +824,31 @@
     picker = { title: 'Choose a thinking level', kind: 'effort', sel: effort ? levels.indexOf(effort) + 1 : 0, items };
   }
 
+  /** A plugin command typed with no argument and with declared choices: pick the first argument. */
+  function choicePicker(c: Command) {
+    const w = Math.max(...c.choices!.map((x) => x.value.length));
+    picker = {
+      title: c.description || `/${c.name}`,
+      kind: 'plugin-choice',
+      sel: 0,
+      command: c,
+      items: c.choices!.map((x) => ({ label: `${x.value.padEnd(w)}  ${x.description}${x.then ? `  ${x.then}` : ''}`, value: x.value, then: x.then })),
+    };
+  }
+
   async function pick(i = picker?.sel ?? 0) {
     const p = picker;
     picker = null;
     const v = p?.items[i]?.value;
     if (!p || !v) return;
     try {
+      if (p.kind === 'plugin-choice') {
+        // A choice that needs more input goes to the composer for the owner to finish; the rest runs.
+        if (p.items[i].then) await setInput(`/${p.command!.name} ${v} `);
+        else await pluginCommand(p.command!, v);
+        ta?.focus();
+        return;
+      }
       if (p.kind === 'session') openSession(v);
       else if (p.kind === 'model') await setModel(v);
       else if (p.kind === 'effort') await setEffort(v);
@@ -1076,7 +1098,8 @@
     const c = menu[i];
     if (!c) return;
     menuSel = 0;
-    if (c.args.startsWith('<')) setInput(`/${c.name} `);
+    // A command that takes text waits for it; one with declared choices runs, to open its picker.
+    if (c.args.startsWith('<') && !c.choices?.length) setInput(`/${c.name} `);
     else {
       input = `/${c.name}`;
       submit();

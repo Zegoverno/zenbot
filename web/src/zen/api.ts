@@ -157,6 +157,8 @@ export interface Command {
   tool?: string;
   description?: string;
   ui?: string;
+  /** A plugin command's declared choices for its first argument: with no argument, the chat opens a picker. */
+  choices?: CommandChoice[];
 }
 
 // ---- plugins (ADR 0001, Host API; the kernel's plugins.rs) ----
@@ -164,7 +166,9 @@ export interface Command {
 export interface PluginView { id: string; title: string; ui: string }
 export interface PluginOpener { id: string; title: string; ui: string; patterns: string[]; mode: 'read' | 'edit' }
 export interface PluginGame { id: string; title: string; ui: string; description?: string }
-export interface PluginCommand { name: string; tool: string; args?: string; description?: string }
+/** A declared value of a plugin command's first argument; `then` (an args hint) means it needs more input. */
+export interface CommandChoice { value: string; description: string; then?: string }
+export interface PluginCommand { name: string; tool: string; args?: string; description?: string; choices?: CommandChoice[] }
 export interface Plugin {
   name: string;
   version: string;
