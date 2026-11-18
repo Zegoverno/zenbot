@@ -53,6 +53,8 @@ const until = async (ok, what) => {
 };
 /** What the page asked the stand-in kernel to do: new sessions' bodies, agent saves. */
 const created = [];
+/** What the page asked the stand-in kernel's search (api.rs `search_once`). */
+const searches = [];
 const saves = [];
 
 // ---- the stand-in plugin host (plugins.rs) ----
@@ -179,6 +181,11 @@ const kernel = createServer(async (req, res) => {
       { role: 'assistant', content: [{ type: 'text', text: 'Standup at **07:00**, see [[God]].' }], seq: 2 },
     ] });
   if (r === 'GET /api/models') return json(res, { models: [{ id: 'faux/smoke', efforts: [] }], authenticated: {}, default: 'faux/smoke' });
+  if (r === 'POST /api/search') {
+    searches.push(body);
+    const hit = (kind, ref, title, snippet, file) => ({ kind, ref, title, snippet, at: now, exact: false, relevance: null, path: path.join(VAULT, file) });
+    return json(res, { query: body.query, scope: body.scope, reranked: false, results: body.query === 'gift' ? [hit('wiki', 'Grace', 'Grace', 'A gift, given freely.', 'wiki/Grace.md'), hit('note', 'Atlas.md', 'Atlas', 'all names matched too', 'wiki/Atlas.md')] : [] });
+  }
   if (r === 'GET /api/tasks')
     return json(res, { today: '2026-10-30', tz: 'UTC', count: 1, problems: [], projects: [{ project: 'acme', tasks: [
       { project: 'acme', text: 'Price the offer', id: 't1', due: '2026-10-29', scheduled: null, priority: 'urgent', goals: [], file: 'x', line: 1, overdue: true },
@@ -378,6 +385,46 @@ try {
   await page.keyboard.press('2');
   await page.getByText('wiki/', { exact: true }).waitFor();
   assert.equal(await page.getByText('plain.txt').count(), 0, 'Files starts in the vault, not home');
+  // Search: names at once (client side over the vault, through the server's find), content from the
+  // kernel after a pause or Enter, names first; a result opens in the reader; Esc clears.
+  const search = page.getByLabel('search files');
+  const results = page.locator('.result');
+  await page.keyboard.press('/');
+  assert.equal(await search.evaluate((i) => i === document.activeElement), true, '/ focuses the search');
+  await search.fill('at');
+  await results.filter({ hasText: 'Atlas.md' }).waitFor();
+  assert.equal(await page.getByRole('tree', { name: 'files' }).count(), 0, 'results replace the tree');
+  assert.equal(await results.filter({ hasText: 'Grace' }).count(), 0, 'only names that match');
+  await new Promise((r) => setTimeout(r, 900));
+  assert.deepEqual(searches, [], 'under 3 characters only names are searched');
+  await search.fill('atl');
+  await until(() => searches.length === 1, 'a pause asks the kernel');
+  assert.deepEqual(searches[0], { query: 'atl', scope: 'notes', limit: 10 });
+  await search.fill('gift');
+  const grace = results.filter({ hasText: 'Grace' });
+  await grace.waitFor();
+  assert.match(await grace.innerText(), /A gift, given freely\./);
+  assert.match(await grace.innerText(), /wiki\/Grace\.md/);
+  assert.equal(await results.count(), 2);
+  assert.match(await results.first().innerText(), /Grace/, 'content results keep the kernel order');
+  await grace.click();
+  await page.locator('.reader').waitFor();
+  await page.getByText('A gift.').first().waitFor();
+  await page.keyboard.press('Escape'); // closes the file; the results are still there
+  await grace.waitFor();
+  await search.fill('god'); // names: ArrowDown, Enter open the first
+  await results.filter({ hasText: 'God.md' }).waitFor();
+  await search.press('ArrowDown');
+  await search.press('Enter');
+  await page.locator('.reader').waitFor();
+  await page.keyboard.press('Escape');
+  await search.press('Escape'); // clears the search
+  await page.getByText('wiki/', { exact: true }).waitFor();
+  assert.equal(await search.inputValue(), '');
+  await page.getByRole('button', { name: 'home', exact: true }).click();
+  await page.getByText('plain.txt').waitFor();
+  await page.getByRole('button', { name: 'vault', exact: true }).click();
+  await page.getByText('wiki/', { exact: true }).waitFor();
   await page.locator('.crumbs button').first().click(); // ~ : back to the home folder
   await page.getByText('plain.txt').waitFor();
   await page.getByText('.zenbot', { exact: true }).waitFor({ state: 'detached' }).catch(() => {}); // dotfiles hidden

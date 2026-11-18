@@ -230,6 +230,7 @@ export const zen = {
   newAgent: (name: string, description: string) => call<Agent & { dir: string }>('POST', '/api/zen/agents', { name, description }),
   saveAgent: (name: string, change: AgentFiles) => call<AgentDetail>('PUT', `/api/zen/agents/${enc(name)}`, change),
   removeAgent: (name: string) => call<{ ok: boolean; moved_to: string }>('DELETE', `/api/zen/agents/${enc(name)}`),
+  search: (query: string, scope = 'notes', limit = 10) => call<{ query: string; scope: string; results: SearchHit[] }>('POST', '/api/zen/search', { query, scope, limit }),
   tasks: () => call<Tasks>('GET', '/api/zen/tasks'),
   handTask: (id: string) => call<{ task: Task; session: string; existing: boolean }>('POST', `/api/zen/tasks/${enc(id)}/agent`, {}),
   version: (refresh = false) => call<{ running: string; latest?: string; behind?: number; available?: boolean; commits?: string[]; error?: string }>('GET', `/api/zen/version${refresh ? '?refresh=true' : ''}`),
@@ -269,11 +270,17 @@ export const zen = {
   },
 };
 
+/** A file or folder whose name matched (server/home.ts `find`); `rel` is its path in the searched folder. */
+export interface Found { name: string; path: string; rel: string; dir: boolean }
+/** A kernel search result (api.rs `search_once`); `path` is the note's file for wiki pages and notes. */
+export interface SearchHit { kind: string; ref: string; title: string; snippet: string; at: string; exact: boolean; relevance: number | null; path: string | null }
+
 export const files = {
   home: () => call<{ home: string; vault: string }>('GET', '/api/fs/home'),
   list: (path: string) => call<{ path: string; entries: Entry[] }>('GET', `/api/fs/list?path=${enc(path)}`),
   read: (path: string) => call<FileRead>('GET', `/api/fs/read?path=${enc(path)}`),
   stat: (path: string) => call<{ mtime: number; size: number }>('GET', `/api/fs/stat?path=${enc(path)}`),
+  find: (root: string, q: string) => call<{ results: Found[]; truncated: boolean }>('GET', `/api/fs/find?root=${enc(root)}&q=${enc(q)}`),
   locate: (ref: string, from?: string) => call<{ found: { path: string; dir: boolean } | null }>('GET', `/api/fs/locate?ref=${enc(ref)}${from ? `&from=${enc(from)}` : ''}`),
   create: (dir: string, name: string) => call<{ path: string }>('POST', '/api/fs/create', { dir, name }),
   mkdir: (dir: string, name: string) => call<{ path: string }>('POST', '/api/fs/mkdir', { dir, name }),

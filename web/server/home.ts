@@ -10,6 +10,9 @@
 //   `.env` or `id_rsa`); the parent must be a folder inside home. Nothing is overwritten (a taken
 //   name is a 409), a rename stays in its folder, and home, `~/.zenbot` and what is within two
 //   levels of it (`~/.zenbot/global`, `~/.zenbot/agents/zenbot`…) can't be renamed.
+// - Find (the search field's name filter) walks a folder that resolves as above: no dot entries,
+//   no symlinks, no secrets, no generated folders (`node_modules`, `target`…), a bounded number of
+//   entries and levels, and the names it returns only.
 
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -139,6 +142,43 @@ export async function list(p: unknown): Promise<{ path: string; entries: Entry[]
   }
   entries.sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name));
   return { path: dir, entries };
+}
+
+export interface Found { name: string; path: string; rel: string; dir: boolean }
+
+const FIND_SKIP = new Set(['node_modules', 'target', '__pycache__']);
+const FIND_VISIT = 20000;
+const FIND_DEPTH = 10;
+
+/** Entries under `root` whose name contains `q` (case-insensitive), shallowest first, at most `limit`. */
+export async function find(root: unknown, q: unknown, limit = 100): Promise<{ results: Found[]; truncated: boolean }> {
+  const top = await resolve(root ?? HOME);
+  const needle = typeof q === 'string' ? q.trim().toLowerCase() : '';
+  if (!needle || needle.length > 200 || needle.includes('\0')) return { results: [], truncated: false };
+  if (!(await fs.stat(top)).isDirectory()) throw new HttpError(400, 'not a folder');
+  const results: Found[] = [];
+  let visited = 0;
+  let level = [top];
+  for (let depth = 0; depth <= FIND_DEPTH && level.length && results.length < limit && visited < FIND_VISIT; depth++) {
+    const next: string[] = [];
+    for (const dir of level) {
+      const items = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+      for (const e of items.sort((a, b) => a.name.localeCompare(b.name))) {
+        if (++visited > FIND_VISIT) return { results, truncated: true };
+        if (e.name.startsWith('.') || FIND_SKIP.has(e.name) || e.isSymbolicLink()) continue;
+        const full = path.join(dir, e.name);
+        if (denied(full)) continue;
+        if (e.isDirectory()) next.push(full);
+        else if (!e.isFile()) continue;
+        if (e.name.toLowerCase().includes(needle)) {
+          if (results.length >= limit) return { results, truncated: true };
+          results.push({ name: e.name, path: full, rel: path.relative(top, full).split(path.sep).join('/'), dir: e.isDirectory() });
+        }
+      }
+    }
+    level = next;
+  }
+  return { results, truncated: visited >= FIND_VISIT };
 }
 
 export interface FileRead { path: string; mtime: number; size: number; text?: string; binary?: boolean; tooBig?: boolean; dir?: boolean; vault?: string | null }
