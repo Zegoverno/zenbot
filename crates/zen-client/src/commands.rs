@@ -445,14 +445,15 @@ Approve with `plugins add {target} --yes`.", approval_text(&r)), r)
 }
 
 /// The body of `POST /api/plugins/install` for what was typed: a marketplace name, or a path on
-/// this machine (a `.tgz` or a folder), made absolute.
+/// this machine (a `.tgz` or a folder), made absolute. A bare name is always the marketplace, even
+/// when a file or folder of that name sits in the current directory (a plugin's own checkout, say):
+/// a local install says so with a path (`./zenvault`).
 pub fn install_body(target: &str) -> Result<Value> {
-    let path = std::path::Path::new(target);
     let named = !target.is_empty() && target.len() <= 40 && target.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
-    if named && !path.exists() {
+    if named {
         return Ok(json!({ "name": target }));
     }
-    let full = std::path::absolute(path)?;
+    let full = std::path::absolute(std::path::Path::new(target))?;
     Ok(json!({ "path": full }))
 }
 
@@ -959,6 +960,11 @@ mod tests {
         let ask = json!({ "needs_approval": true, "name": "hello", "version": "0.2.0", "permissions": ["files:write:Reading", "network"], "upgrade": true });
         assert_eq!(approval_text(&ask), "This upgrade of `hello` 0.2.0 asks for: `files:write:Reading` (read your vault, write only Reading/), `network` (the internet).");
         assert_eq!(install_body("zenread").unwrap(), json!({ "name": "zenread" }));
+        // A folder of the same name in the current directory (tests run in the crate: `src/`) doesn't
+        // turn the name into a path; a path says so.
+        assert!(std::path::Path::new("src").is_dir());
+        assert_eq!(install_body("src").unwrap(), json!({ "name": "src" }));
+        assert!(install_body("./zenread").unwrap()["path"].as_str().unwrap().ends_with("/zenread"));
         assert!(install_body("./hello-0.1.0.tgz").unwrap()["path"].as_str().unwrap().starts_with('/'));
     }
 
