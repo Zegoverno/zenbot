@@ -43,7 +43,10 @@ The same screens as the terminal app, with its keys, and a mouse and a phone way
   gets them without the prefix (learnt per port from its first page). With Point on, a click pins the
   element (source file and line from Svelte's or React 18's dev build, or a `data-source`
   attribute; box, key styles, console errors, a screenshot) to the chat as a chip, numbered #1, #2…
-  for the comment. **The previewed app runs on zen's origin** (the owner's choice): its code, its
+  for the comment. The screenshot is taken on this machine (`server/shot.ts`: Playwright's headless
+  Chromium, or `ZEN_WEB_CHROMIUM`, opens the same page at the owner's screen size), so nothing is
+  uploaded from the browser; it's a fresh load, without an open menu or typed text. If it fails, the
+  browser's own capture is uploaded instead. **The previewed app runs on zen's origin** (the owner's choice): its code, its
   packages included, can act as zen's page, so preview only apps you trust. zen's own ports are
   refused, and the proxy's login headers are stripped before forwarding.
 - **Files fallback** renders Markdown safely using text nodes, and previews text/code verbatim.

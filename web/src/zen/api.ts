@@ -281,6 +281,8 @@ export interface SearchHit { kind: string; ref: string; title: string; snippet: 
 
 export const files = {
   home: () => call<{ home: string; vault: string }>('GET', '/api/fs/home'),
+  /** A Preview pin's screenshot, taken on the server (server/shot.ts). */
+  previewShot: (b: { url: string; selector: string; width: number; height: number }) => call<{ path: string; data: string }>('POST', '/api/preview/shot', b),
   list: (path: string) => call<{ path: string; entries: Entry[] }>('GET', `/api/fs/list?path=${enc(path)}`),
   read: (path: string) => call<FileRead>('GET', `/api/fs/read?path=${enc(path)}`),
   stat: (path: string) => call<{ mtime: number; size: number }>('GET', `/api/fs/stat?path=${enc(path)}`),

@@ -1005,9 +1005,13 @@ try {
     assert.match(sent, /^<app_context>\n<plugin name="Preview \(zen\)">\nPreview of localhost:\d+: the owner pointed at one element\.\n#1 button "Get started" at src\/Hero\.svelte:7:2\n/);
     assert.match(sent, /styles .*font-size: 20px/);
     assert.match(sent, /console errors: fixture boom/);
-    const shotPath = sent.match(/\(attached ~\/inbox\/(\d{4}-\d{2}-\d{2}\/preview-\d+\.png)\)/);
+    const shotPath = sent.match(/\(attached ~\/inbox\/(\d{4}-\d{2}-\d{2}\/preview-\d+-[a-z0-9]+\.png)\)/);
     assert.ok(shotPath, `screenshot path in: ${sent}`);
-    assert.equal(readFileSync(path.join(HOME, 'inbox', shotPath[1])).subarray(1, 4).toString(), 'PNG');
+    const png = readFileSync(path.join(HOME, 'inbox', shotPath[1]));
+    assert.equal(png.subarray(1, 4).toString(), 'PNG');
+    // Taken on the server by headless Chromium: the button alone, at twice its size.
+    const [w, h] = [png.readUInt32BE(16), png.readUInt32BE(20)];
+    assert.ok(w > 150 && w < 600 && h > 50 && h < 200, `button-sized screenshot, got ${w}×${h}`);
     await page.getByText('Streaming answer, done.').last().waitFor();
     // Pointing off, the app works as usual.
     await point.click();
