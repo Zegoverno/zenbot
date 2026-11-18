@@ -31,7 +31,7 @@ create replacements.
 ## The web app
 
 `web/` is zen in the browser: a Svelte page (`src/zen/`: the board with Sessions · Files · Tasks ·
-Agents, a session's chat with the side panel, and Files, which opens in the vault with a search
+Agents (the agents, then a read-only Roles section), a session's chat with the side panel, and Files, which opens in the vault with a search
 field (names under the folder, then the kernel's `notes` search with snippets) and a safe Markdown
 preview and plain textarea edit/save fallback; rich reader/writer features are optional plugins) and a
 Node server (`server/`) that serves it on 127.0.0.1:4400 and relays the kernel with the owner token
@@ -113,6 +113,8 @@ each of the child's turns by the tool list and `dispatch.rs`) and `skills` (each
 to the brief, not the instructions). The role is the delegating agent's; the child records it in
 `sessions.role`. `delegate`'s description lists the roles as the session's first tool list had them
 (the prefix stays fixed); a call checks the current file, and a broken file or unknown role fails it.
+`GET /api/agents` puts each agent's roles on it as `roles` (`{default_model, roles: [...]}`, or
+`{error}` for a broken file) for the web app's Roles section.
 
 ## Agents
 

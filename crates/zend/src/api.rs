@@ -312,15 +312,20 @@ pub(crate) async fn create_session(State(app): State<AppState>, Json(body): Json
     Ok(Json(session_json(&row)))
 }
 
-/// The owner's agents (agents.rs), zenbot first; one whose settings are broken says why.
+/// The owner's agents (agents.rs), zenbot first; one whose settings are broken says why. Each has
+/// its `roles` (roles.rs, read-only): `{default_model, roles: [...]}`, or `{error}` for a broken file.
 pub(crate) async fn list_agents() -> ApiResult<Json<Value>> {
     let agents: Vec<Value> = tokio::task::spawn_blocking(crate::agents::list)
         .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .into_iter()
-        .map(|(name, a)| match a {
-            Ok(a) => a.summary(),
-            Err(e) => json!({ "name": name, "error": format!("{e:#}") }),
+        .map(|(name, a)| {
+            let mut v = match a {
+                Ok(a) => a.summary(),
+                Err(e) => json!({ "name": name, "error": format!("{e:#}") }),
+            };
+            v["roles"] = crate::roles::summary_from(&crate::roles::path(&name));
+            v
         })
         .collect();
     Ok(Json(Value::Array(agents)))

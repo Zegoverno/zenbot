@@ -83,6 +83,11 @@ export interface SessionDetail extends Session {
   suggestion?: { id: number; text: string } | null;
 }
 
+/** A subagent role (roles.rs); `tools` null means every tool the subagent gets anyway. */
+export interface Role { name: string; description: string; model: string | null; effort: string | null; tools: string[] | null; skills: string[] }
+/** An agent's roles file as the kernel read it: the roles, or `error` when the file is broken. */
+export interface AgentRoles { default_model?: string | null; roles?: Role[]; error?: string }
+
 /** An agent (agents.rs): what it may use, or `error` when its agent.toml is broken. */
 export interface Agent {
   name: string;
@@ -95,6 +100,7 @@ export interface Agent {
   model?: string | null;
   workspace?: string | null;
   context?: string[];
+  roles?: AgentRoles;
 }
 /** An agent with its three files' text, its folder and how many sessions it has. */
 export interface AgentDetail extends Agent { soul: string; identity: string; settings: string; dir: string; sessions: number }
