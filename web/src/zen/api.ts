@@ -276,7 +276,7 @@ export interface Found { name: string; path: string; rel: string; dir: boolean }
 export interface SearchHit { kind: string; ref: string; title: string; snippet: string; at: string; exact: boolean; relevance: number | null; path: string | null }
 
 export const files = {
-  home: () => call<{ home: string; vault: string }>('GET', '/api/fs/home'),
+  home: () => call<{ home: string; vault: string; preview?: number | null }>('GET', '/api/fs/home'),
   list: (path: string) => call<{ path: string; entries: Entry[] }>('GET', `/api/fs/list?path=${enc(path)}`),
   read: (path: string) => call<FileRead>('GET', `/api/fs/read?path=${enc(path)}`),
   stat: (path: string) => call<{ mtime: number; size: number }>('GET', `/api/fs/stat?path=${enc(path)}`),

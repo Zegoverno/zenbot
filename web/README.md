@@ -35,13 +35,16 @@ The same screens as the terminal app, with its keys, and a mouse and a phone way
   every other vault note) with a snippet each, listed after the names. ↑↓ and Enter pick a result,
   a click opens it through the normal opener (plugins included), Esc clears. Without the kernel's
   answer the name matches still show.
-- **Preview** (side panel): a dev server on this host's own port (3000–9999, e.g.
-  `https://zenbot.exe.xyz:5173/`, behind the same login), at a screen size. An app that loads
-  `/zen-preview.js` first in its `<head>` (in development only) can be pointed at: with Point on, a
-  click pins the element (source file and line from Svelte's or React 18's dev build, or a
-  `data-source` attribute; box, key styles, console errors, a screenshot) to the chat as a chip,
-  numbered #1, #2… for the comment. The frame is zen's, not a plugin's: a dev server can't run in a
-  plugin's sandbox. This app's own dev server (`npm run dev`) loads the script and may be framed.
+- **Preview** (side panel): any dev server on this machine (a port, 3000–9999), at a screen size,
+  through the preview gateway (`server/preview.ts`, `ZEN_WEB_PREVIEW_PORT`, default 4490): one port
+  that forwards to the chosen dev server (hot reload included), adds `/zen-preview.js` to its pages
+  and drops frame-blocking headers. Behind exe.dev that's one sign-in for every dev server; when the
+  gateway doesn't know the owner yet, the page signs in through it at the top level and comes back
+  to Preview. With Point on, a click pins the element (source file and line from Svelte's or React
+  18's dev build, or a `data-source` attribute; box, key styles, console errors, a screenshot) to the
+  chat as a chip, numbered #1, #2… for the comment. The gateway refuses zen's own ports and strips the
+  proxy's login headers, so zen's web server behind it refuses its requests; the framed page is
+  another origin than zen's.
 - **Files fallback** renders Markdown safely using text nodes, and previews text/code verbatim.
   Vault Markdown has Edit (`e`), a plain textarea, explicit Save (`Ctrl+S`) and Read
   (`Alt+W`). Saves are atomic with an optimistic hash; conflicts retain your local edits.

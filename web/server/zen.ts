@@ -18,6 +18,8 @@ import type { Duplex } from 'node:stream';
 import { HttpError } from './files.ts';
 
 const ZEN_URL = new URL(process.env.ZEN_URL ?? 'http://127.0.0.1:8100');
+/** The kernel's port, which the preview gateway never shows. */
+export const KERNEL_PORT = Number(ZEN_URL.port || (ZEN_URL.protocol === 'https:' ? 443 : 80));
 const TOKEN_FILE = process.env.ZEN_TOKEN_FILE ?? path.join(os.homedir(), '.zenbot/token');
 const token = async () => (await fs.readFile(TOKEN_FILE, 'utf8')).trim();
 

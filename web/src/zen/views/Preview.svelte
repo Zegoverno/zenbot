@@ -9,8 +9,12 @@
   // at a screen size. With "Point" on, a click in the app pins that element: its source file and
   // line, box, key styles, recent console errors and a screenshot go to the chat as one chip
   // ("Preview"), numbered #1, #2… so the owner's comment can refer to them; they go with the next
-  // prompt. The rules (which addresses, what a pin may say) are in ../preview.ts; the app's side is
-  // public/zen-preview.js, which the app loads in development.
+  // prompt. The rules (which addresses, what a pin may say) are in ../preview.ts.
+  //
+  // The frame loads through the preview gateway (web/server/preview.ts, one port on this host): it
+  // forwards to the chosen dev server and adds public/zen-preview.js to its pages, so any app can be
+  // pointed at, and the proxy's sign-in happens once, for that port. When the gateway doesn't answer
+  // (not signed in there yet), the page bounces through it at the top level and comes back here.
   import { onMount } from 'svelte';
   import { app, notice } from '../app.svelte.ts';
   import { upload } from '../api.ts';
@@ -35,7 +39,48 @@
   let n = $state(0);
   let frame: HTMLIFrameElement | undefined = $state();
   let boxWidth = $state(0);
-  const scriptTag = `<script src="${location.origin}/zen-preview.js"><\/script>`;
+  /** Whether the gateway knows the owner: checking, yes, or a sign-in is needed. */
+  let signin = $state<'checking' | 'ok' | 'needed'>('checking');
+  const BOUNCED = 'zen.preview.bounced';
+
+  /** The gateway's origin, or null when it's off (then the frame loads the dev server directly). */
+  const gateway = $derived(app.preview ? `${location.protocol}//${location.hostname}:${app.preview}` : null);
+  /** The origin the framed page has, the only one heard. */
+  const frameOrigin = $derived(gateway ?? target?.origin ?? '');
+  const frameSrc = $derived(
+    !target ? '' : gateway ? `${gateway}/__zen/open?port=${target.port}&path=${encodeURIComponent(target.pathname + target.search + target.hash)}` : target.href,
+  );
+  const label = $derived(target ? `localhost:${target.port}` : '');
+
+  /** Sign in to the gateway's port: a top-level visit through it, back to this page. */
+  function signIn() {
+    if (!gateway) return;
+    localStorage.setItem('zen.preview.reopen', '1');
+    localStorage.setItem(BOUNCED, String(Date.now()));
+    const back = `${gateway}/__zen/back?to=${encodeURIComponent(location.pathname + location.search)}${location.port ? `&port=${location.port}` : ''}`;
+    location.assign(back);
+  }
+
+  // Before showing a page, ask the gateway whether it knows the owner; if not, sign in once by
+  // itself.
+  $effect(() => {
+    if (!gateway || !target) return void (signin = 'ok');
+    let gone = false;
+    signin = 'checking';
+    fetch(`${gateway}/__zen/ping`, { credentials: 'include', cache: 'no-store' })
+      .then((r) => r.ok)
+      .catch(() => false)
+      .then((ok) => {
+        if (gone) return;
+        if (ok) return void (signin = 'ok');
+        signin = 'needed';
+        // A failed ping may also be the gateway down or the network: sign in by itself at most once
+        // in ten minutes, and never over an unsent draft; otherwise the button does it.
+        const draft = (document.querySelector('.zc-compose textarea') as HTMLTextAreaElement | null)?.value.trim();
+        if (!draft && Date.now() - Number(localStorage.getItem(BOUNCED) ?? 0) > 600_000) signIn();
+      });
+    return () => (gone = true);
+  });
 
   const dims = $derived(SIZES[size]);
   const scale = $derived(dims && boxWidth ? Math.min(1, boxWidth / dims[0]) : 1);
@@ -46,7 +91,7 @@
     localStorage.setItem(KEY, address.trim());
     // Pins name the app they came from: another app starts again.
     const sid = app.session;
-    if (sid && pinned.get(sid)?.origin !== t.origin && contexts[sid]?.[NAME]) {
+    if (sid && pinned.get(sid)?.origin !== `localhost:${t.port}` && contexts[sid]?.[NAME]) {
       dropContext(sid, NAME);
       pinned.delete(sid);
     }
@@ -62,7 +107,7 @@
   }
 
   const post = (msg: Record<string, unknown>) => {
-    if (target && frame?.contentWindow) frame.contentWindow.postMessage({ zen: 'preview', ...msg }, target.origin);
+    if (frameOrigin && frame?.contentWindow) frame.contentWindow.postMessage({ zen: 'preview', ...msg }, frameOrigin);
   };
 
   function loaded() {
@@ -86,7 +131,7 @@
   function addPin(pin: Pin) {
     const sid = app.session;
     if (!sid || !target) return notice('open a session to send what you point at');
-    const origin = target.origin;
+    const origin = label;
     // A chip sent or removed starts the list again.
     const entry = contexts[sid]?.[NAME] && pinned.get(sid)?.origin === origin ? pinned.get(sid)! : { origin, pins: [] };
     if (entry.pins.length >= MAX_PINS) return notice(`${MAX_PINS} pins at most: send these first`);
@@ -110,7 +155,7 @@
   onMount(() => {
     const onMessage = (e: MessageEvent) => {
       // Only the framed app, at the address shown, is heard.
-      if (!target || !frame || e.source !== frame.contentWindow || e.origin !== target.origin) return;
+      if (!target || !frame || e.source !== frame.contentWindow || e.origin !== frameOrigin) return;
       const d = e.data as { zen?: unknown; type?: unknown; on?: unknown } | null;
       if (!d || d.zen !== 'preview') return;
       if (d.type === 'ready') linked = true;
@@ -137,20 +182,24 @@
       <option value="tablet">Tablet</option>
       <option value="desktop">Desktop</option>
     </select>
-    <button type="button" class="pv-point" class:on={point} onclick={togglePoint} disabled={!linked} aria-pressed={point} title={linked ? 'click an element in the app to pin it' : 'the app needs zen-preview.js'}>Point</button>
-    {#if target}<a class="dim" href={target.href} target="_blank" rel="noopener noreferrer" title="open in a tab">↗</a>{/if}
+    <button type="button" class="pv-point" class:on={point} onclick={togglePoint} disabled={!linked} aria-pressed={point} title={linked ? 'click an element in the app to pin it' : 'waiting for the page'}>Point</button>
+    {#if target}<a class="dim" href={frameSrc} target="_blank" rel="noopener noreferrer" title="open in a tab">↗</a>{/if}
   </form>
-  {#if target && loadedOnce && !linked}
-    <p class="pv-hint dim">To point at elements, the app loads this first in its <code>&lt;head&gt;</code>, in development: <code>{scriptTag}</code></p>
+  {#if target && signin === 'ok' && loadedOnce && !linked}
+    <p class="pv-hint dim">Point works on the app's pages (HTML); this one hasn't answered yet.</p>
   {/if}
   <div class="pv-box" bind:clientWidth={boxWidth}>
-    {#if target}
+    {#if target && signin === 'checking'}
+      <p class="dim pv-empty">Connecting to the preview…</p>
+    {:else if target && signin === 'needed'}
+      <p class="pv-empty">The preview needs you signed in once. <button class="pv-signin" onclick={signIn}>Sign in to preview</button></p>
+    {:else if target}
       {#key n}
         <div class="pv-stage" style:width={dims ? `${dims[0] * scale}px` : '100%'} style:height={dims ? `${dims[1] * scale}px` : '100%'}>
           <iframe
             bind:this={frame}
             title="preview"
-            src={target.href}
+            src={frameSrc}
             sandbox="allow-scripts allow-same-origin allow-forms allow-modals"
             onload={loaded}
             style:width={dims ? `${dims[0]}px` : '100%'}
@@ -178,4 +227,5 @@
   .pv-stage { flex: none; overflow: hidden; }
   .pv-stage iframe { border: 0; background: white; transform-origin: 0 0; display: block; }
   .pv-empty { padding: 16px; margin: 0; }
+  .pv-signin { color: var(--accent); text-decoration: underline; }
 </style>
