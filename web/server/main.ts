@@ -71,6 +71,11 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
       return send(res, 200, await home.list(q('path')));
     case 'GET /api/fs/read':
       return send(res, 200, await home.read(q('path')));
+    case 'GET /api/fs/image': {
+      const im = await home.image(q('path'));
+      res.writeHead(200, { 'content-type': im.type, 'content-length': im.data.length, 'cache-control': 'private, no-cache', 'content-security-policy': "default-src 'none'; sandbox" });
+      return void res.end(im.data);
+    }
     case 'GET /api/fs/stat':
       return send(res, 200, await home.stat(q('path')));
     case 'GET /api/fs/find':

@@ -9,6 +9,8 @@
 
   let { path, pane, active }: { path: string; pane: Pane; active: boolean } = $props();
   const rel = $derived(vaultNote(path));
+  /** Pictures show as themselves (the server's image types; no SVG). */
+  const picture = $derived(/\.(png|jpe?g|gif|webp|avif|bmp|ico)$/i.test(path));
   const writing = $derived(app.write[pane] && rel !== null);
   let doc = $state<FileRead | null>(null);
   let text = $state('');
@@ -90,6 +92,8 @@
   {#if !loaded && !error}<p>Opening…</p>
   {:else if writing && loaded}
     <textarea aria-label="Markdown source" bind:value={text} spellcheck="false"></textarea>
+  {:else if picture && doc}
+    <div class="scroll picture"><img src={`/api/fs/image?path=${encodeURIComponent(path)}&v=${doc.mtime}`} alt={path.split('/').pop()} /></div>
   {:else if doc?.text !== undefined}
     {#if /\.md$/i.test(path)}<div class="scroll" bind:this={host}></div>
     {:else}<pre>{doc.text}</pre>{/if}
@@ -97,6 +101,8 @@
 </section>
 
 <style>
+  .picture { display: flex; align-items: flex-start; justify-content: center; padding: 12px; }
+  .picture img { max-width: 100%; height: auto; image-rendering: auto; background: repeating-conic-gradient(#8881 0 25%, transparent 0 50%) 0 0 / 16px 16px; }
   .reader { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   header { display: flex; gap: 10px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--faint); }
   header span:first-child { margin-right: auto; overflow-wrap: anywhere; }
