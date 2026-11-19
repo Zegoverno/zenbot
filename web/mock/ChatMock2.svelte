@@ -558,7 +558,7 @@
       {:else if view === 'subagent'}
         <header class="vh">
           {#if narrow}<button class="icon back" title="Back to the chat" aria-label="Back to the chat" onclick={closeSub}>‹</button>{/if}
-          <span class="orb sm" class:busy={!sub.done} style="--a:{agent.a}; --b:{agent.b}"></span>
+          <span class="orb xs hdot" class:busy={!sub.done} style="--a:{agent.a}; --b:{agent.b}"></span>
           <div class="subh"><h2>{sub.name}</h2><span>subagent of {agent.name} · {sub.role} · {sub.model}</span></div>
           <span class="sp"></span>
           {#if !narrow}<button class="icon" title="Close the panel" aria-label="Close the panel" onclick={closeSub}>×</button>{/if}
@@ -674,6 +674,7 @@
     background: radial-gradient(circle at 32% 28%, var(--b), var(--a) 70%); box-shadow: 0 0 0 3px color-mix(in srgb, var(--a) 18%, transparent); }
   .orb.sm { width: 30px; height: 30px; font-size: 13px; }
   .orb.xs { width: 14px; height: 14px; box-shadow: none; }
+  .orb.xs.hdot { width: 10px; height: 10px; margin-right: 2px; }
   .orb.lg { width: 64px; height: 64px; font-size: 26px; margin: 0 auto 16px; box-shadow: 0 0 0 6px color-mix(in srgb, var(--a) 14%, transparent); }
   .orb.busy { animation: breathe 1.8s ease-in-out infinite; }
   @keyframes breathe { 50% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--a) 8%, transparent); transform: scale(0.96); } }
