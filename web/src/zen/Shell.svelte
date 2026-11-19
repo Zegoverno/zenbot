@@ -28,13 +28,14 @@
   let theme = $state<'auto' | 'light' | 'dark'>((['auto','light','dark'].includes(localStorage.getItem('zen.theme') || '') ? localStorage.getItem('zen.theme') : 'auto') as 'auto' | 'light' | 'dark');
   const icons: Record<string, string> = { home: '⌂', sessions: '◬', files: '▤', tasks: '✓', routines: '◷', agents: '◉', games: '◇' };
   $effect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem('zen.theme', theme); });
+  onMount(() => { const sync = (e: Event) => { theme = (e as CustomEvent).detail; }; window.addEventListener('zen-theme', sync); return () => window.removeEventListener('zen-theme', sync); });
   function cycleTheme() { theme = theme === 'auto' ? 'light' : theme === 'light' ? 'dark' : 'auto'; }
   async function action(which: string) {
     ring = false;
     if (which === 'New chat') openSession('new');
     else if (which === 'Search files') { if (app.session && wide) setView('side', 'files'); else board('files'); await tick(); (document.querySelector('.side-body input[type=search], .board input[type=search], .side-body input[placeholder], .board input[placeholder]') as HTMLElement | null)?.focus(); }
     else if (which === 'Attach') { if (app.session) (document.querySelector('[aria-label="attach files"]') as HTMLElement | null)?.click(); else { app.attachOnOpen = true; openSession('new'); } }
-    else if (which === 'Add task') { app.chatDraft = 'Help me add a task.'; openSession('new'); }
+    else if (which === 'Add task') { if (app.session && wide) setView('side', 'tasks'); else board('tasks'); await tick(); (document.querySelector('.tasks input') as HTMLInputElement | null)?.focus(); }
     else if (which === 'Theme') cycleTheme();
     else settings();
   }

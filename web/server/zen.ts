@@ -31,6 +31,14 @@ const AGENT = '[a-z][a-z0-9-]{0,31}';
 const PLUGIN = '[a-z0-9-]{2,40}';
 /** Method and route (after `/api/`) the page may reach. */
 const ROUTES: [string, RegExp][] = [
+  ['GET', /^(prefs|ideas|tasks\/meta|prompt-files\/USER\.md)$/],
+  ['PATCH', /^prefs$/],
+  ['PUT', /^prompt-files\/USER\.md$/],
+  ['POST', /^tasks$/],
+  ['PATCH', /^tasks\/[^/]{1,2048}$/],
+  ['DELETE', /^tasks\/[^/]{1,2048}$/],
+  ['POST', /^tasks\/[^/]{1,2048}\/agent$/],
+  ['POST', new RegExp(`^sessions/${ID}/stop$`)],
   ['GET', /^health$/],
   ['GET', /^(board|sessions|models|version|upgrade|tasks|jobs|jobs\/runs|memory|skills|suggestions|mcp|mcp\/pending)$/],
   ['GET', /^agents$/],

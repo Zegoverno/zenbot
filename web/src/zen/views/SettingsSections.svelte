@@ -20,7 +20,7 @@
   async function patch(p: Record<string, unknown>) { try { prefs = await call<Prefs>('prefs', 'PATCH', p); name = prefs.name ?? ''; prefError = ''; } catch (e) { prefError = (e as Error).message; } }
   async function saveUser() { busy = true; try { const r = await call<{text:string}>('prompt-files/USER.md', 'PUT', {text:user}); savedUser = r.text; userError = ''; } catch(e) { userError = (e as Error).message; } finally { busy = false; } }
   async function refreshVersion() { try { version = await call<Notes>('version?refresh=true'); } catch(e) { error = (e as Error).message; } }
-  function setTheme(t: typeof theme) { theme = t; document.documentElement.dataset.theme = t; localStorage.setItem('zen.theme', t); }
+  function setTheme(t: typeof theme) { theme = t; document.documentElement.dataset.theme = t; localStorage.setItem('zen.theme', t); window.dispatchEvent(new CustomEvent('zen-theme', {detail:t})); }
   onMount(() => {
     const t = localStorage.getItem('zen.theme'); if (t === 'light' || t === 'dark') theme = t;
     call<Prefs>('prefs').then(p => { prefs = p; name = p.name ?? ''; }).catch(e => prefError = e.message);

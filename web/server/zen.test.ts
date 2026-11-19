@@ -7,6 +7,11 @@ import { allowed, sameOrigin } from './zen.ts';
 import { list, run } from './commands.ts';
 
 describe('kernel proxy', () => {
+  it('exposes redesign routes without granting arbitrary kernel access', () => {
+    for (const [m, route] of [['GET','prefs'],['PATCH','prefs'],['GET','ideas'],['GET','tasks/meta'],['POST','tasks'],['PATCH','tasks/L%3AProjects%2Fself%2Ftasks.md%3A1'],['DELETE','tasks/abc123'],['PUT','prompt-files/USER.md'],['POST','sessions/abc/stop']]) expect(allowed(m,route)).toBe(true);
+    for (const route of ['prompt-files/SOUL.md','prompt-files/../token','tasks/../token']) expect(allowed('PUT',route)).toBe(false);
+  });
+
   it('lets through only what the terminal app uses', () => {
     expect(allowed('GET', 'board')).toBe(true);
     expect(allowed('GET', 'sessions/abc-123')).toBe(true);

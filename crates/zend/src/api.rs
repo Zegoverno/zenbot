@@ -86,7 +86,8 @@ fn release_notes(text: &str) -> Value {
 
 /// Three ideas, cached per UTC day and agent. Failures return useful generic prompts without caching.
 pub(crate) async fn ideas(State(app): State<AppState>, Query(q): Query<HashMap<String, String>>) -> Json<Value> {
-    static CACHE: std::sync::OnceLock<tokio::sync::Mutex<HashMap<String, (chrono::NaiveDate, Vec<String>)>>> = std::sync::OnceLock::new();
+    type IdeaCache = tokio::sync::Mutex<HashMap<String, (chrono::NaiveDate, Vec<String>)>>;
+    static CACHE: std::sync::OnceLock<IdeaCache> = std::sync::OnceLock::new();
     let agent = q.get("agent").map(String::as_str).unwrap_or(crate::agents::DEFAULT);
     let today = chrono::Utc::now().date_naive();
     let mut cache = CACHE.get_or_init(Default::default).lock().await;

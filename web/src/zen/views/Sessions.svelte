@@ -244,7 +244,7 @@
 <svelte:window onkeydown={key} />
 
 <div class="view" bind:this={list}>
-  <div class="view-head"><h2>Sessions</h2><button class="chip new" onclick={() => openSession('new')} title="n">+ New</button></div>
+  <div class="view-head"><h2>Sessions</h2><button class="chip new" aria-label="+ new session" onclick={() => openSession('new')} title="n">+ New</button></div>
   <div class="tools">
     <input
       bind:this={input}
