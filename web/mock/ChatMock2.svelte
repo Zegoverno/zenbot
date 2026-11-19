@@ -270,10 +270,30 @@
   }
   let liveN = $state(5);
   let liveOpen = $state(false);
+  // Answering the question: the card folds to your answer, zenbot works briefly, then replies.
+  let answered = $state<string | null>(null);
+  let answerPhase = $state<'working' | 'done'>('working');
+  let answerTimer: ReturnType<typeof setTimeout> | undefined;
+  const REPLIES: Record<string, { work?: string; steps?: [string, string][]; html: string }> = {
+    'Yes, book it': { work: 'Booked Pousada Villa Bella', steps: [['Opened a page', 'pousadavillabella.com.br · Booking'], ['Filled the form', 'Family suite with a crib, Fri 21 – Sun 23'], ['Paid', 'Card ending 4417 · R$ 1.780']],
+      html: '<p>Done. <b>Pousada Villa Bella</b> is booked for Fri 21 – Sun 23: family suite with a crib, R$ 1.780 for both nights.</p><p>The confirmation is in your email, and you can cancel for free until Wednesday.</p>' },
+    'Show me other options': { work: 'Compared 2 more hotels', steps: [['Searched the web', 'Family hotels Campos do Jordão, cribs'], ['Opened a page', 'Hotel Frontenac · Rooms'], ['Opened a page', 'Pousada Recanto da Serra · Rooms']],
+      html: '<p>Two more that take babies well:</p><p><b>Hotel Frontenac</b>: right in Capivari, crib included, R$ 1.150 a night. Busier and louder at night.</p><p><b>Pousada Recanto da Serra</b>: quiet, with a garden for walks, R$ 760 a night. A 10-minute drive to the centre.</p><p>Villa Bella is still my pick. Want me to book one of these instead?</p>' },
+    'Not now': { html: '<p>Okay, I won\'t book anything. The plan stays in this chat, so just ask when you\'re ready. Rooms for that weekend are going fast, though.</p>' },
+  };
+  const reply = $derived(answered ? (REPLIES[answered] ?? { html: `<p>Got it: “${answered}”. I'll take that into account and come back with an updated plan.</p>` }) : null);
+  function answer(text: string) {
+    if (!text.trim()) return;
+    answered = text.trim(); draft = ''; answerPhase = REPLIES[answered]?.work ? 'working' : 'done';
+    clearTimeout(answerTimer);
+    if (answerPhase === 'working') answerTimer = setTimeout(() => (answerPhase = 'done'), 2400);
+  }
+  $effect(() => { void state; void selected; answered = null; clearTimeout(answerTimer); });
+  const shown = $derived(state === 'waiting' && answered ? (answerPhase === 'working' ? 'working' : 'chat') : state);
   // Opening a chat (or switching chat or state) lands on its last message.
   let scroller: HTMLElement | undefined = $state();
   $effect(() => {
-    void selected; void state;
+    void selected; void state; void answered; void answerPhase;
     if (screen !== 'chat' || !scroller) return;
     tick().then(() => scroller && (scroller.scrollTop = scroller.scrollHeight));
   });
@@ -372,8 +392,8 @@
       <header class="hd">
         {#if narrow}<button class="icon back" title="Back" aria-label="Back" onclick={goBack}>‹</button>{/if}
         <h1>{state === 'new' ? 'New chat' : current.title}</h1>
-        {#if state === 'working'}<span class="tag work"><span class="dot work"></span>working</span>
-        {:else if state === 'waiting'}<span class="tag wait"><span class="dot wait"></span>needs you</span>{/if}
+        {#if shown === 'working'}<span class="tag work"><span class="dot work"></span>working</span>
+        {:else if shown === 'waiting'}<span class="tag wait"><span class="dot wait"></span>needs you</span>{/if}
         <span class="sp"></span>
         {#if state !== 'new'}
           <div class="menu-wrap">
@@ -442,11 +462,31 @@
                   {/if}
                 </div>
               {:else if m.k === 'ask'}
-                <div class="askq">
-                  <div class="q">{m.question}</div>
-                  <div class="opts">{#each m.options as o, j}<button class:primary={j === 0} onclick={() => (state = 'chat')}>{o}</button>{/each}</div>
-                  <div class="or">or type your own answer below</div>
-                </div>
+                {#if answered}
+                  <div class="askq done">
+                    <span class="q">{m.question}</span>
+                    <span class="ans">✓ {answered}</span>
+                  </div>
+                  {#if answerPhase === 'working'}
+                    <div class="livew"><div class="lrow"><span class="orb xs busy" style="--a:{agent.a}; --b:{agent.b}"></span><span class="lt"><b>{reply?.steps?.[0][0]}</b>{" "}<span class="ld">{reply?.steps?.[0][1]}</span>…</span><span class="lm">0:02</span></div></div>
+                  {:else}
+                    {#if reply?.work}
+                      <div class="w">
+                        <button class="wline" onclick={() => (open[999] = !open[999])}>
+                          <span class="chk">✓</span>{reply.work}<span class="n">· {reply.steps?.length} steps</span><span class="car">{open[999] ? '▾' : '▸'}</span>
+                        </button>
+                        {#if open[999]}<ol class="steps">{#each reply.steps ?? [] as [l, d]}<li><b>{l}</b> <span>{d}</span></li>{/each}</ol>{/if}
+                      </div>
+                    {/if}
+                    <div class="prose">{@html reply?.html}</div>
+                  {/if}
+                {:else}
+                  <div class="askq">
+                    <div class="q">{m.question}</div>
+                    <div class="opts">{#each m.options as o, j}<button class:primary={j === 0} onclick={() => answer(o)}>{o}</button>{/each}</div>
+                    <div class="or">or type your own answer below</div>
+                  </div>
+                {/if}
               {/if}
             {/each}
             {#if state === 'working'}
@@ -488,7 +528,7 @@
 
       <footer class="dock">
         <div class="compose">
-          <textarea rows="1" placeholder={state === 'waiting' ? `Answer ${agent.name}…` : `Message ${state === 'new' ? talk.name : agent.name}`} bind:value={draft} bind:this={draft_el}></textarea>
+          <textarea rows="1" placeholder={state === 'waiting' && !answered ? `Answer ${agent.name}…` : `Message ${state === 'new' ? talk.name : agent.name}`} bind:value={draft} bind:this={draft_el} onkeydown={(e) => { if (e.key === 'Enter' && !e.shiftKey && state === 'waiting' && !answered) { e.preventDefault(); answer(draft); } }}></textarea>
           <div class="bar">
             <button class="icon" title="Attach a file">{@render ico('clip')}</button>
             <div class="menu-wrap">
@@ -529,7 +569,7 @@
             </div>
             <span class="sp"></span>
             {#if state === 'working'}<button class="send stop" title="Stop" onclick={() => (state = 'chat')}>{@render ico('stop')}</button>
-            {:else}<button class="send" disabled={!draft.trim()} title="Send">↑</button>{/if}
+            {:else}<button class="send" disabled={!draft.trim()} title="Send" onclick={() => state === 'waiting' && !answered && answer(draft)}>↑</button>{/if}
           </div>
         </div>
       </footer>
@@ -773,6 +813,9 @@
   .opts button { padding: 8px 14px; border-radius: 99px; border: 1px solid var(--faint); background: var(--paper); font-size: 14px; }
   .opts button:hover { border-color: var(--dim); }
   .opts .primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .askq.done { flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 10px 14px; background: transparent; border-color: var(--faint); }
+  .askq.done .q { font-weight: 500; color: var(--dim); flex: 1; min-width: 12rem; }
+  .ans { font-size: 14px; font-weight: 600; color: var(--accent); white-space: nowrap; }
   .or { font-size: 12px; color: var(--dim); }
   .hello { max-width: 44rem; margin: 10vh auto 0; padding: 0 24px; text-align: center; }
   .hello h2 { font-family: var(--serif); font-size: 30px; font-weight: 600; margin: 0 0 6px; }
