@@ -37,6 +37,7 @@ mod test_util;
 mod tools;
 mod output;
 mod plugins;
+mod prefs;
 mod prices;
 mod media;
 mod turns;
@@ -327,6 +328,7 @@ async fn serve() -> Result<()> {
         .route("/plugins/{name}", axum::routing::patch(plugins::api_patch).delete(plugins::api_remove))
         .route("/plugins/{name}/resource", get(plugins::api_resource))
         .route("/plugins/{name}/call", axum::routing::post(plugins::api_call))
+        .route("/prefs", get(get_prefs).patch(patch_prefs))
         .route("/version", get(version))
         .route("/upgrade", get(upgrade_status).post(upgrade_start))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth));

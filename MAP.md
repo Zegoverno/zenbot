@@ -235,7 +235,8 @@ busy turns, commit) needs no token; the rest are under `/api` (`main.rs`):
 | `GET/POST /agents` | the agents and what each may use; make one (`name`, `description`) |
 | `GET/PUT/DELETE /agents/{name}` | an agent's files (`soul`, `identity`, `settings` as text) and session count; replace any of them (settings checked first, old files backed up); remove one (not zenbot; its folder moves to `backups/agents/`) |
 | `GET /sessions/{id}/ws` | the session's events; send `{"type":"prompt","text":…,"mode":"steer"?}` or `{"type":"abort"}` |
-| `GET /models`, `GET /version`, `GET/POST /upgrade` | models, update check, self-upgrade |
+| `GET /models`, `GET /version`, `GET/POST /upgrade` | models (`default` is the owner's preferred model, else `ZEN_DEFAULT_MODEL`), update check, self-upgrade |
+| `GET/PATCH /prefs` | the owner's preferences (`prefs.rs`): `name`, `home_layout`, `default_model`, `default_effort`; `PATCH` merges, `null` deletes; new sessions without a model use the preferred model and effort over `ZEN_DEFAULT_MODEL`, no restart |
 | `POST /complete` | one completion without tools (`model`, `system`, `prompt`, `purpose`), for the owner's apps on this machine (including optional writing apps); logged, not on a tape |
 | `POST /search` | the search tool for the owner's apps (`query`, `scope` default `knowledge`; `notes` for the vault's pages and notes; `limit`): words and meaning, reranked by System One, as JSON results (including optional note-finding apps) |
 | `GET /memory`, `POST /memory/sleep`, `POST /brain` | memory and records |
@@ -295,7 +296,7 @@ Tables: `sessions`, `tape_events`, `tape_exports`, `pending_prompts`, `turns`, `
 `prompt_suggestions`, `memories`, `sleep_runs`, `brain_records`, `brain_aliases`, `brain_links`,
 `brain_skill_uses`, `search_docs` (+ `search_docs_fts`), `search_state`, `search_queue`,
 `searches`, `jobs`, `job_runs`, `decisions`, `s1_states`, `s1_outcomes`, `mcp_interactions`,
-`task_agents`, `session_reviews` (retired `work_*` and `session_scores` retained as history).
+`task_agents`, `session_reviews`, `prefs` (the owner's preferences from the web app, `prefs.rs`) (retired `work_*` and `session_scores` retained as history).
 
 ## Learning loop
 

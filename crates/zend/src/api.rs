@@ -2,6 +2,7 @@
 
 use super::*;
 
+#[derive(Debug)]
 pub(crate) struct ApiError(pub(crate) StatusCode, pub(crate) String);
 
 impl IntoResponse for ApiError {
@@ -288,10 +289,17 @@ pub(crate) struct CreateSession {
 pub(crate) async fn create_session(State(app): State<AppState>, Json(body): Json<CreateSession>) -> ApiResult<Json<Value>> {
     let id = Uuid::new_v4();
     let who = crate::agents::load(body.agent.as_deref().unwrap_or(crate::agents::DEFAULT)).map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
-    // A model the client names is the owner's choice; without one, the agent's, else the default.
+    // A model the client names is the owner's choice; without one, the agent's, else the owner's
+    // preferred default (prefs.rs, then ZEN_DEFAULT_MODEL), with its preferred effort.
     let chosen = body.model.is_some().then_some("owner");
-    let model = body.model.or_else(|| who.model.clone()).unwrap_or_else(|| app.default_model.clone());
-    check_effort(&app, &model, body.effort.as_deref()).await?;
+    let (model, effort) = match body.model {
+        Some(m) => (m, body.effort),
+        None => {
+            let (m, preferred) = crate::prefs::new_session_defaults(&app, who.model.clone()).await;
+            (m, body.effort.or(preferred))
+        }
+    };
+    check_effort(&app, &model, effort.as_deref()).await?;
     if body.kind.as_deref().is_some_and(|k| k != crate::agent::CHANNEL) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "kind must be channel".into()));
     }
@@ -302,7 +310,7 @@ pub(crate) async fn create_session(State(app): State<AppState>, Json(body): Json
     .bind(id)
     .bind(body.title.map(|t| t.trim().to_string()).unwrap_or_default())
     .bind(model)
-    .bind(body.effort)
+    .bind(effort)
     .bind(chosen)
     .bind(body.kind)
     .bind(&who.name)
@@ -310,6 +318,17 @@ pub(crate) async fn create_session(State(app): State<AppState>, Json(body): Json
     .fetch_one(&app.db)
     .await?;
     Ok(Json(session_json(&row)))
+}
+
+/// The owner's preferences from the web app (prefs.rs): the keys that are set, as one object.
+pub(crate) async fn get_prefs(State(app): State<AppState>) -> ApiResult<Json<Value>> {
+    Ok(Json(Value::Object(crate::prefs::all(&app.db).await?)))
+}
+
+/// Merge preferences (`name`, `home_layout`, `default_model`, `default_effort`; `null` deletes);
+/// returns every preference that is set.
+pub(crate) async fn patch_prefs(State(app): State<AppState>, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
+    Ok(Json(Value::Object(crate::prefs::patch(&app, &body).await?)))
 }
 
 /// The owner's agents (agents.rs), zenbot first; one whose settings are broken says why. Each has
@@ -616,6 +635,31 @@ mod tests {
         assert!(!same_secret(b"", b"x"));
     }
 
+    /// A new session without a model gets the owner's preferred default; naming one wins.
+    #[tokio::test]
+    async fn new_sessions_follow_the_preferred_default() {
+        let (_db_dir, db) = crate::test_util::database().await;
+        let app = crate::test_util::app(db.clone());
+        let seed = || async {
+            app.catalog.lock().await.insert("faux/smoke".into(), json!({ "id": "faux/smoke", "efforts": ["low", "high"] }));
+            app.catalog.lock().await.insert("faux/other".into(), json!({ "id": "faux/other", "efforts": [] }));
+        };
+        seed().await;
+        let make = |v: Value| create_session(State(app.clone()), Json(serde_json::from_value(v).unwrap()));
+        let s = make(json!({})).await.ok().unwrap().0;
+        assert_eq!((s["model"].as_str(), s["effort"].is_null()), (Some("faux/smoke"), true), "the kernel's default");
+        crate::prefs::patch(&app, &json!({ "default_model": "faux/other" })).await.unwrap();
+        assert_eq!(make(json!({})).await.ok().unwrap().0["model"], "faux/other");
+        assert_eq!(make(json!({ "model": "faux/smoke", "effort": "low" })).await.ok().unwrap().0["model"], "faux/smoke");
+        seed().await;
+        crate::prefs::patch(&app, &json!({ "default_model": "faux/smoke", "default_effort": "high" })).await.unwrap();
+        let s = make(json!({})).await.ok().unwrap().0;
+        assert_eq!((s["model"].as_str(), s["effort"].as_str()), (Some("faux/smoke"), Some("high")));
+        seed().await;
+        assert_eq!(make(json!({ "effort": "low" })).await.ok().unwrap().0["effort"], "low", "a named effort wins");
+        db.close().await;
+    }
+
     /// Archiving records the outcome and when the session ended; restoring clears them.
     #[tokio::test]
     async fn archive_records_the_outcome() {
@@ -906,10 +950,12 @@ pub(crate) async fn task_agent(State(app): State<AppState>, Path(task): Path<Str
         return Ok(Json(json!({ "task": task, "session": a["session"], "agent": a["agent"], "existing": true })));
     }
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO sessions (id, title, model, title_source, agent, workspace) VALUES ($1, $2, $3, 'owner', $4, $5)")
+    let (model, effort) = crate::prefs::new_session_defaults(&app, who.model.clone()).await;
+    sqlx::query("INSERT INTO sessions (id, title, model, effort, title_source, agent, workspace) VALUES ($1, $2, $3, $4, 'owner', $5, $6)")
         .bind(id)
         .bind(tasks::agent_title(&t))
-        .bind(who.model.clone().unwrap_or_else(|| app.default_model.clone()))
+        .bind(model)
+        .bind(effort)
         .bind(&who.name)
         .bind(who.workspace_dir().map(|w| w.display().to_string()))
         .execute(&app.db)
