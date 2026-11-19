@@ -1,7 +1,7 @@
 <script lang="ts">
   // Files tab (mock): opens in the shared vault; ↑ and the path climb up to /, the Vault
   // button comes straight back. Folders first, dotfiles dimmed; search looks under this folder.
-  import { fsRoot, NOTES, VAULT, type FsNode } from './data.ts';
+  import { fsRoot, NOTES, PROPS, VAULT, type FsNode } from './data.ts';
   import { render } from '../src/zen/md.ts';
 
   let { ask }: { ask?: (path: string) => void } = $props();
@@ -11,8 +11,47 @@
   let cwd = $state<string>(saved?.cwd ?? VAULT);
   // The open file, if any: it replaces the list; ↑ or its folder's crumb goes back.
   let file = $state<string | null>(saved?.file ?? null);
-  $effect(() => sessionStorage.setItem(KEY, JSON.stringify({ cwd, file })));
+  $effect(() => sessionStorage.setItem(KEY, JSON.stringify({ cwd, file, flt })));
   let q = $state('');
+  // Filters by the notes' properties (type, status, tags): OR within one, AND across them.
+  type Flt = Record<string, string[]>;
+  let flt = $state<Flt>(saved?.flt ?? {});
+  let fltOpen = $state(false);
+  const FACETS = ['type', 'status', 'tags'];
+  const active = $derived(Object.values(flt).reduce((n, v) => n + v.length, 0));
+  function toggleF(k: string, v: string) {
+    const cur = flt[k] ?? [];
+    flt[k] = cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v];
+  }
+  function frontOf(text: string): Flt {
+    const m = /^---\n([\s\S]*?)\n---/.exec(text);
+    const out: Flt = {};
+    for (const l of (m?.[1] ?? '').split('\n')) {
+      const r = /^(\w+):\s*(.+)$/.exec(l);
+      if (r) out[r[1]] = r[2].replace(/^\[|\]$/g, '').split(/,\s*/).map((x) => x.trim());
+    }
+    return out;
+  }
+  /** A note's properties: its text's front matter, or the stand-in table. */
+  function propsOf(p: string): Flt {
+    const r = p.startsWith(VAULT + '/') ? p.slice(VAULT.length + 1) : p;
+    const t = edits[p] ?? NOTES[r];
+    return { ...(PROPS[r] ?? {}), ...(t ? frontOf(t) : {}) };
+  }
+  const matches = (p: string) => FACETS.every((k) => !flt[k]?.length || flt[k].some((v) => propsOf(p)[k]?.includes(v)));
+  /** Every note under this folder, for the filter's values and counts. */
+  const notesHere = $derived.by(() => {
+    const out: string[] = [];
+    const walk = (n: FsNode, p: string) => { for (const k of n.kids ?? []) { const kp = join(p, k.name); if (k.kids) walk(k, kp); else if (k.name.endsWith('.md')) out.push(kp); } };
+    walk(here, cwd);
+    return out;
+  });
+  const facets = $derived(FACETS.map((k) => {
+    const c = new Map<string, number>();
+    for (const p of notesHere) for (const v of propsOf(p)[k] ?? []) c.set(v, (c.get(v) ?? 0) + 1);
+    for (const v of flt[k] ?? []) if (!c.has(v)) c.set(v, 0);
+    return [k, [...c].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))] as [string, [string, number][]];
+  }).filter(([, vs]) => vs.length));
   let sel = $state<string | null>(null);
   // Long paths keep the current folder in view: the crumbs scroll to their end.
   let crumbsEl: HTMLElement | undefined = $state();
@@ -48,12 +87,12 @@
   /** Search: names under the current folder, with where they are. */
   const found = $derived.by(() => {
     const t = q.trim().toLowerCase();
-    if (!t) return [];
+    if (!t && !active) return [];
     const out: { path: string; node: FsNode }[] = [];
     const walk = (n: FsNode, p: string) => {
       for (const k of n.kids ?? []) {
         const kp = join(p, k.name);
-        if (k.name.toLowerCase().includes(t)) out.push({ path: kp, node: k });
+        if ((!t || k.name.toLowerCase().includes(t)) && (!active || (!k.kids && k.name.endsWith('.md') && matches(kp)))) out.push({ path: kp, node: k });
         walk(k, kp);
       }
     };
@@ -150,6 +189,7 @@
     file: '<path d="M6 3h9l4 4v14H6z"/>',
     up: '<path d="M12 19V5M6 11l6-6 6 6"/>',
     vault: '<path d="M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v13H6a2 2 0 0 1-2-2z"/><path d="M8 4v15"/>',
+    filter: '<path d="M4 6h16M7 12h10M10 18h4"/>',
     search: '<circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/>',
   };
 </script>
@@ -225,17 +265,43 @@
     </div>
   </div>
 {:else}
-<div class="fsearch">{@render ic('search')}<input placeholder={`Search in ${crumbs[crumbs.length - 1].label === '/' ? 'everything' : crumbs[crumbs.length - 1].label}`} bind:value={q} /></div>
+<div class="fsearch">{@render ic('search')}<input placeholder={`Search in ${crumbs[crumbs.length - 1].label === '/' ? 'everything' : crumbs[crumbs.length - 1].label}`} bind:value={q} />
+  <button class="fb" class:on={fltOpen || active > 0} aria-expanded={fltOpen} title="Filter by properties" onclick={() => (fltOpen = !fltOpen)}>{@render ic('filter')}<span class="hl">Filter</span>{#if active}<b>{active}</b>{/if}</button>
+</div>
+{#if fltOpen}
+  <div class="facets">
+    {#each facets as [k, vs]}
+      <div class="fg"><span class="fk">{k}</span>
+        {#each vs as [v, n]}
+          <button class="fc" class:tag={k === 'tags'} class:on={flt[k]?.includes(v)} aria-pressed={flt[k]?.includes(v) ?? false} onclick={() => toggleF(k, v)}>{k === 'tags' ? '#' : ''}{v}<small>{n}</small></button>
+        {/each}
+      </div>
+    {:else}
+      <div class="fk none2">No notes with properties here.</div>
+    {/each}
+    {#if active}<button class="clr" onclick={() => (flt = {})}>Clear filters</button>{/if}
+  </div>
+{:else if active}
+  <div class="facets act">
+    {#each FACETS as k}{#each flt[k] ?? [] as v}
+      <button class="fc on" class:tag={k === 'tags'} title="Remove this filter" onclick={() => toggleF(k, v)}>{#if k !== 'tags'}<em>{k}</em>{/if}{k === 'tags' ? '#' : ''}{v} ×</button>
+    {/each}{/each}
+    <button class="clr" onclick={() => (flt = {})}>Clear</button>
+  </div>
+{/if}
 
 <div class="list">
-  {#if q.trim()}
+  {#if q.trim() || active}
+    {#if active}<div class="rc">{found.length} note{found.length === 1 ? '' : 's'}</div>{/if}
     {#each found as r (r.path)}
+      {@const pr = active ? propsOf(r.path) : {}}
       <button class="row" class:on={sel === r.path} onclick={() => openNode(r.path, r.node)}>
         <span class="k {kind(r.node)}">{@render ic(kind(r.node))}</span>
-        <span class="nm"><span>{r.node.name}</span><small>{shortPath(parent(r.path))}</small></span>
+        <span class="nm"><span>{r.node.name.replace(/\.md$/, '')}</span><small>{shortPath(parent(r.path))}</small></span>
+        {#if active}<span class="pc">{#if pr.status}<span class="chip">{pr.status[0]}</span>{/if}{#each (pr.tags ?? []).slice(0, 2) as t}<span class="chip tag">#{t}</span>{/each}</span>{/if}
       </button>
     {:else}
-      <div class="none">Nothing called “{q.trim()}” here.</div>
+      <div class="none">{q.trim() ? `Nothing called “${q.trim()}”` : 'No notes'}{active ? ' with these filters' : ''} here.</div>
     {/each}
   {:else}
     {#each entries as n (n.name)}
@@ -284,7 +350,25 @@
   .nm > span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .nm small { font-size: 12px; color: var(--dim); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .when { font-size: 12px; color: var(--dim); white-space: nowrap; }
-  @media (max-width: 900px) { .home { padding: 6px; } .home .hl { display: none; } .bl small { display: none; } .rscroll { padding: 16px 16px 120px; } }
+  @media (max-width: 900px) { .fb .hl { display: none; } .pc { display: none; } .fk { width: 100%; } .home { padding: 6px; } .home .hl { display: none; } .bl small { display: none; } .rscroll { padding: 16px 16px 120px; } }
+  .fb { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; margin: -3px -6px -3px 0; border-radius: 99px; font-size: 13px; color: var(--dim); }
+  .fb:hover, .fb.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .fb b { min-width: 17px; height: 17px; border-radius: 99px; font-size: 11px; display: grid; place-items: center; background: var(--accent); color: var(--on-accent); }
+  .facets { display: flex; flex-direction: column; gap: 8px; margin: 0 16px 8px; padding: 10px 12px; border: 1px solid var(--faint); border-radius: 12px; }
+  .facets.act { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px; border: 0; padding: 0 2px; }
+  .fg { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .fk { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 650; width: 56px; }
+  .fk.none2 { width: auto; text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 13px; }
+  .fc { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; padding: 3px 10px; border-radius: 99px; border: 1px solid var(--faint); background: var(--paper); }
+  .fc:hover { border-color: var(--dim); }
+  .fc.tag { color: var(--accent); }
+  .fc small { font-size: 11px; color: var(--dim); }
+  .fc em { font-style: normal; opacity: 0.75; margin-right: 2px; }
+  .fc.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .fc.on small { color: inherit; opacity: 0.8; }
+  .clr { align-self: flex-start; font-size: 13px; color: var(--accent); font-weight: 600; padding: 2px 4px; }
+  .rc { font-size: 12px; color: var(--dim); padding: 4px 12px 2px; }
+  .pc { display: flex; gap: 4px; flex: none; }
   .reader { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .rbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 4px 16px 10px 20px; border-bottom: 1px solid var(--faint); }
   .chip { font-size: 12px; padding: 2px 9px; border-radius: 99px; background: var(--soft); color: var(--ink); white-space: nowrap; }

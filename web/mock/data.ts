@@ -207,3 +207,20 @@ A quiet pousada in Campos do Jordão, 10 minutes from Capivari. Good with babies
 Lk 19:41–44: *“If this day you only knew what makes for peace.”*
 `,
 };
+
+/** Properties of notes that have no text above (as if read from their front matter). */
+export const PROPS: Record<string, Record<string, string[]>> = {
+  'Daily/2026-11-18.md': { type: ['daily'] },
+  'Daily/2026-11-17.md': { type: ['daily'] },
+  'Daily/2026-11-19.md': { type: ['daily'] },
+  'Goals/A present and courageous family life.md': { type: ['goal'], status: ['active'], tags: ['family'] },
+  'Goals/Friendship with God and faithful stewardship.md': { type: ['goal'], status: ['active'], tags: ['faith', 'money'] },
+  'Goals/Rebuild a sustainable athletic life.md': { type: ['goal'], status: ['paused'], tags: ['health'] },
+  'Projects/Baby room/Shopping list.md': { type: ['project'], status: ['done'], tags: ['family', 'baby'] },
+  'Projects/Campos do Jordão/Packing list.md': { type: ['project'], status: ['active'], tags: ['travel', 'baby'] },
+  'wiki/Advent.md': { type: ['concept'], tags: ['faith'] },
+  'wiki/Baby sleep.md': { type: ['concept'], tags: ['baby', 'family'] },
+  'wiki/Budgeting.md': { type: ['solution'], tags: ['money'] },
+  'Templates/Daily.md': { type: ['template'] },
+  'Templates/Project.md': { type: ['template'] },
+};
