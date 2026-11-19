@@ -735,70 +735,28 @@ try {
   assert.match(await page.locator('.row', { hasText: 'Pitch practice' }).innerText(), /@rex · smoke/);
   assert.doesNotMatch(await page.locator('.row', { hasText: 'Plan the week' }).innerText(), /@zenbot/);
   await page.keyboard.press('5');
-  await page.locator('[aria-label="agents"]').getByText('@rex').waitFor();
+  await page.getByRole('button', { name: 'Show zenbot roles' }).waitFor();
   assert.match(page.url(), /view=agents/);
-  const rowOf = (name) => page.locator('[aria-label="agents"] .row', { hasText: `@${name}` });
-  assert.match(await rowOf('zenbot').innerText(), /all tools/);
-  assert.match(await rowOf('rex').innerText(), /read, web_search · no MCP · claude\/opus/);
-  assert.match(await rowOf('broken').innerText(), /⚠ agent `broken`: agent.toml: expected a value/);
-  // Roles: their own read-only section under the agents, grouped by agent, a broken file says why.
-  const roles = page.locator('[aria-label="roles"]');
-  await roles.getByRole('heading', { name: 'Roles' }).waitFor();
-  assert.match(await roles.locator('[data-role="scout"]').innerText(), /claude\/haiku[\s\S]*Reads and reports\.[\s\S]*tools: read, web_search · skills: work\/search/);
-  assert.match(await roles.locator('[data-role="builder"]').innerText(), /high[\s\S]*all tools/);
-  assert.match(await roles.innerText(), /@zenbot · default claude\/sonnet/);
-  assert.match(await roles.innerText(), /@rex[\s\S]*⚠ .*unknown field `nope`/);
-  assert.equal(await page.locator('[aria-label="agents"] [data-role]').count(), 0, 'roles stay out of the agents list');
-  if (shots) await page.screenshot({ path: 'tests/shots/zen-agents.png' });
-
-  // Create one: a bad name is refused before the kernel; a good one opens its files.
-  await page.getByRole('button', { name: 'New agent' }).click();
-  await page.getByLabel('agent name').fill('Bad Name');
-  await page.getByRole('button', { name: 'Create' }).click();
-  await page.getByText(/a name is a lowercase letter/).waitFor();
-  await page.getByLabel('agent name').fill('rex');
-  await page.getByRole('button', { name: 'Create' }).click();
-  await page.getByText('agent `rex` already exists').waitFor();
-  await page.getByLabel('agent name').fill('scout');
-  await page.getByLabel('agent description').fill('finds sources');
-  await page.getByLabel('agent description').press('Enter');
-  await page.getByText('@scout', { exact: true }).waitFor();
-  assert.equal(await page.getByLabel('SOUL.md').inputValue(), '# scout\n');
-
-  // Edit and save: only the changed file goes; a refused agent.toml shows why, nothing kept.
-  const save = page.locator('.view .act.primary');
-  assert.equal(await save.isDisabled(), true, 'nothing to save yet');
-  await page.getByLabel('IDENTITY.md').fill('# How scout works\n');
-  await save.click();
-  await page.getByRole('button', { name: 'Saved' }).waitFor();
-  assert.deepEqual(saves.at(-1), { name: 'scout', body: { identity: '# How scout works\n' } });
-  await page.getByLabel('agent.toml').fill('tools = ["nope"]\n');
-  await page.keyboard.press('Control+s');
-  await page.getByText('Not saved: agent.toml: unknown tool(s) nope; tools are: read, bash').waitFor();
-  assert.deepEqual(saves.at(-1), { name: 'scout', body: { settings: 'tools = ["nope"]\n' } });
-  assert.equal(await save.isDisabled(), false, 'the refused change stays to fix');
-  if (shots) await page.screenshot({ path: 'tests/shots/zen-agent-editor.png' });
-
-  // Delete asks first; zenbot can't be deleted.
-  await page.getByRole('button', { name: 'Delete', exact: true }).click();
-  await page.getByText(/Delete @scout\? Its folder moves/).waitFor();
-  assert.ok(agents.has('scout'), 'nothing removed before the confirm');
-  await page.getByRole('button', { name: 'Yes, delete @scout' }).click();
-  await page.locator('[aria-label="agents"]').getByText('@rex').waitFor();
-  assert.equal(agents.has('scout'), false);
-  assert.equal(await rowOf('scout').count(), 0);
-  await rowOf('zenbot').getByRole('button', { name: 'edit' }).click(); // the first, chosen again
-  await page.getByLabel('SOUL.md').waitFor();
-  assert.equal(await page.getByRole('button', { name: 'Delete', exact: true }).isDisabled(), true, 'zenbot stays');
-  await page.getByRole('button', { name: '← agents' }).click();
-
-  // A new session with an agent: from its editor, the session is started as it.
-  await rowOf('rex').click();
-  await rowOf('rex').getByRole('button', { name: 'edit' }).click();
-  await page.getByRole('button', { name: 'New session with this agent' }).click();
+  assert.match(await page.locator('article.ag', { hasText: 'rex' }).innerText(), /read, web_search · no MCP/);
+  await page.getByText('agent `broken`: agent.toml: expected a value').waitFor();
+  const scout = page.locator('[data-role="scout"]');
+  await scout.getByRole('button').click();
+  assert.match(await scout.innerText(), /Reads and reports/);
+  assert.match(await scout.innerText(), /read[\s\S]*web_search[\s\S]*work\/search/);
+  await scout.getByRole('button', { name: 'Ask zenbot to change it' }).click();
+  const draft = page.locator('textarea').first();
+  await draft.waitFor();
+  assert.equal(await draft.inputValue(), "Change zenbot's scout role:");
+  await page.goto(`${base}/?view=agents`);
+  await page.getByRole('button', { name: 'Show rex roles' }).click();
+  await page.getByText(/Can't read roles:.*unknown field `nope`/).waitFor();
+  await page.getByRole('button', { name: /New agent/ }).click();
+  await draft.waitFor();
+  assert.equal(await draft.inputValue(), 'Create a new agent for me:');
+  await page.goto(`${base}/?view=agents`);
+  await page.getByRole('button', { name: 'Talk to rex' }).click();
   await page.getByText('new session with rex').waitFor();
   await page.locator('.zc-foot', { hasText: /@rex · smoke/ }).waitFor();
-  assert.match((await page.locator('.zc-foot').textContent()).replace(/\s+/g, ' '), /@rex · smoke/);
   // The picker in a fresh chat changes who it starts as.
   await page.getByRole('radio', { name: '@zenbot' }).click();
   await page.getByRole('radio', { name: '@rex' }).click();

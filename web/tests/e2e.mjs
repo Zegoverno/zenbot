@@ -78,10 +78,17 @@ try {
   assert.match(read(), /Plain editing/);
   const onDisk = read();
   await source.fill('Unsaved text');
-  page.once('dialog', dialog => dialog.dismiss());
-  await page.getByRole('button', { name: 'Read', exact: true }).click();
-  assert.equal(await source.inputValue(), 'Unsaved text', 'declining discard keeps edits');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.getByRole('button', { name: 'Keep editing' }).click();
+  assert.equal(await source.inputValue(), 'Unsaved text', 'keeping editing preserves edits');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.getByRole('button', { name: 'Save and leave' }).click();
+  await page.getByText('Unsaved text', { exact: true }).waitFor();
+  assert.equal(read(), 'Unsaved text');
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
   await source.fill(onDisk);
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await page.getByRole('status').filter({ hasText: /^Saved$/ }).waitFor();
 
   // A disk writer wins; conflicts keep local edits instead of silently rebasing them.
   writeFileSync(file, '# Disk wins\n');
@@ -92,8 +99,13 @@ try {
   assert.equal(read(), '# Disk wins\n');
   await page.reload();
   await source.waitFor();
-  assert.equal(await source.inputValue(), '# Disk wins\n');
-  await page.getByRole('button', { name: 'Read', exact: true }).click();
+  assert.equal(await source.inputValue(), '# Local edits kept\n', 'reload restores the draft');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.getByRole('button', { name: 'Save and leave' }).click();
+  await page.getByRole('alert').filter({ hasText: 'Changed on disk' }).waitFor();
+  assert.equal(await source.inputValue(), '# Local edits kept\n');
+  assert.equal(read(), '# Disk wins\n', 'conflict refuses save and leave');
+  await page.getByRole('button', { name: 'Discard' }).click();
   await page.getByRole('heading', { name: 'Disk wins' }).waitFor();
 
   // New Markdown remains possible without plugins, including explicit create-only hash.
