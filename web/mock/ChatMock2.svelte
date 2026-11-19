@@ -148,7 +148,6 @@
   function openById(id: string) {
     const s = [...channels, ...sessions, ...archived].find((x) => x.id === id);
     if (s) pick(s);
-    else { selected = 'trip'; openChat('chat'); }
   }
   function newChat() {
     openChat('new');

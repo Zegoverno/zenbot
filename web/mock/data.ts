@@ -19,7 +19,9 @@ export const channels: Session[] = [
 export const sessions: Session[] = [
   { id: 'trip', title: 'Plan a weekend in Campos do Jordão', when: '9:12', state: 'working', sub: 2 },
   { id: 'budget', title: 'Family budget for December', when: '8:40', state: 'waiting' },
-  { id: 'gift', title: 'Christmas gift ideas for the parents', when: '7:05', state: 'idle' },
+  { id: 'gift', title: 'Christmas gift ideas for the parents', when: '7:05', state: 'waiting' },
+  { id: 'brief', title: 'Morning brief', when: '6:00', state: 'working' },
+  { id: 'budgetwk', title: 'Weekly budget check', when: 'Mon', state: 'idle' },
   { id: 'recipe', title: 'Baby-friendly dinner recipes', when: 'Wed', state: 'idle' },
 ];
 
