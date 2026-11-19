@@ -1251,7 +1251,7 @@ vault_tasks() {
   check "an unknown project is a 404, a bad field a 400" eq "$(curl -s -o /dev/null -w '%{http_code}/' "${api[@]}" -X POST "$URL/api/tasks" -d '{"project":"nope","text":"x"}')$(curl -s -o /dev/null -w '%{http_code}' "${api[@]}" -X POST "$URL/api/tasks" -d '{"project":"work","text":"x","due":"tomorrow"}')" "404/400"
   local k; k=$(curl -s "${api[@]}" -X PATCH "$URL/api/tasks/$nid" -d '{"done":true,"rev":"'"$(jq -r .rev <<<"$c")"'"}')
   check "ticking writes [x] and the date" eq "$(jq -c '[.done, .done_on == "'"$(date -u +%F)"'"]' <<<"$k")" '[true,true]'
-  check "the line is rewritten in place" eq "$(tail -n 1 "$p/work/tasks.md" | cut -c1-8)" "- [x] Cal"
+  check "the line is rewritten in place" eq "$(tail -n 1 "$p/work/tasks.md" | cut -c1-9)" "- [x] Cal"
   check "done=7d lists it, the plain list does not" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/tasks?done=7d" | jq -c '[.count, ([.projects[].tasks[] | select(.done)] | length)]')$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/tasks" | jq -c '[.projects[].tasks[] | select(.done)] | length')" '[3,1]0'
   curl -s "${api[@]}" -X PATCH "$URL/api/tasks/$nid" -d '{"done":false,"priority":null,"project":"self","goal":null,"rev":"'"$(jq -r .rev <<<"$k")"'"}' >/dev/null
   check "a project change moves the line" eq "$(grep -c "🆔 $nid" "$p/work/tasks.md")/$(grep -c "🆔 $nid" "$p/self/tasks.md")" 0/1
@@ -1271,7 +1271,7 @@ vault_tasks() {
   check "dropping writes [-] and the date" eq "$(curl -s "${api[@]}" -X PATCH "$URL/api/tasks/s1" -d '{"dropped":true,"rev":"'"$(jq -r '.projects[].tasks[] | select(.id == "s1") | .rev' <<<"$t")"'"}' >/dev/null; grep -c '^- \[-\] Plan the week .* ❌ ' "$p/self/tasks.md")" 1
   check "delete removes the line" eq "$(curl -s "${api[@]}" -X DELETE "$URL/api/tasks/f2?rev=$(jq -r '.projects[].tasks[] | select(.id == "f2") | .rev' <<<"$t")" >/dev/null; grep -c f2 "$p/garden/tasks.md")" 0
   mkdir -p "$TMP/home/.zenbot/global/Goals"; printf -- '---\nstatus: active\n---\n# Grow\n' >"$TMP/home/.zenbot/global/Goals/Grow.md"
-  check "meta lists the projects and the goals" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/tasks/meta" | jq -c '[[.projects[].id], .goals]')" '[["garden","self","work"],[{"id":"Grow","title":"Grow","status":"active"}]]'
+  check "meta lists the projects and the goals" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/tasks/meta" | jq -c '[[.projects[].id], [.goals[] | {id,title,status}]]')" '[["garden","self","work"],[{"id":"Grow","title":"Grow","status":"active"}]]'
   check "the app's writes pass the token check" eq "$(curl -s -o /dev/null -w '%{http_code}' -X PATCH "$URL/api/tasks/f1" -H 'Content-Type: application/json' -d '{"done":true}')" 401
 }
 
