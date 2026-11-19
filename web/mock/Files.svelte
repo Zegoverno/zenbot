@@ -100,6 +100,7 @@
     $effect(() => {
       if (!doc) return;
       host.replaceChildren(doc.el);
+      host.parentElement?.scrollTo(0, 0);
       host.querySelectorAll<HTMLInputElement>('input[type=checkbox]').forEach((b, i) => {
         b.disabled = false;
         b.onchange = () => toggleTask(i, b.checked);
@@ -118,6 +119,24 @@
     let n = -1;
     edits[file!] = text.replace(/^(\s*[-*] \[)( |x|X)(\])/gm, (m, a, _x, c) => (++n === i ? a + (on ? 'x' : ' ') + c : m));
   }
+  // Between files: the other files of this folder, in list order; ‹ › and ← → step through them.
+  const siblings = $derived(file ? entries.filter((n) => !n.kids).map((n) => join(cwd, n.name)) : []);
+  const at = $derived(file ? siblings.indexOf(file) : -1);
+  let sibOpen = $state(false);
+  function step(d: number) {
+    if (at < 0 || !siblings.length || editing) return;
+    const p = siblings[(at + d + siblings.length) % siblings.length];
+    openNode(p, { name: p.split('/').pop()! }); sibOpen = false;
+  }
+  function keys(e: KeyboardEvent) {
+    if (!file || editing || e.metaKey || e.ctrlKey || e.altKey) return;
+    const t = e.target as HTMLElement;
+    if (t.closest('input, textarea, [contenteditable]')) return;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); step(-1); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); step(1); }
+    else if (e.key === 'Escape' && sibOpen) { e.stopPropagation(); sibOpen = false; }
+  }
+  const nameOf = (p: string) => p.split('/').pop()!;
   let editing = $state(false);
   let draft = $state('');
   function edit() { draft = text; editing = true; }
@@ -134,6 +153,8 @@
     search: '<circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/>',
   };
 </script>
+
+<svelte:window onkeydown={keys} />
 
 {#snippet ic(name: string)}<svg class="fi" viewBox="0 0 24 24" aria-hidden="true">{@html ICON[name]}</svg>{/snippet}
 
@@ -160,6 +181,22 @@
       {/each}
       <span class="edited">Edited {node?.when ?? 'today'}</span>
       <span class="sp"></span>
+      {#if siblings.length > 1 && !editing}
+        <div class="sib">
+          <button class="nb" title={`Previous: ${nameOf(siblings[(at - 1 + siblings.length) % siblings.length])} (←)`} aria-label="Previous file" onclick={() => step(-1)}>‹</button>
+          <button class="cnt" title="Files in this folder" aria-haspopup="listbox" aria-expanded={sibOpen} onclick={() => (sibOpen = !sibOpen)}>{at + 1} of {siblings.length}</button>
+          <button class="nb" title={`Next: ${nameOf(siblings[(at + 1) % siblings.length])} (→)`} aria-label="Next file" onclick={() => step(1)}>›</button>
+          {#if sibOpen}
+            <div class="sibs" role="listbox">
+              {#each siblings as sp, i}
+                <button role="option" aria-selected={i === at} class:on={i === at} onclick={() => { openNode(sp, { name: nameOf(sp) }); sibOpen = false; }}>
+                  {@render ic(kind({ name: nameOf(sp) }))}<span>{nameOf(sp)}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {/if}
       {#if editing}
         <button class="rb" onclick={() => (editing = false)}>Cancel</button>
         <button class="rb pri" onclick={save}>Save</button>
@@ -258,6 +295,17 @@
   .rb { padding: 5px 12px; border-radius: 99px; font-size: 13px; font-weight: 600; border: 1px solid var(--faint); }
   .rb:hover { border-color: var(--dim); }
   .rb.pri { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .sib { position: relative; display: flex; align-items: center; margin-right: 4px; border: 1px solid var(--faint); border-radius: 99px; }
+  .nb { width: 28px; height: 26px; font-size: 18px; line-height: 1; color: var(--dim); border-radius: 99px; }
+  .nb:hover { color: var(--ink); background: var(--soft); }
+  .cnt { font-size: 12px; color: var(--dim); padding: 0 4px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .cnt:hover { color: var(--ink); }
+  .sibs { position: absolute; top: 34px; right: 0; z-index: 12; min-width: 240px; max-width: 320px; max-height: 50vh; overflow: auto; padding: 6px; display: flex; flex-direction: column;
+    background: var(--paper); border: 1px solid var(--faint); border-radius: 14px; box-shadow: 0 14px 40px var(--shadow); }
+  .sibs button { display: flex; align-items: center; gap: 9px; padding: 7px 10px; border-radius: 8px; font-size: 14px; text-align: left; color: var(--dim); }
+  .sibs button span { color: var(--ink); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .sibs button:hover { background: var(--soft); }
+  .sibs button.on span { color: var(--accent); font-weight: 600; }
   .rscroll { flex: 1; overflow: auto; padding: 18px 22px 90px; }
   .raw { width: 100%; min-height: 60vh; resize: vertical; border: 1px solid var(--faint); border-radius: 12px; padding: 16px; background: var(--paper); color: var(--ink); font: 14px/1.6 var(--mono); outline: none; }
   .raw:focus { border-color: var(--accent); }
