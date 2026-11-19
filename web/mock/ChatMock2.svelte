@@ -10,6 +10,7 @@
   // picking it in Sessions; the chat then takes the whole screen, with a back arrow to Sessions.
   // Fake data; nothing here talks to the kernel. The floating "mock" panel switches states.
   import { onMount, tick } from 'svelte';
+  import Files from './Files.svelte';
   import Home from './Home.svelte';
   import { archived, archivedCount, channels, conversation, question, sessions, type Msg, type Session } from './data.ts';
 
@@ -685,11 +686,7 @@
         </div>
       {:else if view === 'files'}
         <header class="vh"><h2>Files</h2><span class="sp"></span>{@render vclose()}</header>
-        <div class="vscroll">
-          {#each [['📁', 'Goals', '4 notes'], ['📁', 'Projects', '12 notes'], ['📁', 'Daily', 'today'], ['📄', 'Family budget — December.md', '8:41'], ['📄', 'Campos do Jordão trip.md', '9:16'], ['🖼', 'baby-room-ideas.png', 'Wed']] as [i, n, w]}
-            <div class="frow"><span>{i}</span><span class="t">{n}</span><span class="when">{w}</span></div>
-          {/each}
-        </div>
+        <Files />
       {:else if view === 'tasks'}
         <header class="vh"><h2>Tasks</h2><span class="sp"></span>{@render vclose()}</header>
         <div class="vscroll">

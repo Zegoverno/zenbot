@@ -84,3 +84,32 @@ export const suggestions = [
   'Find a recipe for tonight',
   'Remind me of something',
 ];
+
+/** A fake filesystem for the Files tab: folders hold children; files carry a short "when". */
+export type FsNode = { name: string; when?: string; kids?: FsNode[] };
+const d = (name: string, kids: FsNode[] = [], when?: string): FsNode => ({ name, kids, when });
+const f = (name: string, when: string): FsNode => ({ name, when });
+export const VAULT = '/home/exedev/.zenbot/global';
+export const fsRoot: FsNode = d('', [
+  d('bin'), d('etc', [f('hostname', 'Oct 2'), f('hosts', 'Oct 2')]), d('tmp', [f('a1.png', '9:20')]), d('usr', [d('bin'), d('lib'), d('share')]), d('var', [d('log')]),
+  d('home', [
+    d('exedev', [
+      d('.zenbot', [
+        d('global', [
+          d('Daily', [f('2026-11-19.md', '6:02'), f('2026-11-18.md', 'Wed'), f('2026-11-17.md', 'Tue')], 'today'),
+          d('Goals', [f('A present and courageous family life.md', 'Nov 3'), f('Friendship with God and faithful stewardship.md', 'Nov 3'), f('Rebuild a sustainable athletic life.md', 'Oct 30')], 'Nov 3'),
+          d('Projects', [d('Baby room', [f('baby-room-ideas.png', 'Wed'), f('Shopping list.md', 'Wed')], 'Wed'), d('Campos do Jordão', [f('Campos do Jordão trip.md', '9:16'), f('Packing list.md', '9:20')], '9:20'), d('Family budget', [f('Family budget — December.md', '8:41'), f('2026 spending.csv', 'Mon')], '8:41')], '9:20'),
+          d('Templates', [f('Daily.md', 'Sep 12'), f('Project.md', 'Sep 12')], 'Sep 12'),
+          d('wiki', [f('Advent.md', 'Nov 16'), f('Baby sleep.md', 'Nov 10'), f('Budgeting.md', 'Oct 22'), f('Pousada Villa Bella.md', '9:16')], '9:16'),
+          f('AGENTS.md', 'Nov 2'), f('MEMORY.md', '3:00'),
+        ], '9:20'),
+        d('agents', [d('zenbot', [f('IDENTITY.md', 'Nov 18'), f('SOUL.md', 'Oct 8')])]), d('outputs'),
+        f('AGENTS.md', 'Nov 12'), f('USER.md', 'Nov 18'),
+      ], '9:20'),
+      d('inbox', [d('2026-11-19', [f('preview-1795105260571.png', '9:41')])], '9:41'),
+      d('zenbot', [d('crates'), d('web'), f('AGENTS.md', 'Nov 17'), f('README.md', 'Nov 17')], 'Nov 18'),
+      d('zengame', [f('project.godot', 'Nov 19')], 'Nov 19'),
+      f('.bashrc', 'Sep 1'),
+    ], '9:41'),
+  ]),
+]);
