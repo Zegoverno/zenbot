@@ -63,7 +63,6 @@
         '--color-border-secondary': v('--faint'),
         '--color-background-info': v('--accent'),
         '--border-radius-md': v('--radius'),
-        '--font-serif': v('--serif'),
         '--color-text-primary': v('--ink'),
         '--color-text-secondary': v('--dim'),
         '--color-border-primary': v('--faint'),
@@ -73,17 +72,19 @@
         '--color-text-warning': v('--warn'),
         '--font-sans': v('--sans'),
         '--font-mono': v('--mono'),
-      },
+      } satisfies Partial<NonNullable<McpUiHostContext['styles']>['variables']>,
     };
   }
 
   function context(): McpUiHostContext {
     return {
       theme: dark ? 'dark' : 'light',
-      styles: styles() as unknown as McpUiHostContext['styles'],
+      // The SDK type requires every variable, although its runtime schema allows a subset.
+      styles: styles() as McpUiHostContext['styles'],
       displayMode: 'inline',
       availableDisplayModes: ['inline'],
-      containerDimensions: dimensions,
+      // Host context crosses postMessage: Svelte's state proxy is not structured-cloneable.
+      containerDimensions: { width: dimensions.width, height: dimensions.height },
       platform: 'web',
       locale: navigator.language,
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
