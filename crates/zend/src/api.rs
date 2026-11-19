@@ -331,6 +331,26 @@ pub(crate) async fn patch_prefs(State(app): State<AppState>, Json(body): Json<Va
     Ok(Json(Value::Object(crate::prefs::patch(&app, &body).await?)))
 }
 
+/// `USER.md` (and only the files `prompt_files::ALLOWED` names) as `{name, text, limit}`: `limit` is
+/// how many characters of it the sessions' instructions keep.
+pub(crate) async fn get_prompt_file(Path(name): Path<String>) -> ApiResult<Json<Value>> {
+    let n = name.clone();
+    let (text, limit) = tokio::task::spawn_blocking(move || crate::prompt_files::read(&n)).await?.map_err(|e| ApiError(StatusCode::NOT_FOUND, format!("{e:#}")))?;
+    Ok(Json(json!({ "name": name, "text": text, "limit": limit })))
+}
+
+/// Replace a prompt file's text (`{text}`): the old version is backed up to
+/// `~/.zenbot/backups/prompt-files/`, the write is atomic. Returns the file as `GET` does, and
+/// `backup` (its path) when there was an old version to keep.
+pub(crate) async fn put_prompt_file(Path(name): Path<String>, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
+    let text = body["text"].as_str().ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "`text` (a string) is required".into()))?.to_string();
+    let (n, t) = (name.clone(), text.clone());
+    let backup = tokio::task::spawn_blocking(move || crate::prompt_files::write(&n, &t))
+        .await?
+        .map_err(|e| ApiError(if crate::prompt_files::ALLOWED.contains(&name.as_str()) { StatusCode::BAD_REQUEST } else { StatusCode::NOT_FOUND }, format!("{e:#}")))?;
+    Ok(Json(json!({ "name": name, "text": text, "limit": crate::config::get().user_chars, "backup": backup.map(|b| b.display().to_string()) })))
+}
+
 /// The owner's agents (agents.rs), zenbot first; one whose settings are broken says why. Each has
 /// its `roles` (roles.rs, read-only): `{default_model, roles: [...]}`, or `{error}` for a broken file.
 pub(crate) async fn list_agents() -> ApiResult<Json<Value>> {

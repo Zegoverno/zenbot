@@ -572,7 +572,7 @@ impl From<std::io::Error> for WriteError {
     }
 }
 
-type Wr<T> = Result<T, WriteError>;
+pub(crate) type Wr<T> = Result<T, WriteError>;
 
 fn invalid<T>(m: impl Into<String>) -> Wr<T> {
     Err(WriteError::Invalid(m.into()))
@@ -666,7 +666,7 @@ fn rel_of(vault: &Path, file: &Path) -> String {
 
 /// Write `text` over `path` atomically: a temporary file next to it, then a rename. An existing
 /// file keeps its permissions.
-fn write_atomic(path: &Path, text: &str) -> Wr<()> {
+pub(crate) fn write_atomic(path: &Path, text: &str) -> Wr<()> {
     use std::io::Write;
     let dir = path.parent().ok_or_else(|| WriteError::Io("no folder".into()))?;
     let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();

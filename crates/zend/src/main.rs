@@ -38,6 +38,7 @@ mod tools;
 mod output;
 mod plugins;
 mod prefs;
+mod prompt_files;
 mod prices;
 mod media;
 mod turns;
@@ -329,6 +330,7 @@ async fn serve() -> Result<()> {
         .route("/plugins/{name}/resource", get(plugins::api_resource))
         .route("/plugins/{name}/call", axum::routing::post(plugins::api_call))
         .route("/prefs", get(get_prefs).patch(patch_prefs))
+        .route("/prompt-files/{name}", get(get_prompt_file).put(put_prompt_file))
         .route("/version", get(version))
         .route("/upgrade", get(upgrade_status).post(upgrade_start))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth));
