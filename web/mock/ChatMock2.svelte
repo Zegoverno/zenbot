@@ -236,20 +236,20 @@
   });
 
   // Working: the live line under the conversation opens into every step so far, the current one
-  // last, plus the helpers (subagents) and their current step. New steps stream in (faked here on a
+  // last, plus the subagents and their current step. New steps stream in (faked here on a
   // timer); the panel stays open while it works and folds into the usual "N steps" line when done.
   type Live = { label: string; detail: string; t: string; failed?: boolean };
   const QUEUE: Live[] = [
     { label: 'Read your message', detail: 'Two adults and a baby, Fri 21 – Sun 23', t: '0:02' },
     { label: 'Searched the web', detail: 'Pousada Villa Bella availability November', t: '0:09' },
     { label: 'Opened a page', detail: 'pousadavillabella.com.br · Rooms', t: '0:21' },
-    { label: 'Asked a helper', detail: 'Compare prices on Booking and Airbnb', t: '0:24' },
+    { label: 'Started a subagent', detail: 'Compare prices on Booking and Airbnb', t: '0:24' },
     { label: 'Opened a page', detail: 'booking.com · Pousada Villa Bella', t: '0:38', failed: true },
     { label: 'Tried another way', detail: 'Called the pousada’s booking form instead', t: '0:47' },
     { label: 'Checked the calendar', detail: 'Fri 21 – Sun 23 Nov is free', t: '0:55' },
     { label: 'Checking availability', detail: 'Family suite with a crib, 2 nights', t: '1:04' },
   ];
-  const HELPERS = [
+  const SUBAGENTS = [
     { name: 'Price check', step: 'Reading Airbnb listings near Capivari…', t: '0:40', steps: [
       ['Searched', 'Booking.com · Pousada Villa Bella', '0:26'], ['Opened a page', 'booking.com · didn’t load', '0:31'],
       ['Searched', 'Airbnb · Capivari, 2 nights', '0:35'], ['Reading', 'Airbnb listings near Capivari', '0:40']] },
@@ -428,7 +428,7 @@
                 <div class="lhead">
                   <span class="orb xs busy" style="--a:{agent.a}; --b:{agent.b}"></span>
                   <b>{agent.name} is working</b>
-                  <span class="lm">{live.length} steps<span class="wide">{" · "}{HELPERS.filter((h) => !h.done).length} of {HELPERS.length} helpers busy</span> · {cur.t}</span>
+                  <span class="lm">{live.length} steps<span class="wide">{" · "}{SUBAGENTS.filter((h) => !h.done).length} of {SUBAGENTS.length} subagents busy</span> · {cur.t}</span>
                 </div>
                 <div class="tline">
                   {#if live.length > 3}
@@ -446,9 +446,9 @@
                       {/if}
                     {/each}
                   </ol>
-                  <div class="hl">Helpers</div>
-                  <div class="helpers">
-                    {#each HELPERS as h, k}
+                  <div class="hl">Subagents</div>
+                  <div class="subagents">
+                    {#each SUBAGENTS as h, k}
                       <div class="hcard" class:done={h.done}>
                         <button class="hrow" aria-expanded={!!hOpen[k]} onclick={() => (hOpen[k] = !hOpen[k])}>
                           <span class="orb xs" class:busy={!h.done} style="--a:{agent.a}; --b:{agent.b}"></span>
@@ -686,7 +686,7 @@
   .lhead b { font-weight: 600; flex: 1; white-space: nowrap; }
   @media (max-width: 900px) { .lm .wide { display: none; } }
   .more { font-size: 12.5px; color: var(--accent); font-weight: 600; padding: 2px 0 6px 29px; }
-  .helpers { align-items: start; display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; }
+  .subagents { align-items: start; display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; }
   .hcard { border: 1px solid var(--faint); border-radius: 12px; background: var(--paper); }
   .hcard .hrow { width: 100%; text-align: left; padding: 8px 10px; animation: none; }
   .hcard .hrow:hover { background: var(--soft); border-radius: 12px; }
