@@ -1298,7 +1298,7 @@
       <div class="zc-pop" role="listbox" aria-label={picker.title}>
         <div class="zc-dim zc-pophead">{picker.title} <span>· ↑↓ enter · esc</span></div>
         {#each picker.items as it, i}
-          <button class="zc-item" class:zc-on={i === picker.sel} role="option" aria-selected={i === picker.sel} onclick={() => pick(i)} onmouseenter={() => picker && (picker.sel = i)}>{it.label}</button>
+          <button class="zc-item" class:zc-on={i === picker.sel} role="option" aria-selected={i === picker.sel} onclick={() => pick(i)} onpointermove={(e) => { if (picker && (e.movementX || e.movementY)) picker.sel = i; }}>{it.label}</button>
         {/each}
       </div>
     {:else if menu.length && hi < 0}
