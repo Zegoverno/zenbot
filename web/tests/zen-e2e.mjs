@@ -186,7 +186,7 @@ const kernel = createServer(async (req, res) => {
   if (r === 'GET /api/sessions/s1')
     return json(res, { ...session('s1', 'Plan the week'), busy: false, tokens: 1200, message_count: 2, messages: [
       { role: 'user', content: 'What is on today?', seq: 1 },
-      { role: 'assistant', content: [{ type: 'text', text: 'Standup at **07:00**, see [[God]].' }], seq: 2 },
+      { role: 'assistant', content: [{ type: 'text', text: 'Standup at **07:00**, see [[God]] and https://example.com/standup.' }], seq: 2 },
     ] });
   if (r === 'GET /api/models') return json(res, { models: [{ id: 'faux/smoke', efforts: [] }], authenticated: {}, default: 'faux/smoke' });
   if (r === 'POST /api/search') {
@@ -599,7 +599,7 @@ try {
   await fx.locator('#ctx', { hasText: 'slot=game' }).waitFor();
   // A zen://open link opens the file in the same pane, through its opener (the built-in reader).
   await fx.getByRole('button', { name: 'Open Grace' }).click();
-  await page.getByRole('heading', { name: 'Grace' }).waitFor();
+  await page.getByRole('heading', { name: 'Grace', exact: true }).waitFor();
   assert.match(page.url(), /view=files&file=.*Grace\.md/);
   // Open with: a plugin's opener for the file, made the default, opens it from then on.
   await page.goto(`${base}/?view=files&file=${encodeURIComponent(path.join(VAULT, 'games/board.fx'))}`);
@@ -759,6 +759,8 @@ try {
   const noHeader = await page.evaluate(() => fetch('/api/upload?name=x.txt', { method: 'POST', body: 'x' }).then((r) => r.status));
   assert.equal(noHeader, 403, 'an upload without X-Zen-Web is refused');
 
+  // A bare web address in a message is a link, its text kept (GFM autolink).
+  assert.equal(await page.locator('a.md-link[href="https://example.com/standup"]').first().textContent(), 'https://example.com/standup');
   // A wiki link in the chat opens the note in the side panel.
   await page.locator('a[data-wiki="God"]').first().click();
   await page.getByRole('heading', { name: 'God' }).waitFor();
