@@ -33,6 +33,14 @@
   let last = '';
   let fetching = 0;
 
+  async function stopChild(id: string) {
+    try {
+      const response = await fetch(`/api/zen/sessions/${encodeURIComponent(id)}/stop`, { method: 'POST', headers: { 'x-zen-web': '1' } });
+      if (!response.ok) throw new Error(`stop failed (${response.status})`);
+      await load();
+    } catch (e) { error = (e as Error).message; }
+  }
+
   function stored(): boolean {
     try {
       return localStorage.getItem(JOBS_KEY) === '1';
@@ -236,13 +244,14 @@
 <svelte:window onkeydown={key} />
 
 <div class="view" bind:this={list}>
+  <div class="view-head"><h2>Sessions</h2><button class="chip new" onclick={() => openSession('new')} title="n">+ New</button></div>
   <div class="tools">
     <input
       bind:this={input}
       bind:value={filter}
       onkeydown={inputKey}
       type="search"
-      placeholder="/ filter"
+      placeholder="Search sessions"
       aria-label="filter sessions"
       spellcheck="false"
       autocomplete="off"
@@ -251,7 +260,6 @@
     {#if showArchived}
       <button class="chip" class:on={showJobs} onclick={toggleJobs} title="J">jobs</button>
     {/if}
-    <button class="chip new" onclick={() => openSession('new')} title="n">+ new session</button>
   </div>
 
   {#if error}<p class="err">can't reach the kernel: {error}</p>{/if}
@@ -300,6 +308,9 @@
             {#if r.s.waiting && !r.s.busy}<span class="warn nowrap"> · waiting on you</span>{/if}
             <span class="dim meta">{meta(r)}</span>
           </span>
+          {#if r.child && r.s.busy}
+            <button class="stop-child" onclick={(event) => { event.stopPropagation(); stopChild(r.id); }} aria-label={`Stop subagent ${task(r.s)}`}>■ Stop</button>
+          {/if}
         </div>
       {/each}
     {/each}
@@ -338,6 +349,20 @@
   .meta { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 12.5px; }
   .dim { color: var(--dim); }
   .arrow { flex: none; }
+  .stop-child { flex: none; padding: 6px 10px; border: 1px solid var(--faint); border-radius: 99px; color: var(--dim); font-size: 12px; }
+  .stop-child:hover { color: var(--ink); border-color: var(--dim); }
+  .view { padding: 0 0 24px; }
+  .view-head { display: flex; align-items: center; justify-content: space-between; padding: 18px 20px 12px; }
+  .view-head h2 { margin: 0; font-family: var(--serif, var(--sans)); font-size: 21px; font-weight: 600; }
+  .tools { padding: 4px 20px 14px; flex-wrap: wrap; }
+  .tools input { max-width: none; padding: 9px 12px; border-radius: 12px; background: color-mix(in srgb, var(--ink) 3%, var(--paper)); }
+  .chip { border-radius: 99px; padding: 6px 12px; }
+  .head { padding: 20px 20px 8px; color: var(--dim); font-size: 11px; letter-spacing: .08em; }
+  .row { margin: 0 10px; padding: 10px; min-height: 48px; border-radius: 12px; }
+  .row.child { padding-left: 30px; }
+  .body { display: block; }
+  .text { display: block; }
+  .meta { display: block; margin-top: 3px; }
   @container (max-width: 560px) {
     .row { white-space: normal; }
     .body { display: block; }
