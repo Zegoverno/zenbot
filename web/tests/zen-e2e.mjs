@@ -194,6 +194,9 @@ const kernel = createServer(async (req, res) => {
     const hit = (kind, ref, title, snippet, file) => ({ kind, ref, title, snippet, at: now, exact: false, relevance: null, path: path.join(VAULT, file) });
     return json(res, { query: body.query, scope: body.scope, reranked: false, results: body.query === 'gift' ? [hit('wiki', 'Grace', 'Grace', 'A gift, given freely.', 'wiki/Grace.md'), hit('note', 'Atlas.md', 'Atlas', 'all names matched too', 'wiki/Atlas.md')] : [] });
   }
+  if (r === 'GET /api/jobs') return json(res, { scheduler: true, jobs: [{ name: 'daily', schedule: '0 9 * * *', tz: 'UTC', enabled: true, next_run_at: null, last_status: 'failed', last_error: 'test failure', failures: 1 }] });
+  if (r === 'GET /api/jobs/runs') return json(res, [{ id: 1, job: 'daily', status: 'failed', started_at: '2026-11-19', error: 'test failure', session: null }]);
+  if (r === 'POST /api/jobs/daily/run' || r === 'PATCH /api/jobs/daily') return json(res, { ok: true });
   if (r === 'GET /api/tasks')
     return json(res, { today: '2026-10-30', tz: 'UTC', count: 1, problems: [], projects: [{ project: 'acme', tasks: [
       { project: 'acme', text: 'Price the offer', id: 't1', due: '2026-10-29', scheduled: null, priority: 'urgent', goals: [], file: 'x', line: 1, overdue: true },
@@ -332,6 +335,23 @@ const errors = [];
 page.on('pageerror', (e) => errors.push(e.message));
 const base = `http://127.0.0.1:${PORT}`;
 try {
+  await page.goto(`${base}/`);
+  await page.getByRole('tab', { name: 'Routines' }).click();
+  await page.getByText('Some routines need attention.', { exact: false }).waitFor();
+  await page.getByRole('button', { name: 'Run now' }).click();
+  await page.getByRole('button', { name: 'Pause' }).click();
+  await page.getByRole('button', { name: '+ New routine' }).click();
+  await page.waitForURL(/\?s=new/);
+  assert.match(await page.locator('textarea').inputValue(), /create a new routine/);
+  await page.goto(`${base}/`);
+  await page.getByRole('button', { name: 'Command ring' }).click();
+  await page.getByRole('button', { name: /Theme · auto/ }).click();
+  assert.equal(await page.locator('html').getAttribute('data-theme'), 'light');
+  await page.reload();
+  assert.equal(await page.locator('html').getAttribute('data-theme'), 'light');
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert.ok(await page.getByRole('tab', { name: 'Routines' }).isVisible());
+  await page.setViewportSize({ width: 1300, height: 850 });
   // Home is a real-data dashboard and opens the selected session, not a mock.
   await page.goto(`${base}/`);
   await page.getByRole('heading', { name: /Good (morning|afternoon|evening)/ }).waitFor();
@@ -657,7 +677,7 @@ try {
   await page.getByText('Pitch practice').waitFor();
   assert.match(await page.locator('.row', { hasText: 'Pitch practice' }).innerText(), /@rex · smoke/);
   assert.doesNotMatch(await page.locator('.row', { hasText: 'Plan the week' }).innerText(), /@zenbot/);
-  await page.keyboard.press('4');
+  await page.keyboard.press('5');
   await page.locator('[aria-label="agents"]').getByText('@rex').waitFor();
   assert.match(page.url(), /view=agents/);
   const rowOf = (name) => page.locator('[aria-label="agents"] .row', { hasText: `@${name}` });

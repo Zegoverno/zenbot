@@ -14,10 +14,10 @@
 import { files } from './api.ts';
 
 /** The built-in views, Games, Settings (the board's), Preview and a plugin command's panel (the side's) and plugin views. */
-export type View = 'home' | 'sessions' | 'files' | 'tasks' | 'agents' | 'games' | 'settings' | 'panel' | 'preview' | `plugin:${string}`;
+export type View = 'home' | 'sessions' | 'files' | 'tasks' | 'routines' | 'agents' | 'games' | 'settings' | 'panel' | 'preview' | `plugin:${string}`;
 export type Pane = 'home' | 'side';
 /** The built-in tabs, in order; plugin views come after them. */
-export const VIEWS: View[] = ['sessions', 'files', 'tasks', 'agents', 'games'];
+export const VIEWS: View[] = ['sessions', 'files', 'tasks', 'routines', 'agents', 'games'];
 const isView = (v: string | null): v is View => !!v && (VIEWS.includes(v as View) || v === 'home' || v === 'settings' || /^plugin:[a-z0-9-]{2,40}\/[A-Za-z0-9._-]+$/.test(v));
 
 export const app = $state({
@@ -25,6 +25,8 @@ export const app = $state({
   session: null as string | null,
   /** The agent a fresh chat ('new') starts its session as. */
   agent: 'zenbot',
+  chatDraft: '',
+  attachOnOpen: false,
   view: 'home' as View,
   side: { open: false, view: 'files' as View },
   /** Which pane has the keys in a session: the chat or the side panel. */

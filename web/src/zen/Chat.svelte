@@ -1156,6 +1156,8 @@
   });
 
   onMount(() => {
+    if (id === 'new') { input = app.chatDraft; app.chatDraft = ''; }
+    if (app.attachOnOpen) { app.attachOnOpen = false; setTimeout(() => picker_?.click(), 0); }
     zen.models().then((m) => {
       models = m;
       if (!sid && !model) model = m.default;
