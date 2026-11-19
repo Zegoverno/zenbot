@@ -49,6 +49,8 @@
   let bridge: AppBridge | null = null;
   const darkQuery = matchMedia('(prefers-color-scheme: dark)');
   let dark = $state(darkQuery.matches);
+  let dimensions = $state({ width: 0, height: 0 });
+  let phone = $state(false);
 
   /** The host's colours and fonts, under MCP Apps' variable names. */
   function styles() {
@@ -57,6 +59,11 @@
     return {
       variables: {
         '--color-background-primary': v('--paper'),
+        '--color-background-secondary': v('--soft'),
+        '--color-border-secondary': v('--faint'),
+        '--color-background-info': v('--accent'),
+        '--border-radius-md': v('--radius'),
+        '--font-serif': v('--serif'),
         '--color-text-primary': v('--ink'),
         '--color-text-secondary': v('--dim'),
         '--color-border-primary': v('--faint'),
@@ -73,13 +80,14 @@
   function context(): McpUiHostContext {
     return {
       theme: dark ? 'dark' : 'light',
-      styles: styles() as McpUiHostContext['styles'],
+      styles: styles() as unknown as McpUiHostContext['styles'],
       displayMode: 'inline',
       availableDisplayModes: ['inline'],
+      containerDimensions: dimensions,
       platform: 'web',
       locale: navigator.language,
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      zen: { pane: pane === 'home' ? 'board' : 'side', path, mode, slot },
+      zen: { pane: pane === 'home' ? 'board' : 'side', path, mode, slot, phone, headingFont: getComputedStyle(document.documentElement).getPropertyValue('--serif').trim() },
     };
   }
 
@@ -87,7 +95,21 @@
 
   onMount(() => {
     let gone = false;
-    const theme = () => (dark = darkQuery.matches);
+    const theme = () => {
+      const selected = document.documentElement.dataset.theme;
+      dark = selected === 'dark' || (selected !== 'light' && darkQuery.matches);
+      bridge?.setHostContext(context());
+    };
+    const resize = () => {
+      if (frame) dimensions = { width: frame.clientWidth, height: frame.clientHeight };
+      phone = window.matchMedia('(max-width: 700px)').matches;
+    };
+    const observer = new MutationObserver(theme);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'class', 'style'] });
+    const sizes = new ResizeObserver(resize);
+    if (frame) sizes.observe(frame);
+    window.addEventListener('resize', resize);
+    theme(); resize();
     darkQuery.addEventListener('change', theme);
     (async () => {
       try {
@@ -153,6 +175,9 @@
     return () => {
       gone = true;
       darkQuery.removeEventListener('change', theme);
+      window.removeEventListener('resize', resize);
+      observer.disconnect();
+      sizes.disconnect();
       void bridge?.close();
       bridge = null;
     };
