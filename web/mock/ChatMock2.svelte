@@ -301,12 +301,12 @@
   }
 
   // Close the chat (×): a subagent panel closes first; then the side panel's view takes the
-  // page, or with no side panel you land on Home.
-  const closeTitle = $derived(split && view === 'subagent' ? 'Close the subagent panel' : split ? `Close the chat, keep ${view}` : 'Close the chat');
+  // page, or with no side panel you land on Sessions.
+  const closeTitle = $derived(split && view === 'subagent' ? 'Close the subagent panel' : split ? `Close the chat, keep ${view}` : 'Close the chat, back to Sessions');
   function closeChat(all = false) {
     if (!all && split && view === 'subagent') { view = null; return; }
     if (split && view !== 'subagent') { screen = 'view'; return; }
-    screen = 'home'; view = null;
+    screen = 'view'; view = 'sessions';
   }
   // Answering the question: the card folds to your answer, zenbot works briefly, then replies.
   let answered = $state<string | null>(null);
