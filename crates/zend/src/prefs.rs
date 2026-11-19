@@ -143,22 +143,22 @@ pub(crate) async fn patch(app: &AppState, body: &Value) -> ApiResult<Map<String,
     Ok(all(&app.db).await?)
 }
 
-/// The model and thinking level a new session gets when its creator named neither: the
-/// preferred model if the kernel still serves it, else the kernel's default; the preferred
-/// effort if that model takes it. `agent_model` (an agent's own `model` setting) wins over both
-/// models and carries no preferred effort.
+/// Resolve a new session or job: an explicit session/job model wins over an agent model,
+/// then the owner's current default, then the environment default. An explicit effort wins;
+/// otherwise the owner's effort applies only when the selected model is the current global
+/// default (and supports it). Child sessions keep their inherited settings instead.
 pub(crate) async fn new_session_defaults(app: &AppState, agent_model: Option<String>) -> (String, Option<String>) {
-    if let Some(m) = agent_model {
-        return (m, None);
-    }
-    let model = match get(&app.db, "default_model").await.and_then(|m| m.as_str().map(String::from)) {
+    let preferred = match get(&app.db, "default_model").await.and_then(|m| m.as_str().map(String::from)) {
         Some(m) if crate::workers::model_info(app, &m).await.is_some() => m,
         _ => app.default_model.clone(),
     };
-    let effort = match get(&app.db, "default_effort").await.and_then(|e| e.as_str().map(String::from)) {
-        Some(e) => crate::workers::effort_on(app, &model, Some(e)).await,
-        None => None,
-    };
+    let model = agent_model.unwrap_or_else(|| preferred.clone());
+    let effort = if model == preferred {
+        match get(&app.db, "default_effort").await.and_then(|e| e.as_str().map(String::from)) {
+            Some(e) => crate::workers::effort_on(app, &model, Some(e)).await,
+            None => None,
+        }
+    } else { None };
     (model, effort)
 }
 
@@ -250,7 +250,8 @@ mod tests {
         patch(&app, &json!({ "default_model": "faux/smoke", "default_effort": "high" })).await.unwrap();
         assert_eq!(new_session_defaults(&app, None).await, ("faux/smoke".to_string(), Some("high".to_string())));
         assert_eq!(default_model(&app).await, "faux/smoke");
-        // An agent's own model wins and takes no preferred effort.
+        assert_eq!(new_session_defaults(&app, Some("faux/smoke".into())).await, ("faux/smoke".into(), Some("high".into())));
+        // An agent model wins; the preferred effort only follows a matching default model.
         assert_eq!(new_session_defaults(&app, Some("faux/other".into())).await, ("faux/other".to_string(), None));
         // The effort has to suit the model: `other` has none to choose.
         assert!(patch(&app, &json!({ "default_model": "faux/other" })).await.is_ok());
