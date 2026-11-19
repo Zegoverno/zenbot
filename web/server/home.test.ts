@@ -32,6 +32,7 @@ describe('vault filesystem', () => {
   });
   it('scans facets and backlinks within the vault only', async () => {
     expect(await home.facets(vault)).toMatchObject({ type: [{ value: 'note', count: 1 }], tags: [{ value: 'one', count: 1 }, { value: 'two', count: 1 }] });
+    expect((await home.facets(vault)).notes).toContainEqual({ path: path.join(vault, 'Source.md'), type: ['note'], status: ['draft'], tags: ['one', 'two'] });
     expect(await home.backlinks(path.join(vault, 'Target.md'))).toMatchObject({ references: [{ path: path.join(vault, 'Source.md'), title: 'Source' }] });
     await expect(home.facets(base)).rejects.toMatchObject({ status: 403 });
     await expect(home.backlinks(path.join(vault, 'escape'))).rejects.toMatchObject({ status: 403 });

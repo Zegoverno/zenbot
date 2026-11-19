@@ -20,6 +20,21 @@
   let saving = $state(false);
   let loaded = $state(false);
   let host = $state<HTMLDivElement>();
+  let links = $state<{ path: string; title: string }[]>([]);
+  let linksTruncated = $state(false);
+  let linksError = $state('');
+  let linkGeneration = 0;
+  $effect(() => {
+    const p = path, r = rel, w = writing;
+    const g = ++linkGeneration;
+    links = []; linksError = ''; linksTruncated = false;
+    if (r === null || w || !/\.md$/i.test(p)) return;
+    void fetch(`/api/fs/backlinks?path=${encodeURIComponent(p)}`).then(async response => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json() as Promise<{ references: { path: string; title: string }[]; truncated: boolean }>;
+    }).then(result => { if (g === linkGeneration) { links = result.references; linksTruncated = result.truncated; } })
+      .catch(e => { if (g === linkGeneration) linksError = (e as Error).message; });
+  });
   let generation = 0;
   let pendingLeave = $state<(() => void) | null>(null);
   const dirty = $derived(writing && loaded && (text !== saved || hash === null));
@@ -135,7 +150,12 @@
   {:else if picture && doc}
     <div class="scroll picture"><img src={`/api/fs/image?path=${encodeURIComponent(path)}&v=${doc.mtime}`} alt={path.split('/').pop()} /></div>
   {:else if doc?.text !== undefined}
-    {#if /\.md$/i.test(path)}<div class="scroll" bind:this={host}></div>
+    {#if /\.md$/i.test(path)}<div class="scroll"><div bind:this={host}></div>
+      {#if links.length || linksTruncated || linksError}<section aria-label="Linked from"><h3>Linked from</h3>
+        {#each links as link}<button onclick={() => openFile(link.path, pane)}>{link.title}</button>{/each}
+        {#if linksTruncated}<p>Backlinks incomplete: vault scan limit reached.</p>{/if}
+        {#if linksError}<p>Backlinks unavailable: {linksError}</p>{/if}
+      </section>{/if}</div>
     {:else}<pre>{doc.text}</pre>{/if}
   {:else if doc}<p>{doc.binary ? 'Binary file' : doc.tooBig ? 'File too large to preview' : 'No preview available'}</p>{/if}
 </section>

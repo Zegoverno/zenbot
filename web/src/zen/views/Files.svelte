@@ -56,6 +56,7 @@
     }
     for (const r of rows) if (r.dir && tree.open[r.path]) read(r.path);
     read(tree.root);
+    if (inVault) void loadFacets(tree.root);
   }
 
   // Follow the pane's root: a new root opens; going up selects the folder we came from.
@@ -72,6 +73,41 @@
       tree.sel = from;
     } else tree.sel = null;
   });
+
+  type FacetKey = 'type' | 'status' | 'tags';
+  type Note = { path: string; type: string[]; status: string[]; tags: string[] };
+  type Facets = Record<FacetKey, { value: string; count: number }[]> & { notes: Note[]; truncated: boolean };
+  const keys: FacetKey[] = ['type', 'status', 'tags'];
+  let facets = $state<Facets | null>(null);
+  let selected = $state<Record<FacetKey, string[]>>({ type: [], status: [], tags: [] });
+  let tagAll = $state(false);
+  let filterOpen = $state(false);
+  let facetError = $state('');
+  let facetSeq = 0;
+  const inVault = $derived(!!app.vault && (t.root === app.vault || t.root.startsWith(app.vault + '/')));
+  const filtering = $derived(keys.some(k => selected[k].length > 0));
+  async function loadFacets(root: string) {
+    const seq = ++facetSeq;
+    facets = null; facetError = '';
+    try {
+      const response = await fetch(`/api/fs/facets?path=${encodeURIComponent(root)}`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const result: Facets = await response.json();
+      if (seq === facetSeq) facets = result;
+    } catch (e) { if (seq === facetSeq) facetError = (e as Error).message; }
+  }
+  $effect(() => {
+    const root = t.root, allowed = inVault;
+    selected = { type: [], status: [], tags: [] };
+    if (allowed) void loadFacets(root); else { facetSeq++; facets = null; }
+  });
+  function toggleFacet(key: FacetKey, value: string) {
+    selected[key] = selected[key].includes(value) ? selected[key].filter(v => v !== value) : [...selected[key], value];
+  }
+  const matches = $derived((facets?.notes ?? []).filter(note => keys.every(key => {
+    const choices = selected[key];
+    return !choices.length || (key === 'tags' && tagAll ? choices.every(v => note[key].includes(v)) : choices.some(v => note[key].includes(v)));
+  })));
 
   interface Row {
     path: string;
@@ -114,7 +150,7 @@
 
   // The tree comes back from the reader: show the selected row.
   $effect(() => {
-    if (!app.file[pane]) follow(list);
+    if (!app.file[pane]) { follow(list); if (inVault) void loadFacets(t.root); }
   });
 
   function select(i: number) {
@@ -520,9 +556,33 @@
         autocapitalize="off"
       />
     </div>
-    {#if searching}
+    {#if inVault}
+      <div class="facet-panel">
+        <button class="chip" aria-expanded={filterOpen} onclick={() => filterOpen = !filterOpen}>Filter by properties{filtering ? ' •' : ''}</button>
+        {#if filtering}<button class="chip" onclick={() => selected = { type: [], status: [], tags: [] }}>Clear filters</button>{/if}
+        {#if facetError}<span role="alert">Filters unavailable: {facetError}</span>{/if}
+        {#if facets?.truncated}<span role="status">Results incomplete: vault scan limit reached.</span>{/if}
+        {#if filterOpen && facets}
+          {#each keys as key}
+            <div><strong>{key}</strong>
+              {#each facets[key] as option}
+                <button class="chip" class:on={selected[key].includes(option.value)} aria-pressed={selected[key].includes(option.value)} onclick={() => toggleFacet(key, option.value)}>{option.value} ({option.count})</button>
+              {/each}
+              {#if key === 'tags'}<button class="chip" onclick={() => tagAll = !tagAll}>Tags: {tagAll ? 'all' : 'any'}</button>{/if}
+            </div>
+          {/each}
+        {/if}
+      </div>
+    {/if}
+    {#if filtering && !searching}
+      <div class="results" aria-label="filtered notes">
+        {#each matches as note (note.path)}<button class="facet-result" onclick={() => openFile(note.path, pane)}>{shown(note.path)}</button>{/each}
+        {#if !facets && !facetError}<p>Loading filters…</p>{:else if !matches.length}<p>No matching notes.</p>{/if}
+      </div>
+    {:else if searching}
       <div class="results" role="listbox" aria-label="search results">
         {#each results as r, i (r.key)}
+          {#if !filtering || matches.some(note => note.path === r.path)}
           <div
             class="result"
             class:sel={i === hit}
@@ -541,6 +601,7 @@
             <span class="rsub">{r.sub}</span>
             {#if r.snippet}<span class="snip">{r.snippet}</span>{/if}
           </div>
+          {/if}
         {/each}
         {#if nameBusy || contentBusy}<p class="dim pad">searching…</p>{/if}
         {#if contentErr}<p class="dim pad">notes search unavailable: {contentErr}</p>{/if}
@@ -607,6 +668,9 @@
 {/if}
 
 <style>
+  .facet-panel { padding: 8px 16px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .facet-panel div { flex-basis: 100%; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .facet-result { display: block; padding: 10px 16px; background: none; border: 0; color: inherit; cursor: pointer; }
   .topbar, .file-actions { display: flex; gap: 8px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--faint); }
   .topbar { flex-wrap: wrap; }
   .up { font-size: 18px; padding: 3px 8px; color: var(--dim); }

@@ -310,7 +310,10 @@ export async function facets(p: unknown) {
   if (!(await fs.stat(root)).isDirectory()) throw new HttpError(400, 'not a folder');
   const scan = await scanVault(root);
   const counts: Record<string, Map<string, number>> = { type: new Map(), status: new Map(), tags: new Map() };
+  const notes: { path: string; type: string[]; status: string[]; tags: string[] }[] = [];
   for (const file of scan.files) {
+    const note = { path: file.path, type: [] as string[], status: [] as string[], tags: [] as string[] };
+    notes.push(note);
     const front = /^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(file.text)?.[1];
     if (!front) continue;
     let key = '';
@@ -326,12 +329,13 @@ export async function facets(p: unknown) {
         value = value.trim().replace(/^['"]|['"]$/g, '').trim();
         if (!value || seen.has(key + '\0' + value)) continue;
         seen.add(key + '\0' + value);
+        note[key as 'type' | 'status' | 'tags'].push(value);
         counts[key].set(value, (counts[key].get(value) ?? 0) + 1);
       }
     }
   }
   const values = (key: string) => [...counts[key]].sort(([a], [b]) => a.localeCompare(b)).map(([value, count]) => ({ value, count }));
-  return { type: values('type'), status: values('status'), tags: values('tags'), truncated: scan.truncated };
+  return { type: values('type'), status: values('status'), tags: values('tags'), notes, truncated: scan.truncated };
 }
 
 /** Notes that contain a wiki link to the requested note, scanned across the vault. */
