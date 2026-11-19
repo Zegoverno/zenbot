@@ -452,6 +452,16 @@
     }
   }
 
+  // Siblings are listed independently of the tree, including for search results.
+  const fileDir = $derived(app.file[pane] ? parentOf(app.file[pane]!) : '');
+  $effect(() => {
+    if (fileDir && !(fileDir in t.listing) && !(fileDir in t.failed)) read(fileDir);
+  });
+  const siblings = $derived((t.listing[fileDir] ?? [])
+    .filter((e) => !e.dir && !SKIP.has(e.name) && (!e.hidden || t.hidden))
+    .sort((a, b) => a.name.localeCompare(b.name)));
+  const fileIndex = $derived(siblings.findIndex((e) => e.path === app.file[pane]));
+
   /** The root as clickable parts: `~ / projects / src`. */
   const crumbs = $derived.by(() => {
     const shown = tilde(t.root);
@@ -475,6 +485,11 @@
 {#if app.file[pane]}
   <div class="file-actions">
     <span class="file-path">{shown(app.file[pane]!)}</span>
+    {#if fileIndex >= 0}
+      <button class="chip" aria-label="Previous file" disabled={app.write[pane] || fileIndex === 0} onclick={() => openFile(siblings[fileIndex - 1].path, pane)}>←</button>
+      <span class="dim">{fileIndex + 1} of {siblings.length}</span>
+      <button class="chip" aria-label="Next file" disabled={app.write[pane] || fileIndex === siblings.length - 1} onclick={() => openFile(siblings[fileIndex + 1].path, pane)}>→</button>
+    {/if}
     <button class="chip primary" disabled={app.write[pane]} title={app.write[pane] ? 'Finish editing first' : 'Ask zenbot about this file'} onclick={() => { app.chatDraft = `Help me with ${shown(app.file[pane]!)}: `; openSession('new'); }}>Ask zenbot</button>
   </div>
   <Opened path={app.file[pane]} {pane} {active} />
