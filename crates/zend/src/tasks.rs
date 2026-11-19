@@ -1041,7 +1041,8 @@ pub fn patch(vault: &Path, id: &str, rev: Option<&str>, patch: &Patch, today: Na
         }
         None => None,
     };
-    let moved_to = edit(&place, rev, |lines, parsed| {
+    let mut destination_written = false;
+    let result = edit(&place, rev, |lines, parsed| {
         let (state, items) = patched(vault, parsed, patch, today)?;
         let new = line_of(&parsed.head, state, &items);
         match &moving {
@@ -1056,9 +1057,17 @@ pub fn patch(vault: &Path, id: &str, rev: Option<&str>, patch: &Patch, today: Na
                 let mut moved = vec![new];
                 moved.extend(lines[place.index + 1..=place.index + notes].iter().cloned());
                 let at = append_lines(dest, name, &moved)?;
+                destination_written = true;
                 lines.drain(place.index..=place.index + notes);
                 Ok(Some(at))
             }
+        }
+    });
+    let moved_to = result.map_err(|err| {
+        if destination_written {
+            WriteError::Conflict(format!("move may have left a duplicate in the destination; inspect both files before retrying: {err:?}"))
+        } else {
+            err
         }
     })?;
     let (file, index) = match (&moving, moved_to) {
@@ -1083,11 +1092,11 @@ pub fn delete(vault: &Path, id: &str, rev: Option<&str>) -> Wr<()> {
 
 /// The task `id` with a `🆔` (written to its line when it had none: the id changes from the
 /// synthetic one to the new `🆔`).
-pub fn give_id(vault: &Path, id: &str, today: NaiveDate) -> Wr<Task> {
+pub fn give_id(vault: &Path, id: &str, rev: &str, today: NaiveDate) -> Wr<Task> {
     let _guard = WRITES.lock().unwrap_or_else(|e| e.into_inner());
     let place = locate(vault, id)?;
     let new = new_id(vault);
-    edit(&place, None, |lines, parsed| {
+    edit(&place, Some(rev), |lines, parsed| {
         if parsed.task.has_id {
             return Ok(());
         }
@@ -1542,11 +1551,21 @@ mod tests {
     #[test]
     fn handing_a_task_without_an_id_writes_one() {
         let v = vault(&[("Projects/p/tasks.md", "- [ ] Bare ⏫\n- [ ] Has 🆔 k1\n")]);
-        let t = give_id(&v, "L:Projects/p/tasks.md:1", d(TODAY)).unwrap();
+        let t = give_id(&v, "L:Projects/p/tasks.md:1", &find(&v, "L:Projects/p/tasks.md:1", d(TODAY)).unwrap().rev, d(TODAY)).unwrap();
         assert!(t.has_id && t.id.len() == 6 && t.priority == Some(Priority::Important));
         assert_eq!(text(&v, "Projects/p/tasks.md"), format!("- [ ] Bare ⏫ 🆔 {}\n- [ ] Has 🆔 k1\n", t.id));
-        assert_eq!(give_id(&v, "k1", d(TODAY)).unwrap().id, "k1");
+        assert_eq!(give_id(&v, "k1", &find(&v, "k1", d(TODAY)).unwrap().rev, d(TODAY)).unwrap().id, "k1");
         assert_eq!(text(&v, "Projects/p/tasks.md").lines().nth(1), Some("- [ ] Has 🆔 k1"));
+    }
+
+    #[test]
+    fn stale_synthetic_handoff_never_assigns_id_to_new_occupant() {
+        let v = vault(&[("Projects/p/tasks.md", "- [ ] First\n- [ ] Second\n")]);
+        let id = "L:Projects/p/tasks.md:1";
+        let rev = find(&v, id, d(TODAY)).unwrap().rev;
+        std::fs::write(v.join("Projects/p/tasks.md"), "- [ ] Second\n").unwrap();
+        assert!(matches!(give_id(&v, id, &rev, d(TODAY)), Err(WriteError::Conflict(_))));
+        assert_eq!(text(&v, "Projects/p/tasks.md"), "- [ ] Second\n");
     }
 
     #[test]

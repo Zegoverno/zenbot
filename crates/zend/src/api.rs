@@ -991,13 +991,17 @@ pub(crate) async fn create_task(State(app): State<AppState>, Json(body): Json<Va
     Ok(Json(task_json(&app, &task).await?))
 }
 
+fn required_rev(rev: Option<String>) -> ApiResult<String> {
+    rev.filter(|r| !r.trim().is_empty()).ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "`rev` is required".into()))
+}
+
 #[derive(Deserialize)]
 pub(crate) struct RevQuery {
     /// The task's `rev` as read: the write is refused (409) when the line has changed since.
     rev: Option<String>,
 }
 
-/// Change a task in place: `{done?, dropped?, text?, due?, priority?, goal?, project?, rev?}`
+/// Change a task in place: `{done?, dropped?, text?, due?, priority?, goal?, project?, rev}`
 /// (`null` clears due, priority and goal). 409 when the line changed since it was read. Returns
 /// the task as written (its id changes when it moves to another project without a 🆔).
 pub(crate) async fn patch_task(State(app): State<AppState>, Path(id): Path<String>, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
@@ -1019,15 +1023,16 @@ pub(crate) async fn patch_task(State(app): State<AppState>, Path(id): Path<Strin
             Some(p) => p,
         },
     };
-    let rev = string_field(&body, "rev")?.flatten();
+    let rev = required_rev(string_field(&body, "rev")?.flatten())?;
     let (today, _) = tasks::today();
-    let task = tokio::task::spawn_blocking(move || tasks::patch(&tasks::vault_dir(), &id, rev.as_deref(), &patch, today)).await?.map_err(write_error)?;
+    let task = tokio::task::spawn_blocking(move || tasks::patch(&tasks::vault_dir(), &id, Some(&rev), &patch, today)).await?.map_err(write_error)?;
     Ok(Json(task_json(&app, &task).await?))
 }
 
-/// Remove a task's line (`?rev=` as read, to refuse when it has changed).
+/// Remove a task's line (`?rev=` required as read, to refuse when it has changed).
 pub(crate) async fn delete_task(Path(id): Path<String>, Query(q): Query<RevQuery>) -> ApiResult<Json<Value>> {
-    tokio::task::spawn_blocking(move || tasks::delete(&tasks::vault_dir(), &id, q.rev.as_deref())).await?.map_err(write_error)?;
+    let rev = required_rev(q.rev)?;
+    tokio::task::spawn_blocking(move || tasks::delete(&tasks::vault_dir(), &id, Some(&rev))).await?.map_err(write_error)?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -1072,7 +1077,7 @@ async fn task_agents(app: &AppState) -> ApiResult<HashMap<String, Value>> {
     Ok(out)
 }
 
-/// The owner hands open task `id` to an agent (`{agent?}`, zenbot when left out): a new session
+/// The owner hands open task `id` to an agent (`{rev, agent?}`, zenbot when left out): a new session
 /// of that agent, briefed with the task, starts working on it, and the link is kept in the
 /// kernel. A task without a 🆔 gets one written first. A task that already has an agent gets
 /// that one back (`"existing": true`). Returns `{task, session, agent, existing}`: `task` is the
@@ -1080,22 +1085,23 @@ async fn task_agents(app: &AppState) -> ApiResult<HashMap<String, Value>> {
 pub(crate) async fn task_agent(State(app): State<AppState>, Path(task): Path<String>, body: Option<Json<Value>>) -> ApiResult<Json<Value>> {
     let body = body.map(|b| b.0).unwrap_or(Value::Null);
     if !body.is_null() {
-        only_keys(&body, &["agent"])?;
+        only_keys(&body, &["agent", "rev"])?;
     }
+    let rev = required_rev(string_field(&body, "rev")?.flatten())?;
     let name = string_field(&body, "agent")?.flatten().filter(|a| !a.trim().is_empty()).unwrap_or_else(|| crate::agents::DEFAULT.into());
     let who = crate::agents::load(&name).map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
-    if let Some(a) = task_agents(&app).await?.remove(&task) {
-        return Ok(Json(json!({ "task": task, "session": a["session"], "agent": a["agent"], "existing": true })));
-    }
     let (today, _) = tasks::today();
     let id_in = task.clone();
     let t = tokio::task::spawn_blocking(move || {
         let vault = tasks::vault_dir();
         let t = tasks::find(&vault, &id_in, today)?;
+        if t.rev != rev {
+            return Err(tasks::WriteError::Conflict("task changed since it was read; reload the tasks".into()));
+        }
         if t.state != tasks::State::Open {
             return Err(tasks::WriteError::NotFound(format!("no open task with id {id_in}")));
         }
-        if t.has_id { Ok(t) } else { tasks::give_id(&vault, &id_in, today) }
+        if t.has_id { Ok(t) } else { tasks::give_id(&vault, &id_in, &rev, today) }
     })
     .await?
     .map_err(write_error)?;

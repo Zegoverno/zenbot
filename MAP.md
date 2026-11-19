@@ -245,7 +245,7 @@ busy turns, commit) needs no token; the rest are under `/api` (`main.rs`):
 | `POST /tasks` | add a task (`project`, `text`, `due?`, `priority?`, `goal?`): a new line with a new 🆔 at the end of the project's `tasks.md` |
 | `PATCH/DELETE /tasks/{id}` | change a task's line in place (`done`, `dropped`, `text`, `due`, `priority`, `goal`, `project`, `rev?`) or remove it; 409 when the line changed since it was read (`id` is URL-encoded: synthetic ids hold `/`) |
 | `GET /tasks/meta` | the projects (`id`, `title`) and goals (`id`, `title`, `status`) a task can name |
-| `POST /tasks/{id}/agent` | hand open task `id` to an agent (`agent?`, default zenbot): a new session of that agent briefed with it, linked in `task_agents`; an existing agent comes back |
+| `POST /tasks/{id}/agent` | hand open task `id` to an agent (`rev` required, `agent?` default zenbot): a new session of that agent briefed with it, linked in `task_agents`; an existing agent comes back |
 | `GET/POST /jobs`, `GET /jobs/runs`, `PATCH/DELETE /jobs/{name}`, `POST /jobs/{name}/run` | jobs |
 | `GET /mcp`, `POST /mcp/login`, `POST /mcp/login/{flow}`, `GET /mcp/pending`, `POST /mcp/pending/{id}` | MCP servers, sign-in, forms |
 | `GET /s1`, `/s1/check`, `/s1/models`, `POST /s1/replay`, `POST /s1/compare` | System One |

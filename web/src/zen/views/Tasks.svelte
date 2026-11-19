@@ -50,7 +50,7 @@
   let tt: ReturnType<typeof setTimeout> | undefined;
   async function run(fn: () => Promise<void>) { try { await fn(); error = ''; await refresh(); } catch (e) { error = (e as Error).message; } }
   function tick(t: T) { run(async () => { await patch(t, {done: !t.done}); }); }
-  async function handTask(t: T) { await run(async () => { const r = await call<{session: string}>('POST', `/api/zen/tasks/${encodeURIComponent(t.id)}/agent`, {agent}); openSession(r.session); }); }
+  async function handTask(t: T) { await run(async () => { const r = await call<{session: string}>('POST', `/api/zen/tasks/${encodeURIComponent(t.id)}/agent`, {agent, rev:t.rev}); openSession(r.session); }); }
   let editing = $state<string | null>(null);
   let draft = $state<T | null>(null);
   function edit(t: T) { editing = t.id; draft = {...t}; }

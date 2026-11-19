@@ -268,7 +268,8 @@ const kernel = createServer(async (req, res) => {
     }
   }
   if (r === 'POST /api/tasks/t1/agent') {
-    assert.deepEqual(body, {agent:'zenbot'});
+    assert.equal(body.agent, 'zenbot');
+    assert.equal(body.rev, tasks.find(t => t.id === 't1').rev);
     handed.push('t1');
     return json(res, { task: {}, session: 's1', existing: false });
   }

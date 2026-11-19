@@ -242,7 +242,7 @@ export const zen = {
   removeAgent: (name: string) => call<{ ok: boolean; moved_to: string }>('DELETE', `/api/zen/agents/${enc(name)}`),
   search: (query: string, scope = 'notes', limit = 10) => call<{ query: string; scope: string; results: SearchHit[] }>('POST', '/api/zen/search', { query, scope, limit }),
   tasks: () => call<Tasks>('GET', '/api/zen/tasks'),
-  handTask: (id: string) => call<{ task: Task; session: string; existing: boolean }>('POST', `/api/zen/tasks/${enc(id)}/agent`, {}),
+  handTask: (id: string, rev: string) => call<{ task: Task; session: string; existing: boolean }>('POST', `/api/zen/tasks/${enc(id)}/agent`, {rev}),
   version: (refresh = false) => call<{ running: string; latest?: string; behind?: number; available?: boolean; commits?: string[]; error?: string }>('GET', `/api/zen/version${refresh ? '?refresh=true' : ''}`),
   upgrade: () => call<{ started_at: string }>('POST', '/api/zen/upgrade', {}),
   upgradeState: () => call<{ running: boolean; job?: { started_at: string; status: string; log: string }; last_result?: string }>('GET', '/api/zen/upgrade'),
