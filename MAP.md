@@ -185,10 +185,13 @@ role when it names none), `judge`. Off unless
   (records, indexed as such), `MEMORY.md`, symlinks, nor, in zenbot's vault, `agents/<name>/`
   (each agent's vault is indexed as its own). Scopes: `notes` = wiki pages and notes;
   `knowledge` (and `all`) = those plus records.
-- Tasks (`tasks.rs`): the open `- [ ]` lines of each `global/Projects/<project>/tasks.md`, in the
+- Tasks (`tasks.rs`): the `- [ ]` lines of each `global/Projects/<project>/tasks.md`, in the
   Obsidian Tasks emoji format, parsed and sorted for `GET /api/tasks` and the `tasks` command. The
-  owner ticks and edits them in Obsidian; the kernel never writes them. A task handed to an agent
-  (`POST /api/tasks/{id}/agent`) is linked to its session in the `task_agents` table, by its 🆔.
+  web app writes them in place (add, tick, edit, move, drop, delete: atomic, re-read first, 409
+  when the line changed) and the owner still edits them in Obsidian. A task's id is its 🆔, else
+  `L:<path from the vault root>:<line>`. A task handed to an agent
+  (`POST /api/tasks/{id}/agent`) is linked to its session in the `task_agents` table, by its 🆔
+  (written first when it had none).
 - Records (`brain/records.rs`): entities (people, organizations, projects) and long-term memory,
   one Markdown file each with JSON frontmatter (evidence, typed links); the files are the source of
   truth, `brain_*` tables an index rebuilt from them. `brain put` refuses new knowledge records;
@@ -237,8 +240,11 @@ busy turns, commit) needs no token; the rest are under `/api` (`main.rs`):
 | `POST /search` | the search tool for the owner's apps (`query`, `scope` default `knowledge`; `notes` for the vault's pages and notes; `limit`): words and meaning, reranked by System One, as JSON results (including optional note-finding apps) |
 | `GET /memory`, `POST /memory/sleep`, `POST /brain` | memory and records |
 | `GET /skills`, `GET /suggestions` | skill use, next-prompt suggestions |
-| `GET /tasks` | the owner's open vault tasks, grouped by project, most pressing first (`tasks.rs`, read-only), each with its agent's session and state |
-| `POST /tasks/{id}/agent` | hand open task `id` (its 🆔) to an agent: a new session briefed with it, linked in `task_agents`; an existing agent comes back |
+| `GET /tasks` | the owner's open vault tasks, grouped by project, most pressing first (`tasks.rs`), each with its `id`, `rev`, `agent` (name), `session` and `agent_state`; `?done=7d` adds tasks ticked in the last 7 days (`done`, `done_on`) |
+| `POST /tasks` | add a task (`project`, `text`, `due?`, `priority?`, `goal?`): a new line with a new 🆔 at the end of the project's `tasks.md` |
+| `PATCH/DELETE /tasks/{id}` | change a task's line in place (`done`, `dropped`, `text`, `due`, `priority`, `goal`, `project`, `rev?`) or remove it; 409 when the line changed since it was read (`id` is URL-encoded: synthetic ids hold `/`) |
+| `GET /tasks/meta` | the projects (`id`, `title`) and goals (`id`, `title`, `status`) a task can name |
+| `POST /tasks/{id}/agent` | hand open task `id` to an agent (`agent?`, default zenbot): a new session of that agent briefed with it, linked in `task_agents`; an existing agent comes back |
 | `GET/POST /jobs`, `GET /jobs/runs`, `PATCH/DELETE /jobs/{name}`, `POST /jobs/{name}/run` | jobs |
 | `GET /mcp`, `POST /mcp/login`, `POST /mcp/login/{flow}`, `GET /mcp/pending`, `POST /mcp/pending/{id}` | MCP servers, sign-in, forms |
 | `GET /s1`, `/s1/check`, `/s1/models`, `POST /s1/replay`, `POST /s1/compare` | System One |
@@ -273,7 +279,7 @@ choice with `then` fills the composer instead of running) and Matrix and `zen` a
 | `agents/<name>/agent.toml`, `agents/<name>/skills/` | what an agent may use (the owner's), its own skills |
 | `agents/<name>/roles.toml` | its roles for subagents (the agent's; `roles.rs`) |
 | `global/MEMORY.md`, `global/memory/`, `global/entities/`, `global/wiki/`, `global/skills/` | memory, records, wiki pages, skills |
-| `global/Projects/<project>/tasks.md` | the owner's tasks (Obsidian Tasks format); the kernel only reads them |
+| `global/Projects/<project>/tasks.md` | the owner's tasks (Obsidian Tasks format); the web app and Obsidian write them |
 | `mcp.json`, `mcp-auth/` | MCP servers and their sign-ins |
 | `s1/` | the owner's decision files and `models.toml` |
 | `outputs/` | full tool outputs too long to show |

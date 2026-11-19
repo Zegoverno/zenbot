@@ -818,10 +818,11 @@ pub fn task_line(x: &Value) -> String {
     if !goals.is_empty() {
         s.push_str(&format!(" · → {}", goals.join(", ")));
     }
-    if let Some(id) = x["id"].as_str() {
+    // A task without a 🆔 has a synthetic id (`L:<path>:<line>`): nothing to show.
+    if let Some(id) = x["id"].as_str().filter(|id| !id.starts_with("L:")) {
         s.push_str(&format!(" `{id}`"));
     }
-    if let Some(state) = x["agent"]["state"].as_str() {
+    if let Some(state) = x["agent_state"].as_str() {
         s.push_str(&format!(" · 🤖 {}", agent_state(state)));
     }
     s
@@ -990,11 +991,12 @@ mod tests {
         assert_eq!(skills_list(&json!({ "skills": [{ "skill": "work/brief", "loads": 3 }] })), "- `work/brief`: 3 loads");
         let t = json!({ "today": "2026-10-28", "count": 2, "problems": [], "projects": [{ "project": "self", "tasks": [
             { "text": "Pay the bill", "priority": "urgent", "due": "2026-10-27", "overdue": true, "goals": [], "id": "s1" },
-            { "text": "Plan", "priority": null, "due": null, "scheduled": "2026-10-30", "overdue": false, "goals": ["A calmer week"], "id": null }] }] });
+            { "text": "Plan", "priority": null, "due": null, "scheduled": "2026-10-30", "overdue": false, "goals": ["A calmer week"], "id": "L:Projects/self/tasks.md:4" }] }] });
         assert_eq!(tasks_list(&t), "2 open tasks · 2026-10-28\n**self**\n- 🔺 Pay the bill · **overdue 2026-10-27** `s1`\n- Plan · ⏳ 2026-10-30 · → A calmer week");
         assert_eq!(tasks_list(&json!({ "projects": [], "problems": [], "count": 0 })), "No open tasks.");
-        let handed = json!({ "text": "Pay", "id": "s1", "agent": { "session": "x", "state": "waiting" } });
+        let handed = json!({ "text": "Pay", "id": "s1", "agent": "zenbot", "session": "x", "agent_state": "waiting" });
         assert_eq!(task_line(&handed), "- Pay `s1` · 🤖 waiting on you");
+        assert_eq!(task_line(&json!({ "text": "Bare", "id": "L:Projects/p/tasks.md:3" })), "- Bare");
         let r = json!({ "job": "n", "started_at": "2026-10-13T09:30:00Z", "status": "ok", "trigger": "manual", "output": "line 1\nline 2" });
         assert_eq!(run_block(&r), "**n** 2026-10-13 09:30 UTC: ok (manual)\n> line 1\n> line 2");
     }

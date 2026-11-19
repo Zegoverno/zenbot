@@ -678,29 +678,173 @@ pub(crate) async fn mcp_status() -> Json<Value> {
     Json(mcp::status().await)
 }
 
-/// The owner's open vault tasks, grouped by project and sorted (`tasks.rs`); read-only. A task
-/// handed to an agent carries `agent`: its session, title and state (`running`, `waiting` on the
-/// owner's answers, or `idle`: it has reported).
-pub(crate) async fn list_tasks(State(app): State<AppState>) -> ApiResult<Json<Value>> {
+#[derive(Deserialize)]
+pub(crate) struct TasksQuery {
+    /// `7d`: also the tasks ticked in the last 7 days.
+    done: Option<String>,
+}
+
+/// The owner's open vault tasks, grouped by project and sorted (`tasks.rs`); `?done=7d` adds the
+/// tasks ticked in the last 7 days after the open ones. A task handed to an agent carries
+/// `agent` (its name), `session` (its id) and `agent_state`: `running`, `waiting` on the owner's
+/// answers, or `idle` (it has reported).
+pub(crate) async fn list_tasks(State(app): State<AppState>, Query(q): Query<TasksQuery>) -> ApiResult<Json<Value>> {
     let (today, tz) = tasks::today();
+    let since = match q.done.as_deref().filter(|d| !d.is_empty()) {
+        None => None,
+        Some(d) => Some(today - chrono::Duration::days(tasks::parse_days(d).ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "done must be a number of days like 7d (1 to 366)".into()))?)),
+    };
     let dir = tasks::projects_dir();
-    let (projects, problems) = tokio::task::spawn_blocking(move || tasks::read(&dir, today)).await?;
-    let count: usize = projects.iter().map(|p| p.tasks.len()).sum();
+    let (projects, problems) = tokio::task::spawn_blocking(move || tasks::read(&dir, today, since)).await?;
+    let count = projects.iter().flat_map(|p| &p.tasks).filter(|t| !t.done).count();
     let mut projects = serde_json::to_value(&projects)?;
     let agents = task_agents(&app).await?;
     for t in projects.as_array_mut().into_iter().flatten().flat_map(|p| p["tasks"].as_array_mut().into_iter().flatten()) {
-        if let Some(a) = t["id"].as_str().and_then(|id| agents.get(id)) {
-            t["agent"] = a.clone();
-        }
+        decorate_task(t, &agents);
     }
     Ok(Json(json!({ "today": today, "tz": tz, "count": count, "projects": projects, "problems": problems })))
 }
 
-/// Every task handed to an agent (task id → the agent's session and state); archived sessions
-/// are left out, so archiving the session frees the task for a new agent.
+/// `agent`, `session` and `agent_state` on a task's JSON, when it was handed to an agent.
+fn decorate_task(t: &mut Value, agents: &HashMap<String, Value>) {
+    if let Some(a) = t["id"].as_str().and_then(|id| agents.get(id)) {
+        t["agent"] = a["agent"].clone();
+        t["session"] = a["session"].clone();
+        t["agent_state"] = a["state"].clone();
+    }
+}
+
+/// A task as the API lists it (with its agent).
+async fn task_json(app: &AppState, t: &tasks::Task) -> ApiResult<Value> {
+    let mut v = serde_json::to_value(t)?;
+    decorate_task(&mut v, &task_agents(app).await?);
+    Ok(v)
+}
+
+fn write_error(e: tasks::WriteError) -> ApiError {
+    use tasks::WriteError::*;
+    let status = match &e {
+        NotFound(_) => StatusCode::NOT_FOUND,
+        Conflict(_) => StatusCode::CONFLICT,
+        Invalid(_) => StatusCode::BAD_REQUEST,
+        Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    ApiError(status, e.message().to_string())
+}
+
+/// A field of a JSON body that may be a string or, to remove the value, `null`: `None` when it is
+/// missing, `Some(None)` for null.
+fn string_field(body: &Value, key: &str) -> ApiResult<Option<Option<String>>> {
+    match body.get(key) {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(Value::String(s)) => Ok(Some(Some(s.clone()))),
+        Some(_) => Err(ApiError(StatusCode::BAD_REQUEST, format!("`{key}` must be a string or null"))),
+    }
+}
+
+fn bool_field(body: &Value, key: &str) -> ApiResult<Option<bool>> {
+    match body.get(key) {
+        None => Ok(None),
+        Some(Value::Bool(b)) => Ok(Some(*b)),
+        Some(_) => Err(ApiError(StatusCode::BAD_REQUEST, format!("`{key}` must be true or false"))),
+    }
+}
+
+fn date_field(body: &Value, key: &str) -> ApiResult<Option<Option<chrono::NaiveDate>>> {
+    match string_field(body, key)? {
+        None => Ok(None),
+        Some(None) => Ok(Some(None)),
+        Some(Some(s)) => chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d").map(|d| Some(Some(d))).map_err(|_| ApiError(StatusCode::BAD_REQUEST, format!("`{key}` must be YYYY-MM-DD or null"))),
+    }
+}
+
+fn priority_field(body: &Value) -> ApiResult<Option<Option<tasks::Priority>>> {
+    match string_field(body, "priority")? {
+        None => Ok(None),
+        Some(None) => Ok(Some(None)),
+        Some(Some(name)) => Ok(Some(tasks::priority_from_name(&name).map_err(write_error)?)),
+    }
+}
+
+/// Only these keys: a misspelt one is an error, not a silent no-op.
+fn only_keys(body: &Value, allowed: &[&str]) -> ApiResult<()> {
+    let obj = body.as_object().ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "the body must be a JSON object".into()))?;
+    match obj.keys().find(|k| !allowed.contains(&k.as_str())) {
+        Some(k) => Err(ApiError(StatusCode::BAD_REQUEST, format!("unknown field `{k}`; allowed: {}", allowed.join(", ")))),
+        None => Ok(()),
+    }
+}
+
+/// Add a task: `{project, text, due?, priority?, goal?}`, written at the end of the project's
+/// `tasks.md` with a new 🆔. Returns the task.
+pub(crate) async fn create_task(State(app): State<AppState>, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
+    only_keys(&body, &["project", "text", "due", "priority", "goal"])?;
+    let project = string_field(&body, "project")?.flatten().ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "`project` is required".into()))?;
+    let text = string_field(&body, "text")?.flatten().ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "`text` is required".into()))?;
+    let due = date_field(&body, "due")?.flatten();
+    let priority = priority_field(&body)?.flatten();
+    let goal = string_field(&body, "goal")?.flatten();
+    let (today, _) = tasks::today();
+    let task = tokio::task::spawn_blocking(move || tasks::create(&tasks::vault_dir(), &project, &text, due, priority, goal.as_deref(), today))
+        .await?
+        .map_err(write_error)?;
+    Ok(Json(task_json(&app, &task).await?))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RevQuery {
+    /// The task's `rev` as read: the write is refused (409) when the line has changed since.
+    rev: Option<String>,
+}
+
+/// Change a task in place: `{done?, dropped?, text?, due?, priority?, goal?, project?, rev?}`
+/// (`null` clears due, priority and goal). 409 when the line changed since it was read. Returns
+/// the task as written (its id changes when it moves to another project without a 🆔).
+pub(crate) async fn patch_task(State(app): State<AppState>, Path(id): Path<String>, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
+    only_keys(&body, &["done", "dropped", "text", "due", "priority", "goal", "project", "rev"])?;
+    let patch = tasks::Patch {
+        done: bool_field(&body, "done")?,
+        dropped: bool_field(&body, "dropped")?,
+        text: match string_field(&body, "text")? {
+            None => None,
+            Some(None) => return Err(ApiError(StatusCode::BAD_REQUEST, "`text` can't be null".into())),
+            Some(t) => t,
+        },
+        due: date_field(&body, "due")?,
+        priority: priority_field(&body)?,
+        goal: string_field(&body, "goal")?,
+        project: match string_field(&body, "project")? {
+            None => None,
+            Some(None) => return Err(ApiError(StatusCode::BAD_REQUEST, "`project` can't be null".into())),
+            Some(p) => p,
+        },
+    };
+    let rev = string_field(&body, "rev")?.flatten();
+    let (today, _) = tasks::today();
+    let task = tokio::task::spawn_blocking(move || tasks::patch(&tasks::vault_dir(), &id, rev.as_deref(), &patch, today))
+        .await?
+        .map_err(write_error)?;
+    Ok(Json(task_json(&app, &task).await?))
+}
+
+/// Remove a task's line (`?rev=` as read, to refuse when it has changed).
+pub(crate) async fn delete_task(Path(id): Path<String>, Query(q): Query<RevQuery>) -> ApiResult<Json<Value>> {
+    tokio::task::spawn_blocking(move || tasks::delete(&tasks::vault_dir(), &id, q.rev.as_deref())).await?.map_err(write_error)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// What the task editor offers: `{projects: [{id, title}], goals: [{id, title, status}]}`, all of
+/// them (clients filter goals by status).
+pub(crate) async fn task_meta() -> ApiResult<Json<Value>> {
+    Ok(Json(tokio::task::spawn_blocking(|| tasks::meta(&tasks::vault_dir())).await?))
+}
+
+/// Every task handed to an agent (task id → the agent's name, session and state); archived
+/// sessions are left out, so archiving the session frees the task for a new agent.
 async fn task_agents(app: &AppState) -> ApiResult<HashMap<String, Value>> {
     let rows = sqlx::query(
-        "SELECT t.task_id, s.id, s.title,
+        "SELECT t.task_id, s.id, s.title, s.agent,
            (q.last IS NOT NULL AND NOT EXISTS (
              SELECT 1 FROM tape_events m
              WHERE m.session_id = s.id AND m.kind = 'message' AND m.seq > q.last
@@ -722,29 +866,52 @@ async fn task_agents(app: &AppState) -> ApiResult<HashMap<String, Value>> {
         } else {
             "idle"
         };
-        out.insert(r.get::<String, _>("task_id"), json!({ "session": id, "title": r.get::<String, _>("title"), "state": state }));
+        out.insert(
+            r.get::<String, _>("task_id"),
+            json!({ "agent": r.try_get::<String, _>("agent").unwrap_or_else(|_| crate::agents::DEFAULT.into()), "session": id, "title": r.get::<String, _>("title"), "state": state }),
+        );
     }
     Ok(out)
 }
 
-/// The owner hands open task `id` to an agent: a new session, briefed with the task, starts
-/// working on it, and the link is kept in the kernel (the vault isn't written). A task that
-/// already has an agent gets that one back (`"existing": true`).
-pub(crate) async fn task_agent(State(app): State<AppState>, Path(task): Path<String>) -> ApiResult<Json<Value>> {
+/// The owner hands open task `id` to an agent (`{agent?}`, zenbot when left out): a new session
+/// of that agent, briefed with the task, starts working on it, and the link is kept in the
+/// kernel. A task without a 🆔 gets one written first. A task that already has an agent gets
+/// that one back (`"existing": true`). Returns `{task, session, agent, existing}`: `task` is the
+/// 🆔 the link is kept under.
+pub(crate) async fn task_agent(State(app): State<AppState>, Path(task): Path<String>, body: Option<Json<Value>>) -> ApiResult<Json<Value>> {
+    let body = body.map(|b| b.0).unwrap_or(Value::Null);
+    if !body.is_null() {
+        only_keys(&body, &["agent"])?;
+    }
+    let name = string_field(&body, "agent")?.flatten().filter(|a| !a.trim().is_empty()).unwrap_or_else(|| crate::agents::DEFAULT.into());
+    let who = crate::agents::load(&name).map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
     if let Some(a) = task_agents(&app).await?.remove(&task) {
-        return Ok(Json(json!({ "task": task, "session": a["session"], "existing": true })));
+        return Ok(Json(json!({ "task": task, "session": a["session"], "agent": a["agent"], "existing": true })));
     }
     let (today, _) = tasks::today();
-    let dir = tasks::projects_dir();
-    let (projects, _) = tokio::task::spawn_blocking(move || tasks::read(&dir, today)).await?;
-    let Some(t) = projects.into_iter().flat_map(|p| p.tasks).find(|t| t.id.as_deref() == Some(task.as_str())) else {
-        return Err(ApiError(StatusCode::NOT_FOUND, format!("no open task with id {task}")));
-    };
+    let id_in = task.clone();
+    let t = tokio::task::spawn_blocking(move || {
+        let vault = tasks::vault_dir();
+        let t = tasks::find(&vault, &id_in, today)?;
+        if t.state != tasks::State::Open {
+            return Err(tasks::WriteError::NotFound(format!("no open task with id {id_in}")));
+        }
+        if t.has_id { Ok(t) } else { tasks::give_id(&vault, &id_in, today) }
+    })
+    .await?
+    .map_err(write_error)?;
+    let task = t.id.clone();
+    if let Some(a) = task_agents(&app).await?.remove(&task) {
+        return Ok(Json(json!({ "task": task, "session": a["session"], "agent": a["agent"], "existing": true })));
+    }
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO sessions (id, title, model, title_source) VALUES ($1, $2, $3, 'owner')")
+    sqlx::query("INSERT INTO sessions (id, title, model, title_source, agent, workspace) VALUES ($1, $2, $3, 'owner', $4, $5)")
         .bind(id)
         .bind(tasks::agent_title(&t))
-        .bind(&app.default_model)
+        .bind(who.model.clone().unwrap_or_else(|| app.default_model.clone()))
+        .bind(&who.name)
+        .bind(who.workspace_dir().map(|w| w.display().to_string()))
         .execute(&app.db)
         .await?;
     sqlx::query("INSERT INTO task_agents (task_id, session_id) VALUES ($1, $2) ON CONFLICT (task_id) DO UPDATE SET session_id = excluded.session_id, created_at = excluded.created_at")
@@ -758,7 +925,7 @@ pub(crate) async fn task_agent(State(app): State<AppState>, Path(task): Path<Str
         sqlx::query("UPDATE sessions SET archived = true WHERE id = $1").bind(id).execute(&app.db).await?;
         return Err(bad_request(e.context("the agent couldn't start")));
     }
-    Ok(Json(json!({ "task": task, "session": id, "existing": false })))
+    Ok(Json(json!({ "task": task, "session": id, "agent": who.name, "existing": false })))
 }
 
 /// Skills with their use.
