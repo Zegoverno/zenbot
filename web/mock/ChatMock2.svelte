@@ -4,17 +4,22 @@
   // the top centre; clicking the open tab again closes the right panel (focus). Top left, the agent's
   // circle: click to switch agent (and reach the user and Settings). Bottom right, a quick-control
   // ring (after Logitech's Actions Ring): one button that fans out the everyday actions.
+  // Panels: Home and the views stand alone (one panel); a chat opens full width, and a tab picked
+  // while in a chat opens beside it (two panels, desktop only).
   // On a phone, one thing at a time: the tab bar picks a full-screen view, and a chat is reached by
   // picking it in Sessions; the chat then takes the whole screen, with a back arrow to Sessions.
   // Fake data; nothing here talks to the kernel. The floating "mock" panel switches states.
   import { onMount } from 'svelte';
+  import Home from './Home.svelte';
   import { archived, archivedCount, channels, conversation, question, sessions, suggestions, type Msg, type Session } from './data.ts';
 
   type State = 'new' | 'chat' | 'working' | 'waiting';
   let state = $state<State>('chat');
   let theme = $state<'auto' | 'light' | 'dark'>('auto');
   let narrow = $state(false);
-  let view = $state<string | null>('sessions');
+  let screen = $state<'home' | 'chat' | 'view'>('home');
+  let view = $state<string | null>(null);
+  let back = $state<'home' | 'view'>('home');
   let selected = $state('trip');
   let draft = $state('');
   let mode = $state('Balanced');
@@ -79,6 +84,7 @@
   // Line icons, 24×24, stroked with currentColor.
   const ICONS: Record<string, string> = {
     chat: '<path d="M4 5h16v11H9l-5 4z"/>',
+    home: '<path d="M4 11l8-6 8 6v8a1 1 0 0 1-1 1h-4v-5h-6v5H5a1 1 0 0 1-1-1z"/>',
     sessions: '<rect x="4" y="4" width="16" height="6" rx="2"/><rect x="4" y="14" width="16" height="6" rx="2"/>',
     files: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
     tasks: '<path d="M9 11l2 2 4-4"/><rect x="4" y="4" width="16" height="16" rx="3"/>',
@@ -99,9 +105,10 @@
 
   const current = $derived([...channels, ...sessions, ...archived].find((s) => s.id === selected) ?? sessions[0]);
   const msgs = $derived<Msg[]>(state === 'new' ? [] : state === 'waiting' ? [...conversation, question] : conversation);
-  const tabs = TABS;
-  const shown = $derived(narrow ? (view ?? 'chat') : 'both');
-  const split = $derived(!narrow && view !== null);
+  const tabs = [{ key: 'home', label: 'Home' }, ...TABS];
+  const split = $derived(screen === 'chat' && !narrow && view !== null);
+  const showView = $derived(screen === 'view' || split);
+  const tabOn = (k: string) => (k === 'home' ? screen === 'home' : screen !== 'home' && view === k);
 
   /** The quick-control ring's actions, fanned out on a quarter circle up and to the left. */
   const actions = $derived([
@@ -110,9 +117,9 @@
     state === 'working'
       ? { key: 'stop', label: 'Stop zenbot', run: () => (state = 'chat') }
       : { key: 'clip', label: 'Attach a file', run: () => {} },
-    narrow
-      ? { key: 'sessions', label: 'Sessions', run: () => (view = 'sessions') }
-      : { key: split ? 'focus' : 'split', label: split ? 'Focus on chat' : 'Show panel', run: () => (view = split ? null : 'sessions') },
+    screen === 'chat' && !narrow
+      ? { key: split ? 'focus' : 'split', label: split ? 'Focus on chat' : 'Show panel', run: () => (view = split ? null : 'sessions') }
+      : { key: 'home', label: 'Home', run: () => pickTab('home') },
     { key: 'theme', label: `Theme: ${theme}`, run: () => cycleTheme() },
     { key: 'settings', label: 'Settings', run: () => pickTab('settings') },
   ]);
@@ -123,16 +130,32 @@
   };
 
   function pickTab(k: string) {
-    view = view === k && !narrow ? null : k;
+    if (k === 'home') { screen = 'home'; view = null; }
+    else if (screen === 'chat' && !narrow) view = view === k ? null : k;
+    else { screen = 'view'; view = k; }
+  }
+  function openChat(st: State) {
+    if (screen !== 'chat') back = screen;
+    state = st;
+    screen = 'chat';
+    if (back === 'home' || narrow) view = null;
   }
   function pick(s: Session) {
     selected = s.id;
-    state = s.state === 'working' ? 'working' : s.state === 'waiting' ? 'waiting' : 'chat';
-    if (narrow) view = null;
+    openChat(s.state === 'working' ? 'working' : s.state === 'waiting' ? 'waiting' : 'chat');
+  }
+  /** From Home: a widget's row opens its chat. */
+  function openById(id: string) {
+    const s = [...channels, ...sessions, ...archived].find((x) => x.id === id);
+    if (s) pick(s);
+    else { selected = 'trip'; openChat('chat'); }
   }
   function newChat() {
-    state = 'new';
-    if (narrow) view = null;
+    openChat('new');
+  }
+  function goBack() {
+    screen = back;
+    if (back === 'home') view = null;
   }
   function cycleTheme() {
     theme = theme === 'auto' ? 'dark' : theme === 'dark' ? 'light' : 'auto';
@@ -145,7 +168,7 @@
 
   onMount(() => {
     const mq = matchMedia('(max-width: 900px)');
-    const fit = () => { narrow = mq.matches; if (narrow && !view) view = 'sessions'; };
+    const fit = () => (narrow = mq.matches);
     fit();
     mq.addEventListener('change', fit);
     return () => mq.removeEventListener('change', fit);
@@ -174,7 +197,7 @@
 {/snippet}
 
 <!-- top: the agent, the tabs -->
-<div class="top" class:hide={narrow && shown === 'chat'}>
+<div class="top" class:hide={narrow && screen === 'chat'}>
   <div class="agent-wrap">
     <button class="agent" onclick={() => (agentMenu = !agentMenu)} aria-expanded={agentMenu} title="Switch agent">
       <span class="orb" class:busy={state === 'working'} style="--a:{agent.a}; --b:{agent.b}">{agent.name[0].toUpperCase()}</span>
@@ -200,7 +223,7 @@
 
   <nav class="tabs" aria-label="Views">
     {#each tabs as t}
-      <button class="tab" class:on={view === t.key} onclick={() => pickTab(t.key)} title={!narrow && view === t.key ? 'Close the panel' : t.label}>
+      <button class="tab" class:on={tabOn(t.key)} onclick={() => pickTab(t.key)} title={split && view === t.key ? 'Close the panel' : t.label}>
         {@render ico(t.key)}<span class="tl">{t.label}</span>
         {#if t.key === 'sessions' && waiting}<span class="badge">{waiting}</span>{/if}
       </button>
@@ -208,7 +231,7 @@
     {#if !narrow}
       <span class="vsep"></span>
       {#each PLUGIN_TABS as t}
-        <button class="tab" class:on={view === t.key} onclick={() => pickTab(t.key)}>{@render ico(t.key)}<span class="tl">{t.label}</span></button>
+        <button class="tab" class:on={tabOn(t.key)} onclick={() => pickTab(t.key)}>{@render ico(t.key)}<span class="tl">{t.label}</span></button>
       {/each}
     {/if}
   </nav>
@@ -216,10 +239,14 @@
 
 <div class="stage" class:split class:dragging bind:this={stage} style={split ? `grid-template-columns: minmax(0, ${1 - side}fr) 14px minmax(0, ${side}fr)` : undefined}>
   <!-- left: the chat -->
-  {#if shown === 'both' || shown === 'chat'}
+  {#if screen === 'home'}
+    <section class="pane"><Home {narrow} onopen={openById} /></section>
+  {/if}
+
+  {#if screen === 'chat'}
     <section class="pane chat">
       <header class="hd">
-        {#if narrow}<button class="icon back" title="Back to Sessions" aria-label="Back to Sessions" onclick={() => (view = 'sessions')}>‹</button>{/if}
+        {#if narrow}<button class="icon back" title="Back" aria-label="Back" onclick={goBack}>‹</button>{/if}
         <h1>{state === 'new' ? 'New chat' : current.title}</h1>
         {#if state === 'working'}<span class="tag work"><span class="dot work"></span>working</span>
         {:else if state === 'waiting'}<span class="tag wait"><span class="dot wait"></span>needs you</span>{/if}
@@ -316,7 +343,7 @@
   {/if}
 
   <!-- right: the view picked in the tab bar -->
-  {#if (shown === 'both' && view) || (shown !== 'both' && shown !== 'chat')}
+  {#if showView}
     <section class="pane view">
       {#if view === 'sessions'}
         <header class="vh"><h2>Sessions</h2><span class="sp"></span>
@@ -389,7 +416,7 @@
 <div class="mock">
   <b>mock</b>
   {#each [['new', 'New'], ['chat', 'Chat'], ['working', 'Working'], ['waiting', 'Question']] as [k, l]}
-    <button class:on={state === k} onclick={() => (state = k as State)}>{l}</button>
+    <button class:on={screen === 'chat' && state === k} onclick={() => openChat(k as State)}>{l}</button>
   {/each}
   <span class="sep"></span>
   <button onclick={cycleTheme}>Theme: {theme}</button>
