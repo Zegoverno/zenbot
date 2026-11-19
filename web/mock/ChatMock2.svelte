@@ -259,6 +259,19 @@
   let hOpen = $state<Record<number, boolean>>({});
   let liveN = $state(5);
   let liveOpen = $state(false);
+
+  // Keep where you are across a refresh (this tab only): screen, open view, chat and its state.
+  const PLACE_KEY = 'zen.mock.place';
+  try {
+    const p = JSON.parse(sessionStorage.getItem(PLACE_KEY) ?? 'null');
+    if (p) {
+      ({ screen, view, back, state, selected, liveOpen } = p);
+      if (screen === 'chat' && state === 'new') queueMicrotask(() => chooseTalk(agent));
+    }
+  } catch {}
+  $effect(() => {
+    sessionStorage.setItem(PLACE_KEY, JSON.stringify({ screen, view, back, state, selected, liveOpen }));
+  });
   const live = $derived(QUEUE.slice(0, liveN));
   $effect(() => {
     if (state !== 'working') { liveN = 5; return; }
