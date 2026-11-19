@@ -43,6 +43,10 @@ const DISABLED: &[&str] = &[
     // no tools and keeps the prefix fixed) and a plugin-directory prefetch at startup (plugins
     // are off), so they stay off.
     "deferred_tool_world_state", "plugin_discovery_prefetch",
+    // 0.167.2–0.170.0: the code-mode host's gRPC transport and output truncation (code mode is
+    // off), and incremental tool declarations on Bedrock and GCP Responses (zen keeps every tool
+    // in a fixed prefix), so they stay off.
+    "code_mode_host_grpc", "code_mode_host_output_truncation", "incremental_tools_legacy", "incremental_tools_legacy_gcp",
 ];
 
 /// Features on by default that were reviewed and give the model nothing to act with (transport,
@@ -57,6 +61,10 @@ const REVIEWED: &[&str] = &[
     // 0.167.0: inherited tool declarations kept in MCP-less prediction forks, and a trusted
     // config item appended when the reasoning effort zen picks changes.
     "prediction_preserve_parent_tools", "reasoning_effort_override",
+    // 0.168.0–0.170.0: more context in Guardian's approval reviews, client-requested tool-output
+    // retention across compaction and client-supplied untrusted context rendered as tool outputs
+    // (zen sends neither), and one shared budget for every image.
+    "guardian_include_additional_context", "retain_client_tool_outputs", "untrusted_as_tool_output", "unified_image_budget",
 ];
 
 /// Codex's settings for every zen thread: the features in `DISABLED` off, no web search, no MCP

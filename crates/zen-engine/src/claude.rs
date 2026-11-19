@@ -33,6 +33,8 @@ const PREFIX: &str = "mcp__zen__";
 /// none is given, so zenbot always passes one: `default_effort` unless the session picks another.
 /// Each model's default is Anthropic's recommended effort (the models overview; `medium` where it
 /// gives none), and its context the window Claude Code reports (`modelUsage.contextWindow`).
+/// Only models the plan's usage limits cover: Fable models run on paid usage credits on the owner's
+/// plan (since 2026-11-16, Anthropic's "Claude Fable models on your plan"), so none is offered.
 pub fn models() -> Vec<Model> {
     let model = |id: &str, name: &str, effort: &str, context: u64| Model {
         id: format!("claude/{id}"),
@@ -45,10 +47,8 @@ pub fn models() -> Vec<Model> {
     };
     vec![
         model("claude-opus-5-5", "Claude Opus 5.5", "medium", 1_000_000),
-        model("claude-fable-5-2", "Claude Fable 5.2", "high", 1_000_000),
         model("claude-sonnet-5-5", "Claude Sonnet 5.5", "high", 1_000_000),
         model("claude-haiku-5-5", "Claude Haiku 5.5", "medium", 1_000_000),
-        model("claude-haiku-4-5-20251001", "Claude Haiku 4.5", "medium", 200_000),
     ]
 }
 
