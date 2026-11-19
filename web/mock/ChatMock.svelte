@@ -20,6 +20,22 @@
     state === 'new' ? [] : state === 'waiting' ? [...conversation, question] : conversation,
   );
   let showArchived = $state(false);
+  // The board's tabs but Sessions (the list above is Sessions), then the plugins' views.
+  const TABS = [
+    { key: 'files', label: 'Files' }, { key: 'tasks', label: 'Tasks' }, { key: 'agents', label: 'Agents' },
+    { key: 'games', label: 'Games' }, { key: 'read', label: 'Read' }, { key: 'write', label: 'Write' },
+  ];
+  // Line icons, 24×24, stroked with currentColor.
+  const ICONS: Record<string, string> = {
+    files: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+    tasks: '<path d="M9 11l2 2 4-4"/><rect x="4" y="4" width="16" height="16" rx="3"/>',
+    agents: '<circle cx="9" cy="9" r="3"/><circle cx="17" cy="10" r="2.2"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0M14.5 19a3.5 3.5 0 0 1 6 0"/>',
+    games: '<rect x="3" y="7" width="18" height="11" rx="4"/><path d="M8 11v3M6.5 12.5h3"/><circle cx="15.5" cy="12" r=".6"/><circle cx="17.5" cy="14" r=".6"/>',
+    read: '<path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H11v16H5.5A1.5 1.5 0 0 1 4 18.5zM20 5.5A1.5 1.5 0 0 0 18.5 4H13v16h5.5a1.5 1.5 0 0 0 1.5-1.5z"/>',
+    write: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>',
+    settings: '<circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4L7 17M17 7l1.4-1.4"/>',
+  };
+  let tab = $state('');
   let selected = $state('trip');
   const pick = (id: string) => { selected = id; state = 'chat'; };
 
@@ -64,11 +80,17 @@
           </div>
         {/if}
       </nav>
+      {#snippet ico(name: string)}
+        <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">{@html ICONS[name]}</svg>
+      {/snippet}
       <div class="sb-foot">
-        <button>📁 Files</button>
-        <button>✓ Tasks</button>
-        <button>⚙ Settings</button>
-        <div class="me"><span class="av">A</span> Adriane</div>
+        {#each TABS as t}
+          <button class="nav" class:on={tab === t.key} onclick={() => (tab = t.key)}>{@render ico(t.key)}{t.label}</button>
+        {/each}
+        <div class="me">
+          <span class="av">A</span><span class="name">Adriane</span>
+          <button class="icon" class:on={tab === 'settings'} title="Settings" onclick={() => (tab = 'settings')}>{@render ico('settings')}</button>
+        </div>
       </div>
     </aside>
   {/if}
@@ -249,9 +271,13 @@
   .tag.work { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
   .tag.wait { color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent); }
   .sb-foot { border-top: 1px solid var(--faint); padding-top: 8px; display: flex; flex-direction: column; gap: 1px; }
-  .sb-foot button { text-align: left; padding: 7px 10px; border-radius: 8px; font-size: 14px; color: var(--dim); }
-  .sb-foot button:hover { background: var(--soft); color: var(--ink); }
-  .me { display: flex; align-items: center; gap: 8px; padding: 10px 10px 2px; font-size: 14px; }
+  .nav { display: flex; align-items: center; gap: 10px; text-align: left; padding: 7px 10px; border-radius: 8px; font-size: 14px; color: var(--dim); }
+  .nav:hover { background: var(--soft); color: var(--ink); }
+  .nav.on { color: var(--ink); background: var(--soft); }
+  .ico { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  .me { display: flex; align-items: center; gap: 10px; margin-top: 6px; padding: 8px 4px 0 8px; border-top: 1px solid var(--faint); font-size: 14px; }
+  .me .name { flex: 1; font-weight: 550; }
+  .me .icon.on { color: var(--accent); }
   .av { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-size: 13px; font-weight: 650; background: var(--soft); flex: none; }
   .av.bot { background: color-mix(in srgb, var(--accent) 22%, var(--paper)); color: var(--accent); }
 
