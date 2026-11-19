@@ -12,7 +12,7 @@
   // opens through the normal opener (plugins included); Esc clears.
   import { onMount } from 'svelte';
   import type { Pane } from '../app.svelte.ts';
-  import { app, openFile, openDir, tilde, typing, notice } from '../app.svelte.ts';
+  import { app, openFile, openDir, openSession, tilde, typing, notice } from '../app.svelte.ts';
   import { files, zen } from '../api.ts';
   import type { Found, SearchHit } from '../api.ts';
   import Opened from '../Opened.svelte';
@@ -85,9 +85,9 @@
   const rows = $derived.by((): Row[] => {
     const out: Row[] = [];
     if (!t.root) return out;
-    if (t.root !== '/' && t.root !== app.home && t.root.startsWith(app.home + '/')) out.push({ path: '..', name: '..', dir: true, depth: 0, size: 0, up: true });
+    if (t.root !== '/') out.push({ path: '..', name: '..', dir: true, depth: 0, size: 0, up: true });
     const walk = (dir: string, depth: number) => {
-      for (const e of t.listing[dir] ?? []) {
+      for (const e of [...(t.listing[dir] ?? [])].sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name))) {
         if (out.length >= MAX_ROWS) return;
         if (SKIP.has(e.name) || (e.hidden && !t.hidden)) continue;
         out.push({ path: e.path, name: e.name, dir: e.dir, depth, size: e.size });
@@ -145,9 +145,8 @@
   function activate(r: Row | undefined) {
     if (!r) return;
     if (r.up) openDir(parentOf(t.root), pane);
-    else if (r.dir) {
-      if (!expand(r)) foldOrParent(r);
-    } else openFile(r.path, pane);
+    else if (r.dir) openDir(r.path, pane);
+    else openFile(r.path, pane);
   }
 
   // ---- search ----
@@ -474,9 +473,25 @@
 <svelte:window onkeydown={key} />
 
 {#if app.file[pane]}
+  <div class="file-actions">
+    <span class="file-path">{shown(app.file[pane]!)}</span>
+    <button class="chip primary" disabled={app.write[pane]} title={app.write[pane] ? 'Finish editing first' : 'Ask zenbot about this file'} onclick={() => { app.chatDraft = `Help me with ${shown(app.file[pane]!)}: `; openSession('new'); }}>Ask zenbot</button>
+  </div>
   <Opened path={app.file[pane]} {pane} {active} />
 {:else}
   <div class="view" bind:this={list}>
+    <div class="topbar">
+      <button class="up" disabled={t.root === '/'} aria-label="Up one folder" onclick={() => openDir(parentOf(t.root), pane)}>↑</button>
+      <nav class="crumbs" aria-label="folder">
+        {#each crumbs as c, i}
+          {#if i > 0}<span class="sep">›</span>{/if}
+          <button class:here={i === crumbs.length - 1} onclick={() => openDir(c.path, pane)} title={c.path}>{c.path === app.vault ? 'Vault' : c.name}</button>
+        {/each}
+      </nav>
+      <span class="grow"></span>
+      {#if app.home}<button class="chip" onclick={() => { clearSearch(); openDir(`${app.home}/inbox`, pane); }}>Inbox</button>{/if}
+      {#if app.vault}<button class="chip" onclick={() => { clearSearch(); openDir(app.vault, pane); }}>Vault</button>{/if}
+    </div>
     <div class="searchbar">
       <input
         bind:this={input}
@@ -489,8 +504,6 @@
         autocomplete="off"
         autocapitalize="off"
       />
-      {#if app.vault && t.root !== app.vault}<button class="chip" onclick={() => { clearSearch(); openDir(app.vault, pane); }} title="the vault">vault</button>{/if}
-      {#if app.home && t.root !== app.home}<button class="chip" onclick={() => { clearSearch(); openDir(app.home, pane); }} title="your home folder">home</button>{/if}
     </div>
     {#if searching}
       <div class="results" role="listbox" aria-label="search results">
@@ -520,13 +533,6 @@
       </div>
     {:else}
     <div class="tools">
-      <nav class="crumbs" aria-label="folder">
-        {#each crumbs as c, i}
-          {#if i > 0 && crumbs[i - 1].name !== '/'}<span class="sep">/</span>{/if}
-          <button class:here={i === crumbs.length - 1} onclick={() => openDir(c.path, pane)}>{c.name}</button>
-        {/each}
-      </nav>
-      <span class="grow"></span>
       <button class="chip" onclick={() => begin('file')} title="a">+ file</button>
       <button class="chip" onclick={() => begin('folder')} title="A">+ folder</button>
       <button class="chip" disabled={!chosen || chosen.dir} onclick={() => chosen && !chosen.dir && openFile(chosen.path, pane, true)}>Edit selected file</button>
@@ -574,7 +580,7 @@
           }}
           onkeydown={() => {}}
         >
-          <span class="twist">{r.up ? '↰' : !r.dir ? '' : t.open[r.path] ? '▾' : '▸'}</span>
+          <span class="twist">{r.up ? '↑' : r.dir ? '▰' : /\.(png|jpe?g|gif|webp|svg)$/i.test(r.name) ? '▧' : '▤'}</span>
           <span class="name">{r.name}{r.dir && !r.up ? '/' : ''}</span>
           {#if r.dir && t.failed[r.path]}<span class="err small">can't read</span>{/if}
           {#if !r.dir}<span class="size">{human(r.size)}</span>{/if}
@@ -586,8 +592,14 @@
 {/if}
 
 <style>
+  .topbar, .file-actions { display: flex; gap: 8px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--faint); }
+  .topbar { flex-wrap: wrap; }
+  .up { font-size: 18px; padding: 3px 8px; color: var(--dim); }
+  .up:disabled { opacity: .4; }
+  .file-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); font-size: 12px; }
+  .primary { color: var(--accent); border-color: var(--accent); }
   .view { container-type: inline-size; padding: 6px 0 24px; font-family: var(--sans); font-size: 14px; }
-  .searchbar { display: flex; gap: 8px; align-items: center; padding: 2px 14px 6px; }
+  .searchbar { display: flex; gap: 8px; align-items: center; padding: 18px 16px 12px; }
   .searchbar input { flex: 1; max-width: 420px; min-width: 0; font: inherit; font-size: 13px; color: var(--ink); background: transparent; border: 1px solid var(--faint); border-radius: 6px; padding: 4px 8px; }
   .searchbar input:focus { outline: none; border-color: var(--accent); }
   .result { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 6px 14px; margin: 0 6px; border-radius: 6px; cursor: pointer; outline-offset: -1px; }
@@ -614,11 +626,11 @@
   .pad { padding: 2px 14px; margin: 0; font-size: 13px; }
   .err { color: var(--err); padding: 4px 14px; margin: 0; font-size: 13px; }
   .err.small { padding: 0; font-size: 12px; }
-  .row { display: flex; align-items: baseline; gap: 6px; min-height: 28px; box-sizing: border-box; padding: 4px 14px; cursor: pointer; white-space: nowrap; overflow: hidden; border-radius: 6px; margin: 0 6px; outline-offset: -1px; }
+  .row { display: flex; align-items: baseline; gap: 6px; min-height: 42px; box-sizing: border-box; padding: 10px 14px; cursor: pointer; white-space: nowrap; overflow: hidden; border-radius: 6px; margin: 0 6px; outline-offset: -1px; }
   .row:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
   .row.sel { outline: 1px solid var(--faint); }
   .row.sel.active { outline: none; background: color-mix(in srgb, var(--accent) 14%, transparent); }
-  .twist { width: 1em; flex: none; color: var(--dim); text-align: center; }
+  .twist { width: 1.5em; flex: none; color: var(--dim); text-align: center; }
   .name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .file .name { color: color-mix(in srgb, var(--ink) 82%, var(--paper)); }
   .size { margin-left: auto; padding-left: 12px; color: var(--dim); font-size: 12px; flex: none; }
