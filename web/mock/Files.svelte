@@ -70,6 +70,8 @@
   }
 
   // ---- the open note ----
+  // A simple built-in reader (with a plain-text Edit) stands in for now; the zenread plugin
+  // will own reading later (Ze, 2026-11-19).
   let edits = $state<Record<string, string>>(JSON.parse(sessionStorage.getItem(KEY + '.edits') ?? '{}'));
   $effect(() => sessionStorage.setItem(KEY + '.edits', JSON.stringify(edits)));
   const rel = (p: string) => (p.startsWith(VAULT + '/') ? p.slice(VAULT.length + 1) : p);
