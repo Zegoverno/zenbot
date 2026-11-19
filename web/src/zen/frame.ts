@@ -41,11 +41,19 @@ export function withCsp(html: string, csp: Csp | undefined): string {
 }
 
 /** Strict pane navigation: no credentials, fragments, duplicate or unknown parameters. */
-export function zenNavigation(url: string): { action: 'close' } | { action: 'open'; path: string; mode: 'read' | 'edit' } | null {
+export function zenNavigation(url: string): { action: 'close' } | { action: 'open'; path: string; mode: 'read' | 'edit' } | { action: 'task'; id: string; done: boolean } | null {
   let u: URL;
   try { u = new URL(url); } catch { return null; }
   if (u.protocol !== 'zen:' || u.username || u.password || u.port || u.hash || (u.pathname !== '' && u.pathname !== '/')) return null;
   if (u.host === 'close') return u.search ? null : { action: 'close' };
+  if (u.host === 'task') {
+    if ([...u.searchParams.keys()].some((k) => !['id', 'done'].includes(k)) ||
+        u.searchParams.getAll('id').length !== 1 || u.searchParams.getAll('done').length !== 1) return null;
+    const id = u.searchParams.get('id');
+    const done = u.searchParams.get('done');
+    if (!id || id.length > 1024 || /[\x00-\x1f\x7f]/.test(id) || (done !== '0' && done !== '1')) return null;
+    return { action: 'task', id, done: done === '1' };
+  }
   if (u.host !== 'open' || [...u.searchParams.keys()].some((k) => !['path', 'mode'].includes(k)) ||
       u.searchParams.getAll('path').length !== 1 || u.searchParams.getAll('mode').length > 1) return null;
   const p = u.searchParams.get('path');

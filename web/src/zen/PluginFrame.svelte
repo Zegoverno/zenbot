@@ -136,6 +136,19 @@
             setView(pane, 'files');
             return {};
           }
+          if (nav?.action === 'task') {
+            try {
+              const response = await fetch(`/api/zen/tasks/${encodeURIComponent(nav.id)}`, {
+                method: 'PATCH', headers: { 'Content-Type': 'application/json', 'X-Zen-Web': '1' },
+                body: JSON.stringify({ done: nav.done }),
+              });
+              if (!response.ok) throw new Error(`HTTP ${response.status}`);
+              return {};
+            } catch (e) {
+              notice(`Could not update task: ${(e as Error).message}`);
+              return { isError: true };
+            }
+          }
           if (nav?.action === 'open' && app.vault) {
             openFile(`${app.vault}/${nav.path}`, pane, nav.mode === 'edit');
             return {};
