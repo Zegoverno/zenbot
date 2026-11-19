@@ -9,7 +9,7 @@
   // by agent when more than one has roles.
   import { onMount, tick } from 'svelte';
   import type { Pane } from '../app.svelte.ts';
-  import { openSession, notice, typing, tilde } from '../app.svelte.ts';
+  import { app, openSession, notice, typing, tilde } from '../app.svelte.ts';
   import { zen, AGENT_NAME, type Agent, type AgentDetail, type AgentFiles } from '../api.ts';
   import { pageRows, follow, plain } from './list.ts';
 
@@ -271,9 +271,12 @@
       </form>
     {/if}
 
-    <div role="listbox" aria-label="agents" tabindex="-1">
+    <h3 class="section-title">Agents</h3>
+    <p class="section-lead">Who you talk to. Each has its own character, memory and limits.</p>
+    <div class="cards" role="listbox" aria-label="agents" tabindex="-1">
       {#each agents ?? [] as a (a.name)}
         {@const on = a.name === sel}
+        {@const live = a as Agent & { chats?: number; busy?: { id: string; title: string }[] }}
         <div
           class="row"
           class:sel={on}
@@ -287,12 +290,15 @@
           onkeydown={() => {}}
         >
           <div class="line">
-            <b>@{a.name}</b>
+            <span class="orb">{a.name[0].toUpperCase()}</span><b>@{a.name}</b>
+            {#if a.name === app.agent}<span class="dim small">Talking to</span>{/if}
             {#if a.description}<span class="desc">{a.description}</span>{/if}
             {#if on}<span class="tail"><button class="act" onclick={(e) => { e.stopPropagation(); edit(a.name); }}>edit</button></span>{/if}
           </div>
           {#if a.error}<div class="refused small">⚠ {a.error}</div>
           {:else}<div class="dim small">{uses(a)}</div>{/if}
+          <div class="stats"><span>{live.busy ? (live.busy.length ? `Working on ${live.busy.length} job${live.busy.length === 1 ? '' : 's'}` : 'Idle') : 'Status unavailable'}</span>{#if live.chats !== undefined}<span>{live.chats} chats</span>{/if}<span>{a.roles?.roles?.length ?? 0} roles</span></div>
+          <button class="act" onclick={(e) => { e.stopPropagation(); openSession('new', a.name); }}>Talk to {a.name}</button>
         </div>
       {/each}
     </div>
@@ -310,7 +316,7 @@
             <div class="role" data-role={role.name}>
               <div class="line">
                 <b>{role.name}</b>
-                <span class="dim">{role.model ?? 'default model'}{role.effort ? ` · ${role.effort}` : ''}</span>
+                <span class="dim">{role.model ?? 'default model'}{role.effort ? ` · ${role.effort}` : ''}{(role as typeof role & { uses_30d?: number }).uses_30d !== undefined ? ` · ${(role as typeof role & { uses_30d: number }).uses_30d} uses in 30 days` : ''}</span>
               </div>
               {#if role.description}<div class="small">{role.description}</div>{/if}
               <div class="dim small">{role.tools ? `tools: ${role.tools.join(', ') || 'none'}` : 'all tools'}{role.skills.length ? ` · skills: ${role.skills.join(', ')}` : ''}</div>
@@ -323,6 +329,13 @@
 </div>
 
 <style>
+  .section-title { margin: 20px 20px 2px; font-size: 22px; }
+  .section-lead { margin: 0 20px 12px; color: var(--dim); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 270px), 1fr)); gap: 10px; margin: 0 14px; }
+  .cards .row { border: 1px solid var(--faint); border-radius: 14px; padding: 14px; margin: 0; }
+  .cards .line { flex-wrap: wrap; align-items: center; }
+  .orb { display: grid; place-items: center; border-radius: 50%; width: 36px; height: 36px; background: var(--accent); color: var(--paper); }
+  .stats { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; color: var(--dim); font-size: 12px; }
   .view { container-type: inline-size; padding: 6px 0 24px; font-family: var(--sans); font-size: 14px; }
   .tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 4px 14px 6px; font-size: 13px; }
   .grow { flex: 1; }

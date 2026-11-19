@@ -5,6 +5,9 @@
   // plugin needs and shows those permissions in plain words before anything is installed
   // (ADR 0001, Host API).
   import { onMount } from 'svelte';
+  import SettingsSections from './SettingsSections.svelte';
+  let section = $state('you');
+  const sections = [['you','You'], ['appearance','Appearance'], ['models','Models'], ['connections','Connections'], ['plugins','Plugins'], ['memory','Memory'], ['updates','Updates']];
   import { pluginApi, type MarketEntry, type Plugin } from '../api.ts';
   import { app, notice, settings } from '../app.svelte.ts';
   import { loadPlugins, permissionWords, plugins } from '../plugins.svelte.ts';
@@ -133,6 +136,8 @@
 </script>
 
 <div class="view settings">
+  <nav class="section-nav" aria-label="Settings sections">{#each sections as [key, label]}<button class:on={section === key} aria-current={section === key ? 'page' : undefined} onclick={() => section = key}>{label}</button>{/each}</nav>
+  {#if section !== 'plugins'}<SettingsSections {section} />{:else}
   <div class="ztabs sub" role="tablist" aria-label="settings">
     <button role="tab" class:on={tab === 'plugins'} aria-selected={tab === 'plugins'} onclick={() => settings('plugins')}>Plugins</button>
     <button role="tab" class:on={tab === 'marketplace'} aria-selected={tab === 'marketplace'} onclick={() => settings('marketplace')}>Marketplace</button>
@@ -205,6 +210,7 @@
       </section>
     {/each}
   {/if}
+  {/if}
 </div>
 
 {#if asking}
@@ -228,6 +234,9 @@
 {/if}
 
 <style>
+  .section-nav { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:20px; }
+  .section-nav button { padding:7px 12px; border-radius:10px; color:var(--dim); }
+  .section-nav button.on { background:color-mix(in srgb, var(--ink) 8%, transparent); color:var(--ink); font-weight:600; }
   .settings { padding: 8px 16px 40px; max-width: 760px; }
   .sub { display: flex; gap: 4px; margin: 4px 0 14px; }
   .sub button { padding: 4px 10px; border-radius: 6px; color: var(--dim); }
