@@ -11,7 +11,7 @@
   // Fake data; nothing here talks to the kernel. The floating "mock" panel switches states.
   import { onMount } from 'svelte';
   import Home from './Home.svelte';
-  import { archived, archivedCount, channels, conversation, question, sessions, suggestions, type Msg, type Session } from './data.ts';
+  import { archived, archivedCount, channels, conversation, question, sessions, type Msg, type Session } from './data.ts';
 
   type State = 'new' | 'chat' | 'working' | 'waiting';
   let state = $state<State>('chat');
@@ -73,6 +73,39 @@
     { id: 'garry', name: 'Garry', role: 'Startup advisor', a: '#7a6a9b', b: '#b3a3cf' },
   ];
   let agent = $state(AGENTS[0]);
+  /** The agent this chat talks to: a new chat starts with the top picker's agent and can switch. */
+  let talk = $state(AGENTS[0]);
+  let draft_el: HTMLTextAreaElement | undefined = $state();
+
+  // New chat: three suggestions written by the cheapest model from recent sessions and the agent.
+  // The page and the composer show at once; the cards load after, with a shimmer, and never block
+  // typing. The real app would call a kernel endpoint on the Fast tier, cached per agent for a while.
+  type Sugg = { title: string; why: string; prompt: string };
+  const SUGG: Record<string, Sugg[]> = {
+    zenbot: [
+      { title: 'Finish the Campos do Jordão booking', why: 'The weekend plan is waiting on a hotel', prompt: 'Book Pousada Villa Bella for Fri 21 – Sun 23, with a crib.' },
+      { title: 'Shopping list for the week', why: 'From the baby-friendly recipes you saved', prompt: 'Make a shopping list for this week from the recipes I liked.' },
+      { title: 'Plan Mom’s birthday call', why: 'Her birthday is today', prompt: 'Help me plan something nice for Mom’s birthday today.' },
+    ],
+    garry: [
+      { title: 'Pressure-test the zenfitness offer', why: 'You talked pricing on Monday', prompt: 'Challenge my zenfitness pricing: who pays, how much, and why now?' },
+      { title: 'Ten customer interviews this month', why: 'No interviews logged since October', prompt: 'Help me find and book ten customer interviews this month.' },
+      { title: 'Draft a one-line pitch', why: 'From your recent startup notes', prompt: 'Draft three one-line pitches for my project and rank them.' },
+    ],
+  };
+  let sugg = $state<Sugg[] | null>(null);
+  let suggFor = '';
+  function loadSugg(id: string) {
+    if (suggFor === id && sugg) return;
+    suggFor = id;
+    sugg = null;
+    setTimeout(() => { if (suggFor === id) sugg = SUGG[id] ?? []; }, 1400 + Math.random() * 1200);
+  }
+  function chooseTalk(a: (typeof AGENTS)[number]) {
+    talk = a;
+    loadSugg(a.id);
+    draft_el?.focus();
+  }
 
   const TABS = [
     { key: 'sessions', label: 'Sessions' }, { key: 'files', label: 'Files' }, { key: 'tasks', label: 'Tasks' },
@@ -138,6 +171,7 @@
     if (screen !== 'chat') back = screen;
     state = st;
     screen = 'chat';
+    if (st === 'new') chooseTalk(agent);
     if (back === 'home' || narrow) view = null;
   }
   function pick(s: Session) {
@@ -206,7 +240,7 @@
       <div class="menu amenu">
         <div class="mlabel">Agents</div>
         {#each AGENTS as a}
-          <button class="arow" class:sel={a.id === agent.id} onclick={() => { agent = a; agentMenu = false; }}>
+          <button class="arow" class:sel={a.id === agent.id} onclick={() => { agent = a; agentMenu = false; if (state === 'new') chooseTalk(a); }}>
             <span class="orb sm" style="--a:{a.a}; --b:{a.b}">{a.name[0].toUpperCase()}</span>
             <span class="ameta"><b>{a.name}</b><span>{a.role}</span></span>
             {#if a.id === agent.id}<span class="tick">✓</span>{/if}
@@ -271,10 +305,31 @@
       <div class="scroll">
         {#if state === 'new'}
           <div class="hello">
-            <span class="orb lg" style="--a:{agent.a}; --b:{agent.b}">{agent.name[0].toUpperCase()}</span>
             <h2>Good morning, Adriane</h2>
-            <p>What can {agent.name} take off your plate today?</p>
-            <div class="sugg">{#each suggestions as s}<button onclick={() => (draft = s)}>{s}</button>{/each}</div>
+            <p>Who do you want to talk to?</p>
+            <div class="who" role="radiogroup" aria-label="Agent">
+              {#each AGENTS as a}
+                <button class="pick" class:sel={a.id === talk.id} role="radio" aria-checked={a.id === talk.id} onclick={() => chooseTalk(a)}>
+                  <span class="orb" style="--a:{a.a}; --b:{a.b}">{a.name[0].toUpperCase()}</span>
+                  <span class="pn"><b>{a.name}</b><span>{a.role}</span></span>
+                </button>
+              {/each}
+            </div>
+            <div class="sgh">
+              Ideas for you
+              {#if !sugg}<span class="think" aria-live="polite"><i></i><i></i><i></i> {talk.name} is thinking of a few</span>{/if}
+            </div>
+            <div class="cards">
+              {#if sugg}
+                {#each sugg as g, i (g.title)}
+                  <button class="idea" style="animation-delay:{i * 70}ms" onclick={() => { draft = g.prompt; draft_el?.focus(); }}>
+                    <b>{g.title}</b><span>{g.why}</span>
+                  </button>
+                {/each}
+              {:else}
+                {#each [0, 1, 2] as i}<div class="idea skel" aria-hidden="true"><i></i><i></i></div>{/each}
+              {/if}
+            </div>
           </div>
         {:else}
           <div class="body">
@@ -312,7 +367,7 @@
 
       <footer class="dock">
         <div class="compose">
-          <textarea rows="1" placeholder={state === 'waiting' ? `Answer ${agent.name}…` : `Message ${agent.name}`} bind:value={draft}></textarea>
+          <textarea rows="1" placeholder={state === 'waiting' ? `Answer ${agent.name}…` : `Message ${state === 'new' ? talk.name : agent.name}`} bind:value={draft} bind:this={draft_el}></textarea>
           <div class="bar">
             <button class="icon" title="Attach a file">{@render ico('clip')}</button>
             <div class="menu-wrap">
@@ -513,12 +568,32 @@
   .opts button:hover { border-color: var(--dim); }
   .opts .primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
   .or { font-size: 12px; color: var(--dim); }
-  .hello { max-width: 34rem; margin: 14vh auto 0; padding: 0 24px; text-align: center; }
+  .hello { max-width: 44rem; margin: 10vh auto 0; padding: 0 24px; text-align: center; }
   .hello h2 { font-family: var(--serif); font-size: 30px; font-weight: 600; margin: 0 0 6px; }
   .hello p { color: var(--dim); margin: 0 0 24px; }
-  .sugg { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
-  .sugg button { padding: 9px 14px; border: 1px solid var(--faint); border-radius: 99px; font-size: 14px; }
-  .sugg button:hover { border-color: var(--dim); background: var(--soft); }
+  .who { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-bottom: 34px; }
+  .pick { display: flex; align-items: center; gap: 10px; padding: 8px 16px 8px 8px; border-radius: 99px; border: 1px solid var(--faint); text-align: left; transition: border-color 0.15s, background 0.15s; }
+  .pick:hover { border-color: var(--dim); }
+  .pick.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, var(--paper)); }
+  .pick .orb { width: 32px; height: 32px; font-size: 14px; }
+  .pn { display: flex; flex-direction: column; line-height: 1.2; }
+  .pn b { font-size: 14px; font-weight: 600; }
+  .pn span { font-size: 12px; color: var(--dim); }
+  .sgh { display: flex; align-items: center; justify-content: center; gap: 10px; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 650; margin-bottom: 12px; min-height: 18px; }
+  .think { text-transform: none; letter-spacing: 0; font-weight: 400; display: inline-flex; align-items: center; gap: 3px; }
+  .think i { width: 4px; height: 4px; border-radius: 50%; background: var(--accent); animation: blink 1.2s infinite; }
+  .think i:nth-child(2) { animation-delay: 0.2s; } .think i:nth-child(3) { animation-delay: 0.4s; margin-right: 4px; }
+  @keyframes blink { 50% { opacity: 0.2; } }
+  .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; text-align: left; }
+  .idea { display: flex; flex-direction: column; gap: 6px; padding: 14px; min-height: 92px; border-radius: 14px; border: 1px solid var(--faint); background: color-mix(in srgb, var(--soft) 45%, var(--paper)); text-align: left; animation: rise 0.3s both; }
+  button.idea:hover { border-color: var(--accent); }
+  .idea b { font-size: 14px; font-weight: 600; line-height: 1.3; }
+  .idea span { font-size: 12.5px; color: var(--dim); line-height: 1.35; }
+  @keyframes rise { from { opacity: 0; transform: translateY(6px); } }
+  .idea.skel i { display: block; height: 11px; border-radius: 6px; background: linear-gradient(90deg, var(--soft), var(--faint), var(--soft)); background-size: 200% 100%; animation: shimmer 1.4s infinite linear; }
+  .idea.skel i:first-child { width: 80%; height: 13px; } .idea.skel i:last-child { width: 55%; margin-top: 4px; }
+  @keyframes shimmer { to { background-position: -200% 0; } }
+  @media (max-width: 900px) { .cards { grid-template-columns: minmax(0, 1fr); } .idea { min-height: 0; } .hello { margin-top: 4vh; } }
   .dock { padding: 6px 16px 16px; }
   .compose { max-width: 44rem; margin: 0 auto; border: 1px solid var(--faint); border-radius: 20px; background: var(--paper); padding: 10px 10px 8px 16px; box-shadow: 0 4px 16px var(--shadow); }
   .compose:focus-within { border-color: var(--accent); }
