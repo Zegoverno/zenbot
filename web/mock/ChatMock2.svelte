@@ -368,6 +368,10 @@
   <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">{@html ICONS[name]}</svg>
 {/snippet}
 
+{#snippet vclose()}
+  {#if split}<button class="icon vclose" title="Close the panel" aria-label="Close the panel" onclick={() => (view = null)}>×</button>{/if}
+{/snippet}
+
 {#snippet row(s: Session)}
   <button class="srow" class:on={state !== 'new' && selected === s.id} onclick={() => pick(s)}>
     <span class="t">{titleOf(s)}</span>
@@ -412,7 +416,7 @@
     {#if !narrow}
       <span class="vsep"></span>
       {#each PLUGIN_TABS as t}
-        <button class="tab" class:on={tabOn(t.key)} onclick={() => pickTab(t.key)}>{@render ico(t.key)}<span class="tl">{t.label}</span></button>
+        <button class="tab" class:on={tabOn(t.key)} onclick={() => pickTab(t.key)} title={split && view === t.key ? 'Close the panel' : t.label}>{@render ico(t.key)}<span class="tl">{t.label}</span></button>
       {/each}
     {/if}
   </nav>
@@ -643,7 +647,7 @@
     <section class="pane view">
       {#if view === 'sessions'}
         <header class="vh"><h2>Sessions</h2><span class="sp"></span>
-          <button class="ghost" onclick={newChat}>{@render ico('plus')} New</button></header>
+          <button class="ghost" onclick={newChat}>{@render ico('plus')} New</button>{@render vclose()}</header>
         <div class="vsearch">{@render ico('search')}<input placeholder="Search sessions" /></div>
         <div class="vscroll">
           <div class="grp">Channels <span class="cnt">{channels.length}</span></div>
@@ -680,21 +684,21 @@
           {/if}
         </div>
       {:else if view === 'files'}
-        <header class="vh"><h2>Files</h2></header>
+        <header class="vh"><h2>Files</h2><span class="sp"></span>{@render vclose()}</header>
         <div class="vscroll">
           {#each [['📁', 'Goals', '4 notes'], ['📁', 'Projects', '12 notes'], ['📁', 'Daily', 'today'], ['📄', 'Family budget — December.md', '8:41'], ['📄', 'Campos do Jordão trip.md', '9:16'], ['🖼', 'baby-room-ideas.png', 'Wed']] as [i, n, w]}
             <div class="frow"><span>{i}</span><span class="t">{n}</span><span class="when">{w}</span></div>
           {/each}
         </div>
       {:else if view === 'tasks'}
-        <header class="vh"><h2>Tasks</h2></header>
+        <header class="vh"><h2>Tasks</h2><span class="sp"></span>{@render vclose()}</header>
         <div class="vscroll">
           {#each [['Book Pousada Villa Bella', 'Fri', false], ['Paediatrician — 6-month check-up', 'Nov 26', false], ['Renew car insurance', 'Nov 30', false], ['Order Christmas gifts', 'Dec 5', false], ['Pay school fee', 'Nov 15', true]] as [t, d, done]}
             <label class="trow" class:done><input type="checkbox" checked={done as boolean} /><span class="t">{t}</span><span class="when">{d}</span></label>
           {/each}
         </div>
       {:else if view === 'agents'}
-        <header class="vh"><h2>Agents</h2></header>
+        <header class="vh"><h2>Agents</h2><span class="sp"></span>{@render vclose()}</header>
         <div class="vscroll cards">
           {#each AGENTS as a}
             <button class="card" class:sel={a.id === agent.id} onclick={() => (agent = a)}>
@@ -704,14 +708,14 @@
           {/each}
         </div>
       {:else if view === 'games'}
-        <header class="vh"><h2>Games</h2></header>
+        <header class="vh"><h2>Games</h2><span class="sp"></span>{@render vclose()}</header>
         <div class="vscroll cards">
           {#each [['Sudoku', 'A calm puzzle a day'], ['zengame', 'Prototype 0']] as [n, d]}
             <div class="card"><span class="orb" style="--a:#a8762c; --b:#cfa660">{n[0]}</span><span class="ameta"><b>{n}</b><span>{d}</span></span></div>
           {/each}
         </div>
       {:else}
-        <header class="vh"><h2>{view ? view[0].toUpperCase() + view.slice(1) : ''}</h2></header>
+        <header class="vh"><h2>{view ? view[0].toUpperCase() + view.slice(1) : ''}</h2><span class="sp"></span>{@render vclose()}</header>
         <div class="empty">The {view} view goes here.</div>
       {/if}
     </section>
@@ -922,7 +926,7 @@
   .amenu { left: 0; top: 50px; min-width: 260px; }
   .mlabel { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 600; padding: 6px 10px 4px; }
   .rename { flex: 0 1 26rem; min-width: 8rem; font: inherit; font-size: 16px; font-weight: 650; color: inherit; background: var(--paper); border: 1px solid var(--accent); border-radius: 8px; padding: 3px 8px; outline: none; }
-  .hd .close { font-size: 20px; }
+  .hd .close, .vclose { font-size: 20px; }
   .archrow { display: flex; align-items: center; gap: 6px; padding: 4px 4px 4px 10px; font-size: 14px; }
   .archrow > span { flex: 1; }
   .oc { padding: 4px 10px; border-radius: 8px; border: 1px solid var(--faint); font-size: 13px; background: var(--paper); }
