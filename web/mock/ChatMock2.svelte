@@ -22,8 +22,36 @@
   let back = $state<'home' | 'view'>('home');
   let selected = $state('trip');
   let draft = $state('');
-  let mode = $state('Balanced');
-  let modes = $state(false);
+  // Model and effort, from the kernel's /api/zen/models (a trimmed copy here): each model has its
+  // own effort levels and default; "Default" follows the model's. Grouped by provider, the less
+  // used ones behind "More models".
+  type Model = { id: string; name: string; group: string; hint: string; efforts: string[]; def: string; more?: boolean };
+  const MODELS: Model[] = [
+    { id: 'claude/claude-opus-5-5', name: 'Opus 5.5', group: 'Claude', hint: 'Smartest, for hard problems', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], def: 'medium' },
+    { id: 'claude/claude-sonnet-5-5', name: 'Sonnet 5.5', group: 'Claude', hint: 'Great for most things', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], def: 'high' },
+    { id: 'claude/claude-haiku-5-5', name: 'Haiku 5.5', group: 'Claude', hint: 'Fast and cheap', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], def: 'medium' },
+    { id: 'codex/gpt-6.2-sol', name: 'GPT-6.2 Sol', group: 'OpenAI', hint: 'Newest from OpenAI', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], def: 'low' },
+    { id: 'codex/gpt-6.2-astra', name: 'GPT-6.2 Astra', group: 'OpenAI', hint: 'Lighter and quicker', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], def: 'low' },
+    { id: 'codex/gpt-6.1-terra', name: 'GPT-6.1 Terra', group: 'OpenAI', hint: '', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], def: 'low', more: true },
+    { id: 'codex/gpt-6-sol', name: 'GPT-6 Sol', group: 'OpenAI', hint: '', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], def: 'medium', more: true },
+    { id: 'codex/gpt-5.6-luna', name: 'GPT-5.6 Luna', group: 'OpenAI', hint: '', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], def: 'medium', more: true },
+  ];
+  const DEFAULT_MODEL = 'claude/claude-sonnet-5-5';
+  const EFFORT: Record<string, [string, string]> = {
+    low: ['Low', 'Quick replies'], medium: ['Medium', 'Everyday tasks'], high: ['High', 'Thinks it through'],
+    xhigh: ['Extra high', 'Careful, slower'], max: ['Max', 'Hardest problems'], ultra: ['Ultra', 'Longest thinking'],
+  };
+  let modelId = $state(DEFAULT_MODEL);
+  let effort = $state<string | null>(null);
+  let pop = $state<'model' | 'effort' | null>(null);
+  let moreModels = $state(false);
+  const model = $derived(MODELS.find((m) => m.id === modelId)!);
+  const effortShown = $derived(effort ?? model.def);
+  function setModel(m: Model) {
+    modelId = m.id;
+    if (effort && !m.efforts.includes(effort)) effort = null;
+    pop = null;
+  }
   let details = $state(false);
   let agentMenu = $state(false);
   let ring = $state(false);
@@ -194,7 +222,7 @@
     theme = theme === 'auto' ? 'dark' : theme === 'dark' ? 'light' : 'auto';
   }
   function key(e: KeyboardEvent) {
-    if (e.key === 'Escape') { ring = false; agentMenu = false; details = false; modes = false; }
+    if (e.key === 'Escape') { ring = false; agentMenu = false; details = false; pop = null; }
     // Hold-free shortcut for the ring, as the mouse button would be on a Logitech mouse.
     if (e.key === '.' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); ring = !ring; }
   }
@@ -371,11 +399,37 @@
           <div class="bar">
             <button class="icon" title="Attach a file">{@render ico('clip')}</button>
             <div class="menu-wrap">
-              <button class="mode" onclick={() => (modes = !modes)}>{mode} ▾</button>
-              {#if modes}
-                <div class="menu up">
-                  {#each [['Fast', 'Quick answers, everyday tasks'], ['Balanced', 'Good for most things'], ['Thorough', 'Hard problems, takes longer']] as [k, d]}
-                    <button class="mopt" class:sel={mode === k} onclick={() => { mode = k; modes = false; }}><b>{k}</b><span>{d}</span></button>
+              <button class="mode" class:open={pop === 'model'} aria-haspopup="menu" aria-expanded={pop === 'model'} title="Model"
+                onclick={() => (pop = pop === 'model' ? null : 'model')}>{model.name} <span class="car">▾</span></button>
+              {#if pop === 'model'}
+                <div class="menu up mmenu" role="menu">
+                  {#each ['Claude', 'OpenAI'] as g}
+                    <div class="mg">{g}</div>
+                    {#each MODELS.filter((m) => m.group === g && (!m.more || moreModels || m.id === modelId)) as m}
+                      <button class="mopt" role="menuitemradio" aria-checked={m.id === modelId} class:sel={m.id === modelId} onclick={() => setModel(m)}>
+                        <b>{m.name}{#if m.id === DEFAULT_MODEL}<em>default</em>{/if}</b>{#if m.hint}<span>{m.hint}</span>{/if}
+                      </button>
+                    {/each}
+                  {/each}
+                  {#if !moreModels}<button class="mopt more" onclick={() => (moreModels = true)}>More models…</button>{/if}
+                </div>
+              {/if}
+            </div>
+            <div class="menu-wrap">
+              <button class="mode" class:open={pop === 'effort'} aria-haspopup="menu" aria-expanded={pop === 'effort'} title="Effort: how hard it thinks"
+                onclick={() => (pop = pop === 'effort' ? null : 'effort')}>
+                <span class="bars" aria-hidden="true">{#each [0, 1, 2] as i}<i class:on={model.efforts.indexOf(effortShown) >= i * 2}></i>{/each}</span>
+                {EFFORT[effortShown][0]} <span class="car">▾</span></button>
+              {#if pop === 'effort'}
+                <div class="menu up eff" role="menu">
+                  <div class="mg">Effort · how hard it thinks</div>
+                  <button class="mopt" role="menuitemradio" aria-checked={effort === null} class:sel={effort === null} onclick={() => { effort = null; pop = null; }}>
+                    <b>Default<em>{EFFORT[model.def][0]}</em></b><span>What {model.name} uses unless told</span>
+                  </button>
+                  {#each model.efforts as l}
+                    <button class="mopt" role="menuitemradio" aria-checked={effort === l} class:sel={effort === l} onclick={() => { effort = l; pop = null; }}>
+                      <b>{EFFORT[l][0]}</b><span>{EFFORT[l][1]}</span>
+                    </button>
                   {/each}
                 </div>
               {/if}
@@ -456,7 +510,7 @@
 
 <!-- bottom right: the quick-control ring -->
 {#if ring}<button class="scrim" aria-label="Close" onclick={() => (ring = false)}></button>{/if}
-<div class="qc" class:open={ring}>
+<div class="qc" class:open={ring} class:hide={narrow && screen === 'chat'}>
   {#each actions as a, i}
     <button class="qa" style="transform: {ring ? at(i, actions.length) : 'translate(0,0)'}; transition-delay: {ring ? i * 18 : 0}ms"
       tabindex={ring ? 0 : -1} title={a.label} aria-label={a.label}
@@ -629,6 +683,22 @@
   .mopt { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; }
   .mopt span { font-size: 12px; color: var(--dim); }
   .mopt.sel b { color: var(--accent); }
+  .mopt b { display: flex; align-items: center; gap: 6px; }
+  .mopt em { font-style: normal; font-size: 10.5px; font-weight: 600; color: var(--dim); border: 1px solid var(--faint); border-radius: 99px; padding: 0 6px; }
+  .mopt.more { font-size: 13px; color: var(--accent); font-weight: 600; }
+  .mg { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 650; padding: 8px 12px 4px; }
+  .qc.hide { display: none; }
+  .menu.up { min-width: 250px; }
+  @media (max-width: 900px) { .menu.up.eff { left: auto; right: -60px; } }
+  .mg { white-space: nowrap; }
+  .mmenu { max-height: min(60vh, 460px); overflow: auto; }
+  .mode { display: inline-flex; align-items: center; gap: 6px; }
+  .mode.open { background: var(--soft); color: var(--ink); }
+  .car { font-size: 10px; opacity: 0.7; }
+  .bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 11px; }
+  .bars i { width: 3px; border-radius: 1px; background: var(--faint); }
+  .bars i:nth-child(1) { height: 5px; } .bars i:nth-child(2) { height: 8px; } .bars i:nth-child(3) { height: 11px; }
+  .bars i.on { background: var(--accent); }
 
   /* the right panel's views */
   .vh { display: flex; align-items: center; gap: 8px; padding: 16px 16px 8px 22px; }
