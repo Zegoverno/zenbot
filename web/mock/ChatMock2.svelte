@@ -270,6 +270,44 @@
   }
   let liveN = $state(5);
   let liveOpen = $state(false);
+
+  // Rename: the header title turns into a field; Enter saves, Esc cancels.
+  let titles = $state<Record<string, string>>({});
+  const titleOf = (s: Session) => titles[s.id] ?? s.title;
+  let renaming = $state(false);
+  let nameDraft = $state('');
+  function startRename() { nameDraft = titleOf(current); renaming = true; details = false; }
+  function saveRename() { if (nameDraft.trim()) titles[current.id] = nameDraft.trim(); renaming = false; }
+
+  // Archive: how did it end? "Done" is preselected; the picker changes it.
+  const OUTCOMES = [
+    { v: 'done', l: 'Done', h: 'The job is done' },
+    { v: 'partial', l: 'Part done', h: 'Continue in a new chat that picks up from here' },
+    { v: 'not-done', l: 'Not done', h: 'Stop here' },
+    { v: '-', l: 'Just archive', h: 'Don’t say how it ended' },
+  ];
+  let outcome = $state('done');
+  let outcomeOpen = $state(false);
+  let gone = $state<Record<string, string>>({});
+  let toast = $state<{ text: string; undo?: () => void } | null>(null);
+  let toastTimer: ReturnType<typeof setTimeout> | undefined;
+  function say(text: string, undo?: () => void) { toast = { text, undo }; clearTimeout(toastTimer); toastTimer = setTimeout(() => (toast = null), 6000); }
+  function archiveChat() {
+    const id = current.id, o = OUTCOMES.find((x) => x.v === outcome)!;
+    gone[id] = outcome; details = false; outcomeOpen = false;
+    if (outcome === 'partial') { openChat('new'); say(`Archived as part done · a new chat continues it`, () => { delete gone[id]; selected = id; openChat('chat'); }); }
+    else { closeChat(true); say(outcome === '-' ? 'Archived' : `Archived as ${o.l.toLowerCase()}`, () => { delete gone[id]; selected = id; openChat('chat'); }); }
+    outcome = 'done';
+  }
+
+  // Close the chat (×): a subagent panel closes first; then the side panel's view takes the
+  // page, or with no side panel you land on Home.
+  const closeTitle = $derived(split && view === 'subagent' ? 'Close the subagent panel' : split ? `Close the chat, keep ${view}` : 'Close the chat');
+  function closeChat(all = false) {
+    if (!all && split && view === 'subagent') { view = null; return; }
+    if (split && view !== 'subagent') { screen = 'view'; return; }
+    screen = 'home'; view = null;
+  }
   // Answering the question: the card folds to your answer, zenbot works briefly, then replies.
   let answered = $state<string | null>(null);
   let answerPhase = $state<'working' | 'done'>('working');
@@ -333,7 +371,7 @@
 
 {#snippet row(s: Session)}
   <button class="srow" class:on={state !== 'new' && selected === s.id} onclick={() => pick(s)}>
-    <span class="t">{s.title}</span>
+    <span class="t">{titleOf(s)}</span>
     {#if s.state === 'working'}<span class="tag work"><span class="dot work"></span>working</span>
     {:else if s.state === 'waiting'}<span class="tag wait"><span class="dot wait"></span>needs you</span>
     {:else}<span class="when">{s.when}</span>{/if}
@@ -391,7 +429,13 @@
     <section class="pane chat">
       <header class="hd">
         {#if narrow}<button class="icon back" title="Back" aria-label="Back" onclick={goBack}>‹</button>{/if}
-        <h1>{state === 'new' ? 'New chat' : current.title}</h1>
+        {#if renaming}
+          <!-- svelte-ignore a11y_autofocus -->
+          <input class="rename" bind:value={nameDraft} autofocus aria-label="Chat name"
+            onkeydown={(e) => { if (e.key === 'Enter') saveRename(); if (e.key === 'Escape') { e.stopPropagation(); renaming = false; } }} onblur={saveRename} />
+        {:else}
+          <h1 ondblclick={() => state !== 'new' && startRename()} title={state !== 'new' ? 'Double-click to rename' : undefined}>{state === 'new' ? 'New chat' : titleOf(current)}</h1>
+        {/if}
         {#if shown === 'working'}<span class="tag work"><span class="dot work"></span>working</span>
         {:else if shown === 'waiting'}<span class="tag wait"><span class="dot wait"></span>needs you</span>{/if}
         <span class="sp"></span>
@@ -405,12 +449,24 @@
                 <div class="row"><span>Context</span><b>104k tokens</b></div>
                 <div class="row"><span>Session</span><b>9e133506</b></div>
                 <hr />
-                <button>Rename</button>
-                <button>Archive chat</button>
+                <button onclick={startRename}>Rename</button>
+                <div class="archrow">
+                  <span>Archive as</span>
+                  <button class="oc" aria-haspopup="listbox" aria-expanded={outcomeOpen} onclick={() => (outcomeOpen = !outcomeOpen)}>{OUTCOMES.find((x) => x.v === outcome)?.l} <span class="car">▾</span></button>
+                  <button class="archgo" onclick={archiveChat}>Archive</button>
+                </div>
+                {#if outcomeOpen}
+                  <div class="ocs" role="listbox">
+                    {#each OUTCOMES as o}
+                      <button class="mopt" role="option" aria-selected={o.v === outcome} class:sel={o.v === outcome} onclick={() => { outcome = o.v; outcomeOpen = false; }}><b>{o.l}</b><span>{o.h}</span></button>
+                    {/each}
+                  </div>
+                {/if}
               </div>
             {/if}
           </div>
         {/if}
+        {#if !narrow}<button class="icon close" title={closeTitle} aria-label={closeTitle} onclick={() => closeChat()}>×</button>{/if}
       </header>
 
       <div class="scroll" bind:this={scroller}>
@@ -594,12 +650,12 @@
           <div class="grp">Channels <span class="cnt">{channels.length}</span></div>
           {#each channels as s}{@render row(s)}{/each}
           <div class="grp">Sessions <span class="cnt">{sessions.length}</span></div>
-          {#each sessions as s}{@render row(s)}{/each}
+          {#each sessions.filter((x) => !gone[x.id]) as s}{@render row(s)}{/each}
           <button class="grp toggle" onclick={() => (showArchived = !showArchived)} aria-expanded={showArchived}>
-            <span class="car">{showArchived ? '▾' : '▸'}</span> Archived <span class="cnt">{archivedCount.toLocaleString()}</span>
+            <span class="car">{showArchived ? '▾' : '▸'}</span> Archived <span class="cnt">{(archivedCount + Object.keys(gone).length).toLocaleString()}</span>
           </button>
           {#if showArchived}
-            <div class="arch">{#each archived as s}{@render row(s)}{/each}<button class="more">Show all archived…</button></div>
+            <div class="arch">{#each [...sessions.filter((x) => gone[x.id]), ...archived] as s}{@render row(s)}{/each}<button class="more">Show all archived…</button></div>
           {/if}
         </div>
       {:else if view === 'subagent'}
@@ -675,6 +731,10 @@
   {#if ring && hover}<span class="qlabel">{hover}</span>{/if}
   <button class="qbtn" onclick={() => (ring = !ring)} aria-expanded={ring} title="Quick actions (Ctrl+.)">{@render ico('ring')}</button>
 </div>
+
+{#if toast}
+  <div class="toast" role="status">{toast.text}{#if toast.undo}<button onclick={() => { toast?.undo?.(); toast = null; }}>Undo</button>{/if}</div>
+{/if}
 
 <div class="mock">
   <b>mock</b>
@@ -862,6 +922,20 @@
   .menu.up { bottom: 40px; left: 0; }
   .amenu { left: 0; top: 50px; min-width: 260px; }
   .mlabel { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 600; padding: 6px 10px 4px; }
+  .rename { flex: 0 1 26rem; min-width: 8rem; font: inherit; font-size: 16px; font-weight: 650; color: inherit; background: var(--paper); border: 1px solid var(--accent); border-radius: 8px; padding: 3px 8px; outline: none; }
+  .hd .close { font-size: 20px; }
+  .archrow { display: flex; align-items: center; gap: 6px; padding: 4px 4px 4px 10px; font-size: 14px; }
+  .archrow > span { flex: 1; }
+  .oc { padding: 4px 10px; border-radius: 8px; border: 1px solid var(--faint); font-size: 13px; background: var(--paper); }
+  .oc:hover { border-color: var(--dim); }
+  .archgo { padding: 4px 12px; border-radius: 8px; font-size: 13px; font-weight: 600; color: var(--on-accent); background: var(--accent); }
+  .ocs { display: flex; flex-direction: column; padding: 4px 0 2px; }
+  .ocs .mopt { text-align: left; padding: 6px 10px 6px 18px; border-radius: 8px; }
+  .ocs .mopt:hover { background: var(--soft); }
+  .menu.right { min-width: 280px; }
+  .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 30; display: flex; align-items: center; gap: 14px; padding: 10px 16px; border-radius: 12px; background: var(--ink); color: var(--paper); font-size: 14px; box-shadow: 0 10px 30px var(--shadow); animation: tin 0.2s both; }
+  @keyframes tin { from { opacity: 0; transform: translate(-50%, 6px); } }
+  .toast button { color: var(--accent); font-weight: 650; filter: brightness(1.6); }
   .menu .row { display: flex; justify-content: space-between; gap: 16px; padding: 6px 10px; font-size: 13px; color: var(--dim); }
   .menu .row b { color: var(--ink); font-weight: 500; font-family: var(--mono); font-size: 12px; }
   .menu hr { border: 0; border-top: 1px solid var(--faint); margin: 6px 0; width: 100%; }
