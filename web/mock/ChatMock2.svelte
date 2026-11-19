@@ -435,7 +435,7 @@
                   {/if}
                 </div>
               {:else if m.k === 'ask'}
-                <div class="ask">
+                <div class="askq">
                   <div class="q">{m.question}</div>
                   <div class="opts">{#each m.options as o, j}<button class:primary={j === 0} onclick={() => (state = 'chat')}>{o}</button>{/each}</div>
                   <div class="or">or type your own answer below</div>
@@ -760,7 +760,7 @@
   .steps { margin: 8px 0 0; padding: 0 0 0 26px; font-size: 13px; color: var(--dim); display: flex; flex-direction: column; gap: 4px; }
   .steps b { color: var(--ink); font-weight: 500; }
   .steps .bad, .steps .bad b { color: var(--err); }
-  .ask { border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--faint)); background: color-mix(in srgb, var(--warn) 6%, var(--paper)); border-radius: 16px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .askq { border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--faint)); background: color-mix(in srgb, var(--warn) 6%, var(--paper)); border-radius: 16px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
   .q { font-weight: 600; }
   .opts { display: flex; flex-wrap: wrap; gap: 8px; }
   .opts button { padding: 8px 14px; border-radius: 99px; border: 1px solid var(--faint); background: var(--paper); font-size: 14px; }
