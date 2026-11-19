@@ -300,11 +300,10 @@
     outcome = 'done';
   }
 
-  // Close the chat (×): a subagent panel closes first; then the side panel's view takes the
-  // page, or with no side panel you land on Sessions.
-  const closeTitle = $derived(split && view === 'subagent' ? 'Close the subagent panel' : split ? `Close the chat, keep ${view}` : 'Close the chat, back to Sessions');
+  // Close the chat (×): a side view (Tasks, Files…) takes the page; otherwise, including when a
+  // subagent panel is open (it closes with its chat), you land on Sessions.
+  const closeTitle = $derived(split && view !== 'subagent' ? `Close the chat, keep ${view}` : 'Close the chat, back to Sessions');
   function closeChat(all = false) {
-    if (!all && split && view === 'subagent') { view = null; return; }
     if (split && view !== 'subagent') { screen = 'view'; return; }
     screen = 'view'; view = 'sessions';
   }
