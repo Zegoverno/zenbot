@@ -889,7 +889,7 @@ try {
   await until(async () => (await box.inputValue()) === '/desk find ', 'a choice with `then` fills the composer');
   assert.equal(await box.evaluate((el) => document.activeElement === el), true, 'the composer has focus');
   await page.waitForTimeout(300);
-  assert.equal(deskCalls().length, 1, 'a choice that needs more input calls nothing');
+  assert.equal(deskCalls().length, 1, `a choice that needs more input calls nothing: ${JSON.stringify(deskCalls())}`);
   await box.fill('/desk find sunday notes');
   await box.press('Enter');
   await until(() => deskCalls().length === 2, 'the finished command runs');
