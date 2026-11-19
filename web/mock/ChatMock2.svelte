@@ -463,7 +463,7 @@
                         <button class="lrow sa" class:done={h.done} aria-expanded={!!hOpen[k]} onclick={() => (hOpen[k] = !hOpen[k])}>
                           {#if h.done}<span class="g">✓</span>{:else}<span class="orb xs busy" style="--a:{agent.a}; --b:{agent.b}"></span>{/if}
                           <span class="lt"><b>{h.name}</b>{" "}<span class="ld">{h.done ? h.step.replace('Done · ', '') : h.step}</span></span>
-                          <span class="lm">subagent · {h.steps.length} steps {hOpen[k] ? '▾' : '▸'}</span>
+                          <span class="lm"><span class="role">{h.role}</span><span class="wide">{" · "}{h.steps.length} steps</span> {hOpen[k] ? '▾' : '▸'}</span>
                         </button>
                         <button class="sopen" onclick={() => openSub(k)} title="Open this subagent's session beside the chat" aria-label="Open {h.name}'s session">{@render ico('split')}</button>
                       </div>
@@ -559,7 +559,7 @@
         <header class="vh">
           {#if narrow}<button class="icon back" title="Back to the chat" aria-label="Back to the chat" onclick={closeSub}>‹</button>{/if}
           <span class="orb xs hdot" class:busy={!sub.done} style="--a:{agent.a}; --b:{agent.b}"></span>
-          <div class="subh"><h2>{sub.name}</h2><span>subagent of {agent.name} · {sub.role} · {sub.model}</span></div>
+          <div class="subh"><h2>{sub.name}</h2><span>{sub.role} subagent of {agent.name} · {sub.model}</span></div>
           <span class="sp"></span>
           {#if !narrow}<button class="icon" title="Close the panel" aria-label="Close the panel" onclick={closeSub}>×</button>{/if}
         </header>
@@ -723,6 +723,7 @@
   .ld { color: var(--dim); }
   .lm { font-size: 12px; color: var(--dim); white-space: nowrap; font-variant-numeric: tabular-nums; }
   @media (max-width: 900px) { .lm .wide { display: none; } }
+  .role { display: inline-block; padding: 1px 7px; border-radius: 999px; background: var(--soft); color: var(--ink); font-size: 11.5px; }
   .sarow { display: flex; align-items: center; border-radius: 10px; }
   .sarow .sa { flex: 1; min-width: 0; }
   .sarow.on { background: var(--soft); }
