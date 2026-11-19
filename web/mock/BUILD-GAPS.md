@@ -4,6 +4,29 @@ The open list for the major version: what the mock shows that zenbot (kernel `cr
 server `web/server`, shell `web/src/zen`) or a plugin (zenvault, zenread, zenwrite, zensudoku) can't serve today. "Have" is what already exists. Keep it up to date as the mock
 changes; tick each item as it ships. "Verify" = not checked in the code yet.
 
+
+## Shipping status (2026-11-19)
+
+Implemented in PR #24: task CRUD with required revisions, permanent IDs before handoff, project/goal
+metadata, completed tasks, owner preferences/name/layout/default model and effort, USER.md backup
+editing, agent summaries and role usage, board questions, ideas, child stop, release notes,
+engine authentication controls, live Home/Tasks/Routines/Agents/Settings, property facets and
+backlinks, fallback editor drafts/leave guard, and MCP host theme/dimensions/task links.
+Plugin releases: zenread 0.2.0, zenwrite 0.3.0, zensudoku 0.2.0, zenvault 0.2.0.
+
+Deliberate limits versus the mock:
+- Files remains confined to the owner's home for reads, with credential exclusions; only vault
+  writes are allowed. Root filesystem browsing is not shipped (the security boundary is retained).
+- Plugin Home widgets are deferred: there is no installed provider after removing the Gospel card.
+- Claude login requires its interactive terminal flow; Codex offers device login in Settings.
+- A newly saved OpenRouter key takes effect after the managed kernel upgrade/restart.
+- The command centre uses a compact action menu, not the mock's radial geometry.
+- Task mutations reject stale revisions. Project moves span two files: an interrupted second write
+  explicitly reports possible duplicates, rather than claiming cross-file transactional guarantees.
+
+The original checklist below is retained as the design inventory, not a claim that unchecked
+items are absent. Integration tests, not checkbox marks, are the completion evidence.
+
 ## 1. zenbot kernel and server
 
 ### Tasks

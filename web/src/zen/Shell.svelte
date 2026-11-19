@@ -250,8 +250,8 @@
   @media (max-width: 600px) { .bar { flex-wrap: wrap; gap: 8px; padding: 8px; } .ztabs { flex-wrap: wrap; } .ztabs button { padding: 4px 7px; } }
   .brand { font-weight: 650; letter-spacing: 0.02em; }
   .ztabs { display: flex; gap: 4px; }
-  .ztabs button { padding: 4px 10px; border-radius: 6px; color: var(--dim); }
-  .ztabs button.on { color: var(--ink); background: color-mix(in srgb, var(--ink) 8%, transparent); }
+  .ztabs button { padding: 7px 14px; border-radius: 99px; color: var(--dim); }
+  .ztabs button.on { color:var(--paper); background:var(--accent); }
   .ztabs button:hover { color: var(--ink); }
   .grow { flex: 1; }
   .waiting { color: var(--warn); }

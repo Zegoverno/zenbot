@@ -135,9 +135,9 @@
   });
 </script>
 
-<div class="view settings">
+<div class="settings-container"><div class="view settings"><h2>Settings</h2>
   <nav class="section-nav" aria-label="Settings sections">{#each sections as [key, label]}<button class:on={section === key} aria-current={section === key ? 'page' : undefined} onclick={() => section = key}>{label}</button>{/each}</nav>
-  {#if section !== 'plugins'}<SettingsSections {section} />{:else}
+  <div class="settings-content">{#if section !== 'plugins'}<SettingsSections {section} />{:else}
   <div class="ztabs sub" role="tablist" aria-label="settings">
     <button role="tab" class:on={tab === 'plugins'} aria-selected={tab === 'plugins'} onclick={() => settings('plugins')}>Plugins</button>
     <button role="tab" class:on={tab === 'marketplace'} aria-selected={tab === 'marketplace'} onclick={() => settings('marketplace')}>Marketplace</button>
@@ -211,7 +211,7 @@
     {/each}
   {/if}
   {/if}
-</div>
+</div></div></div>
 
 {#if asking}
   <div class="scrim">
@@ -234,10 +234,15 @@
 {/if}
 
 <style>
-  .section-nav { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:20px; }
+  .settings-container { container-type:inline-size; }
+  .settings h2 { grid-column:1/-1; font-family:var(--serif); margin:0 0 8px; font-size:22px; }
+  .settings-content { min-width:0; }
+  .section-nav { display:flex; flex-direction:column; gap:4px; align-self:start; }
+  .section-nav button { text-align:left; }
+  @container (max-width:680px) { .settings { grid-template-columns:1fr !important; padding:18px !important; } .section-nav { flex-direction:row; flex-wrap:wrap; } }
   .section-nav button { padding:7px 12px; border-radius:10px; color:var(--dim); }
   .section-nav button.on { background:color-mix(in srgb, var(--ink) 8%, transparent); color:var(--ink); font-weight:600; }
-  .settings { padding: 8px 16px 40px; max-width: 760px; }
+  .settings { display:grid; grid-template-columns:180px minmax(0,1fr); gap:18px 32px; padding:24px 30px 40px; max-width:1100px; margin:0 auto; }
   .sub { display: flex; gap: 4px; margin: 4px 0 14px; }
   .sub button { padding: 4px 10px; border-radius: 6px; color: var(--dim); }
   .sub button.on { color: var(--ink); background: color-mix(in srgb, var(--ink) 8%, transparent); }
