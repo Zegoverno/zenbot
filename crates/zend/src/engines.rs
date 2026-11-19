@@ -63,7 +63,8 @@ pub(crate) async fn login(Path(engine): Path<String>) -> ApiResult<Json<Value>> 
             let deadline = tokio::time::sleep(Duration::from_secs(30)); tokio::pin!(deadline);
             loop { tokio::select! {
                 _ = &mut deadline, if !parsed => { let _ = child.kill().await; *state().lock().await = json!({"status":"error", "error":"Unsupported Codex device-auth output: no device URL and code within 30 seconds."}); return; },
-                line = rx.recv() => match line { Some(line) => { if output.len() < 16384 { output.push_str(&line); output.push('\n'); } if !parsed { if let Some((url,code)) = parse_prompt(&output) { *state().lock().await = json!({"status":"pending", "url":url, "code":code}); parsed = true; } } }, None => break },
+                line = rx.recv() => match line { Some(line) => { if output.len() < 16384 { output.push_str(&line); output.push('\n'); }
+ if !parsed { if let Some((url,code)) = parse_prompt(&output) { *state().lock().await = json!({"status":"pending", "url":url, "code":code}); parsed = true; } } }, None => break },
                 result = child.wait() => { *state().lock().await = if result.is_ok_and(|s| s.success()) && parsed { json!({"status":"complete"}) } else if !parsed { json!({"status":"error", "error":"Unsupported Codex device-auth output or login failed; check the installed CLI."}) } else { json!({"status":"error", "error":"Codex login failed."}) }; return; }
             }}
             let result = child.wait().await;

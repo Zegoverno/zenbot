@@ -346,7 +346,10 @@ pub(crate) async fn create_session(State(app): State<AppState>, Json(body): Json
     // preferred default (prefs.rs, then ZEN_DEFAULT_MODEL), with its preferred effort.
     let chosen = body.model.is_some().then_some("owner");
     let (model, effort) = match body.model {
-        Some(m) => (m, body.effort),
+        Some(m) => {
+            let (model, preferred) = crate::prefs::new_session_defaults(&app, Some(m)).await;
+            (model, body.effort.or(preferred))
+        },
         None => {
             let (m, preferred) = crate::prefs::new_session_defaults(&app, who.model.clone()).await;
             (m, body.effort.or(preferred))
