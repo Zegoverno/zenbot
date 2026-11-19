@@ -259,16 +259,11 @@
   let hOpen = $state<Record<number, boolean>>({});
   let liveN = $state(5);
   let liveOpen = $state(false);
-  let liveBox: HTMLElement | undefined = $state();
   const live = $derived(QUEUE.slice(0, liveN));
   $effect(() => {
     if (state !== 'working') { liveN = 5; return; }
     const id = setInterval(() => { liveN = liveN >= QUEUE.length ? 5 : liveN + 1; }, 2600);
     return () => clearInterval(id);
-  });
-  $effect(() => {
-    void liveN;
-    if (liveOpen && liveBox) queueMicrotask(() => liveBox?.lastElementChild?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }));
   });
 
   $effect(() => {
@@ -425,43 +420,28 @@
             {#if state === 'working'}
               {@const cur = live[live.length - 1]}
               <div class="livew" aria-live="polite">
-                <div class="lhead">
-                  <span class="orb xs busy" style="--a:{agent.a}; --b:{agent.b}"></span>
-                  <b>{agent.name} is working</b>
-                  <span class="lm">{live.length} steps<span class="wide">{" · "}{SUBAGENTS.filter((h) => !h.done).length} of {SUBAGENTS.length} subagents busy</span> · {cur.t}</span>
-                </div>
-                <div class="tline">
-                  {#if live.length > 3}
-                    <button class="more" onclick={() => (liveOpen = !liveOpen)}>{liveOpen ? 'Show only the latest' : `Show ${live.length - 3} earlier steps`}</button>
-                  {/if}
-                  <ol bind:this={liveBox}>
-                    {#each live as st, j (j)}
-                      {#if liveOpen || j >= live.length - 3}
-                        {@const now = j === live.length - 1}
-                        <li class:now class:bad={st.failed}>
-                          <span class="dotl">{#if st.failed}!{:else if now}<i></i>{:else}✓{/if}</span>
-                          <span class="sx"><b>{st.label}</b><span>{st.detail}{#if st.failed}{" · didn’t work, trying another way"}{/if}</span></span>
-                          <span class="st">{st.t}</span>
-                        </li>
-                      {/if}
+                {#if liveOpen}
+                  <ol class="slist">
+                    {#each live.slice(0, -1) as st}
+                      <li class:bad={st.failed}><span class="g">{st.failed ? '!' : '✓'}</span><span class="lt">{st.label}{" "}<span class="ld">{st.detail}{#if st.failed}{" · didn’t work"}{/if}</span></span><span class="st">{st.t}</span></li>
                     {/each}
                   </ol>
-                  <div class="hl">Subagents</div>
-                  <div class="subagents">
-                    {#each SUBAGENTS as h, k}
-                      <div class="hcard" class:done={h.done}>
-                        <button class="hrow" aria-expanded={!!hOpen[k]} onclick={() => (hOpen[k] = !hOpen[k])}>
-                          <span class="orb xs" class:busy={!h.done} style="--a:{agent.a}; --b:{agent.b}"></span>
-                          <span class="sx"><b>{h.name}</b><span>{h.step}</span></span>
-                          <span class="st">{h.steps.length} steps {hOpen[k] ? '▾' : '▸'}</span>
-                        </button>
-                        {#if hOpen[k]}
-                          <ol class="hsteps">{#each h.steps as [l, d, t], q}<li class:now={!h.done && q === h.steps.length - 1}><b>{l}</b> <span>{d}</span><span class="st">{t}</span></li>{/each}</ol>
-                        {/if}
-                      </div>
-                    {/each}
-                  </div>
-                </div>
+                {/if}
+                <button class="lrow lhead" aria-expanded={liveOpen} onclick={() => (liveOpen = !liveOpen)} title={liveOpen ? 'Hide the steps' : 'See every step'}>
+                  <span class="orb xs busy" style="--a:{agent.a}; --b:{agent.b}"></span>
+                  <span class="lt"><b>{cur.label}</b>{" "}<span class="ld">{cur.detail}</span></span>
+                  <span class="lm">{live.length} steps · {cur.t} {liveOpen ? '▾' : '▸'}</span>
+                </button>
+                {#each SUBAGENTS as h, k}
+                  <button class="lrow sa" class:done={h.done} aria-expanded={!!hOpen[k]} onclick={() => (hOpen[k] = !hOpen[k])}>
+                    {#if h.done}<span class="g">✓</span>{:else}<span class="orb xs busy" style="--a:{agent.a}; --b:{agent.b}"></span>{/if}
+                    <span class="lt"><b>{h.name}</b>{" "}<span class="ld">{h.done ? h.step.replace('Done · ', '') : h.step}</span></span>
+                    <span class="lm">subagent {hOpen[k] ? '▾' : '▸'}</span>
+                  </button>
+                  {#if hOpen[k]}
+                    <ol class="slist sub">{#each h.steps as [l, d, t]}<li><span class="g">·</span><span class="lt">{l}{" "}<span class="ld">{d}</span></span><span class="st">{t}</span></li>{/each}</ol>
+                  {/if}
+                {/each}
               </div>
             {/if}
           </div>
@@ -681,41 +661,21 @@
   .prose { line-height: 1.65; }
   .prose :global(p) { margin: 0 0 10px; }
   .prose :global(p:last-child) { margin-bottom: 0; }
-  .livew { border: 1px solid var(--faint); border-radius: 16px; background: color-mix(in srgb, var(--soft) 40%, var(--paper)); overflow: hidden; }
-  .lhead { display: flex; align-items: center; gap: 10px; padding: 10px 14px; font-size: 14px; }
-  .lhead b { font-weight: 600; flex: 1; white-space: nowrap; }
-  @media (max-width: 900px) { .lm .wide { display: none; } }
-  .more { font-size: 12.5px; color: var(--accent); font-weight: 600; padding: 2px 0 6px 29px; }
-  .subagents { align-items: start; display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; }
-  .hcard { border: 1px solid var(--faint); border-radius: 12px; background: var(--paper); }
-  .hcard .hrow { width: 100%; text-align: left; padding: 8px 10px; animation: none; }
-  .hcard .hrow:hover { background: var(--soft); border-radius: 12px; }
-  .hsteps { list-style: none; margin: 0; padding: 0 12px 10px 34px; font-size: 12.5px; display: flex; flex-direction: column; gap: 3px; }
-  .hsteps li { display: flex; gap: 6px; }
-  .hsteps li span:not(.st) { color: var(--dim); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .hsteps li.now b { color: var(--accent); }
-  .thinking { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 14px; text-align: left; font-size: 14px; }
-  .thinking:hover { background: var(--soft); }
+  .livew { border: 1px solid var(--faint); border-radius: 14px; background: color-mix(in srgb, var(--soft) 40%, var(--paper)); padding: 4px; }
+  .lrow { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 7px 10px; border-radius: 10px; font-size: 14px; }
+  .lrow:hover { background: var(--soft); }
   .lt { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .lt b { font-weight: 550; }
   .ld { color: var(--dim); }
-  .lm { font-size: 12px; color: var(--dim); white-space: nowrap; }
-  .tline { border-top: 1px solid var(--faint); padding: 10px 14px 12px; }
-  .tline > ol { list-style: none; margin: 0; padding: 0; position: relative; }
-  .tline > ol::before { content: ''; position: absolute; left: 9px; top: 10px; bottom: 10px; width: 1px; background: var(--faint); }
-  .tline > ol > li, .hrow { display: flex; align-items: flex-start; gap: 10px; padding: 5px 0; font-size: 13px; animation: rise 0.25s both; }
-  .dotl { position: relative; flex: none; width: 19px; height: 19px; border-radius: 50%; display: grid; place-items: center; font-size: 10px; font-weight: 700; background: var(--paper); border: 1px solid var(--faint); color: var(--accent); }
-  .bad .dotl { color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, var(--faint)); }
-  .now .dotl { border-color: var(--accent); }
-  .now .dotl i { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: blink 1.2s infinite; }
-  .sx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-  .sx b { font-weight: 550; }
-  .sx span { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .bad .sx span { color: var(--err); }
-  .now .sx b { color: var(--accent); }
-  .st { font-size: 11.5px; color: var(--dim); font-variant-numeric: tabular-nums; padding-top: 1px; }
-  .hl { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 650; margin: 10px 0 2px; }
-  .hrow .orb.xs { margin: 4px 2px 0 0; }
-  .hcard.done { opacity: 0.75; }
+  .lm { font-size: 12px; color: var(--dim); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .sa { font-size: 13.5px; }
+  .sa.done { opacity: 0.7; }
+  .g { width: 14px; flex: none; text-align: center; font-size: 11px; font-weight: 700; color: var(--accent); }
+  .slist { list-style: none; margin: 4px 0; padding: 0 10px; }
+  .slist li { display: flex; align-items: center; gap: 10px; padding: 3px 0; font-size: 13px; animation: rise 0.25s both; }
+  .slist li.bad .g, .slist li.bad .ld { color: var(--err); }
+  .slist.sub { padding-left: 34px; }
+  .st { font-size: 11.5px; color: var(--dim); font-variant-numeric: tabular-nums; }
   .wline { text-align: left; max-width: 100%; display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--dim); padding: 5px 11px 5px 6px; border-radius: 99px; border: 1px solid var(--faint); }
   .wline:hover { color: var(--ink); border-color: var(--dim); }
   .chk { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
