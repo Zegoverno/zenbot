@@ -3,7 +3,7 @@
   // conversation (tool runs as one plain-language line), a question card, and one composer.
   // Technical details (model, effort, tokens, session id) move behind the header's ⋯ menu.
   // The floating "mock" panel switches states; nothing here talks to the kernel.
-  import { conversation, question, sessions, suggestions, type Msg } from './data.ts';
+  import { archived, archivedCount, channels, conversation, question, sessions, suggestions, type Msg, type Session } from './data.ts';
 
   type State = 'new' | 'chat' | 'working' | 'waiting';
   let state = $state<State>('chat');
@@ -19,7 +19,9 @@
   const msgs = $derived<Msg[]>(
     state === 'new' ? [] : state === 'waiting' ? [...conversation, question] : conversation,
   );
-  const groups = ['Today', 'Yesterday', 'Earlier'] as const;
+  let showArchived = $state(false);
+  let selected = $state('trip');
+  const pick = (id: string) => { selected = id; state = 'chat'; };
 
   $effect(() => {
     const r = document.documentElement;
@@ -37,20 +39,30 @@
       </div>
       <button class="newchat" onclick={() => (state = 'new')}><span>＋</span> New chat</button>
       <input class="search" placeholder="Search chats" />
+      {#snippet row(s: Session)}
+        <button class="item" class:on={state !== 'new' && selected === s.id} onclick={() => pick(s.id)}>
+          <span class="t">{s.title}</span>
+          {#if s.state === 'working'}<span class="tag work"><span class="dot work"></span>working</span>
+          {:else if s.state === 'waiting'}<span class="tag wait"><span class="dot wait"></span>needs you</span>
+          {:else}<span class="when">{s.when}</span>{/if}
+        </button>
+      {/snippet}
       <nav class="list">
-        {#each groups as g}
-          {@const items = sessions.filter((s) => s.group === g)}
-          {#if items.length}
-            <div class="grp">{g}</div>
-            {#each items as s, i}
-              <button class="item" class:on={state !== 'new' && g === 'Today' && i === 0} onclick={() => (state = 'chat')}>
-                <span class="t">{s.title}</span>
-                {#if s.state === 'working'}<span class="dot work" title="Working"></span>
-                {:else if s.state === 'waiting'}<span class="tag">needs you</span>{/if}
-              </button>
-            {/each}
-          {/if}
-        {/each}
+        <div class="grp">Channels <span class="cnt">{channels.length}</span></div>
+        {#each channels as s}{@render row(s)}{/each}
+
+        <div class="grp">Sessions <span class="cnt">{sessions.length}</span></div>
+        {#each sessions as s}{@render row(s)}{/each}
+
+        <button class="grp toggle" onclick={() => (showArchived = !showArchived)} aria-expanded={showArchived}>
+          <span class="car">{showArchived ? '▾' : '▸'}</span> Archived <span class="cnt">{archivedCount.toLocaleString()}</span>
+        </button>
+        {#if showArchived}
+          <div class="arch">
+            {#each archived as s}{@render row(s)}{/each}
+            <button class="more">Show all archived…</button>
+          </div>
+        {/if}
       </nav>
       <div class="sb-foot">
         <button>📁 Files</button>
@@ -219,12 +231,23 @@
   .search { padding: 8px 12px; border-radius: 10px; border: 1px solid transparent; background: var(--soft); outline: none; font-size: 14px; }
   .search:focus { border-color: var(--accent); background: var(--paper); }
   .list { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 1px; margin-top: 4px; }
-  .grp { font-size: 12px; color: var(--dim); padding: 12px 10px 4px; font-weight: 550; }
+  .grp { display: flex; align-items: center; gap: 6px; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); padding: 14px 10px 5px; font-weight: 600; text-align: left; }
+  .grp .cnt { font-weight: 500; letter-spacing: 0; opacity: 0.75; }
+  .grp.toggle { border-radius: 8px; margin-top: 6px; }
+  .grp.toggle:hover { color: var(--ink); }
+  .grp .car { font-size: 9px; width: 8px; }
+  .arch { display: flex; flex-direction: column; gap: 1px; }
+  .arch .item { color: var(--dim); }
+  .more { text-align: left; font-size: 13px; color: var(--accent); padding: 6px 10px; }
   .item { display: flex; align-items: center; gap: 8px; text-align: left; padding: 8px 10px; border-radius: 8px; font-size: 14px; }
   .item:hover { background: var(--soft); }
   .item.on { background: color-mix(in srgb, var(--accent) 16%, var(--side)); }
   .item .t { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-  .tag { font-size: 11px; color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); padding: 1px 7px; border-radius: 99px; white-space: nowrap; }
+  .when { font-size: 12px; color: var(--dim); white-space: nowrap; }
+  .tag { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 550; padding: 2px 8px 2px 7px; border-radius: 99px; white-space: nowrap; }
+  .tag .dot { width: 6px; height: 6px; }
+  .tag.work { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .tag.wait { color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent); }
   .sb-foot { border-top: 1px solid var(--faint); padding-top: 8px; display: flex; flex-direction: column; gap: 1px; }
   .sb-foot button { text-align: left; padding: 7px 10px; border-radius: 8px; font-size: 14px; color: var(--dim); }
   .sb-foot button:hover { background: var(--soft); color: var(--ink); }
@@ -234,6 +257,7 @@
 
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); flex: none; }
   .dot.work { background: var(--accent); animation: blink 1.2s ease-in-out infinite; }
+  .dot.wait { background: var(--warn); }
   @keyframes blink { 50% { opacity: 0.3; } }
 
   /* main */

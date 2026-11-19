@@ -7,15 +7,28 @@ export type Msg =
   | { k: 'work'; summary: string; steps: Step[] }
   | { k: 'ask'; question: string; options: string[] };
 
-export type Session = { id: string; title: string; when: string; state: 'idle' | 'working' | 'waiting'; group: 'Today' | 'Yesterday' | 'Earlier' };
+export type State = 'idle' | 'working' | 'waiting';
+export type Session = { id: string; title: string; when: string; state: State; sub?: number };
 
+/** Long-lived rooms zenbot also answers in (Matrix, …). */
+export const channels: Session[] = [
+  { id: 'matrix', title: 'Matrix', when: '2d', state: 'idle' },
+];
+
+/** Open jobs: each session is one job, end to end. */
 export const sessions: Session[] = [
-  { id: 'trip', title: 'Plan a weekend in Campos do Jordão', when: '9:12', state: 'working', group: 'Today' },
-  { id: 'budget', title: 'Family budget for December', when: '8:40', state: 'waiting', group: 'Today' },
-  { id: 'gift', title: 'Christmas gift ideas for the parents', when: '7:05', state: 'idle', group: 'Today' },
-  { id: 'recipe', title: 'Baby-friendly dinner recipes', when: 'Wed', state: 'idle', group: 'Yesterday' },
-  { id: 'doctor', title: 'Paediatrician appointment reminders', when: 'Tue', state: 'idle', group: 'Earlier' },
-  { id: 'mass', title: 'Sunday Mass times near home', when: 'Mon', state: 'idle', group: 'Earlier' },
+  { id: 'trip', title: 'Plan a weekend in Campos do Jordão', when: '9:12', state: 'working', sub: 2 },
+  { id: 'budget', title: 'Family budget for December', when: '8:40', state: 'waiting' },
+  { id: 'gift', title: 'Christmas gift ideas for the parents', when: '7:05', state: 'idle' },
+  { id: 'recipe', title: 'Baby-friendly dinner recipes', when: 'Wed', state: 'idle' },
+];
+
+/** Finished jobs; the count is all of them, the list the latest. */
+export const archivedCount = 3625;
+export const archived: Session[] = [
+  { id: 'doctor', title: 'Paediatrician appointment reminders', when: 'Tue', state: 'idle' },
+  { id: 'mass', title: 'Sunday Mass times near home', when: 'Mon', state: 'idle' },
+  { id: 'car', title: 'Car insurance renewal', when: 'Nov 12', state: 'idle' },
 ];
 
 export const conversation: Msg[] = [
