@@ -23,6 +23,8 @@ const para = (n) => Array.from({ length: n }, (_, i) => `Paragraph ${i + 1} of p
 writeFileSync(path.join(VAULT, 'wiki/Atlas.md'), `# Atlas\n\n${para(40)}\n\n## North\n\n${para(40)}\n\n## South\n\n${para(40)}\n`);
 writeFileSync(path.join(HOME, '.zenbot/token'), 'test-token');
 writeFileSync(path.join(HOME, 'plain.txt'), 'hello file');
+writeFileSync(path.join(HOME, 'home-only.txt'), 'home');
+writeFileSync(path.join(VAULT, 'wiki/plain.txt'), 'hello file');
 mkdirSync(path.join(VAULT, 'games'));
 writeFileSync(path.join(VAULT, 'games/board.fx'), 'four in a row\n');
 const REAL_ZEN = process.env.ZEN_BIN ?? (() => {
@@ -129,6 +131,11 @@ const agentSummary = (name) => {
 };
 const agentDetail = (name) => ({ ...agentSummary(name), soul: agents.get(name).soul, identity: agents.get(name).identity, settings: agents.get(name).settings, dir: `${HOME}/.zenbot/agents/${name}`, sessions: name === 'rex' ? 1 : 0 });
 
+const taskWrites = [];
+let prefs = {};
+let userText = '# You\n';
+let tasks = [{ project: 'acme', text: 'Price the offer', id: 't1', rev: 'r1', due: '2026-10-29', priority: 'urgent', goal: null, done: false }];
+let revision = 1;
 // ---- the stand-in kernel ----
 const json = (res, body, status = 200) => {
   res.writeHead(status, { 'content-type': 'application/json' });
@@ -197,10 +204,27 @@ const kernel = createServer(async (req, res) => {
   if (r === 'GET /api/jobs') return json(res, { scheduler: true, jobs: [{ name: 'daily', schedule: '0 9 * * *', tz: 'UTC', enabled: true, next_run_at: null, last_status: 'failed', last_error: 'test failure', failures: 1 }] });
   if (r === 'GET /api/jobs/runs') return json(res, [{ id: 1, job: 'daily', status: 'failed', started_at: '2026-11-19', error: 'test failure', session: null }]);
   if (r === 'POST /api/jobs/daily/run' || r === 'PATCH /api/jobs/daily') return json(res, { ok: true });
-  if (r === 'GET /api/tasks')
-    return json(res, { today: '2026-10-30', tz: 'UTC', count: 1, problems: [], projects: [{ project: 'acme', tasks: [
-      { project: 'acme', text: 'Price the offer', id: 't1', due: '2026-10-29', scheduled: null, priority: 'urgent', goals: [], file: 'x', line: 1, overdue: true },
-    ] }] });
+  if (r === 'GET /api/prefs') return json(res, prefs);
+  if (r === 'PATCH /api/prefs') { Object.assign(prefs, body); return json(res, prefs); }
+  if (r === 'GET /api/prompt-files/USER.md') return json(res, {name:'USER.md', text:userText, limit:20000});
+  if (r === 'PUT /api/prompt-files/USER.md') { userText = body.text; return json(res, {name:'USER.md', text:userText, limit:20000, backup:'backup'}); }
+  if (r === 'GET /api/ideas') return json(res, {ideas: []});
+  if (r === 'GET /api/tasks/meta') return json(res, {projects:[{id:'acme', title:'Acme'}], goals:[{id:'growth', title:'Growth', status:'active'}]});
+  if (r === 'GET /api/tasks') return json(res, {today:'2026-10-30', tz:'UTC', count:tasks.filter(t => !t.done).length, problems:[], projects:[{project:'acme', tasks}]});
+  if (r === 'POST /api/tasks') {
+    taskWrites.push({method:'POST', body});
+    const t = { ...body, id:`t${++revision}`, rev:`r${revision}`, done:false }; tasks.push(t); return json(res, t);
+  }
+  const tm = /^(PATCH|DELETE) \/api\/tasks\/([^/]+)$/.exec(r);
+  if (tm) {
+    const t = tasks.find(x => x.id === decodeURIComponent(tm[2]));
+    if (!t) return json(res, {error:'not found'}, 404);
+    const rev = tm[1] === 'PATCH' ? body.rev : u.searchParams.get('rev');
+    if (rev !== t.rev) return json(res, {error:'revision conflict'}, 409);
+    taskWrites.push({method:tm[1], id:t.id, body, rev});
+    if (tm[1] === 'DELETE' || body.dropped) { tasks = tasks.filter(x => x !== t); return json(res, {ok:true}); }
+    Object.assign(t, body, {rev:`r${++revision}`}); return json(res, t);
+  }
   if (r === 'GET /api/plugins') return json(res, { plugins: installedPlugins, defaults: openerDefaults });
   if (r === 'GET /api/plugins/marketplace')
     return json(res, { plugins: market.map((m) => ({ ...m, installed: installedPlugins.find((p) => p.name === m.name)?.version ?? null })) });
@@ -244,6 +268,7 @@ const kernel = createServer(async (req, res) => {
     }
   }
   if (r === 'POST /api/tasks/t1/agent') {
+    assert.deepEqual(body, {agent:'zenbot'});
     handed.push('t1');
     return json(res, { task: {}, session: 's1', existing: false });
   }
@@ -410,10 +435,27 @@ try {
   await page.keyboard.press('3');
   await page.getByText('Price the offer').waitFor();
   assert.ok(await page.getByText(/overdue/).first().isVisible());
-  // Handing a task to an agent: `a` arms, `a` again hands it over and opens its session.
-  await page.keyboard.press('a');
-  await page.getByText(/a again: hand/).waitFor();
-  await page.keyboard.press('a');
+  // Tick and untick carry the latest revision, editing updates the live task, and dropping removes it.
+  await page.getByRole('checkbox', {name:'Mark as done'}).click();
+  await page.getByRole('button', {name:/Done/}).click();
+  await page.getByRole('checkbox', {name:'Mark as not done'}).click();
+  await page.getByRole('button', {name:/Price the offer/}).click();
+  await page.getByLabel('Task', {exact:true}).fill('Price the offer carefully');
+  await page.locator('.edit').getByRole('button', {name:'Done', exact:true}).click();
+  await page.getByText('Price the offer carefully').waitFor();
+  await page.getByPlaceholder('Add a task').fill('Temporary task');
+  await page.getByRole('button', {name:'Add task'}).click();
+  await page.getByText('Temporary task').waitFor();
+  await page.getByPlaceholder('Add a task').waitFor();
+  await page.locator('.task', {hasText:'Temporary task'}).locator('button.main').click();
+  await page.locator('.task', {hasText:'Temporary task'}).locator('button.main').click();
+  await page.getByRole('button', {name:'Drop', exact:true}).click();
+  await page.getByText('Temporary task').waitFor({state:'detached'});
+  assert.deepEqual(taskWrites.map(x => x.method), ['PATCH','PATCH','PATCH','POST','PATCH']);
+  assert.deepEqual(taskWrites.slice(0,3).map(x => x.rev), ['r1','r2','r3']);
+  assert.equal(taskWrites[3].body.project, 'acme');
+  assert.equal(taskWrites[4].body.dropped, true);
+  await page.locator('.task', {hasText:'Price the offer carefully'}).getByRole('button', {name:/Hand to/}).click();
   await page.waitForURL(/\?s=s1/);
   assert.deepEqual(handed, ['t1']);
   await page.goto(`${base}/?view=sessions`);
@@ -423,7 +465,7 @@ try {
   // token; a note opens in the reader, changelog apart.
   await page.keyboard.press('2');
   await page.getByText('wiki/', { exact: true }).waitFor();
-  assert.equal(await page.getByText('plain.txt').count(), 0, 'Files starts in the vault, not home');
+  assert.equal(await page.getByText('home-only.txt').count(), 0, 'Files starts in the vault, not home');
   // Search: names at once (client side over the vault, through the server's find), content from the
   // kernel after a pause or Enter, names first; a result opens in the reader; Esc clears.
   const search = page.getByLabel('search files');
@@ -460,14 +502,23 @@ try {
   await search.press('Escape'); // clears the search
   await page.getByText('wiki/', { exact: true }).waitFor();
   assert.equal(await search.inputValue(), '');
-  await page.getByRole('button', { name: 'home', exact: true }).click();
+  await page.locator('.crumbs button').first().click();
   await page.getByText('plain.txt').waitFor();
-  await page.getByRole('button', { name: 'vault', exact: true }).click();
+  await page.locator('button.chip', { hasText: 'Vault' }).click();
   await page.getByText('wiki/', { exact: true }).waitFor();
   await page.locator('.crumbs button').first().click(); // ~ : back to the home folder
   await page.getByText('plain.txt').waitFor();
   await page.getByText('.zenbot', { exact: true }).waitFor({ state: 'detached' }).catch(() => {}); // dotfiles hidden
-  // New file, folder and rename, asked inline; the server writes under the scratch home.
+  // Reading above the vault is allowed, but writes there are refused.
+  await page.keyboard.press('a');
+  await page.getByLabel('name', {exact:true}).fill('outside.txt');
+  await page.keyboard.press('Enter');
+  await page.getByText(/couldn't create outside\.txt: outside vault/).waitFor();
+  await page.keyboard.press('Escape');
+  await page.locator('button.chip', {hasText:'Vault'}).click();
+  await page.locator('.row', {hasText:'wiki/'}).click();
+  await page.getByText('plain.txt').waitFor();
+  // New file, folder and rename, asked inline; the server writes under the scratch vault.
   await page.keyboard.press('a'); // nothing selected: the root
   await page.getByLabel('name', { exact: true }).fill('..');
   await page.keyboard.press('Enter');
@@ -476,28 +527,28 @@ try {
   await page.getByLabel('name', { exact: true }).fill('.env');
   await page.keyboard.press('Enter');
   await page.getByText(/couldn't create \.env: not allowed here/).waitFor();
-  assert.equal(existsSync(path.join(HOME, '.env')), false);
+  assert.equal(existsSync(path.join(VAULT, 'wiki', '.env')), false);
   await page.getByLabel('name', { exact: true }).fill('plain.txt');
   await page.keyboard.press('Enter');
   await page.getByText(/couldn't create plain\.txt: already exists/).waitFor();
-  assert.equal(readFileSync(path.join(HOME, 'plain.txt'), 'utf8'), 'hello file', 'nothing is overwritten');
+  assert.equal(readFileSync(path.join(VAULT, 'wiki', 'plain.txt'), 'utf8'), 'hello file', 'nothing is overwritten');
   await page.keyboard.press('Escape');
   assert.equal(await page.getByLabel('name', { exact: true }).count(), 0, 'Esc cancels');
   await page.getByRole('button', { name: '+ folder', exact: true }).click();
   await page.getByLabel('name', { exact: true }).fill('proj');
   await page.keyboard.press('Enter');
   await page.locator('.row[data-sel="1"]', { hasText: 'proj/' }).waitFor();
-  assert.ok(statSync(path.join(HOME, 'proj')).isDirectory());
+  assert.ok(statSync(path.join(VAULT, 'wiki', 'proj')).isDirectory());
   await page.keyboard.press('a'); // a folder is selected: inside it, and open
   await page.getByLabel('name', { exact: true }).fill('sub/');
   await page.keyboard.press('Enter');
   await page.locator('.row[data-sel="1"]', { hasText: 'sub/' }).waitFor();
-  assert.ok(statSync(path.join(HOME, 'proj/sub')).isDirectory());
+  assert.ok(statSync(path.join(VAULT, 'wiki', 'proj/sub')).isDirectory());
   await page.keyboard.press('Shift+A');
   await page.getByLabel('name', { exact: true }).fill('docs');
   await page.keyboard.press('Enter'); // inside sub, the selected folder
   await page.locator('.row[data-sel="1"]', { hasText: 'docs/' }).waitFor();
-  assert.ok(statSync(path.join(HOME, 'proj/sub/docs')).isDirectory());
+  assert.ok(statSync(path.join(VAULT, 'wiki', 'proj/sub/docs')).isDirectory());
   await page.locator('.row', { hasText: 'plain.txt' }).click(); // opens it; closing it keeps it selected
   await page.locator('.reader').waitFor();
   await page.keyboard.press('Escape');
@@ -506,7 +557,7 @@ try {
   await page.getByLabel('name', { exact: true }).fill('note.txt');
   await page.keyboard.press('Enter');
   await page.locator('.reader').waitFor(); // the new file opens in the reader
-  assert.equal(readFileSync(path.join(HOME, 'note.txt'), 'utf8'), '');
+  assert.equal(readFileSync(path.join(VAULT, 'wiki', 'note.txt'), 'utf8'), '');
   await page.keyboard.press('Escape');
   await page.locator('.row[data-sel="1"]', { hasText: 'note.txt' }).waitFor();
   await page.keyboard.press('Shift+R');
@@ -516,14 +567,14 @@ try {
   await rename.fill('renamed.txt');
   await page.keyboard.press('Enter');
   await page.locator('.row[data-sel="1"]', { hasText: 'renamed.txt' }).waitFor();
-  assert.equal(existsSync(path.join(HOME, 'note.txt')), false);
-  assert.equal(existsSync(path.join(HOME, 'renamed.txt')), true);
+  assert.equal(existsSync(path.join(VAULT, 'wiki', 'note.txt')), false);
+  assert.equal(existsSync(path.join(VAULT, 'wiki', 'renamed.txt')), true);
   await page.getByRole('button', { name: 'rename', exact: true }).click(); // the button too
   await page.getByLabel('new name').fill('plain.txt');
   await page.keyboard.press('Enter');
   await page.getByText(/couldn't rename plain\.txt: already exists/).waitFor();
   await page.keyboard.press('Escape');
-  rmSync(path.join(HOME, 'renamed.txt'));
+  rmSync(path.join(VAULT, 'wiki', 'renamed.txt'));
   // An image opens as a picture; an SVG (it can carry scripts) and a secret are refused by the image route.
   mkdirSync(path.join(HOME, 'inbox'), { recursive: true });
   writeFileSync(path.join(HOME, 'inbox', 'shot.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==', 'base64'));
@@ -560,6 +611,7 @@ try {
   // disabling one takes its view tab away, enabling brings it back.
   await page.goto(`${base}/?view=sessions`);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Plugins', exact: true }).click();
   await page.waitForURL(/view=settings/);
   const fxRow = page.locator('section[aria-label="Fixture"]');
   await fxRow.getByText('0.1.0').waitFor();
@@ -1079,10 +1131,12 @@ try {
   }
 
   await page.locator('.chat-pane').getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Plugins', exact: true }).click();
   await page.locator('.zside').getByRole('tab', { name: 'Plugins', exact: true }).waitFor();
   assert.match(page.url(), /s=s1/);
   await page.goto(`${base}/?view=sessions`);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Plugins', exact: true }).click();
   const cardsRow = page.locator('section[aria-label="Cards"]');
   await cardsRow.getByRole('button', { name: 'remove', exact: true }).click();
   assert.equal(installedPlugins.length, 2, 'remove asks first');
