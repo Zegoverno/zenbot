@@ -10,6 +10,36 @@
   let memory = $state<{ memories: unknown[]; size: number; last_sleep: unknown } | null>(null);
   let userLoaded = $state(false);
   let error = $state(''), prefError = $state(''), userError = $state(''), busy = $state(false);
+  type Engine = { id: string; signed_in: boolean; login: {status: string; url?: string; code?: string; error?: string}; runtime_note?: string | null };
+  let engines = $state<Engine[] | null>(null), engineError = $state(''), modelsError = $state(''), engineBusy = $state(false), instructions = $state(''), key = $state(''), keyMessage = $state('');
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let alive = false;
+  let availableModels = $derived(models?.models.filter(m => models!.authenticated[m.id.split('/')[0]] === true) ?? []);
+  async function refreshModels() { try { models = await zen.models(); modelsError = ''; } catch (e) { models = null; modelsError = (e as Error).message; } }
+  async function refreshEngines() {
+    try {
+      engines = (await call<{engines: Engine[]}>('engines')).engines; engineError = '';
+      const status = engines.find(e => e.id === 'codex')?.login.status;
+      if (status === 'starting' || status === 'pending') { if (alive) timer = setTimeout(refreshEngines, 2000); }
+      else if (status === 'complete') await refreshModels();
+    } catch (e) { engineError = (e as Error).message; }
+  }
+  async function login(id: string) {
+    engineBusy = true; engineError = ''; instructions = '';
+    try { const result = await call<{instructions?: string}>(`engines/${id}/login`, 'POST'); instructions = result.instructions ?? ''; await refreshEngines(); }
+    catch (e) { engineError = (e as Error).message; } finally { engineBusy = false; }
+  }
+  async function logout(id: string) {
+    if (!window.confirm(`Sign out of ${id}?`)) return;
+    engineBusy = true; engineError = '';
+    try { await call(`engines/${id}/logout`, 'POST'); await refreshEngines(); await refreshModels(); }
+    catch (e) { engineError = (e as Error).message; } finally { engineBusy = false; }
+  }
+  async function saveKey() {
+    engineBusy = true; engineError = ''; keyMessage = '';
+    try { const result = await call<{message: string}>('engines/openrouter/key', 'PUT', {key}); key = ''; keyMessage = result.message; await refreshEngines(); }
+    catch (e) { engineError = (e as Error).message; } finally { engineBusy = false; }
+  }
   let theme = $state<'auto'|'light'|'dark'>('auto');
   async function call<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
     const r = await fetch(`/api/zen/${path}`, { method, headers: method === 'GET' ? {} : { 'content-type': 'application/json', 'x-zen-web': '1' }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -25,10 +55,11 @@
     const t = localStorage.getItem('zen.theme'); if (t === 'light' || t === 'dark') theme = t;
     call<Prefs>('prefs').then(p => { prefs = p; name = p.name ?? ''; }).catch(e => prefError = e.message);
     call<{text:string;limit:number}>('prompt-files/USER.md').then(p => { user = savedUser = p.text; limit = p.limit; userLoaded = true; }).catch(e => userError = e.message);
-    zen.models().then(v => models = v).catch(e => error = e.message);
+    alive = true; refreshModels(); refreshEngines();
     call<typeof mcp>('mcp').then(v => mcp = v).catch(e => error = e.message);
     call<typeof memory>('memory').then(v => memory = v).catch(e => error = e.message);
     call<Notes>('version').then(v => version = v).catch(e => error = e.message);
+    return () => { alive = false; clearTimeout(timer); };
   });
 </script>
 <div class="body">
@@ -43,13 +74,39 @@
   <h3>Appearance</h3><p>Choose a theme for this browser.</p><div class="choices">{#each ['auto','light','dark'] as t}<button class:on={theme === t} onclick={() => setTheme(t as typeof theme)}>{t}</button>{/each}</div>
 {:else if section === 'models'}
   <h3>Models</h3><p>Default for new sessions.</p>
-  {#if models}
-    <label>Model <select value={prefs.default_model ?? models.default} onchange={(e) => patch({default_model:e.currentTarget.value, default_effort:null})}>{#each models.models as m}<option value={m.id}>{m.name || m.id}</option>{/each}</select></label>
-    {@const model = models.models.find(m => m.id === (prefs.default_model ?? models!.default))}
-    <label>Effort <select value={prefs.default_effort ?? ''} onchange={(e) => patch({default_effort:e.currentTarget.value || null})}><option value="">Model default</option>{#each model?.efforts ?? [] as effort}<option value={effort}>{effort}</option>{/each}</select></label>
-    {#each Object.entries(models.authenticated) as [engine, signed]}<div class="card"><b>{engine}</b><span>{signed ? 'Signed in' : 'Not signed in'}</span></div>{/each}
-    <p>To sign in to Claude or Codex, run <code>zen login</code> in a terminal. Engine sign-in is not available in Settings yet.</p>
+  {#if modelsError}<p role="alert">Could not load models: {modelsError}</p>
+  {:else if models}
+    {#if availableModels.length}
+      <label>Model <select value={availableModels.some(m => m.id === (prefs.default_model ?? models!.default)) ? (prefs.default_model ?? models.default) : ''} onchange={(e) => patch({default_model:e.currentTarget.value, default_effort:null})}><option value="" disabled>Select an authenticated model</option>{#each availableModels as m}<option value={m.id}>{m.name || m.id}</option>{/each}</select></label>
+      {@const model = availableModels.find(m => m.id === (prefs.default_model ?? models!.default))}
+      <label>Effort <select value={prefs.default_effort ?? ''} onchange={(e) => patch({default_effort:e.currentTarget.value || null})}><option value="">Model default</option>{#each model?.efforts ?? [] as effort}<option value={effort}>{effort}</option>{/each}</select></label>
+    {:else}<p>No authenticated models available.</p>{/if}
   {:else}<p>Loading models…</p>{/if}
+  <h3>Engines</h3>
+  {#if engineError}<p role="alert">Engine error: {engineError}</p>{/if}
+  {#if engines}
+    {#each engines as engine}
+      <div class="card"><b>{engine.id}</b><span>{engine.signed_in ? 'Signed in' : 'Not signed in'}</span>
+        {#if engine.id !== 'openrouter'}
+          {#if engine.signed_in}<button disabled={engineBusy || (engine.id === 'codex' && ['starting','pending'].includes(engine.login.status))} onclick={() => logout(engine.id)}>Sign out</button>
+          {:else}<button disabled={engineBusy || (engine.id === 'codex' && ['starting','pending'].includes(engine.login.status))} onclick={() => login(engine.id)}>Sign in {engine.id === 'codex' ? 'Codex' : 'Claude'}</button>{/if}
+        {/if}
+      </div>
+      {#if engine.id === 'codex'}
+        {#if engine.login.status === 'starting'}<p>Starting Codex sign-in…</p>
+        {:else if engine.login.status === 'pending'}<p>Complete sign-in at <a href={engine.login.url} target="_blank" rel="noopener noreferrer">{engine.login.url}</a> using code <strong>{engine.login.code}</strong>. Waiting for authorization…</p>
+        {:else if engine.login.status === 'complete'}<p>Codex login completed. {engine.signed_in ? 'Signed in.' : 'Authentication status has not updated yet.'}</p>
+        {:else if engine.login.status === 'error'}<p role="alert">{engine.login.error || 'Codex login failed.'}</p>
+        {:else if engine.login.status === 'expired'}<p role="alert">Codex login expired. Try again.</p>{/if}
+      {/if}
+      {#if engine.id === 'openrouter'}
+        <p>Saving a key requires a kernel upgrade or service restart before it takes effect. {engine.runtime_note ?? ''}</p>
+        <label>OpenRouter API key <input type="password" autocomplete="off" bind:value={key} /></label><button disabled={engineBusy || !key.trim()} onclick={saveKey}>Save key</button>
+        {#if keyMessage}<p>{keyMessage}</p>{/if}
+      {/if}
+    {/each}
+  {:else if !engineError}<p>Loading engines…</p>{/if}
+  {#if instructions}<p>{instructions}</p>{/if}
   {#if prefError}<p role="alert">Preferences unavailable: {prefError}</p>{/if}
 {:else if section === 'connections'}
   <h3>Connections</h3><p>MCP servers configured for zenbot.</p>
