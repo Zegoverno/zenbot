@@ -4,7 +4,8 @@
   // the top centre; clicking the open tab again closes the right panel (focus). Top left, the agent's
   // circle: click to switch agent (and reach the user and Settings). Bottom right, a quick-control
   // ring (after Logitech's Actions Ring): one button that fans out the everyday actions.
-  // On a phone the panels stack: the tab bar gains Chat and picks the one panel shown.
+  // On a phone, one thing at a time: the tab bar picks a full-screen view, and a chat is reached by
+  // picking it in Sessions; the chat then takes the whole screen, with a back arrow to Sessions.
   // Fake data; nothing here talks to the kernel. The floating "mock" panel switches states.
   import { onMount } from 'svelte';
   import { archived, archivedCount, channels, conversation, question, sessions, suggestions, type Msg, type Session } from './data.ts';
@@ -98,7 +99,7 @@
 
   const current = $derived([...channels, ...sessions, ...archived].find((s) => s.id === selected) ?? sessions[0]);
   const msgs = $derived<Msg[]>(state === 'new' ? [] : state === 'waiting' ? [...conversation, question] : conversation);
-  const tabs = $derived(narrow ? [{ key: 'chat', label: 'Chat' }, ...TABS] : TABS);
+  const tabs = TABS;
   const shown = $derived(narrow ? (view ?? 'chat') : 'both');
   const split = $derived(!narrow && view !== null);
 
@@ -109,7 +110,9 @@
     state === 'working'
       ? { key: 'stop', label: 'Stop zenbot', run: () => (state = 'chat') }
       : { key: 'clip', label: 'Attach a file', run: () => {} },
-    { key: split ? 'focus' : 'split', label: split ? 'Focus on chat' : 'Show panel', run: () => (view = split ? null : 'sessions') },
+    narrow
+      ? { key: 'sessions', label: 'Sessions', run: () => (view = 'sessions') }
+      : { key: split ? 'focus' : 'split', label: split ? 'Focus on chat' : 'Show panel', run: () => (view = split ? null : 'sessions') },
     { key: 'theme', label: `Theme: ${theme}`, run: () => cycleTheme() },
     { key: 'settings', label: 'Settings', run: () => pickTab('settings') },
   ]);
@@ -120,8 +123,7 @@
   };
 
   function pickTab(k: string) {
-    if (k === 'chat') view = null;
-    else view = view === k && !narrow ? null : k;
+    view = view === k && !narrow ? null : k;
   }
   function pick(s: Session) {
     selected = s.id;
@@ -143,7 +145,7 @@
 
   onMount(() => {
     const mq = matchMedia('(max-width: 900px)');
-    const fit = () => { narrow = mq.matches; if (narrow) view = null; };
+    const fit = () => { narrow = mq.matches; if (narrow && !view) view = 'sessions'; };
     fit();
     mq.addEventListener('change', fit);
     return () => mq.removeEventListener('change', fit);
@@ -172,7 +174,7 @@
 {/snippet}
 
 <!-- top: the agent, the tabs -->
-<div class="top">
+<div class="top" class:hide={narrow && shown === 'chat'}>
   <div class="agent-wrap">
     <button class="agent" onclick={() => (agentMenu = !agentMenu)} aria-expanded={agentMenu} title="Switch agent">
       <span class="orb" class:busy={state === 'working'} style="--a:{agent.a}; --b:{agent.b}">{agent.name[0].toUpperCase()}</span>
@@ -198,7 +200,7 @@
 
   <nav class="tabs" aria-label="Views">
     {#each tabs as t}
-      <button class="tab" class:on={narrow ? shown === t.key : view === t.key} onclick={() => pickTab(t.key)} title={!narrow && view === t.key ? 'Close the panel' : t.label}>
+      <button class="tab" class:on={view === t.key} onclick={() => pickTab(t.key)} title={!narrow && view === t.key ? 'Close the panel' : t.label}>
         {@render ico(t.key)}<span class="tl">{t.label}</span>
         {#if t.key === 'sessions' && waiting}<span class="badge">{waiting}</span>{/if}
       </button>
@@ -217,6 +219,7 @@
   {#if shown === 'both' || shown === 'chat'}
     <section class="pane chat">
       <header class="hd">
+        {#if narrow}<button class="icon back" title="Back to Sessions" aria-label="Back to Sessions" onclick={() => (view = 'sessions')}>‹</button>{/if}
         <h1>{state === 'new' ? 'New chat' : current.title}</h1>
         {#if state === 'working'}<span class="tag work"><span class="dot work"></span>working</span>
         {:else if state === 'waiting'}<span class="tag wait"><span class="dot wait"></span>needs you</span>{/if}
@@ -591,7 +594,10 @@
     .tabs { max-width: 100%; overflow-x: auto; scrollbar-width: none; }
     .tab { padding: 7px 9px; }
     .tab:not(.on) .tl { display: none; }
+    .top.hide { display: none; }
     .stage { padding: 60px 8px 8px; }
+    .top.hide + .stage { padding-top: 8px; }
+    .back { font-size: 26px; margin-left: -10px; color: var(--ink); }
     .body { padding: 10px 14px; }
     .dock { padding: 6px 8px 8px; }
     .qc { right: 16px; bottom: 96px; }
