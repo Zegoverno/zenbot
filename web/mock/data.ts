@@ -113,3 +113,97 @@ export const fsRoot: FsNode = d('', [
     ], '9:41'),
   ]),
 ]);
+
+/** Note text by vault-relative path; other notes get a short stand-in. */
+export const NOTES: Record<string, string> = {
+  'Projects/Campos do Jordão/Campos do Jordão trip.md': `---
+type: project
+status: active
+tags: [family, travel]
+when: Fri 21 – Sun 23 Nov
+---
+# Campos do Jordão trip
+
+A calm weekend away, the first with the baby. Two adults and José (6 months), leaving Friday after work.
+
+## Plan
+
+**Friday:** leave São Paulo by 18:30; about 2h45 by car. Dinner at the hotel.
+
+**Saturday:** morning walk at Horto Florestal (stroller-friendly paths), lunch at Baden Baden, nap back at the hotel, sunset at Morro do Elefante.
+
+**Sunday:** Mass at Igreja de Santa Terezinha at 9:00, slow lunch, leave by 15:00 to beat traffic.
+
+## Where we stay
+
+[[Pousada Villa Bella]]: family suite with a crib, R$ 1.780 for both nights. Free cancellation until Wednesday.
+
+## To do
+
+- [x] Pick the hotel
+- [x] Book Pousada Villa Bella
+- [ ] Ask Mom to water the plants
+- [ ] Pack: see [[Packing list]]
+- [ ] Fill the tank on Thursday
+
+> It'll be cold at night (8 °C), so pack layers for the baby.
+`,
+  'Projects/Campos do Jordão/Packing list.md': `# Packing list
+
+## Baby
+- [x] Stroller
+- [ ] Warm onesies (3)
+- [ ] Hat and socks
+- [ ] Nappies for 3 days
+- [ ] White noise speaker
+
+## Us
+- [ ] Coats and scarves
+- [ ] Walking shoes
+- [ ] Rosary for Sunday
+
+Back to [[Campos do Jordão trip]].
+`,
+  'Projects/Family budget/Family budget — December.md': `---
+type: project
+tags: [family, money]
+---
+# Family budget — December
+
+December runs **R$ 400 short** because of Christmas gifts and the trip. zenbot suggested moving R$ 400 from savings.
+
+| Item | Planned | Spent |
+|---|---:|---:|
+| Groceries | 2.400 | 2.590 |
+| Baby | 900 | 860 |
+| Gifts | 1.200 | 640 |
+| Trip | 1.800 | 1.780 |
+| **Total** | **6.300** | **5.870** |
+
+## Notes
+- Groceries are 8% over; mostly the Christmas shopping.
+- Gifts list lives in the chat *Christmas gift ideas for the parents*.
+`,
+  'wiki/Pousada Villa Bella.md': `---
+type: place
+tags: [travel, campos-do-jordao]
+---
+# Pousada Villa Bella
+
+A quiet pousada in Campos do Jordão, 10 minutes from Capivari. Good with babies: cribs on request, quiet rooms, a heated pool.
+
+- **Price:** about R$ 890 a night (family suite)
+- **Booked:** Fri 21 – Sun 23 Nov, see [[Campos do Jordão trip]]
+- **Site:** https://pousadavillabella.com.br
+`,
+  'Daily/2026-11-19.md': `# Thursday 19 November
+
+## Today
+- [x] Pay the electricity bill
+- [ ] Call Mom: her birthday, 12:00
+- [ ] Pick up the dry cleaning, 18:00
+
+## Gospel
+Lk 19:41–44: *“If this day you only knew what makes for peace.”*
+`,
+};
