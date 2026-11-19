@@ -9,7 +9,7 @@
   // On a phone, one thing at a time: the tab bar picks a full-screen view, and a chat is reached by
   // picking it in Sessions; the chat then takes the whole screen, with a back arrow to Sessions.
   // Fake data; nothing here talks to the kernel. The floating "mock" panel switches states.
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import Home from './Home.svelte';
   import { archived, archivedCount, channels, conversation, question, sessions, type Msg, type Session } from './data.ts';
 
@@ -270,6 +270,13 @@
   }
   let liveN = $state(5);
   let liveOpen = $state(false);
+  // Opening a chat (or switching chat or state) lands on its last message.
+  let scroller: HTMLElement | undefined = $state();
+  $effect(() => {
+    void selected; void state;
+    if (screen !== 'chat' || !scroller) return;
+    tick().then(() => scroller && (scroller.scrollTop = scroller.scrollHeight));
+  });
 
   // Keep where you are across a refresh (this tab only): screen, open view, chat and its state.
   const PLACE_KEY = 'zen.mock.place';
@@ -386,7 +393,7 @@
         {/if}
       </header>
 
-      <div class="scroll">
+      <div class="scroll" bind:this={scroller}>
         {#if state === 'new'}
           <div class="hello">
             <h2>Good morning, Adriane</h2>
