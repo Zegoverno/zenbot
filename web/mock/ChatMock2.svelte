@@ -25,6 +25,43 @@
   let showArchived = $state(false);
   let open = $state<Record<number, boolean>>({});
 
+  // The right panel's share of the width, dragged on the gutter (as Shell.svelte's side panel) and
+  // kept across visits; double-click or Enter resets it.
+  const SIDE_KEY = 'zen.mock.side';
+  const clamp = (f: number) => Math.min(0.75, Math.max(0.25, f));
+  let side = $state(clamp(Number(localStorage.getItem(SIDE_KEY)) || 0.45));
+  let stage: HTMLElement | undefined = $state();
+  let dragging = $state(false);
+  const keepSide = () => localStorage.setItem(SIDE_KEY, String(side));
+  function grab(e: PointerEvent) {
+    if (!stage || e.button !== 0) return;
+    e.preventDefault();
+    const bar = e.currentTarget as HTMLElement;
+    bar.setPointerCapture(e.pointerId);
+    dragging = true;
+    const box = stage.getBoundingClientRect();
+    const move = (m: PointerEvent) => (side = clamp((box.right - 14 - m.clientX) / (box.width - 28)));
+    const drop = () => {
+      dragging = false;
+      bar.removeEventListener('pointermove', move);
+      bar.removeEventListener('pointerup', drop);
+      bar.removeEventListener('pointercancel', drop);
+      keepSide();
+    };
+    bar.addEventListener('pointermove', move);
+    bar.addEventListener('pointerup', drop);
+    bar.addEventListener('pointercancel', drop);
+  }
+  function nudge(e: KeyboardEvent) {
+    const step = e.shiftKey ? 0.1 : 0.02;
+    if (e.key === 'ArrowLeft') side = clamp(side + step);
+    else if (e.key === 'ArrowRight') side = clamp(side - step);
+    else if (e.key === 'Home' || e.key === 'Enter') side = 0.45;
+    else return;
+    e.preventDefault();
+    keepSide();
+  }
+
   const AGENTS = [
     { id: 'zenbot', name: 'zenbot', role: 'Chief of staff', a: '#4f7d67', b: '#8fb39f' },
     { id: 'garry', name: 'Garry', role: 'Startup advisor', a: '#7a6a9b', b: '#b3a3cf' },
@@ -175,7 +212,7 @@
   </nav>
 </div>
 
-<div class="stage" class:split>
+<div class="stage" class:split class:dragging bind:this={stage} style={split ? `grid-template-columns: minmax(0, ${1 - side}fr) 14px minmax(0, ${side}fr)` : undefined}>
   <!-- left: the chat -->
   {#if shown === 'both' || shown === 'chat'}
     <section class="pane chat">
@@ -266,6 +303,13 @@
         </div>
       </footer>
     </section>
+  {/if}
+
+  {#if split}
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+    <div class="gutter" role="separator" aria-orientation="vertical" aria-label="Resize the panels"
+      aria-valuenow={Math.round((1 - side) * 100)} aria-valuemin={25} aria-valuemax={75} tabindex="0"
+      onpointerdown={grab} onkeydown={nudge} ondblclick={() => { side = 0.45; keepSide(); }}><span></span></div>
   {/if}
 
   <!-- right: the view picked in the tab bar -->
@@ -407,7 +451,11 @@
 
   /* the panels */
   .stage { height: 100dvh; padding: 64px 14px 14px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
-  .stage.split { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); }
+  .stage.split { gap: 0; }
+  .stage.dragging { cursor: col-resize; user-select: none; }
+  .gutter { display: grid; place-items: center; cursor: col-resize; outline: none; touch-action: none; }
+  .gutter span { width: 4px; height: 44px; border-radius: 99px; background: var(--faint); transition: background 0.15s, height 0.15s; }
+  .gutter:hover span, .gutter:focus-visible span, .dragging .gutter span { background: var(--accent); height: 72px; }
   .pane { background: var(--paper); border: 1px solid var(--faint); border-radius: 22px; min-height: 0; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 1px 2px var(--shadow); }
 
   /* chat */
