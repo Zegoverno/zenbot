@@ -250,13 +250,24 @@
     { label: 'Checking availability', detail: 'Family suite with a crib, 2 nights', t: '1:04' },
   ];
   const SUBAGENTS = [
-    { name: 'Price check', step: 'Reading Airbnb listings near Capivari…', t: '0:40', steps: [
+    { name: 'Price check', role: 'researcher', model: 'Haiku 5.5', task: 'Compare prices for 2 nights, Fri 21 – Sun 23, family suite with a crib: Booking and Airbnb near Capivari.', step: 'Reading Airbnb listings near Capivari…', t: '0:40', steps: [
       ['Searched', 'Booking.com · Pousada Villa Bella', '0:26'], ['Opened a page', 'booking.com · didn’t load', '0:31'],
       ['Searched', 'Airbnb · Capivari, 2 nights', '0:35'], ['Reading', 'Airbnb listings near Capivari', '0:40']] },
-    { name: 'Weather', step: 'Done · Cold nights, 8 °C', t: '0:12', done: true, steps: [
+    { name: 'Weather', role: 'researcher', model: 'Haiku 5.5', task: 'Weather in Campos do Jordão, Fri 21 – Sun 23 November.', result: 'Cold nights, around 8 °C. Sunny Saturday, light rain possible Sunday afternoon. Pack warm clothes for the baby.', step: 'Done · Cold nights, 8 °C', t: '0:12', done: true, steps: [
       ['Opened a page', 'climatempo.com.br · Campos do Jordão', '0:06'], ['Summarized', 'Cold nights, 8 °C; sunny Saturday', '0:12']] },
   ];
   let hOpen = $state<Record<number, boolean>>({});
+  /** The subagent whose session is open in the right panel (phone: full screen). */
+  let subIx = $state(0);
+  const sub = $derived(SUBAGENTS[subIx] ?? SUBAGENTS[0]);
+  function openSub(k: number) {
+    subIx = k;
+    if (narrow) { screen = 'view'; view = 'subagent'; }
+    else view = view === 'subagent' && subIx === k && screen === 'chat' ? view : 'subagent';
+  }
+  function closeSub() {
+    if (narrow || screen === 'view') { screen = 'chat'; view = null; } else view = null;
+  }
   let liveN = $state(5);
   let liveOpen = $state(false);
 
@@ -266,11 +277,12 @@
     const p = JSON.parse(sessionStorage.getItem(PLACE_KEY) ?? 'null');
     if (p) {
       ({ screen, view, back, state, selected, liveOpen } = p);
+      subIx = p.subIx ?? 0;
       if (screen === 'chat' && state === 'new') queueMicrotask(() => chooseTalk(agent));
     }
   } catch {}
   $effect(() => {
-    sessionStorage.setItem(PLACE_KEY, JSON.stringify({ screen, view, back, state, selected, liveOpen }));
+    sessionStorage.setItem(PLACE_KEY, JSON.stringify({ screen, view, back, state, selected, liveOpen, subIx }));
   });
   const live = $derived(QUEUE.slice(0, liveN));
   $effect(() => {
@@ -447,11 +459,14 @@
                       {/each}
                     </ol>
                     {#each SUBAGENTS as h, k}
-                      <button class="lrow sa" class:done={h.done} aria-expanded={!!hOpen[k]} onclick={() => (hOpen[k] = !hOpen[k])}>
-                        {#if h.done}<span class="g">✓</span>{:else}<span class="orb xs busy" style="--a:{agent.a}; --b:{agent.b}"></span>{/if}
-                        <span class="lt"><b>{h.name}</b>{" "}<span class="ld">{h.done ? h.step.replace('Done · ', '') : h.step}</span></span>
-                        <span class="lm">subagent · {h.steps.length} steps {hOpen[k] ? '▾' : '▸'}</span>
-                      </button>
+                      <div class="sarow" class:on={view === 'subagent' && subIx === k && (split || screen === 'view')}>
+                        <button class="lrow sa" class:done={h.done} aria-expanded={!!hOpen[k]} onclick={() => (hOpen[k] = !hOpen[k])}>
+                          {#if h.done}<span class="g">✓</span>{:else}<span class="orb xs busy" style="--a:{agent.a}; --b:{agent.b}"></span>{/if}
+                          <span class="lt"><b>{h.name}</b>{" "}<span class="ld">{h.done ? h.step.replace('Done · ', '') : h.step}</span></span>
+                          <span class="lm">subagent · {h.steps.length} steps {hOpen[k] ? '▾' : '▸'}</span>
+                        </button>
+                        <button class="sopen" onclick={() => openSub(k)} title="Open this subagent's session beside the chat" aria-label="Open {h.name}'s session">{@render ico('split')}</button>
+                      </div>
                       {#if hOpen[k]}
                         <ol class="slist sub">{#each h.steps as [l, d, t], q}<li class:now={!h.done && q === h.steps.length - 1}><span class="g">{#if !h.done && q === h.steps.length - 1}<i class="pulse"></i>{:else}✓{/if}</span><span class="lt">{l}{" "}<span class="ld">{d}</span></span><span class="st">{t}</span></li>{/each}</ol>
                       {/if}
@@ -538,6 +553,28 @@
           </button>
           {#if showArchived}
             <div class="arch">{#each archived as s}{@render row(s)}{/each}<button class="more">Show all archived…</button></div>
+          {/if}
+        </div>
+      {:else if view === 'subagent'}
+        <header class="vh">
+          {#if narrow}<button class="icon back" title="Back to the chat" aria-label="Back to the chat" onclick={closeSub}>‹</button>{/if}
+          <span class="orb sm" class:busy={!sub.done} style="--a:{agent.a}; --b:{agent.b}"></span>
+          <div class="subh"><h2>{sub.name}</h2><span>subagent of {agent.name} · {sub.role} · {sub.model}</span></div>
+          <span class="sp"></span>
+          {#if !narrow}<button class="icon" title="Close the panel" aria-label="Close the panel" onclick={closeSub}>×</button>{/if}
+        </header>
+        <div class="vscroll subv">
+          <div class="sbrief"><span class="k">Asked by {agent.name}</span>{sub.task}</div>
+          <ol class="slist">
+            {#each sub.steps as [l, d, t], q}
+              {@const now = !sub.done && q === sub.steps.length - 1}
+              <li class:now><span class="g">{#if now}<i class="pulse"></i>{:else}✓{/if}</span><span class="lt">{l}{" "}<span class="ld">{d}</span></span><span class="st">{t}</span></li>
+            {/each}
+          </ol>
+          {#if sub.done}
+            <div class="sres"><span class="k">Result · {sub.t}</span>{sub.result}</div>
+          {:else}
+            <div class="swork"><span class="orb xs busy" style="--a:{agent.a}; --b:{agent.b}"></span>Still working · {sub.t}<span class="sp"></span><button class="ghost">{@render ico('stop')} Stop</button></div>
           {/if}
         </div>
       {:else if view === 'files'}
@@ -685,6 +722,22 @@
   .ld { color: var(--dim); }
   .lm { font-size: 12px; color: var(--dim); white-space: nowrap; font-variant-numeric: tabular-nums; }
   @media (max-width: 900px) { .lm .wide { display: none; } }
+  .sarow { display: flex; align-items: center; border-radius: 10px; }
+  .sarow .sa { flex: 1; min-width: 0; }
+  .sarow.on { background: var(--soft); }
+  .sopen { flex: none; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; color: var(--dim); }
+  .sopen:hover, .sarow.on .sopen { color: var(--accent); background: var(--soft); }
+  .sopen :global(.ico) { width: 16px; height: 16px; }
+  .subh { display: flex; flex-direction: column; min-width: 0; }
+  .subh span { font-size: 12.5px; color: var(--dim); }
+  .subv { padding: 4px 16px 20px 22px; }
+  .subv .slist { padding: 0; margin: 10px 0; }
+  .subv .slist li { font-size: 14px; padding: 5px 0; }
+  .sbrief, .sres { border: 1px solid var(--faint); border-radius: 12px; padding: 10px 12px; font-size: 14px; line-height: 1.5; background: var(--paper); }
+  .sres { border-color: color-mix(in srgb, var(--accent) 35%, var(--faint)); }
+  .sbrief .k, .sres .k { display: block; font-size: 11.5px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px; }
+  .swork { display: flex; align-items: center; gap: 10px; font-size: 13.5px; color: var(--dim); padding: 6px 0; }
+  .swork .sp { flex: 1; }
   .sa { font-size: 13.5px; }
   .sa.done { opacity: 0.7; }
   .g { width: 14px; flex: none; text-align: center; font-size: 11px; font-weight: 700; color: var(--accent); }
