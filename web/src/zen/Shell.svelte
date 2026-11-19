@@ -8,6 +8,7 @@
   import { findView, loadPlugins, panel, views as pluginViews } from './plugins.svelte.ts';
   import PluginFrame from './PluginFrame.svelte';
   import Games from './views/Games.svelte';
+  import Home from './views/Home.svelte';
   import Settings from './views/Settings.svelte';
   import Chat from './Chat.svelte';
   import Sessions from './views/Sessions.svelte';
@@ -17,9 +18,9 @@
   import Preview from './views/Preview.svelte';
   import { zen, type BoardSession } from './api.ts';
 
-  const LABEL: Record<string, string> = { sessions: 'Sessions', files: 'Files', tasks: 'Tasks', agents: 'Agents', games: 'Games' };
+  const LABEL: Record<string, string> = { home: 'Home', sessions: 'Sessions', files: 'Files', tasks: 'Tasks', agents: 'Agents', games: 'Games' };
   /** The tabs in order: the built-ins, then each enabled plugin's views. */
-  const tabList = $derived([...VIEWS.map((v) => ({ key: v, label: LABEL[v] })), ...pluginViews().map((v) => ({ key: v.key as View, label: v.title }))]);
+  const tabList = $derived([...(['home', ...VIEWS] as View[]).map((v) => ({ key: v, label: LABEL[v] })), ...pluginViews().map((v) => ({ key: v.key as View, label: v.title }))]);
   const keysOf = () => tabList.map((t) => t.key);
   let wide = $state(true);
 
@@ -105,7 +106,7 @@
     }
     if (inSession || typing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
     // The board.
-    const keys = keysOf();
+    const keys: View[] = keysOf().filter((v) => v !== 'home');
     const i = /^[1-9]$/.test(e.key) ? Number(e.key) - 1 : -1;
     if (i >= 0 && i < keys.length) {
       e.preventDefault();
@@ -139,7 +140,9 @@
 {/snippet}
 
 {#snippet view(pane: Pane, v: View, active: boolean)}
-  {#if v === 'sessions'}
+  {#if v === 'home'}
+    <Home />
+  {:else if v === 'sessions'}
     <Sessions {pane} {active} hide={pane === 'side' ? app.session : null} />
   {:else if v === 'files'}
     <Files {pane} {active} />
@@ -170,7 +173,7 @@
 <div class="zen" class:in-session={app.session !== null}>
   {#if app.session === null}
     <div class="bar">
-      <button class="brand" onclick={() => board('sessions')}>zen</button>
+      <button class="brand" onclick={() => board('home')}>zen</button>
       {@render tabs('home', app.view)}
       <span class="grow"></span>
       {#if counts.waiting}<span class="waiting">? {counts.waiting} waiting on you</span>{/if}

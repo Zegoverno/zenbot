@@ -332,8 +332,13 @@ const errors = [];
 page.on('pageerror', (e) => errors.push(e.message));
 const base = `http://127.0.0.1:${PORT}`;
 try {
-  // The board: the session, waiting on the owner.
+  // Home is a real-data dashboard and opens the selected session, not a mock.
   await page.goto(`${base}/`);
+  await page.getByRole('heading', { name: /Good (morning|afternoon|evening)/ }).waitFor();
+  await page.getByRole('button', { name: /Plan the week/ }).first().click();
+  await page.waitForURL(/\?s=s1/);
+  // The board: the session, waiting on the owner.
+  await page.goto(`${base}/?view=sessions`);
   await page.getByText('Plan the week').first().waitFor();
   assert.ok(await page.getByText('waiting on you').first().isVisible());
   // Channels apart; waiting first; a subagent under its session.
@@ -349,7 +354,7 @@ try {
   await page.getByRole('button', { name: '+ new session', exact: true }).click();
   await page.waitForURL(/\?s=new/);
   await page.locator('.zc-foot', { hasText: '@zenbot' }).waitFor();
-  await page.goto(`${base}/`);
+  await page.goto(`${base}/?view=sessions`);
   await page.getByText('Plan the week').first().waitFor();
   // Archived jobs stay out of Archived (and its count) until `J` or the jobs chip.
   assert.equal(await page.getByRole('button', { name: 'jobs', exact: true }).count(), 0, 'the jobs chip shows with archived');
@@ -386,7 +391,7 @@ try {
   await page.keyboard.press('a');
   await page.waitForURL(/\?s=s1/);
   assert.deepEqual(handed, ['t1']);
-  await page.goto(`${base}/`);
+  await page.goto(`${base}/?view=sessions`);
   await page.getByText('Plan the week').first().waitFor();
 
   // Files: opens in the shared workspace (the vault); `..` climbs to the home folder, without the
@@ -528,7 +533,7 @@ try {
 
   // Plugins. Settings (off the top bar) lists the installed ones, with permissions in plain words;
   // disabling one takes its view tab away, enabling brings it back.
-  await page.goto(`${base}/`);
+  await page.goto(`${base}/?view=sessions`);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.waitForURL(/view=settings/);
   const fxRow = page.locator('section[aria-label="Fixture"]');
@@ -648,7 +653,7 @@ try {
 
   // Agents: listed with what each may use, a broken one says why; another agent's session says
   // whose on the board.
-  await page.goto(`${base}/`);
+  await page.goto(`${base}/?view=sessions`);
   await page.getByText('Pitch practice').waitFor();
   assert.match(await page.locator('.row', { hasText: 'Pitch practice' }).innerText(), /@rex · smoke/);
   assert.doesNotMatch(await page.locator('.row', { hasText: 'Plan the week' }).innerText(), /@zenbot/);
@@ -1051,7 +1056,7 @@ try {
   await page.locator('.chat-pane').getByRole('button', { name: 'Settings', exact: true }).click();
   await page.locator('.zside').getByRole('tab', { name: 'Plugins', exact: true }).waitFor();
   assert.match(page.url(), /s=s1/);
-  await page.goto(`${base}/`);
+  await page.goto(`${base}/?view=sessions`);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   const cardsRow = page.locator('section[aria-label="Cards"]');
   await cardsRow.getByRole('button', { name: 'remove', exact: true }).click();
