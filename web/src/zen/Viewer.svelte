@@ -3,7 +3,7 @@
   // Markdown uses the chat's text-node renderer; other files remain escaped plain text.
   import { untrack } from 'svelte';
   import { files, type FileRead } from './api.ts';
-  import { app, closeFile, editNote, readNote, vaultNote, typing, type Pane } from './app.svelte.ts';
+  import { app, closeFile, editNote, openFile, readNote, vaultNote, typing, type Pane } from './app.svelte.ts';
   import { api, Conflict } from '../lib/api.ts';
   import { render } from './md.ts';
 
@@ -21,6 +21,26 @@
   let loaded = $state(false);
   let host = $state<HTMLDivElement>();
   let generation = 0;
+  let pendingLeave = $state<(() => void) | null>(null);
+  const dirty = $derived(writing && loaded && (text !== saved || hash === null));
+  const draftKey = (p: string) => `zen.files.draft:${p}`;
+  function getDraft(p: string): { text: string; saved: string; hash: string | null } | null {
+    try {
+      const d = JSON.parse(sessionStorage.getItem(draftKey(p)) ?? 'null');
+      return d && typeof d.text === 'string' && typeof d.saved === 'string' && (typeof d.hash === 'string' || d.hash === null) ? d : null;
+    } catch { return null; }
+  }
+  function persist(p: string, value: string, baseline: string, version: string | null) {
+    try {
+      if (value !== baseline || version === null) sessionStorage.setItem(draftKey(p), JSON.stringify({ text: value, saved: baseline, hash: version }));
+      else sessionStorage.removeItem(draftKey(p));
+    } catch { /* Storage may be unavailable; the editor still keeps its in-memory copy. */ }
+  }
+  function dropDraft(p: string) { try { sessionStorage.removeItem(draftKey(p)); } catch { /* unavailable */ } }
+  function input(e: Event) {
+    text = (e.currentTarget as HTMLTextAreaElement).value;
+    persist(path, text, saved, hash);
+  }
 
   $effect(() => {
     const p = path, r = rel, w = writing;
@@ -31,12 +51,16 @@
     loaded = false; error = ''; doc = null;
     try {
       if (w && r !== null) {
+        const stored = getDraft(p);
         const draft = app.draft?.path === r ? app.draft : null;
-        const d = draft ? { text: draft.text, hash: null } : await api.read(r);
+        const d = stored ? null : draft ? { text: draft.text, hash: null } : await api.read(r);
         if (g !== generation) return;
         if (draft) app.draft = null;
-        text = saved = d.text; hash = d.hash;
+        if (stored) { text = stored.text; saved = stored.saved; hash = stored.hash; }
+        else if (d) { text = saved = d.text; hash = d.hash; }
+        persist(p, text, saved, hash);
       } else {
+        if (r !== null && getDraft(p)) { openFile(p, pane, true, 'builtin'); return; }
         const d = await files.read(p);
         if (g !== generation) return;
         doc = d;
@@ -49,26 +73,34 @@
       host.replaceChildren(render(doc.text, { keepFront: true }).el);
     }
   });
-  async function save() {
-    if (rel === null || saving || !loaded) return;
-    const g = generation, value = text, r = rel;
+  async function save(): Promise<boolean> {
+    if (rel === null || saving || !loaded) return false;
+    const g = generation, value = text, r = rel, p = path;
     saving = true; error = '';
     try {
       const out = await api.write(r, value, hash);
-      if (g === generation) { hash = out.hash; saved = value; }
+      if (g === generation) { hash = out.hash; saved = value; persist(p, text, saved, hash); }
+      return g === generation && text === value;
     } catch (e) {
       if (g === generation) error = e instanceof Conflict
         ? 'Changed on disk. Your edits are kept here; copy them before reloading.'
         : (e as Error).message;
+      return false;
     } finally { saving = false; }
   }
-  export function canLeave() {
-    return !writing || (!saving && (!(text !== saved || hash === null) || confirm('Discard unsaved edits?')));
+  export function leave(next: () => void) {
+    if (saving) return;
+    if (dirty) pendingLeave = next;
+    else next();
   }
-  function read() {
-    if (!canLeave()) return;
-    readNote(pane);
+  async function saveAndLeave() {
+    if (await save()) { const next = pendingLeave; pendingLeave = null; next?.(); }
   }
+  function discard() {
+    const next = pendingLeave;
+    dropDraft(path); pendingLeave = null; next?.();
+  }
+  function read() { leave(() => readNote(pane)); }
   function key(e: KeyboardEvent) {
     if (!active) return;
     if (writing && (e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); void save(); }
@@ -88,10 +120,18 @@
     {/if}
     <button onclick={() => writing ? read() : closeFile(pane)}>{writing ? 'Cancel' : 'Close'}</button>
   </header>
+  {#if pendingLeave}
+    <div class="guard" role="alert">
+      <span>You have unsaved changes.</span>
+      <button onclick={() => (pendingLeave = null)} disabled={saving}>Keep editing</button>
+      <button onclick={saveAndLeave} disabled={saving}>Save and leave</button>
+      <button onclick={discard} disabled={saving}>Discard</button>
+    </div>
+  {/if}
   {#if error}<p role="alert">{error}</p>{/if}
   {#if !loaded && !error}<p>Opening…</p>
   {:else if writing && loaded}
-    <textarea aria-label="Markdown source" bind:value={text} spellcheck="false"></textarea>
+    <textarea aria-label="Markdown source" value={text} oninput={input} spellcheck="false"></textarea>
   {:else if picture && doc}
     <div class="scroll picture"><img src={`/api/fs/image?path=${encodeURIComponent(path)}&v=${doc.mtime}`} alt={path.split('/').pop()} /></div>
   {:else if doc?.text !== undefined}
@@ -101,6 +141,8 @@
 </section>
 
 <style>
+  .guard { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--faint); }
+  .guard span { margin-right: auto; }
   .picture { display: flex; align-items: flex-start; justify-content: center; padding: 12px; }
   .picture img { max-width: 100%; height: auto; image-rendering: auto; background: repeating-conic-gradient(#8881 0 25%, transparent 0 50%) 0 0 / 16px 16px; }
   .reader { display: flex; flex-direction: column; height: 100%; min-height: 0; }

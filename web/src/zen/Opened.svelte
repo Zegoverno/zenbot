@@ -33,12 +33,13 @@
 
   let menu = $state(false);
   let viewer: Viewer | undefined = $state();
-  const leave = () => viewer?.canLeave() ?? true;
+  const leave = (next: () => void) => viewer ? viewer.leave(next) : next();
 
   function open(c: Choice) {
-    if (!leave()) return;
-    menu = false;
-    openFile(path, pane, c.mode === 'edit', c.key);
+    leave(() => {
+      menu = false;
+      openFile(path, pane, c.mode === 'edit', c.key);
+    });
   }
 
   async function makeDefault(c: Choice) {
@@ -53,9 +54,9 @@
 
 <div class="opened">
     <div class="with" role="toolbar" aria-label="file actions">
-      <button class="dim" onclick={() => leave() && closeFile(pane)} title="back to the folder">Back</button>
-      <button class="dim" aria-pressed={mode === 'read'} onclick={() => leave() && openFile(path, pane)}>Read</button>
-      <button class="dim" aria-pressed={mode === 'edit'} disabled={!vaultNote(path) && !options.some((o) => o.mode === 'edit')} onclick={() => leave() && openFile(path, pane, true)}>Edit</button>
+      <button class="dim" onclick={() => leave(() => closeFile(pane))} title="back to the folder">Back</button>
+      <button class="dim" aria-pressed={mode === 'read'} onclick={() => leave(() => openFile(path, pane))}>Read</button>
+      <button class="dim" aria-pressed={mode === 'edit'} disabled={!vaultNote(path) && !options.some((o) => o.mode === 'edit')} onclick={() => leave(() => openFile(path, pane, true))}>Edit</button>
       <span class="dim name">{name}{chosen ? ` · ${chosen.title}` : ''}</span>
       <span class="grow"></span>
       <div class="menu-at">
