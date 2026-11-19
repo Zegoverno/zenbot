@@ -420,28 +420,31 @@
             {#if state === 'working'}
               {@const cur = live[live.length - 1]}
               <div class="livew" aria-live="polite">
-                {#if liveOpen}
-                  <ol class="slist">
-                    {#each live.slice(0, -1) as st}
-                      <li class:bad={st.failed}><span class="g">{st.failed ? '!' : '✓'}</span><span class="lt">{st.label}{" "}<span class="ld">{st.detail}{#if st.failed}{" · didn’t work"}{/if}</span></span><span class="st">{st.t}</span></li>
-                    {/each}
-                  </ol>
-                {/if}
-                <button class="lrow lhead" aria-expanded={liveOpen} onclick={() => (liveOpen = !liveOpen)} title={liveOpen ? 'Hide the steps' : 'See every step'}>
+                <button class="lrow lhead" aria-expanded={liveOpen} onclick={() => (liveOpen = !liveOpen)} title={liveOpen ? 'Hide the steps' : 'See every step and subagent'}>
                   <span class="orb xs busy" style="--a:{agent.a}; --b:{agent.b}"></span>
-                  <span class="lt"><b>{cur.label}</b>{" "}<span class="ld">{cur.detail}</span></span>
-                  <span class="lm">{live.length} steps · {cur.t} {liveOpen ? '▾' : '▸'}</span>
+                  <span class="lt"><b>{cur.label}</b>{" "}<span class="ld">{cur.detail}</span>…</span>
+                  <span class="lm">{live.length} steps<span class="wide">{" · "}{SUBAGENTS.length} subagents</span> · {cur.t} {liveOpen ? '▾' : '▸'}</span>
                 </button>
-                {#each SUBAGENTS as h, k}
-                  <button class="lrow sa" class:done={h.done} aria-expanded={!!hOpen[k]} onclick={() => (hOpen[k] = !hOpen[k])}>
-                    {#if h.done}<span class="g">✓</span>{:else}<span class="orb xs busy" style="--a:{agent.a}; --b:{agent.b}"></span>{/if}
-                    <span class="lt"><b>{h.name}</b>{" "}<span class="ld">{h.done ? h.step.replace('Done · ', '') : h.step}</span></span>
-                    <span class="lm">subagent {hOpen[k] ? '▾' : '▸'}</span>
-                  </button>
-                  {#if hOpen[k]}
-                    <ol class="slist sub">{#each h.steps as [l, d, t]}<li><span class="g">·</span><span class="lt">{l}{" "}<span class="ld">{d}</span></span><span class="st">{t}</span></li>{/each}</ol>
-                  {/if}
-                {/each}
+                {#if liveOpen}
+                  <div class="lbody">
+                    <ol class="slist">
+                      {#each live as st, j}
+                        {@const now = j === live.length - 1}
+                        <li class:bad={st.failed && !now} class:now><span class="g">{#if now}<i class="pulse"></i>{:else}{st.failed ? '!' : '✓'}{/if}</span><span class="lt">{st.label}{" "}<span class="ld">{st.detail}{#if st.failed && !now}{" · didn’t work"}{/if}</span></span><span class="st">{st.t}</span></li>
+                      {/each}
+                    </ol>
+                    {#each SUBAGENTS as h, k}
+                      <button class="lrow sa" class:done={h.done} aria-expanded={!!hOpen[k]} onclick={() => (hOpen[k] = !hOpen[k])}>
+                        {#if h.done}<span class="g">✓</span>{:else}<span class="orb xs busy" style="--a:{agent.a}; --b:{agent.b}"></span>{/if}
+                        <span class="lt"><b>{h.name}</b>{" "}<span class="ld">{h.done ? h.step.replace('Done · ', '') : h.step}</span></span>
+                        <span class="lm">subagent · {h.steps.length} steps {hOpen[k] ? '▾' : '▸'}</span>
+                      </button>
+                      {#if hOpen[k]}
+                        <ol class="slist sub">{#each h.steps as [l, d, t], q}<li class:now={!h.done && q === h.steps.length - 1}><span class="g">{#if !h.done && q === h.steps.length - 1}<i class="pulse"></i>{:else}✓{/if}</span><span class="lt">{l}{" "}<span class="ld">{d}</span></span><span class="st">{t}</span></li>{/each}</ol>
+                      {/if}
+                    {/each}
+                  </div>
+                {/if}
               </div>
             {/if}
           </div>
@@ -668,9 +671,14 @@
   .lt b { font-weight: 550; }
   .ld { color: var(--dim); }
   .lm { font-size: 12px; color: var(--dim); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  @media (max-width: 900px) { .lm .wide { display: none; } }
   .sa { font-size: 13.5px; }
   .sa.done { opacity: 0.7; }
   .g { width: 14px; flex: none; text-align: center; font-size: 11px; font-weight: 700; color: var(--accent); }
+  .lbody { border-top: 1px solid var(--faint); margin: 2px 6px 0; padding-top: 4px; }
+  .pulse { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: 0.3; transform: scale(0.75); } }
+  .slist li.now { font-weight: 550; }
   .slist { list-style: none; margin: 4px 0; padding: 0 10px; }
   .slist li { display: flex; align-items: center; gap: 10px; padding: 3px 0; font-size: 13px; animation: rise 0.25s both; }
   .slist li.bad .g, .slist li.bad .ld { color: var(--err); }
