@@ -186,7 +186,7 @@
      text by night (no pure black or white, contrast kept around WCAG AA, not maximal). */
   :global(:root), :global(:root[data-theme='light']) {
     --paper: #f6f4ef; --side: #efece5; --soft: #e8e4db; --faint: #dfdad0;
-    --ink: #2e2d2a; --dim: #85807a; --accent: #4f7d67; --on-accent: #f6f4ef;
+    --ink: #2e2d2a; --dim: #736e67; --accent: #4f7d67; --on-accent: #f6f4ef;
     --warn: #a8762c; --err: #b0533c; --ok: #4f7d67; --shadow: rgb(60 50 30 / 0.08);
     --r: 14px; color-scheme: light;
   }
