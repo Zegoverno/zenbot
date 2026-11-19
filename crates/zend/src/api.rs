@@ -374,6 +374,9 @@ pub(crate) async fn create_session(State(app): State<AppState>, Json(body): Json
 
 /// The owner's preferences from the web app (prefs.rs): the keys that are set, as one object.
 pub(crate) async fn get_prefs(State(app): State<AppState>) -> ApiResult<Json<Value>> {
+    if let Ok((text, _)) = crate::prompt_files::read("USER.md") {
+        crate::prefs::seed_name(&app.db, &text).await?;
+    }
     Ok(Json(Value::Object(crate::prefs::all(&app.db).await?)))
 }
 

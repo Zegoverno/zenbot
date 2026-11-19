@@ -31,6 +31,25 @@ pub async fn all(db: &SqlitePool) -> Result<Map<String, Value>, sqlx::Error> {
     Ok(rows.into_iter().filter_map(|(k, v)| Some((k, serde_json::from_str(&v).ok()?))).collect())
 }
 
+/// Seed the display name once from the first line of USER.md's “Who I am” section.
+/// INSERT OR IGNORE protects a name the owner has already set, including concurrent edits.
+pub async fn seed_name(db: &SqlitePool, user_text: &str) -> Result<(), sqlx::Error> {
+    if let Some(name) = name_from_user(user_text) {
+        sqlx::query("INSERT OR IGNORE INTO prefs (key, value) VALUES ('name', $1)")
+            .bind(json!(name).to_string()).execute(db).await?;
+    }
+    Ok(())
+}
+
+fn name_from_user(text: &str) -> Option<&str> {
+    let mut lines = text.lines();
+    lines.find(|line| line.trim() == "## Who I am")?;
+    let line = lines.map(str::trim).find(|line| !line.is_empty())?;
+    if line.starts_with('#') { return None; }
+    let name = line.split([',', '.', '(']).next()?.trim();
+    if name.is_empty() || name.chars().count() > NAME_MAX || name.chars().any(char::is_control) { None } else { Some(name) }
+}
+
 /// One preference, when it is set.
 pub async fn get(db: &SqlitePool, key: &str) -> Option<Value> {
     let v: Option<String> = sqlx::query_scalar("SELECT value FROM prefs WHERE key = $1").bind(key).fetch_optional(db).await.ok().flatten();
@@ -169,6 +188,18 @@ mod tests {
         let app = crate::test_util::app(db);
         seed(&app).await;
         (dir, app)
+    }
+
+    #[tokio::test]
+    async fn seed_name_preserves_owner_edits() {
+        let (_dir, app) = app_with_models().await;
+        seed_name(&app.db, "## Who I am\n\nJosé Governo, 32, São Paulo.\n").await.unwrap();
+        assert_eq!(get(&app.db, "name").await, Some(json!("José Governo")));
+        patch(&app, &json!({"name": "Ze"})).await.unwrap();
+        seed_name(&app.db, "## Who I am\nAnother Name, 40.\n").await.unwrap();
+        assert_eq!(get(&app.db, "name").await, Some(json!("Ze")));
+        assert_eq!(name_from_user("## Who I am\n\n## How I like to work"), None);
+        app.db.close().await;
     }
 
     #[tokio::test]
