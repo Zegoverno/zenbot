@@ -16,7 +16,7 @@
   import { AppBridge, PostMessageTransport, type McpUiHostContext } from '@modelcontextprotocol/ext-apps/app-bridge';
   import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
   import { pluginApi, type ToolResult } from './api.ts';
-  import { app, openFile, closeFile, setView, notice, type Pane } from './app.svelte.ts';
+  import { app, openFile, closeFile, setView, openSession, notice, type Pane } from './app.svelte.ts';
   import { chat, contextImages, keepContextSaving, resultText } from './plugins.svelte.ts';
   import { SANDBOX, webLink, withCsp, zenNavigation } from './frame.ts';
 
@@ -163,6 +163,11 @@
         b.onmessage = async ({ content }) => {
           const text = resultText({ content: content as { type: string; text?: string }[] }).trim();
           // Plugin text is untrusted: queue only, never invoke the prompt/command path.
+          if (text && !app.session && text.length <= 100000) {
+            app.chatDraft = `[From ${title}]\n${text}`;
+            openSession('new', 'zenbot');
+            return {};
+          }
           if (text && chat.queue?.(plugin, text)) return {};
           notice(chat.queue ? `${title}: draft could not be queued (empty, read-only, or queue full)` : `${title} wants to write in the chat: open a session first`);
           return { isError: true };
