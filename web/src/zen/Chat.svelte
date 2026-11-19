@@ -36,6 +36,8 @@
   let agent = $state(sid ? 'zenbot' : app.agent);
   /** The agents a fresh chat can start as (loaded only for a fresh chat). */
   let agents = $state<string[]>([]);
+  let ideas = $state<string[]>([]);
+  let ideasLoading = $state(false);
   let models = $state<Models | null>(null);
   let cmds = $state<Command[]>([]);
   let loaded = $state(false);
@@ -1155,6 +1157,24 @@
     if (active && loaded && matchMedia('(pointer: fine)').matches) ta?.focus();
   });
 
+  // Ideas are independent of the composer; changing agent invalidates an in-flight response.
+  $effect(() => {
+    if (sid) return;
+    const selected = agent;
+    const controller = new AbortController();
+    ideas = [];
+    ideasLoading = true;
+    fetch(`/api/zen/ideas?agent=${encodeURIComponent(selected)}`, { signal: controller.signal })
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then((data: { ideas?: unknown }) => {
+        if (!controller.signal.aborted && Array.isArray(data.ideas))
+          ideas = data.ideas.filter((x): x is string => typeof x === 'string').slice(0, 3);
+      })
+      .catch(() => {})
+      .finally(() => { if (!controller.signal.aborted) ideasLoading = false; });
+    return () => controller.abort();
+  });
+
   onMount(() => {
     if (id === 'new') { input = app.chatDraft; app.chatDraft = ''; }
     if (app.attachOnOpen) { app.attachOnOpen = false; setTimeout(() => picker_?.click(), 0); }
@@ -1217,6 +1237,13 @@
             <button role="radio" aria-checked={a === agent} class:zc-on={a === agent} onclick={() => (agent = a)}>@{a}</button>
           {/each}
         </div>
+      {/if}
+      {#if !sid && !entries.length}
+        <section class="zc-ideas" aria-label="Ideas for a new session">
+          <h2>What would you like to do?</h2>
+          {#if ideasLoading}<p class="zc-dim" role="status">Finding ideas…</p>
+          {:else if ideas.length}<div class="zc-idea-list">{#each ideas as idea}<button onclick={() => setInput(idea)}>{idea}<span aria-hidden="true">↗</span></button>{/each}</div>{/if}
+        </section>
       {/if}
       {#if failed}<div class="zc-line zc-err">couldn't load the session: {failed}</div>{/if}
       {#each entries as e (e.key)}
@@ -1378,6 +1405,13 @@
   .zc-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
   .zc-body { max-width: 860px; margin: 0 auto; padding: 14px 20px 18px; font-size: 15px; line-height: 1.55; }
   .zc-title { color: var(--dim); text-align: center; font-size: 13px; margin: 2px 0 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .zc-ideas { margin: 70px auto 28px; max-width: 650px; }
+  .zc-ideas h2 { font-size: 22px; font-weight: 550; letter-spacing: -0.02em; }
+  .zc-idea-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .zc-idea-list button { display: flex; justify-content: space-between; gap: 10px; text-align: left; padding: 14px; border: 1px solid var(--faint); border-radius: 12px; color: var(--ink); }
+  .zc-idea-list button:hover { border-color: var(--accent); }
+  .zc-idea-list button span { color: var(--dim); }
+  @media (max-width: 600px) { .zc-ideas { margin-top: 32px; } .zc-idea-list { grid-template-columns: 1fr; } }
   .zc-earlier { display: block; margin: 0 auto 8px; color: var(--accent); font-size: 13px; }
   .zc-user { white-space: pre-wrap; overflow-wrap: anywhere; font-weight: 560; margin: 14px 0 10px; }
   .zc-kernel { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--dim); font-size: 13px; margin: 10px 0; }

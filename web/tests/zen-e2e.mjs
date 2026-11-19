@@ -370,10 +370,15 @@ try {
   assert.equal(at(/verifier: Check the plan/), at(/Plan the week/) + 1, 'the subagent sits under its session');
   if (shots) await page.screenshot({ path: 'tests/shots/zen-board.png' });
 
+  // Suggestions load independently of the composer and selecting one only drafts it.
+  await page.route('**/api/zen/ideas?*', (route) => route.fulfill({ json: { ideas: ['Plan a week', 'Review a project', 'Explore an idea'] } }));
   // Sessions: a `+ new session` button does what `n` does.
   await page.getByRole('button', { name: '+ new session', exact: true }).click();
   await page.waitForURL(/\?s=new/);
   await page.locator('.zc-foot', { hasText: '@zenbot' }).waitFor();
+  await page.getByRole('button', { name: 'Plan a week' }).click();
+  assert.equal(await page.getByRole('textbox', { name: 'message' }).inputValue(), 'Plan a week', 'an idea fills the composer without sending');
+  await page.unroute('**/api/zen/ideas?*');
   await page.goto(`${base}/?view=sessions`);
   await page.getByText('Plan the week').first().waitFor();
   // Archived jobs stay out of Archived (and its count) until `J` or the jobs chip.
