@@ -213,9 +213,9 @@
     if (s) pick(s);
   }
   /** Files' "Ask zenbot": beside a chat, the note goes into its message box; else a new chat starts with it. */
-  function askAbout(name: string) {
+  function askAbout(path: string) {
     if (screen !== 'chat' || narrow) openChat('new');
-    draft = `About “${name}”: `; tick().then(() => { draft_el?.focus(); draft_el?.setSelectionRange(draft.length, draft.length); });
+    draft = `About \`${path}\`: `; tick().then(() => { draft_el?.focus(); draft_el?.setSelectionRange(draft.length, draft.length); });
   }
   function newChat() {
     openChat('new');

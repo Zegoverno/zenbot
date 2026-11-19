@@ -4,7 +4,7 @@
   import { fsRoot, NOTES, VAULT, type FsNode } from './data.ts';
   import { render } from '../src/zen/md.ts';
 
-  let { ask }: { ask?: (name: string) => void } = $props();
+  let { ask }: { ask?: (path: string) => void } = $props();
 
   const KEY = 'zen.mock.files';
   const saved = (() => { try { const v = JSON.parse(sessionStorage.getItem(KEY) ?? 'null'); return typeof v === 'object' ? v : null; } catch { return null; } })();
@@ -165,7 +165,7 @@
         <button class="rb pri" onclick={save}>Save</button>
       {:else}
         {#if isNote}<button class="rb" onclick={edit} title="Edit the text (E)">Edit</button>{/if}
-        {#if ask}<button class="rb pri" onclick={() => ask?.(title)} title="Ask zenbot about this note">Ask zenbot</button>{/if}
+        {#if ask}<button class="rb pri" onclick={() => ask?.(shortPath(file!))} title="Ask zenbot about this note">Ask zenbot</button>{/if}
       {/if}
     </div>
     <div class="rscroll">
