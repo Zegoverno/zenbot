@@ -12,6 +12,7 @@ mod context;
 mod defaults;
 mod delegate;
 mod dispatch;
+mod engines;
 mod git;
 mod handoff;
 mod jobs;
@@ -293,6 +294,10 @@ async fn serve() -> Result<()> {
 
     let api = Router::new()
         .route("/models", get(list_models))
+        .route("/engines", get(engines::list))
+        .route("/engines/{engine}/login", axum::routing::post(engines::login))
+        .route("/engines/{engine}/logout", axum::routing::post(engines::logout))
+        .route("/engines/openrouter/key", axum::routing::put(engines::set_key))
         .route("/reviews", get(review::list))
         .route("/complete", axum::routing::post(complete_once))
         .route("/search", axum::routing::post(search_once))
