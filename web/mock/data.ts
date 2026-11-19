@@ -116,6 +116,23 @@ export const fsRoot: FsNode = d('', [
 
 /** Note text by vault-relative path; other notes get a short stand-in. */
 export const NOTES: Record<string, string> = {
+  // Outside the vault: keyed by full path. USER.md is shared by every agent (~/.zenbot/USER.md).
+  '/home/exedev/.zenbot/USER.md': `# USER.md — the owner
+
+## Who I am
+
+Adriane, 30, São Paulo. Catholic. Married to José; first son, José, born 2026.
+
+## How I like to work
+
+- Portuguese at home, English is fine for work.
+- Short answers; ask before spending money or messaging anyone.
+- Mornings are for the baby; I check things after lunch.
+
+## What I'm working on
+
+- Baby room, the family budget and a weekend in Campos do Jordão.
+`,
   'Projects/Campos do Jordão/Campos do Jordão trip.md': `---
 type: project
 status: active
@@ -224,3 +241,21 @@ export const PROPS: Record<string, Record<string, string[]>> = {
   'Templates/Daily.md': { type: ['template'] },
   'Templates/Project.md': { type: ['template'] },
 };
+
+/** Where chat attachments land (web/server/uploads.ts): ~/inbox/<day>/, never overwriting. */
+export const INBOX = '/home/exedev/inbox';
+/** Picked files' bytes in this tab (object URLs), so the mock can show an attached image. */
+export const BLOBS: Record<string, string> = {};
+export function addToInbox(name: string, day = '2026-11-19', url?: string): string {
+  const home = fsRoot.kids!.find((k) => k.name === 'home')!.kids!.find((k) => k.name === 'exedev')!;
+  const inbox = home.kids!.find((k) => k.name === 'inbox')!;
+  let dir = inbox.kids!.find((k) => k.name === day);
+  if (!dir) inbox.kids!.push((dir = d(day, [], 'now')));
+  const dot = name.lastIndexOf('.');
+  const [stem, ext] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ''];
+  let n = name;
+  for (let i = 2; dir.kids!.some((k) => k.name === n); i++) n = `${stem}-${i}${ext}`;
+  dir.kids!.push(f(n, 'now'));
+  if (url) BLOBS[`${INBOX}/${day}/${n}`] = url;
+  return `${INBOX}/${day}/${n}`;
+}

@@ -11,8 +11,14 @@
   // Fake data; nothing here talks to the kernel. The floating "mock" panel switches states.
   import { onMount, tick } from 'svelte';
   import Files from './Files.svelte';
+  import Tasks from './Tasks.svelte';
+  import Agents from './Agents.svelte';
+  import Settings from './Settings.svelte';
+  import Routines from './Routines.svelte';
+  import { failing } from './routinestore.svelte.ts';
   import Home from './Home.svelte';
-  import { archived, archivedCount, channels, conversation, question, sessions, type Msg, type Session } from './data.ts';
+  import { me } from './profilestore.svelte.ts';
+  import { archived, archivedCount, channels, conversation, question, sessions, type Msg, type Session, addToInbox } from './data.ts';
 
   type State = 'new' | 'chat' | 'working' | 'waiting';
   let state = $state<State>('chat');
@@ -137,10 +143,10 @@
   }
 
   const TABS = [
-    { key: 'sessions', label: 'Sessions' }, { key: 'files', label: 'Files' }, { key: 'tasks', label: 'Tasks' },
+    { key: 'sessions', label: 'Sessions' }, { key: 'files', label: 'Files' }, { key: 'tasks', label: 'Tasks' }, { key: 'routines', label: 'Routines' },
     { key: 'agents', label: 'Agents' }, { key: 'games', label: 'Games' },
   ];
-  const PLUGIN_TABS = [{ key: 'read', label: 'Read' }, { key: 'write', label: 'Write' }];
+  // Read and Write aren't tabs: zenread and zenwrite open a note from Files (their openers).
   const waiting = sessions.filter((s) => s.state === 'waiting').length;
 
   // Line icons, 24×24, stroked with currentColor.
@@ -151,11 +157,14 @@
     files: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
     tasks: '<path d="M9 11l2 2 4-4"/><rect x="4" y="4" width="16" height="16" rx="3"/>',
     agents: '<circle cx="9" cy="9" r="3"/><circle cx="17" cy="10" r="2.2"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0M14.5 19a3.5 3.5 0 0 1 6 0"/>',
+    routines: '<circle cx="12" cy="12" r="8"/><path d="M12 8v4l2.5 2.5"/><path d="M4 4l2 2M20 4l-2 2"/>',
     games: '<rect x="3" y="7" width="18" height="11" rx="4"/><path d="M8 11v3M6.5 12.5h3"/><circle cx="15.5" cy="12" r=".6"/><circle cx="17.5" cy="14" r=".6"/>',
     read: '<path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H11v16H5.5A1.5 1.5 0 0 1 4 18.5zM20 5.5A1.5 1.5 0 0 0 18.5 4H13v16h5.5a1.5 1.5 0 0 0 1.5-1.5z"/>',
     write: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>',
-    settings: '<circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4L7 17M17 7l1.4-1.4"/>',
+    settings: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
+    task: '<path d="M9 11l2 2 4-4"/><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M18 2v4M16 4h4"/>',
+    sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
     search: '<circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/>',
     split: '<rect x="3" y="5" width="18" height="14" rx="3"/><path d="M12 5v14"/>',
     focus: '<rect x="3" y="5" width="18" height="14" rx="3"/>',
@@ -165,8 +174,12 @@
     ring: '<circle cx="12" cy="12" r="2.5"/><circle cx="12" cy="4.5" r="1.3"/><circle cx="19.5" cy="12" r="1.3"/><circle cx="12" cy="19.5" r="1.3"/><circle cx="4.5" cy="12" r="1.3"/>',
   };
 
-  const current = $derived([...channels, ...sessions, ...archived].find((s) => s.id === selected) ?? sessions[0]);
-  const msgs = $derived<Msg[]>(state === 'new' ? [] : state === 'waiting' ? [...conversation, question] : conversation);
+  const current = $derived([...channels, ...handed, ...sessions, ...archived].find((s) => s.id === selected) ?? sessions[0]);
+  const msgs = $derived<Msg[]>(state === 'new' ? [] : briefs[selected]
+    ? [{ k: 'user', text: briefs[selected], time: 'now' }, ...(state === 'waiting' ? [taskAsk] : [])]
+    : state === 'waiting' ? [...conversation, question] : conversation);
+  /** A handed task waiting on you asks about the task, not the trip. */
+  const taskAsk: Msg = { k: 'ask', question: 'Dr. Lima has Tue 25 at 9:00 or Wed 26 at 14:30. Which should I book?', options: ['Tue 25 at 9:00', 'Wed 26 at 14:30', 'Neither, find another day'] };
   const tabs = [{ key: 'home', label: 'Home' }, ...TABS];
   const split = $derived(screen === 'chat' && !narrow && view !== null);
   const showView = $derived(screen === 'view' || split);
@@ -175,23 +188,54 @@
   /** The quick-control ring's actions, fanned out on a quarter circle up and to the left. */
   const actions = $derived([
     { key: 'plus', label: 'New chat', run: () => newChat() },
-    { key: 'search', label: 'Search', run: () => pickTab('sessions') },
-    state === 'working'
-      ? { key: 'stop', label: 'Stop zenbot', run: () => (state = 'chat') }
-      : { key: 'clip', label: 'Attach a file', run: () => {} },
-    screen === 'chat' && !narrow
-      ? { key: split ? 'focus' : 'split', label: split ? 'Focus on chat' : 'Show panel', run: () => (view = split ? null : 'sessions') }
-      : { key: 'home', label: 'Home', run: () => pickTab('home') },
-    { key: 'theme', label: `Theme: ${theme}`, run: () => cycleTheme() },
-    { key: 'settings', label: 'Settings', run: () => pickTab('settings') },
+    { key: 'search', label: 'Search files', run: () => openAndFocus('files', '.fsearch input') },
+    { key: 'clip', label: 'Attach a file', run: () => filePick?.click() },
+    { key: 'task', label: 'Add a task', run: () => openAndFocus('tasks', '.add input') },
+    { key: dark ? 'sun' : 'theme', label: dark ? 'Light mode' : 'Dark mode', run: () => (theme = dark ? 'light' : 'dark') },
+    { key: 'settings', label: 'Settings', run: () => openTab('settings') },
   ]);
+  /** Open a tab (beside the chat when one is open) and put the cursor in its field. */
+  /** Open a tab, never toggling it shut (menu and ring shortcuts). */
+  function openTab(tab: string) { if (!tabOn(tab)) pickTab(tab); }
+  function openAndFocus(tab: string, sel: string) {
+    openTab(tab);
+    tick().then(() => setTimeout(() => (document.querySelector(sel) as HTMLElement | null)?.focus(), 30));
+  }
+  // The theme as shown: auto follows the system until the ring's toggle picks light or dark.
+  let sysDark = $state(matchMedia('(prefers-color-scheme: dark)').matches);
+  const dark = $derived(theme === 'dark' || (theme === 'auto' && sysDark));
+  // Attach: the ring and the composer's clip share one file picker; files go to the open chat's
+  // message, else a new chat starts with them.
+  let filePick = $state<HTMLInputElement>();
+  let attached = $state<string[]>([]);
+  /** A chip's file in Files, beside the chat. */
+  let reveal = $state<{ path: string; n: number; open?: boolean; edit?: boolean }>({ path: '', n: 0 });
+  function showFile(p: string, how: { open?: boolean; edit?: boolean } = {}) {
+    const from = tabOn('settings') ? 'settings' : null;
+    if (!tabOn('files')) pickTab('files');
+    filesFrom = from;
+    reveal = { path: p, n: reveal.n + 1, ...how };
+  }
+  function picked(e: Event) {
+    const fs = [...((e.target as HTMLInputElement).files ?? [])];
+    (e.target as HTMLInputElement).value = '';
+    if (!fs.length) return;
+    if (screen !== 'chat') openChat('new');
+    attached = [...attached, ...fs.map((f) => addToInbox(f.name, undefined, URL.createObjectURL(f)))];
+    tick().then(() => draft_el?.focus());
+  }
   const R = 156;
   const at = (i: number, n: number) => {
     const a = Math.PI + (i * (Math.PI / 2)) / (n - 1);
     return `translate(${Math.cos(a) * R}px, ${Math.sin(a) * R}px)`;
   };
 
+  /** Where Files was opened from (Settings › You, Memory), for its "‹ Settings" button. */
+  let filesFrom = $state<string | null>(null);
+  /** The mock's own switcher folds to a chip on a phone. */
+  let mockOpen = $state(false);
   function pickTab(k: string) {
+    filesFrom = null;
     if (k === 'home') { screen = 'home'; view = null; }
     else if (screen === 'chat' && !narrow) view = view === k ? null : k;
     else { screen = 'view'; view = k; }
@@ -216,6 +260,40 @@
   function askAbout(path: string) {
     if (screen !== 'chat' || narrow) openChat('new');
     draft = `About \`${path}\`: `; tick().then(() => { draft_el?.focus(); draft_el?.setSelectionRange(draft.length, draft.length); });
+  }
+  /** Tasks' "Hand to <agent>", as the kernel does it (POST /api/tasks/{id}/agent): a new session,
+   *  titled by the task, starts working on its brief at once; the task keeps the session id, so
+   *  handing it again (or clicking its status) opens that chat. Tasks stays beside it. */
+  let handed = $state<Session[]>(JSON.parse(sessionStorage.getItem('zen.mock.handed2') ?? 'null') ?? [
+    { id: 'task-a8', title: 'Renew car insurance', when: '8:10', state: 'working' },
+    { id: 'task-a7', title: 'Paediatrician: 6-month check-up', when: 'Tue', state: 'waiting' },
+  ]);
+  let briefs = $state<Record<string, string>>(JSON.parse(sessionStorage.getItem('zen.mock.briefs2') ?? 'null') ?? {
+    'task-a8': 'Task from House: Renew car insurance (due 2026-11-30). Work on it and tell me what you need.',
+    'task-a7': 'Task from Family: Paediatrician: 6-month check-up (due 2026-11-26), for the goal “A present and courageous family life”. Work on it and tell me what you need.',
+  });
+  $effect(() => { sessionStorage.setItem('zen.mock.handed2', JSON.stringify(handed)); sessionStorage.setItem('zen.mock.briefs2', JSON.stringify(briefs)); });
+  function handTask(t: { id: string; text: string; project: string; due: string | null; goal: string | null }) {
+    const id = `task-${t.id}`;
+    if (!handed.some((x) => x.id === id)) {
+      handed.unshift({ id, title: t.text, when: 'now', state: 'working' });
+      briefs[id] = `Task from ${t.project}: ${t.text}${t.due ? ` (due ${t.due})` : ''}${t.goal ? `, for the goal “${t.goal}”` : ''}. Work on it and tell me what you need.`;
+    }
+    openTaskChat(id);
+    return id;
+  }
+  function openTaskChat(id: string) {
+    const s = handed.find((x) => x.id === id);
+    if (!s) return;
+    selected = id;
+    openChat(s.state === 'working' ? 'working' : s.state === 'waiting' ? 'waiting' : 'chat');
+  }
+  /** Agents' asks ("Ask zenbot to change it", "New agent"): a new chat with the request started. */
+  /** Creating agents and roles always goes to zenbot: only it can set agents up (it knows how). */
+  function askAgent(text: string) {
+    openChat('new');
+    chooseTalk(AGENTS[0]);
+    draft = text; tick().then(() => { draft_el?.focus(); draft_el?.setSelectionRange(draft.length, draft.length); });
   }
   function newChat() {
     openChat('new');
@@ -354,7 +432,17 @@
   $effect(() => {
     sessionStorage.setItem(PLACE_KEY, JSON.stringify({ screen, view, back, state, selected, liveOpen, subIx }));
   });
-  const live = $derived(QUEUE.slice(0, liveN));
+  // A handed task's chat streams generic steps, not the trip's.
+  const TASKQ: Live[] = [
+    { label: 'Read the task', detail: 'From the project’s tasks.md', t: '0:01' },
+    { label: 'Read the project note', detail: 'Purpose, status and recent notes', t: '0:06' },
+    { label: 'Searched your notes', detail: 'Anything already known about it', t: '0:14' },
+    { label: 'Checked your calendar', detail: 'Free slots before the due date', t: '0:22' },
+    { label: 'Drafting a plan', detail: 'Steps, and what it needs from you', t: '0:31' },
+  ];
+  const live = $derived((briefs[selected] ? TASKQ : QUEUE).slice(0, liveN));
+  /** Subagents shown in the working panel: the trip demo's; a handed task's chat has none. */
+  const subs = $derived(briefs[selected] ? [] : SUBAGENTS);
   $effect(() => {
     if (state !== 'working') { liveN = 5; return; }
     const id = setInterval(() => { liveN = liveN >= QUEUE.length ? 5 : liveN + 1; }, 2600);
@@ -405,8 +493,8 @@
           </button>
         {/each}
         <hr />
-        <div class="me"><span class="av">A</span><span class="name">Adriane</span>
-          <button class="icon" title="Settings" onclick={() => { pickTab('settings'); agentMenu = false; }}>{@render ico('settings')}</button>
+        <div class="me"><span class="av">{me.name[0]?.toUpperCase()}</span><span class="name">{me.name}</span>
+          <button class="icon" title="Settings" onclick={() => { openTab('settings'); agentMenu = false; }}>{@render ico('settings')}</button>
         </div>
       </div>
     {/if}
@@ -417,21 +505,16 @@
       <button class="tab" class:on={tabOn(t.key)} onclick={() => pickTab(t.key)} title={split && view === t.key ? 'Close the panel' : t.label}>
         {@render ico(t.key)}<span class="tl">{t.label}</span>
         {#if t.key === 'sessions' && waiting}<span class="badge">{waiting}</span>{/if}
+        {#if t.key === 'routines' && failing().length}<span class="badge bad" title="{failing().length} routine failed">{failing().length}</span>{/if}
       </button>
     {/each}
-    {#if !narrow}
-      <span class="vsep"></span>
-      {#each PLUGIN_TABS as t}
-        <button class="tab" class:on={tabOn(t.key)} onclick={() => pickTab(t.key)} title={split && view === t.key ? 'Close the panel' : t.label}>{@render ico(t.key)}<span class="tl">{t.label}</span></button>
-      {/each}
-    {/if}
   </nav>
 </div>
 
 <div class="stage" class:split class:dragging bind:this={stage} style={split ? `grid-template-columns: minmax(0, ${1 - side}fr) 14px minmax(0, ${side}fr)` : undefined}>
   <!-- left: the chat -->
   {#if screen === 'home'}
-    <section class="pane"><Home {narrow} onopen={openById} /></section>
+    <section class="pane"><Home {narrow} onopen={openById} ontab={pickTab} /></section>
   {/if}
 
   {#if screen === 'chat'}
@@ -481,7 +564,7 @@
       <div class="scroll" bind:this={scroller}>
         {#if state === 'new'}
           <div class="hello">
-            <h2>Good morning, Adriane</h2>
+            <h2>Good morning, {me.name}</h2>
             <p>Who do you want to talk to?</p>
             <div class="who" role="radiogroup" aria-label="Agent">
               {#each AGENTS as a}
@@ -560,7 +643,7 @@
                 <button class="lrow lhead" aria-expanded={liveOpen} onclick={() => (liveOpen = !liveOpen)} title={liveOpen ? 'Hide the steps' : 'See every step and subagent'}>
                   <span class="orb xs busy" style="--a:{agent.a}; --b:{agent.b}"></span>
                   <span class="lt"><b>{cur.label}</b>{" "}<span class="ld">{cur.detail}</span>…</span>
-                  <span class="lm">{live.length} steps<span class="wide">{" · "}{SUBAGENTS.length} subagents</span> · {cur.t} {liveOpen ? '▾' : '▸'}</span>
+                  <span class="lm">{live.length} steps{#if subs.length}<span class="wide">{" · "}{subs.length} subagents</span>{/if} · {cur.t} {liveOpen ? '▾' : '▸'}</span>
                 </button>
                 {#if liveOpen}
                   <div class="lbody">
@@ -570,7 +653,7 @@
                         <li class:bad={st.failed && !now} class:now><span class="g">{#if now}<i class="pulse"></i>{:else}{st.failed ? '!' : '✓'}{/if}</span><span class="lt">{st.label}{" "}<span class="ld">{st.detail}{#if st.failed && !now}{" · didn’t work"}{/if}</span></span><span class="st">{st.t}</span></li>
                       {/each}
                     </ol>
-                    {#each SUBAGENTS as h, k}
+                    {#each subs as h, k}
                       <div class="sarow" class:on={view === 'subagent' && subIx === k && (split || screen === 'view')}>
                         <button class="lrow sa" class:done={h.done} aria-expanded={!!hOpen[k]} onclick={() => (hOpen[k] = !hOpen[k])}>
                           {#if h.done}<span class="g">✓</span>{:else}<span class="orb xs busy" style="--a:{agent.a}; --b:{agent.b}"></span>{/if}
@@ -593,9 +676,12 @@
 
       <footer class="dock">
         <div class="compose">
+          {#if attached.length}
+            <div class="atts">{#each attached as f, i}<span class="att" title="Saved to {f.replace('/home/exedev', '~')}"><button class="atn" onclick={() => showFile(f)}>{@render ico('clip')}{f.slice(f.lastIndexOf('/') + 1)}</button><button aria-label="Remove {f}" onclick={() => (attached = attached.filter((_, j) => j !== i))}>×</button></span>{/each}</div>
+          {/if}
           <textarea rows="1" placeholder={state === 'waiting' && !answered ? `Answer ${agent.name}…` : `Message ${state === 'new' ? talk.name : agent.name}`} bind:value={draft} bind:this={draft_el} onkeydown={(e) => { if (e.key === 'Enter' && !e.shiftKey && state === 'waiting' && !answered) { e.preventDefault(); answer(draft); } }}></textarea>
           <div class="bar">
-            <button class="icon" title="Attach a file">{@render ico('clip')}</button>
+            <button class="icon" title="Attach a file" onclick={() => filePick?.click()}>{@render ico('clip')}</button>
             <div class="menu-wrap">
               <button class="mode" class:open={pop === 'model'} aria-haspopup="menu" aria-expanded={pop === 'model'} title="Model"
                 onclick={() => (pop = pop === 'model' ? null : 'model')}>{model.name} <span class="car">▾</span></button>
@@ -658,8 +744,8 @@
         <div class="vscroll">
           <div class="grp">Channels <span class="cnt">{channels.length}</span></div>
           {#each channels as s}{@render row(s)}{/each}
-          <div class="grp">Sessions <span class="cnt">{sessions.length}</span></div>
-          {#each sessions.filter((x) => !gone[x.id]) as s}{@render row(s)}{/each}
+          <div class="grp">Sessions <span class="cnt">{handed.length + sessions.length}</span></div>
+          {#each [...handed, ...sessions].filter((x) => !gone[x.id]) as s}{@render row(s)}{/each}
           <button class="grp toggle" onclick={() => (showArchived = !showArchived)} aria-expanded={showArchived}>
             <span class="car">{showArchived ? '▾' : '▸'}</span> Archived <span class="cnt">{(archivedCount + Object.keys(gone).length).toLocaleString()}</span>
           </button>
@@ -691,31 +777,27 @@
         </div>
       {:else if view === 'files'}
         <header class="vh"><h2>Files</h2><span class="sp"></span>{@render vclose()}</header>
-        <Files ask={askAbout} />
+        <Files ask={askAbout} {reveal} back={filesFrom ? { label: 'Settings', run: () => pickTab('settings') } : null} />
       {:else if view === 'tasks'}
         <header class="vh"><h2>Tasks</h2><span class="sp"></span>{@render vclose()}</header>
-        <div class="vscroll">
-          {#each [['Book Pousada Villa Bella', 'Fri', false], ['Paediatrician — 6-month check-up', 'Nov 26', false], ['Renew car insurance', 'Nov 30', false], ['Order Christmas gifts', 'Dec 5', false], ['Pay school fee', 'Nov 15', true]] as [t, d, done]}
-            <label class="trow" class:done><input type="checkbox" checked={done as boolean} /><span class="t">{t}</span><span class="when">{d}</span></label>
-          {/each}
-        </div>
+        <Tasks hand={handTask} open={openTaskChat} agent={agent.name} />
       {:else if view === 'agents'}
         <header class="vh"><h2>Agents</h2><span class="sp"></span>{@render vclose()}</header>
-        <div class="vscroll cards">
-          {#each AGENTS as a}
-            <button class="card" class:sel={a.id === agent.id} onclick={() => (agent = a)}>
-              <span class="orb" style="--a:{a.a}; --b:{a.b}">{a.name[0].toUpperCase()}</span>
-              <span class="ameta"><b>{a.name}</b><span>{a.role}</span></span>
-            </button>
-          {/each}
-        </div>
+        <Agents agents={AGENTS} current={agent} pick={(a) => (agent = a)} ask={askAgent} />
       {:else if view === 'games'}
         <header class="vh"><h2>Games</h2><span class="sp"></span>{@render vclose()}</header>
         <div class="vscroll cards">
           {#each [['Sudoku', 'A calm puzzle a day'], ['zengame', 'Prototype 0']] as [n, d]}
-            <div class="card"><span class="orb" style="--a:#a8762c; --b:#cfa660">{n[0]}</span><span class="ameta"><b>{n}</b><span>{d}</span></span></div>
+            <div class="card game"><span class="orb" style="--a:#a8762c; --b:#cfa660">{n[0]}</span><span class="ameta"><b>{n}</b><span>{d}</span></span>
+              <button class="play" title="Play {n}" aria-label="Play {n}"><svg viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z"/></svg>Play</button></div>
           {/each}
         </div>
+      {:else if view === 'routines'}
+        <header class="vh"><h2>Routines</h2><span class="sp"></span>{@render vclose()}</header>
+        <Routines ask={askAgent} openRun={() => openChat('chat')} />
+      {:else if view === 'settings'}
+        <header class="vh"><h2>Settings</h2><span class="sp"></span>{@render vclose()}</header>
+        <Settings {theme} setTheme={(t) => (theme = t)} ask={askAgent} openFile={showFile} />
       {:else}
         <header class="vh"><h2>{view ? view[0].toUpperCase() + view.slice(1) : ''}</h2><span class="sp"></span>{@render vclose()}</header>
         <div class="empty">The {view} view goes here.</div>
@@ -727,6 +809,7 @@
 <!-- bottom right: the quick-control ring -->
 {#if ring}<button class="scrim" aria-label="Close" onclick={() => (ring = false)}></button>{/if}
 <div class="qc" class:open={ring} class:hide={narrow && screen === 'chat'}>
+  <input type="file" multiple hidden bind:this={filePick} onchange={picked} />
   {#each actions as a, i}
     <button class="qa" style="transform: {ring ? at(i, actions.length) : 'translate(0,0)'}; transition-delay: {ring ? i * 18 : 0}ms"
       tabindex={ring ? 0 : -1} title={a.label} aria-label={a.label}
@@ -741,8 +824,8 @@
   <div class="toast" role="status">{toast.text}{#if toast.undo}<button onclick={() => { toast?.undo?.(); toast = null; }}>Undo</button>{/if}</div>
 {/if}
 
-<div class="mock">
-  <b>mock</b>
+<div class="mock" class:open={mockOpen}>
+  <b role="button" tabindex="0" title="Mock controls" onclick={() => (mockOpen = !mockOpen)} onkeydown={(e) => e.key === 'Enter' && (mockOpen = !mockOpen)}>mock</b>
   {#each [['new', 'New'], ['chat', 'Chat'], ['working', 'Working'], ['waiting', 'Question']] as [k, l]}
     <button class:on={screen === 'chat' && state === k} onclick={() => openChat(k as State)}>{l}</button>
   {/each}
@@ -806,6 +889,7 @@
   .tab:hover { color: var(--ink); background: var(--soft); }
   .tab.on { color: var(--on-accent); background: var(--accent); }
   .badge { min-width: 17px; height: 17px; padding: 0 5px; border-radius: 99px; font-size: 11px; font-weight: 700; display: grid; place-items: center; background: var(--warn); color: var(--on-accent); }
+  .badge.bad { background: var(--bad, #b5543c); }
   .vsep { width: 1px; height: 18px; background: var(--faint); margin: 0 4px; }
 
   /* the panels */
@@ -1000,6 +1084,20 @@
   .cards { padding-top: 6px; gap: 8px; }
   .card { display: flex; align-items: center; gap: 12px; padding: 14px; border-radius: 16px; border: 1px solid var(--faint); text-align: left; }
   .card.sel { border-color: var(--accent); }
+  .atts { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px 0; }
+  .att { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; padding: 3px 4px 3px 9px; border-radius: 99px; background: var(--soft); border: 1px solid var(--faint); }
+  .att :global(svg) { width: 13px; height: 13px; }
+  .att .atn { display: inline-flex; align-items: center; gap: 5px; width: auto; height: auto; border-radius: 0; color: inherit; }
+  .att .atn:hover { background: none; text-decoration: underline; }
+  .att button { width: 18px; height: 18px; border-radius: 50%; color: var(--dim); }
+  .att button:hover { background: var(--faint); color: var(--ink); }
+  .card.game { transition: border-color 0.15s, box-shadow 0.15s; }
+  .card.game:hover, .card.game:focus-within { border-color: color-mix(in srgb, var(--accent) 45%, var(--faint)); box-shadow: 0 4px 16px var(--shadow); }
+  .play { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px 6px 11px; border-radius: 99px; background: var(--accent); color: var(--on-accent); font-size: 13px; font-weight: 650;
+    opacity: 0; transform: scale(0.92); transition: opacity 0.15s, transform 0.15s; }
+  .play svg { width: 13px; height: 13px; fill: currentColor; }
+  .card.game:hover .play, .play:focus-visible { opacity: 1; transform: none; }
+  @media (hover: none) { .play { opacity: 1; transform: none; } }
   .empty { padding: 24px; color: var(--dim); }
 
   .tag { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; padding: 2px 9px 2px 7px; border-radius: 99px; white-space: nowrap; }
@@ -1024,6 +1122,17 @@
   .qa:hover, .qa:focus-visible { color: var(--on-accent); background: var(--accent); border-color: var(--accent); outline: none; }
   .qlabel { position: absolute; right: 200px; bottom: 14px; white-space: nowrap; font-size: 13px; font-weight: 600; padding: 5px 12px; border-radius: 99px; background: var(--ink); color: var(--paper); pointer-events: none; }
 
+  /* Calm scrolling everywhere: a thin, ink-tinted bar that only darkens on hover, and content
+     that fades in and out at the edges instead of being cut. */
+  :global(.scroll, .vscroll, .list, .tlist, .rscroll, .fvals, .sibs) {
+    scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--ink) 18%, transparent) transparent; scroll-behavior: smooth; overscroll-behavior: contain;
+  }
+  :global(.scroll:hover, .vscroll:hover, .list:hover, .tlist:hover, .rscroll:hover) { scrollbar-color: color-mix(in srgb, var(--ink) 32%, transparent) transparent; }
+  :global(.scroll::-webkit-scrollbar, .vscroll::-webkit-scrollbar, .list::-webkit-scrollbar, .tlist::-webkit-scrollbar, .rscroll::-webkit-scrollbar) { width: 8px; }
+  :global(.scroll::-webkit-scrollbar-thumb, .vscroll::-webkit-scrollbar-thumb, .list::-webkit-scrollbar-thumb, .tlist::-webkit-scrollbar-thumb, .rscroll::-webkit-scrollbar-thumb) {
+    background: color-mix(in srgb, var(--ink) 18%, transparent); border-radius: 99px; border: 2px solid transparent; background-clip: padding-box; }
+  :global(.vscroll, .list, .tlist, .rscroll) {
+    mask-image: linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(100% - 40px), transparent 100%); }
   .mock { position: fixed; left: 14px; bottom: 14px; z-index: 20; display: flex; align-items: center; gap: 4px; padding: 6px 8px; border-radius: 12px; background: #2a2e2c; color: #d6d2c9; font-size: 12px; box-shadow: 0 6px 20px rgb(0 0 0 / 0.25); opacity: 0.9; }
   .mock b { color: #f5c542; margin-right: 4px; }
   .mock button, .mock a { padding: 3px 8px; border-radius: 7px; color: #bbb; text-decoration: none; }
@@ -1037,8 +1146,9 @@
     .aname { display: none; }
     .orb { width: 34px; height: 34px; }
     .tabs { max-width: 100%; overflow-x: auto; scrollbar-width: none; }
-    .tab { padding: 7px 9px; }
-    .tab:not(.on) .tl { display: none; }
+    .tab { padding: 7px 8px; }
+    .tab .tl { display: none; }
+    .tab .badge { position: absolute; top: -1px; right: -3px; min-width: 15px; height: 15px; font-size: 10px; padding: 0 4px; }
     .top.hide { display: none; }
     .stage { padding: 60px 8px 8px; }
     .top.hide + .stage { padding-top: 8px; }
@@ -1046,6 +1156,8 @@
     .body { padding: 10px 14px; }
     .dock { padding: 6px 8px 8px; }
     .qc { right: 16px; bottom: 96px; }
-    .mock { left: 8px; bottom: 160px; flex-wrap: wrap; max-width: 60vw; }
+    .mock { left: 8px; bottom: 8px; flex-wrap: wrap; max-width: calc(100vw - 100px); }
+    .mock:not(.open) > :not(b) { display: none; }
+    .mock b { cursor: pointer; }
   }
 </style>
