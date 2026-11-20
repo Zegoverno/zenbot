@@ -22,6 +22,13 @@
   }
   /** The failed routine's latest run with a session, to open it. */
   const lastRun = (name: string) => runsOf(name).find((r) => r.session)?.session ?? null;
+  /** See the run: its session when it has one, else the routine's past runs (with their errors) unfolded. */
+  function seeRun(name: string) {
+    const s = lastRun(name);
+    if (s) return openRun?.(s);
+    if (jobs.some((j) => j.name === name)) { sel = name; void loadRuns(name); } else showUpkeep = true;
+    setTimeout(() => document.querySelector(`[data-job="${CSS.escape(name)}"]`)?.scrollIntoView({ block: 'nearest' }), 30);
+  }
   onMount(() => { void load(); const t = setInterval(load, 10000); return () => clearInterval(t); });
 </script>
 
@@ -37,14 +44,14 @@
       <div class="fail" role="status">
         <span class="dot error"></span>
         <div class="cm"><b>{f.name} failed {'what' in f ? 'last night' : 'on its last run'}</b><span>{'what' in f ? `zenbot's own upkeep: ${f.what}. ` : ''}{f.error ? `${f.error}. ` : ''}{failing().length === 1 ? 'The other routines are fine.' : ''}</span></div>
-        {#if lastRun(f.name)}<button class="pill" onclick={() => openRun?.(lastRun(f.name)!)}>See the run</button>{/if}
+        <button class="pill" onclick={() => seeRun(f.name)}>See the run</button>
         <button class="pill" onclick={() => runNow(f.name)}>{ran === f.name ? 'Running…' : 'Run again'}</button>
         <button class="pill on" onclick={() => ask(`The ${f.name} routine failed. Find out why and fix it: `)}>Ask zenbot to fix it</button>
       </div>
     {/each}
     <div class="rows">
       {#each jobs as j (j.name)}
-        <div class="li" class:off={!j.on}>
+        <div class="li" class:off={!j.on} data-job={j.name}>
           <span class="dot {j.last}" title="Last run: {j.last}"></span>
           <button class="cm" aria-expanded={sel === j.name} title="Past runs" onclick={() => { sel = sel === j.name ? null : j.name; if (sel) void loadRuns(j.name); }}><b>{j.name}</b><span>{j.on ? j.when : 'Paused'}{j.kind === 'script' ? ' · a script' : ''}</span></button>
           <button class="pill" onclick={() => runNow(j.name)}>{ran === j.name ? 'Started ✓' : 'Run now'}</button>

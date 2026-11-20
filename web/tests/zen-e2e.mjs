@@ -372,6 +372,11 @@ try {
   // Routines: a failing one says so (and badges its tab), run now, pause, and a new one asks the agent.
   await page.getByRole('tab', { name: 'Routines' }).click();
   await page.getByText('daily failed', { exact: false }).first().waitFor();
+  // The failed banner, as the mock: See the run, Run again, Ask zenbot to fix it. A run with no session unfolds its past runs.
+  const failBox = page.locator('.fail', { hasText: 'daily failed' });
+  for (const n of ['See the run', 'Run again', 'Ask zenbot to fix it']) assert.ok(await failBox.getByRole('button', { name: n }).isVisible(), `the failed banner has ${n}`);
+  await failBox.getByRole('button', { name: 'See the run' }).click();
+  assert.equal(await page.locator('[data-job="daily"] .cm').getAttribute('aria-expanded'), 'true', 'See the run unfolds the past runs');
   assert.ok(await page.locator('.tab .badge.bad').isVisible(), 'the Routines tab badges a failure');
   await page.getByRole('button', { name: 'Run now' }).first().click();
   await page.getByRole('switch', { name: 'daily on or paused' }).first().click();
