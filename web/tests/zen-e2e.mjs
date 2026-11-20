@@ -639,13 +639,12 @@ try {
   await box.press('Enter');
   await until(() => calls.at(-1)?.arguments?.sides === '12', 'the command reaches the plugin');
   assert.deepEqual(calls.at(-1), { plugin: 'zenfx', tool: 'zenfx_roll', arguments: { sides: '12' }, session: 's1' });
-  const sideFx = page.frameLocator('.zside iframe[data-plugin="zenfx"]');
+  const sideFx = page.frameLocator('.pane.view iframe[data-plugin="zenfx"]');
   await sideFx.locator('#out', { hasText: 'result: rolled 12: 4' }).waitFor();
   await sideFx.locator('#ctx', { hasText: 'slot=view pane=side' }).waitFor();
-  await page.locator('.zside').getByRole('tab', { name: 'Fixture', exact: true }).waitFor();
   const pluginDraft = page.getByRole('region', { name: 'plugin draft' });
   await pluginDraft.getByText('/danger malicious init', { exact: true }).waitFor();
-  assert.match(await pluginDraft.innerText(), /DRAFT · plugin: zenfx/);
+  assert.match(await pluginDraft.innerText(), /DRAFT FROM ZENFX/i);
   await box.fill('my untouched draft');
   await page.waitForTimeout(400);
   assert.equal(prompts.length, beforePlugin, 'no WS prompt before owner Send');
@@ -699,21 +698,21 @@ try {
 <script>document.getElementById('hero').__svelte_meta = { loc: { file: 'src/Hero.svelte', line: 7, column: 2 } }; document.getElementById('hero').onclick = () => { document.title = 'clicked'; }; console.error('fixture boom');</script></body></html>`);
   }).listen(APP_PORT, '127.0.0.1');
   try {
-    await page.locator('.zside').getByRole('tab', { name: 'Preview', exact: true }).click();
+    await page.locator('.pane.view').getByRole('tab', { name: 'Preview', exact: true }).click();
     const addr = page.getByLabel('preview address');
     await addr.fill('http://example.com:5173/');
     await addr.press('Enter');
     await page.getByText("Preview shows this host's own ports").waitFor();
-    assert.equal(await page.locator('.zside iframe[title="preview"]').count(), 0, 'another host is never framed');
+    assert.equal(await page.locator('.pane.view iframe[title="preview"]').count(), 0, 'another host is never framed');
     await addr.fill(String(APP_PORT));
     await addr.press('Enter');
-    const devFrame = page.frameLocator('.zside iframe[title="preview"]');
+    const devFrame = page.frameLocator('.pane.view iframe[title="preview"]');
     await devFrame.locator('#hero').waitFor();
-    assert.equal(await page.locator('.zside iframe[title="preview"]').getAttribute('src'), `/preview/${APP_PORT}/`, 'the frame loads under zen\'s own address');
+    assert.equal(await page.locator('.pane.view iframe[title="preview"]').getAttribute('src'), `/preview/${APP_PORT}/`, 'the frame loads under zen\'s own address');
     // zen's own ports are never shown.
     assert.equal((await fetch(`${base}/preview/${PORT}/`)).status, 400);
     assert.equal((await fetch(`${base}/preview/${KERNEL}/`)).status, 400);
-    const point = page.locator('.zside').getByRole('button', { name: 'Point', exact: true });
+    const point = page.locator('.pane.view').getByRole('button', { name: 'Point', exact: true });
     for (let i = 0; i < 100 && !(await point.isEnabled()); i++) await page.waitForTimeout(50);
     assert.ok(await point.isEnabled(), 'the app loaded zen-preview.js and answered');
     // The app can't send pins by itself: only while the owner points.
@@ -769,14 +768,14 @@ try {
     await devFrame.locator('#hero').click();
     for (let i = 0; i < 40 && (await appFrame().title()) !== 'clicked'; i++) await page.waitForTimeout(50);
     assert.equal(await appFrame().title(), 'clicked', 'with Point off, clicks reach the app');
-    await page.locator('.zside').getByRole('tab', { name: 'Files', exact: true }).click();
+    await page.locator('.pane.view').getByRole('tab', { name: 'Files', exact: true }).click();
   } finally {
     devApp.close();
   }
 
   await page.locator('.chat-pane').getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Plugins', exact: true }).click();
-  await page.locator('.zside').getByRole('tab', { name: 'Plugins', exact: true }).waitFor();
+  await page.locator('.pane.view').getByRole('tab', { name: 'Plugins', exact: true }).waitFor();
   assert.match(page.url(), /s=s1/);
   await page.goto(`${base}/?view=sessions`);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
