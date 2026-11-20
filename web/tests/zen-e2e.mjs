@@ -159,7 +159,7 @@ const kernel = createServer(async (req, res) => {
       { ...session('c0', 'zen room', { kind: 'channel' }), busy: false, waiting: false },
       { ...session('s0', 'Pitch practice', { agent: 'rex' }), busy: false, waiting: false },
       { ...session('s1', 'Plan the week', { agent: 'zenbot' }), busy: false, waiting: true },
-      { ...session('k1', 'verifier', { kind: 'verifier', parent: 's1' }), task: 'Check the plan', busy: true, waiting: false },
+      { ...session('k1', 'verifier', { kind: 'verifier', parent: 's1' }), task: 'Check the plan', busy: false, waiting: false },
       ...old,
     ], archived: 2 });
   }
@@ -606,6 +606,8 @@ try {
   // A session: history, then a prompt streams an answer through the relayed socket.
   await page.goto(`${base}/?s=s1`);
   await page.getByText('What is on today?').waitFor();
+  await page.getByRole('button', { name: /Finished.*subagent/ }).click();
+  await page.getByRole('button', { name: /Open verifier.s session/ }).waitFor();
   const box = page.locator('textarea').first();
   await box.fill('Book the gym');
   await box.press('Enter');
