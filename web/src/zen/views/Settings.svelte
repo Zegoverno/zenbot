@@ -20,6 +20,25 @@
   }
 
   // ---- You ----
+  // USER.md is edited here, through the kernel (GET/PUT /prompt-files/USER.md: backed up, size-checked).
+  let userEdit = $state<{ text: string; limit: number; saving: boolean; error: string } | null>(null);
+  async function editUser() {
+    try {
+      const f = await call<{ text: string; limit: number }>('prompt-files/USER.md');
+      userEdit = { text: f.text, limit: f.limit, saving: false, error: '' };
+    } catch (e) { notice(`couldn't open USER.md: ${(e as Error).message}`); }
+  }
+  async function saveUser() {
+    if (!userEdit) return;
+    userEdit.saving = true;
+    userEdit.error = '';
+    try {
+      await call('prompt-files/USER.md', 'PUT', { text: userEdit.text });
+      userEdit = null;
+      userUpdated = new Date().toLocaleDateString('en', { month: 'short', day: 'numeric' });
+      notice('USER.md saved');
+    } catch (e) { if (userEdit) { userEdit.saving = false; userEdit.error = (e as Error).message; } }
+  }
   let nameDraft = $state(me.full);
   $effect(() => { if (me.loaded && !nameDraft) nameDraft = me.full; });
   let nameSaved = $state(false);
@@ -217,10 +236,20 @@
         <input id="me-name" bind:value={nameDraft} onblur={saveName} onkeydown={(e) => { if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur(); if (e.key === 'Escape') { nameDraft = me.name; (e.currentTarget as HTMLInputElement).blur(); } }} />
         <span class="hint">{nameSaved ? 'Saved' : 'What your agents call you. zenbot filled it in from your first chat.'}</span></div>
       <div class="card big"><div class="cm"><b>USER.md</b><span>{userUpdated ? `Updated ${userUpdated} · ` : ''}read by {readers}</span></div>
-        <div class="acts">
-          <button class="pill on" onclick={() => openFile?.(`${app.home}/.zenbot/USER.md`, { edit: true })}>Edit</button>
-          <button class="pill" onclick={() => ask('Update what you know about me: ')}>Ask zenbot to update it</button>
-        </div></div>
+        {#if !userEdit}
+          <div class="acts">
+            <button class="pill on" onclick={editUser}>Edit</button>
+            <button class="pill" onclick={() => ask('Update what you know about me: ')}>Ask zenbot to update it</button>
+          </div>
+        {/if}</div>
+      {#if userEdit}
+        <div class="uedit">
+          <textarea aria-label="USER.md" bind:value={userEdit.text} spellcheck="true" onkeydown={(e) => { if (e.key === 's' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void saveUser(); } if (e.key === 'Escape') userEdit = null; }}></textarea>
+          <div class="acts"><span class="hint" class:err={userEdit.text.length > userEdit.limit || !!userEdit.error}>{userEdit.error || `${userEdit.text.length.toLocaleString()} / ${userEdit.limit.toLocaleString()} characters`}</span><span class="sp"></span>
+            <button class="pill" onclick={() => (userEdit = null)}>Cancel</button>
+            <button class="pill on" disabled={userEdit.saving || userEdit.text.length > userEdit.limit} onclick={saveUser}>{userEdit.saving ? 'Saving…' : 'Save'}</button></div>
+        </div>
+      {/if}
 
     {:else if sec === 'appearance'}
       <h3>Appearance</h3>
@@ -340,7 +369,7 @@
         {#if mem?.last_sleep}<span class="hint">Last sorted {sleepAt(mem.last_sleep)}{why(mem.last_sleep.trigger) ? ` (${why(mem.last_sleep.trigger)})` : ''}: {mem.last_sleep.promoted ?? 0} kept for good, {mem.last_sleep.dropped ?? 0} archived, {mem.last_sleep.kept ?? 0} still in mind</span>{/if}</div>
       <div class="acts">
         <button class="pill" onclick={() => ask('Show me what you remember about me and let me correct it.')}>Review with zenbot</button>
-        <button class="pill" onclick={() => openFile?.(`${app.vault}/MEMORY.md`, { open: true })}>Open MEMORY.md</button>
+        <button class="pill" title="Read-only: zenbot keeps it; ask it to change what it remembers" onclick={() => openFile?.(`${app.vault}/MEMORY.md`, { open: true })}>View MEMORY.md <small class="ro">read-only</small></button>
       </div>
 
     {:else if sec === 'updates'}
@@ -377,12 +406,19 @@
   .field input { font: inherit; font-size: 14px; padding: 6px 10px; border: 1px solid var(--faint); border-radius: 9px; background: var(--paper); color: var(--ink); outline: none; width: 16rem; }
   .field input:focus { border-color: var(--accent); }
   .hint { font-size: 12.5px; color: var(--dim); }
+  .hint.err { color: var(--err, #b5543c); }
   .seg { display: inline-flex; background: var(--soft); border-radius: 99px; padding: 2px; justify-self: start; }
   .seg button { padding: 4px 12px; border-radius: 99px; font-size: 13px; color: var(--dim); }
   .seg button.on { background: var(--paper); color: var(--ink); font-weight: 600; box-shadow: 0 1px 3px var(--shadow); }
   .dd { appearance: none; font: inherit; font-size: 13.5px; color: var(--ink); background: var(--paper) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M7 10l5 5 5-5'/%3E%3C/svg%3E") no-repeat right 8px center / 14px; border: 1px solid var(--faint); border-radius: 9px; padding: 6px 30px 6px 10px; justify-self: start; min-width: 14rem; }
   .card { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--faint); border-radius: 14px; background: var(--paper); }
   .card.big { align-items: flex-start; }
+  .uedit { display: flex; flex-direction: column; gap: 8px; }
+  .uedit textarea { min-height: 18rem; resize: vertical; padding: 12px 14px; border: 1px solid var(--faint); border-radius: 14px; background: var(--paper); color: var(--ink); font-family: var(--mono); font-size: 13px; line-height: 1.55; outline: none; }
+  .uedit textarea:focus { border-color: color-mix(in srgb, var(--accent) 45%, var(--faint)); }
+  .uedit .acts { display: flex; align-items: center; gap: 8px; }
+  .uedit .sp { flex: 1; }
+  .ro { font-size: 11px; color: var(--dim); margin-left: 6px; }
   .cm { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .cm b { font-size: 14px; font-weight: 600; }
   .cm b small { font-weight: 400; color: var(--dim); font-size: 12px; margin-left: 4px; }

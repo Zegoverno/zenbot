@@ -783,6 +783,19 @@ try {
     devApp.close();
   }
 
+  // Settings › You edits USER.md through the kernel, in place; MEMORY.md is shown as read-only.
+  await page.goto(`${base}/?view=settings`);
+  await page.locator('.card', { hasText: 'USER.md' }).getByRole('button', { name: 'Edit', exact: true }).click();
+  const userBox = page.getByRole('textbox', { name: 'USER.md' });
+  assert.equal(await userBox.inputValue(), '# You\n', 'the editor loads USER.md from the kernel');
+  await userBox.fill('# You\n\nLikes calm.\n');
+  await page.locator('.uedit').getByRole('button', { name: 'Save', exact: true }).click();
+  await userBox.waitFor({ state: 'detached' });
+  assert.equal(userText, '# You\n\nLikes calm.\n', 'Save PUTs USER.md to the kernel');
+  assert.ok(page.url().includes('view=settings'), 'editing USER.md stays in Settings');
+  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Memory', exact: true }).click();
+  await page.getByRole('button', { name: /View MEMORY\.md read-only/ }).waitFor();
+
   // Settings › Plugins: remove asks first, then the plugin goes.
   await page.goto(`${base}/?view=sessions`);
   await page.locator('.agent').first().click();
