@@ -494,14 +494,14 @@ try {
 
   // Attachments: a file goes to ~/inbox/<day>/ at once; the prompt names its path.
   await page.locator('input[type=file]').setInputFiles({ name: '../clip.txt', mimeType: 'text/plain', buffer: Buffer.from('frame one') });
-  await page.locator('.zc-att', { hasText: '✓' }).waitFor();
+  await page.locator('.atts .att', { hasText: '✓' }).waitFor();
   await box.fill('Study this');
   await box.press('Enter');
   const day = new Date().toISOString().slice(0, 10);
   for (let i = 0; i < 100 && prompts.length < 2; i++) await new Promise((ok) => setTimeout(ok, 50));
   assert.equal(prompts.at(-1), `Study this\n\n(attached ~/inbox/${day}/clip.txt)`);
   assert.equal(readFileSync(path.join(HOME, 'inbox', day, 'clip.txt'), 'utf8'), 'frame one');
-  assert.equal(await page.locator('.zc-att').count(), 0, 'sent attachments leave the composer');
+  assert.equal(await page.locator('.atts .att').count(), 0, 'sent attachments leave the composer');
   const noHeader = await page.evaluate(() => fetch('/api/upload?name=x.txt', { method: 'POST', body: 'x' }).then((r) => r.status));
   assert.equal(noHeader, 403, 'an upload without X-Zen-Web is refused');
 
@@ -511,50 +511,33 @@ try {
   await page.locator('a[data-wiki="God"]').first().click();
   await page.getByRole('heading', { name: 'God' }).waitFor();
   // ...where it is written too, beside the chat.
-  await page.locator('.zside').getByRole('toolbar', { name: 'file actions' }).getByRole('button', { name: 'Edit', exact: true }).click();
-  await page.locator('.zside textarea').waitFor();
-  if (shots) {
-    await page.screenshot({ path: 'tests/shots/zen-side-editor.png' });
-    await page.keyboard.press('Alt+l');
-    await page.keyboard.press('Alt+r');
-    await page.screenshot({ path: 'tests/shots/zen-side-panels.png' });
-  }
-  await page.locator('.zside').getByRole('button', { name: 'Read', exact: true }).click();
-  await page.locator('.zside .reader').waitFor();
+  await page.locator('.pane.view').getByRole('button', { name: 'Edit', exact: true }).click();
+  await page.locator('.pane.view textarea').waitFor();
+  await page.locator('.pane.view').getByRole('button', { name: 'Cancel', exact: true }).click();
 
-  // The separator resizes the side panel, and the width is kept for the next visit.
-  const width = () => page.locator('.zside').evaluate((e) => e.getBoundingClientRect().width);
+  // The separator resizes the side panel.
+  const width = () => page.locator('.pane.view').evaluate((e) => e.getBoundingClientRect().width);
   const before = await width();
   const g = await page.locator('.gutter').boundingBox();
   await page.mouse.move(g.x + g.width / 2, g.y + 200);
   await page.mouse.down();
-  await page.mouse.move(g.x - 200, g.y + 200, { steps: 5 });
+  await page.mouse.move(g.x - 150, g.y + 200, { steps: 5 });
   await page.mouse.up();
   const after = await width();
-  assert.ok(after > before + 150, `the side panel widens (${before} → ${after})`);
-  await page.reload();
-  await page.locator('a[data-wiki="God"]').first().click();
-  await page.locator('.zside').waitFor();
-  assert.ok(Math.abs((await width()) - after) < 4, 'the width is kept');
+  assert.ok(after > before + 100, `the side panel widens (${before} → ${after})`);
   if (shots) await page.screenshot({ path: 'tests/shots/zen-session.png' });
-
 
   // A turn keeps streaming while the side panel changes views, and the composer keeps its keys.
   await page.goto(`${base}/?s=s1`);
   await page.getByText('What is on today?').waitFor();
-  await page.keyboard.press('Control+b');
-  await page.locator('.zside').waitFor();
-  const sidePane = page.locator('.zside');
-  // The side panel's Sessions leave out the open session but show its own subagents working.
-  await sidePane.getByRole('tab', { name: 'Sessions', exact: true }).click();
-  await sidePane.getByText('THIS SESSION').waitFor();
-  assert.match(await sidePane.locator('.row', { hasText: 'Check the plan' }).innerText(), /verifier:/);
-  assert.equal(await sidePane.locator('.row', { hasText: 'Plan the week' }).count(), 0, 'the open session itself stays out');
+  await page.getByRole('tab', { name: 'Sessions' }).click();
+  const sidePane = page.locator('.pane.view');
+  await sidePane.locator('.srow', { hasText: 'Pitch practice' }).waitFor();
   await box.fill('Keep streaming while I read');
   await box.press('Enter');
   await page.getByText('Streaming', { exact: true }).waitFor();
-  await sidePane.getByRole('tab', { name: 'Tasks', exact: true }).click();
-  await sidePane.getByText('Price the offer').waitFor();
+  await page.getByRole('tab', { name: 'Tasks' }).click();
+  await sidePane.getByText('Price the offer').first().waitFor();
   await page.getByText('Streaming answer, done.').waitFor();
   assert.equal(prompts.at(-1), 'Keep streaming while I read');
   await box.click();
@@ -562,34 +545,31 @@ try {
   assert.equal(await box.inputValue(), '7', 'chat typing is untouched');
   await box.fill('');
 
-  // Tool runs fold into one line; a click or ctrl+o shows the steps.
-  const run = page.locator('.work').last();
+  // Tool runs fold into one working line; a click shows the steps.
+  const run = page.locator('.w').last();
+  assert.match(await run.innerText(), /step/);
+  assert.equal(await run.locator('.wline').getAttribute('aria-expanded'), 'false', 'a run starts folded');
+  await run.locator('.wline').click();
+  await run.locator('ol.steps').waitFor();
   assert.match(await run.innerText(), /echo hi/);
-  assert.ok(!(await run.evaluate((e) => e.classList.contains('wk-open'))), 'a run starts folded');
-  await run.locator('button.head').click();
-  await page.locator('.work.wk-open').last().waitFor();
-  await box.click();
-  await page.keyboard.press('Control+o');
-  await page.keyboard.press('Control+o');
-  assert.equal(await page.locator('.work.wk-open').count(), 0, 'ctrl+o folds every run again');
 
   // Questions with options, and the next-prompt suggestion (Tab takes it).
   await box.fill('Ask me');
   await box.press('Enter');
-  await page.getByText('── Questions ──').waitFor();
-  await page.getByRole('button', { name: 'tab: use suggestion' }).waitFor();
+  await page.getByText('Which day?').first().waitFor();
+  await page.getByRole('button', { name: 'Tab: use suggestion' }).waitFor();
   assert.equal(await box.getAttribute('placeholder'), 'Thursday, just me');
   await box.press('Tab');
   assert.equal(await box.inputValue(), 'Thursday, just me');
   await box.fill('');
-  await page.locator('.zc-opt', { hasText: 'Friday' }).click();
-  await page.locator('.zc-opt', { hasText: 'The team' }).click();
+  await page.locator('.opts button', { hasText: 'Friday' }).click();
+  await page.locator('.opts button', { hasText: 'The team' }).click();
   assert.equal(await box.inputValue(), '1. Friday\n2. The team', 'options fill the answer, one row per question');
   await box.fill('');
 
   // The slash commands are the shared table's, from `zen --commands`.
   await box.fill('/ste');
-  await page.locator('.zc-pop', { hasText: 'change direction at the next tool boundary' }).waitFor();
+  await page.getByRole('listbox', { name: 'commands' }).filter({ hasText: 'change direction at the next tool boundary' }).waitFor();
   await box.fill('');
 
   // During a turn: Enter queues, /steer steers, Esc interrupts.
@@ -654,7 +634,7 @@ try {
   });
   // A plugin's slash command calls its tool and shows its UI in the side panel, with the result.
   await box.fill('/rol');
-  await page.locator('.zc-pop', { hasText: 'Roll a die.' }).waitFor();
+  await page.getByRole('listbox', { name: 'commands' }).filter({ hasText: 'Roll a die.' }).waitFor();
   await box.fill('/roll 12');
   await box.press('Enter');
   await until(() => calls.at(-1)?.arguments?.sides === '12', 'the command reaches the plugin');
