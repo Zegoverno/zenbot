@@ -431,11 +431,22 @@ try {
   if (shots) await page.screenshot({ path: 'tests/shots/zen-board.png' });
 
   // A new chat: its ideas load without blocking the box, and picking one only drafts it.
-  await page.route('**/api/zen/ideas?*', (route) => route.fulfill({ json: { ideas: ['Plan a week', 'Review a project', 'Explore an idea'] } }));
+  await page.route('**/api/zen/ideas?*', (route) => route.fulfill({ json: { ideas: [{ text: 'Plan a week', why: 'Monday looks full' }, 'Review a project', { text: 'Explore an idea', why: '' }] } }));
   await page.locator('.pane.view').getByRole('button', { name: /New/ }).first().click();
   await page.waitForURL(/\?s=new/);
-  await page.getByRole('button', { name: 'Plan a week' }).click();
+  assert.equal(await page.locator('.idea', { hasText: 'Plan a week' }).locator('span').textContent(), 'Monday looks full', 'an idea shows its why line');
+  assert.ok(await page.getByRole('button', { name: 'Review a project' }).isVisible(), 'plain-string ideas still parse');
+  await page.getByRole('button', { name: /Plan a week/ }).click();
   assert.equal(await page.getByRole('textbox', { name: 'message' }).inputValue(), 'Plan a week', 'an idea fills the composer without sending');
+  await page.unroute('**/api/zen/ideas?*');
+  // No ideas (the model failed): no generic cards pretending to be made for you.
+  await page.route('**/api/zen/ideas?*', (route) => route.fulfill({ json: { ideas: [], error: 'no ideas right now' } }));
+  await page.locator('.agent').first().click();
+  await page.locator('.amenu .arow', { hasText: /rex/i }).click();
+  await page.waitForTimeout(300);
+  assert.equal(await page.locator('.idea').count(), 0, 'a failed idea call shows no cards');
+  await page.locator('.agent').first().click();
+  await page.locator('.amenu .arow', { hasText: /zenbot/i }).click();
   await page.unroute('**/api/zen/ideas?*');
   await page.goto(`${base}/?view=sessions`);
   await page.locator('.srow', { hasText: 'Plan the week' }).waitFor();

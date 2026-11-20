@@ -186,10 +186,18 @@ export async function loadIdeas(agent: string, signal?: AbortSignal): Promise<Su
   const r = await fetch(`/api/zen/ideas?agent=${encodeURIComponent(agent)}`, { signal });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   const d = (await r.json()) as { ideas?: unknown };
+  // The kernel gives `{text, why}`; older kernels plain strings (no why), the mock `{title, why, prompt}`.
   const list = (Array.isArray(d.ideas) ? d.ideas : [])
-    .map((x): Sugg | null => (typeof x === 'string' ? { title: x, why: '', prompt: x } : x && typeof x === 'object' && typeof (x as Sugg).title === 'string' ? { title: (x as Sugg).title, why: String((x as Sugg).why ?? ''), prompt: String((x as Sugg).prompt ?? (x as Sugg).title) } : null))
+    .map((x): Sugg | null => {
+      if (typeof x === 'string') return x.trim() ? { title: x, why: '', prompt: x } : null;
+      if (!x || typeof x !== 'object') return null;
+      const o = x as { text?: unknown; title?: unknown; why?: unknown; prompt?: unknown };
+      const title = typeof o.text === 'string' ? o.text : typeof o.title === 'string' ? o.title : '';
+      return title.trim() ? { title, why: typeof o.why === 'string' ? o.why : '', prompt: typeof o.prompt === 'string' ? o.prompt : title } : null;
+    })
     .filter((x): x is Sugg => !!x)
     .slice(0, 3);
+  if (!list.length) return list; // none today (the model failed): ask again next time
   return (ideaCache[agent] = list);
 }
 
