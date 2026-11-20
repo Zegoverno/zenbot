@@ -1,6 +1,10 @@
-// The Files view: the owner's home folder, as the zen terminal app shows it, with a few safe writes.
+// The Files view: the machine from `/` down, read-only, as the zen terminal app shows it, with a
+// few safe writes inside the vault.
 //
-// - Paths are absolute or `~/…`, and must stay inside the home folder once symlinks are followed.
+// - Paths are absolute or `~/…`, checked again once symlinks are followed. Reads reach the whole
+//   file system except what holds the system's or other people's secrets (`/proc`, `/sys`, `/dev`,
+//   `/run`, `/root`, `/tmp`, `/var`, other homes, `/etc`'s shadow, sudoers, ssh and private keys,
+//   the VM's `/exe.dev`); the home folder's own secrets are denied as below.
 // - Secrets are never listed or read: zen's token, settings and database, the engines' sign-ins,
 //   ssh, gpg and cloud credentials (the terminal app's list, and more, since a web page is easier
 //   to reach than a terminal). Anything under a denied folder is denied too.
@@ -39,17 +43,34 @@ export function denied(full: string): boolean {
   return DENIED.some((d) => full === d || full.startsWith(d + path.sep));
 }
 
-const inside = (full: string) => full === HOME || full.startsWith(HOME + path.sep);
+const under = (full: string, dir: string) => full === dir || full.startsWith(dir + path.sep);
+const inside = (full: string) => under(full, HOME);
 
-/** The real path of `p` (absolute or `~/…`), checked: inside home, not a secret. */
+/** Outside home: what holds the system's secrets, live processes, or other people's files. */
+const SYSTEM = ['/proc', '/sys', '/dev', '/run', '/root', '/tmp', '/var', '/lost+found', '/swapfile', '/exe.dev', '/boot',
+  '/etc/shadow', '/etc/shadow-', '/etc/gshadow', '/etc/gshadow-', '/etc/sudoers', '/etc/sudoers.d', '/etc/ssh',
+  '/etc/ssl/private', '/etc/security', '/etc/credstore', '/etc/credstore.encrypted'];
+const HOMES = path.dirname(HOME);
+
+/** Whether a path outside home may be read: not a system secret, not someone else's home. */
+function systemOk(full: string): boolean {
+  if (SYSTEM.some((d) => under(full, d))) return false;
+  if (under(full, HOMES) && full !== HOMES && !inside(full)) return false;
+  return !DENIED_NAMES.test(path.basename(full)) || path.basename(full).endsWith('.pub');
+}
+
+/** Readable: inside home and not a secret, or outside it and not a system secret. */
+export const readable = (full: string) => (inside(full) ? !denied(full) : systemOk(full));
+
+/** The real path of `p` (absolute or `~/…`), checked: readable before and after symlinks. */
 export async function resolve(p: unknown): Promise<string> {
   if (typeof p !== 'string' || !p || p.includes('\0')) throw new HttpError(400, 'bad path');
   const full = path.resolve(HOME, p === '~' ? '.' : p.replace(/^~\//, ''));
-  if (!inside(full) || denied(full)) throw new HttpError(403, 'not shown here');
+  if (!readable(full)) throw new HttpError(403, 'not shown here');
   const real = await fs.realpath(full).catch(() => {
     throw new HttpError(404, 'not found');
   });
-  if (!inside(real) || denied(real)) throw new HttpError(403, 'not shown here');
+  if (!readable(real)) throw new HttpError(403, 'not shown here');
   return real;
 }
 
@@ -146,7 +167,7 @@ export async function list(p: unknown): Promise<{ path: string; entries: Entry[]
   const entries: Entry[] = [];
   for (const e of items.slice(0, 5000)) {
     const full = path.join(dir, e.name);
-    if (denied(full)) continue;
+    if (!readable(full)) continue;
     const st = await fs.stat(full).catch(() => null);
     if (!st) continue;
     entries.push({ name: e.name, path: full, dir: st.isDirectory(), hidden: e.name.startsWith('.'), size: st.size, mtime: st.mtimeMs });
@@ -178,7 +199,7 @@ export async function find(root: unknown, q: unknown, limit = 100): Promise<{ re
         if (++visited > FIND_VISIT) return { results, truncated: true };
         if (e.name.startsWith('.') || FIND_SKIP.has(e.name) || e.isSymbolicLink()) continue;
         const full = path.join(dir, e.name);
-        if (denied(full)) continue;
+        if (!readable(full)) continue;
         if (e.isDirectory()) next.push(full);
         else if (!e.isFile()) continue;
         if (e.name.toLowerCase().includes(needle)) {

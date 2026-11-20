@@ -1,5 +1,6 @@
 // zen's web server: serves the page, reads and writes notes in one folder (the vault), shows the
-// home folder (`home.ts`: reads, plus new files and folders and renames, never over anything),
+// file system (`home.ts`: reads from / down without secrets, plus new files and folders and renames
+// in the vault, never over anything),
 // relays the zen kernel (`zen.ts`), runs zen's kernel commands (`commands.ts`) and takes chat
 // attachments into `~/inbox` (`uploads.ts`), and shows dev servers under `/preview/<port>/` for the
 // Preview tab (`preview.ts`), with its pins' screenshots taken here (`shot.ts`).
@@ -12,6 +13,9 @@
 // - Every write needs the `X-Zen-Web: 1` header, which a page on another site can't send without
 //   a CORS preflight this server never grants: no cross-site writes.
 // - Paths stay inside the root: relative, Markdown only, no dot folders, no symlinks out.
+// - Files (`/api/fs`) reads from `/` down but never secrets (zen's token, env, matrix and
+//   database, sign-ins, keys, `/proc`, `/etc/shadow`, other homes: `home.ts`), and writes only
+//   inside the vault.
 // - The kernel token is read here for authenticated relays and never sent to the page.
 //
 // Run with Node's own type stripping: `node server/main.ts` (`--dev` serves the page from Vite;
