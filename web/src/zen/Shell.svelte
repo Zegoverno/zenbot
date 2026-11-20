@@ -22,6 +22,7 @@
   import Preview from './views/Preview.svelte';
   import Chat from './Chat.svelte';
   import PluginFrame from './PluginFrame.svelte';
+  import { hand as handToAgent, type T as TaskT } from './views/taskstore.svelte.ts';
   import { failing, load as loadRoutines } from './views/routinestore.svelte.ts';
   import { app, start, pickTab, openTab, openSession, closeChat, showFile, split as isSplit, tabOn, notice, typing } from './app.svelte.ts';
   import { me, board, agents, agentOf, kids, loadKid, loadMe, loadBoard, loadArchived, loadAgents, loadModels, waitingCount, findSession, type Session } from './live.svelte.ts';
@@ -182,6 +183,12 @@
   function openTaskChat(id: string) {
     openSession(id);
   }
+  /** Hand a task to the agent at the top: a chat starts on it, and opens. */
+  async function handTask(t: TaskT) {
+    const r = await handToAgent(t, agent.id);
+    if (r?.session) openSession(r.session);
+    return r?.session ?? null;
+  }
 
   // ---- the subagent panel ----
   const kid = $derived(app.subagent ? kids[app.subagent] : null);
@@ -324,7 +331,7 @@
     {/if}
   </div>
 
-  <nav class="tabs" aria-label="Views" role="tablist">
+  <div class="tabs" aria-label="Views" role="tablist">
     {#each tabs as t (t.key)}
       <button class="tab" role="tab" aria-label={t.label} aria-selected={tabOn(t.key)} class:on={tabOn(t.key)} onclick={() => pickTab(t.key)} title={split && app.view === t.key ? 'Close the panel' : t.label}>
         {@render ico(t.icon)}<span class="tl">{t.label}</span>
@@ -332,7 +339,7 @@
         {#if t.key === 'routines' && failing().length}<span class="badge bad" title="{failing().length} routine failed">{failing().length}</span>{/if}
       </button>
     {/each}
-  </nav>
+  </div>
 </div>
 
 <div class="stage" class:split class:dragging bind:this={stage} style={split ? `grid-template-columns: minmax(0, ${1 - side}fr) 14px minmax(0, ${side}fr)` : undefined}>
@@ -411,7 +418,7 @@
         <Files ask={askAbout} reveal={app.reveal} back={app.filesFrom ? { label: 'Settings', run: () => pickTab('settings') } : null} />
       {:else if app.view === 'tasks'}
         <header class="vh"><h2>Tasks</h2><span class="sp"></span>{@render vclose()}</header>
-        <Tasks open={openTaskChat} agent={agent.name} />
+        <Tasks open={openTaskChat} agent={agent.name} hand={handTask} />
       {:else if app.view === 'agents'}
         <header class="vh"><h2>Agents</h2><span class="sp"></span>{@render vclose()}</header>
         <Agents agents={agents.list} current={agent} pick={(a) => (app.agent = a.id)} ask={askAgent} />

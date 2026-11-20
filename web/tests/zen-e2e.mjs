@@ -426,7 +426,7 @@ try {
   await page.locator('.srow', { hasText: 'Plan the week' }).waitFor();
 
   // Tasks: the urgent task, overdue.
-  await page.keyboard.press('3');
+  await page.getByRole('tab', { name: 'Tasks' }).click();
   await page.getByText('Price the offer').waitFor();
   assert.ok(await page.getByText(/overdue/).first().isVisible());
   // Tick and untick carry the latest revision, editing updates the live task, and dropping removes it.
@@ -457,7 +457,7 @@ try {
 
   // Files: opens in the shared workspace (the vault); `..` climbs to the home folder, without the
   // token; a note opens in the reader, changelog apart.
-  await page.keyboard.press('2');
+  await page.getByRole('tab', { name: 'Files' }).click();
   await page.getByText('wiki/', { exact: true }).waitFor();
   assert.equal(await page.getByText('home-only.txt').count(), 0, 'Files starts in the vault, not home');
   // Search: names at once (client side over the vault, through the server's find), content from the
