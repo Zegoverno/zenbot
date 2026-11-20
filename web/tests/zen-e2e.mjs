@@ -483,8 +483,9 @@ try {
   assert.deepEqual(taskWrites.slice(0,3).map(x => x.rev), ['r1','r2','r3']);
   assert.equal(taskWrites[3].body.project, 'acme');
   assert.equal(taskWrites[4].body.dropped, true);
+  await page.locator('.task', {hasText:'Price the offer carefully'}).getByRole('button', {name:'Hand'}).click();
   await page.getByLabel('Agent for Price the offer carefully').selectOption('rex');
-  await page.locator('.task', {hasText:'Price the offer carefully'}).getByRole('button', {name:/Hand to/}).click();
+  await page.locator('.task', {hasText:'Price the offer carefully'}).getByRole('button', {name:'Start'}).click();
   await page.waitForURL(/\?s=s1/);
   assert.deepEqual(handed, ['t1']);
   await page.goto(`${base}/?view=sessions`);

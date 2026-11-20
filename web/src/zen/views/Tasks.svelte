@@ -4,6 +4,7 @@
   // by project or by goal. One user per zenbot: no owners. (The redesign mock's Tasks, live.)
   let { hand, open: openChat, agent = 'zenbot', agents = [] }: { hand?: (t: T, agent: string) => Promise<string | null>; open?: (session: string) => void; agent?: string; agents?: { id: string; name: string }[] } = $props();
   let handAgent = $state<Record<string, string>>({});
+  let choosing = $state<string | null>(null);
 
   import { onMount } from 'svelte';
   import { box, flag, facts } from './TaskBits.svelte';
@@ -162,7 +163,7 @@
     {#if t.session && openChat}
       <button class="hand on" title="Open the chat working on this task" onclick={() => openChat?.(t.session!)}>Open chat</button>
     {:else if hand && !t.done && !t.agent}
-      <select aria-label={`Agent for ${t.text}`} bind:value={handAgent[t.id]}><option value={undefined}>Current agent</option>{#each agents as a}<option value={a.id}>{a.name}</option>{/each}</select><button class="hand" title={`Hand it to ${handAgent[t.id] || agent}: a new chat starts working on this task`} onclick={() => handTo(t)}>Hand<span class="ha">{" "}to {agent}</span></button>
+      {#if choosing === t.id}<select class="agent-choice" aria-label={`Agent for ${t.text}`} bind:value={handAgent[t.id]}><option value={undefined}>Current agent</option>{#each agents as a}<option value={a.id}>{a.name}</option>{/each}</select>{/if}<button class="hand" class:on={choosing === t.id} title="Choose an agent for this task" onclick={() => choosing === t.id ? handTo(t) : (choosing = t.id)}>{choosing === t.id ? "Start" : "Hand"}</button>
     {/if}
   </div>
   {#if editing === t.id && ed}
@@ -278,6 +279,7 @@
   .ag.waiting { color: var(--warn); } .ag.waiting i { background: var(--warn); }
   @keyframes bl { 50% { opacity: 0.3; } }
   .hand { flex: none; font-size: 12.5px; font-weight: 600; color: var(--accent); padding: 3px 10px; border-radius: 99px; border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--faint)); opacity: 0; transition: opacity 0.15s; }
+  .agent-choice { border: 1px solid var(--faint); border-radius: 99px; background: var(--paper); color: var(--ink); padding: 5px 8px; max-width: 140px; }
   .task:hover .hand, .hand:focus-visible, .hand.on { opacity: 1; }
   .hand:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
   .edit { margin: -2px 10px 8px 40px; padding: 10px 12px; border: 1px solid var(--faint); border-radius: 12px; display: flex; flex-direction: column; gap: 8px; background: var(--paper); }
