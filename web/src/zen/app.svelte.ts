@@ -30,7 +30,7 @@ export const app = $state({
   /** The open chat's session; 'new' a chat whose session starts with its first prompt. */
   session: null as string | null,
   /** The agent picked at the top (the orb); a new chat starts with it. */
-  agent: 'zenbot',
+  agent: typeof localStorage === 'undefined' ? 'zenbot' : localStorage.getItem('zen.agent') || 'zenbot',
   /** A new chat's first words, put in its message box when it opens. */
   chatDraft: '',
   /** Open the file picker when the next chat opens (the ring's Attach). */

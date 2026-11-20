@@ -11,7 +11,7 @@
   const infoOf = (a: A) => {
     const n = (a.info.busy ?? []).length;
     return {
-      about: a.info.description || (a.id === 'zenbot' ? 'Your chief of staff: carries jobs end to end, keeps your vault, tasks and routines.' : ''),
+      about: a.info.error || a.info.description || (a.id === 'zenbot' ? 'Your chief of staff: carries jobs end to end, keeps your vault, tasks and routines.' : ''),
       model: short(a.info.model) || short(models.default) || 'Default',
       state: n ? `Working on ${n} job${n > 1 ? 's' : ''}` : 'Idle',
       busy: n > 0,
@@ -58,7 +58,7 @@
             <div><dt>Chats</dt><dd>{i.chats}</dd></div>
           </dl>
           <div class="acts">
-            {#if a.id !== current.id}<button class="pill on" onclick={() => pick(a)}>Talk to {a.name}</button>{/if}
+            {#if a.id !== current.id && !a.info.error}<button class="pill on" onclick={() => pick(a)}>Talk to {a.name}</button>{/if}
             <span class="tag" class:none={!n} title="Helpers {a.name} can hand work to">{n ? `${n} role${n > 1 ? 's' : ''}` : 'No roles'}</span>
           </div>
         </article>
@@ -118,9 +118,9 @@
   .top { display: flex; align-items: center; gap: 10px; }
   .nm { display: flex; flex-direction: column; flex: 1; }
   .nm b { font-size: 15px; }
-  .nm span { font-size: 12.5px; color: var(--dim); }
+  .nm span { font-size: 12.5px; color: var(--dim); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
   .cur { font-size: 11px; font-weight: 650; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); padding: 2px 8px; border-radius: 99px; }
-  .ag p { margin: 0; font-size: 13.5px; line-height: 1.45; }
+  .ag p { margin: 0; font-size: 13.5px; line-height: 1.45; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
   dl { margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; }
   dt { font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 650; }
   dd { margin: 0; font-size: 13px; }

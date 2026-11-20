@@ -122,12 +122,12 @@ export const agents = $state({ list: [{ id: 'zenbot', name: 'zenbot', role: 'Chi
 
 export async function loadAgents() {
   try {
-    const l = (await zen.agents()).filter((a) => !a.error);
+    const l = await zen.agents();
     l.sort((x, y) => (x.name === 'zenbot' ? -1 : y.name === 'zenbot' ? 1 : x.name.localeCompare(y.name)));
     agents.list = l.map((a, i) => ({
       id: a.name,
       name: display(a.name),
-      role: a.description ? a.description[0].toUpperCase() + a.description.slice(1) : a.name === 'zenbot' ? 'Chief of staff' : 'Agent',
+      role: a.error ? `Error: ${a.error}` : a.description ? a.description[0].toUpperCase() + a.description.slice(1) : a.name === 'zenbot' ? 'Chief of staff' : 'Agent',
       a: ORBS[i % ORBS.length][0],
       b: ORBS[i % ORBS.length][1],
       info: a as A['info'],

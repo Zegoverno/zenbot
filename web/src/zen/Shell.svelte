@@ -119,7 +119,7 @@
     { key: 'home', label: 'Home', icon: 'home' },
     ...TABS.map((t) => ({ ...t, icon: t.key })),
     ...pluginViews().map((v) => ({ key: v.key, label: v.title, icon: 'plugin' })),
-    ...(app.screen === 'chat' && !app.narrow ? [{ key: 'preview', label: 'Preview', icon: 'preview' }] : []),
+    ...(app.session ? [{ key: 'preview', label: 'Preview', icon: 'preview' }] : []),
     ...(app.screen === 'chat' && !app.narrow && panel.current ? [{ key: 'panel', label: panel.current.title, icon: 'plugin' }] : []),
   ]);
 
@@ -184,8 +184,8 @@
     openSession(id);
   }
   /** Hand a task to the agent at the top: a chat starts on it, and opens. */
-  async function handTask(t: TaskT) {
-    const r = await handToAgent(t, agent.id);
+  async function handTask(t: TaskT, agentId: string) {
+    const r = await handToAgent(t, agentId);
     if (r?.session) openSession(r.session);
     return r?.session ?? null;
   }
@@ -294,7 +294,7 @@
 {/snippet}
 
 {#snippet vclose()}
-  {#if split}<button class="icon vclose" title="Close the panel" aria-label="Close the panel" onclick={() => (app.view = null)}>×</button>{/if}
+  {#if app.narrow && app.screen === 'view' && app.session}<button class="icon back" title="Back to the chat" aria-label="Back to the chat" onclick={() => { app.screen = 'chat'; app.view = null; }}>‹</button>{:else if split}<button class="icon vclose" title="Close the panel" aria-label="Close the panel" onclick={() => (app.view = null)}>×</button>{/if}
 {/snippet}
 
 {#snippet row(s: Session)}
@@ -317,7 +317,7 @@
       <div class="menu amenu">
         <div class="mlabel">Agents</div>
         {#each agents.list as a}
-          <button class="arow" class:sel={a.id === agent.id} onclick={() => { app.agent = a.id; agentMenu = false; }}>
+          <button class="arow" disabled={!!a.info.error} class:sel={a.id === agent.id} onclick={() => { app.agent = a.id; localStorage.setItem('zen.agent', a.id); agentMenu = false; }}>
             <span class="orb sm" style="--a:{a.a}; --b:{a.b}">{a.name[0].toUpperCase()}</span>
             <span class="ameta"><b>{a.name}</b><span>{a.role}</span></span>
             {#if a.id === agent.id}<span class="tick">✓</span>{/if}
@@ -348,8 +348,8 @@
     <section class="pane"><Home narrow={app.narrow} onopen={openById} ontab={(t) => openTab(t)} onfile={(p) => showFile(p, { open: true })} /></section>
   {/if}
 
-  {#if app.screen === 'chat' && app.session}
-    <section class="pane chat">
+  {#if app.session && (app.screen === 'chat' || (app.narrow && app.screen === 'view'))}
+    <section class="pane chat" hidden={app.screen !== 'chat'}>
       {#key app.session}
         <Chat id={app.session} {split} />
       {/key}
@@ -418,10 +418,10 @@
         <Files ask={askAbout} reveal={app.reveal} back={app.filesFrom ? { label: 'Settings', run: () => pickTab('settings') } : null} />
       {:else if app.view === 'tasks'}
         <header class="vh"><h2>Tasks</h2><span class="sp"></span>{@render vclose()}</header>
-        <Tasks open={openTaskChat} agent={agent.name} hand={handTask} />
+        <Tasks open={openTaskChat} agent={agent.id} agents={agents.list.filter((a) => !a.info.error)} hand={handTask} />
       {:else if app.view === 'agents'}
         <header class="vh"><h2>Agents</h2><span class="sp"></span>{@render vclose()}</header>
-        <Agents agents={agents.list} current={agent} pick={(a) => (app.agent = a.id)} ask={askAgent} />
+        <Agents agents={agents.list} current={agent} pick={(a) => { app.agent = a.id; localStorage.setItem('zen.agent', a.id); openSession('new', a.id); }} ask={askAgent} />
       {:else if app.view === 'games'}
         {#if game}
           <header class="vh"><button class="icon back" title="Back to Games" aria-label="Back to Games" onclick={() => (playing = null)}>‹</button><h2>{game.title}</h2><span class="sp"></span>{@render vclose()}</header>
@@ -562,7 +562,7 @@
   .arow { display: flex !important; align-items: center; gap: 10px; }
   .ameta { display: flex; flex-direction: column; flex: 1; text-align: left; min-width: 0; }
   .ameta b { font-weight: 600; }
-  .ameta span { font-size: 12px; color: var(--dim); }
+  .ameta span { font-size: 12px; color: var(--dim); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
   .tick { color: var(--accent); }
   .me { display: flex; align-items: center; gap: 10px; padding: 4px 4px 2px 10px; font-size: 14px; }
   .me .name { flex: 1; font-weight: 550; }

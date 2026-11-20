@@ -192,7 +192,7 @@
   const live = $derived(busy ? entries.slice(turnAt + 1).flatMap((e) => (e.k === 'work' ? e.steps : [])) : []);
   const liveSteps = $derived(live.map((s) => ({ ...stepOf(s.name, s.args), t: s.id && stepAt[s.id] !== undefined ? clock(stepAt[s.id]) : '', failed: s.result?.error === true })));
   /** This turn's subagents: the session's children started since the turn began. */
-  const subs = $derived(busy && sid ? (board.children[sid] ?? []).filter((c) => Date.parse(c.created_at) >= turnStarted - 2000 || c.busy) : []);
+  const subs = $derived(sid ? (board.children[sid] ?? []).filter((c) => !busy || Date.parse(c.created_at) >= turnStarted - 2000 || c.busy) : []);
   $effect(() => {
     if (!liveOpen || !subs.length) return;
     const ids = subs.map((s) => s.id);
@@ -1325,6 +1325,7 @@
     {:else if shown === 'waiting'}<span class="tag wait"><span class="dot wait"></span>needs you</span>{/if}
     {#if ro}<span class="tag ro">read-only</span>{/if}
     <span class="sp"></span>
+    {#if app.narrow}<button class="icon" aria-label="Preview" title="Preview" onclick={() => { app.screen = 'view'; app.view = 'preview'; }}>▣</button>{/if}
     {#if sid}
       <div class="menu-wrap">
         <button class="icon" title="Details" aria-label="Details" aria-expanded={details} onclick={() => (details = !details)}>⋯</button>
@@ -1462,7 +1463,7 @@
           {/if}
         {/each}
         {#if streamShown}<div class="prose" use:markdown={streamShown}></div>{/if}
-        {#if busy}
+        {#if busy || subs.length}
           {@const cur = liveSteps[liveSteps.length - 1]}
           <div class="livew" aria-live="polite">
             <button class="lrow lhead" aria-expanded={liveOpen} onclick={() => (liveOpen = !liveOpen)} title={liveOpen ? 'Hide the steps' : 'See every step and subagent'}>
@@ -1470,7 +1471,7 @@
               {#if cur && (toolSince !== null || status === 'Working')}
                 <span class="lt"><b>{cur.label}</b>{" "}<span class="ld">{cur.detail}</span>…</span>
               {:else}
-                <span class="lt"><b>{status}</b>…</span>
+                <span class="lt"><b>{busy ? status : 'Finished'}</b>{busy ? '…' : ''}</span>
               {/if}
               <span class="lm">{liveSteps.length} step{liveSteps.length === 1 ? '' : 's'}{#if subs.length}<span class="wide">{" · "}{subs.length} subagent{subs.length === 1 ? '' : 's'}</span>{/if} · {clock(now - turnStarted)} {liveOpen ? '▾' : '▸'}</span>
             </button>
@@ -1605,7 +1606,7 @@
           </div>
         {/if}
         <span class="sp"></span>
-        {#if suggestion && !input && !busy && !ro}<button class="hint" onclick={takeSuggestion}>Tab: use suggestion</button>{/if}
+        {#if suggestion && !input && !busy && !ro}<button class="hint" onclick={takeSuggestion}>{app.narrow ? 'Use suggestion' : 'Tab: use suggestion'}</button>{/if}
         {#if busy && !input.trim() && !ro}<button class="send stop" title="Stop (esc)" aria-label="interrupt" onclick={abort}>{@render ico('stop')}</button>
         {:else if !ro}<button class="send" disabled={(!input.trim() && !ready.length) || uploading || creating} title="Send (enter)" aria-label="send" onclick={submit}>↑</button>{/if}
       </div>
@@ -1732,7 +1733,7 @@
   @media (max-width: 900px) { .cards { grid-template-columns: minmax(0, 1fr); } .idea { min-height: 0; } .hello { margin-top: 4vh; } }
   .dock { padding: 6px 16px 16px; position: relative; }
   .compose { max-width: 44rem; margin: 0 auto; border: 1px solid var(--faint); border-radius: 20px; background: var(--paper); padding: 10px 10px 8px 16px; box-shadow: 0 4px 16px var(--shadow); position: relative; }
-  .compose:focus-within { border-color: var(--accent); }
+  .compose:has(textarea:focus-visible) { border-color: var(--accent); }
   .compose.drag { border-color: var(--accent); border-style: dashed; }
   .compose.ro { opacity: 0.7; }
   .compose textarea { width: 100%; border: 0; outline: none; background: transparent; resize: none; font: inherit; color: inherit; padding: 4px 0 8px; field-sizing: content; max-height: 40vh; }

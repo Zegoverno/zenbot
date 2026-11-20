@@ -2,7 +2,8 @@
   // Tasks tab: the vault's tasks (Projects/<p>/tasks.md, through the kernel), ticked, added and
   // edited here; every write carries the line's revision. Grouped by when (default), by priority,
   // by project or by goal. One user per zenbot: no owners. (The redesign mock's Tasks, live.)
-  let { hand, open: openChat, agent = 'zenbot' }: { hand?: (t: T) => Promise<string | null>; open?: (session: string) => void; agent?: string } = $props();
+  let { hand, open: openChat, agent = 'zenbot', agents = [] }: { hand?: (t: T, agent: string) => Promise<string | null>; open?: (session: string) => void; agent?: string; agents?: { id: string; name: string }[] } = $props();
+  let handAgent = $state<Record<string, string>>({});
 
   import { onMount } from 'svelte';
   import { box, flag, facts } from './TaskBits.svelte';
@@ -115,8 +116,9 @@
   function cancelAdd() { nt = blank(nt.project); adding = false; addEl?.blur(); }
   const QUICK = $derived<[string, string | null][]>([['Today', day.today], ['Tomorrow', plus(1)], ['Next week', plus(7)], ['No date', null]]);
   async function handTo(t: T) {
-    const s = await hand?.(t);
-    if (s) { t.agent = 'working'; t.by = agent; t.session = s; }
+    const chosen = handAgent[t.id] || agent;
+    const s = await hand?.(t, chosen);
+    if (s) { t.agent = 'working'; t.by = chosen; t.session = s; }
   }
 </script>
 
@@ -160,7 +162,7 @@
     {#if t.session && openChat}
       <button class="hand on" title="Open the chat working on this task" onclick={() => openChat?.(t.session!)}>Open chat</button>
     {:else if hand && !t.done && !t.agent}
-      <button class="hand" title={`Hand it to ${agent}: a new chat starts working on this task`} onclick={() => handTo(t)}>Hand<span class="ha">{" "}to {agent}</span></button>
+      <select aria-label={`Agent for ${t.text}`} bind:value={handAgent[t.id]}><option value={undefined}>Current agent</option>{#each agents as a}<option value={a.id}>{a.name}</option>{/each}</select><button class="hand" title={`Hand it to ${handAgent[t.id] || agent}: a new chat starts working on this task`} onclick={() => handTo(t)}>Hand<span class="ha">{" "}to {agent}</span></button>
     {/if}
   </div>
   {#if editing === t.id && ed}

@@ -25,6 +25,7 @@ writeFileSync(path.join(HOME, '.zenbot/token'), 'test-token');
 writeFileSync(path.join(HOME, 'plain.txt'), 'hello file');
 writeFileSync(path.join(HOME, 'home-only.txt'), 'home');
 writeFileSync(path.join(VAULT, 'wiki/plain.txt'), 'hello file');
+writeFileSync(path.join(VAULT, '.hidden-test'), 'hidden');
 mkdirSync(path.join(VAULT, 'games'));
 writeFileSync(path.join(VAULT, 'games/board.fx'), 'four in a row\n');
 const REAL_ZEN = process.env.ZEN_BIN ?? (() => {
@@ -268,7 +269,7 @@ const kernel = createServer(async (req, res) => {
     }
   }
   if (r === 'POST /api/tasks/t1/agent') {
-    assert.equal(body.agent, 'zenbot');
+    assert.equal(body.agent, 'rex');
     assert.equal(body.rev, tasks.find(t => t.id === 't1').rev);
     handed.push('t1');
     return json(res, { task: {}, session: 's1', existing: false });
@@ -397,6 +398,13 @@ try {
   assert.equal(await page.locator('html').getAttribute('data-theme'), 'light');
   await page.setViewportSize({ width: 390, height: 844 });
   assert.ok(await page.getByRole('tab', { name: 'Routines' }).isVisible());
+  await page.goto(`${base}/?s=s1`);
+  await page.locator('textarea').first().fill('keep this draft');
+  await page.getByRole('button', { name: 'Preview', exact: true }).click();
+  await page.getByRole('heading', { name: 'Preview' }).waitFor();
+  await page.getByRole('button', { name: 'Back to the chat' }).click();
+  assert.equal(await page.locator("textarea").first().inputValue(), "keep this draft");
+
   await page.setViewportSize({ width: 1300, height: 850 });
   // Home is a real-data dashboard and opens the selected session, not a mock.
   await page.goto(`${base}/`);
@@ -475,6 +483,7 @@ try {
   assert.deepEqual(taskWrites.slice(0,3).map(x => x.rev), ['r1','r2','r3']);
   assert.equal(taskWrites[3].body.project, 'acme');
   assert.equal(taskWrites[4].body.dropped, true);
+  await page.getByLabel('Agent for Price the offer carefully').selectOption('rex');
   await page.locator('.task', {hasText:'Price the offer carefully'}).getByRole('button', {name:/Hand to/}).click();
   await page.waitForURL(/\?s=s1/);
   assert.deepEqual(handed, ['t1']);
@@ -485,6 +494,14 @@ try {
   await page.getByRole('tab', { name: 'Files' }).click();
   await page.locator('.row', { hasText: 'wiki' }).first().waitFor();
   assert.equal(await page.getByText('home-only.txt').count(), 0, 'Files starts in the vault, not home');
+  assert.equal(await page.getByText('.hidden-test').count(), 0);
+  await page.locator('.list').click();
+  await page.keyboard.press('.');
+  await page.getByText('.hidden-test').waitFor();
+  await page.keyboard.press('.');
+  assert.equal(await page.getByText('.hidden-test').count(), 0);
+  await page.keyboard.press('j');
+  assert.equal(await page.locator('.list .row.on').count(), 1, 'keyboard selects a file');
   const upBtn = page.getByRole('button', { name: 'Up one folder' });
   await upBtn.click();
   await upBtn.click();
@@ -571,7 +588,13 @@ try {
   // Agents and Settings: the agents' list, and Settings off the agent menu.
   await page.goto(`${base}/`);
   await page.getByRole('tab', { name: 'Agents' }).click();
-  await page.locator('.pane.view').getByText('rex').first().waitFor();
+  await page.locator('.pane.view').getByText('rex', { exact: false }).first().waitFor();
+  await page.getByText('agent `broken`: agent.toml: expected a value').first().waitFor();
+  await page.getByRole('button', { name: 'Talk to Rex' }).click();
+  await page.waitForURL(/s=new/);
+  await page.reload();
+  assert.equal(await page.evaluate(() => localStorage.getItem('zen.agent')), 'rex');
+  await page.goto(`${base}/?view=agents`);
   await page.locator('.agent').first().click();
   await page.locator('.me .icon[title="Settings"]').click();
   await page.locator('.pane.view h2', { hasText: 'Settings' }).waitFor();
@@ -656,8 +679,10 @@ try {
   await page.getByText('Which day?').first().waitFor();
   await page.getByRole('button', { name: 'Tab: use suggestion' }).waitFor();
   assert.equal(await box.getAttribute('placeholder'), 'Thursday, just me');
-  await box.press('Tab');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: 'Use suggestion' }).click();
   assert.equal(await box.inputValue(), 'Thursday, just me');
+  await page.setViewportSize({ width: 1300, height: 850 });
   await box.fill('');
   await page.locator('.opts button', { hasText: 'Friday' }).click();
   await page.locator('.opts button', { hasText: 'The team' }).click();
