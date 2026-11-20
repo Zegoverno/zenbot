@@ -698,7 +698,7 @@ try {
 <script>document.getElementById('hero').__svelte_meta = { loc: { file: 'src/Hero.svelte', line: 7, column: 2 } }; document.getElementById('hero').onclick = () => { document.title = 'clicked'; }; console.error('fixture boom');</script></body></html>`);
   }).listen(APP_PORT, '127.0.0.1');
   try {
-    await page.locator('.pane.view').getByRole('tab', { name: 'Preview', exact: true }).click();
+    await page.getByRole('tab', { name: 'Preview', exact: true }).click();
     const addr = page.getByLabel('preview address');
     await addr.fill('http://example.com:5173/');
     await addr.press('Enter');
@@ -768,29 +768,25 @@ try {
     await devFrame.locator('#hero').click();
     for (let i = 0; i < 40 && (await appFrame().title()) !== 'clicked'; i++) await page.waitForTimeout(50);
     assert.equal(await appFrame().title(), 'clicked', 'with Point off, clicks reach the app');
-    await page.locator('.pane.view').getByRole('tab', { name: 'Files', exact: true }).click();
+    await page.getByRole('tab', { name: 'Files', exact: true }).click();
   } finally {
     devApp.close();
   }
 
-  await page.locator('.chat-pane').getByRole('button', { name: 'Settings', exact: true }).click();
-  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Plugins', exact: true }).click();
-  await page.locator('.pane.view').getByRole('tab', { name: 'Plugins', exact: true }).waitFor();
-  assert.match(page.url(), /s=s1/);
+  // Settings › Plugins: remove asks first, then the plugin goes.
   await page.goto(`${base}/?view=sessions`);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.locator('.agent').first().click();
+  await page.locator('.me .icon[title="Settings"]').click();
   await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Plugins', exact: true }).click();
-  const cardsRow = page.locator('section[aria-label="Cards"]');
-  await cardsRow.getByRole('button', { name: 'remove', exact: true }).click();
-  assert.equal(installedPlugins.length, 2, 'remove asks first');
-  await cardsRow.getByRole('button', { name: 'Yes, remove Cards', exact: true }).click();
-  await cardsRow.waitFor({ state: 'detached' });
-  assert.equal(installedPlugins.length, 1);
-
-  const fixtureRow = page.locator('section[aria-label="Fixture"]');
-  await fixtureRow.getByRole('button', { name: 'remove', exact: true }).click();
-  await fixtureRow.getByRole('button', { name: 'Yes, remove Fixture', exact: true }).click();
-  await fixtureRow.waitFor({ state: 'detached' });
+  const removeAll = installedPlugins.length;
+  for (const p of [...installedPlugins]) {
+    const t = p.title || p.name;
+    const row = page.locator('.li[aria-label="' + t + '"]');
+    await row.getByRole('button', { name: 'Remove', exact: true }).first().click();
+    assert.equal(installedPlugins.length, removeAll, 'remove asks first');
+    await row.locator('.confirm').getByRole('button', { name: 'Remove', exact: true }).click();
+    await row.getByRole('button', { name: 'Remove', exact: true }).waitFor({ state: 'detached' }); // back in the marketplace
+  }
   assert.equal(installedPlugins.length, 0);
   await page.goto(`${base}/?view=files&file=${encodeURIComponent(path.join(VAULT, 'wiki/God.md'))}`);
   await page.getByRole('heading', { name: 'God' }).waitFor();
