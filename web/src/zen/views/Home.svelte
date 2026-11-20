@@ -13,7 +13,7 @@
   // A slot's `kind` is its catalog entry (default: its id). Task widgets can be added more than
   // once, each with its own view (`tasks`: what to show, in what order), set in Customize.
   type Slot = { id: string; size: Size; kind?: string; tasks?: TaskView };
-  let { narrow, onopen, ontab }: { narrow: boolean; onopen: (session: string) => void; ontab?: (tab: string) => void } = $props();
+  let { narrow, onopen, ontab, onfile }: { narrow: boolean; onopen: (session: string) => void; ontab?: (tab: string) => void; onfile?: (path: string) => void } = $props();
   import { box, flag, facts } from './TaskBits.svelte';
   import { store, toggle, viewTasks, viewTitle, TASK_VIEW, meta, PRI, days, type TaskView } from './taskstore.svelte.ts';
   const PROJECTS = $derived(meta.projects);
@@ -209,7 +209,7 @@
             {/each}
           {:else if s.id === 'files'}
             {#each recentFiles as f (f.path)}
-              <button class="row" onclick={() => ontab?.(`file:${f.path}`)}><span class="t">{f.name}</span><span class="when">{f.w}</span></button>
+              <button class="row" onclick={() => onfile?.(f.path)}><span class="t">{f.name}</span><span class="when">{f.w}</span></button>
             {:else}<div class="dim">No files yet.</div>
             {/each}
           {/if}

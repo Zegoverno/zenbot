@@ -398,6 +398,16 @@ try {
   await page.getByRole('heading', { name: /Good (morning|afternoon|evening)/ }).waitFor();
   await page.getByRole('button', { name: /Plan the week/ }).first().click();
   await page.waitForURL(/\?s=s1/);
+  // Home › Recent files opens the file in Files.
+  writeFileSync(path.join(VAULT, 'Inbox.md'), '# Inbox\n\nLoose ends.\n');
+  prefs.home_layout = [{ id: 'files', size: 1 }];
+  await page.goto(`${base}/`);
+  await page.locator('.wd .row', { hasText: 'Inbox.md' }).click();
+  await page.getByRole('heading', { name: 'Inbox' }).waitFor();
+  assert.equal(await page.getByText("This view isn't available").count(), 0, 'a recent file opens, not a missing view');
+  delete prefs.home_layout;
+  rmSync(path.join(VAULT, 'Inbox.md'));
+  await page.evaluate(() => sessionStorage.clear()); // Files keeps its open file per tab
   // Sessions: channels apart and first, the session waiting on the owner says so; archived on demand.
   await page.goto(`${base}/?view=sessions`);
   await page.locator('.srow', { hasText: 'Plan the week' }).waitFor();

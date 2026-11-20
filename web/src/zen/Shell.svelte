@@ -345,7 +345,7 @@
 <div class="stage" class:split class:dragging bind:this={stage} style={split ? `grid-template-columns: minmax(0, ${1 - side}fr) 14px minmax(0, ${side}fr)` : undefined}>
   <!-- left: Home, or the chat -->
   {#if app.screen === 'home'}
-    <section class="pane"><Home narrow={app.narrow} onopen={openById} ontab={(t) => openTab(t)} /></section>
+    <section class="pane"><Home narrow={app.narrow} onopen={openById} ontab={(t) => openTab(t)} onfile={(p) => showFile(p, { open: true })} /></section>
   {/if}
 
   {#if app.screen === 'chat' && app.session}
