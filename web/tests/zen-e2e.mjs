@@ -519,6 +519,54 @@ try {
   await page.locator('.row', { hasText: 'God.md' }).first().click();
   await page.getByText('Three persons.').first().waitFor();
   if (shots) await page.screenshot({ path: 'tests/shots/zen-files.png' });
+  // New file, new folder and rename, from the folder's menu; the vault only, never over anything.
+  await page.getByRole('button', { name: 'Back to the folder' }).click();
+  const folderMenu = page.getByRole('button', { name: 'Folder actions' });
+  const menuItem = (name) => page.getByRole('menu', { name: 'Folder actions' }).getByRole('menuitem', { name });
+  const nameBox = page.getByLabel('name', { exact: true });
+  await folderMenu.click();
+  await menuItem('New folder').click();
+  await nameBox.fill('proj');
+  await nameBox.press('Enter');
+  await page.locator('.list .row.on', { hasText: 'proj' }).waitFor();
+  assert.ok(statSync(path.join(VAULT, 'wiki', 'proj')).isDirectory());
+  await folderMenu.click();
+  await menuItem('New file').click();
+  for (const [bad, why] of [['..', /Couldn't create \.\.: bad name/], ['.env', /Couldn't create \.env: not allowed here/], ['plain.txt', /Couldn't create plain\.txt: already exists/]]) {
+    await nameBox.fill(bad);
+    await nameBox.press('Enter');
+    await page.getByRole('alert').filter({ hasText: why }).waitFor();
+  }
+  assert.equal(existsSync(path.join(VAULT, 'wiki', '.env')), false);
+  assert.equal(readFileSync(path.join(VAULT, 'wiki', 'plain.txt'), 'utf8'), 'hello file', 'nothing is overwritten');
+  await nameBox.press('Escape');
+  assert.equal(await nameBox.count(), 0, 'Esc cancels');
+  await folderMenu.click();
+  await menuItem('New file').click();
+  await nameBox.fill('note.txt');
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await page.getByRole('button', { name: 'Back to the folder' }).waitFor(); // the new file opens
+  assert.equal(readFileSync(path.join(VAULT, 'wiki', 'note.txt'), 'utf8'), '');
+  await page.getByRole('button', { name: 'Back to the folder' }).click(); // it stays selected
+  await page.locator('.list .row.on', { hasText: 'note.txt' }).waitFor();
+  await folderMenu.click();
+  await menuItem(/Rename “note\.txt”/).click();
+  const renameBox = page.getByLabel('new name');
+  assert.equal(await renameBox.inputValue(), 'note.txt');
+  assert.deepEqual(await renameBox.evaluate((i) => [i.selectionStart, i.selectionEnd]), [0, 4], 'the stem is selected');
+  await renameBox.fill('renamed.txt');
+  await renameBox.press('Enter');
+  await page.locator('.list .row.on', { hasText: 'renamed.txt' }).waitFor();
+  assert.ok(existsSync(path.join(VAULT, 'wiki', 'renamed.txt')) && !existsSync(path.join(VAULT, 'wiki', 'note.txt')));
+  rmSync(path.join(VAULT, 'wiki', 'renamed.txt'));
+  rmSync(path.join(VAULT, 'wiki', 'proj'), { recursive: true });
+  // Above the vault, Files is read-only: no writes offered.
+  await page.getByRole('button', { name: 'Up one folder' }).click();
+  await page.getByRole('button', { name: 'Up one folder' }).click();
+  await folderMenu.click();
+  assert.ok(await menuItem('New file').isDisabled(), 'no new files outside the vault');
+  await folderMenu.click();
+  await page.getByRole('button', { name: /Vault/ }).last().click();
 
   // Agents and Settings: the agents' list, and Settings off the agent menu.
   await page.goto(`${base}/`);

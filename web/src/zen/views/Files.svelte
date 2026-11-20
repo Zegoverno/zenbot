@@ -163,7 +163,7 @@
       if (open || ed) { file = p; if (ed) tick().then(edit); }
     });
   });
-  function go(p: string) { if (p === file) return; if (guard(() => go(p))) return; const from = file; cwd = p; q = ''; file = null; editing = false; sel = from; }
+  function go(p: string) { if (p === file) return; if (guard(() => go(p))) return; const from = file ?? (parent(cwd) === p ? cwd : null); cwd = p; q = ''; file = null; editing = false; sel = from; menu = false; askFor = null; askErr = ''; }
   function up() { if (file) go(cwd); else go(parent(cwd)); }
   function openNode(p: string, n: FsNode) {
     if (p !== file && guard(() => openNode(p, n))) return;
@@ -346,6 +346,60 @@
     if (u.href !== location.href) history.replaceState(null, '', u);
   });
   onMount(() => () => { clearTimeout(findTimer); clearTimeout(noteTimer); });
+
+  // ---- new file, new folder, rename (the vault only; the server never overwrites: server/home.ts) ----
+  type Ask = { kind: 'file' | 'folder' | 'rename'; dir: string; from?: string; value: string };
+  let askFor = $state<Ask | null>(null);
+  let askErr = $state('');
+  let askEl: HTMLInputElement | undefined = $state();
+  let menu = $state(false);
+  let busy = false;
+  /** The selected row in this folder, if any (what Rename renames). */
+  const chosen = $derived(sel && parent(sel) === cwd ? entries.find((n) => join(cwd, n.name) === sel) ?? null : null);
+  function begin(kind: Ask['kind']) {
+    menu = false; askErr = '';
+    if (!inVault) return;
+    if (kind === 'rename') {
+      if (!chosen || !sel) return;
+      askFor = { kind, dir: cwd, from: sel, value: chosen.name };
+    } else askFor = { kind, dir: cwd, value: '' };
+  }
+  // Focus the name as it appears; a rename starts with the stem selected.
+  $effect(() => {
+    if (!askEl || !askFor) return;
+    const a = untrack(() => askFor!);
+    askEl.focus();
+    const dot = a.value.lastIndexOf('.');
+    if (a.kind === 'rename') askEl.setSelectionRange(0, dot > 0 ? dot : a.value.length);
+  });
+  async function submit() {
+    const a = askFor;
+    if (!a || busy) return;
+    let name = a.value.trim();
+    if (!name) return;
+    busy = true; askErr = '';
+    try {
+      if (a.kind === 'rename') {
+        if (name === nameOf(a.from!)) { askFor = null; return; }
+        const { path } = await files.rename(a.from!, name);
+        await list(a.dir);
+        sel = path; askFor = null;
+      } else {
+        const folder = a.kind === 'folder' || name.endsWith('/');
+        name = name.replace(/\/+$/, '');
+        const { path } = folder ? await files.mkdir(a.dir, name) : await files.create(a.dir, name);
+        await list(a.dir);
+        sel = path; askFor = null;
+        if (!folder) openNode(path, { name: nameOf(path) });
+      }
+    } catch (e) {
+      askErr = `Couldn't ${a.kind === 'rename' ? 'rename' : 'create'} ${name}: ${(e as Error).message}`;
+    } finally { busy = false; }
+  }
+  function askKey(e: KeyboardEvent) {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); askFor = null; askErr = ''; }
+    else if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); e.stopPropagation(); void submit(); }
+  }
   const count = (n: FsNode) => { const c = n.kids?.length ?? 0; return c === 0 ? '' : `${c} item${c === 1 ? '' : 's'}`; };
   const kind = (n: FsNode) => (n.kids ? 'dir' : /\.(png|jpe?g|gif|webp|avif|bmp)$/i.test(n.name) ? 'img' : /\.md$/i.test(n.name) ? 'note' : 'file');
   const ICON: Record<string, string> = {
@@ -358,6 +412,9 @@
     vault: '<path d="M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v13H6a2 2 0 0 1-2-2z"/><path d="M8 4v15"/>',
     filter: '<path d="M4 6h16M7 12h10M10 18h4"/>',
     search: '<circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/>',
+    more: '<circle cx="6" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="18" cy="12" r="1.2"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    rename: '<path d="M4 20h4L19 9l-4-4L4 16z"/>',
   };
 </script>
 
@@ -464,7 +521,27 @@
 {:else}
 <div class="fsearch">{@render ic('search')}<input placeholder={`Search in ${crumbs[crumbs.length - 1].label === '/' ? 'everything' : crumbs[crumbs.length - 1].label}`} bind:value={q} aria-label="Search files and notes" onkeydown={(e) => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); searchNow(); } else if (e.key === 'Escape' && q) { e.preventDefault(); e.stopPropagation(); q = ''; } }} />
   <button class="fb" class:on={fltOpen || active > 0} aria-expanded={fltOpen} title="Filter by properties" onclick={() => (fltOpen = !fltOpen)}>{@render ic('filter')}<span class="hl">Filter</span>{#if active}<b>{active}</b>{/if}</button>
+  <div class="sib more">
+    <button class="fb" class:on={menu} aria-haspopup="menu" aria-expanded={menu} title="New file, new folder, rename" aria-label="Folder actions" onclick={() => (menu = !menu)}>{@render ic('more')}</button>
+    {#if menu}
+      <div class="sibs" role="menu" aria-label="Folder actions">
+        <button role="menuitem" disabled={!inVault} title={inVault ? 'A name ending in / makes a folder (A)' : 'Writes stay inside the vault'} onclick={() => begin('file')}>{@render ic('plus')}<span>New file</span></button>
+        <button role="menuitem" disabled={!inVault} title={inVault ? 'New folder (Shift+A)' : 'Writes stay inside the vault'} onclick={() => begin('folder')}>{@render ic('dir')}<span>New folder</span></button>
+        <button role="menuitem" disabled={!inVault || !chosen} title={!inVault ? 'Writes stay inside the vault' : chosen ? 'Rename (Shift+R)' : 'Select a file or folder first'} onclick={() => begin('rename')}>{@render ic('rename')}<span>Rename{chosen ? ` “${chosen.name}”` : '…'}</span></button>
+      </div>
+    {/if}
+  </div>
 </div>
+{#if askFor}
+  <div class="fsearch">
+    {@render ic(askFor.kind === 'folder' ? 'dir' : askFor.kind === 'rename' ? 'rename' : 'plus')}
+    <input bind:this={askEl} bind:value={askFor.value} onkeydown={askKey} aria-label={askFor.kind === 'rename' ? 'new name' : 'name'} spellcheck="false" autocomplete="off" autocapitalize="off"
+      placeholder={askFor.kind === 'rename' ? 'New name' : askFor.kind === 'folder' ? 'Folder name' : 'File name (a trailing / makes a folder)'} />
+    <button class="rb" onclick={() => { askFor = null; askErr = ''; }}>Cancel</button>
+    <button class="rb pri" onclick={() => void submit()}>{askFor.kind === 'rename' ? 'Rename' : 'Create'}</button>
+  </div>
+  {#if askErr}<div class="leave" role="alert"><span>{askErr}</span></div>{/if}
+{/if}
 {#if fltOpen}
   {@const cur = facets.find(([k]) => k === fkey) ?? facets[0]}
   {@const vals = cur ? cur[1].filter(([v]) => v.toLowerCase().includes(fq.trim().toLowerCase())).sort((x, y) => +!!flt[cur[0]]?.includes(y[0]) - +!!flt[cur[0]]?.includes(x[0])) : []}
@@ -642,6 +719,10 @@
   .sibs button span { color: var(--ink); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .sibs button:hover { background: var(--soft); }
   .sibs button.on span { color: var(--accent); font-weight: 600; }
+  .sibs button:disabled { opacity: 0.45; cursor: default; }
+  .sibs button:disabled:hover { background: none; }
+  .sib.more { border: 0; margin: 0; }
+  .sib.more .fb { margin: -3px -6px -3px 0; }
   .rscroll { flex: 1; overflow: auto; padding: 18px 22px 90px; }
   .rscroll.plug { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
   .frame { flex: 1; min-height: 0; display: flex; flex-direction: column; }
