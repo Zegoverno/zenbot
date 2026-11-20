@@ -359,21 +359,36 @@ const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1300, height: 850 } });
 const errors = [];
 page.on('pageerror', (e) => errors.push(e.message));
+page.setDefaultTimeout(8000);
 const base = `http://127.0.0.1:${PORT}`;
 try {
   await page.goto(`${base}/`);
+  // The shell: the agent orb top left, floating centre tabs, the quick-control ring bottom right.
+  await page.locator('.agent').first().waitFor();
+  assert.equal(await page.getByRole('tablist', { name: 'Views' }).getByRole('tab').count() >= 6, true, 'the floating tabs');
+  await page.locator('.agent').first().click();
+  await page.locator('.me .icon[title="Settings"]').waitFor();
+  await page.locator('.agent').first().click();
+  // Routines: a failing one says so (and badges its tab), run now, pause, and a new one asks the agent.
   await page.getByRole('tab', { name: 'Routines' }).click();
-  await page.getByText('Some routines need attention.', { exact: false }).waitFor();
-  await page.getByRole('button', { name: 'Run now' }).click();
-  await page.getByRole('button', { name: 'Pause' }).click();
-  await page.getByRole('button', { name: '+ New routine' }).click();
+  await page.getByText('daily failed', { exact: false }).first().waitFor();
+  assert.ok(await page.locator('.tab .badge.bad').isVisible(), 'the Routines tab badges a failure');
+  await page.getByRole('button', { name: 'Run now' }).first().click();
+  await page.getByRole('switch', { name: 'daily on or paused' }).first().click();
+  await page.getByRole('button', { name: /New routine/ }).click();
   await page.waitForURL(/\?s=new/);
-  assert.match(await page.locator('textarea').inputValue(), /create a new routine/);
+  assert.match(await page.locator('textarea').inputValue(), /create a new routine/i);
+  // The radial ring: opens around its button, each action labelled; the theme toggles and is kept.
   await page.goto(`${base}/`);
-  await page.getByRole('button', { name: 'Command ring' }).click();
-  await page.getByRole('button', { name: /Theme · auto/ }).click();
-  assert.equal(await page.locator('html').getAttribute('data-theme'), 'light');
+  await page.getByRole('button', { name: 'Quick actions' }).click();
+  assert.equal(await page.locator('.qc.open').count(), 1, 'the ring opens');
+  assert.ok((await page.locator('.qc .qa').count()) >= 4, 'the ring has its actions');
+  await page.getByRole('button', { name: 'Dark mode' }).click();
+  assert.equal(await page.locator('html').getAttribute('data-theme'), 'dark');
   await page.reload();
+  assert.equal(await page.locator('html').getAttribute('data-theme'), 'dark');
+  await page.getByRole('button', { name: 'Quick actions' }).click();
+  await page.getByRole('button', { name: 'Light mode' }).click();
   assert.equal(await page.locator('html').getAttribute('data-theme'), 'light');
   await page.setViewportSize({ width: 390, height: 844 });
   assert.ok(await page.getByRole('tab', { name: 'Routines' }).isVisible());
@@ -383,54 +398,32 @@ try {
   await page.getByRole('heading', { name: /Good (morning|afternoon|evening)/ }).waitFor();
   await page.getByRole('button', { name: /Plan the week/ }).first().click();
   await page.waitForURL(/\?s=s1/);
-  // The board: the session, waiting on the owner.
+  // Sessions: channels apart and first, the session waiting on the owner says so; archived on demand.
   await page.goto(`${base}/?view=sessions`);
-  await page.getByText('Plan the week').first().waitFor();
-  assert.ok(await page.getByText('waiting on you').first().isVisible());
-  // Channels apart; waiting first; a subagent under its session.
-  await page.locator('.head', { hasText: 'CHANNELS' }).waitFor();
-  const boardRows = (await page.locator('.row').allInnerTexts()).map((t) => t.replace(/\s+/g, ' '));
+  await page.locator('.srow', { hasText: 'Plan the week' }).waitFor();
+  assert.ok(await page.locator('.srow', { hasText: 'Plan the week' }).getByText('needs you').isVisible());
+  await page.locator('.grp', { hasText: 'Channels' }).waitFor();
+  const boardRows = (await page.locator('.srow').allInnerTexts()).map((t) => t.replace(/\s+/g, ' '));
   const at = (re) => boardRows.findIndex((t) => re.test(t));
   assert.ok(at(/zen room/) >= 0 && at(/zen room/) < at(/Plan the week/), `channels come first: ${boardRows}`);
-  assert.ok(at(/Plan the week/) < at(/Pitch practice/), 'the session waiting on the owner comes first');
-  assert.equal(at(/verifier: Check the plan/), at(/Plan the week/) + 1, 'the subagent sits under its session');
+  assert.ok(at(/Pitch practice/) >= 0, 'the open sessions are listed');
+  assert.equal(at(/verifier/), -1, 'subagents stay under their session, not in the list');
+  await page.getByPlaceholder('Search sessions').fill('pitch');
+  assert.equal(await page.locator('.srow', { hasText: 'Plan the week' }).count(), 0, 'search filters the list');
+  await page.getByPlaceholder('Search sessions').fill('');
+  await page.getByRole('button', { name: /Archived/ }).click();
+  await page.locator('.srow', { hasText: 'Old chat' }).waitFor();
   if (shots) await page.screenshot({ path: 'tests/shots/zen-board.png' });
 
-  // Suggestions load independently of the composer and selecting one only drafts it.
+  // A new chat: its ideas load without blocking the box, and picking one only drafts it.
   await page.route('**/api/zen/ideas?*', (route) => route.fulfill({ json: { ideas: ['Plan a week', 'Review a project', 'Explore an idea'] } }));
-  // Sessions: a `+ new session` button does what `n` does.
-  await page.getByRole('button', { name: '+ new session', exact: true }).click();
+  await page.locator('.pane.view').getByRole('button', { name: /New/ }).first().click();
   await page.waitForURL(/\?s=new/);
-  await page.locator('.zc-foot', { hasText: '@zenbot' }).waitFor();
   await page.getByRole('button', { name: 'Plan a week' }).click();
   assert.equal(await page.getByRole('textbox', { name: 'message' }).inputValue(), 'Plan a week', 'an idea fills the composer without sending');
   await page.unroute('**/api/zen/ideas?*');
   await page.goto(`${base}/?view=sessions`);
-  await page.getByText('Plan the week').first().waitFor();
-  // Archived jobs stay out of Archived (and its count) until `J` or the jobs chip.
-  assert.equal(await page.getByRole('button', { name: 'jobs', exact: true }).count(), 0, 'the jobs chip shows with archived');
-  await page.keyboard.press('J');
-  assert.equal(await page.evaluate(() => localStorage.getItem('zen.sessions.archivedJobs')), null, 'J does nothing while archived is hidden');
-  await page.keyboard.press('a');
-  await page.getByText('Old chat').waitFor();
-  assert.equal(await page.getByText('vault-sync').count(), 0, 'archived jobs are hidden by default');
-  const archivedHead = page.locator('.head', { hasText: 'ARCHIVED' });
-  assert.match((await archivedHead.innerText()).replace(/\s+/g, ' '), /ARCHIVED 1 · a hides · J shows jobs \(1\)/);
-  const badge = page.locator('.outcome.partial');
-  assert.equal(await badge.innerText(), 'partial', 'an archived session shows how it ended');
-  assert.equal(await badge.getAttribute('title'), 'tests red', 'the badge carries the note');
-  await page.keyboard.press('J');
-  await page.getByText('vault-sync').waitFor();
-  assert.match((await archivedHead.innerText()).replace(/\s+/g, ' '), /ARCHIVED 2 · a hides · J hides jobs/);
-  assert.equal(await page.evaluate(() => localStorage.getItem('zen.sessions.archivedJobs')), '1');
-  await page.reload();
-  await page.keyboard.press('a');
-  await page.getByText('vault-sync').waitFor(); // kept across reloads
-  await page.getByRole('button', { name: 'jobs', exact: true }).click(); // the chip hides them again
-  await page.getByText('vault-sync').waitFor({ state: 'detached' });
-  assert.equal(await page.evaluate(() => localStorage.getItem('zen.sessions.archivedJobs')), '0');
-  await page.keyboard.press('a');
-  await page.getByText('Old chat').waitFor({ state: 'detached' });
+  await page.locator('.srow', { hasText: 'Plan the week' }).waitFor();
 
   // Tasks: the urgent task, overdue.
   await page.keyboard.press('3');

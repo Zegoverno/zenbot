@@ -126,7 +126,7 @@
         <header class="wh">
           {#if edit}<span class="grip" title="Drag to move">⠿</span>{/if}
           <h2>{kind(s) === 'today' ? viewTitle(tv(s)) : w.title}</h2>
-          {#if s.id === 'needs' && !edit}<span class="count">{NEEDS.length}</span>{/if}
+          {#if s.id === 'needs' && !edit && NEEDS.length > 0}<span class="count">{NEEDS.length}</span>{/if}
           <span class="sp"></span>
           {#if edit}
             <div class="ctl">

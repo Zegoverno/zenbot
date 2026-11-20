@@ -324,9 +324,9 @@
     {/if}
   </div>
 
-  <nav class="tabs" aria-label="Views">
+  <nav class="tabs" aria-label="Views" role="tablist">
     {#each tabs as t (t.key)}
-      <button class="tab" class:on={tabOn(t.key)} onclick={() => pickTab(t.key)} title={split && app.view === t.key ? 'Close the panel' : t.label}>
+      <button class="tab" role="tab" aria-label={t.label} aria-selected={tabOn(t.key)} class:on={tabOn(t.key)} onclick={() => pickTab(t.key)} title={split && app.view === t.key ? 'Close the panel' : t.label}>
         {@render ico(t.icon)}<span class="tl">{t.label}</span>
         {#if t.key === 'sessions' && waiting}<span class="badge">{waiting}</span>{/if}
         {#if t.key === 'routines' && failing().length}<span class="badge bad" title="{failing().length} routine failed">{failing().length}</span>{/if}
