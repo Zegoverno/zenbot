@@ -56,6 +56,8 @@ describe('plugin frame', () => {
 describe('pane navigation', () => {
   it('validates mode and close without accepting ambiguous URLs', () => {
     expect(zenNavigation('zen://open?path=wiki/a.md&mode=edit')).toEqual({ action: 'open', path: 'wiki/a.md', mode: 'edit' });
+    expect(zenNavigation('zen://task?id=L%3ATasks.md%3A7&done=1')).toEqual({ action: 'task', id: 'L:Tasks.md:7', done: true });
+    for (const u of ['zen://task?id=x&done=2', 'zen://task?id=x&done=1&done=0', 'zen://task?id=x&done=1&extra=y', 'zen://task?id=%00&done=1']) expect(zenNavigation(u)).toBeNull();
     expect(zenNavigation('zen://close')).toEqual({ action: 'close' });
     for (const u of ['zen://close?path=a', 'zen://close#x', 'zen://user@close', 'zen://open?path=a&mode=write',
       'zen://open?path=a&mode=read&mode=edit', 'zen://open?path=a&path=b', 'zen://open?path=a&unknown=x',

@@ -14,18 +14,20 @@
 import { files } from './api.ts';
 
 /** The built-in views, Games, Settings (the board's), Preview and a plugin command's panel (the side's) and plugin views. */
-export type View = 'sessions' | 'files' | 'tasks' | 'agents' | 'games' | 'settings' | 'panel' | 'preview' | `plugin:${string}`;
+export type View = 'home' | 'sessions' | 'files' | 'tasks' | 'routines' | 'agents' | 'games' | 'settings' | 'panel' | 'preview' | `plugin:${string}`;
 export type Pane = 'home' | 'side';
 /** The built-in tabs, in order; plugin views come after them. */
-export const VIEWS: View[] = ['sessions', 'files', 'tasks', 'agents', 'games'];
-const isView = (v: string | null): v is View => !!v && (VIEWS.includes(v as View) || v === 'settings' || /^plugin:[a-z0-9-]{2,40}\/[A-Za-z0-9._-]+$/.test(v));
+export const VIEWS: View[] = ['sessions', 'files', 'tasks', 'routines', 'agents', 'games'];
+const isView = (v: string | null): v is View => !!v && (VIEWS.includes(v as View) || v === 'home' || v === 'settings' || /^plugin:[a-z0-9-]{2,40}\/[A-Za-z0-9._-]+$/.test(v));
 
 export const app = $state({
   /** The open session; 'new' a chat whose session starts with its first prompt; null the board. */
   session: null as string | null,
   /** The agent a fresh chat ('new') starts its session as. */
   agent: 'zenbot',
-  view: 'sessions' as View,
+  chatDraft: '',
+  attachOnOpen: false,
+  view: 'home' as View,
   side: { open: false, view: 'files' as View },
   /** Which pane has the keys in a session: the chat or the side panel. */
   focus: 'chat' as 'chat' | 'side',
@@ -59,7 +61,7 @@ function url(): string {
   const p = new URLSearchParams();
   if (app.session) p.set('s', app.session);
   else {
-    if (app.view !== 'sessions') p.set('view', app.view);
+    if (app.view !== 'home') p.set('view', app.view);
     if (app.view === 'files' && app.file.home) p.set('file', app.file.home);
     if (app.view === 'files' && app.file.home && app.write.home) p.set('edit', '1');
     if (app.view === 'files' && app.file.home && app.opener.home) p.set('with', app.opener.home);
@@ -81,7 +83,7 @@ export function fromUrl() {
   const p = new URLSearchParams(location.search);
   app.session = p.get('s');
   const v = p.get('view');
-  app.view = isView(v) ? v : app.session ? app.view : 'sessions';
+  app.view = isView(v) ? v : app.session ? app.view : 'home';
   if (!app.session) {
     app.file.home = p.get('file');
     app.write.home = p.has('edit');

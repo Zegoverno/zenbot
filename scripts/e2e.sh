@@ -1204,7 +1204,7 @@ phase4_brain() {
 
 # Vault tasks (tasks.rs): `GET /api/tasks` reads the open `- [ ]` lines of each project's
 # tasks.md under the zen home's global/Projects, grouped and sorted, behind the token; `zen tasks`
-# lists them; the files are never written.
+# lists them; reading never writes. Then the writes: add, tick, edit, move, drop, delete.
 vault_tasks() {
   local ws; ws=$(new_workspace tasks)
   local p="$TMP/home/.zenbot/global/Projects"
@@ -1228,18 +1228,51 @@ vault_tasks() {
   check "zen tasks --json is the kernel's answer" eq "$(zen tasks --json | jq .count)" 3
   # Handing a task to an agent (`a` in the Tasks view): a new session briefed with the task, linked
   # in the kernel by the task's id; asked again, the same agent comes back.
-  local h; h=$(curl -s -X POST -H "Authorization: Bearer $TOKEN" "$URL/api/tasks/f1/agent")
+  local f1rev; f1rev=$(jq -r '.projects[].tasks[] | select(.id == "f1") | .rev' <<<"$t")
+  local h; h=$(curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d "{\"rev\":\"$f1rev\"}" "$URL/api/tasks/f1/agent")
   local sid; sid=$(jq -r .session <<<"$h")
   check "a task is handed to a new agent" eq "$(jq -c '[.task, .existing, .error]' <<<"$h")" '["f1",false,null]'
   check "its session is titled after the task" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/sessions/$sid" | jq -r .title)" "task: Draft the seed order"
   check "its first prompt is the task's brief" bash -c 'grep -q "Draft the seed order" <<<"$1" && grep -q "Goal: \[\[Garden first harvest\]\]" <<<"$1" && grep -q "garden/tasks.md:2" <<<"$1"' _ \
     "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/sessions/$sid" | jq -r '[.messages[] | select(.role == "user")][0].content | if type == "string" then . else map(.text // "") | join("") end')"
-  check "the task shows its agent" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/tasks" | jq -r '.projects[0].tasks[0].agent.session')" "$sid"
-  check "asked again, the same agent" eq "$(curl -s -X POST -H "Authorization: Bearer $TOKEN" "$URL/api/tasks/f1/agent" | jq -c '[.session == "'"$sid"'", .existing]')" '[true,true]'
-  check "no open task, no agent" eq "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" "$URL/api/tasks/s0/agent")" 404
-  check "the agent's turn ends" until_ok bash -c '[ "$(curl -s -H "Authorization: Bearer $1" "$2/api/tasks" | jq -r ".projects[0].tasks[0].agent.state")" != running ]' _ "$TOKEN" "$URL"
+  check "the task shows its agent" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/tasks" | jq -r '.projects[0].tasks[0].session')" "$sid"
+  check "its agent is named" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/tasks" | jq -r '.projects[0].tasks[0] | [.agent, .agent_state != null] | @csv')" '"zenbot",true'
+  check "asked again, the same agent" eq "$(curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d "{\"rev\":\"$f1rev\"}" "$URL/api/tasks/f1/agent" | jq -c '[.session == "'"$sid"'", .existing]')" '[true,true]'
+  check "no open task, no agent" eq "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"rev":"x"}' "$URL/api/tasks/nonexistent/agent")" 404
+  check "the agent's turn ends" until_ok bash -c '[ "$(curl -s -H "Authorization: Bearer $1" "$2/api/tasks" | jq -r ".projects[0].tasks[0].agent_state")" != running ]' _ "$TOKEN" "$URL"
   check "zen tasks shows the agent" bash -c 'grep -q "\`f1\` · 🤖" <<<"$1"' _ "$(zen tasks)"
-  check "the vault files are never written" eq "$(cat "$p"/*/tasks.md | sha256sum)" "$before"
+  check "reading and handing a task never write the vault" eq "$(cat "$p"/*/tasks.md | sha256sum)" "$before"
+  # Writes: the app ticks, adds, edits, moves, drops and deletes lines in place.
+  local api=(-H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json")
+  local c; c=$(curl -s "${api[@]}" -X POST "$URL/api/tasks" -d '{"project":"work","text":"Call the bank","due":"2099-02-03","priority":"important"}')
+  local nid; nid=$(jq -r .id <<<"$c")
+  check "a new task gets a six-character id" bash -c '[[ "$1" =~ ^[a-z0-9]{6}$ ]]' _ "$nid"
+  check "it is written at the end of the project's tasks.md" eq "$(tail -n 1 "$p/work/tasks.md")" "- [ ] Call the bank ⏫ 📅 2099-02-03 🆔 $nid"
+  check "an unknown project is a 404, a bad field a 400" eq "$(curl -s -o /dev/null -w '%{http_code}/' "${api[@]}" -X POST "$URL/api/tasks" -d '{"project":"nope","text":"x"}')$(curl -s -o /dev/null -w '%{http_code}' "${api[@]}" -X POST "$URL/api/tasks" -d '{"project":"work","text":"x","due":"tomorrow"}')" "404/400"
+  local k; k=$(curl -s "${api[@]}" -X PATCH "$URL/api/tasks/$nid" -d '{"done":true,"rev":"'"$(jq -r .rev <<<"$c")"'"}')
+  check "ticking writes [x] and the date" eq "$(jq -c '[.done, .done_on == "'"$(date -u +%F)"'"]' <<<"$k")" '[true,true]'
+  check "the line is rewritten in place" eq "$(tail -n 1 "$p/work/tasks.md" | cut -c1-9)" "- [x] Cal"
+  check "done=7d lists it, the plain list does not" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/tasks?done=7d" | jq -c '[.count, ([.projects[].tasks[] | select(.done)] | length)]')$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/tasks" | jq -c '[.projects[].tasks[] | select(.done)] | length')" '[3,1]0'
+  curl -s "${api[@]}" -X PATCH "$URL/api/tasks/$nid" -d '{"done":false,"priority":null,"project":"self","goal":null,"rev":"'"$(jq -r .rev <<<"$k")"'"}' >/dev/null
+  check "a project change moves the line" eq "$(grep -c "🆔 $nid" "$p/work/tasks.md")/$(grep -c "🆔 $nid" "$p/self/tasks.md")" 0/1
+  # A task with no 🆔 is addressed by its place (the id is URL-encoded: it holds slashes).
+  printf -- '- [ ] Bare line\n' >>"$p/work/tasks.md"
+  local bare="L:Projects/work/tasks.md:$(wc -l <"$p/work/tasks.md" | tr -d ' ')"
+  local enc; enc=$(jq -rn --arg i "$bare" '$i | @uri')
+  check "a task without a 🆔 is listed with the synthetic id" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/tasks" | jq -r '[.projects[].tasks[] | select(.text == "Bare line")][0].id')" "$bare"
+  local stale; stale=$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/tasks" | jq -r '[.projects[].tasks[] | select(.text == "Bare line")][0].rev')
+  printf '\n' >>"$p/work/tasks.md"; sed -i 's/Bare line/Changed line/' "$p/work/tasks.md"
+  check "a line that changed since it was read is a 409" eq "$(curl -s -o /dev/null -w '%{http_code}' "${api[@]}" -X PATCH "$URL/api/tasks/$enc" -d '{"done":true,"rev":"'"$stale"'"}')" 409
+  check "a line that is gone is a 409" eq "$(curl -s -o /dev/null -w '%{http_code}' "${api[@]}" -X PATCH "$URL/api/tasks/$(jq -rn '"L:Projects/work/tasks.md:99" | @uri')" -d '{"done":true,"rev":"x"}')" 409
+  check "missing revisions rejected" eq "$(curl -s -o /dev/null -w '%{http_code}/' "${api[@]}" -X PATCH "$URL/api/tasks/$enc" -d '{}')$(curl -s -o /dev/null -w '%{http_code}/' "${api[@]}" -X DELETE "$URL/api/tasks/$enc")$(curl -s -o /dev/null -w '%{http_code}' "${api[@]}" -X POST "$URL/api/tasks/$enc/agent" -d '{}')" 400/400/400
+  check "stale handoff refuses changed synthetic occupant" eq "$(curl -s -o /dev/null -w '%{http_code}' "${api[@]}" -X POST "$URL/api/tasks/$enc/agent" -d '{"rev":"'"$stale"'"}')/$(grep -c 'Changed line 🆔' "$p/work/tasks.md")" 409/0
+  local current; current=$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/tasks" | jq -r '[.projects[].tasks[] | select(.text == "Changed line")][0].rev')
+  check "handing a task without a 🆔 writes one" bash -c '[[ "$(curl -s -X POST -H "Authorization: Bearer $1" "$2/api/tasks/$3/agent" -d "{\"rev\":\"$5\"}" -H "Content-Type: application/json" | jq -r .task)" =~ ^[a-z0-9]{6}$ ]] && grep -q "Changed line 🆔" "$4"' _ "$TOKEN" "$URL" "$enc" "$p/work/tasks.md" "$current"
+  check "dropping writes [-] and the date" eq "$(curl -s "${api[@]}" -X PATCH "$URL/api/tasks/s1" -d '{"dropped":true,"rev":"'"$(jq -r '.projects[].tasks[] | select(.id == "s1") | .rev' <<<"$t")"'"}' >/dev/null; grep -c '^- \[-\] Plan the week .* ❌ ' "$p/self/tasks.md")" 1
+  check "delete removes the line" eq "$(curl -s "${api[@]}" -X DELETE "$URL/api/tasks/f2?rev=$(jq -r '.projects[].tasks[] | select(.id == "f2") | .rev' <<<"$t")" >/dev/null; grep -c f2 "$p/garden/tasks.md")" 0
+  mkdir -p "$TMP/home/.zenbot/global/Goals"; printf -- '---\nstatus: active\n---\n# Grow\n' >"$TMP/home/.zenbot/global/Goals/Grow.md"
+  check "meta lists the projects and the goals" eq "$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/tasks/meta" | jq -c '[[.projects[].id], [.goals[] | {id,title,status}]]')" '[["garden","self","work"],[{"id":"Grow","title":"Grow","status":"active"}]]'
+  check "the app's writes pass the token check" eq "$(curl -s -o /dev/null -w '%{http_code}' -X PATCH "$URL/api/tasks/f1" -H 'Content-Type: application/json' -d '{"done":true}')" 401
 }
 
 retired_work_rejected() {

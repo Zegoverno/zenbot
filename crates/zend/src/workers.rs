@@ -191,12 +191,18 @@ pub(crate) async fn collect_models(app: &App) -> Value {
     *app.routes.lock().await = routes;
     *app.catalog.lock().await = catalog;
     let curated = visible_models(&all, std::env::var("ZEN_MODELS").ok().as_deref());
-    let default = if curated.iter().any(|m| m["id"] == app.default_model.as_str()) {
+    // New sessions' model: the owner's preference (prefs.rs), else ZEN_DEFAULT_MODEL, else the first listed.
+    let wanted = crate::prefs::default_model(app).await;
+    let serves = |id: &str| curated.iter().any(|m| m["id"] == id);
+    let default = if serves(&wanted) {
+        wanted
+    } else if serves(&app.default_model) {
         app.default_model.clone()
     } else {
         curated.first().and_then(|m| m["id"].as_str()).unwrap_or(&app.default_model).to_string()
     };
     json!({ "models": curated, "authenticated": authenticated, "default": default,
+            "default_effort": crate::prefs::get(&app.db, "default_effort").await,
             "scorer": crate::s1::default_model() })
 }
 

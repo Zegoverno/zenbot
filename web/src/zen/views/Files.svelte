@@ -12,7 +12,7 @@
   // opens through the normal opener (plugins included); Esc clears.
   import { onMount } from 'svelte';
   import type { Pane } from '../app.svelte.ts';
-  import { app, openFile, openDir, tilde, typing, notice } from '../app.svelte.ts';
+  import { app, openFile, openDir, openSession, tilde, typing, notice } from '../app.svelte.ts';
   import { files, zen } from '../api.ts';
   import type { Found, SearchHit } from '../api.ts';
   import Opened from '../Opened.svelte';
@@ -56,6 +56,7 @@
     }
     for (const r of rows) if (r.dir && tree.open[r.path]) read(r.path);
     read(tree.root);
+    if (inVault) void loadFacets(tree.root);
   }
 
   // Follow the pane's root: a new root opens; going up selects the folder we came from.
@@ -73,6 +74,41 @@
     } else tree.sel = null;
   });
 
+  type FacetKey = 'type' | 'status' | 'tags';
+  type Note = { path: string; type: string[]; status: string[]; tags: string[] };
+  type Facets = Record<FacetKey, { value: string; count: number }[]> & { notes: Note[]; truncated: boolean };
+  const keys: FacetKey[] = ['type', 'status', 'tags'];
+  let facets = $state<Facets | null>(null);
+  let selected = $state<Record<FacetKey, string[]>>({ type: [], status: [], tags: [] });
+  let tagAll = $state(false);
+  let filterOpen = $state(false);
+  let facetError = $state('');
+  let facetSeq = 0;
+  const inVault = $derived(!!app.vault && (t.root === app.vault || t.root.startsWith(app.vault + '/')));
+  const filtering = $derived(keys.some(k => selected[k].length > 0));
+  async function loadFacets(root: string) {
+    const seq = ++facetSeq;
+    facets = null; facetError = '';
+    try {
+      const response = await fetch(`/api/fs/facets?path=${encodeURIComponent(root)}`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const result: Facets = await response.json();
+      if (seq === facetSeq) facets = result;
+    } catch (e) { if (seq === facetSeq) facetError = (e as Error).message; }
+  }
+  $effect(() => {
+    const root = t.root, allowed = inVault;
+    selected = { type: [], status: [], tags: [] };
+    if (allowed) void loadFacets(root); else { facetSeq++; facets = null; }
+  });
+  function toggleFacet(key: FacetKey, value: string) {
+    selected[key] = selected[key].includes(value) ? selected[key].filter(v => v !== value) : [...selected[key], value];
+  }
+  const matches = $derived((facets?.notes ?? []).filter(note => keys.every(key => {
+    const choices = selected[key];
+    return !choices.length || (key === 'tags' && tagAll ? choices.every(v => note[key].includes(v)) : choices.some(v => note[key].includes(v)));
+  })));
+
   interface Row {
     path: string;
     name: string;
@@ -85,9 +121,9 @@
   const rows = $derived.by((): Row[] => {
     const out: Row[] = [];
     if (!t.root) return out;
-    if (t.root !== '/' && t.root !== app.home && t.root.startsWith(app.home + '/')) out.push({ path: '..', name: '..', dir: true, depth: 0, size: 0, up: true });
+    if (t.root !== '/') out.push({ path: '..', name: '..', dir: true, depth: 0, size: 0, up: true });
     const walk = (dir: string, depth: number) => {
-      for (const e of t.listing[dir] ?? []) {
+      for (const e of [...(t.listing[dir] ?? [])].sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name))) {
         if (out.length >= MAX_ROWS) return;
         if (SKIP.has(e.name) || (e.hidden && !t.hidden)) continue;
         out.push({ path: e.path, name: e.name, dir: e.dir, depth, size: e.size });
@@ -114,7 +150,7 @@
 
   // The tree comes back from the reader: show the selected row.
   $effect(() => {
-    if (!app.file[pane]) follow(list);
+    if (!app.file[pane]) { follow(list); if (inVault) void loadFacets(t.root); }
   });
 
   function select(i: number) {
@@ -145,9 +181,8 @@
   function activate(r: Row | undefined) {
     if (!r) return;
     if (r.up) openDir(parentOf(t.root), pane);
-    else if (r.dir) {
-      if (!expand(r)) foldOrParent(r);
-    } else openFile(r.path, pane);
+    else if (r.dir) openDir(r.path, pane);
+    else openFile(r.path, pane);
   }
 
   // ---- search ----
@@ -453,6 +488,16 @@
     }
   }
 
+  // Siblings are listed independently of the tree, including for search results.
+  const fileDir = $derived(app.file[pane] ? parentOf(app.file[pane]!) : '');
+  $effect(() => {
+    if (fileDir && !(fileDir in t.listing) && !(fileDir in t.failed)) read(fileDir);
+  });
+  const siblings = $derived((t.listing[fileDir] ?? [])
+    .filter((e) => !e.dir && !SKIP.has(e.name) && (!e.hidden || t.hidden))
+    .sort((a, b) => a.name.localeCompare(b.name)));
+  const fileIndex = $derived(siblings.findIndex((e) => e.path === app.file[pane]));
+
   /** The root as clickable parts: `~ / projects / src`. */
   const crumbs = $derived.by(() => {
     const shown = tilde(t.root);
@@ -474,9 +519,30 @@
 <svelte:window onkeydown={key} />
 
 {#if app.file[pane]}
+  <div class="file-actions">
+    <span class="file-path">{shown(app.file[pane]!)}</span>
+    {#if fileIndex >= 0}
+      <button class="chip" aria-label="Previous file" disabled={app.write[pane] || fileIndex === 0} onclick={() => openFile(siblings[fileIndex - 1].path, pane)}>←</button>
+      <span class="dim">{fileIndex + 1} of {siblings.length}</span>
+      <button class="chip" aria-label="Next file" disabled={app.write[pane] || fileIndex === siblings.length - 1} onclick={() => openFile(siblings[fileIndex + 1].path, pane)}>→</button>
+    {/if}
+    <button class="chip primary" disabled={app.write[pane]} title={app.write[pane] ? 'Finish editing first' : 'Ask zenbot about this file'} onclick={() => { app.chatDraft = `Help me with ${shown(app.file[pane]!)}: `; openSession('new'); }}>Ask zenbot</button>
+  </div>
   <Opened path={app.file[pane]} {pane} {active} />
 {:else}
   <div class="view" bind:this={list}>
+    <div class="topbar">
+      <button class="up" disabled={t.root === '/'} aria-label="Up one folder" onclick={() => openDir(parentOf(t.root), pane)}>↑</button>
+      <nav class="crumbs" aria-label="folder">
+        {#each crumbs as c, i}
+          {#if i > 0}<span class="sep">›</span>{/if}
+          <button class:here={i === crumbs.length - 1} onclick={() => openDir(c.path, pane)} title={c.path}>{c.path === app.vault ? 'Vault' : c.name}</button>
+        {/each}
+      </nav>
+      <span class="grow"></span>
+      {#if app.home}<button class="chip" onclick={() => { clearSearch(); openDir(`${app.home}/inbox`, pane); }}>Inbox</button>{/if}
+      {#if app.vault}<button class="chip" onclick={() => { clearSearch(); openDir(app.vault, pane); }}>Vault</button>{/if}
+    </div>
     <div class="searchbar">
       <input
         bind:this={input}
@@ -489,12 +555,34 @@
         autocomplete="off"
         autocapitalize="off"
       />
-      {#if app.vault && t.root !== app.vault}<button class="chip" onclick={() => { clearSearch(); openDir(app.vault, pane); }} title="the vault">vault</button>{/if}
-      {#if app.home && t.root !== app.home}<button class="chip" onclick={() => { clearSearch(); openDir(app.home, pane); }} title="your home folder">home</button>{/if}
     </div>
-    {#if searching}
+    {#if inVault}
+      <div class="facet-panel">
+        <button class="chip" aria-expanded={filterOpen} onclick={() => filterOpen = !filterOpen}>Filter by properties{filtering ? ' •' : ''}</button>
+        {#if filtering}<button class="chip" onclick={() => selected = { type: [], status: [], tags: [] }}>Clear filters</button>{/if}
+        {#if facetError}<span role="alert">Filters unavailable: {facetError}</span>{/if}
+        {#if facets?.truncated}<span role="status">Results incomplete: vault scan limit reached.</span>{/if}
+        {#if filterOpen && facets}
+          {#each keys as key}
+            <div><strong>{key}</strong>
+              {#each facets[key] as option}
+                <button class="chip" class:on={selected[key].includes(option.value)} aria-pressed={selected[key].includes(option.value)} onclick={() => toggleFacet(key, option.value)}>{option.value} ({option.count})</button>
+              {/each}
+              {#if key === 'tags'}<button class="chip" onclick={() => tagAll = !tagAll}>Tags: {tagAll ? 'all' : 'any'}</button>{/if}
+            </div>
+          {/each}
+        {/if}
+      </div>
+    {/if}
+    {#if filtering && !searching}
+      <div class="results" aria-label="filtered notes">
+        {#each matches as note (note.path)}<button class="facet-result" onclick={() => openFile(note.path, pane)}>{shown(note.path)}</button>{/each}
+        {#if !facets && !facetError}<p>Loading filters…</p>{:else if !matches.length}<p>No matching notes.</p>{/if}
+      </div>
+    {:else if searching}
       <div class="results" role="listbox" aria-label="search results">
         {#each results as r, i (r.key)}
+          {#if !filtering || matches.some(note => note.path === r.path)}
           <div
             class="result"
             class:sel={i === hit}
@@ -513,6 +601,7 @@
             <span class="rsub">{r.sub}</span>
             {#if r.snippet}<span class="snip">{r.snippet}</span>{/if}
           </div>
+          {/if}
         {/each}
         {#if nameBusy || contentBusy}<p class="dim pad">searching…</p>{/if}
         {#if contentErr}<p class="dim pad">notes search unavailable: {contentErr}</p>{/if}
@@ -520,13 +609,6 @@
       </div>
     {:else}
     <div class="tools">
-      <nav class="crumbs" aria-label="folder">
-        {#each crumbs as c, i}
-          {#if i > 0 && crumbs[i - 1].name !== '/'}<span class="sep">/</span>{/if}
-          <button class:here={i === crumbs.length - 1} onclick={() => openDir(c.path, pane)}>{c.name}</button>
-        {/each}
-      </nav>
-      <span class="grow"></span>
       <button class="chip" onclick={() => begin('file')} title="a">+ file</button>
       <button class="chip" onclick={() => begin('folder')} title="A">+ folder</button>
       <button class="chip" disabled={!chosen || chosen.dir} onclick={() => chosen && !chosen.dir && openFile(chosen.path, pane, true)}>Edit selected file</button>
@@ -574,7 +656,7 @@
           }}
           onkeydown={() => {}}
         >
-          <span class="twist">{r.up ? '↰' : !r.dir ? '' : t.open[r.path] ? '▾' : '▸'}</span>
+          <span class="twist">{r.up ? '↑' : r.dir ? '▰' : /\.(png|jpe?g|gif|webp|svg)$/i.test(r.name) ? '▧' : '▤'}</span>
           <span class="name">{r.name}{r.dir && !r.up ? '/' : ''}</span>
           {#if r.dir && t.failed[r.path]}<span class="err small">can't read</span>{/if}
           {#if !r.dir}<span class="size">{human(r.size)}</span>{/if}
@@ -586,8 +668,17 @@
 {/if}
 
 <style>
+  .facet-panel { padding: 8px 16px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .facet-panel div { flex-basis: 100%; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .facet-result { display: block; padding: 10px 16px; background: none; border: 0; color: inherit; cursor: pointer; }
+  .topbar, .file-actions { display: flex; gap: 8px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--faint); }
+  .topbar { flex-wrap: wrap; }
+  .up { font-size: 18px; padding: 3px 8px; color: var(--dim); }
+  .up:disabled { opacity: .4; }
+  .file-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); font-size: 12px; }
+  .primary { color: var(--accent); border-color: var(--accent); }
   .view { container-type: inline-size; padding: 6px 0 24px; font-family: var(--sans); font-size: 14px; }
-  .searchbar { display: flex; gap: 8px; align-items: center; padding: 2px 14px 6px; }
+  .searchbar { display: flex; gap: 8px; align-items: center; padding: 18px 16px 12px; }
   .searchbar input { flex: 1; max-width: 420px; min-width: 0; font: inherit; font-size: 13px; color: var(--ink); background: transparent; border: 1px solid var(--faint); border-radius: 6px; padding: 4px 8px; }
   .searchbar input:focus { outline: none; border-color: var(--accent); }
   .result { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 6px 14px; margin: 0 6px; border-radius: 6px; cursor: pointer; outline-offset: -1px; }
@@ -614,11 +705,11 @@
   .pad { padding: 2px 14px; margin: 0; font-size: 13px; }
   .err { color: var(--err); padding: 4px 14px; margin: 0; font-size: 13px; }
   .err.small { padding: 0; font-size: 12px; }
-  .row { display: flex; align-items: baseline; gap: 6px; min-height: 28px; box-sizing: border-box; padding: 4px 14px; cursor: pointer; white-space: nowrap; overflow: hidden; border-radius: 6px; margin: 0 6px; outline-offset: -1px; }
+  .row { display: flex; align-items: baseline; gap: 6px; min-height: 42px; box-sizing: border-box; padding: 10px 14px; cursor: pointer; white-space: nowrap; overflow: hidden; border-radius: 6px; margin: 0 6px; outline-offset: -1px; }
   .row:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
   .row.sel { outline: 1px solid var(--faint); }
   .row.sel.active { outline: none; background: color-mix(in srgb, var(--accent) 14%, transparent); }
-  .twist { width: 1em; flex: none; color: var(--dim); text-align: center; }
+  .twist { width: 1.5em; flex: none; color: var(--dim); text-align: center; }
   .name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .file .name { color: color-mix(in srgb, var(--ink) 82%, var(--paper)); }
   .size { margin-left: auto; padding-left: 12px; color: var(--dim); font-size: 12px; flex: none; }

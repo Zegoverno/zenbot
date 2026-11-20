@@ -16,7 +16,7 @@
   import { AppBridge, PostMessageTransport, type McpUiHostContext } from '@modelcontextprotocol/ext-apps/app-bridge';
   import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
   import { pluginApi, type ToolResult } from './api.ts';
-  import { app, openFile, closeFile, setView, notice, type Pane } from './app.svelte.ts';
+  import { app, openFile, closeFile, setView, openSession, notice, type Pane } from './app.svelte.ts';
   import { chat, contextImages, keepContextSaving, resultText } from './plugins.svelte.ts';
   import { SANDBOX, webLink, withCsp, zenNavigation } from './frame.ts';
 
@@ -49,6 +49,8 @@
   let bridge: AppBridge | null = null;
   const darkQuery = matchMedia('(prefers-color-scheme: dark)');
   let dark = $state(darkQuery.matches);
+  let dimensions = $state({ width: 0, height: 0 });
+  let phone = $state(false);
 
   /** The host's colours and fonts, under MCP Apps' variable names. */
   function styles() {
@@ -57,6 +59,10 @@
     return {
       variables: {
         '--color-background-primary': v('--paper'),
+        '--color-background-secondary': v('--soft'),
+        '--color-border-secondary': v('--faint'),
+        '--color-background-info': v('--accent'),
+        '--border-radius-md': v('--radius'),
         '--color-text-primary': v('--ink'),
         '--color-text-secondary': v('--dim'),
         '--color-border-primary': v('--faint'),
@@ -66,20 +72,23 @@
         '--color-text-warning': v('--warn'),
         '--font-sans': v('--sans'),
         '--font-mono': v('--mono'),
-      },
+      } satisfies Partial<NonNullable<McpUiHostContext['styles']>['variables']>,
     };
   }
 
   function context(): McpUiHostContext {
     return {
       theme: dark ? 'dark' : 'light',
+      // The SDK type requires every variable, although its runtime schema allows a subset.
       styles: styles() as McpUiHostContext['styles'],
       displayMode: 'inline',
       availableDisplayModes: ['inline'],
+      // Host context crosses postMessage: Svelte's state proxy is not structured-cloneable.
+      containerDimensions: { width: dimensions.width, height: dimensions.height },
       platform: 'web',
       locale: navigator.language,
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      zen: { pane: pane === 'home' ? 'board' : 'side', path, mode, slot },
+      zen: { pane: pane === 'home' ? 'board' : 'side', path, mode, slot, phone, headingFont: getComputedStyle(document.documentElement).getPropertyValue('--serif').trim() },
     };
   }
 
@@ -87,7 +96,21 @@
 
   onMount(() => {
     let gone = false;
-    const theme = () => (dark = darkQuery.matches);
+    const theme = () => {
+      const selected = document.documentElement.dataset.theme;
+      dark = selected === 'dark' || (selected !== 'light' && darkQuery.matches);
+      bridge?.setHostContext(context());
+    };
+    const resize = () => {
+      if (frame) dimensions = { width: frame.clientWidth, height: frame.clientHeight };
+      phone = window.matchMedia('(max-width: 700px)').matches;
+    };
+    const observer = new MutationObserver(theme);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'class', 'style'] });
+    const sizes = new ResizeObserver(resize);
+    if (frame) sizes.observe(frame);
+    window.addEventListener('resize', resize);
+    theme(); resize();
     darkQuery.addEventListener('change', theme);
     (async () => {
       try {
@@ -114,6 +137,19 @@
             setView(pane, 'files');
             return {};
           }
+          if (nav?.action === 'task') {
+            try {
+              const response = await fetch(`/api/zen/tasks/${encodeURIComponent(nav.id)}`, {
+                method: 'PATCH', headers: { 'Content-Type': 'application/json', 'X-Zen-Web': '1' },
+                body: JSON.stringify({ done: nav.done }),
+              });
+              if (!response.ok) throw new Error(`HTTP ${response.status}`);
+              return {};
+            } catch (e) {
+              notice(`Could not update task: ${(e as Error).message}`);
+              return { isError: true };
+            }
+          }
           if (nav?.action === 'open' && app.vault) {
             openFile(`${app.vault}/${nav.path}`, pane, nav.mode === 'edit');
             return {};
@@ -127,6 +163,11 @@
         b.onmessage = async ({ content }) => {
           const text = resultText({ content: content as { type: string; text?: string }[] }).trim();
           // Plugin text is untrusted: queue only, never invoke the prompt/command path.
+          if (text && !app.session && text.length <= 100000) {
+            app.chatDraft = `[From ${title}]\n${text}`;
+            openSession('new', 'zenbot');
+            return {};
+          }
           if (text && chat.queue?.(plugin, text)) return {};
           notice(chat.queue ? `${title}: draft could not be queued (empty, read-only, or queue full)` : `${title} wants to write in the chat: open a session first`);
           return { isError: true };
@@ -153,6 +194,9 @@
     return () => {
       gone = true;
       darkQuery.removeEventListener('change', theme);
+      window.removeEventListener('resize', resize);
+      observer.disconnect();
+      sizes.disconnect();
       void bridge?.close();
       bridge = null;
     };

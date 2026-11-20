@@ -6,7 +6,7 @@
 //   to reach than a terminal). Anything under a denied folder is denied too.
 // - Reads stop at 2 MB; a binary file says so instead of its bytes. Images (not SVG) are served as
 //   they are, up to 25 MB, for the viewer to show.
-// - Writes are only these: create an empty file, make a folder, rename. The new name is one plain
+// - Writes are restricted to the canonical vault and are only these: create an empty file, make a folder, rename. The new name is one plain
 //   segment (no `/`, `\`, NUL, `.` or `..`, at most 255 bytes) and never a denied one (no new
 //   `.env` or `id_rsa`); the parent must be a folder inside home. Nothing is overwritten (a taken
 //   name is a 409), a rename stays in its folder, and home, `~/.zenbot` and what is within two
@@ -53,6 +53,14 @@ export async function resolve(p: unknown): Promise<string> {
   return real;
 }
 
+/** Require an existing path to resolve inside the canonical vault. */
+async function inVault(p: unknown): Promise<string> {
+  const full = await resolve(p);
+  const root = await resolve(VAULT);
+  if (full !== root && !full.startsWith(root + path.sep)) throw new HttpError(403, 'outside vault');
+  return full;
+}
+
 /** A new entry's name: one plain segment. */
 function segment(name: unknown): string {
   if (typeof name !== 'string' || !name || name === '.' || name === '..' || /[/\\\0]/.test(name) || Buffer.byteLength(name) > 255) throw new HttpError(400, 'bad name');
@@ -62,7 +70,7 @@ function segment(name: unknown): string {
 /** The folder `dir` and the new entry's path in it: the folder resolves, the name is plain and not a secret's. */
 async function target(dir: unknown, name: unknown): Promise<string> {
   const seg = segment(name);
-  const parent = await resolve(dir);
+  const parent = await inVault(dir);
   const st = await fs.stat(parent);
   if (!st.isDirectory()) throw new HttpError(400, 'not a folder');
   const full = path.join(parent, seg);
@@ -105,7 +113,7 @@ export async function rename(p: unknown, name: unknown): Promise<{ path: string 
   if (typeof p !== 'string' || !p || p.includes('\0')) throw new HttpError(400, 'bad path');
   const given = path.resolve(HOME, p === '~' ? '.' : p.replace(/^~\//, ''));
   // The entry itself (a symlink is renamed, not what it points at): its folder resolves, the name stays.
-  const parent = await resolve(path.dirname(given));
+  const parent = await inVault(path.dirname(given));
   const from = path.join(parent, path.basename(given));
   const deep = from.startsWith(ZEN + path.sep) ? path.relative(ZEN, from).split(path.sep).length : 0;
   if (from === HOME || from === ZEN || (deep > 0 && deep <= 2)) throw new HttpError(403, 'protected');
@@ -113,6 +121,8 @@ export async function rename(p: unknown, name: unknown): Promise<{ path: string 
   await fs.lstat(from).catch(() => {
     throw new HttpError(404, 'not found');
   });
+  // Even renaming a symlink must not operate on an escape or secret.
+  await inVault(from);
   const to = path.join(parent, seg);
   if (denied(to)) throw new HttpError(403, 'not allowed here');
   if (to === from) return { path: from };
@@ -267,4 +277,78 @@ async function findByName(name: string): Promise<{ path: string; dir: boolean } 
     level = next;
   }
   return null;
+}
+
+// A bounded, symlink-free scan; no hidden paths or secrets, and only small Markdown files.
+async function scanVault(root: string): Promise<{ files: { path: string; text: string }[]; truncated: boolean }> {
+  const files: { path: string; text: string }[] = [];
+  const dirs = [root];
+  let visited = 0, bytes = 0, truncated = false;
+  while (dirs.length) {
+    const dir = dirs.shift()!;
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (++visited > 10000) { truncated = true; break; }
+      const full = path.join(dir, e.name);
+      if (e.name.startsWith('.') || denied(full) || e.isSymbolicLink() || FIND_SKIP.has(e.name)) continue;
+      if (e.isDirectory()) { dirs.push(full); continue; }
+      if (!e.isFile() || !e.name.toLowerCase().endsWith('.md')) continue;
+      const st = await fs.stat(full).catch(() => null);
+      if (!st || st.size > 256 * 1024) continue;
+      if (files.length >= 2000 || bytes + st.size > 16 * 1024 * 1024) { truncated = true; break; }
+      const text = await fs.readFile(full, 'utf8').catch(() => null);
+      if (text !== null) { files.push({ path: full, text }); bytes += st.size; }
+    }
+    if (truncated) break;
+  }
+  return { files, truncated };
+}
+
+/** Facets for Markdown notes beneath a vault directory. Supports scalar and simple YAML lists. */
+export async function facets(p: unknown) {
+  const root = await inVault(p ?? VAULT);
+  if (!(await fs.stat(root)).isDirectory()) throw new HttpError(400, 'not a folder');
+  const scan = await scanVault(root);
+  const counts: Record<string, Map<string, number>> = { type: new Map(), status: new Map(), tags: new Map() };
+  const notes: { path: string; type: string[]; status: string[]; tags: string[] }[] = [];
+  for (const file of scan.files) {
+    const note = { path: file.path, type: [] as string[], status: [] as string[], tags: [] as string[] };
+    notes.push(note);
+    const front = /^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(file.text)?.[1];
+    if (!front) continue;
+    let key = '';
+    const seen = new Set<string>();
+    for (const line of front.split(/\r?\n/)) {
+      const prop = /^(type|status|tags):\s*(.*)$/i.exec(line);
+      const item = /^\s+-\s+(.+)$/.exec(line);
+      if (prop) key = prop[1].toLowerCase();
+      else if (!item) { key = ''; continue; }
+      if (!key) continue;
+      const raw = prop ? prop[2] : item![1];
+      for (let value of raw.replace(/^\[|\]$/g, '').split(',')) {
+        value = value.trim().replace(/^['"]|['"]$/g, '').trim();
+        if (!value || seen.has(key + '\0' + value)) continue;
+        seen.add(key + '\0' + value);
+        note[key as 'type' | 'status' | 'tags'].push(value);
+        counts[key].set(value, (counts[key].get(value) ?? 0) + 1);
+      }
+    }
+  }
+  const values = (key: string) => [...counts[key]].sort(([a], [b]) => a.localeCompare(b)).map(([value, count]) => ({ value, count }));
+  return { type: values('type'), status: values('status'), tags: values('tags'), notes, truncated: scan.truncated };
+}
+
+/** Notes that contain a wiki link to the requested note, scanned across the vault. */
+export async function backlinks(p: unknown) {
+  const target = await inVault(p);
+  if (!(await fs.stat(target)).isFile() || !target.toLowerCase().endsWith('.md')) throw new HttpError(400, 'not a markdown file');
+  const root = await inVault(VAULT);
+  const scan = await scanVault(root);
+  const rel = path.relative(root, target).split(path.sep).join('/').replace(/\.md$/i, '');
+  const name = path.basename(rel).toLowerCase();
+  const references = scan.files.filter((file) => file.path !== target && [...file.text.matchAll(/\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/g)].some((m) => {
+    const link = m[1].trim().replace(/\.md$/i, '').replace(/^\//, '').toLowerCase();
+    return link === rel.toLowerCase() || (!link.includes('/') && link === name);
+  })).map((file) => ({ path: file.path, title: path.basename(file.path, path.extname(file.path)) }));
+  return { references, truncated: scan.truncated };
 }

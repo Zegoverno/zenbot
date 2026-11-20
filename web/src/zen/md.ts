@@ -286,7 +286,8 @@ function table(n: SyntaxNode, src: string, t: HTMLElement) {
   t.append(body);
 }
 
-const MARKS = new Set(['EmphasisMark', 'CodeMark', 'LinkMark', 'QuoteMark', 'StrikethroughMark', 'URL', 'LinkTitle', 'LinkLabel']);
+// A link's own `URL` is skipped where the link is drawn; a bare `URL` (GFM autolink) is drawn as a link.
+const MARKS = new Set(['EmphasisMark', 'CodeMark', 'LinkMark', 'QuoteMark', 'StrikethroughMark', 'LinkTitle', 'LinkLabel']);
 
 /** The inline content of `n` into `out`, leaving out the `skip` children and every mark. */
 function inline(n: SyntaxNode, src: string, out: HTMLElement, skip: Set<string>) {
@@ -337,7 +338,7 @@ function inlineNode(c: SyntaxNode, src: string, out: HTMLElement) {
     case 'Link': {
       const url = c.getChild('URL');
       const href = url ? src.slice(url.from, url.to).replace(/^<|>$/g, '') : '';
-      inline(c, src, out.appendChild(link(href)), new Set());
+      inline(c, src, out.appendChild(link(href)), new Set(['URL']));
       return;
     }
     case 'Image': {

@@ -81,6 +81,7 @@ describe('home folder writes', () => {
   async function scratch() {
     const dir = await fs.realpath(await tmp());
     process.env.ZEN_WEB_HOME = dir;
+    process.env.ZEN_WEB_ROOT = dir; // Exercise the existing write cases with this scratch home as the vault.
     vi.resetModules();
     const home = await import('./home.ts');
     await fs.mkdir(path.join(dir, '.zenbot/global/wiki'), { recursive: true });

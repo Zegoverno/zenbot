@@ -233,6 +233,23 @@ fn mask_private_keys(text: &str) -> String {
     out
 }
 
+/// Save an OpenRouter key to the private service environment; it takes effect on restart.
+pub(crate) fn set_openrouter_key(key: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    if key.is_empty() || key.len() > 512 || !key.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_') {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid key"));
+    }
+    let home = crate::zen_home(); std::fs::create_dir_all(&home)?;
+    let path = home.join("env");
+    let existing = match std::fs::read_to_string(&path) { Ok(s) => s, Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(), Err(e) => return Err(e) };
+    let tmp = home.join(format!(".env-{}", uuid::Uuid::new_v4()));
+    let result = (|| { let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        for line in existing.lines().filter(|s| !s.starts_with("OPENROUTER_API_KEY=")) { writeln!(f, "{line}")?; }
+        writeln!(f, "OPENROUTER_API_KEY={key}")?; f.sync_all()?; std::fs::rename(&tmp, &path) })();
+    if result.is_err() { let _ = std::fs::remove_file(tmp); } result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,3 +294,4 @@ mod tests {
         assert!(masked.contains("-----BEGIN CERTIFICATE-----\nMIIB"), "certificates are public");
     }
 }
+

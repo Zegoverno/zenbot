@@ -242,7 +242,7 @@ export const zen = {
   removeAgent: (name: string) => call<{ ok: boolean; moved_to: string }>('DELETE', `/api/zen/agents/${enc(name)}`),
   search: (query: string, scope = 'notes', limit = 10) => call<{ query: string; scope: string; results: SearchHit[] }>('POST', '/api/zen/search', { query, scope, limit }),
   tasks: () => call<Tasks>('GET', '/api/zen/tasks'),
-  handTask: (id: string) => call<{ task: Task; session: string; existing: boolean }>('POST', `/api/zen/tasks/${enc(id)}/agent`, {}),
+  handTask: (id: string, rev: string) => call<{ task: Task; session: string; existing: boolean }>('POST', `/api/zen/tasks/${enc(id)}/agent`, {rev}),
   version: (refresh = false) => call<{ running: string; latest?: string; behind?: number; available?: boolean; commits?: string[]; error?: string }>('GET', `/api/zen/version${refresh ? '?refresh=true' : ''}`),
   upgrade: () => call<{ started_at: string }>('POST', '/api/zen/upgrade', {}),
   upgradeState: () => call<{ running: boolean; job?: { started_at: string; status: string; log: string }; last_result?: string }>('GET', '/api/zen/upgrade'),
@@ -284,6 +284,15 @@ export const zen = {
 export interface Found { name: string; path: string; rel: string; dir: boolean }
 /** A kernel search result (api.rs `search_once`); `path` is the note's file for wiki pages and notes. */
 export interface SearchHit { kind: string; ref: string; title: string; snippet: string; at: string; exact: boolean; relevance: number | null; path: string | null }
+
+export interface Routine { name: string; schedule: string; tz: string; enabled: boolean; next_run_at: string | null; last_status: string | null; last_error: string | null; failures: number }
+export interface RoutineRun { id: number; job: string; status: string; started_at: string; error: string | null; session: string | null }
+export const routines = {
+  list: () => call<{ jobs: Routine[]; scheduler: boolean }>('GET', '/api/zen/jobs'),
+  runs: () => call<RoutineRun[]>('GET', '/api/zen/jobs/runs'),
+  run: (name: string) => call('POST', `/api/zen/jobs/${enc(name)}/run`, {}),
+  enable: (name: string, enabled: boolean) => call('PATCH', `/api/zen/jobs/${enc(name)}`, { enabled }),
+};
 
 export const files = {
   home: () => call<{ home: string; vault: string }>('GET', '/api/fs/home'),

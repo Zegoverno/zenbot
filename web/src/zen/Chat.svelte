@@ -36,6 +36,8 @@
   let agent = $state(sid ? 'zenbot' : app.agent);
   /** The agents a fresh chat can start as (loaded only for a fresh chat). */
   let agents = $state<string[]>([]);
+  let ideas = $state<string[]>([]);
+  let ideasLoading = $state(false);
   let models = $state<Models | null>(null);
   let cmds = $state<Command[]>([]);
   let loaded = $state(false);
@@ -1155,7 +1157,27 @@
     if (active && loaded && matchMedia('(pointer: fine)').matches) ta?.focus();
   });
 
+  // Ideas are independent of the composer; changing agent invalidates an in-flight response.
+  $effect(() => {
+    if (sid) return;
+    const selected = agent;
+    const controller = new AbortController();
+    ideas = [];
+    ideasLoading = true;
+    fetch(`/api/zen/ideas?agent=${encodeURIComponent(selected)}`, { signal: controller.signal })
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then((data: { ideas?: unknown }) => {
+        if (!controller.signal.aborted && Array.isArray(data.ideas))
+          ideas = data.ideas.filter((x): x is string => typeof x === 'string').slice(0, 3);
+      })
+      .catch(() => {})
+      .finally(() => { if (!controller.signal.aborted) ideasLoading = false; });
+    return () => controller.abort();
+  });
+
   onMount(() => {
+    if (id === 'new') { input = app.chatDraft; app.chatDraft = ''; }
+    if (app.attachOnOpen) { app.attachOnOpen = false; setTimeout(() => picker_?.click(), 0); }
     zen.models().then((m) => {
       models = m;
       if (!sid && !model) model = m.default;
@@ -1207,7 +1229,7 @@
       {#if earlier > 0}
         <button class="zc-earlier" onclick={showEarlier}>show {Math.min(PAGE, earlier)} earlier · {earlier} not shown</button>
       {/if}
-      <div class="zc-title">── {title || (sid ? short(sid) : agent !== 'zenbot' ? `new session with ${agent}` : 'new session')} ──</div>
+      <div class="zc-title">{title || (sid ? short(sid) : agent !== 'zenbot' ? `new session with ${agent}` : 'new session')}</div>
       {#if !sid && agents.length > 1 && !entries.some((e) => e.k === 'user')}
         <div class="zc-as" role="radiogroup" aria-label="start as">
           <span class="zc-dim">start as</span>
@@ -1216,13 +1238,20 @@
           {/each}
         </div>
       {/if}
+      {#if !sid && !entries.length}
+        <section class="zc-ideas" aria-label="Ideas for a new session">
+          <h2>What would you like to do?</h2>
+          {#if ideasLoading}<p class="zc-dim" role="status">Finding ideas…</p>
+          {:else if ideas.length}<div class="zc-idea-list">{#each ideas as idea}<button onclick={() => setInput(idea)}>{idea}<span aria-hidden="true">↗</span></button>{/each}</div>{/if}
+        </section>
+      {/if}
       {#if failed}<div class="zc-line zc-err">couldn't load the session: {failed}</div>{/if}
       {#each entries as e (e.key)}
         {#if e.k === 'user'}
           {#if e.kernel}
             <div class="zc-kernel">zen › {e.text}</div>
           {:else}
-            <div class="zc-user"><span class="zc-acc">›</span> <span>{e.text}</span></div>
+            <div class="zc-user"><span>{e.text}</span></div>
           {/if}
         {:else if e.k === 'md'}
           <div class="zc-md" use:markdown={e.text}></div>
@@ -1269,7 +1298,7 @@
       <div class="zc-pop" role="listbox" aria-label={picker.title}>
         <div class="zc-dim zc-pophead">{picker.title} <span>· ↑↓ enter · esc</span></div>
         {#each picker.items as it, i}
-          <button class="zc-item" class:zc-on={i === picker.sel} role="option" aria-selected={i === picker.sel} onclick={() => pick(i)} onmouseenter={() => picker && (picker.sel = i)}>{it.label}</button>
+          <button class="zc-item" class:zc-on={i === picker.sel} role="option" aria-selected={i === picker.sel} onclick={() => pick(i)} onpointermove={(e) => { if (picker && (e.movementX || e.movementY)) picker.sel = i; }}>{it.label}</button>
         {/each}
       </div>
     {:else if menu.length && hi < 0}
@@ -1376,6 +1405,13 @@
   .zc-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
   .zc-body { max-width: 860px; margin: 0 auto; padding: 14px 20px 18px; font-size: 15px; line-height: 1.55; }
   .zc-title { color: var(--dim); text-align: center; font-size: 13px; margin: 2px 0 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .zc-ideas { margin: 70px auto 28px; max-width: 650px; }
+  .zc-ideas h2 { font-size: 22px; font-weight: 550; letter-spacing: -0.02em; }
+  .zc-idea-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .zc-idea-list button { display: flex; justify-content: space-between; gap: 10px; text-align: left; padding: 14px; border: 1px solid var(--faint); border-radius: 12px; color: var(--ink); }
+  .zc-idea-list button:hover { border-color: var(--accent); }
+  .zc-idea-list button span { color: var(--dim); }
+  @media (max-width: 600px) { .zc-ideas { margin-top: 32px; } .zc-idea-list { grid-template-columns: 1fr; } }
   .zc-earlier { display: block; margin: 0 auto 8px; color: var(--accent); font-size: 13px; }
   .zc-user { white-space: pre-wrap; overflow-wrap: anywhere; font-weight: 560; margin: 14px 0 10px; }
   .zc-kernel { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--dim); font-size: 13px; margin: 10px 0; }
@@ -1461,6 +1497,24 @@
   .zc-md :global(img) { max-width: 100%; }
   .zc-md :global(.md-display) { overflow-x: auto; }
 
+  /* The conversation stays quiet: user bubbles on the right, responses in the flow. */
+  .zc-body { max-width: 704px; padding-top: 28px; }
+  .zc-title { margin-bottom: 28px; }
+  .zc-user { display: flex; justify-content: flex-end; margin: 22px 0; font-weight: 400; }
+  .zc-user > span { max-width: 82%; padding: 10px 15px; border-radius: 18px 18px 5px 18px; background: color-mix(in srgb, var(--ink) 7%, var(--paper)); }
+  .zc-md { margin: 18px 0 22px; line-height: 1.65; }
+  .zc-dock { max-width: 744px; padding-bottom: 14px; }
+  .zc-compose { display: grid; grid-template-columns: 1fr auto; border-radius: 20px; padding: 14px 12px 9px 16px; box-shadow: 0 4px 16px rgb(0 0 0 / 0.06); }
+  .zc-compose textarea { grid-column: 1 / -1; grid-row: 1; min-height: 40px; }
+  .zc-clip { grid-column: 1; grid-row: 2; }
+  .zc-send { grid-column: 2; grid-row: 2; width: 34px; height: 34px; line-height: 34px; }
+  .zc-status { padding: 8px 4px; color: var(--dim); }
+  .zc-qs { padding: 16px; border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--faint)); border-radius: 16px; background: color-mix(in srgb, var(--warn) 6%, var(--paper)); }
+  .zc-opt { display: inline-block; margin: 8px 6px 0 0; padding: 8px 14px; border: 1px solid var(--faint); border-radius: 99px; }
+  .zc-as button { border-radius: 99px; padding: 7px 14px; }
+  .zc-ideas { text-align: center; }
+  .zc-ideas h2 { font-family: var(--serif, var(--sans)); font-size: 30px; }
+  .zc-idea-list button { min-height: 90px; background: color-mix(in srgb, var(--ink) 3%, var(--paper)); }
   @media (max-width: 600px) {
     .zc-body { padding: 10px 12px 14px; }
     .zc-dock { padding: 0 10px 6px; }

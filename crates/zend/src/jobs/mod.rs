@@ -974,12 +974,13 @@ async fn last_report(app: &AppState, job: &Job, run: i64) -> Result<Option<Strin
 }
 
 /// A run's own session (kind `job`), recorded on the run with the command a script runs.
-async fn run_session(app: &AppState, job: &Job, run: i64, model: &str, workspace: &std::path::Path, command: Option<&str>) -> Result<Uuid> {
+async fn run_session(app: &AppState, job: &Job, run: i64, model: &str, effort: Option<&str>, workspace: &std::path::Path, command: Option<&str>) -> Result<Uuid> {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO sessions (id, title, model, kind, workspace, agent) VALUES ($1, $2, $3, $4, $5, $6)")
+    sqlx::query("INSERT INTO sessions (id, title, model, effort, kind, workspace, agent) VALUES ($1, $2, $3, $4, $5, $6, $7)")
         .bind(id)
         .bind(format!("job: {}", job.name))
         .bind(model)
+        .bind(effort)
         .bind(JOB)
         .bind(workspace.display().to_string())
         .bind(&job.agent)
@@ -1004,7 +1005,7 @@ async fn run_script(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
     let workspace = workspace_of(app, job.workspace.as_deref().or(own.as_deref()));
     let sandbox = who.sandbox();
     let started = std::time::SystemTime::now();
-    let id = run_session(app, job, run, "script", &workspace, Some(&command)).await?;
+    let id = run_session(app, job, run, "script", None, &workspace, Some(&command)).await?;
     tape::append(&app.db, id, "message", &json!({ "role": "user", "content": format!("$ {command}"), "kernel": true, "timestamp": Utc::now().timestamp_millis() })).await?;
     let session = id.to_string();
     let shell = tools::run_shell(&workspace, &command, &[("ZEN_SESSION_ID", session.as_str())], SCRIPT_TIMEOUT, sandbox.as_ref()).await;
@@ -1039,17 +1040,22 @@ async fn run_script(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
 /// The most of a script's output that becomes its report: its head and tail past that.
 const MAX_SCRIPT_REPORT: usize = 60 * 1024;
 
+/// Resolve each run afresh, retaining an explicitly configured job or agent model.
+async fn job_model(app: &AppState, job_model: Option<String>, agent_model: Option<String>) -> (String, Option<String>) {
+    crate::prefs::new_session_defaults(app, job_model.or(agent_model)).await
+}
+
 /// An agent job: a fresh session with the job's instructions and its prompt; the final answer is
 /// the report.
 async fn run_agent(app: &AppState, job: &Job, run: i64) -> Result<Outcome> {
     let who = crate::agents::load(&job.agent)?;
-    let model = job.model.clone().or_else(|| who.model.clone()).unwrap_or_else(|| app.default_model.clone());
+    let (model, effort) = job_model(app, job.model.clone(), who.model.clone()).await;
     let inferred = if job.workspace.is_none() { inferred_workspace(app, job) } else { None };
     let own = who.workspace_dir().map(|w| w.display().to_string());
     let workspace = workspace_of(app, job.workspace.as_deref().or(inferred.as_deref()).or(own.as_deref()));
     // A report file older than this wasn't written by this run.
     let started = std::time::SystemTime::now();
-    let id = run_session(app, job, run, &model, &workspace, None).await?;
+    let id = run_session(app, job, run, &model, effort.as_deref(), &workspace, None).await?;
     let base = job_instructions(app, job, &who, &workspace).await?;
     tape::append(&app.db, id, "base", &json!({ "text": base })).await?;
     let mut prompt = job.prompt.clone().unwrap_or_default();
@@ -1226,6 +1232,23 @@ pub async fn run_tool(app: &AppState, session: Uuid, name: &str, args: &Value) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn job_models_follow_live_preferences_without_overriding_explicit_models() {
+        let (_dir, db) = crate::test_util::database().await;
+        let app = crate::test_util::app(db);
+        app.catalog.lock().await.insert("faux/smoke".into(), json!({ "id": "faux/smoke", "efforts": ["low", "high"] }));
+        app.catalog.lock().await.insert("faux/other".into(), json!({ "id": "faux/other", "efforts": [] }));
+        assert_eq!(job_model(&app, None, None).await, ("faux/smoke".into(), None));
+        crate::prefs::patch(&app, &json!({ "default_model": "faux/smoke", "default_effort": "high" })).await.unwrap();
+        assert_eq!(job_model(&app, None, None).await, ("faux/smoke".into(), Some("high".into())));
+        assert_eq!(job_model(&app, Some("faux/other".into()), Some("faux/smoke".into())).await, ("faux/other".into(), None));
+        assert_eq!(job_model(&app, None, Some("faux/smoke".into())).await, ("faux/smoke".into(), Some("high".into())));
+        crate::prefs::patch(&app, &json!({ "default_model": "faux/other" })).await.unwrap();
+        assert_eq!(job_model(&app, None, None).await, ("faux/other".into(), None));
+        assert_eq!(job_model(&app, Some("faux/smoke".into()), None).await, ("faux/smoke".into(), None));
+        app.db.close().await;
+    }
 
     #[test]
     fn context_always_has_the_soul_and_only_known_parts() {

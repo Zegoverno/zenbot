@@ -1,0 +1,1163 @@
+<script lang="ts">
+  // Chat redesign mock (v2, "two panels"): no sidebar. The chat on the left, one view on the right
+  // (Sessions, Files, Tasks, Agents, Games, the plugins' views) picked from a floating tab bar at
+  // the top centre; clicking the open tab again closes the right panel (focus). Top left, the agent's
+  // circle: click to switch agent (and reach the user and Settings). Bottom right, a quick-control
+  // ring (after Logitech's Actions Ring): one button that fans out the everyday actions.
+  // Panels: Home and the views stand alone (one panel); a chat opens full width, and a tab picked
+  // while in a chat opens beside it (two panels, desktop only).
+  // On a phone, one thing at a time: the tab bar picks a full-screen view, and a chat is reached by
+  // picking it in Sessions; the chat then takes the whole screen, with a back arrow to Sessions.
+  // Fake data; nothing here talks to the kernel. The floating "mock" panel switches states.
+  import { onMount, tick } from 'svelte';
+  import Files from './Files.svelte';
+  import Tasks from './Tasks.svelte';
+  import Agents from './Agents.svelte';
+  import Settings from './Settings.svelte';
+  import Routines from './Routines.svelte';
+  import { failing } from './routinestore.svelte.ts';
+  import Home from './Home.svelte';
+  import { me } from './profilestore.svelte.ts';
+  import { archived, archivedCount, channels, conversation, question, sessions, type Msg, type Session, addToInbox } from './data.ts';
+
+  type State = 'new' | 'chat' | 'working' | 'waiting';
+  let state = $state<State>('chat');
+  let theme = $state<'auto' | 'light' | 'dark'>('auto');
+  let narrow = $state(false);
+  let screen = $state<'home' | 'chat' | 'view'>('home');
+  let view = $state<string | null>(null);
+  let back = $state<'home' | 'view'>('home');
+  let selected = $state('trip');
+  let draft = $state('');
+  // Model and effort, from the kernel's /api/zen/models (a trimmed copy here): each model has its
+  // own effort levels and default; "Default" follows the model's. Grouped by provider, the less
+  // used ones behind "More models".
+  type Model = { id: string; name: string; group: string; hint: string; efforts: string[]; def: string; more?: boolean };
+  const MODELS: Model[] = [
+    { id: 'claude/claude-opus-5-5', name: 'Opus 5.5', group: 'Claude', hint: 'Smartest, for hard problems', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], def: 'medium' },
+    { id: 'claude/claude-sonnet-5-5', name: 'Sonnet 5.5', group: 'Claude', hint: 'Great for most things', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], def: 'high' },
+    { id: 'claude/claude-haiku-5-5', name: 'Haiku 5.5', group: 'Claude', hint: 'Fast and cheap', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], def: 'medium' },
+    { id: 'codex/gpt-6.2-sol', name: 'GPT-6.2 Sol', group: 'OpenAI', hint: 'Newest from OpenAI', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], def: 'low' },
+    { id: 'codex/gpt-6.2-astra', name: 'GPT-6.2 Astra', group: 'OpenAI', hint: 'Lighter and quicker', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], def: 'low' },
+    { id: 'codex/gpt-6.1-terra', name: 'GPT-6.1 Terra', group: 'OpenAI', hint: '', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], def: 'low', more: true },
+    { id: 'codex/gpt-6-sol', name: 'GPT-6 Sol', group: 'OpenAI', hint: '', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], def: 'medium', more: true },
+    { id: 'codex/gpt-5.6-luna', name: 'GPT-5.6 Luna', group: 'OpenAI', hint: '', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], def: 'medium', more: true },
+  ];
+  const DEFAULT_MODEL = 'claude/claude-sonnet-5-5';
+  const EFFORT: Record<string, [string, string]> = {
+    low: ['Low', 'Quick replies'], medium: ['Medium', 'Everyday tasks'], high: ['High', 'Thinks it through'],
+    xhigh: ['Extra high', 'Careful, slower'], max: ['Max', 'Hardest problems'], ultra: ['Ultra', 'Longest thinking'],
+  };
+  let modelId = $state(DEFAULT_MODEL);
+  let effort = $state<string | null>(null);
+  let pop = $state<'model' | 'effort' | null>(null);
+  let moreModels = $state(false);
+  const model = $derived(MODELS.find((m) => m.id === modelId)!);
+  const effortShown = $derived(effort ?? model.def);
+  function setModel(m: Model) {
+    modelId = m.id;
+    if (effort && !m.efforts.includes(effort)) effort = null;
+    pop = null;
+  }
+  let details = $state(false);
+  let agentMenu = $state(false);
+  let ring = $state(false);
+  let hover = $state('');
+  let showArchived = $state(false);
+  let open = $state<Record<number, boolean>>({});
+
+  // The right panel's share of the width, dragged on the gutter (as Shell.svelte's side panel) and
+  // kept across visits; double-click or Enter resets it.
+  const SIDE_KEY = 'zen.mock.side';
+  const clamp = (f: number) => Math.min(0.75, Math.max(0.25, f));
+  let side = $state(clamp(Number(localStorage.getItem(SIDE_KEY)) || 0.45));
+  let stage: HTMLElement | undefined = $state();
+  let dragging = $state(false);
+  const keepSide = () => localStorage.setItem(SIDE_KEY, String(side));
+  function grab(e: PointerEvent) {
+    if (!stage || e.button !== 0) return;
+    e.preventDefault();
+    const bar = e.currentTarget as HTMLElement;
+    bar.setPointerCapture(e.pointerId);
+    dragging = true;
+    const box = stage.getBoundingClientRect();
+    const move = (m: PointerEvent) => (side = clamp((box.right - 14 - m.clientX) / (box.width - 28)));
+    const drop = () => {
+      dragging = false;
+      bar.removeEventListener('pointermove', move);
+      bar.removeEventListener('pointerup', drop);
+      bar.removeEventListener('pointercancel', drop);
+      keepSide();
+    };
+    bar.addEventListener('pointermove', move);
+    bar.addEventListener('pointerup', drop);
+    bar.addEventListener('pointercancel', drop);
+  }
+  function nudge(e: KeyboardEvent) {
+    const step = e.shiftKey ? 0.1 : 0.02;
+    if (e.key === 'ArrowLeft') side = clamp(side + step);
+    else if (e.key === 'ArrowRight') side = clamp(side - step);
+    else if (e.key === 'Home' || e.key === 'Enter') side = 0.45;
+    else return;
+    e.preventDefault();
+    keepSide();
+  }
+
+  const AGENTS = [
+    { id: 'zenbot', name: 'zenbot', role: 'Chief of staff', a: '#4f7d67', b: '#8fb39f' },
+    { id: 'garry', name: 'Garry', role: 'Startup advisor', a: '#7a6a9b', b: '#b3a3cf' },
+  ];
+  let agent = $state(AGENTS[0]);
+  /** The agent this chat talks to: a new chat starts with the top picker's agent and can switch. */
+  let talk = $state(AGENTS[0]);
+  let draft_el: HTMLTextAreaElement | undefined = $state();
+
+  // New chat: three suggestions written by the cheapest model from recent sessions and the agent.
+  // The page and the composer show at once; the cards load after, with a shimmer, and never block
+  // typing. The real app would call a kernel endpoint on the Fast tier, cached per agent for a while.
+  type Sugg = { title: string; why: string; prompt: string };
+  const SUGG: Record<string, Sugg[]> = {
+    zenbot: [
+      { title: 'Finish the Campos do Jordão booking', why: 'The weekend plan is waiting on a hotel', prompt: 'Book Pousada Villa Bella for Fri 21 – Sun 23, with a crib.' },
+      { title: 'Shopping list for the week', why: 'From the baby-friendly recipes you saved', prompt: 'Make a shopping list for this week from the recipes I liked.' },
+      { title: 'Plan Mom’s birthday call', why: 'Her birthday is today', prompt: 'Help me plan something nice for Mom’s birthday today.' },
+    ],
+    garry: [
+      { title: 'Pressure-test the zenfitness offer', why: 'You talked pricing on Monday', prompt: 'Challenge my zenfitness pricing: who pays, how much, and why now?' },
+      { title: 'Ten customer interviews this month', why: 'No interviews logged since October', prompt: 'Help me find and book ten customer interviews this month.' },
+      { title: 'Draft a one-line pitch', why: 'From your recent startup notes', prompt: 'Draft three one-line pitches for my project and rank them.' },
+    ],
+  };
+  let sugg = $state<Sugg[] | null>(null);
+  let suggFor = '';
+  function loadSugg(id: string) {
+    if (suggFor === id && sugg) return;
+    suggFor = id;
+    sugg = null;
+    setTimeout(() => { if (suggFor === id) sugg = SUGG[id] ?? []; }, 1400 + Math.random() * 1200);
+  }
+  function chooseTalk(a: (typeof AGENTS)[number]) {
+    talk = a;
+    loadSugg(a.id);
+    draft_el?.focus();
+  }
+
+  const TABS = [
+    { key: 'sessions', label: 'Sessions' }, { key: 'files', label: 'Files' }, { key: 'tasks', label: 'Tasks' }, { key: 'routines', label: 'Routines' },
+    { key: 'agents', label: 'Agents' }, { key: 'games', label: 'Games' },
+  ];
+  // Read and Write aren't tabs: zenread and zenwrite open a note from Files (their openers).
+  const waiting = sessions.filter((s) => s.state === 'waiting').length;
+
+  // Line icons, 24×24, stroked with currentColor.
+  const ICONS: Record<string, string> = {
+    chat: '<path d="M4 5h16v11H9l-5 4z"/>',
+    home: '<path d="M4 11l8-6 8 6v8a1 1 0 0 1-1 1h-4v-5h-6v5H5a1 1 0 0 1-1-1z"/>',
+    sessions: '<rect x="4" y="4" width="16" height="6" rx="2"/><rect x="4" y="14" width="16" height="6" rx="2"/>',
+    files: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+    tasks: '<path d="M9 11l2 2 4-4"/><rect x="4" y="4" width="16" height="16" rx="3"/>',
+    agents: '<circle cx="9" cy="9" r="3"/><circle cx="17" cy="10" r="2.2"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0M14.5 19a3.5 3.5 0 0 1 6 0"/>',
+    routines: '<circle cx="12" cy="12" r="8"/><path d="M12 8v4l2.5 2.5"/><path d="M4 4l2 2M20 4l-2 2"/>',
+    games: '<rect x="3" y="7" width="18" height="11" rx="4"/><path d="M8 11v3M6.5 12.5h3"/><circle cx="15.5" cy="12" r=".6"/><circle cx="17.5" cy="14" r=".6"/>',
+    read: '<path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H11v16H5.5A1.5 1.5 0 0 1 4 18.5zM20 5.5A1.5 1.5 0 0 0 18.5 4H13v16h5.5a1.5 1.5 0 0 0 1.5-1.5z"/>',
+    write: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>',
+    settings: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    task: '<path d="M9 11l2 2 4-4"/><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M18 2v4M16 4h4"/>',
+    sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+    search: '<circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/>',
+    split: '<rect x="3" y="5" width="18" height="14" rx="3"/><path d="M12 5v14"/>',
+    focus: '<rect x="3" y="5" width="18" height="14" rx="3"/>',
+    theme: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',
+    clip: '<path d="M20 11.5l-8 8a5 5 0 0 1-7-7l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7L9.7 17.2a1.7 1.7 0 0 1-2.4-2.4l7.7-7.7"/>',
+    stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
+    ring: '<circle cx="12" cy="12" r="2.5"/><circle cx="12" cy="4.5" r="1.3"/><circle cx="19.5" cy="12" r="1.3"/><circle cx="12" cy="19.5" r="1.3"/><circle cx="4.5" cy="12" r="1.3"/>',
+  };
+
+  const current = $derived([...channels, ...handed, ...sessions, ...archived].find((s) => s.id === selected) ?? sessions[0]);
+  const msgs = $derived<Msg[]>(state === 'new' ? [] : briefs[selected]
+    ? [{ k: 'user', text: briefs[selected], time: 'now' }, ...(state === 'waiting' ? [taskAsk] : [])]
+    : state === 'waiting' ? [...conversation, question] : conversation);
+  /** A handed task waiting on you asks about the task, not the trip. */
+  const taskAsk: Msg = { k: 'ask', question: 'Dr. Lima has Tue 25 at 9:00 or Wed 26 at 14:30. Which should I book?', options: ['Tue 25 at 9:00', 'Wed 26 at 14:30', 'Neither, find another day'] };
+  const tabs = [{ key: 'home', label: 'Home' }, ...TABS];
+  const split = $derived(screen === 'chat' && !narrow && view !== null);
+  const showView = $derived(screen === 'view' || split);
+  const tabOn = (k: string) => (k === 'home' ? screen === 'home' : screen !== 'home' && view === k);
+
+  /** The quick-control ring's actions, fanned out on a quarter circle up and to the left. */
+  const actions = $derived([
+    { key: 'plus', label: 'New chat', run: () => newChat() },
+    { key: 'search', label: 'Search files', run: () => openAndFocus('files', '.fsearch input') },
+    { key: 'clip', label: 'Attach a file', run: () => filePick?.click() },
+    { key: 'task', label: 'Add a task', run: () => openAndFocus('tasks', '.add input') },
+    { key: dark ? 'sun' : 'theme', label: dark ? 'Light mode' : 'Dark mode', run: () => (theme = dark ? 'light' : 'dark') },
+    { key: 'settings', label: 'Settings', run: () => openTab('settings') },
+  ]);
+  /** Open a tab (beside the chat when one is open) and put the cursor in its field. */
+  /** Open a tab, never toggling it shut (menu and ring shortcuts). */
+  function openTab(tab: string) { if (!tabOn(tab)) pickTab(tab); }
+  function openAndFocus(tab: string, sel: string) {
+    openTab(tab);
+    tick().then(() => setTimeout(() => (document.querySelector(sel) as HTMLElement | null)?.focus(), 30));
+  }
+  // The theme as shown: auto follows the system until the ring's toggle picks light or dark.
+  let sysDark = $state(matchMedia('(prefers-color-scheme: dark)').matches);
+  const dark = $derived(theme === 'dark' || (theme === 'auto' && sysDark));
+  // Attach: the ring and the composer's clip share one file picker; files go to the open chat's
+  // message, else a new chat starts with them.
+  let filePick = $state<HTMLInputElement>();
+  let attached = $state<string[]>([]);
+  /** A chip's file in Files, beside the chat. */
+  let reveal = $state<{ path: string; n: number; open?: boolean; edit?: boolean }>({ path: '', n: 0 });
+  function showFile(p: string, how: { open?: boolean; edit?: boolean } = {}) {
+    const from = tabOn('settings') ? 'settings' : null;
+    if (!tabOn('files')) pickTab('files');
+    filesFrom = from;
+    reveal = { path: p, n: reveal.n + 1, ...how };
+  }
+  function picked(e: Event) {
+    const fs = [...((e.target as HTMLInputElement).files ?? [])];
+    (e.target as HTMLInputElement).value = '';
+    if (!fs.length) return;
+    if (screen !== 'chat') openChat('new');
+    attached = [...attached, ...fs.map((f) => addToInbox(f.name, undefined, URL.createObjectURL(f)))];
+    tick().then(() => draft_el?.focus());
+  }
+  const R = 156;
+  const at = (i: number, n: number) => {
+    const a = Math.PI + (i * (Math.PI / 2)) / (n - 1);
+    return `translate(${Math.cos(a) * R}px, ${Math.sin(a) * R}px)`;
+  };
+
+  /** Where Files was opened from (Settings › You, Memory), for its "‹ Settings" button. */
+  let filesFrom = $state<string | null>(null);
+  /** The mock's own switcher folds to a chip on a phone. */
+  let mockOpen = $state(false);
+  function pickTab(k: string) {
+    filesFrom = null;
+    if (k === 'home') { screen = 'home'; view = null; }
+    else if (screen === 'chat' && !narrow) view = view === k ? null : k;
+    else { screen = 'view'; view = k; }
+  }
+  function openChat(st: State) {
+    if (screen !== 'chat') back = screen;
+    state = st;
+    screen = 'chat';
+    if (st === 'new') chooseTalk(agent);
+    if (back === 'home' || narrow) view = null;
+  }
+  function pick(s: Session) {
+    selected = s.id;
+    openChat(s.state === 'working' ? 'working' : s.state === 'waiting' ? 'waiting' : 'chat');
+  }
+  /** From Home: a widget's row opens its chat. */
+  function openById(id: string) {
+    const s = [...channels, ...sessions, ...archived].find((x) => x.id === id);
+    if (s) pick(s);
+  }
+  /** Files' "Ask zenbot": beside a chat, the note goes into its message box; else a new chat starts with it. */
+  function askAbout(path: string) {
+    if (screen !== 'chat' || narrow) openChat('new');
+    draft = `About \`${path}\`: `; tick().then(() => { draft_el?.focus(); draft_el?.setSelectionRange(draft.length, draft.length); });
+  }
+  /** Tasks' "Hand to <agent>", as the kernel does it (POST /api/tasks/{id}/agent): a new session,
+   *  titled by the task, starts working on its brief at once; the task keeps the session id, so
+   *  handing it again (or clicking its status) opens that chat. Tasks stays beside it. */
+  let handed = $state<Session[]>(JSON.parse(sessionStorage.getItem('zen.mock.handed2') ?? 'null') ?? [
+    { id: 'task-a8', title: 'Renew car insurance', when: '8:10', state: 'working' },
+    { id: 'task-a7', title: 'Paediatrician: 6-month check-up', when: 'Tue', state: 'waiting' },
+  ]);
+  let briefs = $state<Record<string, string>>(JSON.parse(sessionStorage.getItem('zen.mock.briefs2') ?? 'null') ?? {
+    'task-a8': 'Task from House: Renew car insurance (due 2026-11-30). Work on it and tell me what you need.',
+    'task-a7': 'Task from Family: Paediatrician: 6-month check-up (due 2026-11-26), for the goal “A present and courageous family life”. Work on it and tell me what you need.',
+  });
+  $effect(() => { sessionStorage.setItem('zen.mock.handed2', JSON.stringify(handed)); sessionStorage.setItem('zen.mock.briefs2', JSON.stringify(briefs)); });
+  function handTask(t: { id: string; text: string; project: string; due: string | null; goal: string | null }) {
+    const id = `task-${t.id}`;
+    if (!handed.some((x) => x.id === id)) {
+      handed.unshift({ id, title: t.text, when: 'now', state: 'working' });
+      briefs[id] = `Task from ${t.project}: ${t.text}${t.due ? ` (due ${t.due})` : ''}${t.goal ? `, for the goal “${t.goal}”` : ''}. Work on it and tell me what you need.`;
+    }
+    openTaskChat(id);
+    return id;
+  }
+  function openTaskChat(id: string) {
+    const s = handed.find((x) => x.id === id);
+    if (!s) return;
+    selected = id;
+    openChat(s.state === 'working' ? 'working' : s.state === 'waiting' ? 'waiting' : 'chat');
+  }
+  /** Agents' asks ("Ask zenbot to change it", "New agent"): a new chat with the request started. */
+  /** Creating agents and roles always goes to zenbot: only it can set agents up (it knows how). */
+  function askAgent(text: string) {
+    openChat('new');
+    chooseTalk(AGENTS[0]);
+    draft = text; tick().then(() => { draft_el?.focus(); draft_el?.setSelectionRange(draft.length, draft.length); });
+  }
+  function newChat() {
+    openChat('new');
+  }
+  function goBack() {
+    screen = back;
+    if (back === 'home') view = null;
+  }
+  function cycleTheme() {
+    theme = theme === 'auto' ? 'dark' : theme === 'dark' ? 'light' : 'auto';
+  }
+  function key(e: KeyboardEvent) {
+    if (e.key === 'Escape') { ring = false; agentMenu = false; details = false; pop = null; }
+    // Hold-free shortcut for the ring, as the mouse button would be on a Logitech mouse.
+    if (e.key === '.' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); ring = !ring; }
+  }
+
+  onMount(() => {
+    const mq = matchMedia('(max-width: 900px)');
+    const fit = () => (narrow = mq.matches);
+    fit();
+    mq.addEventListener('change', fit);
+    return () => mq.removeEventListener('change', fit);
+  });
+
+  // Working: the live line under the conversation opens into every step so far, the current one
+  // last, plus the subagents and their current step. New steps stream in (faked here on a
+  // timer); the panel stays open while it works and folds into the usual "N steps" line when done.
+  type Live = { label: string; detail: string; t: string; failed?: boolean };
+  const QUEUE: Live[] = [
+    { label: 'Read your message', detail: 'Two adults and a baby, Fri 21 – Sun 23', t: '0:02' },
+    { label: 'Searched the web', detail: 'Pousada Villa Bella availability November', t: '0:09' },
+    { label: 'Opened a page', detail: 'pousadavillabella.com.br · Rooms', t: '0:21' },
+    { label: 'Started a subagent', detail: 'Compare prices on Booking and Airbnb', t: '0:24' },
+    { label: 'Opened a page', detail: 'booking.com · Pousada Villa Bella', t: '0:38', failed: true },
+    { label: 'Tried another way', detail: 'Called the pousada’s booking form instead', t: '0:47' },
+    { label: 'Checked the calendar', detail: 'Fri 21 – Sun 23 Nov is free', t: '0:55' },
+    { label: 'Checking availability', detail: 'Family suite with a crib, 2 nights', t: '1:04' },
+  ];
+  const SUBAGENTS = [
+    { name: 'Price check', role: 'researcher', model: 'Haiku 5.5', task: 'Compare prices for 2 nights, Fri 21 – Sun 23, family suite with a crib: Booking and Airbnb near Capivari.', step: 'Reading Airbnb listings near Capivari…', t: '0:40', steps: [
+      ['Searched', 'Booking.com · Pousada Villa Bella', '0:26'], ['Opened a page', 'booking.com · didn’t load', '0:31'],
+      ['Searched', 'Airbnb · Capivari, 2 nights', '0:35'], ['Reading', 'Airbnb listings near Capivari', '0:40']] },
+    { name: 'Weather', role: 'researcher', model: 'Haiku 5.5', task: 'Weather in Campos do Jordão, Fri 21 – Sun 23 November.', result: 'Cold nights, around 8 °C. Sunny Saturday, light rain possible Sunday afternoon. Pack warm clothes for the baby.', step: 'Done · Cold nights, 8 °C', t: '0:12', done: true, steps: [
+      ['Opened a page', 'climatempo.com.br · Campos do Jordão', '0:06'], ['Summarized', 'Cold nights, 8 °C; sunny Saturday', '0:12']] },
+  ];
+  let hOpen = $state<Record<number, boolean>>({});
+  /** The subagent whose session is open in the right panel (phone: full screen). */
+  let subIx = $state(0);
+  const sub = $derived(SUBAGENTS[subIx] ?? SUBAGENTS[0]);
+  function openSub(k: number) {
+    subIx = k;
+    if (narrow) { screen = 'view'; view = 'subagent'; }
+    else view = view === 'subagent' && subIx === k && screen === 'chat' ? view : 'subagent';
+  }
+  function closeSub() {
+    if (narrow || screen === 'view') { screen = 'chat'; view = null; } else view = null;
+  }
+  let liveN = $state(5);
+  let liveOpen = $state(false);
+
+  // Rename: the header title turns into a field; Enter saves, Esc cancels.
+  let titles = $state<Record<string, string>>({});
+  const titleOf = (s: Session) => titles[s.id] ?? s.title;
+  let renaming = $state(false);
+  let nameDraft = $state('');
+  function startRename() { nameDraft = titleOf(current); renaming = true; details = false; }
+  function saveRename() { if (nameDraft.trim()) titles[current.id] = nameDraft.trim(); renaming = false; }
+
+  // Archive: how did it end? "Done" is preselected; the picker changes it.
+  const OUTCOMES = [
+    { v: 'done', l: 'Done', h: 'The job is done' },
+    { v: 'partial', l: 'Part done', h: 'Continue in a new chat that picks up from here' },
+    { v: 'not-done', l: 'Not done', h: 'Stop here' },
+    { v: '-', l: 'Just archive', h: 'Don’t say how it ended' },
+  ];
+  let outcome = $state('done');
+  let outcomeOpen = $state(false);
+  let gone = $state<Record<string, string>>({});
+  let toast = $state<{ text: string; undo?: () => void } | null>(null);
+  let toastTimer: ReturnType<typeof setTimeout> | undefined;
+  function say(text: string, undo?: () => void) { toast = { text, undo }; clearTimeout(toastTimer); toastTimer = setTimeout(() => (toast = null), 6000); }
+  function archiveChat() {
+    const id = current.id, o = OUTCOMES.find((x) => x.v === outcome)!;
+    gone[id] = outcome; details = false; outcomeOpen = false;
+    if (outcome === 'partial') { openChat('new'); say(`Archived as part done · a new chat continues it`, () => { delete gone[id]; selected = id; openChat('chat'); }); }
+    else { closeChat(true); say(outcome === '-' ? 'Archived' : `Archived as ${o.l.toLowerCase()}`, () => { delete gone[id]; selected = id; openChat('chat'); }); }
+    outcome = 'done';
+  }
+
+  // Close the chat (×): a side view (Tasks, Files…) takes the page; otherwise, including when a
+  // subagent panel is open (it closes with its chat), you land on Sessions.
+  const closeTitle = $derived(split && view !== 'subagent' ? `Close the chat, keep ${view}` : 'Close the chat, back to Sessions');
+  function closeChat(all = false) {
+    if (split && view !== 'subagent') { screen = 'view'; return; }
+    screen = 'view'; view = 'sessions';
+  }
+  // Answering the question: the card folds to your answer, zenbot works briefly, then replies.
+  let answered = $state<string | null>(null);
+  let answerPhase = $state<'working' | 'done'>('working');
+  let answerTimer: ReturnType<typeof setTimeout> | undefined;
+  const REPLIES: Record<string, { work?: string; steps?: [string, string][]; html: string }> = {
+    'Yes, book it': { work: 'Booked Pousada Villa Bella', steps: [['Opened a page', 'pousadavillabella.com.br · Booking'], ['Filled the form', 'Family suite with a crib, Fri 21 – Sun 23'], ['Paid', 'Card ending 4417 · R$ 1.780']],
+      html: '<p>Done. <b>Pousada Villa Bella</b> is booked for Fri 21 – Sun 23: family suite with a crib, R$ 1.780 for both nights.</p><p>The confirmation is in your email, and you can cancel for free until Wednesday.</p>' },
+    'Show me other options': { work: 'Compared 2 more hotels', steps: [['Searched the web', 'Family hotels Campos do Jordão, cribs'], ['Opened a page', 'Hotel Frontenac · Rooms'], ['Opened a page', 'Pousada Recanto da Serra · Rooms']],
+      html: '<p>Two more that take babies well:</p><p><b>Hotel Frontenac</b>: right in Capivari, crib included, R$ 1.150 a night. Busier and louder at night.</p><p><b>Pousada Recanto da Serra</b>: quiet, with a garden for walks, R$ 760 a night. A 10-minute drive to the centre.</p><p>Villa Bella is still my pick. Want me to book one of these instead?</p>' },
+    'Not now': { html: '<p>Okay, I won\'t book anything. The plan stays in this chat, so just ask when you\'re ready. Rooms for that weekend are going fast, though.</p>' },
+  };
+  const reply = $derived(answered ? (REPLIES[answered] ?? { html: `<p>Got it: “${answered}”. I'll take that into account and come back with an updated plan.</p>` }) : null);
+  function answer(text: string) {
+    if (!text.trim()) return;
+    answered = text.trim(); draft = ''; answerPhase = REPLIES[answered]?.work ? 'working' : 'done';
+    clearTimeout(answerTimer);
+    if (answerPhase === 'working') answerTimer = setTimeout(() => (answerPhase = 'done'), 2400);
+  }
+  $effect(() => { void state; void selected; answered = null; clearTimeout(answerTimer); });
+  const shown = $derived(state === 'waiting' && answered ? (answerPhase === 'working' ? 'working' : 'chat') : state);
+  // Opening a chat (or switching chat or state) lands on its last message.
+  let scroller: HTMLElement | undefined = $state();
+  $effect(() => {
+    void selected; void state; void answered; void answerPhase;
+    if (screen !== 'chat' || !scroller) return;
+    tick().then(() => scroller && (scroller.scrollTop = scroller.scrollHeight));
+  });
+
+  // Keep where you are across a refresh (this tab only): screen, open view, chat and its state.
+  const PLACE_KEY = 'zen.mock.place';
+  try {
+    const p = JSON.parse(sessionStorage.getItem(PLACE_KEY) ?? 'null');
+    if (p) {
+      ({ screen, view, back, state, selected, liveOpen } = p);
+      subIx = p.subIx ?? 0;
+      if (screen === 'chat' && state === 'new') queueMicrotask(() => chooseTalk(agent));
+    }
+  } catch {}
+  $effect(() => {
+    sessionStorage.setItem(PLACE_KEY, JSON.stringify({ screen, view, back, state, selected, liveOpen, subIx }));
+  });
+  // A handed task's chat streams generic steps, not the trip's.
+  const TASKQ: Live[] = [
+    { label: 'Read the task', detail: 'From the project’s tasks.md', t: '0:01' },
+    { label: 'Read the project note', detail: 'Purpose, status and recent notes', t: '0:06' },
+    { label: 'Searched your notes', detail: 'Anything already known about it', t: '0:14' },
+    { label: 'Checked your calendar', detail: 'Free slots before the due date', t: '0:22' },
+    { label: 'Drafting a plan', detail: 'Steps, and what it needs from you', t: '0:31' },
+  ];
+  const live = $derived((briefs[selected] ? TASKQ : QUEUE).slice(0, liveN));
+  /** Subagents shown in the working panel: the trip demo's; a handed task's chat has none. */
+  const subs = $derived(briefs[selected] ? [] : SUBAGENTS);
+  $effect(() => {
+    if (state !== 'working') { liveN = 5; return; }
+    const id = setInterval(() => { liveN = liveN >= QUEUE.length ? 5 : liveN + 1; }, 2600);
+    return () => clearInterval(id);
+  });
+
+  $effect(() => {
+    const r = document.documentElement;
+    if (theme === 'auto') r.removeAttribute('data-theme');
+    else r.setAttribute('data-theme', theme);
+  });
+</script>
+
+<svelte:window onkeydown={key} />
+
+{#snippet ico(name: string)}
+  <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">{@html ICONS[name]}</svg>
+{/snippet}
+
+{#snippet vclose()}
+  {#if split}<button class="icon vclose" title="Close the panel" aria-label="Close the panel" onclick={() => (view = null)}>×</button>{/if}
+{/snippet}
+
+{#snippet row(s: Session)}
+  <button class="srow" class:on={state !== 'new' && selected === s.id} onclick={() => pick(s)}>
+    <span class="t">{titleOf(s)}</span>
+    {#if s.state === 'working'}<span class="tag work"><span class="dot work"></span>working</span>
+    {:else if s.state === 'waiting'}<span class="tag wait"><span class="dot wait"></span>needs you</span>
+    {:else}<span class="when">{s.when}</span>{/if}
+  </button>
+{/snippet}
+
+<!-- top: the agent, the tabs -->
+<div class="top" class:hide={narrow && screen === 'chat'}>
+  <div class="agent-wrap">
+    <button class="agent" onclick={() => (agentMenu = !agentMenu)} aria-expanded={agentMenu} title="Switch agent">
+      <span class="orb" class:busy={state === 'working'} style="--a:{agent.a}; --b:{agent.b}">{agent.name[0].toUpperCase()}</span>
+      <span class="aname">{agent.name}<span class="chev">▾</span></span>
+    </button>
+    {#if agentMenu}
+      <div class="menu amenu">
+        <div class="mlabel">Agents</div>
+        {#each AGENTS as a}
+          <button class="arow" class:sel={a.id === agent.id} onclick={() => { agent = a; agentMenu = false; if (state === 'new') chooseTalk(a); }}>
+            <span class="orb sm" style="--a:{a.a}; --b:{a.b}">{a.name[0].toUpperCase()}</span>
+            <span class="ameta"><b>{a.name}</b><span>{a.role}</span></span>
+            {#if a.id === agent.id}<span class="tick">✓</span>{/if}
+          </button>
+        {/each}
+        <hr />
+        <div class="me"><span class="av">{me.name[0]?.toUpperCase()}</span><span class="name">{me.name}</span>
+          <button class="icon" title="Settings" onclick={() => { openTab('settings'); agentMenu = false; }}>{@render ico('settings')}</button>
+        </div>
+      </div>
+    {/if}
+  </div>
+
+  <nav class="tabs" aria-label="Views">
+    {#each tabs as t}
+      <button class="tab" class:on={tabOn(t.key)} onclick={() => pickTab(t.key)} title={split && view === t.key ? 'Close the panel' : t.label}>
+        {@render ico(t.key)}<span class="tl">{t.label}</span>
+        {#if t.key === 'sessions' && waiting}<span class="badge">{waiting}</span>{/if}
+        {#if t.key === 'routines' && failing().length}<span class="badge bad" title="{failing().length} routine failed">{failing().length}</span>{/if}
+      </button>
+    {/each}
+  </nav>
+</div>
+
+<div class="stage" class:split class:dragging bind:this={stage} style={split ? `grid-template-columns: minmax(0, ${1 - side}fr) 14px minmax(0, ${side}fr)` : undefined}>
+  <!-- left: the chat -->
+  {#if screen === 'home'}
+    <section class="pane"><Home {narrow} onopen={openById} ontab={pickTab} /></section>
+  {/if}
+
+  {#if screen === 'chat'}
+    <section class="pane chat">
+      <header class="hd">
+        {#if narrow}<button class="icon back" title="Back" aria-label="Back" onclick={goBack}>‹</button>{/if}
+        {#if renaming}
+          <!-- svelte-ignore a11y_autofocus -->
+          <input class="rename" bind:value={nameDraft} autofocus aria-label="Chat name"
+            onkeydown={(e) => { if (e.key === 'Enter') saveRename(); if (e.key === 'Escape') { e.stopPropagation(); renaming = false; } }} onblur={saveRename} />
+        {:else}
+          <h1 ondblclick={() => state !== 'new' && startRename()} title={state !== 'new' ? 'Double-click to rename' : undefined}>{state === 'new' ? 'New chat' : titleOf(current)}</h1>
+        {/if}
+        {#if shown === 'working'}<span class="tag work"><span class="dot work"></span>working</span>
+        {:else if shown === 'waiting'}<span class="tag wait"><span class="dot wait"></span>needs you</span>{/if}
+        <span class="sp"></span>
+        {#if state !== 'new'}
+          <div class="menu-wrap">
+            <button class="icon" title="Details" onclick={() => (details = !details)}>⋯</button>
+            {#if details}
+              <div class="menu right">
+                <div class="row"><span>Model</span><b>claude-opus-5-5</b></div>
+                <div class="row"><span>Effort</span><b>medium</b></div>
+                <div class="row"><span>Context</span><b>104k tokens</b></div>
+                <div class="row"><span>Session</span><b>9e133506</b></div>
+                <hr />
+                <button onclick={startRename}>Rename</button>
+                <div class="archrow">
+                  <span>Archive as</span>
+                  <button class="oc" aria-haspopup="listbox" aria-expanded={outcomeOpen} onclick={() => (outcomeOpen = !outcomeOpen)}>{OUTCOMES.find((x) => x.v === outcome)?.l} <span class="car">▾</span></button>
+                  <button class="archgo" onclick={archiveChat}>Archive</button>
+                </div>
+                {#if outcomeOpen}
+                  <div class="ocs" role="listbox">
+                    {#each OUTCOMES as o}
+                      <button class="mopt" role="option" aria-selected={o.v === outcome} class:sel={o.v === outcome} onclick={() => { outcome = o.v; outcomeOpen = false; }}><b>{o.l}</b><span>{o.h}</span></button>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            {/if}
+          </div>
+        {/if}
+        {#if !narrow}<button class="icon close" title={closeTitle} aria-label={closeTitle} onclick={() => closeChat()}>×</button>{/if}
+      </header>
+
+      <div class="scroll" bind:this={scroller}>
+        {#if state === 'new'}
+          <div class="hello">
+            <h2>Good morning, {me.name}</h2>
+            <p>Who do you want to talk to?</p>
+            <div class="who" role="radiogroup" aria-label="Agent">
+              {#each AGENTS as a}
+                <button class="pick" class:sel={a.id === talk.id} role="radio" aria-checked={a.id === talk.id} onclick={() => chooseTalk(a)}>
+                  <span class="orb" style="--a:{a.a}; --b:{a.b}">{a.name[0].toUpperCase()}</span>
+                  <span class="pn"><b>{a.name}</b><span>{a.role}</span></span>
+                </button>
+              {/each}
+            </div>
+            <div class="sgh">
+              Ideas for you
+              {#if !sugg}<span class="think" aria-live="polite"><i></i><i></i><i></i> {talk.name} is thinking of a few</span>{/if}
+            </div>
+            <div class="cards">
+              {#if sugg}
+                {#each sugg as g, i (g.title)}
+                  <button class="idea" style="animation-delay:{i * 70}ms" onclick={() => { draft = g.prompt; draft_el?.focus(); }}>
+                    <b>{g.title}</b><span>{g.why}</span>
+                  </button>
+                {/each}
+              {:else}
+                {#each [0, 1, 2] as i}<div class="idea skel" aria-hidden="true"><i></i><i></i></div>{/each}
+              {/if}
+            </div>
+          </div>
+        {:else}
+          <div class="body">
+            {#each msgs as m, i}
+              {#if m.k === 'user'}
+                <div class="u"><div class="bubble">{m.text}</div></div>
+              {:else if m.k === 'bot'}
+                <div class="prose">{@html m.html}</div>
+              {:else if m.k === 'work'}
+                <div class="w">
+                  <button class="wline" onclick={() => (open[i] = !open[i])}>
+                    <span class="chk" class:bad={m.steps.some((s) => s.failed)}>{m.steps.some((s) => s.failed) ? '!' : '✓'}</span>
+                    {m.summary}<span class="n">· {m.steps.length} steps</span><span class="car">{open[i] ? '▾' : '▸'}</span>
+                  </button>
+                  {#if open[i]}
+                    <ol class="steps">
+                      {#each m.steps as s}<li class:bad={s.failed}><b>{s.label}</b> <span>{s.detail}</span>{#if s.failed} · didn't work{/if}</li>{/each}
+                    </ol>
+                  {/if}
+                </div>
+              {:else if m.k === 'ask'}
+                {#if answered}
+                  <div class="askq done">
+                    <span class="q">{m.question}</span>
+                    <span class="ans">✓ {answered}</span>
+                  </div>
+                  {#if answerPhase === 'working'}
+                    <div class="livew"><div class="lrow"><span class="orb xs busy" style="--a:{agent.a}; --b:{agent.b}"></span><span class="lt"><b>{reply?.steps?.[0][0]}</b>{" "}<span class="ld">{reply?.steps?.[0][1]}</span>…</span><span class="lm">0:02</span></div></div>
+                  {:else}
+                    {#if reply?.work}
+                      <div class="w">
+                        <button class="wline" onclick={() => (open[999] = !open[999])}>
+                          <span class="chk">✓</span>{reply.work}<span class="n">· {reply.steps?.length} steps</span><span class="car">{open[999] ? '▾' : '▸'}</span>
+                        </button>
+                        {#if open[999]}<ol class="steps">{#each reply.steps ?? [] as [l, d]}<li><b>{l}</b> <span>{d}</span></li>{/each}</ol>{/if}
+                      </div>
+                    {/if}
+                    <div class="prose">{@html reply?.html}</div>
+                  {/if}
+                {:else}
+                  <div class="askq">
+                    <div class="q">{m.question}</div>
+                    <div class="opts">{#each m.options as o, j}<button class:primary={j === 0} onclick={() => answer(o)}>{o}</button>{/each}</div>
+                    <div class="or">or type your own answer below</div>
+                  </div>
+                {/if}
+              {/if}
+            {/each}
+            {#if state === 'working'}
+              {@const cur = live[live.length - 1]}
+              <div class="livew" aria-live="polite">
+                <button class="lrow lhead" aria-expanded={liveOpen} onclick={() => (liveOpen = !liveOpen)} title={liveOpen ? 'Hide the steps' : 'See every step and subagent'}>
+                  <span class="orb xs busy" style="--a:{agent.a}; --b:{agent.b}"></span>
+                  <span class="lt"><b>{cur.label}</b>{" "}<span class="ld">{cur.detail}</span>…</span>
+                  <span class="lm">{live.length} steps{#if subs.length}<span class="wide">{" · "}{subs.length} subagents</span>{/if} · {cur.t} {liveOpen ? '▾' : '▸'}</span>
+                </button>
+                {#if liveOpen}
+                  <div class="lbody">
+                    <ol class="slist">
+                      {#each live as st, j}
+                        {@const now = j === live.length - 1}
+                        <li class:bad={st.failed && !now} class:now><span class="g">{#if now}<i class="pulse"></i>{:else}{st.failed ? '!' : '✓'}{/if}</span><span class="lt">{st.label}{" "}<span class="ld">{st.detail}{#if st.failed && !now}{" · didn’t work"}{/if}</span></span><span class="st">{st.t}</span></li>
+                      {/each}
+                    </ol>
+                    {#each subs as h, k}
+                      <div class="sarow" class:on={view === 'subagent' && subIx === k && (split || screen === 'view')}>
+                        <button class="lrow sa" class:done={h.done} aria-expanded={!!hOpen[k]} onclick={() => (hOpen[k] = !hOpen[k])}>
+                          {#if h.done}<span class="g">✓</span>{:else}<span class="orb xs busy" style="--a:{agent.a}; --b:{agent.b}"></span>{/if}
+                          <span class="lt"><b>{h.name}</b>{" "}<span class="ld">{h.done ? h.step.replace('Done · ', '') : h.step}</span></span>
+                          <span class="lm"><span class="role">{h.role}</span><span class="wide">{" · "}{h.steps.length} steps</span> {hOpen[k] ? '▾' : '▸'}</span>
+                        </button>
+                        <button class="sopen" onclick={() => openSub(k)} title="Open this subagent's session beside the chat" aria-label="Open {h.name}'s session">{@render ico('split')}</button>
+                      </div>
+                      {#if hOpen[k]}
+                        <ol class="slist sub">{#each h.steps as [l, d, t], q}<li class:now={!h.done && q === h.steps.length - 1}><span class="g">{#if !h.done && q === h.steps.length - 1}<i class="pulse"></i>{:else}✓{/if}</span><span class="lt">{l}{" "}<span class="ld">{d}</span></span><span class="st">{t}</span></li>{/each}</ol>
+                      {/if}
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            {/if}
+          </div>
+        {/if}
+      </div>
+
+      <footer class="dock">
+        <div class="compose">
+          {#if attached.length}
+            <div class="atts">{#each attached as f, i}<span class="att" title="Saved to {f.replace('/home/exedev', '~')}"><button class="atn" onclick={() => showFile(f)}>{@render ico('clip')}{f.slice(f.lastIndexOf('/') + 1)}</button><button aria-label="Remove {f}" onclick={() => (attached = attached.filter((_, j) => j !== i))}>×</button></span>{/each}</div>
+          {/if}
+          <textarea rows="1" placeholder={state === 'waiting' && !answered ? `Answer ${agent.name}…` : `Message ${state === 'new' ? talk.name : agent.name}`} bind:value={draft} bind:this={draft_el} onkeydown={(e) => { if (e.key === 'Enter' && !e.shiftKey && state === 'waiting' && !answered) { e.preventDefault(); answer(draft); } }}></textarea>
+          <div class="bar">
+            <button class="icon" title="Attach a file" onclick={() => filePick?.click()}>{@render ico('clip')}</button>
+            <div class="menu-wrap">
+              <button class="mode" class:open={pop === 'model'} aria-haspopup="menu" aria-expanded={pop === 'model'} title="Model"
+                onclick={() => (pop = pop === 'model' ? null : 'model')}>{model.name} <span class="car">▾</span></button>
+              {#if pop === 'model'}
+                <div class="menu up mmenu" role="menu">
+                  {#each ['Claude', 'OpenAI'] as g}
+                    <div class="mg">{g}</div>
+                    {#each MODELS.filter((m) => m.group === g && (!m.more || moreModels || m.id === modelId)) as m}
+                      <button class="mopt" role="menuitemradio" aria-checked={m.id === modelId} class:sel={m.id === modelId} onclick={() => setModel(m)}>
+                        <b>{m.name}{#if m.id === DEFAULT_MODEL}<em>default</em>{/if}</b>{#if m.hint}<span>{m.hint}</span>{/if}
+                      </button>
+                    {/each}
+                  {/each}
+                  {#if !moreModels}<button class="mopt more" onclick={() => (moreModels = true)}>More models…</button>{/if}
+                </div>
+              {/if}
+            </div>
+            <div class="menu-wrap">
+              <button class="mode" class:open={pop === 'effort'} aria-haspopup="menu" aria-expanded={pop === 'effort'} title="Effort: how hard it thinks"
+                onclick={() => (pop = pop === 'effort' ? null : 'effort')}>
+                <span class="bars" aria-hidden="true">{#each [0, 1, 2] as i}<i class:on={model.efforts.indexOf(effortShown) >= i * 2}></i>{/each}</span>
+                {EFFORT[effortShown][0]} <span class="car">▾</span></button>
+              {#if pop === 'effort'}
+                <div class="menu up eff" role="menu">
+                  <div class="mg">Effort · how hard it thinks</div>
+                  <button class="mopt" role="menuitemradio" aria-checked={effort === null} class:sel={effort === null} onclick={() => { effort = null; pop = null; }}>
+                    <b>Default<em>{EFFORT[model.def][0]}</em></b><span>What {model.name} uses unless told</span>
+                  </button>
+                  {#each model.efforts as l}
+                    <button class="mopt" role="menuitemradio" aria-checked={effort === l} class:sel={effort === l} onclick={() => { effort = l; pop = null; }}>
+                      <b>{EFFORT[l][0]}</b><span>{EFFORT[l][1]}</span>
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+            <span class="sp"></span>
+            {#if state === 'working'}<button class="send stop" title="Stop" onclick={() => (state = 'chat')}>{@render ico('stop')}</button>
+            {:else}<button class="send" disabled={!draft.trim()} title="Send" onclick={() => state === 'waiting' && !answered && answer(draft)}>↑</button>{/if}
+          </div>
+        </div>
+      </footer>
+    </section>
+  {/if}
+
+  {#if split}
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+    <div class="gutter" role="separator" aria-orientation="vertical" aria-label="Resize the panels"
+      aria-valuenow={Math.round((1 - side) * 100)} aria-valuemin={25} aria-valuemax={75} tabindex="0"
+      onpointerdown={grab} onkeydown={nudge} ondblclick={() => { side = 0.45; keepSide(); }}><span></span></div>
+  {/if}
+
+  <!-- right: the view picked in the tab bar -->
+  {#if showView}
+    <section class="pane view">
+      {#if view === 'sessions'}
+        <header class="vh"><h2>Sessions</h2><span class="sp"></span>
+          <button class="ghost" onclick={newChat}>{@render ico('plus')} New</button>{@render vclose()}</header>
+        <div class="vsearch">{@render ico('search')}<input placeholder="Search sessions" /></div>
+        <div class="vscroll">
+          <div class="grp">Channels <span class="cnt">{channels.length}</span></div>
+          {#each channels as s}{@render row(s)}{/each}
+          <div class="grp">Sessions <span class="cnt">{handed.length + sessions.length}</span></div>
+          {#each [...handed, ...sessions].filter((x) => !gone[x.id]) as s}{@render row(s)}{/each}
+          <button class="grp toggle" onclick={() => (showArchived = !showArchived)} aria-expanded={showArchived}>
+            <span class="car">{showArchived ? '▾' : '▸'}</span> Archived <span class="cnt">{(archivedCount + Object.keys(gone).length).toLocaleString()}</span>
+          </button>
+          {#if showArchived}
+            <div class="arch">{#each [...sessions.filter((x) => gone[x.id]), ...archived] as s}{@render row(s)}{/each}<button class="more">Show all archived…</button></div>
+          {/if}
+        </div>
+      {:else if view === 'subagent'}
+        <header class="vh">
+          {#if narrow}<button class="icon back" title="Back to the chat" aria-label="Back to the chat" onclick={closeSub}>‹</button>{/if}
+          <span class="orb xs hdot" class:busy={!sub.done} style="--a:{agent.a}; --b:{agent.b}"></span>
+          <div class="subh"><h2>{sub.name}</h2><span>{sub.role} subagent of {agent.name} · {sub.model}</span></div>
+          <span class="sp"></span>
+          {#if !narrow}<button class="icon" title="Close the panel" aria-label="Close the panel" onclick={closeSub}>×</button>{/if}
+        </header>
+        <div class="vscroll subv">
+          <div class="sbrief"><span class="k">Asked by {agent.name}</span>{sub.task}</div>
+          <ol class="slist">
+            {#each sub.steps as [l, d, t], q}
+              {@const now = !sub.done && q === sub.steps.length - 1}
+              <li class:now><span class="g">{#if now}<i class="pulse"></i>{:else}✓{/if}</span><span class="lt">{l}{" "}<span class="ld">{d}</span></span><span class="st">{t}</span></li>
+            {/each}
+          </ol>
+          {#if sub.done}
+            <div class="sres"><span class="k">Result · {sub.t}</span>{sub.result}</div>
+          {:else}
+            <div class="swork"><span class="orb xs busy" style="--a:{agent.a}; --b:{agent.b}"></span>Still working · {sub.t}<span class="sp"></span><button class="ghost">{@render ico('stop')} Stop</button></div>
+          {/if}
+        </div>
+      {:else if view === 'files'}
+        <header class="vh"><h2>Files</h2><span class="sp"></span>{@render vclose()}</header>
+        <Files ask={askAbout} {reveal} back={filesFrom ? { label: 'Settings', run: () => pickTab('settings') } : null} />
+      {:else if view === 'tasks'}
+        <header class="vh"><h2>Tasks</h2><span class="sp"></span>{@render vclose()}</header>
+        <Tasks hand={handTask} open={openTaskChat} agent={agent.name} />
+      {:else if view === 'agents'}
+        <header class="vh"><h2>Agents</h2><span class="sp"></span>{@render vclose()}</header>
+        <Agents agents={AGENTS} current={agent} pick={(a) => (agent = a)} ask={askAgent} />
+      {:else if view === 'games'}
+        <header class="vh"><h2>Games</h2><span class="sp"></span>{@render vclose()}</header>
+        <div class="vscroll cards">
+          {#each [['Sudoku', 'A calm puzzle a day'], ['zengame', 'Prototype 0']] as [n, d]}
+            <div class="card game"><span class="orb" style="--a:#a8762c; --b:#cfa660">{n[0]}</span><span class="ameta"><b>{n}</b><span>{d}</span></span>
+              <button class="play" title="Play {n}" aria-label="Play {n}"><svg viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z"/></svg>Play</button></div>
+          {/each}
+        </div>
+      {:else if view === 'routines'}
+        <header class="vh"><h2>Routines</h2><span class="sp"></span>{@render vclose()}</header>
+        <Routines ask={askAgent} openRun={() => openChat('chat')} />
+      {:else if view === 'settings'}
+        <header class="vh"><h2>Settings</h2><span class="sp"></span>{@render vclose()}</header>
+        <Settings {theme} setTheme={(t) => (theme = t)} ask={askAgent} openFile={showFile} />
+      {:else}
+        <header class="vh"><h2>{view ? view[0].toUpperCase() + view.slice(1) : ''}</h2><span class="sp"></span>{@render vclose()}</header>
+        <div class="empty">The {view} view goes here.</div>
+      {/if}
+    </section>
+  {/if}
+</div>
+
+<!-- bottom right: the quick-control ring -->
+{#if ring}<button class="scrim" aria-label="Close" onclick={() => (ring = false)}></button>{/if}
+<div class="qc" class:open={ring} class:hide={narrow && screen === 'chat'}>
+  <input type="file" multiple hidden bind:this={filePick} onchange={picked} />
+  {#each actions as a, i}
+    <button class="qa" style="transform: {ring ? at(i, actions.length) : 'translate(0,0)'}; transition-delay: {ring ? i * 18 : 0}ms"
+      tabindex={ring ? 0 : -1} title={a.label} aria-label={a.label}
+      onmouseenter={() => (hover = a.label)} onmouseleave={() => (hover = '')} onfocus={() => (hover = a.label)}
+      onclick={() => { a.run(); ring = false; hover = ''; }}>{@render ico(a.key)}</button>
+  {/each}
+  {#if ring && hover}<span class="qlabel">{hover}</span>{/if}
+  <button class="qbtn" onclick={() => (ring = !ring)} aria-expanded={ring} title="Quick actions (Ctrl+.)">{@render ico('ring')}</button>
+</div>
+
+{#if toast}
+  <div class="toast" role="status">{toast.text}{#if toast.undo}<button onclick={() => { toast?.undo?.(); toast = null; }}>Undo</button>{/if}</div>
+{/if}
+
+<div class="mock" class:open={mockOpen}>
+  <b role="button" tabindex="0" title="Mock controls" onclick={() => (mockOpen = !mockOpen)} onkeydown={(e) => e.key === 'Enter' && (mockOpen = !mockOpen)}>mock</b>
+  {#each [['new', 'New'], ['chat', 'Chat'], ['working', 'Working'], ['waiting', 'Question']] as [k, l]}
+    <button class:on={screen === 'chat' && state === k} onclick={() => openChat(k as State)}>{l}</button>
+  {/each}
+  <span class="sep"></span>
+  <button onclick={cycleTheme}>Theme: {theme}</button>
+  <a href="#v1">v1</a>
+</div>
+
+<style>
+  /* Palette "stone & moss" (v1), plus --bg: the table the panels sit on. */
+  :global(:root), :global(:root[data-theme='light']) {
+    --bg: #e9e5dc; --paper: #f7f5f0; --side: #efece5; --soft: #ece8e0; --faint: #dfdad0;
+    --ink: #2e2d2a; --dim: #736e67; --accent: #4f7d67; --on-accent: #f6f4ef;
+    --warn: #a8762c; --err: #b0533c; --ok: #4f7d67; --shadow: rgb(60 50 30 / 0.10); --glass: rgb(247 245 240 / 0.78);
+    color-scheme: light;
+  }
+  :global(:root[data-theme='dark']) {
+    --bg: #151716; --paper: #1e2120; --side: #1a1c1b; --soft: #282c2a; --faint: #323734;
+    --ink: #cdc9c0; --dim: #868b85; --accent: #8fb39f; --on-accent: #1a1c1b;
+    --warn: #cfa660; --err: #d4836d; --ok: #8fb39f; --shadow: rgb(0 0 0 / 0.35); --glass: rgb(36 40 38 / 0.8);
+    color-scheme: dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :global(:root:not([data-theme='light'])) {
+      --bg: #151716; --paper: #1e2120; --side: #1a1c1b; --soft: #282c2a; --faint: #323734;
+      --ink: #cdc9c0; --dim: #868b85; --accent: #8fb39f; --on-accent: #1a1c1b;
+      --warn: #cfa660; --err: #d4836d; --ok: #8fb39f; --shadow: rgb(0 0 0 / 0.35); --glass: rgb(36 40 38 / 0.8);
+      color-scheme: dark;
+    }
+  }
+  :global(html), :global(body) { background: var(--bg); }
+  :global(body) { font-size: 15px; overflow: hidden; }
+
+  .ico { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  .sp { flex: 1; }
+  .icon { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; color: var(--dim); font-size: 16px; }
+  .icon:hover { background: var(--soft); color: var(--ink); }
+
+  /* the agent orb: a soft two-tone sphere; it breathes while the agent works */
+  .orb { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; flex: none; font-weight: 700; font-size: 16px; color: #fbfaf6;
+    background: radial-gradient(circle at 32% 28%, var(--b), var(--a) 70%); box-shadow: 0 0 0 3px color-mix(in srgb, var(--a) 18%, transparent); }
+  .orb.sm { width: 30px; height: 30px; font-size: 13px; }
+  .orb.xs { width: 14px; height: 14px; box-shadow: none; }
+  .orb.xs.hdot { width: 10px; height: 10px; margin-right: 2px; }
+  .orb.lg { width: 64px; height: 64px; font-size: 26px; margin: 0 auto 16px; box-shadow: 0 0 0 6px color-mix(in srgb, var(--a) 14%, transparent); }
+  .orb.busy { animation: breathe 1.8s ease-in-out infinite; }
+  @keyframes breathe { 50% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--a) 8%, transparent); transform: scale(0.96); } }
+
+  /* top bar */
+  .top { position: fixed; inset: 0 0 auto 0; height: 64px; display: flex; align-items: center; justify-content: center; z-index: 8; pointer-events: none; }
+  .top > * { pointer-events: auto; }
+  .agent-wrap { position: absolute; left: 14px; top: 12px; }
+  .agent { display: flex; align-items: center; gap: 10px; padding: 2px 12px 2px 2px; border-radius: 99px; }
+  .agent:hover { background: var(--glass); }
+  .aname { font-weight: 650; font-size: 15px; display: flex; align-items: center; gap: 4px; }
+  .chev { font-size: 10px; color: var(--dim); }
+
+  .tabs { display: flex; align-items: center; gap: 2px; padding: 5px; border-radius: 99px; background: var(--glass); backdrop-filter: blur(14px);
+    border: 1px solid var(--faint); box-shadow: 0 6px 24px var(--shadow); }
+  .tab { position: relative; display: flex; align-items: center; gap: 7px; padding: 7px 14px; border-radius: 99px; font-size: 14px; color: var(--dim); }
+  .tab:hover { color: var(--ink); background: var(--soft); }
+  .tab.on { color: var(--on-accent); background: var(--accent); }
+  .badge { min-width: 17px; height: 17px; padding: 0 5px; border-radius: 99px; font-size: 11px; font-weight: 700; display: grid; place-items: center; background: var(--warn); color: var(--on-accent); }
+  .badge.bad { background: var(--bad, #b5543c); }
+  .vsep { width: 1px; height: 18px; background: var(--faint); margin: 0 4px; }
+
+  /* the panels */
+  .stage { height: 100dvh; padding: 64px 14px 14px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .stage.split { gap: 0; }
+  .stage.dragging { cursor: col-resize; user-select: none; }
+  .gutter { display: grid; place-items: center; cursor: col-resize; outline: none; touch-action: none; }
+  .gutter span { width: 4px; height: 44px; border-radius: 99px; background: var(--faint); transition: background 0.15s, height 0.15s; }
+  .gutter:hover span, .gutter:focus-visible span, .dragging .gutter span { background: var(--accent); height: 72px; }
+  .pane { background: var(--paper); border: 1px solid var(--faint); border-radius: 22px; min-height: 0; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 1px 2px var(--shadow); }
+
+  /* chat */
+  .hd { display: flex; align-items: center; gap: 10px; padding: 14px 18px 10px 22px; }
+  .hd h1 { font-size: 16px; font-weight: 650; margin: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .scroll { flex: 1; overflow: auto; }
+  .body { max-width: 44rem; margin: 0 auto; padding: 14px 26px 12px; display: flex; flex-direction: column; gap: 18px; }
+  .u { display: flex; justify-content: flex-end; }
+  .bubble { max-width: 82%; background: var(--soft); padding: 10px 15px; border-radius: 18px 18px 5px 18px; line-height: 1.5; }
+  .prose { line-height: 1.65; }
+  .prose :global(p) { margin: 0 0 10px; }
+  .prose :global(p:last-child) { margin-bottom: 0; }
+  .livew { border: 1px solid var(--faint); border-radius: 14px; background: color-mix(in srgb, var(--soft) 40%, var(--paper)); padding: 4px; }
+  .lrow { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 7px 10px; border-radius: 10px; font-size: 14px; }
+  .lrow:hover { background: var(--soft); }
+  .lt { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .lt b { font-weight: 550; }
+  .ld { color: var(--dim); }
+  .lm { font-size: 12px; color: var(--dim); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  @media (max-width: 900px) { .lm .wide { display: none; } }
+  .role { display: inline-block; padding: 1px 7px; border-radius: 999px; background: var(--soft); color: var(--ink); font-size: 11.5px; }
+  .sarow { display: flex; align-items: center; border-radius: 10px; }
+  .sarow .sa { flex: 1; min-width: 0; }
+  .sarow.on { background: var(--soft); }
+  .sopen { flex: none; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; color: var(--dim); }
+  .sopen:hover, .sarow.on .sopen { color: var(--accent); background: var(--soft); }
+  .sopen :global(.ico) { width: 16px; height: 16px; }
+  .subh { display: flex; flex-direction: column; min-width: 0; }
+  .subh span { font-size: 12.5px; color: var(--dim); }
+  .subv { padding: 4px 16px 20px 22px; }
+  .subv .slist { padding: 0; margin: 10px 0; }
+  .subv .slist li { font-size: 14px; padding: 5px 0; }
+  .sbrief, .sres { border: 1px solid var(--faint); border-radius: 12px; padding: 10px 12px; font-size: 14px; line-height: 1.5; background: var(--paper); }
+  .sres { border-color: color-mix(in srgb, var(--accent) 35%, var(--faint)); }
+  .sbrief .k, .sres .k { display: block; font-size: 11.5px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px; }
+  .swork { display: flex; align-items: center; gap: 10px; font-size: 13.5px; color: var(--dim); padding: 6px 0; }
+  .swork .sp { flex: 1; }
+  .sa { font-size: 13.5px; }
+  .sa.done { opacity: 0.7; }
+  .g { width: 14px; flex: none; text-align: center; font-size: 11px; font-weight: 700; color: var(--accent); }
+  .lbody { border-top: 1px solid var(--faint); margin: 2px 6px 0; padding-top: 4px; }
+  .pulse { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: 0.3; transform: scale(0.75); } }
+  .slist li.now { font-weight: 550; }
+  .slist { list-style: none; margin: 4px 0; padding: 0 10px; }
+  .slist li { display: flex; align-items: center; gap: 10px; padding: 3px 0; font-size: 13px; animation: rise 0.25s both; }
+  .slist li.bad .g, .slist li.bad .ld { color: var(--err); }
+  .slist.sub { padding-left: 34px; }
+  .st { font-size: 11.5px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .wline { text-align: left; max-width: 100%; display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--dim); padding: 5px 11px 5px 6px; border-radius: 99px; border: 1px solid var(--faint); }
+  .wline:hover { color: var(--ink); border-color: var(--dim); }
+  .chk { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+  .chk.bad { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+  .car { font-size: 10px; }
+  .steps { margin: 8px 0 0; padding: 0 0 0 26px; font-size: 13px; color: var(--dim); display: flex; flex-direction: column; gap: 4px; }
+  .steps b { color: var(--ink); font-weight: 500; }
+  .steps .bad, .steps .bad b { color: var(--err); }
+  .askq { border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--faint)); background: color-mix(in srgb, var(--warn) 6%, var(--paper)); border-radius: 16px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .q { font-weight: 600; }
+  .opts { display: flex; flex-wrap: wrap; gap: 8px; }
+  .opts button { padding: 8px 14px; border-radius: 99px; border: 1px solid var(--faint); background: var(--paper); font-size: 14px; }
+  .opts button:hover { border-color: var(--dim); }
+  .opts .primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .askq.done { flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 10px 14px; background: transparent; border-color: var(--faint); }
+  .askq.done .q { font-weight: 500; color: var(--dim); flex: 1; min-width: 12rem; }
+  .ans { font-size: 14px; font-weight: 600; color: var(--accent); white-space: nowrap; }
+  .or { font-size: 12px; color: var(--dim); }
+  .hello { max-width: 44rem; margin: 10vh auto 0; padding: 0 24px; text-align: center; }
+  .hello h2 { font-family: var(--serif); font-size: 30px; font-weight: 600; margin: 0 0 6px; }
+  .hello p { color: var(--dim); margin: 0 0 24px; }
+  .who { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-bottom: 34px; }
+  .pick { display: flex; align-items: center; gap: 10px; padding: 8px 16px 8px 8px; border-radius: 99px; border: 1px solid var(--faint); text-align: left; transition: border-color 0.15s, background 0.15s; }
+  .pick:hover { border-color: var(--dim); }
+  .pick.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, var(--paper)); }
+  .pick .orb { width: 32px; height: 32px; font-size: 14px; }
+  .pn { display: flex; flex-direction: column; line-height: 1.2; }
+  .pn b { font-size: 14px; font-weight: 600; }
+  .pn span { font-size: 12px; color: var(--dim); }
+  .sgh { display: flex; align-items: center; justify-content: center; gap: 10px; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 650; margin-bottom: 12px; min-height: 18px; }
+  .think { text-transform: none; letter-spacing: 0; font-weight: 400; display: inline-flex; align-items: center; gap: 3px; }
+  .think i { width: 4px; height: 4px; border-radius: 50%; background: var(--accent); animation: blink 1.2s infinite; }
+  .think i:nth-child(2) { animation-delay: 0.2s; } .think i:nth-child(3) { animation-delay: 0.4s; margin-right: 4px; }
+  @keyframes blink { 50% { opacity: 0.2; } }
+  .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; text-align: left; }
+  .idea { display: flex; flex-direction: column; gap: 6px; padding: 14px; min-height: 92px; border-radius: 14px; border: 1px solid var(--faint); background: color-mix(in srgb, var(--soft) 45%, var(--paper)); text-align: left; animation: rise 0.3s both; }
+  button.idea:hover { border-color: var(--accent); }
+  .idea b { font-size: 14px; font-weight: 600; line-height: 1.3; }
+  .idea span { font-size: 12.5px; color: var(--dim); line-height: 1.35; }
+  @keyframes rise { from { opacity: 0; transform: translateY(6px); } }
+  .idea.skel i { display: block; height: 11px; border-radius: 6px; background: linear-gradient(90deg, var(--soft), var(--faint), var(--soft)); background-size: 200% 100%; animation: shimmer 1.4s infinite linear; }
+  .idea.skel i:first-child { width: 80%; height: 13px; } .idea.skel i:last-child { width: 55%; margin-top: 4px; }
+  @keyframes shimmer { to { background-position: -200% 0; } }
+  @media (max-width: 900px) { .cards { grid-template-columns: minmax(0, 1fr); } .idea { min-height: 0; } .hello { margin-top: 4vh; } }
+  .dock { padding: 6px 16px 16px; }
+  .compose { max-width: 44rem; margin: 0 auto; border: 1px solid var(--faint); border-radius: 20px; background: var(--paper); padding: 10px 10px 8px 16px; box-shadow: 0 4px 16px var(--shadow); }
+  .compose:focus-within { border-color: var(--accent); }
+  .compose textarea { width: 100%; border: 0; outline: none; background: transparent; resize: none; font: inherit; color: inherit; padding: 4px 0 8px; field-sizing: content; max-height: 40vh; }
+  .bar { display: flex; align-items: center; gap: 4px; margin-left: -8px; }
+  .mode { font-size: 13px; color: var(--dim); padding: 5px 10px; border-radius: 99px; }
+  .mode:hover { background: var(--soft); color: var(--ink); }
+  .send { width: 34px; height: 34px; border-radius: 50%; background: var(--accent); color: var(--on-accent); font-size: 17px; font-weight: 700; display: grid; place-items: center; }
+  .send:disabled { background: var(--soft); color: var(--dim); cursor: default; }
+  .send.stop { background: var(--soft); color: var(--ink); border: 1px solid var(--faint); }
+  .send.stop .ico { width: 14px; height: 14px; }
+
+  /* menus */
+  .menu-wrap { position: relative; }
+  .menu { position: absolute; z-index: 12; min-width: 240px; background: var(--paper); border: 1px solid var(--faint); border-radius: 14px; padding: 6px; box-shadow: 0 14px 40px var(--shadow); display: flex; flex-direction: column; }
+  .menu.right { right: 0; top: 38px; }
+  .menu.up { bottom: 40px; left: 0; }
+  .amenu { left: 0; top: 50px; min-width: 260px; }
+  .mlabel { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 600; padding: 6px 10px 4px; }
+  .rename { flex: 0 1 26rem; min-width: 8rem; font: inherit; font-size: 16px; font-weight: 650; color: inherit; background: var(--paper); border: 1px solid var(--accent); border-radius: 8px; padding: 3px 8px; outline: none; }
+  .hd .close, .vclose { font-size: 20px; }
+  .archrow { display: flex; align-items: center; gap: 6px; padding: 4px 4px 4px 10px; font-size: 14px; }
+  .archrow > span { flex: 1; }
+  .oc { padding: 4px 10px; border-radius: 8px; border: 1px solid var(--faint); font-size: 13px; background: var(--paper); }
+  .oc:hover { border-color: var(--dim); }
+  .archgo { padding: 4px 12px; border-radius: 8px; font-size: 13px; font-weight: 600; color: var(--on-accent); background: var(--accent); }
+  .ocs { display: flex; flex-direction: column; padding: 4px 0 2px; }
+  .ocs .mopt { text-align: left; padding: 6px 10px 6px 18px; border-radius: 8px; }
+  .ocs .mopt:hover { background: var(--soft); }
+  .menu.right { min-width: 280px; }
+  .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 30; display: flex; align-items: center; gap: 14px; padding: 10px 16px; border-radius: 12px; background: var(--ink); color: var(--paper); font-size: 14px; box-shadow: 0 10px 30px var(--shadow); animation: tin 0.2s both; }
+  @keyframes tin { from { opacity: 0; transform: translate(-50%, 6px); } }
+  .toast button { color: var(--accent); font-weight: 650; filter: brightness(1.6); }
+  .menu .row { display: flex; justify-content: space-between; gap: 16px; padding: 6px 10px; font-size: 13px; color: var(--dim); }
+  .menu .row b { color: var(--ink); font-weight: 500; font-family: var(--mono); font-size: 12px; }
+  .menu hr { border: 0; border-top: 1px solid var(--faint); margin: 6px 0; width: 100%; }
+  .menu > button { text-align: left; padding: 7px 10px; border-radius: 8px; font-size: 14px; }
+  .menu > button:hover { background: var(--soft); }
+  .arow { display: flex !important; align-items: center; gap: 10px; }
+  .ameta { display: flex; flex-direction: column; flex: 1; text-align: left; }
+  .ameta b { font-weight: 600; }
+  .ameta span { font-size: 12px; color: var(--dim); }
+  .tick { color: var(--accent); }
+  .me { display: flex; align-items: center; gap: 10px; padding: 4px 4px 2px 10px; font-size: 14px; }
+  .me .name { flex: 1; font-weight: 550; }
+  .av { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-size: 13px; font-weight: 650; background: var(--soft); }
+  .mopt { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; }
+  .mopt span { font-size: 12px; color: var(--dim); }
+  .mopt.sel b { color: var(--accent); }
+  .mopt b { display: flex; align-items: center; gap: 6px; }
+  .mopt em { font-style: normal; font-size: 10.5px; font-weight: 600; color: var(--dim); border: 1px solid var(--faint); border-radius: 99px; padding: 0 6px; }
+  .mopt.more { font-size: 13px; color: var(--accent); font-weight: 600; }
+  .mg { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 650; padding: 8px 12px 4px; }
+  .qc.hide { display: none; }
+  .menu.up { min-width: 250px; }
+  @media (max-width: 900px) { .menu.up.eff { left: auto; right: -60px; } }
+  .mg { white-space: nowrap; }
+  .mmenu { max-height: min(60vh, 460px); overflow: auto; }
+  .mode { display: inline-flex; align-items: center; gap: 6px; }
+  .mode.open { background: var(--soft); color: var(--ink); }
+  .car { font-size: 10px; opacity: 0.7; }
+  .bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 11px; }
+  .bars i { width: 3px; border-radius: 1px; background: var(--faint); }
+  .bars i:nth-child(1) { height: 5px; } .bars i:nth-child(2) { height: 8px; } .bars i:nth-child(3) { height: 11px; }
+  .bars i.on { background: var(--accent); }
+
+  /* the right panel's views */
+  .vh { display: flex; align-items: center; gap: 8px; padding: 16px 16px 8px 22px; }
+  .vh h2 { margin: 0; font-size: 20px; font-family: var(--serif); font-weight: 600; }
+  .ghost { display: flex; align-items: center; gap: 6px; font-size: 13px; padding: 6px 12px; border-radius: 99px; border: 1px solid var(--faint); }
+  .ghost:hover { border-color: var(--dim); }
+  .ghost .ico { width: 14px; height: 14px; }
+  .vsearch { display: flex; align-items: center; gap: 8px; margin: 4px 16px 6px; padding: 8px 12px; border-radius: 12px; background: var(--soft); color: var(--dim); }
+  .vsearch input { flex: 1; border: 0; outline: none; background: transparent; font-size: 14px; }
+  .vscroll { flex: 1; overflow: auto; padding: 0 10px 80px; display: flex; flex-direction: column; gap: 1px; }
+  .grp { display: flex; align-items: center; gap: 6px; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); padding: 14px 12px 5px; font-weight: 600; text-align: left; }
+  .grp .cnt { font-weight: 500; letter-spacing: 0; opacity: 0.75; }
+  .grp.toggle:hover { color: var(--ink); }
+  .grp .car { font-size: 9px; width: 8px; }
+  .arch { display: flex; flex-direction: column; gap: 1px; }
+  .arch .srow { color: var(--dim); }
+  .more { text-align: left; font-size: 13px; color: var(--accent); padding: 6px 12px; }
+  .srow, .frow, .trow { display: flex; align-items: center; gap: 10px; text-align: left; padding: 10px 12px; border-radius: 12px; font-size: 14px; }
+  .srow:hover, .frow:hover, .trow:hover { background: var(--soft); }
+  .srow.on { background: color-mix(in srgb, var(--accent) 14%, var(--paper)); }
+  .t { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .when { font-size: 12px; color: var(--dim); white-space: nowrap; }
+  .trow input { accent-color: var(--accent); width: 16px; height: 16px; }
+  .trow.done .t { text-decoration: line-through; color: var(--dim); }
+  .cards { padding-top: 6px; gap: 8px; }
+  .card { display: flex; align-items: center; gap: 12px; padding: 14px; border-radius: 16px; border: 1px solid var(--faint); text-align: left; }
+  .card.sel { border-color: var(--accent); }
+  .atts { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px 0; }
+  .att { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; padding: 3px 4px 3px 9px; border-radius: 99px; background: var(--soft); border: 1px solid var(--faint); }
+  .att :global(svg) { width: 13px; height: 13px; }
+  .att .atn { display: inline-flex; align-items: center; gap: 5px; width: auto; height: auto; border-radius: 0; color: inherit; }
+  .att .atn:hover { background: none; text-decoration: underline; }
+  .att button { width: 18px; height: 18px; border-radius: 50%; color: var(--dim); }
+  .att button:hover { background: var(--faint); color: var(--ink); }
+  .card.game { transition: border-color 0.15s, box-shadow 0.15s; }
+  .card.game:hover, .card.game:focus-within { border-color: color-mix(in srgb, var(--accent) 45%, var(--faint)); box-shadow: 0 4px 16px var(--shadow); }
+  .play { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px 6px 11px; border-radius: 99px; background: var(--accent); color: var(--on-accent); font-size: 13px; font-weight: 650;
+    opacity: 0; transform: scale(0.92); transition: opacity 0.15s, transform 0.15s; }
+  .play svg { width: 13px; height: 13px; fill: currentColor; }
+  .card.game:hover .play, .play:focus-visible { opacity: 1; transform: none; }
+  @media (hover: none) { .play { opacity: 1; transform: none; } }
+  .empty { padding: 24px; color: var(--dim); }
+
+  .tag { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; padding: 2px 9px 2px 7px; border-radius: 99px; white-space: nowrap; }
+  .tag.work { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .tag.wait { color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent); }
+  .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+  .dot.work { background: var(--accent); animation: blink 1.2s ease-in-out infinite; }
+  .dot.wait { background: var(--warn); }
+  @keyframes blink { 50% { opacity: 0.3; } }
+
+  /* quick-control ring */
+  .scrim { position: fixed; inset: 0; z-index: 14; background: color-mix(in srgb, var(--bg) 35%, transparent); backdrop-filter: blur(2px); cursor: default; }
+  .qc { position: fixed; right: 26px; bottom: 26px; width: 56px; height: 56px; z-index: 15; }
+  .qbtn { position: absolute; inset: 0; border-radius: 50%; display: grid; place-items: center; color: var(--on-accent); background: radial-gradient(circle at 32% 28%, color-mix(in srgb, var(--accent) 70%, white), var(--accent) 72%);
+    box-shadow: 0 8px 24px var(--shadow), 0 0 0 4px color-mix(in srgb, var(--accent) 16%, transparent); transition: transform 0.2s; }
+  .qbtn .ico { width: 22px; height: 22px; }
+  .qc.open .qbtn { transform: rotate(45deg); }
+  .qa { position: absolute; left: 4px; top: 4px; width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; color: var(--ink);
+    background: var(--paper); border: 1px solid var(--faint); box-shadow: 0 6px 18px var(--shadow); opacity: 0; pointer-events: none;
+    transition: transform 0.22s cubic-bezier(.2,.9,.3,1.2), opacity 0.15s; }
+  .qc.open .qa { opacity: 1; pointer-events: auto; }
+  .qa:hover, .qa:focus-visible { color: var(--on-accent); background: var(--accent); border-color: var(--accent); outline: none; }
+  .qlabel { position: absolute; right: 200px; bottom: 14px; white-space: nowrap; font-size: 13px; font-weight: 600; padding: 5px 12px; border-radius: 99px; background: var(--ink); color: var(--paper); pointer-events: none; }
+
+  /* Calm scrolling everywhere: a thin, ink-tinted bar that only darkens on hover, and content
+     that fades in and out at the edges instead of being cut. */
+  :global(.scroll, .vscroll, .list, .tlist, .rscroll, .fvals, .sibs) {
+    scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--ink) 18%, transparent) transparent; scroll-behavior: smooth; overscroll-behavior: contain;
+  }
+  :global(.scroll:hover, .vscroll:hover, .list:hover, .tlist:hover, .rscroll:hover) { scrollbar-color: color-mix(in srgb, var(--ink) 32%, transparent) transparent; }
+  :global(.scroll::-webkit-scrollbar, .vscroll::-webkit-scrollbar, .list::-webkit-scrollbar, .tlist::-webkit-scrollbar, .rscroll::-webkit-scrollbar) { width: 8px; }
+  :global(.scroll::-webkit-scrollbar-thumb, .vscroll::-webkit-scrollbar-thumb, .list::-webkit-scrollbar-thumb, .tlist::-webkit-scrollbar-thumb, .rscroll::-webkit-scrollbar-thumb) {
+    background: color-mix(in srgb, var(--ink) 18%, transparent); border-radius: 99px; border: 2px solid transparent; background-clip: padding-box; }
+  :global(.vscroll, .list, .tlist, .rscroll) {
+    mask-image: linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(100% - 40px), transparent 100%); }
+  .mock { position: fixed; left: 14px; bottom: 14px; z-index: 20; display: flex; align-items: center; gap: 4px; padding: 6px 8px; border-radius: 12px; background: #2a2e2c; color: #d6d2c9; font-size: 12px; box-shadow: 0 6px 20px rgb(0 0 0 / 0.25); opacity: 0.9; }
+  .mock b { color: #f5c542; margin-right: 4px; }
+  .mock button, .mock a { padding: 3px 8px; border-radius: 7px; color: #bbb; text-decoration: none; }
+  .mock button.on { background: #3a3f3c; color: #fff; }
+  .mock .sep { width: 1px; height: 16px; background: #444; margin: 0 4px; }
+
+  @media (max-width: 900px) {
+    .top { height: 60px; justify-content: space-between; gap: 8px; padding: 0 8px; }
+    .agent-wrap { position: static; }
+    .agent { padding: 2px; }
+    .aname { display: none; }
+    .orb { width: 34px; height: 34px; }
+    .tabs { max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+    .tab { padding: 7px 8px; }
+    .tab .tl { display: none; }
+    .tab .badge { position: absolute; top: -1px; right: -3px; min-width: 15px; height: 15px; font-size: 10px; padding: 0 4px; }
+    .top.hide { display: none; }
+    .stage { padding: 60px 8px 8px; }
+    .top.hide + .stage { padding-top: 8px; }
+    .back { font-size: 26px; margin-left: -10px; color: var(--ink); }
+    .body { padding: 10px 14px; }
+    .dock { padding: 6px 8px 8px; }
+    .qc { right: 16px; bottom: 96px; }
+    .mock { left: 8px; bottom: 8px; flex-wrap: wrap; max-width: calc(100vw - 100px); }
+    .mock:not(.open) > :not(b) { display: none; }
+    .mock b { cursor: pointer; }
+  }
+</style>

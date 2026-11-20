@@ -41,7 +41,7 @@
         <button class="row" onclick={() => play(g)}>
           <span class="title">{g.title}</span>
           <span class="dim">{g.description ?? ''}</span>
-          <span class="dim from">{titleOf(g.plugin)}</span>
+          <span class="dim from">{titleOf(g.plugin)}</span><span class="play">Play →</span>
         </button>
       {/each}
     {/if}
@@ -57,6 +57,9 @@
   .link { color: var(--accent); }
   .row { display: flex; gap: 12px; align-items: baseline; width: 100%; text-align: left; padding: 8px 16px; }
   .row:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+  .play { opacity:0; color:var(--accent); border:1px solid var(--faint); border-radius:99px; padding:3px 12px; }
+  .row:hover .play, .row:focus-visible .play { opacity:1; }
+  @media (hover:none) { .play { opacity:1; } }
   .title { font-weight: 550; }
   .from { margin-left: auto; font-size: 13px; }
 </style>

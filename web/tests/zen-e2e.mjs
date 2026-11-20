@@ -23,6 +23,8 @@ const para = (n) => Array.from({ length: n }, (_, i) => `Paragraph ${i + 1} of p
 writeFileSync(path.join(VAULT, 'wiki/Atlas.md'), `# Atlas\n\n${para(40)}\n\n## North\n\n${para(40)}\n\n## South\n\n${para(40)}\n`);
 writeFileSync(path.join(HOME, '.zenbot/token'), 'test-token');
 writeFileSync(path.join(HOME, 'plain.txt'), 'hello file');
+writeFileSync(path.join(HOME, 'home-only.txt'), 'home');
+writeFileSync(path.join(VAULT, 'wiki/plain.txt'), 'hello file');
 mkdirSync(path.join(VAULT, 'games'));
 writeFileSync(path.join(VAULT, 'games/board.fx'), 'four in a row\n');
 const REAL_ZEN = process.env.ZEN_BIN ?? (() => {
@@ -129,6 +131,11 @@ const agentSummary = (name) => {
 };
 const agentDetail = (name) => ({ ...agentSummary(name), soul: agents.get(name).soul, identity: agents.get(name).identity, settings: agents.get(name).settings, dir: `${HOME}/.zenbot/agents/${name}`, sessions: name === 'rex' ? 1 : 0 });
 
+const taskWrites = [];
+let prefs = {};
+let userText = '# You\n';
+let tasks = [{ project: 'acme', text: 'Price the offer', id: 't1', rev: 'r1', due: '2026-10-29', priority: 'urgent', goal: null, done: false }];
+let revision = 1;
 // ---- the stand-in kernel ----
 const json = (res, body, status = 200) => {
   res.writeHead(status, { 'content-type': 'application/json' });
@@ -186,7 +193,7 @@ const kernel = createServer(async (req, res) => {
   if (r === 'GET /api/sessions/s1')
     return json(res, { ...session('s1', 'Plan the week'), busy: false, tokens: 1200, message_count: 2, messages: [
       { role: 'user', content: 'What is on today?', seq: 1 },
-      { role: 'assistant', content: [{ type: 'text', text: 'Standup at **07:00**, see [[God]].' }], seq: 2 },
+      { role: 'assistant', content: [{ type: 'text', text: 'Standup at **07:00**, see [[God]] and https://example.com/standup.' }], seq: 2 },
     ] });
   if (r === 'GET /api/models') return json(res, { models: [{ id: 'faux/smoke', efforts: [] }], authenticated: {}, default: 'faux/smoke' });
   if (r === 'POST /api/search') {
@@ -194,10 +201,30 @@ const kernel = createServer(async (req, res) => {
     const hit = (kind, ref, title, snippet, file) => ({ kind, ref, title, snippet, at: now, exact: false, relevance: null, path: path.join(VAULT, file) });
     return json(res, { query: body.query, scope: body.scope, reranked: false, results: body.query === 'gift' ? [hit('wiki', 'Grace', 'Grace', 'A gift, given freely.', 'wiki/Grace.md'), hit('note', 'Atlas.md', 'Atlas', 'all names matched too', 'wiki/Atlas.md')] : [] });
   }
-  if (r === 'GET /api/tasks')
-    return json(res, { today: '2026-10-30', tz: 'UTC', count: 1, problems: [], projects: [{ project: 'acme', tasks: [
-      { project: 'acme', text: 'Price the offer', id: 't1', due: '2026-10-29', scheduled: null, priority: 'urgent', goals: [], file: 'x', line: 1, overdue: true },
-    ] }] });
+  if (r === 'GET /api/jobs') return json(res, { scheduler: true, jobs: [{ name: 'daily', schedule: '0 9 * * *', tz: 'UTC', enabled: true, next_run_at: null, last_status: 'failed', last_error: 'test failure', failures: 1 }] });
+  if (r === 'GET /api/jobs/runs') return json(res, [{ id: 1, job: 'daily', status: 'failed', started_at: '2026-11-19', error: 'test failure', session: null }]);
+  if (r === 'POST /api/jobs/daily/run' || r === 'PATCH /api/jobs/daily') return json(res, { ok: true });
+  if (r === 'GET /api/prefs') return json(res, prefs);
+  if (r === 'PATCH /api/prefs') { Object.assign(prefs, body); return json(res, prefs); }
+  if (r === 'GET /api/prompt-files/USER.md') return json(res, {name:'USER.md', text:userText, limit:20000});
+  if (r === 'PUT /api/prompt-files/USER.md') { userText = body.text; return json(res, {name:'USER.md', text:userText, limit:20000, backup:'backup'}); }
+  if (r === 'GET /api/ideas') return json(res, {ideas: []});
+  if (r === 'GET /api/tasks/meta') return json(res, {projects:[{id:'acme', title:'Acme'}], goals:[{id:'growth', title:'Growth', status:'active'}]});
+  if (r === 'GET /api/tasks') return json(res, {today:'2026-10-30', tz:'UTC', count:tasks.filter(t => !t.done).length, problems:[], projects:[{project:'acme', tasks}]});
+  if (r === 'POST /api/tasks') {
+    taskWrites.push({method:'POST', body});
+    const t = { ...body, id:`t${++revision}`, rev:`r${revision}`, done:false }; tasks.push(t); return json(res, t);
+  }
+  const tm = /^(PATCH|DELETE) \/api\/tasks\/([^/]+)$/.exec(r);
+  if (tm) {
+    const t = tasks.find(x => x.id === decodeURIComponent(tm[2]));
+    if (!t) return json(res, {error:'not found'}, 404);
+    const rev = tm[1] === 'PATCH' ? body.rev : u.searchParams.get('rev');
+    if (rev !== t.rev) return json(res, {error:'revision conflict'}, 409);
+    taskWrites.push({method:tm[1], id:t.id, body, rev});
+    if (tm[1] === 'DELETE' || body.dropped) { tasks = tasks.filter(x => x !== t); return json(res, {ok:true}); }
+    Object.assign(t, body, {rev:`r${++revision}`}); return json(res, t);
+  }
   if (r === 'GET /api/plugins') return json(res, { plugins: installedPlugins, defaults: openerDefaults });
   if (r === 'GET /api/plugins/marketplace')
     return json(res, { plugins: market.map((m) => ({ ...m, installed: installedPlugins.find((p) => p.name === m.name)?.version ?? null })) });
@@ -241,6 +268,8 @@ const kernel = createServer(async (req, res) => {
     }
   }
   if (r === 'POST /api/tasks/t1/agent') {
+    assert.equal(body.agent, 'zenbot');
+    assert.equal(body.rev, tasks.find(t => t.id === 't1').rev);
     handed.push('t1');
     return json(res, { task: {}, session: 's1', existing: false });
   }
@@ -332,8 +361,30 @@ const errors = [];
 page.on('pageerror', (e) => errors.push(e.message));
 const base = `http://127.0.0.1:${PORT}`;
 try {
-  // The board: the session, waiting on the owner.
   await page.goto(`${base}/`);
+  await page.getByRole('tab', { name: 'Routines' }).click();
+  await page.getByText('Some routines need attention.', { exact: false }).waitFor();
+  await page.getByRole('button', { name: 'Run now' }).click();
+  await page.getByRole('button', { name: 'Pause' }).click();
+  await page.getByRole('button', { name: '+ New routine' }).click();
+  await page.waitForURL(/\?s=new/);
+  assert.match(await page.locator('textarea').inputValue(), /create a new routine/);
+  await page.goto(`${base}/`);
+  await page.getByRole('button', { name: 'Command ring' }).click();
+  await page.getByRole('button', { name: /Theme · auto/ }).click();
+  assert.equal(await page.locator('html').getAttribute('data-theme'), 'light');
+  await page.reload();
+  assert.equal(await page.locator('html').getAttribute('data-theme'), 'light');
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert.ok(await page.getByRole('tab', { name: 'Routines' }).isVisible());
+  await page.setViewportSize({ width: 1300, height: 850 });
+  // Home is a real-data dashboard and opens the selected session, not a mock.
+  await page.goto(`${base}/`);
+  await page.getByRole('heading', { name: /Good (morning|afternoon|evening)/ }).waitFor();
+  await page.getByRole('button', { name: /Plan the week/ }).first().click();
+  await page.waitForURL(/\?s=s1/);
+  // The board: the session, waiting on the owner.
+  await page.goto(`${base}/?view=sessions`);
   await page.getByText('Plan the week').first().waitFor();
   assert.ok(await page.getByText('waiting on you').first().isVisible());
   // Channels apart; waiting first; a subagent under its session.
@@ -345,11 +396,16 @@ try {
   assert.equal(at(/verifier: Check the plan/), at(/Plan the week/) + 1, 'the subagent sits under its session');
   if (shots) await page.screenshot({ path: 'tests/shots/zen-board.png' });
 
+  // Suggestions load independently of the composer and selecting one only drafts it.
+  await page.route('**/api/zen/ideas?*', (route) => route.fulfill({ json: { ideas: ['Plan a week', 'Review a project', 'Explore an idea'] } }));
   // Sessions: a `+ new session` button does what `n` does.
   await page.getByRole('button', { name: '+ new session', exact: true }).click();
   await page.waitForURL(/\?s=new/);
   await page.locator('.zc-foot', { hasText: '@zenbot' }).waitFor();
-  await page.goto(`${base}/`);
+  await page.getByRole('button', { name: 'Plan a week' }).click();
+  assert.equal(await page.getByRole('textbox', { name: 'message' }).inputValue(), 'Plan a week', 'an idea fills the composer without sending');
+  await page.unroute('**/api/zen/ideas?*');
+  await page.goto(`${base}/?view=sessions`);
   await page.getByText('Plan the week').first().waitFor();
   // Archived jobs stay out of Archived (and its count) until `J` or the jobs chip.
   assert.equal(await page.getByRole('button', { name: 'jobs', exact: true }).count(), 0, 'the jobs chip shows with archived');
@@ -380,20 +436,37 @@ try {
   await page.keyboard.press('3');
   await page.getByText('Price the offer').waitFor();
   assert.ok(await page.getByText(/overdue/).first().isVisible());
-  // Handing a task to an agent: `a` arms, `a` again hands it over and opens its session.
-  await page.keyboard.press('a');
-  await page.getByText(/a again: hand/).waitFor();
-  await page.keyboard.press('a');
+  // Tick and untick carry the latest revision, editing updates the live task, and dropping removes it.
+  await page.getByRole('checkbox', {name:'Mark as done'}).click();
+  await page.getByRole('button', {name:/Done/}).click();
+  await page.getByRole('checkbox', {name:'Mark as not done'}).click();
+  await page.getByRole('button', {name:/Price the offer/}).click();
+  await page.getByLabel('Task', {exact:true}).fill('Price the offer carefully');
+  await page.locator('.edit').getByRole('button', {name:'Done', exact:true}).click();
+  await page.getByText('Price the offer carefully').waitFor();
+  await page.getByPlaceholder('Add a task').fill('Temporary task');
+  await page.getByRole('button', {name:'Add task'}).click();
+  await page.getByText('Temporary task').waitFor();
+  await page.getByPlaceholder('Add a task').waitFor();
+  await page.locator('.task', {hasText:'Temporary task'}).locator('button.main').click();
+  await page.locator('.task', {hasText:'Temporary task'}).locator('button.main').click();
+  await page.getByRole('button', {name:'Drop', exact:true}).click();
+  await page.getByText('Temporary task').waitFor({state:'detached'});
+  assert.deepEqual(taskWrites.map(x => x.method), ['PATCH','PATCH','PATCH','POST','PATCH']);
+  assert.deepEqual(taskWrites.slice(0,3).map(x => x.rev), ['r1','r2','r3']);
+  assert.equal(taskWrites[3].body.project, 'acme');
+  assert.equal(taskWrites[4].body.dropped, true);
+  await page.locator('.task', {hasText:'Price the offer carefully'}).getByRole('button', {name:/Hand to/}).click();
   await page.waitForURL(/\?s=s1/);
   assert.deepEqual(handed, ['t1']);
-  await page.goto(`${base}/`);
+  await page.goto(`${base}/?view=sessions`);
   await page.getByText('Plan the week').first().waitFor();
 
   // Files: opens in the shared workspace (the vault); `..` climbs to the home folder, without the
   // token; a note opens in the reader, changelog apart.
   await page.keyboard.press('2');
   await page.getByText('wiki/', { exact: true }).waitFor();
-  assert.equal(await page.getByText('plain.txt').count(), 0, 'Files starts in the vault, not home');
+  assert.equal(await page.getByText('home-only.txt').count(), 0, 'Files starts in the vault, not home');
   // Search: names at once (client side over the vault, through the server's find), content from the
   // kernel after a pause or Enter, names first; a result opens in the reader; Esc clears.
   const search = page.getByLabel('search files');
@@ -430,14 +503,23 @@ try {
   await search.press('Escape'); // clears the search
   await page.getByText('wiki/', { exact: true }).waitFor();
   assert.equal(await search.inputValue(), '');
-  await page.getByRole('button', { name: 'home', exact: true }).click();
+  await page.locator('.crumbs button').first().click();
   await page.getByText('plain.txt').waitFor();
-  await page.getByRole('button', { name: 'vault', exact: true }).click();
+  await page.locator('button.chip', { hasText: 'Vault' }).click();
   await page.getByText('wiki/', { exact: true }).waitFor();
   await page.locator('.crumbs button').first().click(); // ~ : back to the home folder
   await page.getByText('plain.txt').waitFor();
   await page.getByText('.zenbot', { exact: true }).waitFor({ state: 'detached' }).catch(() => {}); // dotfiles hidden
-  // New file, folder and rename, asked inline; the server writes under the scratch home.
+  // Reading above the vault is allowed, but writes there are refused.
+  await page.keyboard.press('a');
+  await page.getByLabel('name', {exact:true}).fill('outside.txt');
+  await page.keyboard.press('Enter');
+  await page.getByText(/couldn't create outside\.txt: outside vault/).waitFor();
+  await page.keyboard.press('Escape');
+  await page.locator('button.chip', {hasText:'Vault'}).click();
+  await page.locator('.row', {hasText:'wiki/'}).click();
+  await page.getByText('plain.txt').waitFor();
+  // New file, folder and rename, asked inline; the server writes under the scratch vault.
   await page.keyboard.press('a'); // nothing selected: the root
   await page.getByLabel('name', { exact: true }).fill('..');
   await page.keyboard.press('Enter');
@@ -446,28 +528,28 @@ try {
   await page.getByLabel('name', { exact: true }).fill('.env');
   await page.keyboard.press('Enter');
   await page.getByText(/couldn't create \.env: not allowed here/).waitFor();
-  assert.equal(existsSync(path.join(HOME, '.env')), false);
+  assert.equal(existsSync(path.join(VAULT, 'wiki', '.env')), false);
   await page.getByLabel('name', { exact: true }).fill('plain.txt');
   await page.keyboard.press('Enter');
   await page.getByText(/couldn't create plain\.txt: already exists/).waitFor();
-  assert.equal(readFileSync(path.join(HOME, 'plain.txt'), 'utf8'), 'hello file', 'nothing is overwritten');
+  assert.equal(readFileSync(path.join(VAULT, 'wiki', 'plain.txt'), 'utf8'), 'hello file', 'nothing is overwritten');
   await page.keyboard.press('Escape');
   assert.equal(await page.getByLabel('name', { exact: true }).count(), 0, 'Esc cancels');
   await page.getByRole('button', { name: '+ folder', exact: true }).click();
   await page.getByLabel('name', { exact: true }).fill('proj');
   await page.keyboard.press('Enter');
   await page.locator('.row[data-sel="1"]', { hasText: 'proj/' }).waitFor();
-  assert.ok(statSync(path.join(HOME, 'proj')).isDirectory());
+  assert.ok(statSync(path.join(VAULT, 'wiki', 'proj')).isDirectory());
   await page.keyboard.press('a'); // a folder is selected: inside it, and open
   await page.getByLabel('name', { exact: true }).fill('sub/');
   await page.keyboard.press('Enter');
   await page.locator('.row[data-sel="1"]', { hasText: 'sub/' }).waitFor();
-  assert.ok(statSync(path.join(HOME, 'proj/sub')).isDirectory());
+  assert.ok(statSync(path.join(VAULT, 'wiki', 'proj/sub')).isDirectory());
   await page.keyboard.press('Shift+A');
   await page.getByLabel('name', { exact: true }).fill('docs');
   await page.keyboard.press('Enter'); // inside sub, the selected folder
   await page.locator('.row[data-sel="1"]', { hasText: 'docs/' }).waitFor();
-  assert.ok(statSync(path.join(HOME, 'proj/sub/docs')).isDirectory());
+  assert.ok(statSync(path.join(VAULT, 'wiki', 'proj/sub/docs')).isDirectory());
   await page.locator('.row', { hasText: 'plain.txt' }).click(); // opens it; closing it keeps it selected
   await page.locator('.reader').waitFor();
   await page.keyboard.press('Escape');
@@ -476,7 +558,7 @@ try {
   await page.getByLabel('name', { exact: true }).fill('note.txt');
   await page.keyboard.press('Enter');
   await page.locator('.reader').waitFor(); // the new file opens in the reader
-  assert.equal(readFileSync(path.join(HOME, 'note.txt'), 'utf8'), '');
+  assert.equal(readFileSync(path.join(VAULT, 'wiki', 'note.txt'), 'utf8'), '');
   await page.keyboard.press('Escape');
   await page.locator('.row[data-sel="1"]', { hasText: 'note.txt' }).waitFor();
   await page.keyboard.press('Shift+R');
@@ -486,14 +568,14 @@ try {
   await rename.fill('renamed.txt');
   await page.keyboard.press('Enter');
   await page.locator('.row[data-sel="1"]', { hasText: 'renamed.txt' }).waitFor();
-  assert.equal(existsSync(path.join(HOME, 'note.txt')), false);
-  assert.equal(existsSync(path.join(HOME, 'renamed.txt')), true);
+  assert.equal(existsSync(path.join(VAULT, 'wiki', 'note.txt')), false);
+  assert.equal(existsSync(path.join(VAULT, 'wiki', 'renamed.txt')), true);
   await page.getByRole('button', { name: 'rename', exact: true }).click(); // the button too
   await page.getByLabel('new name').fill('plain.txt');
   await page.keyboard.press('Enter');
   await page.getByText(/couldn't rename plain\.txt: already exists/).waitFor();
   await page.keyboard.press('Escape');
-  rmSync(path.join(HOME, 'renamed.txt'));
+  rmSync(path.join(VAULT, 'wiki', 'renamed.txt'));
   // An image opens as a picture; an SVG (it can carry scripts) and a secret are refused by the image route.
   mkdirSync(path.join(HOME, 'inbox'), { recursive: true });
   writeFileSync(path.join(HOME, 'inbox', 'shot.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==', 'base64'));
@@ -528,8 +610,9 @@ try {
 
   // Plugins. Settings (off the top bar) lists the installed ones, with permissions in plain words;
   // disabling one takes its view tab away, enabling brings it back.
-  await page.goto(`${base}/`);
+  await page.goto(`${base}/?view=sessions`);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Plugins', exact: true }).click();
   await page.waitForURL(/view=settings/);
   const fxRow = page.locator('section[aria-label="Fixture"]');
   await fxRow.getByText('0.1.0').waitFor();
@@ -599,7 +682,7 @@ try {
   await fx.locator('#ctx', { hasText: 'slot=game' }).waitFor();
   // A zen://open link opens the file in the same pane, through its opener (the built-in reader).
   await fx.getByRole('button', { name: 'Open Grace' }).click();
-  await page.getByRole('heading', { name: 'Grace' }).waitFor();
+  await page.getByRole('heading', { name: 'Grace', exact: true }).waitFor();
   assert.match(page.url(), /view=files&file=.*Grace\.md/);
   // Open with: a plugin's opener for the file, made the default, opens it from then on.
   await page.goto(`${base}/?view=files&file=${encodeURIComponent(path.join(VAULT, 'games/board.fx'))}`);
@@ -648,75 +731,33 @@ try {
 
   // Agents: listed with what each may use, a broken one says why; another agent's session says
   // whose on the board.
-  await page.goto(`${base}/`);
+  await page.goto(`${base}/?view=sessions`);
   await page.getByText('Pitch practice').waitFor();
   assert.match(await page.locator('.row', { hasText: 'Pitch practice' }).innerText(), /@rex · smoke/);
   assert.doesNotMatch(await page.locator('.row', { hasText: 'Plan the week' }).innerText(), /@zenbot/);
-  await page.keyboard.press('4');
-  await page.locator('[aria-label="agents"]').getByText('@rex').waitFor();
+  await page.keyboard.press('5');
+  await page.getByRole('button', { name: 'Show zenbot roles' }).waitFor();
   assert.match(page.url(), /view=agents/);
-  const rowOf = (name) => page.locator('[aria-label="agents"] .row', { hasText: `@${name}` });
-  assert.match(await rowOf('zenbot').innerText(), /all tools/);
-  assert.match(await rowOf('rex').innerText(), /read, web_search · no MCP · claude\/opus/);
-  assert.match(await rowOf('broken').innerText(), /⚠ agent `broken`: agent.toml: expected a value/);
-  // Roles: their own read-only section under the agents, grouped by agent, a broken file says why.
-  const roles = page.locator('[aria-label="roles"]');
-  await roles.getByRole('heading', { name: 'Roles' }).waitFor();
-  assert.match(await roles.locator('[data-role="scout"]').innerText(), /claude\/haiku[\s\S]*Reads and reports\.[\s\S]*tools: read, web_search · skills: work\/search/);
-  assert.match(await roles.locator('[data-role="builder"]').innerText(), /high[\s\S]*all tools/);
-  assert.match(await roles.innerText(), /@zenbot · default claude\/sonnet/);
-  assert.match(await roles.innerText(), /@rex[\s\S]*⚠ .*unknown field `nope`/);
-  assert.equal(await page.locator('[aria-label="agents"] [data-role]').count(), 0, 'roles stay out of the agents list');
-  if (shots) await page.screenshot({ path: 'tests/shots/zen-agents.png' });
-
-  // Create one: a bad name is refused before the kernel; a good one opens its files.
-  await page.getByRole('button', { name: 'New agent' }).click();
-  await page.getByLabel('agent name').fill('Bad Name');
-  await page.getByRole('button', { name: 'Create' }).click();
-  await page.getByText(/a name is a lowercase letter/).waitFor();
-  await page.getByLabel('agent name').fill('rex');
-  await page.getByRole('button', { name: 'Create' }).click();
-  await page.getByText('agent `rex` already exists').waitFor();
-  await page.getByLabel('agent name').fill('scout');
-  await page.getByLabel('agent description').fill('finds sources');
-  await page.getByLabel('agent description').press('Enter');
-  await page.getByText('@scout', { exact: true }).waitFor();
-  assert.equal(await page.getByLabel('SOUL.md').inputValue(), '# scout\n');
-
-  // Edit and save: only the changed file goes; a refused agent.toml shows why, nothing kept.
-  const save = page.locator('.view .act.primary');
-  assert.equal(await save.isDisabled(), true, 'nothing to save yet');
-  await page.getByLabel('IDENTITY.md').fill('# How scout works\n');
-  await save.click();
-  await page.getByRole('button', { name: 'Saved' }).waitFor();
-  assert.deepEqual(saves.at(-1), { name: 'scout', body: { identity: '# How scout works\n' } });
-  await page.getByLabel('agent.toml').fill('tools = ["nope"]\n');
-  await page.keyboard.press('Control+s');
-  await page.getByText('Not saved: agent.toml: unknown tool(s) nope; tools are: read, bash').waitFor();
-  assert.deepEqual(saves.at(-1), { name: 'scout', body: { settings: 'tools = ["nope"]\n' } });
-  assert.equal(await save.isDisabled(), false, 'the refused change stays to fix');
-  if (shots) await page.screenshot({ path: 'tests/shots/zen-agent-editor.png' });
-
-  // Delete asks first; zenbot can't be deleted.
-  await page.getByRole('button', { name: 'Delete', exact: true }).click();
-  await page.getByText(/Delete @scout\? Its folder moves/).waitFor();
-  assert.ok(agents.has('scout'), 'nothing removed before the confirm');
-  await page.getByRole('button', { name: 'Yes, delete @scout' }).click();
-  await page.locator('[aria-label="agents"]').getByText('@rex').waitFor();
-  assert.equal(agents.has('scout'), false);
-  assert.equal(await rowOf('scout').count(), 0);
-  await rowOf('zenbot').getByRole('button', { name: 'edit' }).click(); // the first, chosen again
-  await page.getByLabel('SOUL.md').waitFor();
-  assert.equal(await page.getByRole('button', { name: 'Delete', exact: true }).isDisabled(), true, 'zenbot stays');
-  await page.getByRole('button', { name: '← agents' }).click();
-
-  // A new session with an agent: from its editor, the session is started as it.
-  await rowOf('rex').click();
-  await rowOf('rex').getByRole('button', { name: 'edit' }).click();
-  await page.getByRole('button', { name: 'New session with this agent' }).click();
+  assert.match(await page.locator('article.ag', { hasText: 'rex' }).innerText(), /read, web_search · no MCP/);
+  await page.getByText('agent `broken`: agent.toml: expected a value').waitFor();
+  const scout = page.locator('[data-role="scout"]');
+  await scout.getByRole('button').click();
+  assert.match(await scout.innerText(), /Reads and reports/);
+  assert.match(await scout.innerText(), /read[\s\S]*web_search[\s\S]*work\/search/);
+  await scout.getByRole('button', { name: 'Ask zenbot to change it' }).click();
+  const draft = page.locator('textarea').first();
+  await draft.waitFor();
+  assert.equal(await draft.inputValue(), "Change zenbot's scout role:");
+  await page.goto(`${base}/?view=agents`);
+  await page.getByRole('button', { name: 'Show rex roles' }).click();
+  await page.getByText(/Can't read roles:.*unknown field `nope`/).waitFor();
+  await page.getByRole('button', { name: /New agent/ }).click();
+  await draft.waitFor();
+  assert.equal(await draft.inputValue(), 'Create a new agent for me:');
+  await page.goto(`${base}/?view=agents`);
+  await page.getByRole('button', { name: 'Talk to rex' }).click();
   await page.getByText('new session with rex').waitFor();
   await page.locator('.zc-foot', { hasText: /@rex · smoke/ }).waitFor();
-  assert.match((await page.locator('.zc-foot').textContent()).replace(/\s+/g, ' '), /@rex · smoke/);
   // The picker in a fresh chat changes who it starts as.
   await page.getByRole('radio', { name: '@zenbot' }).click();
   await page.getByRole('radio', { name: '@rex' }).click();
@@ -759,6 +800,8 @@ try {
   const noHeader = await page.evaluate(() => fetch('/api/upload?name=x.txt', { method: 'POST', body: 'x' }).then((r) => r.status));
   assert.equal(noHeader, 403, 'an upload without X-Zen-Web is refused');
 
+  // A bare web address in a message is a link, its text kept (GFM autolink).
+  assert.equal(await page.locator('a.md-link[href="https://example.com/standup"]').first().textContent(), 'https://example.com/standup');
   // A wiki link in the chat opens the note in the side panel.
   await page.locator('a[data-wiki="God"]').first().click();
   await page.getByRole('heading', { name: 'God' }).waitFor();
@@ -1047,10 +1090,12 @@ try {
   }
 
   await page.locator('.chat-pane').getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Plugins', exact: true }).click();
   await page.locator('.zside').getByRole('tab', { name: 'Plugins', exact: true }).waitFor();
   assert.match(page.url(), /s=s1/);
-  await page.goto(`${base}/`);
+  await page.goto(`${base}/?view=sessions`);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Plugins', exact: true }).click();
   const cardsRow = page.locator('section[aria-label="Cards"]');
   await cardsRow.getByRole('button', { name: 'remove', exact: true }).click();
   assert.equal(installedPlugins.length, 2, 'remove asks first');

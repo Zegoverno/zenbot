@@ -4,41 +4,44 @@ mod agent;
 mod agents;
 mod api;
 mod assist;
+mod brain;
 mod compact;
 mod compile;
 mod config;
 mod context;
 mod defaults;
-mod layout;
 mod delegate;
 mod dispatch;
-mod shared_brain;
+mod engines;
 mod git;
 mod handoff;
 mod jobs;
+mod layout;
 mod mcp;
 mod mcp_interaction;
 mod measure;
+mod media;
 mod memory;
-mod brain;
 mod mind;
-mod roles;
+mod output;
+mod plugins;
+mod prefs;
+mod prices;
+mod prompt_files;
 mod review;
+mod roles;
 mod s1;
-mod search;
 mod sandbox;
+mod search;
 mod secrets;
+mod shared_brain;
 mod skills;
+mod storage;
 mod tape;
 mod tasks;
-mod storage;
 #[cfg(test)]
 mod test_util;
 mod tools;
-mod output;
-mod plugins;
-mod prices;
-mod media;
 mod turns;
 mod update;
 mod web;
@@ -54,16 +57,16 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use serde_json::{json, Value};
-use sqlx::{SqlitePool, Row};
-use tokio::sync::{broadcast, mpsc, watch, Mutex};
+use serde_json::{Value, json};
+use sqlx::{Row, SqlitePool};
+use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use uuid::Uuid;
 
 use mind::{Incoming, Mind};
@@ -137,7 +140,12 @@ pub(crate) fn outputs_dir() -> Option<PathBuf> {
 /// `max` bytes. The rule is the same everywhere; only the length differs (64 for skills and tools,
 /// from agentskills.io; 40 for jobs, which `zen jobs` shows in a column).
 pub(crate) fn valid_name(n: &str, max: usize) -> bool {
-    !n.is_empty() && n.len() <= max && n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') && !n.starts_with('-') && !n.ends_with('-') && !n.contains("--")
+    !n.is_empty()
+        && n.len() <= max
+        && n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !n.starts_with('-')
+        && !n.ends_with('-')
+        && !n.contains("--")
 }
 
 /// One unit of background work in `App::background`, released when dropped (even on a panic).
@@ -286,6 +294,10 @@ async fn serve() -> Result<()> {
 
     let api = Router::new()
         .route("/models", get(list_models))
+        .route("/engines", get(engines::list))
+        .route("/engines/{engine}/login", axum::routing::post(engines::login))
+        .route("/engines/{engine}/logout", axum::routing::post(engines::logout))
+        .route("/engines/openrouter/key", axum::routing::put(engines::set_key))
         .route("/reviews", get(review::list))
         .route("/complete", axum::routing::post(complete_once))
         .route("/search", axum::routing::post(search_once))
@@ -296,6 +308,8 @@ async fn serve() -> Result<()> {
         .route("/s1/compare", axum::routing::post(s1::api::compare))
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/board", get(board))
+        .route("/ideas", get(ideas))
+        .route("/sessions/{id}/stop", axum::routing::post(stop_child))
         .route("/agents", get(list_agents).post(create_agent))
         .route("/agents/{name}", get(get_agent).put(update_agent).delete(delete_agent))
         .route("/sessions/{id}", get(get_session).patch(update_session))
@@ -311,7 +325,9 @@ async fn serve() -> Result<()> {
         .route("/mcp/pending", get(mcp_pending))
         .route("/mcp/pending/{id}", axum::routing::post(mcp_respond))
         .route("/skills", get(list_skills))
-        .route("/tasks", get(list_tasks))
+        .route("/tasks", get(list_tasks).post(create_task))
+        .route("/tasks/meta", get(task_meta))
+        .route("/tasks/{id}", axum::routing::patch(patch_task).delete(delete_task))
         .route("/tasks/{id}/agent", axum::routing::post(task_agent))
         .route("/memory/sleep", axum::routing::post(run_sleep))
         .route("/jobs", get(list_jobs).post(create_job))
@@ -325,14 +341,13 @@ async fn serve() -> Result<()> {
         .route("/plugins/{name}", axum::routing::patch(plugins::api_patch).delete(plugins::api_remove))
         .route("/plugins/{name}/resource", get(plugins::api_resource))
         .route("/plugins/{name}/call", axum::routing::post(plugins::api_call))
+        .route("/prefs", get(get_prefs).patch(patch_prefs))
+        .route("/prompt-files/{name}", get(get_prompt_file).put(put_prompt_file))
         .route("/version", get(version))
         .route("/upgrade", get(upgrade_status).post(upgrade_start))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth));
 
-    let router = Router::new()
-        .route("/health", get(health))
-        .nest("/api", api)
-        .with_state(app);
+    let router = Router::new().route("/health", get(health)).nest("/api", api).with_state(app);
 
     // Localhost only unless ZEN_BIND says otherwise: anyone with the token can run commands.
     let bind = std::env::var("ZEN_BIND").ok().filter(|b| !b.trim().is_empty()).unwrap_or_else(|| "127.0.0.1".into());

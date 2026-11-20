@@ -1,9 +1,10 @@
 :root {
+  --canvas: #eeeee8;
   --paper: #fbfaf7;
   --ink: #1f1d1a;
   --dim: #8d877d;
   --faint: #d9d4ca;
-  --accent: #2f6fdb;
+  --accent: #667e70;
   --ai: #9a5bd6;
   --warn: #b7791f;
   --err: #c0392b;
@@ -14,12 +15,13 @@
   color-scheme: light dark;
 }
 @media (prefers-color-scheme: dark) {
-  :root {
-    --paper: #1a1917;
+  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+    --canvas: #232824;
+    --paper: #2d332f;
     --ink: #e9e5dd;
     --dim: #8a847a;
     --faint: #3a3732;
-    --accent: #7aa7ff;
+    --accent: #9db7a5;
     --ai: #c79bf2;
     --warn: #e0b050;
     --err: #ff7b72;
@@ -41,3 +43,6 @@ kbd { font-family: var(--sans); font-size: 0.85em; border: 1px solid var(--faint
 .ask .h1 { display: flex; align-items: baseline; gap: 8px; font-family: var(--serif); font-size: 32px; font-weight: 650; }
 .ask .h1 input { font-weight: 650; }
 .ask p { font-size: 13px; margin: 0; }
+
+:root[data-theme="dark"] { color-scheme: dark; --canvas:#232824; --paper:#2d332f; --ink:#e9e5dd; --dim:#aaa99f; --faint:#505a51; --accent:#9db7a5; --ai:#c79bf2; --warn:#e0b050; --err:#ff8b80; --ok:#6fcf97; }
+:root[data-theme="light"] { color-scheme: light; }
