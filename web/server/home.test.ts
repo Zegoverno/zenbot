@@ -37,4 +37,24 @@ describe('vault filesystem', () => {
     await expect(home.facets(base)).rejects.toMatchObject({ status: 403 });
     await expect(home.backlinks(path.join(vault, 'escape'))).rejects.toMatchObject({ status: 403 });
   });
+
+  it('reads above home down from /, but never system secrets or other homes', async () => {
+    expect((await home.list('/')).entries.map((e) => e.name)).not.toContain('proc');
+    expect((await home.list('/usr')).path).toBe('/usr');
+    expect(home.readable('/etc/hostname')).toBe(true);
+    for (const p of ['/proc/self/environ', '/etc/shadow', '/etc/ssh/ssh_host_ed25519_key', '/root', '/var/lib', '/run', '/tmp/x', '/dev/null', '/etc/ssl/private/k.pem', '/srv/id_rsa'])
+      expect(home.readable(p), p).toBe(false);
+    await expect(home.read('/proc/self/environ')).rejects.toMatchObject({ status: 403 });
+    await expect(home.list('/root')).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('keeps zen secrets in home unreadable and writes in the vault only', async () => {
+    await fs.mkdir(path.join(base, '.zenbot', 'matrix'), { recursive: true });
+    for (const f of ['token', 'env', 'matrix.env', 'zen.sqlite3']) await fs.writeFile(path.join(base, '.zenbot', f), 'secret');
+    for (const f of ['token', 'env', 'matrix.env', 'zen.sqlite3', 'matrix']) await expect(home.read(path.join(base, '.zenbot', f))).rejects.toMatchObject({ status: 403 });
+    const names = (await home.list(path.join(base, '.zenbot'))).entries.map((e) => e.name);
+    expect(names).toEqual([]);
+    await expect(home.create('/usr', 'x')).rejects.toMatchObject({ status: 403 });
+    await expect(home.mkdir(base, 'x')).rejects.toMatchObject({ status: 403 });
+  });
 });

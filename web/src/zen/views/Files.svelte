@@ -1,718 +1,808 @@
 <script lang="ts">
-  // The Files view (the TUI's files.rs): a folder tree from the pane's root, read lazily per open
-  // folder, dotfiles off until `.`; a file opens through its opener (Opened.svelte: the built-in
-  // reader or a plugin's) in place of the tree, and the tree comes back as it was when the file
-  // closes. Secrets are never listed (the server leaves them out). Expansion and selection are kept
-  // per pane for the page's life (tree.svelte.ts).
-  // `a` makes a file (a name ending in `/` a folder), `A` a folder and `R` renames the selected row,
-  // asked with a small input over the tree; the server never overwrites (server/home.ts).
-  // The search field (`/`) replaces the tree with results: names under the root at once (the
-  // server's `find`, no secrets, dot entries or symlinks), then, after a pause (3+ characters) or
-  // Enter, the kernel's search of the vault's notes (words and meaning) with a snippet each. A result
-  // opens through the normal opener (plugins included); Esc clears.
-  import { onMount } from 'svelte';
-  import type { Pane } from '../app.svelte.ts';
-  import { app, openFile, openDir, openSession, tilde, typing, notice } from '../app.svelte.ts';
-  import { files, zen } from '../api.ts';
-  import type { Found, SearchHit } from '../api.ts';
-  import Opened from '../Opened.svelte';
-  import { trees } from './tree.svelte.ts';
-  import { pageRows, follow, plain, human } from './list.ts';
+  // Files tab: opens in the shared vault; ↑ and the path climb up to /, the Vault button comes
+  // straight back; Inbox shows the chats' attachments (~/inbox). Folders first, dotfiles dimmed;
+  // search looks for names under this folder; Filter picks vault notes by their properties (type,
+  // status, tags: OR within one, AND across them; tags any or all). A file opens in place of the
+  // list: a note reads rendered (properties as chips, tickable tasks, [[links]], Linked from), or in
+  // the plugin reader picked for it (Settings › Plugins); ‹ › and ← → step through the folder's
+  // files; Edit writes a vault note (the built-in editor or the plugin's), guarding unsaved
+  // changes; Ask zenbot puts it in a chat. Above the vault it's read-only. (The redesign mock's
+  // Files, on the web server's /api/fs.)
+  import { onMount, tick, untrack } from 'svelte';
+  import { files, zen, type Entry, type FileRead, type SearchHit } from '../api.ts';
+  import { api, Conflict } from '../../lib/api.ts';
+  import { render } from '../md.ts';
+  import { app } from '../app.svelte.ts';
+  import { defaultOpener } from '../plugins.svelte.ts';
+  import PluginFrame from '../PluginFrame.svelte';
+  import { when as ago } from '../live.svelte.ts';
 
-  let { pane, active }: { pane: Pane; active: boolean } = $props();
+  let { ask, reveal, back }: { ask?: (path: string) => void; back?: { label: string; run: () => void } | null; reveal?: { path: string; n: number; open?: boolean; edit?: boolean } } = $props();
 
-  /** Never listed: huge, generated, or noise (as the terminal app). */
-  const SKIP = new Set(['.git', 'target', 'node_modules', '.venv', '__pycache__']);
-  /** Most rows shown, so a huge folder can't stall the page. */
-  const MAX_ROWS = 5000;
+  type FsNode = { name: string; when?: string; kids?: FsNode[]; dir?: boolean; hidden?: boolean; path?: string };
+  const VAULT = $derived(app.vault);
+  const INBOX = $derived(`${app.home}/inbox`);
+  const KEY = 'zen.files';
+  const saved = (() => { try { const v = JSON.parse(sessionStorage.getItem(KEY) ?? 'null'); return typeof v === 'object' ? v : null; } catch { return null; } })();
+  let cwd = $state<string>(saved?.cwd ?? '');
+  $effect(() => { if (!cwd && app.vault) cwd = app.vault; });
+  // The open file, if any: it replaces the list; ↑ or its folder's crumb goes back.
+  let file = $state<string | null>(saved?.file ?? null);
+  // Dotfiles stay out of the list until `.` (or the folder menu) shows them.
+  let showHidden = $state<boolean>(saved?.showHidden ?? false);
+  $effect(() => sessionStorage.setItem(KEY, JSON.stringify({ cwd, file, flt, tagsAll, showHidden })));
+  let q = $state('');
+  // Filters by the notes' properties (type, status, tags): OR within one, AND across them.
+  type Flt = Record<string, string[]>;
+  let flt = $state<Flt>(saved?.flt ?? {});
+  let fltOpen = $state(false);
+  let fkey = $state('tags');
+  // Tags only: any (OR, default) or all (AND) of the picked tags.
+  let tagsAll = $state<boolean>(saved?.tagsAll ?? false);
+  let fq = $state('');
+  const FACETS = ['type', 'status', 'tags'];
+  const active = $derived(Object.values(flt).reduce((n, v) => n + v.length, 0));
+  function toggleF(k: string, v: string) {
+    const cur = flt[k] ?? [];
+    flt[k] = cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v];
+  }
+  // The folder's notes and their properties (the server's facets, vault only).
+  let notes = $state<{ path: string; type: string[]; status: string[]; tags: string[] }[]>([]);
+  function propsOf(p: string): Flt {
+    const n = notes.find((x) => x.path === p);
+    return n ? { type: n.type, status: n.status, tags: n.tags } : {};
+  }
+  const matches = (p: string) => FACETS.every((k) => !flt[k]?.length || (k === 'tags' && tagsAll ? flt[k].every : flt[k].some).call(flt[k], (v: string) => propsOf(p)[k]?.includes(v)));
+  const facets = $derived(FACETS.map((k) => {
+    const c = new Map<string, number>();
+    for (const n of notes) for (const v of propsOf(n.path)[k] ?? []) c.set(v, (c.get(v) ?? 0) + 1);
+    for (const v of flt[k] ?? []) if (!c.has(v)) c.set(v, 0);
+    return [k, [...c].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))] as [string, [string, number][]];
+  }).filter(([, vs]) => vs.length));
+  let sel = $state<string | null>(null);
+  // Long paths keep the current folder in view: the crumbs scroll to their end.
+  let crumbsEl: HTMLElement | undefined = $state();
+  $effect(() => { void cwd; void file; queueMicrotask(() => crumbsEl && (crumbsEl.scrollLeft = crumbsEl.scrollWidth)); });
 
-  const t = $derived(trees[pane]);
-  let list: HTMLElement | undefined = $state();
-  const pending = new Set<string>();
+  const parts = (p: string) => p.split('/').filter(Boolean);
+  const join = (a: string, b: string) => (a === '/' ? '' : a) + '/' + b;
+  const parent = (p: string) => '/' + parts(p).slice(0, -1).join('/');
+  const inVault = $derived(!!VAULT && (cwd === VAULT || cwd.startsWith(VAULT + '/')));
+  const sorted = (ks: FsNode[]) => [...ks].sort((a, b) => (+!a.kids - +!b.kids) || a.name.localeCompare(b.name));
 
-  const parentOf = (p: string) => (p.lastIndexOf('/') > 0 ? p.slice(0, p.lastIndexOf('/')) : '/');
-
-  async function read(dir: string) {
-    if (pending.has(dir)) return;
-    pending.add(dir);
-    const tree = trees[pane];
+  // ---- the folder (the server's listing) ----
+  let listing = $state<Record<string, FsNode[]>>({});
+  let failed = $state('');
+  const node = (e: Entry): FsNode => ({ name: e.name, when: e.mtime ? ago(new Date(e.mtime).toISOString()) : '', kids: e.dir ? [] : undefined, dir: e.dir, hidden: e.hidden, path: e.path });
+  async function list(p: string) {
     try {
-      const r = await files.list(dir);
-      tree.listing[dir] = r.entries;
-      delete tree.failed[dir];
-    } catch (e) {
-      tree.failed[dir] = (e as Error).message;
-    } finally {
-      pending.delete(dir);
-    }
+      const r = await files.list(p);
+      listing[p] = r.entries.map(node);
+      if (p === cwd) failed = '';
+    } catch (e) { if (p === cwd) failed = (e as Error).message; }
   }
-
-  /** Read every open folder again (`r`; `forget`: drop what was listed first). */
-  function reload(forget: boolean) {
-    const tree = trees[pane];
-    if (forget) {
-      tree.listing = {};
-      tree.failed = {};
-    }
-    for (const r of rows) if (r.dir && tree.open[r.path]) read(r.path);
-    read(tree.root);
-    if (inVault) void loadFacets(tree.root);
-  }
-
-  // Follow the pane's root: a new root opens; going up selects the folder we came from.
+  $effect(() => { const p = cwd; if (p) untrack(() => void list(p)); });
   $effect(() => {
-    const root = app.root[pane];
-    const tree = trees[pane];
-    if (!root || root === tree.root) return;
-    const from = tree.root;
-    tree.root = root;
-    tree.open[root] = true;
-    if (from && from.startsWith(root + '/')) {
-      // Open the folders down to where we were, and select it.
-      for (let p = parentOf(from); p.length > root.length; p = parentOf(p)) tree.open[p] = true;
-      tree.sel = from;
-    } else tree.sel = null;
+    const p = cwd, v = inVault;
+    notes = [];
+    if (!p || !v) return;
+    fetch(`/api/fs/facets?path=${encodeURIComponent(p)}`).then((r) => (r.ok ? r.json() : null)).then((d) => { if (d && p === cwd) notes = d.notes ?? []; }).catch(() => {});
   });
+  const entries = $derived(sorted((listing[cwd] ?? []).filter((n) => showHidden || !n.hidden)));
 
-  type FacetKey = 'type' | 'status' | 'tags';
-  type Note = { path: string; type: string[]; status: string[]; tags: string[] };
-  type Facets = Record<FacetKey, { value: string; count: number }[]> & { notes: Note[]; truncated: boolean };
-  const keys: FacetKey[] = ['type', 'status', 'tags'];
-  let facets = $state<Facets | null>(null);
-  let selected = $state<Record<FacetKey, string[]>>({ type: [], status: [], tags: [] });
-  let tagAll = $state(false);
-  let filterOpen = $state(false);
-  let facetError = $state('');
-  let facetSeq = 0;
-  const inVault = $derived(!!app.vault && (t.root === app.vault || t.root.startsWith(app.vault + '/')));
-  const filtering = $derived(keys.some(k => selected[k].length > 0));
-  async function loadFacets(root: string) {
-    const seq = ++facetSeq;
-    facets = null; facetError = '';
-    try {
-      const response = await fetch(`/api/fs/facets?path=${encodeURIComponent(root)}`);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const result: Facets = await response.json();
-      if (seq === facetSeq) facets = result;
-    } catch (e) { if (seq === facetSeq) facetError = (e as Error).message; }
+  /** Breadcrumbs: inside the vault they start at "Vault"; outside, at "/". */
+  const crumbs = $derived.by(() => {
+    const c = folderCrumbs();
+    return file ? [...c, { label: file.split('/').pop()!, path: file }] : c;
+  });
+  function folderCrumbs() {
+    if (inVault) {
+      const rest = parts(cwd.slice(VAULT.length));
+      return [{ label: 'Vault', path: VAULT }, ...rest.map((x, i) => ({ label: x, path: VAULT + '/' + rest.slice(0, i + 1).join('/') }))];
+    }
+    const ps = parts(cwd);
+    return [{ label: '/', path: '/' }, ...ps.map((x, i) => ({ label: x, path: '/' + ps.slice(0, i + 1).join('/') }))];
   }
+
+  /** Search: names under the current folder (the server's bounded find), with where they are, at
+   * once; then, after a pause (3+ characters) or Enter, the kernel's search of the vault's notes
+   * (words and meaning) with a snippet each, after the names, each file once. Or the notes the
+   * filters pick. */
+  type Hit = { path: string; node: FsNode; snippet?: string };
+  let hits = $state<Hit[]>([]);
+  let noteHits = $state<SearchHit[]>([]);
+  let noteBusy = $state(false);
+  let noteErr = $state('');
+  let findTimer: ReturnType<typeof setTimeout> | undefined;
+  let noteTimer: ReturnType<typeof setTimeout> | undefined;
+  let noteSeq = 0;
   $effect(() => {
-    const root = t.root, allowed = inVault;
-    selected = { type: [], status: [], tags: [] };
-    if (allowed) void loadFacets(root); else { facetSeq++; facets = null; }
+    const t = q.trim(), p = cwd;
+    clearTimeout(findTimer); clearTimeout(noteTimer);
+    if (!t) { hits = []; noteSeq++; noteHits = []; noteBusy = false; noteErr = ''; return; }
+    untrack(() => { sel = null; });
+    findTimer = setTimeout(() => {
+      files.find(p, t).then((r) => { if (q.trim() === t && cwd === p) hits = r.results.map((x) => ({ path: x.path, node: { name: x.name, kids: x.dir ? [] : undefined, dir: x.dir } })); }).catch(() => (hits = []));
+    }, 180);
+    if (t.length >= 3) noteTimer = setTimeout(() => untrack(() => void searchNotes(t)), 600);
+    else { noteSeq++; noteHits = []; noteBusy = false; noteErr = ''; }
   });
-  function toggleFacet(key: FacetKey, value: string) {
-    selected[key] = selected[key].includes(value) ? selected[key].filter(v => v !== value) : [...selected[key], value];
+  async function searchNotes(t: string) {
+    const s = ++noteSeq;
+    noteBusy = true; noteErr = '';
+    try { const r = await zen.search(t, 'notes', 10); if (s === noteSeq) noteHits = r.results; }
+    catch (e) { if (s === noteSeq) { noteHits = []; noteErr = (e as Error).message; } }
+    finally { if (s === noteSeq) noteBusy = false; }
   }
-  const matches = $derived((facets?.notes ?? []).filter(note => keys.every(key => {
-    const choices = selected[key];
-    return !choices.length || (key === 'tags' && tagAll ? choices.every(v => note[key].includes(v)) : choices.some(v => note[key].includes(v)));
-  })));
-
-  interface Row {
-    path: string;
-    name: string;
-    dir: boolean;
-    depth: number;
-    size: number;
-    up?: boolean;
-  }
-
-  const rows = $derived.by((): Row[] => {
-    const out: Row[] = [];
-    if (!t.root) return out;
-    if (t.root !== '/') out.push({ path: '..', name: '..', dir: true, depth: 0, size: 0, up: true });
-    const walk = (dir: string, depth: number) => {
-      for (const e of [...(t.listing[dir] ?? [])].sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name))) {
-        if (out.length >= MAX_ROWS) return;
-        if (SKIP.has(e.name) || (e.hidden && !t.hidden)) continue;
-        out.push({ path: e.path, name: e.name, dir: e.dir, depth, size: e.size });
-        if (e.dir && t.open[e.path]) walk(e.path, depth + 1);
+  /** Enter in the search: the kernel's search now, without the pause. */
+  function searchNow() { const t = q.trim(); if (!t) return; clearTimeout(noteTimer); void searchNotes(t); }
+  const found = $derived.by((): Hit[] => {
+    const t = q.trim().toLowerCase();
+    if (!t && !active) return [];
+    if (!active) {
+      const out: Hit[] = hits.slice(0, 40);
+      const seen = new Set(out.map((h) => h.path));
+      for (const h of noteHits) {
+        if (!h.path || seen.has(h.path)) continue;
+        seen.add(h.path);
+        out.push({ path: h.path, node: { name: h.path.split('/').pop()! }, snippet: h.snippet });
       }
-    };
-    walk(t.root, 0);
-    return out;
+      return out;
+    }
+    return notes.filter((n) => matches(n.path) && (!t || n.path.split('/').pop()!.toLowerCase().includes(t)))
+      .map((n) => ({ path: n.path, node: { name: n.path.split('/').pop()! } as FsNode })).slice(0, 40);
   });
+  const shortPath = (p: string) => (VAULT && p.startsWith(VAULT + '/') ? p.slice(VAULT.length + 1) : app.home && p.startsWith(app.home) ? '~' + p.slice(app.home.length) : p);
 
-  // Read open folders that aren't listed yet.
+  // An attachment's chip (or Settings, or a plugin's link): show its folder with the file picked.
   $effect(() => {
-    if (!t.root) return;
-    if (!(t.root in t.listing) && !(t.root in t.failed)) read(t.root);
-    for (const r of rows) if (r.dir && !r.up && t.open[r.path] && !(r.path in t.listing) && !(r.path in t.failed)) read(r.path);
+    if (!reveal?.n) return;
+    const { path: p, open, edit: ed } = reveal;
+    untrack(() => {
+      if (!p) return;
+      go(p.endsWith('/') ? p.replace(/\/+$/, '') || '/' : parent(p));
+      if (p.endsWith('/')) return;
+      sel = p;
+      if (open || ed) { file = p; if (ed) tick().then(edit); }
+    });
   });
-
-  const at = $derived(Math.max(0, rows.findIndex((r) => r.path === t.sel)));
-
-  onMount(() => {
-    if (t.root) reload(false);
-    follow(list);
-  });
-
-  // The tree comes back from the reader: show the selected row.
-  $effect(() => {
-    if (!app.file[pane]) { follow(list); if (inVault) void loadFacets(t.root); }
-  });
-
-  function select(i: number) {
-    if (!rows.length) return;
-    t.sel = rows[Math.min(rows.length - 1, Math.max(0, i))].path;
-    follow(list);
+  function go(p: string) { if (p === file) return; if (guard(() => go(p))) return; const from = file ?? (parent(cwd) === p ? cwd : null); cwd = p; q = ''; file = null; editing = false; sel = from; menu = false; askFor = null; askErr = ''; }
+  function up() { if (file) go(cwd); else go(parent(cwd)); }
+  function openNode(p: string, n: FsNode) {
+    if (p !== file && guard(() => openNode(p, n))) return;
+    if (n.kids) return go(p);
+    cwd = parent(p); q = ''; sel = p; file = p; editing = false;
   }
 
-  /** Expand the selected folder; true when it was a closed folder. */
-  function expand(r: Row | undefined): boolean {
-    if (!r || !r.dir || r.up || t.open[r.path]) return false;
-    t.open[r.path] = true;
+  // ---- the open file ----
+  const rel = (p: string) => (VAULT && p.startsWith(VAULT + '/') ? p.slice(VAULT.length + 1) : null);
+  const fileName = $derived(file ? file.split('/').pop()! : '');
+  const isNote = $derived(/\.md$/i.test(fileName));
+  const vaultRel = $derived(file ? rel(file) : null);
+  const title = $derived(fileName.replace(/\.md$/i, ''));
+  let doc = $state<FileRead | null>(null);
+  let readError = $state('');
+  let text = $state('');
+  let hash = $state<string | null>(null);
+  let gen = 0;
+  async function readFile(p: string) {
+    const g = ++gen;
+    doc = null; readError = ''; text = ''; hash = null;
+    try {
+      const r = rel(p);
+      if (r && /\.md$/i.test(p)) {
+        const d = await api.read(r).catch((e) => { if (app.draft?.path === r) return null; throw e; });
+        if (g !== gen) return;
+        if (d) { text = d.text; hash = d.hash; }
+        doc = { path: p, mtime: 0, size: text.length, text };
+        files.stat(p).then((s) => { if (g === gen && doc) doc.mtime = s.mtime; }).catch(() => {});
+      } else {
+        const d = await files.read(p);
+        if (g !== gen) return;
+        doc = d; text = d.text ?? '';
+      }
+    } catch (e) { if (g === gen) readError = (e as Error).message; }
+  }
+  // Re-read once the vault is known too: a note opened by address before then needs its hash to save.
+  $effect(() => { const f = file; void VAULT; if (f) untrack(() => void readFile(f)); else doc = null; });
+  $effect(() => { app.viewing = file; return () => { app.viewing = null; }; });
+  const rendered = $derived(isNote && doc ? render(text) : null);
+  const fprops = $derived((rendered?.front ?? '').split('\n').map((l) => /^(\w+):\s*(.+)$/.exec(l)).filter((m): m is RegExpExecArray => !!m)
+    .map((m) => [m[1], m[2].replace(/^\[|\]$/g, '').split(/,\s*/)] as [string, string[]]));
+  /** Notes that link here (the server's scan of the vault). */
+  let backlinks = $state<string[]>([]);
+  $effect(() => {
+    const f = file, r = vaultRel;
+    backlinks = [];
+    if (!f || !r || !/\.md$/i.test(f)) return;
+    fetch(`/api/fs/backlinks?path=${encodeURIComponent(f)}`).then((x) => (x.ok ? x.json() : null)).then((d) => { if (d && f === file) backlinks = (d.references ?? []).map((x: { path: string }) => x.path); }).catch(() => {});
+  });
+  /** The plugin opener picked for this file (vault notes only): its reader, or its editor. */
+  const reader = $derived(vaultRel ? defaultOpener(fileName, 'read') : null);
+  const writer = $derived(vaultRel ? defaultOpener(fileName, 'edit') : null);
+  async function follow(name: string, from?: string) {
+    try {
+      const r = await files.locate(`[[${name}]]`, from ?? file ?? undefined);
+      if (r.found) openNode(r.found.path, { name: r.found.path.split('/').pop()!, kids: r.found.dir ? [] : undefined });
+    } catch {}
+  }
+  /** Mount the rendered note; its checkboxes tick (and write the note), [[links]] open their note. */
+  function mount(host: HTMLElement) {
+    $effect(() => {
+      if (!rendered) return;
+      host.replaceChildren(rendered.el);
+      host.parentElement?.scrollTo(0, 0);
+      host.querySelectorAll<HTMLInputElement>('input[type=checkbox]').forEach((b, i) => {
+        b.disabled = !vaultRel;
+        b.onchange = () => toggleTask(i, b.checked);
+      });
+    });
+    const click = (e: MouseEvent) => {
+      const a = (e.target as HTMLElement).closest('a');
+      if (!a) return;
+      if (a.dataset.wiki) { e.preventDefault(); void follow(a.dataset.wiki); }
+      else if (a.dataset.href) { e.preventDefault(); void follow(a.dataset.href); }
+      else if (a.getAttribute('href')?.startsWith('http')) { a.target = '_blank'; a.rel = 'noopener noreferrer'; }
+    };
+    host.addEventListener('click', click);
+    return () => host.removeEventListener('click', click);
+  }
+  async function toggleTask(i: number, on: boolean) {
+    if (!vaultRel) return;
+    let n = -1;
+    const next = text.replace(/^(\s*[-*] \[)( |x|X)(\])/gm, (m, a, _x, c) => (++n === i ? a + (on ? 'x' : ' ') + c : m));
+    try { hash = (await api.write(vaultRel, next, hash)).hash; text = next; }
+    catch (e) { readError = e instanceof Conflict ? 'Changed on disk: reopen the note to tick it.' : (e as Error).message; }
+  }
+  // Between files: the other files of this folder, in list order; ‹ › and ← → step through them.
+  const siblings = $derived(file ? entries.filter((n) => !n.kids).map((n) => join(cwd, n.name)) : []);
+  const at = $derived(file ? siblings.indexOf(file) : -1);
+  let sibOpen = $state(false);
+  function step(d: number) {
+    if (at < 0 || !siblings.length || editing) return;
+    const p = siblings[(at + d + siblings.length) % siblings.length];
+    openNode(p, { name: p.split('/').pop()! }); sibOpen = false;
+  }
+  /** The rows shown (the folder, or the search's results) for j/k and Enter. */
+  const rows = $derived(q.trim() || active ? found.map((r) => ({ path: r.path, node: r.node })) : entries.map((n) => ({ path: join(cwd, n.name), node: n })));
+  function move(d: number) {
+    if (!rows.length) return;
+    const i = rows.findIndex((r) => r.path === sel);
+    sel = rows[i < 0 ? (d > 0 ? 0 : rows.length - 1) : Math.min(rows.length - 1, Math.max(0, i + d))].path;
+    tick().then(() => listEl?.querySelector('.row.on')?.scrollIntoView({ block: 'nearest' }));
+  }
+  function openSel(): boolean {
+    const r = rows.find((x) => x.path === sel);
+    if (r) openNode(r.path, r.node);
+    return !!r;
+  }
+  let listEl = $state<HTMLElement>();
+  let searchEl = $state<HTMLInputElement>();
+  /** The list's keys: j/k or ↓/↑ move, Enter opens, `.` shows dotfiles, `/` searches, a/A/R new file, folder, rename. */
+  function listKeys(e: KeyboardEvent) {
+    if (!listEl?.isConnected || askFor) return;
+    const act: Record<string, () => void> = {
+      j: () => move(1), ArrowDown: () => move(1), k: () => move(-1), ArrowUp: () => move(-1),
+      Home: () => { sel = null; move(1); }, End: () => { sel = null; move(-1); },
+      Enter: () => void openSel(),
+      '.': () => { showHidden = !showHidden; },
+      '/': () => searchEl?.focus(),
+      a: () => begin('file'), A: () => begin('folder'), R: () => begin('rename'),
+    };
+    if (act[e.key]) { e.preventDefault(); act[e.key](); }
+  }
+  function searchKeys(e: KeyboardEvent) {
+    if (e.isComposing) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); move(e.key === 'ArrowDown' ? 1 : -1); }
+    else if (e.key === 'Enter') { e.preventDefault(); if (!openSel()) searchNow(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (q) q = ''; else searchEl?.blur(); }
+  }
+  function keys(e: KeyboardEvent) {
+    if (editing || e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
+    const t = e.target as HTMLElement;
+    if (t.closest('input, textarea, select, [contenteditable]')) return;
+    if (!file) return listKeys(e);
+    if (!host?.isConnected) return;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); step(-1); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); step(1); }
+    else if (e.key === 'Escape' && sibOpen) { e.stopPropagation(); sibOpen = false; }
+    else if (e.key === 'e' && isNote && vaultRel) { e.preventDefault(); edit(); }
+  }
+  let host = $state<HTMLElement>();
+  const nameOf = (p: string) => p.split('/').pop()!;
+
+  // ---- writing a vault note: the built-in editor (a plain text box) or the plugin's ----
+  let editing = $state(false);
+  let draft = $state('');
+  let saving = $state(false);
+  let status = $state('');
+  let saveError = $state('');
+  // Unsaved edits: leaving inside Files asks first; leaving Files (another tab) keeps the draft in
+  // this tab's storage and brings it back when the note is opened again.
+  const DRAFTS = KEY + '.drafts';
+  let drafts = $state<Record<string, { text: string; hash: string | null }>>((() => { try { return JSON.parse(sessionStorage.getItem(DRAFTS) ?? '{}'); } catch { return {}; } })());
+  $effect(() => { try { sessionStorage.setItem(DRAFTS, JSON.stringify(drafts)); } catch {} });
+  const builtin = $derived(editing && !writer);
+  const dirty = $derived(builtin && (draft !== text || hash === null));
+  $effect(() => { if (file && builtin) { if (draft !== text || hash === null) drafts[file] = { text: draft, hash }; else delete drafts[file]; } });
+  let pendingLeave = $state<(() => void) | null>(null);
+  /** True when there are unsaved changes: the move waits for Keep editing or Discard. */
+  function guard(next: () => void): boolean {
+    if (!dirty) return false;
+    pendingLeave = next;
     return true;
   }
-
-  function foldOrParent(r: Row | undefined) {
-    if (!r || r.up) return;
-    if (r.dir && t.open[r.path]) {
-      t.open[r.path] = false;
-      return;
-    }
-    const parent = parentOf(r.path);
-    const i = rows.findIndex((x) => x.path === parent);
-    if (i >= 0) select(i);
-    else if (parent === t.root && rows[0]?.up) select(0);
+  /** Drop a note's draft now (Files may close before an effect would write it). */
+  function dropDraft(f: string | null) {
+    if (!f) return;
+    delete drafts[f];
+    try { sessionStorage.setItem(DRAFTS, JSON.stringify(drafts)); } catch {}
   }
-
-  function activate(r: Row | undefined) {
-    if (!r) return;
-    if (r.up) openDir(parentOf(t.root), pane);
-    else if (r.dir) openDir(r.path, pane);
-    else openFile(r.path, pane);
+  function discard() {
+    const next = pendingLeave;
+    dropDraft(file);
+    editing = false; pendingLeave = null; saveError = '';
+    if (file) void readFile(file);
+    next?.();
   }
-
-  // ---- search ----
-
-  interface Result {
-    key: string;
-    path: string;
-    name: string;
-    sub: string;
-    dir: boolean;
-    snippet?: string;
+  function cancelEdit() { if (!guard(() => { editing = false; })) editing = false; }
+  function edit() {
+    if (!file || !vaultRel || !isNote) return;
+    const kept = drafts[file];
+    const fresh = app.draft?.path === vaultRel ? app.draft : null;
+    if (fresh) { draft = fresh.text; hash = null; app.draft = null; }
+    else if (kept) { draft = kept.text; hash = kept.hash; }
+    else draft = text;
+    status = ''; saveError = '';
+    editing = true;
   }
-
-  let q = $state('');
-  let input: HTMLInputElement | undefined = $state();
-  let names = $state<Found[]>([]);
-  let hits = $state<SearchHit[]>([]);
-  let nameBusy = $state(false);
-  let contentBusy = $state(false);
-  let contentErr = $state('');
-  let hit = $state(-1);
-  let nameSeq = 0;
-  let contentSeq = 0;
-  let nameTimer: ReturnType<typeof setTimeout> | undefined;
-  let contentTimer: ReturnType<typeof setTimeout> | undefined;
-  const searching = $derived(q.trim() !== '');
-
-  const base = (p: string) => p.slice(p.lastIndexOf('/') + 1);
-  /** A path shown shortly: in the vault, from it; else `~/…`. */
-  const shown = (p: string) => (app.vault && p.startsWith(app.vault + '/') ? p.slice(app.vault.length + 1) : tilde(p));
-
-  /** Names first, then content matches (their snippet), each file once. */
-  const results = $derived.by((): Result[] => {
-    const out: Result[] = names.map((f) => ({ key: 'n:' + f.path, path: f.path, name: f.name, sub: shown(f.path), dir: f.dir }));
-    const seen = new Set(out.map((r) => r.path));
-    for (const h of hits) {
-      if (!h.path || seen.has(h.path)) continue;
-      seen.add(h.path);
-      out.push({ key: 'c:' + h.path, path: h.path, name: h.title || base(h.path), sub: shown(h.path), dir: false, snippet: h.snippet });
-    }
-    return out;
-  });
-
-  function clearSearch() {
-    clearTimeout(nameTimer);
-    clearTimeout(contentTimer);
-    nameSeq++;
-    contentSeq++;
-    q = '';
-    names = [];
-    hits = [];
-    nameBusy = contentBusy = false;
-    contentErr = '';
-    hit = -1;
-  }
-
-  async function findNames(text: string, root: string) {
-    const seq = ++nameSeq;
-    nameBusy = true;
+  async function save(): Promise<boolean> {
+    if (!file || !vaultRel || saving) return false;
+    const value = draft, f = file;
+    saving = true; saveError = '';
     try {
-      const r = await files.find(root, text);
-      if (seq === nameSeq) names = r.results;
-    } catch {
-      if (seq === nameSeq) names = [];
-    } finally {
-      if (seq === nameSeq) nameBusy = false;
-    }
-  }
-
-  async function findContent(text: string) {
-    const seq = ++contentSeq;
-    contentBusy = true;
-    contentErr = '';
-    try {
-      const r = await zen.search(text, 'notes', 10);
-      if (seq === contentSeq) hits = r.results;
+      const out = await api.write(vaultRel, value, hash);
+      if (f === file) { hash = out.hash; text = value; status = 'Saved'; dropDraft(f); if (doc) doc.text = value; }
+      return true;
     } catch (e) {
-      if (seq === contentSeq) {
-        hits = [];
-        contentErr = (e as Error).message;
-      }
-    } finally {
-      if (seq === contentSeq) contentBusy = false;
-    }
+      saveError = e instanceof Conflict ? 'Changed on disk. Your edits are kept here; copy them before reloading.' : (e as Error).message;
+      return false;
+    } finally { saving = false; }
   }
-
-  // Typing: names after a moment, content after a longer one (3+ characters); a new text drops what an earlier one found.
+  async function saveAndClose() { if (await save()) { editing = false; pendingLeave = null; } }
+  async function saveAndLeave() { const next = pendingLeave; if (await save()) { editing = false; pendingLeave = null; next?.(); } }
+  // A note with a kept draft (or a new one) opens straight into editing it.
+  $effect(() => { if (file && !editing && doc && vaultRel && (drafts[file] != null || app.draft?.path === vaultRel)) untrack(edit); });
+  // The open file in the address (`?view=files&file=…`), so a reload comes back to it.
   $effect(() => {
-    const text = q.trim();
-    const root = t.root;
-    clearTimeout(nameTimer);
-    clearTimeout(contentTimer);
-    hit = -1;
-    if (!text) return;
-    nameTimer = setTimeout(() => findNames(text, root), 120);
-    if (text.length >= 3) contentTimer = setTimeout(() => findContent(text), 600);
-    else {
-      contentSeq++;
-      hits = [];
-      contentBusy = false;
-    }
-    return () => {
-      clearTimeout(nameTimer);
-      clearTimeout(contentTimer);
-    };
+    const f = file;
+    if (!app.vault || app.screen === 'chat') return;
+    const u = new URL(location.href);
+    if (u.searchParams.get('view') !== 'files') return;
+    if (f) u.searchParams.set('file', f); else u.searchParams.delete('file');
+    if (f && editing) u.searchParams.set('edit', '1'); else u.searchParams.delete('edit');
+    if (u.href !== location.href) history.replaceState(null, '', u);
   });
+  onMount(() => () => { clearTimeout(findTimer); clearTimeout(noteTimer); });
 
-  function searchNow() {
-    const text = q.trim();
-    if (!text) return;
-    clearTimeout(nameTimer);
-    clearTimeout(contentTimer);
-    findNames(text, t.root);
-    findContent(text);
-  }
-
-  function pick(i: number) {
-    if (!results.length) return;
-    hit = Math.min(results.length - 1, Math.max(0, i));
-    follow(list);
-  }
-
-  function open(r: Result | undefined) {
-    if (!r) return;
-    if (r.dir) {
-      clearSearch();
-      openDir(r.path, pane);
-    } else openFile(r.path, pane);
-  }
-
-  function searchKey(e: KeyboardEvent) {
-    if (e.isComposing) return;
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
-      if (q) clearSearch();
-      else input?.blur();
-    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      e.preventDefault();
-      pick(hit < 0 ? 0 : hit + (e.key === 'ArrowDown' ? 1 : -1));
-    } else if (e.key === 'Enter') {
-      e.preventDefault();
-      e.stopPropagation();
-      if (hit >= 0 && results[hit]) open(results[hit]);
-      else searchNow();
-    }
-  }
-
-  // ---- new file, new folder, rename ----
-
+  // ---- new file, new folder, rename (the vault only; the server never overwrites: server/home.ts) ----
   type Ask = { kind: 'file' | 'folder' | 'rename'; dir: string; from?: string; value: string };
-  let ask = $state<Ask | null>(null);
-  let askInput: HTMLInputElement | undefined = $state();
+  let askFor = $state<Ask | null>(null);
+  let askErr = $state('');
+  let askEl: HTMLInputElement | undefined = $state();
+  let menu = $state(false);
   let busy = false;
-
-  /** The selected row, unless it is the `..` one or nothing was selected. */
-  const chosen = $derived(t.sel && t.sel !== '..' ? rows.find((r) => r.path === t.sel) : undefined);
-
-  /** Where a new entry goes: inside the selected folder, else beside the selected file, else the root. */
-  function targetDir(): string {
-    const r = chosen;
-    if (!r) return t.root;
-    return r.dir ? r.path : parentOf(r.path);
-  }
-
+  /** The selected row in this folder, if any (what Rename renames). */
+  const chosen = $derived(sel && parent(sel) === cwd ? entries.find((n) => join(cwd, n.name) === sel) ?? null : null);
   function begin(kind: Ask['kind']) {
+    menu = false; askErr = '';
+    if (!inVault) return;
     if (kind === 'rename') {
-      const r = chosen;
-      if (!r) return notice('select a file or folder to rename');
-      ask = { kind, dir: parentOf(r.path), from: r.path, value: r.name };
-    } else {
-      const dir = targetDir();
-      trees[pane].open[dir] = true;
-      ask = { kind, dir, value: '' };
-    }
+      if (!chosen || !sel) return;
+      askFor = { kind, dir: cwd, from: sel, value: chosen.name };
+    } else askFor = { kind, dir: cwd, value: '' };
   }
-
-  // Focus the input as it appears; a rename starts with the name's stem selected.
+  // Focus the name as it appears; a rename starts with the stem selected.
   $effect(() => {
-    if (!askInput || !ask) return;
-    askInput.focus();
-    const dot = ask.value.lastIndexOf('.');
-    if (ask.kind === 'rename') askInput.setSelectionRange(0, dot > 0 ? dot : ask.value.length);
+    if (!askEl || !askFor) return;
+    const a = untrack(() => askFor!);
+    askEl.focus();
+    const dot = a.value.lastIndexOf('.');
+    if (a.kind === 'rename') askEl.setSelectionRange(0, dot > 0 ? dot : a.value.length);
   });
-
-  /** Read a folder again now (not skipped while another read is under way). */
-  async function refresh(dir: string) {
-    const tree = trees[pane];
-    try {
-      tree.listing[dir] = (await files.list(dir)).entries;
-      delete tree.failed[dir];
-    } catch (e) {
-      tree.failed[dir] = (e as Error).message;
-    }
-  }
-
   async function submit() {
-    const a = ask;
+    const a = askFor;
     if (!a || busy) return;
     let name = a.value.trim();
     if (!name) return;
-    busy = true;
-    const tree = trees[pane];
+    busy = true; askErr = '';
     try {
       if (a.kind === 'rename') {
-        const from = a.from!;
-        if (name === from.slice(from.lastIndexOf('/') + 1)) {
-          ask = null;
-          return;
-        }
-        const { path } = await files.rename(from, name);
-        // What was listed or open under the old path now lives under the new one.
-        for (const k of Object.keys(tree.open)) if (k === from || k.startsWith(from + '/')) {
-          tree.open[path + k.slice(from.length)] = tree.open[k];
-          delete tree.open[k];
-        }
-        for (const k of Object.keys(tree.listing)) if (k === from || k.startsWith(from + '/')) delete tree.listing[k];
-        for (const k of Object.keys(tree.failed)) if (k === from || k.startsWith(from + '/')) delete tree.failed[k];
-        if (name.startsWith('.')) tree.hidden = true;
-        await refresh(a.dir);
-        tree.sel = path;
-        ask = null;
-        follow(list);
+        if (name === nameOf(a.from!)) { askFor = null; return; }
+        const { path } = await files.rename(a.from!, name);
+        if (name.startsWith('.')) showHidden = true;
+        await list(a.dir);
+        sel = path; askFor = null;
       } else {
         const folder = a.kind === 'folder' || name.endsWith('/');
         name = name.replace(/\/+$/, '');
         const { path } = folder ? await files.mkdir(a.dir, name) : await files.create(a.dir, name);
-        if (name.startsWith('.')) tree.hidden = true;
-        tree.open[a.dir] = true;
-        await refresh(a.dir);
-        tree.sel = path;
-        ask = null;
-        follow(list);
-        if (!folder) openFile(path, pane);
+        if (name.startsWith('.')) showHidden = true;
+        await list(a.dir);
+        sel = path; askFor = null;
+        if (!folder) openNode(path, { name: nameOf(path) });
       }
     } catch (e) {
-      notice(`couldn't ${a.kind === 'rename' ? 'rename' : 'create'} ${name}: ${(e as Error).message}`);
-    } finally {
-      busy = false;
-    }
+      askErr = `Couldn't ${a.kind === 'rename' ? 'rename' : 'create'} ${name}: ${(e as Error).message}`;
+    } finally { busy = false; }
   }
-
   function askKey(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
-      ask = null;
-    } else if (e.key === 'Enter' && !e.isComposing) {
-      e.preventDefault();
-      e.stopPropagation();
-      submit();
-    }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); askFor = null; askErr = ''; }
+    else if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); e.stopPropagation(); void submit(); }
   }
-
-  function key(e: KeyboardEvent) {
-    if (!active || app.file[pane] || !plain(e) || typing(e)) return;
-    if (e.key === '/') {
-      e.preventDefault();
-      input?.focus();
-      return;
-    }
-    if (searching) {
-      const move: Record<string, () => void> = {
-        ArrowUp: () => pick(hit - 1),
-        k: () => pick(hit - 1),
-        ArrowDown: () => pick(hit + 1),
-        j: () => pick(hit + 1),
-        Enter: () => open(results[hit]),
-        Escape: clearSearch,
-      };
-      if (move[e.key]) {
-        e.preventDefault();
-        move[e.key]();
-      }
-      return;
-    }
-    const r = rows[at];
-    const page = pageRows(list);
-    const acts: Record<string, () => void> = {
-      ArrowUp: () => select(at - 1),
-      k: () => select(at - 1),
-      ArrowDown: () => select(at + 1),
-      j: () => select(at + 1),
-      PageUp: () => select(at - page),
-      PageDown: () => select(at + page),
-      Home: () => select(0),
-      End: () => select(rows.length - 1),
-      ArrowRight: () => {
-        if (!expand(r) && r && !r.dir) activate(r);
-      },
-      Enter: () => activate(r),
-      ArrowLeft: () => foldOrParent(r),
-      '.': () => (t.hidden = !t.hidden),
-      r: () => reload(true),
-      a: () => begin('file'),
-      A: () => begin('folder'),
-      R: () => begin('rename'),
-    };
-    const act = acts[e.key];
-    if (act) {
-      e.preventDefault();
-      act();
-    }
-  }
-
-  // Siblings are listed independently of the tree, including for search results.
-  const fileDir = $derived(app.file[pane] ? parentOf(app.file[pane]!) : '');
-  $effect(() => {
-    if (fileDir && !(fileDir in t.listing) && !(fileDir in t.failed)) read(fileDir);
-  });
-  const siblings = $derived((t.listing[fileDir] ?? [])
-    .filter((e) => !e.dir && !SKIP.has(e.name) && (!e.hidden || t.hidden))
-    .sort((a, b) => a.name.localeCompare(b.name)));
-  const fileIndex = $derived(siblings.findIndex((e) => e.path === app.file[pane]));
-
-  /** The root as clickable parts: `~ / projects / src`. */
-  const crumbs = $derived.by(() => {
-    const shown = tilde(t.root);
-    if (!shown) return [];
-    const out: { name: string; path: string }[] = [];
-    if (shown.startsWith('~')) {
-      out.push({ name: '~', path: app.home });
-      let p = app.home;
-      for (const part of shown.slice(1).split('/').filter(Boolean)) out.push({ name: part, path: (p = `${p}/${part}`) });
-    } else {
-      out.push({ name: '/', path: '/' });
-      let p = '';
-      for (const part of shown.split('/').filter(Boolean)) out.push({ name: part, path: (p = `${p}/${part}`) });
-    }
-    return out;
-  });
+  const count = (n: FsNode) => { const c = n.kids?.length ?? 0; return c === 0 ? '' : `${c} item${c === 1 ? '' : 's'}`; };
+  const kind = (n: FsNode) => (n.kids ? 'dir' : /\.(png|jpe?g|gif|webp|avif|bmp)$/i.test(n.name) ? 'img' : /\.md$/i.test(n.name) ? 'note' : 'file');
+  const ICON: Record<string, string> = {
+    dir: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+    note: '<path d="M6 3h9l4 4v14H6z"/><path d="M9 12h7M9 16h5"/>',
+    img: '<rect x="4" y="4" width="16" height="16" rx="2"/><circle cx="9" cy="9" r="1.6"/><path d="M20 16l-5-5-9 9"/>',
+    file: '<path d="M6 3h9l4 4v14H6z"/>',
+    up: '<path d="M12 19V5M6 11l6-6 6 6"/>',
+    inbox: '<path d="M4 13l2.5-7h11L20 13v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z"/><path d="M4 13h4.5l1 2h5l1-2H20"/>',
+    vault: '<path d="M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v13H6a2 2 0 0 1-2-2z"/><path d="M8 4v15"/>',
+    filter: '<path d="M4 6h16M7 12h10M10 18h4"/>',
+    search: '<circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/>',
+    more: '<circle cx="6" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="18" cy="12" r="1.2"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    rename: '<path d="M4 20h4L19 9l-4-4L4 16z"/>',
+    eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
+  };
 </script>
 
-<svelte:window onkeydown={key} />
+<svelte:window onkeydown={keys} />
 
-{#if app.file[pane]}
-  <div class="file-actions">
-    <span class="file-path">{shown(app.file[pane]!)}</span>
-    {#if fileIndex >= 0}
-      <button class="chip" aria-label="Previous file" disabled={app.write[pane] || fileIndex === 0} onclick={() => openFile(siblings[fileIndex - 1].path, pane)}>←</button>
-      <span class="dim">{fileIndex + 1} of {siblings.length}</span>
-      <button class="chip" aria-label="Next file" disabled={app.write[pane] || fileIndex === siblings.length - 1} onclick={() => openFile(siblings[fileIndex + 1].path, pane)}>→</button>
-    {/if}
-    <button class="chip primary" disabled={app.write[pane]} title={app.write[pane] ? 'Finish editing first' : 'Ask zenbot about this file'} onclick={() => { app.chatDraft = `Help me with ${shown(app.file[pane]!)}: `; openSession('new'); }}>Ask zenbot</button>
-  </div>
-  <Opened path={app.file[pane]} {pane} {active} />
-{:else}
-  <div class="view" bind:this={list}>
-    <div class="topbar">
-      <button class="up" disabled={t.root === '/'} aria-label="Up one folder" onclick={() => openDir(parentOf(t.root), pane)}>↑</button>
-      <nav class="crumbs" aria-label="folder">
-        {#each crumbs as c, i}
-          {#if i > 0}<span class="sep">›</span>{/if}
-          <button class:here={i === crumbs.length - 1} onclick={() => openDir(c.path, pane)} title={c.path}>{c.path === app.vault ? 'Vault' : c.name}</button>
-        {/each}
-      </nav>
-      <span class="grow"></span>
-      {#if app.home}<button class="chip" onclick={() => { clearSearch(); openDir(`${app.home}/inbox`, pane); }}>Inbox</button>{/if}
-      {#if app.vault}<button class="chip" onclick={() => { clearSearch(); openDir(app.vault, pane); }}>Vault</button>{/if}
-    </div>
-    <div class="searchbar">
-      <input
-        bind:this={input}
-        bind:value={q}
-        onkeydown={searchKey}
-        type="search"
-        placeholder="/ search files and notes"
-        aria-label="search files"
-        spellcheck="false"
-        autocomplete="off"
-        autocapitalize="off"
-      />
-    </div>
-    {#if inVault}
-      <div class="facet-panel">
-        <button class="chip" aria-expanded={filterOpen} onclick={() => filterOpen = !filterOpen}>Filter by properties{filtering ? ' •' : ''}</button>
-        {#if filtering}<button class="chip" onclick={() => selected = { type: [], status: [], tags: [] }}>Clear filters</button>{/if}
-        {#if facetError}<span role="alert">Filters unavailable: {facetError}</span>{/if}
-        {#if facets?.truncated}<span role="status">Results incomplete: vault scan limit reached.</span>{/if}
-        {#if filterOpen && facets}
-          {#each keys as key}
-            <div><strong>{key}</strong>
-              {#each facets[key] as option}
-                <button class="chip" class:on={selected[key].includes(option.value)} aria-pressed={selected[key].includes(option.value)} onclick={() => toggleFacet(key, option.value)}>{option.value} ({option.count})</button>
+{#snippet ic(name: string)}<svg class="fi" viewBox="0 0 24 24" aria-hidden="true">{@html ICON[name]}</svg>{/snippet}
+
+<div class="fwrap">
+<div class="bar">
+  {#if back}<button class="home ret" title="Back to {back.label}" onclick={() => { if (!guard(back.run)) back.run(); }}>‹ {back.label}</button>{/if}
+  <button class="ib" title={file ? 'Back to the folder' : 'Up one folder'} aria-label={file ? 'Back to the folder' : 'Up one folder'} disabled={cwd === '/' && !file} onclick={up}>{@render ic('up')}</button>
+  <nav class="crumbs" aria-label="Path" bind:this={crumbsEl}>
+    {#each crumbs as c, i}
+      {#if i > 0}<span class="sep">›</span>{/if}
+      <button class="cr" class:last={i === crumbs.length - 1} class:vault={c.label === 'Vault'} onclick={() => go(c.path)} title={c.path}>{c.label}</button>
+    {/each}
+  </nav>
+  {#if !cwd.startsWith(INBOX) || file}
+    <button class="home" title="Files you attached in chats (~/inbox)" onclick={() => go(INBOX)}>{@render ic('inbox')}<span class="hl">Inbox</span></button>
+  {/if}
+  {#if cwd !== VAULT || file}
+    <button class="home" title="Back to the vault" onclick={() => go(VAULT)}>{@render ic('vault')}<span class="hl">Vault</span></button>
+  {/if}
+</div>
+
+{#if file}
+  <div class="reader" bind:this={host}>
+    <div class="rbar">
+      {#each fprops as [k, vs]}
+        {#if k === 'tags'}{#each vs as v}<span class="chip tag">#{v}</span>{/each}
+        {:else}<span class="chip" title={k}>{#if k !== 'type'}<em>{k}</em>{/if}{vs.join(', ')}</span>{/if}
+      {/each}
+      {#if doc?.mtime}<span class="edited">Edited {ago(new Date(doc.mtime).toISOString())}</span>{/if}
+      {#if !vaultRel}<span class="edited">Read-only</span>{/if}
+      <span class="sp"></span>
+      {#if siblings.length > 1 && !editing}
+        <div class="sib">
+          <button class="nb" title={`Previous: ${nameOf(siblings[(at - 1 + siblings.length) % siblings.length])} (←)`} aria-label="Previous file" onclick={() => step(-1)}>‹</button>
+          <button class="cnt" title="Files in this folder" aria-haspopup="listbox" aria-expanded={sibOpen} onclick={() => (sibOpen = !sibOpen)}>{at + 1} of {siblings.length}</button>
+          <button class="nb" title={`Next: ${nameOf(siblings[(at + 1) % siblings.length])} (→)`} aria-label="Next file" onclick={() => step(1)}>›</button>
+          {#if sibOpen}
+            <div class="sibs" role="listbox">
+              {#each siblings as sp, i}
+                <button role="option" aria-selected={i === at} class:on={i === at} onclick={() => { openNode(sp, { name: nameOf(sp) }); sibOpen = false; }}>
+                  {@render ic(kind({ name: nameOf(sp) }))}<span>{nameOf(sp)}</span>
+                </button>
               {/each}
-              {#if key === 'tags'}<button class="chip" onclick={() => tagAll = !tagAll}>Tags: {tagAll ? 'all' : 'any'}</button>{/if}
             </div>
-          {/each}
+          {/if}
+        </div>
+      {/if}
+      {#if editing && writer}
+        <button class="rb" onclick={() => (editing = false)}>Done</button>
+      {:else if editing}
+        <button class="rb" onclick={cancelEdit}>Cancel</button>
+        <button class="rb pri" disabled={saving} onclick={() => void save()}>Save</button>
+      {:else}
+        {#if isNote && vaultRel}<button class="rb" onclick={edit} title="Edit the text (E)">Edit</button>{/if}
+        {#if ask}<button class="rb pri" onclick={() => ask?.(shortPath(file!))} title="Ask zenbot about this note">Ask zenbot</button>{/if}
+      {/if}
+    </div>
+    {#if pendingLeave}
+      <div class="leave" role="alertdialog" aria-label="Unsaved changes">
+        <span>You have unsaved changes.</span><span class="sp"></span>
+        <button class="rb" onclick={() => (pendingLeave = null)}>Keep editing</button>
+        <button class="rb" disabled={saving} onclick={saveAndLeave}>Save and leave</button>
+        <button class="rb danger" onclick={discard}>Discard</button>
+      </div>
+    {:else if builtin && file}
+      <div class="leave soft"><span role="status">{saving ? 'Saving…' : dirty ? 'Unsaved changes · ⌘S saves' : status || 'No changes'}</span></div>
+    {/if}
+    {#if saveError || readError}<div class="leave" role="alert"><span>{saveError || readError}</span></div>{/if}
+    <div class="rscroll" class:plug={(editing && writer && vaultRel) || (!editing && isNote && reader && vaultRel && doc)}>
+      {#if editing && writer && vaultRel}
+        {#key `${writer.key}:${vaultRel}`}<div class="frame"><PluginFrame plugin={writer.plugin} ui={writer.ui} pane={app.screen === 'chat' ? 'side' : 'home'} path={vaultRel} mode="edit" slot="opener" title={writer.title} /></div>{/key}
+      {:else if editing}
+        <!-- svelte-ignore a11y_autofocus -->
+        <textarea class="raw" bind:value={draft} autofocus spellcheck="true" aria-label="Markdown source" onkeydown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); void save(); } if (e.key === 'Escape') { e.stopPropagation(); cancelEdit(); } }}></textarea>
+      {:else if !doc && !readError}
+        <div class="none">Opening…</div>
+      {:else if isNote && reader && vaultRel}
+        {#key `${reader.key}:${vaultRel}`}<div class="frame"><PluginFrame plugin={reader.plugin} ui={reader.ui} pane={app.screen === 'chat' ? 'side' : 'home'} path={vaultRel} mode="read" slot="opener" title={reader.title} /></div>{/key}
+      {:else if isNote && doc}
+        <article class="note" {@attach mount}></article>
+        {#if backlinks.length}
+          <div class="back">
+            <div class="bh">Linked from</div>
+            {#each backlinks as b}<button class="bl" onclick={() => openNode(b, { name: b.split('/').pop()! })}>{@render ic('note')}<span>{b.split('/').pop()!.replace(/\.md$/, '')}</span><small>{parent(b) === VAULT ? 'Vault' : shortPath(parent(b))}</small></button>{/each}
+          </div>
         {/if}
+      {:else if kind({ name: fileName }) === 'img' && doc}
+        {@const src = `/api/fs/image?path=${encodeURIComponent(file)}&v=${doc.mtime}`}
+        <figure class="img">
+          <a href={src} target="_blank" rel="noopener" title="Open full size in a new tab"><img {src} alt={fileName} /></a>
+          <figcaption>{fileName} · <a href={src} target="_blank" rel="noopener">Full size ↗</a></figcaption>
+        </figure>
+      {:else if doc?.text !== undefined && !doc.binary}
+        <pre class="txt">{doc.text}</pre>
+      {:else if doc}
+        <div class="none">{doc.tooBig ? 'Too large to preview.' : 'No preview for this kind of file.'} Ask zenbot to open it for you.</div>
+      {/if}
+    </div>
+  </div>
+{:else}
+<div class="fsearch">{@render ic('search')}<input placeholder={`Search in ${crumbs[crumbs.length - 1].label === '/' ? 'everything' : crumbs[crumbs.length - 1].label}`} bind:value={q} bind:this={searchEl} aria-label="Search files and notes" onkeydown={searchKeys} />
+  <button class="fb" class:on={fltOpen || active > 0} aria-expanded={fltOpen} title="Filter by properties" onclick={() => (fltOpen = !fltOpen)}>{@render ic('filter')}<span class="hl">Filter</span>{#if active}<b>{active}</b>{/if}</button>
+  <div class="sib more">
+    <button class="fb" class:on={menu} aria-haspopup="menu" aria-expanded={menu} title="New file, new folder, rename" aria-label="Folder actions" onclick={() => (menu = !menu)}>{@render ic('more')}</button>
+    {#if menu}
+      <div class="sibs" role="menu" aria-label="Folder actions">
+        <button role="menuitem" disabled={!inVault} title={inVault ? 'A name ending in / makes a folder (A)' : 'Writes stay inside the vault'} onclick={() => begin('file')}>{@render ic('plus')}<span>New file</span></button>
+        <button role="menuitem" disabled={!inVault} title={inVault ? 'New folder (Shift+A)' : 'Writes stay inside the vault'} onclick={() => begin('folder')}>{@render ic('dir')}<span>New folder</span></button>
+        <button role="menuitem" disabled={!inVault || !chosen} title={!inVault ? 'Writes stay inside the vault' : chosen ? 'Rename (Shift+R)' : 'Select a file or folder first'} onclick={() => begin('rename')}>{@render ic('rename')}<span>Rename{chosen ? ` “${chosen.name}”` : '…'}</span></button>
+        <button role="menuitemcheckbox" aria-checked={showHidden} class:on={showHidden} title="Show or hide dotfiles (.)" onclick={() => { showHidden = !showHidden; menu = false; }}>{@render ic('eye')}<span>{showHidden ? 'Hide hidden files' : 'Show hidden files'}</span></button>
       </div>
     {/if}
-    {#if filtering && !searching}
-      <div class="results" aria-label="filtered notes">
-        {#each matches as note (note.path)}<button class="facet-result" onclick={() => openFile(note.path, pane)}>{shown(note.path)}</button>{/each}
-        {#if !facets && !facetError}<p>Loading filters…</p>{:else if !matches.length}<p>No matching notes.</p>{/if}
-      </div>
-    {:else if searching}
-      <div class="results" role="listbox" aria-label="search results">
-        {#each results as r, i (r.key)}
-          {#if !filtering || matches.some(note => note.path === r.path)}
-          <div
-            class="result"
-            class:sel={i === hit}
-            class:active
-            data-sel={i === hit ? '1' : '0'}
-            role="option"
-            tabindex="-1"
-            aria-selected={i === hit}
-            onclick={() => {
-              pick(i);
-              open(r);
-            }}
-            onkeydown={() => {}}
-          >
-            <span class="rname">{r.name}{r.dir ? '/' : ''}</span>
-            <span class="rsub">{r.sub}</span>
-            {#if r.snippet}<span class="snip">{r.snippet}</span>{/if}
-          </div>
-          {/if}
+  </div>
+</div>
+{#if askFor}
+  <div class="fsearch">
+    {@render ic(askFor.kind === 'folder' ? 'dir' : askFor.kind === 'rename' ? 'rename' : 'plus')}
+    <input bind:this={askEl} bind:value={askFor.value} onkeydown={askKey} aria-label={askFor.kind === 'rename' ? 'new name' : 'name'} spellcheck="false" autocomplete="off" autocapitalize="off"
+      placeholder={askFor.kind === 'rename' ? 'New name' : askFor.kind === 'folder' ? 'Folder name' : 'File name (a trailing / makes a folder)'} />
+    <button class="rb" onclick={() => { askFor = null; askErr = ''; }}>Cancel</button>
+    <button class="rb pri" onclick={() => void submit()}>{askFor.kind === 'rename' ? 'Rename' : 'Create'}</button>
+  </div>
+  {#if askErr}<div class="leave" role="alert"><span>{askErr}</span></div>{/if}
+{/if}
+{#if fltOpen}
+  {@const cur = facets.find(([k]) => k === fkey) ?? facets[0]}
+  {@const vals = cur ? cur[1].filter(([v]) => v.toLowerCase().includes(fq.trim().toLowerCase())).sort((x, y) => +!!flt[cur[0]]?.includes(y[0]) - +!!flt[cur[0]]?.includes(x[0])) : []}
+  <div class="facets">
+    {#if cur}
+      <div class="ftabs" role="tablist">
+        {#each facets as [k, vs]}
+          <button role="tab" aria-selected={k === cur[0]} class:on={k === cur[0]} onclick={() => { fkey = k; fq = ''; }}>
+            {k[0].toUpperCase() + k.slice(1)}{#if flt[k]?.length}<b>{flt[k].length}</b>{:else}<small>{vs.length}</small>{/if}
+          </button>
         {/each}
-        {#if nameBusy || contentBusy}<p class="dim pad">searching…</p>{/if}
-        {#if contentErr}<p class="dim pad">notes search unavailable: {contentErr}</p>{/if}
-        {#if !results.length && !nameBusy && !contentBusy}<p class="dim pad">nothing found · Enter searches the notes' words and meaning</p>{/if}
+        <span class="sp"></span>
+        {#if active}<button class="clr" onclick={() => (flt = {})}>Clear all</button>{/if}
+      </div>
+      {#if cur[0] === 'tags'}
+        <div class="anyall" role="radiogroup" aria-label="Match tags">
+          <span>Notes with</span>
+          <button role="radio" aria-checked={!tagsAll} class:on={!tagsAll} onclick={() => (tagsAll = false)}>any</button>
+          <button role="radio" aria-checked={tagsAll} class:on={tagsAll} onclick={() => (tagsAll = true)}>all</button>
+          <span>of the picked tags</span>
+        </div>
+      {/if}
+      <input class="fq" placeholder={`Find ${cur[0] === 'tags' ? 'a tag' : `a ${cur[0]}`} among ${cur[1].length}`} bind:value={fq} />
+      <div class="fvals" role="listbox" aria-multiselectable="true">
+        {#each vals as [v, n] (v)}
+          <label class="fv" class:on={flt[cur[0]]?.includes(v)}>
+            <input type="checkbox" checked={flt[cur[0]]?.includes(v) ?? false} onchange={() => toggleF(cur[0], v)} />
+            <span>{cur[0] === 'tags' ? '#' : ''}{v}</span><small>{n}</small>
+          </label>
+        {:else}
+          <div class="fk none2">No {cur[0]} matching “{fq.trim()}”.</div>
+        {/each}
       </div>
     {:else}
-    <div class="tools">
-      <button class="chip" onclick={() => begin('file')} title="a">+ file</button>
-      <button class="chip" onclick={() => begin('folder')} title="A">+ folder</button>
-      <button class="chip" disabled={!chosen || chosen.dir} onclick={() => chosen && !chosen.dir && openFile(chosen.path, pane, true)}>Edit selected file</button>
-      <button class="chip" onclick={() => begin('rename')} disabled={!chosen} title="R">rename</button>
-      <button class="chip" class:on={t.hidden} onclick={() => (t.hidden = !t.hidden)} title=".">hidden</button>
-      <button class="chip" onclick={() => reload(true)} title="r">↻</button>
-    </div>
-    {#if ask}
-      <div class="ask">
-        <label for="files-ask" class="dim">{ask.kind === 'rename' ? 'rename to' : ask.kind === 'folder' ? 'new folder in' : 'new file in'} {ask.kind === 'rename' ? '' : tilde(ask.dir) + '/'}</label>
-        <input
-          id="files-ask"
-          bind:this={askInput}
-          bind:value={ask.value}
-          onkeydown={askKey}
-          placeholder={ask.kind === 'file' ? 'name (a trailing / makes a folder)' : 'name'}
-          aria-label={ask.kind === 'rename' ? 'new name' : 'name'}
-          spellcheck="false"
-          autocomplete="off"
-          autocapitalize="off"
-        />
-        <button class="chip" onclick={submit}>{ask.kind === 'rename' ? 'rename' : 'create'}</button>
-        <button class="chip" onclick={() => (ask = null)} title="Esc">cancel</button>
-      </div>
+      <div class="fk none2">No notes with properties here.</div>
     {/if}
-    {#if t.failed[t.root]}<p class="err">can't list {tilde(t.root)}: {t.failed[t.root]}</p>{/if}
-    {#if t.root && !(t.root in t.listing) && !t.failed[t.root]}<p class="dim pad">loading…</p>{/if}
-    {#if t.root in t.listing && rows.filter((r) => !r.up).length === 0}<p class="dim pad">empty{t.hidden ? '' : ' · . shows hidden files'}</p>{/if}
-    <div role="tree" aria-label="files" tabindex="-1">
-      {#each rows as r, i (r.path)}
-        <div
-          class="row"
-          class:sel={i === at}
-          class:active
-          class:file={!r.dir}
-          data-sel={i === at ? '1' : '0'}
-          role="treeitem"
-          tabindex="-1"
-          aria-selected={i === at}
-          aria-expanded={r.dir && !r.up ? !!t.open[r.path] : undefined}
-          style:padding-left="{14 + r.depth * 16}px"
-          onclick={() => {
-            select(i);
-            activate(r);
-          }}
-          onkeydown={() => {}}
-        >
-          <span class="twist">{r.up ? '↑' : r.dir ? '▰' : /\.(png|jpe?g|gif|webp|svg)$/i.test(r.name) ? '▧' : '▤'}</span>
-          <span class="name">{r.name}{r.dir && !r.up ? '/' : ''}</span>
-          {#if r.dir && t.failed[r.path]}<span class="err small">can't read</span>{/if}
-          {#if !r.dir}<span class="size">{human(r.size)}</span>{/if}
-        </div>
-      {/each}
-    </div>
-    {/if}
+  </div>
+{:else if active}
+  <div class="facets act">
+    {#each FACETS as k}{#each flt[k] ?? [] as v}
+      <button class="fc on" class:tag={k === 'tags'} title="Remove this filter" onclick={() => toggleF(k, v)}>{#if k !== 'tags'}<em>{k}</em>{/if}{k === 'tags' ? '#' : ''}{v} ×</button>
+    {/each}{/each}
+    {#if (flt.tags?.length ?? 0) > 1}<span class="mode">{tagsAll ? 'all tags' : 'any tag'}</span>{/if}
+    <button class="clr" onclick={() => (flt = {})}>Clear</button>
   </div>
 {/if}
 
+<div class="list" bind:this={listEl}>
+  {#if failed}<div class="none">Can't open this folder: {failed}</div>{/if}
+  {#if q.trim() || active}
+    {#if active}<div class="rc">{found.length} note{found.length === 1 ? '' : 's'}</div>{/if}
+    {#each found as r (r.path)}
+      {@const pr = active ? propsOf(r.path) : {}}
+      <button class="row" class:on={sel === r.path} onclick={() => openNode(r.path, r.node)}>
+        <span class="k {kind(r.node)}">{@render ic(kind(r.node))}</span>
+        <span class="nm"><span>{r.node.name.replace(/\.md$/, '')}</span><small>{shortPath(parent(r.path))}</small>{#if r.snippet}<small class="snip">{r.snippet}</small>{/if}</span>
+        {#if active}<span class="pc">{#if pr.status}<span class="chip">{pr.status[0]}</span>{/if}{#each (pr.tags ?? []).slice(0, 2) as t}<span class="chip tag">#{t}</span>{/each}</span>{/if}
+      </button>
+    {:else}
+      {#if !noteBusy || active}<div class="none">{q.trim() ? `Nothing called “${q.trim()}”` : 'No notes'}{active ? ' with these filters' : ''} here.</div>{/if}
+    {/each}
+    {#if !active && noteBusy}<div class="rc" role="status">Searching your notes…</div>{/if}
+    {#if !active && noteErr}<div class="rc" role="alert">Couldn't search your notes: {noteErr}</div>{/if}
+  {:else}
+    {#each entries as n (n.name)}
+      {@const p = join(cwd, n.name)}
+      <button class="row" class:on={sel === p} class:hid={n.name.startsWith('.')} class:isvault={p === VAULT} onclick={() => openNode(p, n)}>
+        <span class="k {kind(n)}">{@render ic(p === VAULT ? 'vault' : kind(n))}</span>
+        <span class="nm"><span>{n.name}</span>{#if p === VAULT}<small>your shared vault</small>{/if}</span>
+        <span class="when">{n.kids ? (n.when || count(n)) : n.when}</span>
+      </button>
+    {:else}
+      {#if listing[cwd] && !failed}<div class="none">This folder is empty{!showHidden && listing[cwd].some((n) => n.hidden) ? ' · . shows hidden files' : ''}.</div>{/if}
+    {/each}
+  {/if}
+</div>
+{/if}
+</div>
+
 <style>
-  .facet-panel { padding: 8px 16px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
-  .facet-panel div { flex-basis: 100%; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
-  .facet-result { display: block; padding: 10px 16px; background: none; border: 0; color: inherit; cursor: pointer; }
-  .topbar, .file-actions { display: flex; gap: 8px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--faint); }
-  .topbar { flex-wrap: wrap; }
-  .up { font-size: 18px; padding: 3px 8px; color: var(--dim); }
-  .up:disabled { opacity: .4; }
-  .file-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); font-size: 12px; }
-  .primary { color: var(--accent); border-color: var(--accent); }
-  .view { container-type: inline-size; padding: 6px 0 24px; font-family: var(--sans); font-size: 14px; }
-  .searchbar { display: flex; gap: 8px; align-items: center; padding: 18px 16px 12px; }
-  .searchbar input { flex: 1; max-width: 420px; min-width: 0; font: inherit; font-size: 13px; color: var(--ink); background: transparent; border: 1px solid var(--faint); border-radius: 6px; padding: 4px 8px; }
-  .searchbar input:focus { outline: none; border-color: var(--accent); }
-  .result { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 6px 14px; margin: 0 6px; border-radius: 6px; cursor: pointer; outline-offset: -1px; }
-  .result:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
-  .result.sel { outline: 1px solid var(--faint); }
-  .result.sel.active { outline: none; background: color-mix(in srgb, var(--accent) 14%, transparent); }
-  .rname { min-width: 0; overflow-wrap: anywhere; }
-  .rsub { color: var(--dim); font-size: 12px; min-width: 0; overflow-wrap: anywhere; }
-  .snip { flex-basis: 100%; color: var(--dim); font-size: 12px; line-height: 1.4; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; }
-  .tools { display: flex; gap: 8px; align-items: center; padding: 4px 14px 8px; }
-  .crumbs { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px; min-width: 0; font-size: 13px; }
-  .crumbs button { color: var(--dim); padding: 2px 3px; border-radius: 4px; }
-  .crumbs button:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 6%, transparent); }
-  .crumbs button.here { color: var(--ink); }
-  .sep { color: var(--faint); }
-  .grow { flex: 1; }
-  .chip { font-size: 12px; color: var(--dim); border: 1px solid var(--faint); border-radius: 6px; padding: 3px 8px; flex: none; }
-  .chip.on { color: var(--accent); border-color: var(--accent); }
-  .chip:disabled { opacity: 0.45; cursor: default; }
-  .ask { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 2px 14px 8px; font-size: 13px; }
-  .ask label { min-width: 0; overflow-wrap: anywhere; }
-  .ask input { flex: 1; min-width: 8em; max-width: 320px; font: inherit; color: var(--ink); background: transparent; border: 1px solid var(--faint); border-radius: 6px; padding: 4px 8px; }
-  .ask input:focus { outline: none; border-color: var(--accent); }
-  .pad { padding: 2px 14px; margin: 0; font-size: 13px; }
-  .err { color: var(--err); padding: 4px 14px; margin: 0; font-size: 13px; }
-  .err.small { padding: 0; font-size: 12px; }
-  .row { display: flex; align-items: baseline; gap: 6px; min-height: 42px; box-sizing: border-box; padding: 10px 14px; cursor: pointer; white-space: nowrap; overflow: hidden; border-radius: 6px; margin: 0 6px; outline-offset: -1px; }
-  .row:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
-  .row.sel { outline: 1px solid var(--faint); }
-  .row.sel.active { outline: none; background: color-mix(in srgb, var(--accent) 14%, transparent); }
-  .twist { width: 1.5em; flex: none; color: var(--dim); text-align: center; }
-  .name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-  .file .name { color: color-mix(in srgb, var(--ink) 82%, var(--paper)); }
-  .size { margin-left: auto; padding-left: 12px; color: var(--dim); font-size: 12px; flex: none; }
-  .dim { color: var(--dim); }
-  @media (pointer: coarse) { .row { min-height: 40px; padding-top: 8px; padding-bottom: 8px; } }
+  .leave { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 24px 0; padding: 8px 12px; border-radius: 12px; font-size: 13.5px;
+    background: color-mix(in srgb, var(--warn, #b8862f) 12%, var(--paper)); border: 1px solid color-mix(in srgb, var(--warn, #b8862f) 35%, var(--faint)); }
+  .leave.soft { background: none; border-color: transparent; padding: 2px 12px; color: var(--dim); font-size: 12.5px; }
+  .leave .sp { flex: 1; }
+  .rb.danger { color: var(--bad, #b5543c); border-color: color-mix(in srgb, var(--bad, #b5543c) 40%, var(--faint)); }
+  .ret { margin-right: 4px; }
+  .fwrap { flex: 1; min-height: 0; display: flex; flex-direction: column; width: 100%; max-width: 860px; margin: 0 auto; }
+  .bar { display: flex; align-items: center; gap: 6px; padding: 2px 16px 6px 14px; }
+  .fi { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  .ib { width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; color: var(--dim); flex: none; }
+  .ib:hover:not(:disabled) { background: var(--soft); color: var(--ink); }
+  .ib:disabled { opacity: 0.35; cursor: default; }
+  .crumbs { flex: 1; min-width: 0; display: flex; align-items: center; gap: 2px; overflow-x: auto; scrollbar-width: none; white-space: nowrap; font-size: 14px; }
+  .cr { padding: 4px 6px; border-radius: 7px; color: var(--dim); }
+  .cr:hover { background: var(--soft); color: var(--ink); }
+  .cr.last { color: var(--ink); font-weight: 600; }
+  .cr.vault { color: var(--accent); font-weight: 600; }
+  .sep { color: var(--faint); font-size: 13px; }
+  .home { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px 5px 9px; border-radius: 99px; font-size: 13px; font-weight: 600; flex: none;
+    color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--faint)); background: color-mix(in srgb, var(--accent) 8%, var(--paper)); }
+  .home:hover { background: color-mix(in srgb, var(--accent) 16%, var(--paper)); }
+  .home .fi { width: 15px; height: 15px; }
+  .fsearch { display: flex; align-items: center; gap: 8px; margin: 2px 16px 6px; padding: 8px 12px; border-radius: 12px; background: var(--soft); color: var(--dim); }
+  .fsearch input { flex: 1; min-width: 0; border: 0; outline: none; background: transparent; font-size: 14px; color: var(--ink); }
+  .list { flex: 1; overflow: auto; padding: 0 10px 80px; display: flex; flex-direction: column; gap: 1px; }
+  .row { display: flex; align-items: center; gap: 11px; text-align: left; padding: 9px 12px; border-radius: 12px; font-size: 14px; }
+  .row:hover { background: var(--soft); }
+  .row.on { background: color-mix(in srgb, var(--accent) 14%, var(--paper)); }
+  .row.hid { color: var(--dim); }
+  .k { color: var(--dim); display: grid; }
+  .k.dir { color: var(--accent); }
+  .row.isvault .nm > span { font-weight: 600; }
+  .nm { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .nm > span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .nm small { font-size: 12px; color: var(--dim); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .nm small.snip { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.4; }
+  .when { font-size: 12px; color: var(--dim); white-space: nowrap; }
+  @media (max-width: 900px) { .fb .hl { display: none; } .pc { display: none; } .fk { width: 100%; } .home { padding: 6px; } .home .hl { display: none; } .bl small { display: none; } .rscroll { padding: 16px 16px 120px; } }
+  .fb { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; margin: -3px -6px -3px 0; border-radius: 99px; font-size: 13px; color: var(--dim); }
+  .fb:hover, .fb.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .fb b { min-width: 17px; height: 17px; border-radius: 99px; font-size: 11px; display: grid; place-items: center; background: var(--accent); color: var(--on-accent); }
+  .facets { display: flex; flex-direction: column; gap: 8px; margin: 0 16px 8px; padding: 10px 12px; border: 1px solid var(--faint); border-radius: 12px; }
+  .facets.act { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px; border: 0; padding: 0 2px; }
+  .ftabs { display: flex; align-items: center; gap: 4px; }
+  .ftabs button[role=tab] { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 99px; font-size: 13px; color: var(--dim); }
+  .ftabs button[role=tab]:hover { color: var(--ink); background: var(--soft); }
+  .ftabs button.on { color: var(--ink); font-weight: 600; background: var(--soft); }
+  .ftabs small { font-size: 11px; opacity: 0.7; font-weight: 400; }
+  .ftabs b { min-width: 16px; height: 16px; border-radius: 99px; font-size: 10.5px; display: grid; place-items: center; background: var(--accent); color: var(--on-accent); }
+  .anyall { display: flex; align-items: center; gap: 4px; font-size: 12.5px; color: var(--dim); }
+  .anyall button { padding: 2px 9px; border-radius: 99px; border: 1px solid var(--faint); font-size: 12.5px; }
+  .anyall button.on { background: var(--ink); border-color: var(--ink); color: var(--paper); font-weight: 600; }
+  .fq { border: 1px solid var(--faint); border-radius: 9px; padding: 6px 10px; font-size: 13.5px; background: var(--paper); color: var(--ink); outline: none; }
+  .fq:focus { border-color: var(--accent); }
+  .fvals { max-height: 164px; overflow: auto; display: flex; flex-wrap: wrap; gap: 6px; align-content: flex-start; padding: 2px; }
+  .fv { display: inline-flex; align-items: center; gap: 6px; padding: 4px 11px; border-radius: 99px; font-size: 13px; cursor: pointer; border: 1px solid var(--faint); background: var(--paper); max-width: 100%; }
+  .fv:hover { border-color: var(--dim); }
+  .fv:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .fv input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .fv span { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .fv small { font-size: 11px; color: var(--dim); }
+  .fv.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .fv.on small { color: inherit; opacity: 0.8; }
+  .fv.on span::before { content: '✓ '; }
+  .fg { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .fk { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 650; width: 56px; }
+  .fk.none2 { width: auto; text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 13px; }
+  .fc { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; padding: 3px 10px; border-radius: 99px; border: 1px solid var(--faint); background: var(--paper); }
+  .fc:hover { border-color: var(--dim); }
+  .fc.tag { color: var(--accent); }
+  .fc em { font-style: normal; opacity: 0.75; margin-right: 2px; }
+  .fc.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .clr { align-self: flex-start; font-size: 13px; color: var(--accent); font-weight: 600; padding: 2px 4px; }
+  .mode { font-size: 12px; color: var(--dim); }
+  .rc { font-size: 12px; color: var(--dim); padding: 4px 12px 2px; }
+  .pc { display: flex; gap: 4px; flex: none; }
+  .reader { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .rbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 4px 16px 10px 20px; border-bottom: 1px solid var(--faint); }
+  .chip { font-size: 12px; padding: 2px 9px; border-radius: 99px; background: var(--soft); color: var(--ink); white-space: nowrap; }
+  .chip em { font-style: normal; color: var(--dim); margin-right: 5px; }
+  .chip.tag { color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .edited { font-size: 12px; color: var(--dim); margin-left: 4px; }
+  .sp { flex: 1; }
+  .rb { padding: 5px 12px; border-radius: 99px; font-size: 13px; font-weight: 600; border: 1px solid var(--faint); }
+  .rb:hover { border-color: var(--dim); }
+  .rb.pri { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .sib { position: relative; display: flex; align-items: center; margin-right: 4px; border: 1px solid var(--faint); border-radius: 99px; }
+  .nb { width: 28px; height: 26px; font-size: 18px; line-height: 1; color: var(--dim); border-radius: 99px; }
+  .nb:hover { color: var(--ink); background: var(--soft); }
+  .cnt { font-size: 12px; color: var(--dim); padding: 0 4px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .cnt:hover { color: var(--ink); }
+  .sibs { position: absolute; top: 34px; right: 0; z-index: 12; min-width: 240px; max-width: 320px; max-height: 50vh; overflow: auto; padding: 6px; display: flex; flex-direction: column;
+    background: var(--paper); border: 1px solid var(--faint); border-radius: 14px; box-shadow: 0 14px 40px var(--shadow); }
+  .sibs button { display: flex; align-items: center; gap: 9px; padding: 7px 10px; border-radius: 8px; font-size: 14px; text-align: left; color: var(--dim); }
+  .sibs button span { color: var(--ink); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .sibs button:hover { background: var(--soft); }
+  .sibs button.on span { color: var(--accent); font-weight: 600; }
+  .sibs button:disabled { opacity: 0.45; cursor: default; }
+  .sibs button:disabled:hover { background: none; }
+  .sib.more { border: 0; margin: 0; }
+  .sib.more .fb { margin: -3px -6px -3px 0; }
+  .rscroll { flex: 1; overflow: auto; padding: 18px 22px 90px; }
+  .rscroll.plug { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+  .frame { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .txt { margin: 0; font: 13px/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .rb:disabled { opacity: 0.6; cursor: default; }
+  .raw { width: 100%; min-height: 60vh; resize: vertical; border: 1px solid var(--faint); border-radius: 12px; padding: 16px; background: var(--paper); color: var(--ink); font: 14px/1.6 var(--mono); outline: none; }
+  .raw:focus { border-color: var(--accent); }
+  .note { max-width: 680px; margin: 0 auto; font-size: 15.5px; line-height: 1.65; }
+  .note :global(h1) { font-family: var(--serif); font-size: 30px; line-height: 1.2; font-weight: 600; margin: 4px 0 14px; }
+  .note :global(h2) { font-size: 17px; font-weight: 650; margin: 26px 0 8px; }
+  .note :global(h3) { font-size: 15.5px; font-weight: 650; margin: 20px 0 6px; }
+  .note :global(p) { margin: 0 0 12px; }
+  .note :global(ul), .note :global(ol) { margin: 0 0 12px; padding-left: 22px; }
+  .note :global(li) { margin: 2px 0; }
+  .note :global(li p) { margin: 0; }
+  .note :global(li.md-task) { list-style: none; margin-left: -22px; }
+  .note :global(li.md-task input) { accent-color: var(--accent); width: 16px; height: 16px; vertical-align: -3px; margin: 0 8px 0 0; cursor: pointer; }
+  .note :global(li.md-done) { color: var(--dim); text-decoration: line-through; }
+  .note :global(a) { color: var(--accent); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent) 35%, transparent); text-underline-offset: 3px; }
+  .note :global(a.md-wiki) { text-decoration-style: dotted; font-weight: 550; }
+  .note :global(blockquote) { margin: 16px 0; padding: 10px 16px; border-left: 3px solid var(--accent); background: var(--soft); border-radius: 0 10px 10px 0; color: var(--ink); }
+  .note :global(blockquote p) { margin: 0; }
+  .note :global(table) { border-collapse: collapse; margin: 6px 0 16px; font-size: 14.5px; width: 100%; }
+  .note :global(th), .note :global(td) { padding: 7px 10px; border-bottom: 1px solid var(--faint); text-align: left; }
+  .note :global(th) { font-weight: 650; color: var(--dim); font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .note :global(code) { font-family: var(--mono); font-size: 0.9em; background: var(--soft); padding: 1px 5px; border-radius: 5px; }
+  .back { max-width: 680px; margin: 28px auto 0; padding-top: 14px; border-top: 1px solid var(--faint); }
+  .bh { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 650; margin-bottom: 6px; }
+  .bl { display: flex; align-items: center; gap: 9px; width: 100%; padding: 7px 8px; border-radius: 10px; font-size: 14px; text-align: left; color: var(--dim); }
+  .bl span { color: var(--ink); }
+  .bl small { margin-left: auto; font-size: 12px; }
+  .bl:hover { background: var(--soft); }
+  .img { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 20px; margin: 0; }
+  .img img { max-width: 100%; max-height: 70vh; border-radius: 12px; border: 1px solid var(--faint); box-shadow: 0 6px 24px var(--shadow); cursor: zoom-in; background: var(--soft); }
+  .img figcaption { font-size: 12.5px; color: var(--dim); }
+  .img figcaption a { color: var(--accent); font-weight: 600; }
+  .ph { width: min(100%, 560px); aspect-ratio: 4 / 3; border-radius: 14px; display: grid; place-content: center; justify-items: center; gap: 10px; color: var(--dim); font-size: 13px;
+    background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 18%, var(--soft)), var(--soft)); }
+  .ph .fi { width: 40px; height: 40px; }
+  .none { padding: 20px 12px; color: var(--dim); font-size: 14px; }
 </style>

@@ -1,24 +1,27 @@
 <script lang="ts">
+  // Tasks tab: the vault's tasks (Projects/<p>/tasks.md, through the kernel), ticked, added and
+  // edited here; every write carries the line's revision. Grouped by when (default), by priority,
+  // by project or by goal. One user per zenbot: no owners. (The redesign mock's Tasks, live.)
+  let { hand, open: openChat, agent = 'zenbot', agents = [] }: { hand?: (t: T, agent: string) => Promise<string | null>; open?: (session: string) => void; agent?: string; agents?: { id: string; name: string }[] } = $props();
+  let handAgent = $state<Record<string, string>>({});
+  let choosing = $state<string | null>(null);
+
   import { onMount } from 'svelte';
-  import type { Pane } from '../app.svelte.ts';
-  import { app, openSession } from '../app.svelte.ts';
-  import { zen } from '../api.ts';
   import { box, flag, facts } from './TaskBits.svelte';
-  import { store, TODAY, PRI, OFFER, days, sort, type T, type Pri, call, load, patch, remove } from './taskstore.svelte.ts';
-  let { pane, active }: { pane: Pane; active: boolean } = $props();
-  let PROJECTS = $state<string[]>([]);
-  let GOALS = $state<string[]>([]);
-  let agents = $state<string[]>([]);
-  let agent = $state('zenbot');
-  let error = $state('');
-  async function refresh() { try { await load(); error = ''; } catch (e) { error = (e as Error).message; } }
-  onMount(() => { refresh(); call<{projects: {id:string}[]; goals: {id:string; status:string}[]}>('GET', '/api/zen/tasks/meta').then(m => { PROJECTS = m.projects.map(p => p.id); GOALS = m.goals.filter(g => g.status === 'active').map(g => g.id); if (!nt.project) nt.project = PROJECTS[0] ?? ''; }).catch(e => error = e.message); zen.agents().then(a => agents = a.map(x => x.name)).catch(e => error = e.message); const timer = setInterval(refresh, 10000); return () => clearInterval(timer); });
+  import { store, toggle, load, loadMeta, meta, day, plus, patch, remove, add, PRI, OFFER, days, sort, type T, type Pri } from './taskstore.svelte.ts';
+  const PROJECTS = $derived(meta.projects);
+  const GOALS = $derived(meta.goals);
   const KEY = 'zen.tasks';
   let by = $state<'when' | 'priority' | 'project' | 'goal'>((sessionStorage.getItem(KEY + '.by') as 'when') ?? 'when');
   $effect(() => { sessionStorage.setItem(KEY + '.by', by); });
+  onMount(() => {
+    void load(); void loadMeta();
+    const t = setInterval(() => { if (!editing && !adding) void load(); }, 10000);
+    return () => clearInterval(t);
+  });
 
   // ---- groups ----
-  const open = $derived(store.tasks.filter((t) => !t.done));
+  const open = $derived(store.tasks.filter((t) => !t.done && !t.dropped));
   const doneN = $derived(store.tasks.filter((t) => t.done));
   const groups = $derived.by(() => {
     const g: { key: string; label: string; tone?: string; items: T[] }[] = [];
@@ -35,9 +38,9 @@
       add('none', 'No priority', open.filter((t) => !t.pri));
       add('parking_lot', PRI.parking_lot.l, open.filter((t) => t.pri === 'parking_lot'));
     } else if (by === 'project') {
-      for (const p of [...new Set(open.map(t => t.project))]) add(p, p, open.filter((t) => t.project === p));
+      for (const p of [...new Set([...PROJECTS, ...open.map((t) => t.project)])]) add(p, p, open.filter((t) => t.project === p));
     } else {
-      for (const x of [...new Set(open.flatMap(t => t.goal ? [t.goal] : []))]) add(x, x, open.filter((t) => t.goal === x));
+      for (const x of [...new Set([...GOALS, ...open.map((t) => t.goal).filter((x): x is string => !!x)])]) add(x, x, open.filter((t) => t.goal === x));
       add('none', 'No goal', open.filter((t) => !t.goal));
     }
     return g;
@@ -46,28 +49,78 @@
   const todayN = $derived(open.filter((t) => t.due && days(t.due) === 0).length);
 
   // ---- actions ----
-  let toast = $state<{ text: string; id: string; added?: boolean } | null>(null);
+  let toast = $state<{ text: string; id: string; added?: T } | null>(null);
   let tt: ReturnType<typeof setTimeout> | undefined;
-  async function run(fn: () => Promise<void>) { try { await fn(); error = ''; await refresh(); } catch (e) { error = (e as Error).message; } }
-  function tick(t: T) { run(async () => { await patch(t, {done: !t.done}); }); }
-  async function handTask(t: T) { await run(async () => { const r = await call<{session: string}>('POST', `/api/zen/tasks/${encodeURIComponent(t.id)}/agent`, {agent, rev:t.rev}); openSession(r.session); }); }
+  function say(t: typeof toast, ms = 5000) { toast = t; clearTimeout(tt); tt = setTimeout(() => (toast = null), ms); }
+  async function tick(t: T) {
+    const text = t.text, id = t.id, was = t.done;
+    await toggle(t);
+    if (!was) say({ text: `Done: ${text}`, id });
+  }
+  async function undo() {
+    const t0 = toast;
+    toast = null;
+    if (!t0) return;
+    const t = store.tasks.find((x) => x.id === t0.id || (t0.added && x.text === t0.added.text && x.project === t0.added.project));
+    if (!t) return;
+    if (t0.added) await run(() => remove(t));
+    else await toggle(t);
+  }
+  async function run(f: () => Promise<unknown>) {
+    try { await f(); store.error = ''; } catch (e) { store.error = (e as Error).message; }
+    await load();
+  }
+
   let editing = $state<string | null>(null);
-  let draft = $state<T | null>(null);
-  function edit(t: T) { editing = t.id; draft = {...t}; }
-  function save() { if (!draft) return; const d = draft; run(async () => { await patch(d, {text:d.text, project:d.project, goal:d.goal, due:d.due, priority:d.pri}); editing = null; draft = null; }); }
+  /** The task being edited, a copy saved with Done (the vault changes once, not per keystroke). */
+  let ed = $state<T | null>(null);
+  function startEdit(t: T) {
+    if (editing === t.id) return saveEdit();
+    void saveEdit();
+    editing = t.id; ed = { ...$state.snapshot(t) } as T;
+  }
+  async function saveEdit() {
+    const t = store.tasks.find((x) => x.id === editing), e = ed;
+    editing = null; ed = null;
+    if (!t || !e) return;
+    const f: Record<string, unknown> = {};
+    if (e.text.trim() && e.text.trim() !== t.text) f.text = e.text.trim();
+    if (e.due !== t.due) f.due = e.due;
+    if (e.pri !== t.pri) f.priority = e.pri;
+    if (e.goal !== t.goal) f.goal = e.goal;
+    if (e.project !== t.project) f.project = e.project;
+    if (Object.keys(f).length) await run(() => patch(t, f));
+  }
   let showDone = $state(false);
 
   // Quick add: Enter adds to the chosen project; due defaults to today in the "when" view.
   // The adder: the text, then the same fields as the editor, open while it has focus or text.
   // Defaults come from the last task added (project) and the view (a project or goal group).
-  const blank = (p = PROJECTS[0]): T => ({ id: '', rev: '', text: '', project: p ?? '', goal: null, due: null, pri: null });
+  const blank = (p = PROJECTS[0] ?? ''): T => ({ id: '', rev: '', text: '', project: p, goal: null, due: null, pri: null });
   let nt = $state<T>(blank());
+  $effect(() => { if (!nt.project && PROJECTS[0]) nt.project = PROJECTS[0]; });
   let adding = $state(false);
   let addEl = $state<HTMLInputElement>();
-  function addTask() { const t = {...nt}; if (!t.text.trim() || !t.project) return; run(async () => { await call('POST', '/api/zen/tasks', {text:t.text.trim(), project:t.project, due:t.due, priority:t.pri, goal:t.goal}); nt = blank(t.project); addEl?.focus(); }); }
+  async function addTask() {
+    const text = nt.text.trim();
+    if (!text || !nt.project) return;
+    const t = { ...$state.snapshot(nt), text };
+    nt = blank(nt.project);
+    addEl?.focus();
+    try {
+      const made = await add(t);
+      say({ text: `Added to ${t.project}`, id: made.id, added: made }, 3000);
+      store.error = '';
+    } catch (e) { store.error = (e as Error).message; }
+    await load();
+  }
   function cancelAdd() { nt = blank(nt.project); adding = false; addEl?.blur(); }
-  const datePlus = (n: number) => { const d = new Date(TODAY + 'T12:00:00'); d.setDate(d.getDate() + n); return d.toISOString().slice(0,10); };
-  const QUICK: [string, string | null][] = [['Today', TODAY], ['Tomorrow', datePlus(1)], ['Next week', datePlus(7)], ['No date', null]];
+  const QUICK = $derived<[string, string | null][]>([['Today', day.today], ['Tomorrow', plus(1)], ['Next week', plus(7)], ['No date', null]]);
+  async function handTo(t: T) {
+    const chosen = handAgent[t.id] || agent;
+    const s = await hand?.(t, chosen);
+    if (s) { t.agent = 'working'; t.by = chosen; t.session = s; }
+  }
 </script>
 
 {#snippet fields(t: T)}
@@ -89,46 +142,47 @@
   </div>
   <div class="ef">
     <span class="lbl">Project</span>
-    <select class="dd" bind:value={t.project} aria-label="Project">{#each PROJECTS as p}<option value={p}>{p}</option>{/each}</select>
+    <select class="dd" bind:value={t.project} aria-label="Project">{#each PROJECTS.includes(t.project) || !t.project ? PROJECTS : [t.project, ...PROJECTS] as p}<option value={p}>{p}</option>{/each}</select>
   </div>
   <div class="ef" class:want={t.pri === 'important' && !t.goal}>
     <span class="lbl">Goal</span>
-    <select class="dd" bind:value={t.goal} aria-label="Goal" title={t.goal ?? 'No goal'}><option value={null}>No goal</option>{#each GOALS as x}<option value={x}>{x}</option>{/each}</select>
+    <select class="dd" bind:value={t.goal} aria-label="Goal" title={t.goal ?? 'No goal'}><option value={null}>No goal</option>{#each !t.goal || GOALS.includes(t.goal) ? GOALS : [t.goal, ...GOALS] as x}<option value={x}>{x}</option>{/each}</select>
   </div>
 {/snippet}
 
 {#snippet row(t: T)}
   <div class="task" class:done={t.done} class:ed={editing === t.id}>
     {@render box(t, () => tick(t))}
-    <button class="main" onclick={() => editing === t.id ? (editing = null) : edit(t)}>
+    <button class="main" onclick={() => startEdit(t)}>
       <span class="tx">{@render flag(t)}{t.text}</span>
       <span class="meta">
         {@render facts(t, { project: by !== 'project', goal: by !== 'goal' })}
-        {#if t.agent}<span class="ag {t.agent}" role="link" tabindex="-1" onclick={(e) => { if (t.session) { e.stopPropagation(); openSession(t.session); } }} onkeydown={() => {}}><i></i>{t.by ?? 'zenbot'} {t.agent === 'working' ? 'is on it' : 'needs you'}</span>{/if}
+        {#if t.agent}<span class="ag {t.agent}" role="link" tabindex="-1" onclick={(e) => { if (t.session && openChat) { e.stopPropagation(); openChat(t.session); } }} onkeydown={() => {}}><i></i>{t.by ?? 'zenbot'} {t.agent === 'working' ? 'is on it' : 'needs you'}</span>{/if}
       </span>
     </button>
-    {#if t.session}
-      <button class="hand on" title="Open the chat working on this task" onclick={() => openSession(t.session!)}>Open chat</button>
-    {:else if !t.done && !t.agent}
-      <button class="hand" title={`Hand it to ${agent}: a new chat starts working on this task`} onclick={() => handTask(t)}>Hand<span class="ha">{" "}to {agent}</span></button>
+    {#if t.session && openChat}
+      <button class="hand on" title="Open the chat working on this task" onclick={() => openChat?.(t.session!)}>Open chat</button>
+    {:else if hand && !t.done && !t.agent}
+      {#if choosing === t.id}<select class="agent-choice" aria-label={`Agent for ${t.text}`} bind:value={handAgent[t.id]}><option value={undefined}>Current agent</option>{#each agents as a}<option value={a.id}>{a.name}</option>{/each}</select>{/if}<button class="hand" class:on={choosing === t.id} title="Choose an agent for this task" onclick={() => choosing === t.id ? handTo(t) : (choosing = t.id)}>{choosing === t.id ? "Start" : "Hand"}</button>
     {/if}
   </div>
-  {#if editing === t.id && draft}
+  {#if editing === t.id && ed}
     <div class="edit">
-      <input class="et" bind:value={draft.text} aria-label="Task" />
-      {@render fields(draft)}
+      <!-- svelte-ignore a11y_autofocus -->
+      <input class="et" bind:value={ed.text} aria-label="Task" autofocus onkeydown={(e) => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') { e.stopPropagation(); editing = null; ed = null; } }} />
+      {@render fields(ed)}
       <div class="ef end">
-        <button class="del" onclick={() => { if (confirm('Delete this task?')) run(async () => { await remove(t); editing = null; }); }}>Delete</button>
-        <button class="del" onclick={() => run(async () => { await patch(t, {dropped:true}); editing = null; })}>Drop</button><span class="sp"></span><button class="pill" onclick={() => editing = null}>Cancel</button>
-        <button class="pill on" onclick={save}>Done</button>
+        <button class="del" onclick={() => { editing = null; ed = null; void run(() => remove(t)); }}>Delete</button>
+        <button class="del drop" title="Keep the line, marked dropped ([-])" onclick={() => { editing = null; ed = null; void run(() => patch(t, { dropped: true })); }}>Drop</button>
+        <span class="sp"></span>
+        <button class="pill on" onclick={saveEdit}>Done</button>
       </div>
     </div>
   {/if}
 {/snippet}
 
 <div class="twrap">
-  {#if error}<p role="alert">{error}</p>{/if}
-  <label>Hand tasks to <select bind:value={agent} aria-label="Agent">{#each agents as a}<option value={a}>{a}</option>{/each}</select></label>
+  {#if store.error}<div class="err" role="alert">{store.error}</div>{/if}
   <div class="sum">
     <span>{#if lateN}<b class="bad">{lateN} overdue</b>{" · "}{/if}<b>{todayN} today</b> · {open.length} open</span>
     <span class="sp"></span>
@@ -163,7 +217,7 @@
       <div class="gh" class:bad={g.tone === 'bad'}>{#if by === 'priority' && PRI[g.key]}<i class="pd" style="background:{PRI[g.key].c}"></i>{/if}{g.label}<span>{g.items.length}</span>{#if by === 'priority' && PRI[g.key]}<em>{PRI[g.key].h}</em>{/if}</div>
       {#each g.items as t (t.id)}{@render row(t)}{/each}
     {:else}
-      <div class="empty">Nothing open. Enjoy the day.</div>
+      <div class="empty">{store.loaded ? 'Nothing open. Enjoy the day.' : 'Loading…'}</div>
     {/each}
     {#if doneN.length}
       <button class="gh tog" onclick={() => (showDone = !showDone)}>{showDone ? '▾' : '▸'} Done<span>{doneN.length}</span></button>
@@ -171,6 +225,10 @@
     {/if}
   </div>
 </div>
+
+{#if toast}
+  <div class="toast" role="status">{toast.text}<button onclick={undo}>Undo</button></div>
+{/if}
 
 <style>
   .twrap { flex: 1; min-height: 0; display: flex; flex-direction: column; width: 100%; max-width: 760px; margin: 0 auto; }
@@ -221,6 +279,7 @@
   .ag.waiting { color: var(--warn); } .ag.waiting i { background: var(--warn); }
   @keyframes bl { 50% { opacity: 0.3; } }
   .hand { flex: none; font-size: 12.5px; font-weight: 600; color: var(--accent); padding: 3px 10px; border-radius: 99px; border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--faint)); opacity: 0; transition: opacity 0.15s; }
+  .agent-choice { border: 1px solid var(--faint); border-radius: 99px; background: var(--paper); color: var(--ink); padding: 5px 8px; max-width: 140px; }
   .task:hover .hand, .hand:focus-visible, .hand.on { opacity: 1; }
   .hand:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
   .edit { margin: -2px 10px 8px 40px; padding: 10px 12px; border: 1px solid var(--faint); border-radius: 12px; display: flex; flex-direction: column; gap: 8px; background: var(--paper); }
@@ -238,6 +297,8 @@
   .pill.want { border-color: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 15%, transparent); }
   .pd { width: 8px; height: 8px; border-radius: 50%; }
   .del { font-size: 12.5px; color: var(--bad, #b5543c); }
+  .del.drop { color: var(--dim); margin-left: 10px; }
+  .err { margin: 0 16px 8px; padding: 8px 12px; border-radius: 10px; font-size: 13px; color: var(--err); background: color-mix(in srgb, var(--err) 8%, var(--paper)); }
   .empty { padding: 30px 12px; color: var(--dim); }
   .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 30; display: flex; align-items: center; gap: 14px; padding: 10px 16px; border-radius: 12px; background: var(--ink); color: var(--paper); font-size: 14px; box-shadow: 0 10px 30px var(--shadow); }
   .toast button { color: var(--accent); font-weight: 650; filter: brightness(1.6); }

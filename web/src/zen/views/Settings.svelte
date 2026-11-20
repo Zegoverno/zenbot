@@ -1,276 +1,475 @@
 <script lang="ts">
-  // Settings (a board page off the top bar). Plugins: the installed ones (version, permissions,
-  // enable or disable, remove; for one granted `ai`, its AI switch and last 30 days' AI calls) and the default opener per file pattern and mode. Marketplace: the
-  // kernel's marketplace entries, with Install / Update; installing first asks the kernel what the
-  // plugin needs and shows those permissions in plain words before anything is installed
-  // (ADR 0001, Host API).
+  // Settings: You (name, USER.md), Appearance (this browser's theme), Models (engines' sign-in, the
+  // default model and effort for new chats), Connections (MCP servers), Plugins (installed ones:
+  // on/off, AI, updates, remove, default openers; the marketplace with installs that show what a
+  // plugin needs before anything is installed), Memory and Updates (version, release notes, the
+  // upgrade). Adding things (a connection, a routine) opens a chat with zenbot, which knows how.
+  // (The redesign mock's Settings, on the kernel's API.)
   import { onMount } from 'svelte';
-  import SettingsSections from './SettingsSections.svelte';
-  let section = $state('you');
-  const sections = [['you','You'], ['appearance','Appearance'], ['models','Models'], ['connections','Connections'], ['plugins','Plugins'], ['memory','Memory'], ['updates','Updates']];
-  import { pluginApi, type MarketEntry, type Plugin } from '../api.ts';
-  import { app, notice, settings } from '../app.svelte.ts';
-  import { loadPlugins, permissionWords, plugins } from '../plugins.svelte.ts';
+  import { zen, pluginApi, type MarketEntry, type Plugin } from '../api.ts';
+  import { me, setName, patchPrefs, models, modelOf, loadModels, agents, EFFORT } from '../live.svelte.ts';
+  import { loadPlugins, permissionWords, plugins as host } from '../plugins.svelte.ts';
+  import { app, notice } from '../app.svelte.ts';
+  let { theme, setTheme, ask, openFile }: { theme: 'auto' | 'light' | 'dark'; setTheme: (t: 'auto' | 'light' | 'dark') => void; ask: (text: string) => void; openFile?: (path: string, how?: { open?: boolean; edit?: boolean }) => void } = $props();
 
-  const tab = $derived(app.settings);
+  async function call<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
+    const r = await fetch(`/api/zen/${path}`, { method, headers: method === 'GET' ? {} : { 'content-type': 'application/json', 'x-zen-web': '1' }, body: body === undefined ? undefined : JSON.stringify(body) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    return data as T;
+  }
 
-  // ---- installed ----
+  // ---- You ----
+  // USER.md is edited here, through the kernel (GET/PUT /prompt-files/USER.md: backed up, size-checked).
+  let userEdit = $state<{ text: string; limit: number; saving: boolean; error: string } | null>(null);
+  async function editUser() {
+    try {
+      const f = await call<{ text: string; limit: number }>('prompt-files/USER.md');
+      userEdit = { text: f.text, limit: f.limit, saving: false, error: '' };
+    } catch (e) { notice(`couldn't open USER.md: ${(e as Error).message}`); }
+  }
+  async function saveUser() {
+    if (!userEdit) return;
+    userEdit.saving = true;
+    userEdit.error = '';
+    try {
+      await call('prompt-files/USER.md', 'PUT', { text: userEdit.text });
+      userEdit = null;
+      userUpdated = new Date().toLocaleDateString('en', { month: 'short', day: 'numeric' });
+      notice('USER.md saved');
+    } catch (e) { if (userEdit) { userEdit.saving = false; userEdit.error = (e as Error).message; } }
+  }
+  let nameDraft = $state(me.full);
+  $effect(() => { if (me.loaded && !nameDraft) nameDraft = me.full; });
+  let nameSaved = $state(false);
+  async function saveName() {
+    if (nameDraft.trim() === me.full) return;
+    try {
+      if (await setName(nameDraft)) { nameSaved = true; setTimeout(() => (nameSaved = false), 1500); } else nameDraft = me.full;
+    } catch (e) { notice(`couldn't save your name: ${(e as Error).message}`); nameDraft = me.full; }
+  }
+  const readers = $derived(agents.list.map((a) => a.name).join(' and '));
+  let userUpdated = $state('');
 
+  const SECTIONS = [
+    ['you', 'You'], ['appearance', 'Appearance'], ['models', 'Models'], ['connections', 'Connections'],
+    ['plugins', 'Plugins'], ['memory', 'Memory'], ['updates', 'Updates'],
+  ] as const;
+  type Sec = (typeof SECTIONS)[number][0];
+  const saved = sessionStorage.getItem('zen.settings') as Sec | null;
+  let sec = $state<Sec>(app.settings === 'marketplace' ? 'plugins' : SECTIONS.some(([k]) => k === app.settings) ? (app.settings as Sec) : saved && SECTIONS.some(([k]) => k === saved) ? saved : 'you');
+  $effect(() => sessionStorage.setItem('zen.settings', sec));
+
+  // ---- Models: the engines' sign-in, and what new chats start on (prefs) ----
+  type Engine = { id: string; signed_in: boolean; login: { status: string; url?: string; code?: string; error?: string }; runtime_note?: string | null };
+  const ENGINE: Record<string, { name: string; via: string; key: boolean }> = {
+    claude: { name: 'Claude', via: 'claude.ai account', key: false },
+    codex: { name: 'Codex (OpenAI)', via: 'ChatGPT account', key: false },
+    openrouter: { name: 'OpenRouter', via: 'API key', key: true },
+  };
+  let engines = $state<Engine[]>([]);
+  let engineError = $state('');
+  let confirmOut = $state<string | null>(null);
+  let signing = $state<string | null>(null);
+  let instructions = $state('');
+  let keyDraft = $state('');
+  let alive = true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  async function refreshEngines() {
+    try {
+      engines = (await call<{ engines: Engine[] }>('engines')).engines;
+      engineError = '';
+      const pending = engines.find((e) => ['starting', 'pending'].includes(e.login.status));
+      if (pending && alive) timer = setTimeout(refreshEngines, 2000);
+      else if (signing && engines.find((e) => e.id === signing)?.signed_in) { signing = null; void loadModels(); }
+    } catch (e) { engineError = (e as Error).message; }
+  }
+  async function signIn(id: string) {
+    signing = id; instructions = ''; engineError = '';
+    if (ENGINE[id]?.key) return;
+    try {
+      const r = await call<{ instructions?: string; url?: string }>(`engines/${id}/login`, 'POST');
+      instructions = r.instructions ?? '';
+      if (r.url) window.open(r.url, '_blank', 'noopener,noreferrer');
+      await refreshEngines();
+    } catch (e) { engineError = (e as Error).message; signing = null; }
+  }
+  async function signOut(id: string) {
+    confirmOut = null;
+    try { await call(`engines/${id}/logout`, 'POST'); await refreshEngines(); await loadModels(); }
+    catch (e) { engineError = (e as Error).message; }
+  }
+  async function saveKey() {
+    try { const r = await call<{ message?: string }>('engines/openrouter/key', 'PUT', { key: keyDraft }); keyDraft = ''; signing = null; notice(r.message ?? 'Key saved', 4000); await refreshEngines(); }
+    catch (e) { engineError = (e as Error).message; }
+  }
+  const login = (id: string) => engines.find((e) => e.id === id)?.login;
+  let defModel = $state('');
+  let defEffort = $state('');
+  const usable = $derived(models.list.filter((m) => models.raw?.authenticated[m.id.split('/')[0]] !== false));
+  const cur = $derived(modelOf(defModel || models.default));
+  async function pickModel(id: string) {
+    defModel = id;
+    const m = modelOf(id);
+    if (!m.efforts.includes(defEffort)) defEffort = m.def;
+    await savePrefs();
+  }
+  async function pickEffort(x: string) { defEffort = x; await savePrefs(); }
+  async function savePrefs() {
+    try { await patchPrefs({ default_model: defModel, default_effort: defEffort || null }); me.defaultModel = defModel; me.defaultEffort = defEffort || null; }
+    catch (e) { notice(`couldn't save the default model: ${(e as Error).message}`); }
+  }
+
+  // ---- Connections (GET /api/mcp: the global servers, sign-in state, problems) ----
+  let mcp = $state<{ servers: Record<string, number>; login: Record<string, string>; problems: string[] } | null>(null);
+  const CONNS = $derived(Object.keys(mcp?.servers ?? {}).filter((n) => !n.startsWith('plugin-')).map((name) => ({ name, login: mcp?.login[name] ?? null })));
+
+  // ---- Plugins (installed, the marketplace) ----
+  const PERM: Record<string, string> = { 'files:read': 'Read your files', 'files:write': 'Write your files', ai: 'Use AI' };
+  const perm = (x: string) => PERM[x] ?? permissionWords(x);
+  let market = $state<MarketEntry[] | null>(null);
+  let marketError = $state('');
+  let upd = $state<string | null>(null);
   let removing = $state<string | null>(null);
-
-  async function toggle(p: Plugin) {
-    try {
-      await pluginApi.setEnabled(p.name, !p.enabled);
-      p.enabled = !p.enabled;
-    } catch (e) {
-      notice(`couldn't ${p.enabled ? 'disable' : 'enable'} ${p.title || p.name}: ${(e as Error).message}`);
-    }
+  let asking = $state<{ entry: MarketEntry; permissions: string[] } | null>(null);
+  const nextOf = (p: Plugin) => { const m = market?.find((x) => x.name === p.name); return m && m.version !== p.version ? m.version : null; };
+  const fresh = $derived((market ?? []).filter((m) => !m.installed));
+  async function loadMarket() {
+    try { market = await pluginApi.marketplace(); marketError = ''; } catch (e) { marketError = (e as Error).message; }
+  }
+  async function flip(p: Plugin) {
+    try { await pluginApi.setEnabled(p.name, !p.enabled); p.enabled = !p.enabled; } catch (e) { notice(`couldn't switch ${p.title || p.name}: ${(e as Error).message}`); }
     await loadPlugins();
   }
-
-  async function toggleAi(p: Plugin) {
+  async function flipAi(p: Plugin) {
     const on = p.ai_enabled !== false;
-    try {
-      await pluginApi.setAi(p.name, !on);
-      p.ai_enabled = !on;
-    } catch (e) {
-      notice(`couldn't turn AI ${on ? 'off' : 'on'} for ${p.title || p.name}: ${(e as Error).message}`);
-    }
+    try { await pluginApi.setAi(p.name, !on); p.ai_enabled = !on; } catch (e) { notice(`couldn't switch AI for ${p.title || p.name}: ${(e as Error).message}`); }
     await loadPlugins();
   }
-
   async function remove(p: Plugin) {
     removing = null;
-    try {
-      await pluginApi.remove(p.name);
-      notice(`removed ${p.title || p.name}; its data stays`, 3000);
-    } catch (e) {
-      notice(`couldn't remove ${p.title || p.name}: ${(e as Error).message}`);
-    }
-    await loadPlugins();
-    market = null;
+    try { await pluginApi.remove(p.name); notice(`Removed ${p.title || p.name}; its data stays`, 3000); } catch (e) { notice(`couldn't remove ${p.title || p.name}: ${(e as Error).message}`); }
+    await Promise.all([loadPlugins(), loadMarket()]);
   }
-
+  /** Asks the kernel what the plugin needs; nothing is installed until the owner approves. */
+  async function install(entry: MarketEntry, approve?: string[]) {
+    upd = entry.name; asking = null;
+    try {
+      const r = await pluginApi.install(entry.name, approve);
+      // The release may have changed since the question: never report success when the kernel asks again.
+      if ('needs_approval' in r && r.needs_approval) asking = { entry, permissions: r.permissions ?? [] };
+      else { notice(`${entry.installed ? 'Updated' : 'Installed'} ${entry.title || entry.name} ${entry.version}`, 3000); await Promise.all([loadPlugins(), loadMarket()]); }
+    } catch (e) { notice(`couldn't install ${entry.title || entry.name}: ${(e as Error).message}`); }
+    upd = null;
+  }
   /** Every pattern and mode an enabled plugin opens, with who can open it. */
   const slots = $derived.by(() => {
     const m = new Map<string, { key: string; pattern: string; mode: string; options: { value: string; label: string }[] }>();
-    for (const p of plugins.list.filter((x) => x.enabled))
+    for (const p of host.list.filter((x) => x.enabled))
       for (const o of p.contributes.openers ?? [])
         for (const pattern of o.patterns) {
           const key = `${pattern}:${o.mode}`;
-          if (!m.has(key)) m.set(key, { key, pattern, mode: o.mode, options: [{ value: 'builtin', label: o.mode === 'edit' ? 'Writer (built-in)' : 'Reader (built-in)' }] });
+          if (!m.has(key)) m.set(key, { key, pattern, mode: o.mode, options: [{ value: 'builtin', label: o.mode === 'edit' ? 'Built-in editor' : 'Built-in reader' }] });
           m.get(key)!.options.push({ value: `${p.name}/${o.id}`, label: `${o.title} · ${p.title || p.name}` });
         }
     return [...m.values()];
   });
-
   async function setDefault(key: string, value: string) {
-    try {
-      await pluginApi.setDefault(key, value);
-      plugins.defaults[key] = value;
-    } catch (e) {
-      notice(`couldn't set the default: ${(e as Error).message}`);
-    }
+    try { await pluginApi.setDefault(key, value); host.defaults[key] = value; } catch (e) { notice(`couldn't set the default: ${(e as Error).message}`); }
   }
 
-  // ---- marketplace ----
+  // ---- Memory (GET /api/memory: short-term notes, the size limit, the last sleep) ----
+  type Sleep = { ended_at?: string; trigger?: string; promoted?: number; dropped?: number; kept?: number; error?: string | null };
+  let mem = $state<{ memories: { text: string }[]; size?: number; limit?: number; last_sleep?: Sleep | null } | null>(null);
+  const used = $derived(mem ? mem.size ?? mem.memories.reduce((n, m) => n + m.text.length, 0) : 0);
+  const max = $derived(mem?.limit ?? 4000);
+  const sleepAt = (s: Sleep | null | undefined) => { if (!s?.ended_at) return 'not yet'; const d = new Date(s.ended_at); const today = d.toDateString() === new Date().toDateString(); return `${today ? 'Today' : d.toLocaleDateString('en', { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString('en-GB', { hour: 'numeric', minute: '2-digit' })}`; };
+  const why = (t?: string) => (t === 'size' ? 'memory was full' : t === 'schedule' || t === 'nightly' ? 'nightly' : t ?? '');
 
-  let market = $state<MarketEntry[] | null>(null);
-  let marketError = $state('');
-  let asking = $state<{ entry: MarketEntry; permissions: string[] } | null>(null);
-  let busy = $state<string | null>(null);
-
-  async function loadMarket() {
-    try {
-      market = await pluginApi.marketplace();
-      marketError = '';
-    } catch (e) {
-      marketError = (e as Error).message;
-    }
+  // ---- Updates (GET /api/version: the running commit, the latest on main, release notes) ----
+  type Ver = { running: string; latest?: string; behind?: number; available?: boolean; commits?: string[]; error?: string; checked_at?: string; notes?: { version: string; date: string; items: string[] }[] };
+  let ver = $state<Ver | null>(null);
+  let checking = $state(false);
+  let upgrading = $state(false);
+  async function check(refresh = false) {
+    checking = true;
+    try { ver = await zen.version(refresh) as Ver; } catch (e) { notice(`couldn't check for updates: ${(e as Error).message}`); }
+    checking = false;
   }
-
-  $effect(() => {
-    if (tab === 'marketplace' && market === null) void loadMarket();
-  });
-
-  /** Asks the kernel what the plugin needs; nothing is installed until the owner approves. */
-  async function install(entry: MarketEntry) {
-    busy = entry.name;
-    try {
-      const r = await pluginApi.install(entry.name);
-      if ('needs_approval' in r && r.needs_approval) asking = { entry, permissions: r.permissions ?? [] };
-      else await installed(entry);
-    } catch (e) {
-      notice(`couldn't install ${entry.title || entry.name}: ${(e as Error).message}`);
-    } finally {
-      busy = null;
-    }
+  async function upgrade() {
+    upgrading = true;
+    try { await zen.upgrade(); notice('Updating: zenbot restarts once no session is working', 8000); } catch (e) { notice(`couldn't start the update: ${(e as Error).message}`); upgrading = false; }
   }
-
-  async function approve() {
-    if (!asking) return;
-    const { entry, permissions } = asking;
-    asking = null;
-    busy = entry.name;
-    try {
-      const r = await pluginApi.install(entry.name, permissions);
-      // The release may have changed since the dialog opened. Never report success when the
-      // kernel asks for a fresh approval (it checks the exact permission set).
-      if ('needs_approval' in r && r.needs_approval) asking = { entry, permissions: r.permissions ?? [] };
-      else await installed(entry);
-    } catch (e) {
-      notice(`couldn't install ${entry.title || entry.name}: ${(e as Error).message}`);
-    } finally {
-      busy = null;
-    }
-  }
-
-  async function installed(entry: MarketEntry) {
-    notice(`${entry.installed ? 'updated' : 'installed'} ${entry.title || entry.name} ${entry.version}`, 3000);
-    await Promise.all([loadPlugins(), loadMarket()]);
-  }
+  const at = (iso?: string) => (iso ? new Date(iso).toLocaleTimeString('en-GB', { hour: 'numeric', minute: '2-digit' }) : '');
+  const dayOf = (d: string) => { const x = new Date(d + 'T12:00:00'); return isNaN(+x) ? d : x.toLocaleDateString('en', { month: 'short', day: 'numeric' }); };
 
   onMount(() => {
-    void loadPlugins();
+    defModel = me.defaultModel || models.default;
+    defEffort = me.defaultEffort ?? '';
+    void refreshEngines();
+    void loadPlugins(); void loadMarket();
+    call<typeof mcp>('mcp').then((v) => (mcp = v)).catch(() => {});
+    call<typeof mem>('memory').then((v) => (mem = v)).catch(() => {});
+    void check();
+    fetch(`/api/fs/stat?path=${encodeURIComponent('~/.zenbot/USER.md')}`).then((r) => r.json()).then((s: { mtime?: number }) => { if (s.mtime) userUpdated = new Date(s.mtime).toLocaleDateString('en', { month: 'short', day: 'numeric' }); }).catch(() => {});
+    return () => { alive = false; clearTimeout(timer); };
   });
+  $effect(() => { if (!defModel && models.default) defModel = me.defaultModel || models.default; });
 </script>
 
-<div class="settings-container"><div class="view settings"><h2>Settings</h2>
-  <nav class="section-nav" aria-label="Settings sections">{#each sections as [key, label]}<button class:on={section === key} aria-current={section === key ? 'page' : undefined} onclick={() => section = key}>{label}</button>{/each}</nav>
-  <div class="settings-content">{#if section !== 'plugins'}<SettingsSections {section} />{:else}
-  <div class="ztabs sub" role="tablist" aria-label="settings">
-    <button role="tab" class:on={tab === 'plugins'} aria-selected={tab === 'plugins'} onclick={() => settings('plugins')}>Plugins</button>
-    <button role="tab" class:on={tab === 'marketplace'} aria-selected={tab === 'marketplace'} onclick={() => settings('marketplace')}>Marketplace</button>
-  </div>
+{#snippet toggle(on: boolean, flip: () => void, label: string)}
+  <button class="sw" class:on role="switch" aria-checked={on} aria-label={label} onclick={flip}><i></i></button>
+{/snippet}
 
-  {#if tab === 'plugins'}
-    {#if plugins.error}<p class="dim note">⚠ {plugins.error}</p>{/if}
-    {#if plugins.loaded && !plugins.list.length && !plugins.error}
-      <p class="dim note">No plugins yet. <button class="link" onclick={() => settings('marketplace')}>Browse the marketplace</button></p>
-    {/if}
-    {#each plugins.list as p (p.name)}
-      <section class="plugin" aria-label={p.title || p.name} class:off={!p.enabled}>
-        <div class="line">
-          <span class="title">{p.title || p.name}</span>
-          <span class="dim">{p.version}</span>
-          <span class="grow"></span>
-          <label class="dim switch"><input type="checkbox" checked={p.enabled} onchange={() => toggle(p)} aria-label={`enable ${p.title || p.name}`} /> enabled</label>
-          <button class="dim act" onclick={() => (removing = p.name)}>remove</button>
-        </div>
-        {#if p.description}<p class="dim desc">{p.description}</p>{/if}
-        <p class="dim perms">{p.permissions.length ? p.permissions.map(permissionWords).join(' · ') : 'No permissions beyond its own data'}</p>
-        {#if p.permissions.includes('ai')}
-          <p class="dim perms ai">
-            <label class="switch"><input type="checkbox" checked={p.ai_enabled !== false} onchange={() => toggleAi(p)} aria-label={`AI for ${p.title || p.name}`} /> AI</label>
-            <span>{p.ai_calls_30d ?? 0} AI call{(p.ai_calls_30d ?? 0) === 1 ? '' : 's'} in the last 30 days</span>
-          </p>
-        {/if}
-        {#if removing === p.name}
-          <p class="confirm">
-            Remove {p.title || p.name}? Its data stays.
-            <button class="warn" onclick={() => remove(p)}>Yes, remove {p.title || p.name}</button>
-            <button class="dim" onclick={() => (removing = null)}>Cancel</button>
-          </p>
-        {/if}
-      </section>
+<div class="setc"><div class="set">
+  <nav class="snav" aria-label="Settings sections">
+    {#each SECTIONS as [k, l]}
+      <button class:on={sec === k} aria-current={sec === k ? 'page' : undefined} onclick={() => (sec = k)}>{l}</button>
     {/each}
-    {#if slots.length}
-      <h3 class="head dim">DEFAULT OPENERS</h3>
-      {#each slots as s (s.key)}
-        <label class="slot">
-          <span class="pat">{s.pattern}</span>
-          <span class="dim">{s.mode === 'edit' ? 'write' : 'read'}</span>
-          <select aria-label={`default for ${s.pattern} ${s.mode}`} value={plugins.defaults[s.key] ?? 'builtin'} onchange={(e) => setDefault(s.key, (e.currentTarget as HTMLSelectElement).value)}>
-            {#each s.options as o}<option value={o.value}>{o.label}</option>{/each}
-          </select>
-        </label>
+  </nav>
+
+  <div class="sbody">
+    {#if sec === 'you'}
+      <h3>You</h3>
+      <p class="lead">What every agent knows about you: who you are, how you like to work and what you're working on. It lives in <code>~/.zenbot/USER.md</code>; zenbot also adds to it as it learns, keeping it short.</p>
+      <div class="field"><label for="me-name">Your name</label>
+        <input id="me-name" bind:value={nameDraft} onblur={saveName} onkeydown={(e) => { if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur(); if (e.key === 'Escape') { nameDraft = me.name; (e.currentTarget as HTMLInputElement).blur(); } }} />
+        <span class="hint">{nameSaved ? 'Saved' : 'What your agents call you. zenbot filled it in from your first chat.'}</span></div>
+      <div class="card big"><div class="cm"><b>USER.md</b><span>{userUpdated ? `Updated ${userUpdated} · ` : ''}read by {readers}</span></div>
+        {#if !userEdit}
+          <div class="acts">
+            <button class="pill on" onclick={editUser}>Edit</button>
+            <button class="pill" onclick={() => ask('Update what you know about me: ')}>Ask zenbot to update it</button>
+          </div>
+        {/if}</div>
+      {#if userEdit}
+        <div class="uedit">
+          <textarea aria-label="USER.md" bind:value={userEdit.text} spellcheck="true" onkeydown={(e) => { if (e.key === 's' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void saveUser(); } if (e.key === 'Escape') userEdit = null; }}></textarea>
+          <div class="acts"><span class="hint" class:err={userEdit.text.length > userEdit.limit || !!userEdit.error}>{userEdit.error || `${userEdit.text.length.toLocaleString()} / ${userEdit.limit.toLocaleString()} characters`}</span><span class="sp"></span>
+            <button class="pill" onclick={() => (userEdit = null)}>Cancel</button>
+            <button class="pill on" disabled={userEdit.saving || userEdit.text.length > userEdit.limit} onclick={saveUser}>{userEdit.saving ? 'Saving…' : 'Save'}</button></div>
+        </div>
+      {/if}
+
+    {:else if sec === 'appearance'}
+      <h3>Appearance</h3>
+      <div class="field"><span class="lb">Theme</span>
+        <div class="seg">{#each [['auto', 'Auto'], ['light', 'Light'], ['dark', 'Dark']] as [k, l]}<button class:on={theme === k} onclick={() => setTheme(k as 'auto')}>{l}</button>{/each}</div>
+        <span class="hint">Auto follows your device. Kept in this browser.</span></div>
+
+    {:else if sec === 'models'}
+      <h3>Models</h3>
+      <p class="lead">The engines zenbot runs on. Signing out stops every model of that engine until you sign in again.</p>
+      {#if engineError}<p class="hint err" role="alert">{engineError}</p>{/if}
+      <div class="rows">
+        {#each engines as en (en.id)}
+          {@const e = { id: en.id, ok: en.signed_in, ...(ENGINE[en.id] ?? { name: en.id, via: 'account', key: false }) }}
+          {@const l = login(en.id)}
+          <div class="li"><span class="dot" class:ok={e.ok}></span>
+            <div class="cm"><b>{e.name}</b><span>{signing === e.id ? (e.key ? 'Paste your API key…' : l?.code ? `Enter the code ${l.code} on the sign-in page` : instructions || 'Waiting for you to sign in in the new tab…') : e.ok ? `Signed in with your ${e.via}` : 'Not signed in'}</span>
+              {#if signing === e.id && l?.url}<span><a href={l.url} target="_blank" rel="noopener noreferrer">Open the sign-in page ↗</a></span>{/if}
+              {#if l?.error}<span class="err">{l.error}</span>{/if}
+              {#if en.runtime_note && signing === e.id}<span>{en.runtime_note}</span>{/if}</div>
+            {#if signing === e.id && e.key}
+              <input class="key" type="password" placeholder="sk-or-…" bind:value={keyDraft} aria-label="OpenRouter API key" onkeydown={(ev) => ev.key === 'Enter' && keyDraft.trim() && saveKey()} />
+              <button class="pill" onclick={() => (signing = null)}>Cancel</button>
+              <button class="pill on" disabled={!keyDraft.trim()} onclick={saveKey}>Save key</button>
+            {:else if confirmOut === e.id}
+              <span class="hint">Sign out of {e.name}?</span>
+              <button class="pill" onclick={() => (confirmOut = null)}>Cancel</button>
+              <button class="pill warn" onclick={() => signOut(e.id)}>Sign out</button>
+            {:else if e.ok}
+              <button class="pill" onclick={() => (confirmOut = e.id)}>Sign out</button>
+            {:else}
+              <button class="pill on" disabled={signing === e.id} onclick={() => signIn(e.id)}>{e.key ? 'Add key' : 'Sign in'}</button>
+            {/if}
+          </div>
+        {:else}
+          <div class="li"><div class="cm"><span>Loading…</span></div></div>
+        {/each}
+      </div>
+      <h4>New chats start on</h4>
+      <div class="field"><label for="dm">Model</label>
+        <select id="dm" class="dd" value={defModel} onchange={(ev) => pickModel((ev.target as HTMLSelectElement).value)}>{#each usable as m}<option value={m.id}>{m.group === 'Claude' ? 'Claude ' : m.group === 'OpenAI' ? 'Codex ' : ''}{m.name}</option>{/each}</select>
+        <span></span>
+        <span class="lb">Effort</span>
+        <div class="seg">{#each cur.efforts as x}<button class:on={(defEffort || cur.def) === x} title={EFFORT[x]?.[1]} onclick={() => pickEffort(x)}>{x}</button>{/each}</div>
+        <span></span>
+        <span class="hint">Any chat can still switch model from its message box. Agents with their own model keep it.</span></div>
+
+    {:else if sec === 'connections'}
+      <h3>Connections</h3>
+      <p class="lead">Services zenbot can use for you (<code>~/.zenbot/mcp.json</code>). Other agents get only the ones you allow them.</p>
+      <div class="rows">
+        {#each CONNS as c (c.name)}
+          <div class="li"><span class="dot ok"></span>
+            <div class="cm"><b>{c.name}</b><span>{c.login ? `Ready · ${c.login}` : 'Ready'}</span></div>
+          </div>
+        {/each}
+        {#each mcp?.problems ?? [] as pr}
+          <div class="li"><span class="dot error"></span><div class="cm"><b>Problem</b><span>{pr}</span></div></div>
+        {/each}
+        <button class="li add" onclick={() => ask('Connect a new service for me: ')}><span class="plus">+</span><div class="cm"><b>Connect a service</b><span>Opens a chat with zenbot to set it up</span></div></button>
+      </div>
+      <p class="hint">Plugins bring their own tools too; they're under Plugins.</p>
+
+    {:else if sec === 'plugins'}
+      <h3>Plugins</h3>
+      {#if host.error}<p class="hint err" role="alert">{host.error}</p>{/if}
+      <div class="rows">
+        {#each host.list as p (p.name)}
+          {@const next = nextOf(p)}
+          <div class="li" class:off={!p.enabled} aria-label={p.title || p.name}>
+            <div class="cm"><b>{p.name} <small>{p.version}</small></b><span>{p.description}</span>
+              <span class="perms">{#if p.permissions.length}{#each p.permissions as x}<i>{perm(x)}</i>{/each}{:else}<i>No access to your data</i>{/if}
+                {#if p.permissions.includes('ai')}<button class="aisw" role="switch" aria-checked={p.ai_enabled !== false} aria-label="AI for {p.title || p.name}" onclick={() => flipAi(p)}>AI {p.ai_enabled !== false ? 'on' : 'off'} · {p.ai_calls_30d ?? 0} call{(p.ai_calls_30d ?? 0) === 1 ? '' : 's'} in 30 days</button>{/if}</span>
+              {#if removing === p.name}<span class="confirm">Remove {p.title || p.name}? Its data stays. <button class="pill warn" onclick={() => remove(p)}>Remove</button> <button class="pill" onclick={() => (removing = null)}>Cancel</button></span>{/if}</div>
+            {#if next}{@const m = market?.find((x) => x.name === p.name)}<button class="pill on" disabled={upd === p.name} onclick={() => m && install(m)}>{upd === p.name ? 'Updating…' : `Update to ${next}`}</button>{/if}
+            <button class="pill rm" title="Remove {p.title || p.name}" onclick={() => (removing = p.name)}>Remove</button>
+            {@render toggle(p.enabled, () => flip(p), `${p.name} on or off`)}
+          </div>
+        {:else}
+          <div class="li"><div class="cm"><span>{host.loaded ? 'No plugins yet.' : 'Loading…'}</span></div></div>
+        {/each}
+      </div>
+      {#if slots.length}
+        <h4>Open files with</h4>
+        <div class="rows">
+          {#each slots as s (s.key)}
+            <div class="li"><div class="cm"><b>{s.pattern}</b><span>{s.mode === 'edit' ? 'Editing' : 'Reading'}</span></div>
+              <select class="dd" aria-label="Default for {s.pattern} {s.mode}" value={host.defaults[s.key] ?? 'builtin'} onchange={(e) => setDefault(s.key, (e.currentTarget as HTMLSelectElement).value)}>
+                {#each s.options as o}<option value={o.value}>{o.label}</option>{/each}
+              </select></div>
+          {/each}
+        </div>
+      {/if}
+      <h4>Marketplace</h4>
+      {#if marketError}<p class="hint err">{marketError}</p>{/if}
+      {#if asking}
+        <div class="card big" role="alertdialog" aria-label="Install {asking.entry.title || asking.entry.name}"><div class="cm"><b>Install {asking.entry.title || asking.entry.name} {asking.entry.version}?</b><span>It asks to:</span>
+          <span class="perms">{#each asking.permissions as x}<i>{perm(x)}</i>{:else}<i>No access to your data</i>{/each}</span></div>
+          <div class="acts"><button class="pill" onclick={() => (asking = null)}>Cancel</button><button class="pill on" onclick={() => asking && install(asking.entry, asking.permissions)}>Allow and install</button></div></div>
+      {/if}
+      {#if fresh.length}
+        <div class="rows">
+          {#each fresh as m (m.name)}
+            <div class="li" aria-label={m.title || m.name}><div class="cm"><b>{m.title || m.name} <small>{m.version}{m.author ? ` · ${m.author}` : ''}</small></b><span>{m.description ?? ''}</span>
+              <span class="perms">{#each m.kernel ?? [] as x}<i>{perm(x)}</i>{:else}<i>No access to your data</i>{/each}</span></div>
+              <button class="pill on" disabled={upd === m.name} onclick={() => install(m)}>{upd === m.name ? 'Installing…' : 'Install'}</button></div>
+          {/each}
+        </div>
+      {/if}
+      <p class="hint">{market === null ? 'Loading the marketplace…' : host.list.some((p) => nextOf(p)) ? 'Updates come from the marketplace; each one asks again if it needs new access.' : fresh.length ? 'Each plugin says what it needs before anything is installed.' : 'Everything in the marketplace is installed and up to date.'}</p>
+
+    {:else if sec === 'memory'}
+      <h3>Memory</h3>
+      <p class="lead">What zenbot keeps in mind between chats. When it fills up, and every night, zenbot sorts it: lasting things move to long-term memory.</p>
+      <div class="meter"><div style="width:{Math.min(100, (used / max) * 100)}%"></div></div>
+      <div class="mrow"><span>Short-term memory: <b>{mem?.memories.length ?? 0} notes</b>, {Math.round((used / max) * 100)}% full</span><span class="sp"></span>
+        {#if mem?.last_sleep}<span class="hint">Last sorted {sleepAt(mem.last_sleep)}{why(mem.last_sleep.trigger) ? ` (${why(mem.last_sleep.trigger)})` : ''}: {mem.last_sleep.promoted ?? 0} kept for good, {mem.last_sleep.dropped ?? 0} archived, {mem.last_sleep.kept ?? 0} still in mind</span>{/if}</div>
+      <div class="acts">
+        <button class="pill" onclick={() => ask('Show me what you remember about me and let me correct it.')}>Review with zenbot</button>
+        <button class="pill" title="Read-only: zenbot keeps it; ask it to change what it remembers" onclick={() => openFile?.(`${app.vault}/MEMORY.md`, { open: true })}>View MEMORY.md <small class="ro">read-only</small></button>
+      </div>
+
+    {:else if sec === 'updates'}
+      <h3>Updates</h3>
+      <div class="card big"><div class="cm">
+        {#if !ver}<b>Checking…</b>
+        {:else if ver.error}<b>Couldn't check</b><span>{ver.error}</span>
+        {:else if ver.behind}<b>{ver.behind} new changes</b><span>Running {ver.running}, latest {ver.latest}.</span><ul class="chg">{#each ver.commits ?? [] as c}<li>{c}</li>{/each}</ul>
+        {:else}<b>Up to date</b><span>Running {ver.running} · checked {checking ? 'now…' : at(ver.checked_at) || 'just now'}</span>{/if}</div>
+        {#if ver?.behind}<button class="pill on" disabled={upgrading} onclick={upgrade}>{upgrading ? 'Updating…' : 'Update now'}</button>{:else}<button class="pill" disabled={checking} onclick={() => check(true)}>Check again</button>{/if}</div>
+      <h4>What's new</h4>
+      {#each ver?.notes ?? [] as n, i}
+        <div class="note"><div class="nd">{dayOf(n.date)}{#if i === 0}<span class="tag">running</span>{/if}</div><ul class="chg">{#each n.items as x}<li>{x}</li>{/each}</ul></div>
+      {:else}
+        <p class="hint">No release notes yet.</p>
       {/each}
     {/if}
-  {:else}
-    {#if marketError}<p class="dim note">⚠ {marketError}</p>{/if}
-    {#if market === null && !marketError}<p class="dim note">…</p>{/if}
-    {#if market && !market.length}<p class="dim note">The marketplace is empty.</p>{/if}
-    {#each market ?? [] as m (m.name)}
-      <section class="plugin" aria-label={m.title || m.name}>
-        <div class="line">
-          <span class="title">{m.title || m.name}</span>
-          <span class="dim">{m.version}{m.author ? ` · ${m.author}` : ''}</span>
-          <span class="grow"></span>
-          {#if m.installed === m.version}
-            <span class="dim">Installed</span>
-          {:else}
-            <button class="act primary" disabled={busy === m.name} onclick={() => install(m)}>{m.installed ? `Update from ${m.installed}` : 'Install'}</button>
-          {/if}
-        </div>
-        {#if m.description}<p class="dim desc">{m.description}</p>{/if}
-        <p class="dim perms">
-          {(m.kernel ?? []).length ? (m.kernel ?? []).map(permissionWords).join(' · ') : 'No permissions beyond its own data'}
-          {#if m.repository}· <a href={m.repository} target="_blank" rel="noopener noreferrer">source</a>{/if}
-        </p>
-      </section>
-    {/each}
-  {/if}
-  {/if}
-</div></div></div>
-
-{#if asking}
-  <div class="scrim">
-    <div class="dialog" role="dialog" aria-modal="true" aria-label={`Install ${asking.entry.title || asking.entry.name}`}>
-      <h3>Install {asking.entry.title || asking.entry.name} {asking.entry.version}?</h3>
-      <p>New plugins become the default reader or editor for their supported file types. Updates preserve your choices.</p>
-      {#if asking.permissions.length}
-        <p class="dim">It asks to:</p>
-        <ul>{#each asking.permissions as p}<li>{permissionWords(p)}</li>{/each}</ul>
-      {:else}
-        <p class="dim">It asks for nothing beyond its own data.</p>
-      {/if}
-      <p class="dim small">It runs sandboxed: it reaches only what's listed here.</p>
-      <div class="buttons">
-        <button class="dim" onclick={() => (asking = null)}>Cancel</button>
-        <button class="act primary" onclick={approve}>Install</button>
-      </div>
-    </div>
   </div>
-{/if}
+</div></div>
 
 <style>
-  .settings-container { container-type:inline-size; }
-  .settings h2 { grid-column:1/-1; font-family:var(--serif); margin:0 0 8px; font-size:22px; }
-  .settings-content { min-width:0; }
-  .section-nav { display:flex; flex-direction:column; gap:4px; align-self:start; }
-  .section-nav button { text-align:left; }
-  @container (max-width:680px) { .settings { grid-template-columns:1fr !important; padding:18px !important; } .section-nav { flex-direction:row; flex-wrap:wrap; } }
-  .section-nav button { padding:7px 12px; border-radius:10px; color:var(--dim); }
-  .section-nav button.on { background:color-mix(in srgb, var(--ink) 8%, transparent); color:var(--ink); font-weight:600; }
-  .settings { display:grid; grid-template-columns:180px minmax(0,1fr); gap:18px 32px; padding:24px 30px 40px; max-width:1100px; margin:0 auto; }
-  .sub { display: flex; gap: 4px; margin: 4px 0 14px; }
-  .sub button { padding: 4px 10px; border-radius: 6px; color: var(--dim); }
-  .sub button.on { color: var(--ink); background: color-mix(in srgb, var(--ink) 8%, transparent); }
-  .note { margin: 8px 0; }
-  .link { color: var(--accent); }
-  .plugin { padding: 10px 0; border-bottom: 1px solid var(--faint); }
-  .plugin.off .title { color: var(--dim); }
-  .line { display: flex; align-items: baseline; gap: 10px; }
-  .title { font-weight: 600; }
-  .grow { flex: 1; }
-  .desc, .perms { margin: 4px 0 0; font-size: 13px; }
-  .ai { display: flex; gap: 12px; align-items: center; }
-  .switch { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; cursor: pointer; }
-  .act { font-size: 13px; }
-  .act:hover { color: var(--ink); }
-  .act.primary { color: var(--accent); }
-  .act:disabled { opacity: 0.5; cursor: default; }
-  .confirm { margin: 8px 0 0; font-size: 13px; display: flex; gap: 12px; align-items: baseline; }
-  .warn { color: var(--err); }
-  .head { font-size: 12px; letter-spacing: 0.06em; font-weight: 500; margin: 22px 0 6px; }
-  .slot { display: flex; align-items: baseline; gap: 10px; padding: 4px 0; font-size: 14px; }
-  .pat { font-family: var(--mono); font-size: 13px; min-width: 90px; }
-  select { font: inherit; color: inherit; background: var(--paper); border: 1px solid var(--faint); border-radius: 6px; padding: 2px 6px; margin-left: auto; }
-  .scrim { position: fixed; inset: 0; background: rgb(0 0 0 / 0.25); display: grid; place-items: center; z-index: 60; }
-  .dialog { background: var(--paper); border: 1px solid var(--faint); border-radius: 10px; padding: 18px 20px; width: min(440px, 92vw); box-shadow: 0 8px 30px rgb(0 0 0 / 0.15); }
-  .dialog h3 { margin: 0 0 10px; font-size: 16px; }
-  .dialog ul { margin: 6px 0 10px; padding-left: 20px; }
-  .dialog p { margin: 6px 0; }
-  .small { font-size: 12px; }
-  .buttons { display: flex; justify-content: flex-end; gap: 16px; margin-top: 14px; }
+  .set { flex: 1; min-height: 0; display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 8px; max-width: 920px; width: 100%; margin: 0 auto; padding: 0 16px; }
+  .snav { display: flex; flex-direction: column; gap: 2px; padding-top: 4px; }
+  .snav button { text-align: left; padding: 7px 12px; border-radius: 10px; font-size: 14px; color: var(--dim); }
+  .snav button:hover { color: var(--ink); background: var(--soft); }
+  .snav button.on { color: var(--ink); background: var(--soft); font-weight: 600; }
+  .sbody { overflow: auto; padding: 0 6px 100px; display: flex; flex-direction: column; gap: 14px; }
+  h3 { margin: 6px 0 0; font-family: var(--serif); font-size: 22px; font-weight: 600; }
+  h4 { margin: 8px 0 -4px; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 650; }
+  .lead { margin: -6px 0 0; color: var(--dim); font-size: 13.5px; }
+  .field { display: grid; grid-template-columns: 150px auto 1fr; align-items: center; gap: 6px 12px; }
+  .field label, .lb { font-size: 13.5px; font-weight: 600; }
+  .field .hint { grid-column: 2 / -1; }
+  .field input { font: inherit; font-size: 14px; padding: 6px 10px; border: 1px solid var(--faint); border-radius: 9px; background: var(--paper); color: var(--ink); outline: none; width: 16rem; }
+  .field input:focus { border-color: var(--accent); }
+  .hint { font-size: 12.5px; color: var(--dim); }
+  .hint.err { color: var(--err, #b5543c); }
+  .seg { display: inline-flex; background: var(--soft); border-radius: 99px; padding: 2px; justify-self: start; }
+  .seg button { padding: 4px 12px; border-radius: 99px; font-size: 13px; color: var(--dim); }
+  .seg button.on { background: var(--paper); color: var(--ink); font-weight: 600; box-shadow: 0 1px 3px var(--shadow); }
+  .dd { appearance: none; font: inherit; font-size: 13.5px; color: var(--ink); background: var(--paper) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M7 10l5 5 5-5'/%3E%3C/svg%3E") no-repeat right 8px center / 14px; border: 1px solid var(--faint); border-radius: 9px; padding: 6px 30px 6px 10px; justify-self: start; min-width: 14rem; }
+  .card { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--faint); border-radius: 14px; background: var(--paper); }
+  .card.big { align-items: flex-start; }
+  .uedit { display: flex; flex-direction: column; gap: 8px; }
+  .uedit textarea { min-height: 18rem; resize: vertical; padding: 12px 14px; border: 1px solid var(--faint); border-radius: 14px; background: var(--paper); color: var(--ink); font-family: var(--mono); font-size: 13px; line-height: 1.55; outline: none; }
+  .uedit textarea:focus { border-color: color-mix(in srgb, var(--accent) 45%, var(--faint)); }
+  .uedit .acts { display: flex; align-items: center; gap: 8px; }
+  .uedit .sp { flex: 1; }
+  .ro { font-size: 11px; color: var(--dim); margin-left: 6px; }
+  .cm { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .cm b { font-size: 14px; font-weight: 600; }
+  .cm b small { font-weight: 400; color: var(--dim); font-size: 12px; margin-left: 4px; }
+  .cm > span { font-size: 12.5px; color: var(--dim); }
+  .rows { border: 1px solid var(--faint); border-radius: 14px; background: var(--paper); overflow: hidden; }
+  .li { display: flex; align-items: center; gap: 12px; padding: 11px 14px; width: 100%; text-align: left; }
+  .li + .li { border-top: 1px solid var(--faint); }
+  .li.off .cm { opacity: 0.55; }
+  .li.add:hover { background: var(--soft); }
+  .li.add .plus { width: 10px; color: var(--accent); font-size: 18px; text-align: center; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--faint); }
+  .dot.ok { background: var(--accent); }
+  .dot.error { background: var(--bad, #b5543c); }
+  .tag { font-size: 12px; font-weight: 600; color: var(--accent); }
+  .perms { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  .perms i { font-style: normal; font-size: 11.5px; padding: 1px 8px; border-radius: 99px; background: var(--soft); border: 1px solid var(--faint); color: var(--ink); }
+  .pill { display: inline-flex; align-items: center; padding: 4px 12px; border-radius: 99px; border: 1px solid var(--faint); font-size: 12.5px; background: var(--paper); color: var(--ink); white-space: nowrap; }
+  .pill:hover { border-color: var(--dim); }
+  .pill.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+  .pill.warn { border-color: var(--bad, #b5543c); color: var(--bad, #b5543c); font-weight: 600; }
+  .pill:disabled { opacity: 0.7; }
+  .sw { width: 36px; height: 21px; border-radius: 99px; background: var(--faint); position: relative; flex: none; transition: background 0.15s; }
+  .sw i { position: absolute; top: 2.5px; left: 2.5px; width: 16px; height: 16px; border-radius: 50%; background: var(--paper); box-shadow: 0 1px 2px var(--shadow); transition: transform 0.15s; }
+  .sw.on { background: var(--accent); }
+  .sw.on i { transform: translateX(15px); }
+  .meter { height: 8px; border-radius: 99px; background: var(--soft); overflow: hidden; }
+  .meter div { height: 100%; background: var(--accent); border-radius: 99px; }
+  .mrow { display: flex; align-items: baseline; gap: 10px; font-size: 13.5px; flex-wrap: wrap; }
+  .sp { flex: 1; }
+  .acts { display: flex; gap: 8px; }
+  code { font-size: 12px; background: var(--soft); padding: 1px 5px; border-radius: 5px; }
+  .err { color: var(--err); }
+  .key { font: inherit; font-size: 13px; padding: 4px 10px; border: 1px solid var(--faint); border-radius: 9px; background: var(--paper); color: var(--ink); width: 12rem; }
+  .aisw { font-size: 11.5px; padding: 1px 8px; border-radius: 99px; border: 1px solid var(--faint); color: var(--accent); }
+  .aisw[aria-checked='false'] { color: var(--dim); }
+  .pill.rm { color: var(--dim); }
+  .confirm { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 6px; font-size: 12.5px; color: var(--ink) !important; }
+  .cm a { color: var(--accent); font-weight: 600; }
+  .note { display: grid; grid-template-columns: 110px 1fr; gap: 10px; padding: 2px 4px; }
+  .nd { font-size: 13px; font-weight: 600; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+  .note .chg { margin: 0; }
+  .chg { margin: 6px 0 0; padding-left: 18px; font-size: 13px; }
+  /* One column when the panel is narrow: a phone, or Settings beside a chat. */
+  .setc { flex: 1; min-height: 0; display: flex; container-type: inline-size; }
+  .card { flex-wrap: wrap; }
+  .card > .cm { flex: 1 1 200px; }
+  @container (max-width: 640px) {
+    .set { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); padding: 0 10px; }
+    .snav { flex-direction: row; align-items: center; overflow-x: auto; gap: 4px; padding-bottom: 4px; scrollbar-width: none; }
+    .snav button { white-space: nowrap; }
+    .field { grid-template-columns: 1fr; }
+    .field .hint { grid-column: 1; }
+  }
 </style>

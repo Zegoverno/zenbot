@@ -1,26 +1,31 @@
 <script lang="ts">
-  // A session's chat, as the terminal's (crates/zen/src/tui: events.rs, transcript.rs, input.rs,
-  // pickers.rs): the transcript (prompts, Markdown replies streamed as they come, tool runs folded
-  // into one line), the composer with its / menu and pickers, the status line while zenbot works,
-  // and the footer. 'new' is a chat whose session starts with its first prompt; that prompt is
-  // handed to the chat re-created with the session's id (Shell keys Chat on the session).
-  // Plugins: a plugin's slash command calls its tool and shows its UI in the side panel (typed with
+  // A session's chat, as the redesign draws it (web/mock/ChatMock2.svelte's chat pane) on the
+  // terminal's logic (crates/zen/src/tui: events.rs, transcript.rs, input.rs, pickers.rs).
+  // The header: the title (double-click or ⋯ › Rename), working / needs-you, the ⋯ details (model,
+  // effort, context, session; rename; archive with how it ended) and × to close. The conversation:
+  // prompts as bubbles, Markdown replies streamed as they come, each run of tool calls folded into
+  // one "N steps" line, questions as a card with their options (one click answers), and while the
+  // agent works one live line that opens into every step of the turn and its subagents (each with
+  // its steps, and its session beside the chat). The message box: attachments (sent to ~/inbox at
+  // once, named in the prompt), the model and effort pickers, send or stop; `/` commands with their
+  // pickers. 'new' is a chat whose session starts with its first prompt: the greeting, who to talk
+  // to, and three ideas that load without blocking; that prompt is handed to the chat re-created
+  // with the session's id (Shell keys Chat on the session).
+  // Plugins: a plugin's slash command calls its tool and shows its UI in the right panel (typed with
   // no argument and with declared `choices`, it opens a picker of them first: a choice runs it, one
-  // with `then` goes to the composer to finish); a plugin
-  // UI's `sendMessage` queues an owner-reviewed draft here (`chat.queue`), and what plugin UIs put in the model context shows
+  // with `then` goes to the composer to finish); a plugin UI's `sendMessage` queues an
+  // owner-reviewed draft here (`chat.queue`), and what plugin UIs put in the model context shows
   // as a removable chip above the box and goes with the next prompt (plugins.svelte.ts).
   import { onMount, tick } from 'svelte';
-  import { zen, files, commands, upload, toolSummary, short, readOnly, agentTag, AGENT_NAME, pluginApi, type Command, type Message, type Models, type Outcome, type SessionDetail, type ZenEvent } from './api.ts';
+  import { zen, files, commands, upload, short, readOnly, AGENT_NAME, pluginApi, type Command, type Message, type Outcome, type SessionDetail, type ZenEvent } from './api.ts';
   import { chat, contexts, contextSaving, dropContext, plugins, resultText, showPanel, takeContext, toolArgs, uiOf } from './plugins.svelte.ts';
-  import { app, board, openSession, sessionStarted, openFile, openDir, toggleSide, settings, notice, typing, tilde } from './app.svelte.ts';
+  import { app, board as toBoard, openSession, sessionStarted, openFile, openDir, pickTab, openTab, settings, notice, typing, tilde, closeChat, goBack, openSub, showFile } from './app.svelte.ts';
+  import { me, board, agents, agentOf, models, modelOf, kids, loadKid, loadIdeas, stepOf, clock, EFFORT, effortName, type Sugg } from './live.svelte.ts';
   import { render as mdRender } from './md.ts';
   import * as M from './chat/model.ts';
-  import Work from './chat/Work.svelte';
 
-  let { id, active, wide }: { id: string; active: boolean; wide: boolean } = $props();
+  let { id, split }: { id: string; split: boolean } = $props();
 
-  const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-  const PLACEHOLDER = 'Ask zenbot to do something…';
   const READ_ONLY = 'Read-only: zenbot drives this session';
   const PAGE = 40;
 
@@ -31,14 +36,9 @@
   let model = $state('');
   let effort = $state<string | null>(null);
   let kind = $state<string | null>(null);
-  /** Who the session is: a fresh chat starts as the agent it was opened with (the picker changes it). */
+  /** Who the session is: a fresh chat starts as the agent picked at the top (the picker changes it). */
   // svelte-ignore state_referenced_locally
   let agent = $state(sid ? 'zenbot' : app.agent);
-  /** The agents a fresh chat can start as (loaded only for a fresh chat). */
-  let agents = $state<string[]>([]);
-  let ideas = $state<string[]>([]);
-  let ideasLoading = $state(false);
-  let models = $state<Models | null>(null);
   let cmds = $state<Command[]>([]);
   let loaded = $state(false);
   let failed = $state('');
@@ -51,6 +51,7 @@
   let firstSeq = Infinity;
   let modelPinned = false;
   const ro = $derived(readOnly({ kind }));
+  const who = $derived(agentOf(agent));
 
   // ---- the conversation ----
   let entries = $state<M.Entry[]>([]);
@@ -61,14 +62,15 @@
   let lastDraw = 0;
   /** Prompts sent here that the kernel hasn't echoed yet. */
   let pending: string[] = [];
+  /** Folded runs opened by a click, and steps whose output shows. */
+  let open = $state<Record<number, boolean>>({});
+  let outOpen = $state<Record<string, boolean>>({});
 
   // ---- the turn ----
   let busy = $state(false);
   let status = $state('Working');
   let turnStarted = $state(Date.now());
   let toolSince = $state<number | null>(null);
-  let turnTools = $state(0);
-  let turnFiles = $state<string[]>([]);
   let turnTokens = 0;
   let turnModel = '';
   let turnEffort: string | null = null;
@@ -77,7 +79,10 @@
   let suggestion = $state<{ id: number; text: string; taken: boolean } | null>(null);
   let lastFile: string | null = null;
   let now = $state(Date.now());
-  let spin = $state(0);
+  /** When each tool call of the turn started (ms into the turn), by call id. */
+  let stepAt = $state<Record<string, number>>({});
+  let liveOpen = $state(false);
+  let hOpen = $state<Record<string, boolean>>({});
 
   // ---- the connection ----
   let conn: ReturnType<typeof zen.socket> | null = null;
@@ -87,7 +92,22 @@
   let retries = 0;
   let alive = true;
   let upgrading = false;
-  let mcpFlow: { server: string; flow: string } | null = null;
+  let mcpFlow = $state<{ server: string; flow: string } | null>(null);
+
+  // ---- the header's menus ----
+  let details = $state(false);
+  let renaming = $state(false);
+  let nameDraft = $state('');
+  const OUTCOMES = [
+    { v: 'done', l: 'Done', h: 'The job is done' },
+    { v: 'partial', l: 'Part done', h: 'Continue in a new chat that picks up from here' },
+    { v: 'not-done', l: 'Not done', h: 'Stop here' },
+    { v: '-', l: 'Just archive', h: 'Don’t say how it ended' },
+  ];
+  let outcome = $state('done');
+  let outcomeOpen = $state(false);
+  let pop = $state<'model' | 'effort' | null>(null);
+  let moreModels = $state(false);
 
   // ---- the composer ----
   let input = $state('');
@@ -106,10 +126,14 @@
   let pinned = $state(true);
   let unseen = $state(0);
 
+  // ---- new chat: three ideas from the assist model, never blocking the box ----
+  let sugg = $state<Sugg[] | null>(null);
+  let suggFailed = $state(false);
+
   // ---- attachments: sent to ~/inbox at once, named in the prompt on send ----
   type Attachment = { id: number; name: string; size: number; progress: number; path?: string; error?: string; cancel: () => void };
   let attachments = $state<Attachment[]>([]);
-  let picker_ = $state<HTMLInputElement>();
+  let filePick = $state<HTMLInputElement>();
   let dragging = $state(false);
   let nextAtt = 0;
   const uploading = $derived(attachments.some((a) => !a.path && !a.error));
@@ -153,11 +177,35 @@
   const sizeText = (n: number) => (n < 1024 ? `${n} B` : n < 1024 ** 2 ? `${(n / 1024).toFixed(0)} KB` : n < 1024 ** 3 ? `${(n / 1024 ** 2).toFixed(1)} MB` : `${(n / 1024 ** 3).toFixed(2)} GB`);
 
   const menu = $derived(input.startsWith('/') && !/\s/.test(input) ? cmds.filter((c) => c.name.startsWith(input.slice(1))) : []);
-  const info = $derived(models?.models.find((m) => m.id === model));
-  const levels = $derived(info?.efforts ?? []);
-  const shownEffort = $derived(levels.length ? (effort ?? info?.default_effort ?? null) : null);
+  const info = $derived(modelOf(model || me.defaultModel || models.default));
+  const levels = $derived(info.efforts);
+  const shownEffort = $derived(levels.length ? (effort ?? info.def ?? null) : null);
   const earlier = $derived(Math.max(0, total - held));
-  const placeholder = $derived(ro ? READ_ONLY : suggestion && !busy && !input ? suggestion.text : PLACEHOLDER);
+
+  // ---- the turn's steps and subagents ----
+  /** Where the current turn starts in the transcript: after the last prompt. */
+  const turnAt = $derived.by(() => {
+    for (let i = entries.length - 1; i >= 0; i--) if (entries[i].k === 'user') return i;
+    return -1;
+  });
+  /** The current turn's tool calls, in plain words. */
+  const live = $derived(busy ? entries.slice(turnAt + 1).flatMap((e) => (e.k === 'work' ? e.steps : [])) : []);
+  const liveSteps = $derived(live.map((s) => ({ ...stepOf(s.name, s.args), t: s.id && stepAt[s.id] !== undefined ? clock(stepAt[s.id]) : '', failed: s.result?.error === true })));
+  /** This turn's subagents: the session's children started since the turn began. */
+  const subs = $derived(sid ? (board.children[sid] ?? []).filter((c) => !busy || Date.parse(c.created_at) >= turnStarted - 2000 || c.busy) : []);
+  $effect(() => {
+    if (!liveOpen || !subs.length) return;
+    const ids = subs.map((s) => s.id);
+    for (const k of ids) void loadKid(k);
+    const t = setInterval(() => ids.forEach((k) => void loadKid(k)), 3000);
+    return () => clearInterval(t);
+  });
+  const subName = (c: { id: string; title: string | null; role?: string | null }) => kids[c.id]?.name || (c.title ?? '').replace(/^subagent:\s*/i, '') || c.role || 'Subagent';
+  /** The question card waiting on an answer (the last thing said, nothing sent since). */
+  const asking = $derived(!busy && entries.length > 0 && entries[entries.length - 1].k === 'questions');
+  const shown = $derived(busy ? 'working' : asking ? 'waiting' : 'chat');
+  const placeholder = $derived(ro ? READ_ONLY : suggestion && !busy && !input ? suggestion.text : asking ? `Answer ${who.name}…` : `Message ${who.name}`);
+  const closeTitle = $derived(split && app.view !== 'subagent' ? `Close the chat, keep ${app.view}` : 'Close the chat, back to Sessions');
 
   // ---- entries ----
 
@@ -204,8 +252,11 @@
       held = d.messages.length;
       known = d.message_count;
       for (const m of d.messages) firstSeq = Math.min(firstSeq, m.seq);
-      if (d.busy) beginTurn();
-      else if (d.suggestion) suggestion = { id: d.suggestion.id, text: d.suggestion.text.trim(), taken: false };
+      if (d.busy) {
+        beginTurn();
+        const u = [...d.messages].reverse().find((m) => m.role === 'user');
+        if (u?.timestamp) turnStarted = u.timestamp;
+      } else if (d.suggestion) suggestion = { id: d.suggestion.id, text: d.suggestion.text.trim(), taken: false };
       loaded = true;
       const h = M.takeHandoff(id);
       if (h) {
@@ -312,9 +363,8 @@
     status = 'Working';
     turnStarted = Date.now();
     turnTokens = 0;
-    turnTools = 0;
-    turnFiles = [];
     toolSince = null;
+    stepAt = {};
   }
 
   function resetStream() {
@@ -399,12 +449,11 @@
         status = 'Thinking';
         break;
       case 'tool_start': {
-        status = `Running ${M.clean(toolSummary(e.name, e.args))}`;
+        status = 'Working';
         toolSince = Date.now();
-        turnTools++;
+        stepAt[e.call_id] = Date.now() - turnStarted;
         const path = typeof e.args?.path === 'string' ? e.args.path : null;
         const b = base(e.name);
-        if (path && (b === 'write' || b === 'edit') && !turnFiles.includes(path)) turnFiles = [...turnFiles, path];
         if (path && (b === 'read' || b === 'write' || b === 'edit')) lastFile = path;
         break;
       }
@@ -436,11 +485,9 @@
     aborting = false;
     resetStream();
     if (turn && typeof turn === 'object') turnTokens = M.recordTotal(turn);
-    const secs = ((Date.now() - turnStarted) / 1000).toFixed(1);
-    const name = turnModel || model.split('/').pop() || '';
-    line(`${name}${turnEffort ? ` · ${turnEffort}` : ''} · ${M.fmtTokens(turnTokens)} tokens · ${secs}s`);
     sessionTokens += turnTokens;
     turnEffort = null;
+    void turnModel;
     busy = next;
     if (busy) status = 'Continuing';
   }
@@ -459,12 +506,12 @@
 
   let pluginDrafts = $state<{ plugin: string; text: string }[]>([]);
 
-  function sendPluginDraft(draft: { plugin: string; text: string }) {
+  function sendPluginDraft(d: { plugin: string; text: string }) {
     if (ro || creating || uploading || mcpFlow || ready.length) return;
     const ownDraft = input;
-    input = `(from the ${draft.plugin} plugin) ${draft.text}`;
+    input = `(from the ${d.plugin} plugin) ${d.text}`;
     void submit().finally(() => { if (!input) input = ownDraft; });
-    pluginDrafts = pluginDrafts.filter((d) => d !== draft);
+    pluginDrafts = pluginDrafts.filter((x) => x !== d);
   }
 
   async function submit() {
@@ -482,7 +529,7 @@
       text = text ? `${text}\n\n${list}` : list;
     }
     // The file open beside the chat travels with the prompt, so "this file" needs no path.
-    const viewing = app.side.open && app.side.view === 'files' ? app.file.side : null;
+    const viewing = split && app.view === 'files' ? app.viewing : null;
     if (viewing && !text.startsWith('/')) text += `\n\n(viewing ${tilde(viewing)})`;
     if (raw) M.saveHistory(raw);
     hi = -1;
@@ -589,7 +636,7 @@
       switch (name) {
         case 'board':
         case 'exit':
-          return board();
+          return toBoard();
         case 'new': {
           const as = arg.startsWith('@') ? arg.slice(1).split(/\s+/)[0].toLowerCase() : 'zenbot';
           if (!AGENT_NAME.test(as)) return notice('usage: /new [@agent] [title]');
@@ -620,25 +667,24 @@
         case 'steer':
           return notice('usage: /steer <message>');
         case 'files':
-          if (!arg) return toggleSide('files');
+          if (!arg) return pickTab('files');
           return await locateAnd(arg, true, true);
         case 'open':
           if (arg) return await locateAnd(arg, true);
           if (lastFile) return await locateAnd(lastFile, true);
           return notice('no file yet: /open <path>');
         case 'close':
-          if (!app.side.open) return notice('no side panel is open');
-          app.side.open = false;
-          app.focus = 'chat';
+          if (!split) return notice('no side panel is open');
+          app.view = null;
           return;
         case 'mouse':
           return notice('the mouse always works here');
         case 'tasks':
-          return toggleSide('tasks');
+          return pickTab('tasks');
         case 'restart':
           return location.reload();
         case 'help':
-          return push({ k: 'help', rows: cmds.map((c) => [`/${c.name}`, `${c.help}${c.args ? `: /${c.name} ${c.args}` : ''}`]), keys: M.KEYS });
+          return help();
         case 'mcp':
           if (arg.startsWith('login')) return await mcpLogin(arg.split(/\s+/)[1]);
           return await kernel('mcp', arg);
@@ -654,6 +700,10 @@
     } catch (e) {
       notice(String((e as Error).message ?? e));
     }
+  }
+
+  function help() {
+    push({ k: 'help', rows: cmds.map((c) => [`/${c.name}`, `${c.help}${c.args ? `: /${c.name} ${c.args}` : ''}`]), keys: M.KEYS });
   }
 
   /** A kernel command's answer, in the transcript (never sent to the agent). */
@@ -678,7 +728,7 @@
     return () => { gone = true; };
   });
 
-  /** A plugin's command: calls its tool; its UI opens in the side panel, or its text shows here. */
+  /** A plugin's command: calls its tool; its UI opens in the right panel, or its text shows here. */
   async function pluginCommand(c: Command, arg: string) {
     const head = `/${c.name}${arg ? ' ' + arg : ''}`;
     push({ k: 'mono', text: '…', title: head });
@@ -687,10 +737,10 @@
     try {
       const r = await pluginApi.call(c.plugin!, c.tool!, args, sid);
       const ui = r.isError ? null : (c.ui ?? uiOf(r));
-      const title = plugins.list.find((p) => p.name === c.plugin)?.title || c.plugin!;
+      const t = plugins.list.find((p) => p.name === c.plugin)?.title || c.plugin!;
       if (ui) {
-        showPanel(c.plugin!, ui, title, args, r);
-        e.text = `opened in the side panel (${title})`;
+        showPanel(c.plugin!, ui, t, args, r);
+        e.text = `opened in the side panel (${t})`;
       } else e.text = M.clean(resultText(r) || (r.isError ? 'failed' : '(nothing)'));
     } catch (err) {
       e.text = String((err as Error).message ?? err);
@@ -722,7 +772,7 @@
       for (const c of v.commits ?? []) line(`  · ${c}`);
       const target = v.latest ?? '';
       const started = (await zen.upgrade()).started_at ?? '';
-      let shown = 0;
+      let shownLines = 0;
       for (;;) {
         await sleep(1000);
         let st;
@@ -732,8 +782,8 @@
           break;
         }
         const log = (st.job?.log ?? '').split('\n').filter((l, i, a) => i < a.length - 1 || l);
-        for (const l of log.slice(shown)) line(M.clean(l));
-        shown = log.length;
+        for (const l of log.slice(shownLines)) line(M.clean(l));
+        shownLines = log.length;
         const s = st.job?.status;
         if (s === 'running') continue;
         if (s === 'scheduled' || s === undefined) break;
@@ -778,32 +828,20 @@
   /** `/agents` opens the Agents view beside the chat; `new <name> [description]` makes one there. */
   async function agentsCommand(arg: string) {
     const [sub, name, ...rest] = arg.split(/\s+/).filter(Boolean);
-    if (!sub || sub === 'list') return toggleSide('agents');
+    if (!sub || sub === 'list') return openTab('agents');
     if (sub === 'new' && name) {
       const a = await zen.newAgent(name.toLowerCase(), rest.join(' '));
       notice(`made @${a.name}: its files are in the Agents view`);
-      return toggleSide('agents');
+      return openTab('agents');
     }
     if (sub === 'rm' && name) {
       notice('remove an agent in the Agents view: it asks first');
-      return toggleSide('agents');
+      return openTab('agents');
     }
     notice('usage: /agents [new <name> [description] | rm <name>]');
   }
 
   // ---- pickers (pickers.rs) ----
-
-  /** Who a fresh chat's session will be. */
-  async function agentPicker() {
-    if (sid) return notice(`this session is @${agent}; /new @<agent> starts one with another`);
-    const list = (await zen.agents()).filter((a) => !a.error);
-    picker = {
-      title: 'Start this session as',
-      kind: 'agent',
-      sel: Math.max(0, list.findIndex((a) => a.name === agent)),
-      items: list.map((a) => ({ label: `@${a.name}${a.description ? `  ${a.description}` : ''}${a.name === agent ? '  (current)' : ''}`, value: a.name })),
-    };
-  }
 
   async function sessionPicker() {
     const list = await zen.sessions();
@@ -813,7 +851,7 @@
   }
 
   function modelPicker() {
-    const ids = models?.models.map((m) => m.id) ?? [];
+    const ids = models.list.map((m) => m.id);
     if (!ids.length) return notice('no models yet');
     picker = { title: 'Choose a model', kind: 'model', sel: Math.max(0, ids.indexOf(model)), items: ids.map((m) => ({ label: `${m}${m === model ? '  (current)' : ''}`, value: m })) };
   }
@@ -821,7 +859,7 @@
   function effortPicker() {
     if (!levels.length) return notice(`${model} has no thinking levels to choose from`);
     const cur = (v: string | null) => (effort === v ? '  (current)' : '');
-    const def = info?.default_effort ? ` (${info.default_effort})` : '';
+    const def = info.def ? ` (${info.def})` : '';
     const items = [{ label: `default${def}${cur(null)}`, value: 'default' }, ...levels.map((l) => ({ label: `${l}${cur(l)}`, value: l }))];
     picker = { title: 'Choose a thinking level', kind: 'effort', sel: effort ? levels.indexOf(effort) + 1 : 0, items };
   }
@@ -863,12 +901,12 @@
   }
 
   async function setModel(value: string) {
-    if (models && !models.models.some((m) => m.id === value)) {
-      const m = models.models.filter((x) => x.id.endsWith('/' + value) || x.id.includes(value));
+    if (models.list.length && !models.list.some((m) => m.id === value)) {
+      const m = models.list.filter((x) => x.id.endsWith('/' + value) || x.id.includes(value));
       if (m.length !== 1) return notice(`unknown model ${value}; /model lists them`);
       value = m[0].id;
     }
-    const lv = models?.models.find((m) => m.id === value)?.efforts ?? [];
+    const lv = modelOf(value).efforts;
     const reset = !!effort && !lv.includes(effort);
     if (sid) {
       const s = await zen.update(sid, { model: value });
@@ -879,8 +917,6 @@
       if (reset) effort = null;
     }
     modelPinned = true;
-    await tick();
-    notice(`model: ${model}${shownEffort ? ` · effort: ${shownEffort}${reset ? ' (default for this model)' : ''}` : ''}`);
   }
 
   async function setEffort(value: string) {
@@ -889,17 +925,54 @@
       const s = await zen.update(sid, { effort: value });
       effort = s.effort;
     } else effort = value === 'default' ? null : value;
-    await tick();
-    notice(`effort: ${shownEffort ?? value}`);
   }
 
-  /** Archive the session with how it ended (`-`: unsaid); after partial, open the session that continues it. */
+  /** Archive the session with how it ended (`-`: unsaid); after partial, open the session that continues it. Undo brings it back. */
   async function archive(o: string, note: string) {
     if (!sid) return notice('nothing to archive yet');
-    const outcome = o === '-' ? undefined : (o as Outcome);
-    const s = await zen.update(sid, { archived: true, ...(outcome ? { outcome } : {}), ...(note ? { note } : {}) });
-    notice(`archived ${short(sid)}${outcome ? ` as ${outcome}` : ''}`);
-    return openSession(s.continued_by ?? 'new');
+    const out = o === '-' ? undefined : (o as Outcome);
+    const s = await zen.update(sid, { archived: true, ...(out ? { outcome: out } : {}), ...(note ? { note } : {}) });
+    const me_ = sid;
+    const undo = () => { void zen.update(me_, { archived: false }).then(() => openSession(me_)).catch((e) => notice(String((e as Error).message ?? e))); };
+    const label = OUTCOMES.find((x) => x.v === o)?.l.toLowerCase();
+    if (o === 'partial') {
+      openSession(s.continued_by ?? 'new');
+      notice('Archived as part done · a new chat continues it', 6000, undo);
+    } else {
+      closeChat();
+      notice(o === '-' ? 'Archived' : `Archived as ${label}`, 6000, undo);
+    }
+  }
+  async function archiveChat() {
+    details = false;
+    outcomeOpen = false;
+    const o = outcome;
+    outcome = 'done';
+    try {
+      await archive(o, '');
+    } catch (e) {
+      notice(String((e as Error).message ?? e));
+    }
+  }
+
+  // ---- rename ----
+  function startRename() {
+    if (!sid) return;
+    nameDraft = title || '';
+    renaming = true;
+    details = false;
+  }
+  async function saveRename() {
+    if (!renaming) return;
+    renaming = false;
+    const t = nameDraft.trim();
+    if (!t || t === title || !sid) return;
+    try {
+      await zen.update(sid, { title: t });
+      title = t;
+    } catch (e) {
+      notice(String((e as Error).message ?? e));
+    }
   }
 
   // ---- links ----
@@ -908,9 +981,9 @@
     try {
       const r = await files.locate(ref);
       if (!r.found) return loud && notice(`can't find ${ref}`);
-      if (r.found.dir) openDir(r.found.path, 'side');
+      if (r.found.dir) openDir(r.found.path);
       else if (dirOnly) notice(`${ref} is a file`);
-      else openFile(r.found.path, 'side');
+      else openFile(r.found.path);
     } catch (e) {
       if (loud) notice(String((e as Error).message ?? e));
     }
@@ -925,7 +998,7 @@
       return;
     }
     const code = t.closest('code');
-    if (code && !code.closest('pre') && code.closest('.zc-md') && !getSelection()?.toString()) {
+    if (code && !code.closest('pre') && code.closest('.prose') && !getSelection()?.toString()) {
       const ref = (code.textContent ?? '').trim();
       if (ref && ref.length < 300 && !/\s/.test(ref)) locateAnd(ref, /[/~]/.test(ref));
     }
@@ -937,18 +1010,29 @@
     return { update: draw };
   }
 
+  /** An option of a question card: one question answers at once; several fill the box, one line each. */
   function answer(qs: { question: string }[], qi: number, option: string) {
-    if (qs.length <= 1) input = option;
-    else {
-      const rows = input.split('\n').filter((l) => l.trim());
-      const tag = `${qi + 1}.`;
-      const at = rows.findIndex((l) => l.startsWith(tag + ' '));
-      const row = `${tag} ${option}`;
-      if (at >= 0) rows[at] = row;
-      else rows.push(row);
-      input = rows.sort((x, y) => parseInt(x) - parseInt(y)).join('\n');
+    if (qs.length <= 1) {
+      input = option;
+      void submit();
+      return;
     }
+    const rows = input.split('\n').filter((l) => l.trim());
+    const tag = `${qi + 1}.`;
+    const at = rows.findIndex((l) => l.startsWith(tag + ' '));
+    const row = `${tag} ${option}`;
+    if (at >= 0) rows[at] = row;
+    else rows.push(row);
+    input = rows.sort((x, y) => parseInt(x) - parseInt(y)).join('\n');
     ta?.focus();
+  }
+  /** A question card's answer: the prompt sent after it, if any. */
+  function answerOf(i: number): string | null {
+    for (let j = i + 1; j < entries.length; j++) {
+      const e = entries[j];
+      if (e.k === 'user' && !e.kernel) return e.text;
+    }
+    return null;
   }
 
   // ---- scrolling ----
@@ -982,14 +1066,17 @@
   async function setInput(v: string) {
     input = v;
     await tick();
+    ta?.focus();
     ta?.setSelectionRange(v.length, v.length);
   }
 
   function key(e: KeyboardEvent) {
     const inTa = e.target === ta;
-    // Keys in the composer are the chat's even when the side panel had them.
-    if (!(active || inTa) || e.defaultPrevented || e.isComposing) return;
-    if (!inTa && typing(e)) return;
+    if (e.defaultPrevented || e.isComposing) return;
+    // Keys belong to the chat from its box, or from anywhere that isn't another field or the right panel.
+    const t = e.target as HTMLElement | null;
+    const mine = inTa || !t || t === document.body || !!root?.contains(t);
+    if (!mine || (!inTa && typing(e))) return;
     const ctrl = e.ctrlKey && !e.altKey && !e.metaKey;
     const plain = !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey;
 
@@ -1006,7 +1093,7 @@
     if (ctrl && e.key.toLowerCase() === 'o') {
       e.preventDefault();
       expandAll = !expandAll;
-      for (const x of entries) if (x.k === 'work') x.open = null;
+      open = {};
       return;
     }
     if ((e.key === 'PageUp' || e.key === 'PageDown') && !e.altKey && scroller) {
@@ -1023,12 +1110,10 @@
       return;
     }
     if (e.key === 'Escape' && plain) {
+      if (details || pop || outcomeOpen) { details = false; pop = null; outcomeOpen = false; return; }
       e.preventDefault();
-      if (picker) picker = null;
-      else if (ro) board();
-      else if (busy) abort();
+      if (busy && !ro) abort();
       else if (input.startsWith('/')) input = '';
-      else if (!input.trim()) board();
       return;
     }
     if (!inTa) {
@@ -1114,80 +1199,70 @@
     setInput(suggestion.text);
   }
 
-  /** A click or focus in the chat gives it the keys back from the side panel. */
-  function takeKeys() {
-    if (app.focus !== 'chat') app.focus = 'chat';
-  }
-
   function onInput() {
     hi = -1;
     menuSel = 0;
   }
 
-  // Grow with the text, up to half the pane.
-  $effect(() => {
-    void input;
-    if (!ta) return;
-    ta.style.height = 'auto';
-    const max = Math.max(60, (root?.clientHeight ?? 600) / 2);
-    ta.style.height = `${Math.min(ta.scrollHeight, max)}px`;
-  });
+  /** Who a new chat talks to: the ideas follow. */
+  function chooseTalk(a: string) {
+    agent = a;
+    ta?.focus();
+  }
 
-  // The spinner and the clocks while a turn runs.
+  // The clock while a turn runs.
   $effect(() => {
     if (!busy) return;
-    const t = setInterval(() => {
-      now = Date.now();
-      spin++;
-    }, 100);
+    const t = setInterval(() => (now = Date.now()), 500);
     return () => clearInterval(t);
+  });
+  $effect(() => {
+    app.working = busy;
   });
 
   // Keep the latest in view while it grows (streaming, math loading), unless scrolled up.
   $effect(() => {
     if (!content || !scroller) return;
-    const ro = new ResizeObserver(() => {
+    const obs = new ResizeObserver(() => {
       if (pinned && scroller) scroller.scrollTop = scroller.scrollHeight;
     });
-    ro.observe(content);
-    return () => ro.disconnect();
+    obs.observe(content);
+    return () => obs.disconnect();
   });
 
   $effect(() => {
-    if (active && loaded && matchMedia('(pointer: fine)').matches) ta?.focus();
+    if (loaded && matchMedia('(pointer: fine)').matches) ta?.focus();
   });
 
-  // Ideas are independent of the composer; changing agent invalidates an in-flight response.
+  // A new chat's ideas: they load after the page and the box show; changing agent drops an answer in flight.
   $effect(() => {
     if (sid) return;
-    const selected = agent;
-    const controller = new AbortController();
-    ideas = [];
-    ideasLoading = true;
-    fetch(`/api/zen/ideas?agent=${encodeURIComponent(selected)}`, { signal: controller.signal })
-      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
-      .then((data: { ideas?: unknown }) => {
-        if (!controller.signal.aborted && Array.isArray(data.ideas))
-          ideas = data.ideas.filter((x): x is string => typeof x === 'string').slice(0, 3);
-      })
-      .catch(() => {})
-      .finally(() => { if (!controller.signal.aborted) ideasLoading = false; });
-    return () => controller.abort();
+    const a = agent;
+    const ctl = new AbortController();
+    sugg = null;
+    suggFailed = false;
+    loadIdeas(a, ctl.signal).then((l) => { if (!ctl.signal.aborted) sugg = l; }, () => { if (!ctl.signal.aborted) suggFailed = true; });
+    return () => ctl.abort();
+  });
+  // The agent picked at the top changes who a new chat talks to.
+  $effect(() => {
+    const a = app.agent;
+    if (!sid && !entries.length) agent = a;
+  });
+  // Files' "Ask zenbot" beside the chat.
+  let insertSeen = app.chatInsert.n;
+  $effect(() => {
+    const ins = app.chatInsert;
+    if (ins.n === insertSeen) return;
+    insertSeen = ins.n;
+    void setInput(ins.text);
   });
 
   onMount(() => {
     if (id === 'new') { input = app.chatDraft; app.chatDraft = ''; }
-    if (app.attachOnOpen) { app.attachOnOpen = false; setTimeout(() => picker_?.click(), 0); }
-    zen.models().then((m) => {
-      models = m;
-      if (!sid && !model) model = m.default;
-    }).catch(() => {});
-
+    if (app.attachOnOpen) { app.attachOnOpen = false; setTimeout(() => filePick?.click(), 0); }
     if (sid) load();
-    else {
-      loaded = true;
-      zen.agents().then((l) => (agents = l.filter((a) => !a.error).map((a) => a.name))).catch(() => {});
-    }
+    else loaded = true;
     const online = () => !conn && sid && retry(0);
     addEventListener('online', online);
     // Untrusted iframe messages never enter submit() without an owner's Send click.
@@ -1208,318 +1283,564 @@
       clearTimeout(retryTimer);
       if (streamTimer) clearTimeout(streamTimer);
       removeEventListener('online', online);
+      app.working = false;
     };
   });
 
-  const secs = (from: number) => Math.max(0, Math.floor((now - from) / 1000));
-  const shortModel = (m: string) => m.split('/').pop() ?? m;
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+  const groups = $derived([...new Set(models.list.map((m) => m.group))]);
+  const curModel = $derived(model || me.defaultModel || models.default);
+  /** A folded run's line: its latest step, in plain words. */
+  const summary = (steps: M.Step[]) => { const s = stepOf(steps[steps.length - 1].name, steps[steps.length - 1].args); return `${s.label}${s.detail ? ` · ${s.detail}` : ''}`; };
+  /** Runs of the current turn show in the live line, not in the flow. */
+  const inTurn = (i: number) => busy && i > turnAt;
 </script>
 
 <svelte:window onkeydown={key} />
 
+{#snippet ico(name: 'clip' | 'stop' | 'split')}
+  <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
+    {#if name === 'clip'}<path d="M20 11.5l-8 8a5 5 0 0 1-7-7l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7L9.7 17.2a1.7 1.7 0 0 1-2.4-2.4l7.7-7.7"/>
+    {:else if name === 'stop'}<rect x="6" y="6" width="12" height="12" rx="2"/>
+    {:else}<rect x="3" y="5" width="18" height="14" rx="3"/><path d="M12 5v14"/>{/if}
+  </svg>
+{/snippet}
+
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="zc" bind:this={root} onpointerdown={takeKeys} onfocusin={takeKeys}
+<div class="chatroot" bind:this={root}
   ondragover={(e) => { if (!ro && e.dataTransfer?.types.includes('Files')) { e.preventDefault(); dragging = true; } }}
   ondragleave={(e) => { if (!root?.contains(e.relatedTarget as Node)) dragging = false; }}
   ondrop={onDrop}>
+  <header class="hd">
+    {#if app.narrow}<button class="icon back" title="Back" aria-label="Back" onclick={goBack}>‹</button>{/if}
+    {#if renaming}
+      <!-- svelte-ignore a11y_autofocus -->
+      <input class="rename" bind:value={nameDraft} autofocus aria-label="Chat name"
+        onkeydown={(e) => { if (e.key === 'Enter') saveRename(); if (e.key === 'Escape') { e.stopPropagation(); renaming = false; } }} onblur={saveRename} />
+    {:else}
+      <h1 ondblclick={() => sid && startRename()} title={sid ? 'Double-click to rename' : undefined}>{!sid ? 'New chat' : title || 'New chat'}</h1>
+    {/if}
+    {#if shown === 'working'}<span class="tag work"><span class="dot work"></span>working</span>
+    {:else if shown === 'waiting'}<span class="tag wait"><span class="dot wait"></span>needs you</span>{/if}
+    {#if ro}<span class="tag ro">read-only</span>{/if}
+    <span class="sp"></span>
+    {#if app.narrow}<button class="icon" aria-label="Preview" title="Preview" onclick={() => { app.screen = 'view'; app.view = 'preview'; }}>▣</button>{/if}
+    {#if sid}
+      <div class="menu-wrap">
+        <button class="icon" title="Details" aria-label="Details" aria-expanded={details} onclick={() => (details = !details)}>⋯</button>
+        {#if details}
+          <div class="menu right">
+            <div class="row"><span>Model</span><b>{model.split('/').pop() || '…'}</b></div>
+            <div class="row"><span>Effort</span><b>{shownEffort ?? '—'}</b></div>
+            <div class="row"><span>Context</span><b>{M.fmtTokens(sessionTokens)} tokens</b></div>
+            <div class="row"><span>Session</span><b>{short(sid)}</b></div>
+            {#if who.id !== 'zenbot'}<div class="row"><span>Agent</span><b>@{who.id}</b></div>{/if}
+            <hr />
+            <button onclick={startRename}>Rename</button>
+            <button onclick={() => { details = false; help(); }}>Commands and keys</button>
+            <div class="archrow">
+              <span>Archive as</span>
+              <button class="oc" aria-haspopup="listbox" aria-expanded={outcomeOpen} onclick={() => (outcomeOpen = !outcomeOpen)}>{OUTCOMES.find((x) => x.v === outcome)?.l} <span class="car">▾</span></button>
+              <button class="archgo" onclick={archiveChat}>Archive</button>
+            </div>
+            {#if outcomeOpen}
+              <div class="ocs" role="listbox">
+                {#each OUTCOMES as o}
+                  <button class="mopt" role="option" aria-selected={o.v === outcome} class:sel={o.v === outcome} onclick={() => { outcome = o.v; outcomeOpen = false; }}><b>{o.l}</b><span>{o.h}</span></button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
+      </div>
+    {/if}
+    {#if !app.narrow}<button class="icon close" title={closeTitle} aria-label={closeTitle} onclick={() => closeChat()}>×</button>{/if}
+  </header>
+
   <!-- Clicks on links and paths in the messages (each has a keyboard way: /open). -->
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-  <div class="zc-scroll" bind:this={scroller} onscroll={onScroll} onclick={onClick} role="log" aria-live="polite">
-    <div class="zc-body" bind:this={content}>
-      {#if earlier > 0}
-        <button class="zc-earlier" onclick={showEarlier}>show {Math.min(PAGE, earlier)} earlier · {earlier} not shown</button>
-      {/if}
-      <div class="zc-title">{title || (sid ? short(sid) : agent !== 'zenbot' ? `new session with ${agent}` : 'new session')}</div>
-      {#if !sid && agents.length > 1 && !entries.some((e) => e.k === 'user')}
-        <div class="zc-as" role="radiogroup" aria-label="start as">
-          <span class="zc-dim">start as</span>
-          {#each agents as a}
-            <button role="radio" aria-checked={a === agent} class:zc-on={a === agent} onclick={() => (agent = a)}>@{a}</button>
+  <div class="scroll" bind:this={scroller} onscroll={onScroll} onclick={onClick} role="log">
+    {#if !sid && !entries.length}
+      <div class="hello">
+        <h2>{greeting}{me.name ? `, ${me.name}` : ''}</h2>
+        <p>Who do you want to talk to?</p>
+        <div class="who" role="radiogroup" aria-label="Agent">
+          {#each agents.list as a (a.id)}
+            <button class="pick" class:sel={a.id === agent} role="radio" aria-checked={a.id === agent} onclick={() => chooseTalk(a.id)}>
+              <span class="orb" style="--a:{a.a}; --b:{a.b}">{a.name[0].toUpperCase()}</span>
+              <span class="pn"><b>{a.name}</b><span>{a.role}</span></span>
+            </button>
+          {/each}
+        </div>
+        {#if !suggFailed && (!sugg || sugg.length)}
+          <div class="sgh">
+            Ideas for you
+            {#if !sugg}<span class="think" aria-live="polite"><i></i><i></i><i></i> {who.name} is thinking of a few</span>{/if}
+          </div>
+          <div class="cards">
+            {#if sugg}
+              {#each sugg as g, i (g.title)}
+                <button class="idea" style="animation-delay:{i * 70}ms" onclick={() => setInput(g.prompt)}>
+                  <b>{g.title}</b>{#if g.why}<span>{g.why}</span>{/if}
+                </button>
+              {/each}
+            {:else}
+              {#each [0, 1, 2] as i (i)}<div class="idea skel" aria-hidden="true"><i></i><i></i></div>{/each}
+            {/if}
+          </div>
+        {/if}
+      </div>
+    {:else}
+      <div class="body" bind:this={content}>
+        {#if earlier > 0}
+          <button class="earlier" onclick={showEarlier}>Show {Math.min(PAGE, earlier)} earlier · {earlier} not shown</button>
+        {/if}
+        {#if failed}<div class="note err">Couldn't load the session: {failed}</div>{/if}
+        {#each entries as e, i (e.key)}
+          {#if e.k === 'user'}
+            {#if e.kernel}
+              <div class="note kline">zen › {e.text}</div>
+            {:else}
+              <div class="u"><div class="bubble">{e.text}</div></div>
+            {/if}
+          {:else if e.k === 'md'}
+            <div class="prose" use:markdown={e.text}></div>
+          {:else if e.k === 'work'}
+            {#if !inTurn(i)}
+              {@const bad = e.steps.some((s) => s.result?.error)}
+              {@const isOpen = open[e.key] ?? expandAll}
+              <div class="w">
+                <button class="wline" aria-expanded={isOpen} onclick={() => { if (!getSelection()?.toString()) open[e.key] = !isOpen; }}>
+                  <span class="chk" class:bad>{bad ? '!' : '✓'}</span>
+                  <span class="ws">{summary(e.steps)}</span><span class="n">· {e.steps.length} step{e.steps.length === 1 ? '' : 's'}</span><span class="car">{isOpen ? '▾' : '▸'}</span>
+                </button>
+                {#if isOpen}
+                  <ol class="steps">
+                    {#each e.steps as s, j (j)}
+                      {@const p = stepOf(s.name, s.args)}
+                      {@const k = `${e.key}:${j}`}
+                      <li class:bad={s.result?.error}>
+                        <button class="sline" onclick={() => (outOpen[k] = !outOpen[k])} title={s.result ? 'Show what it returned' : undefined}><b>{p.label}</b> <span>{p.detail}</span>{#if s.result?.error} · didn't work{/if}</button>
+                        {#if outOpen[k] && s.result}<pre class="out">{s.result.lines.join('\n') || '(no output)'}</pre>{/if}
+                      </li>
+                    {/each}
+                  </ol>
+                {/if}
+              </div>
+            {/if}
+          {:else if e.k === 'result'}
+            <pre class="out" class:bad={e.result.error}>{e.result.lines.slice(0, 3).join('\n')}{e.result.lines.length > 3 ? `\n… ${e.result.lines.length - 3} more lines` : ''}</pre>
+          {:else if e.k === 'line'}
+            <div class="note {e.sty}">{e.text}</div>
+          {:else if e.k === 'mono'}
+            <div class="mono">{#if e.title}<div class="mt">{e.title}</div>{/if}<pre>{e.text}</pre></div>
+          {:else if e.k === 'link'}
+            <div class="note"><a href={e.url} target="_blank" rel="noopener noreferrer">{e.text}</a></div>
+          {:else if e.k === 'questions'}
+            {@const ans = answerOf(i)}
+            {#if ans !== null}
+              <div class="askq done">
+                <span class="q">{e.questions.map((q) => q.question).join(' · ')}</span>
+                <span class="ans">✓ {ans.split('\n')[0]}</span>
+              </div>
+            {:else}
+              <div class="askq">
+                {#each e.questions as q, qi (qi)}
+                  <div class="q">{e.questions.length > 1 ? `${qi + 1}. ` : ''}{q.question}</div>
+                  <div class="opts">{#each q.options as o, j (j)}<button class:primary={j === 0} disabled={ro} onclick={() => answer(e.questions, qi, o)}>{o}</button>{/each}</div>
+                {/each}
+                <div class="or">or type your own answer below</div>
+              </div>
+            {/if}
+          {:else if e.k === 'help'}
+            <div class="help">
+              <b>Commands</b>
+              {#each e.rows as [k, h] (k)}<div class="hrow"><button class="acc" onclick={() => setInput(k + ' ')}>{k}</button><span>{h}</span></div>{/each}
+              <b>Keys</b>
+              {#each e.keys as [k, h] (k)}<div class="hrow"><span class="acc">{k}</span><span>{h}</span></div>{/each}
+            </div>
+          {/if}
+        {/each}
+        {#if streamShown}<div class="prose" use:markdown={streamShown}></div>{/if}
+        {#if busy || subs.length}
+          {@const cur = liveSteps[liveSteps.length - 1]}
+          <div class="livew" aria-live="polite">
+            <button class="lrow lhead" aria-expanded={liveOpen} onclick={() => (liveOpen = !liveOpen)} title={liveOpen ? 'Hide the steps' : 'See every step and subagent'}>
+              <span class="orb xs busy" style="--a:{who.a}; --b:{who.b}"></span>
+              {#if cur && (toolSince !== null || status === 'Working')}
+                <span class="lt"><b>{cur.label}</b>{" "}<span class="ld">{cur.detail}</span>…</span>
+              {:else}
+                <span class="lt"><b>{busy ? status : 'Finished'}</b>{busy ? '…' : ''}</span>
+              {/if}
+              <span class="lm">{liveSteps.length} step{liveSteps.length === 1 ? '' : 's'}{#if subs.length}<span class="wide">{" · "}{subs.length} subagent{subs.length === 1 ? '' : 's'}</span>{/if} · {clock(now - turnStarted)} {liveOpen ? '▾' : '▸'}</span>
+            </button>
+            {#if liveOpen}
+              <div class="lbody">
+                <ol class="slist">
+                  {#each liveSteps as st, j (j)}
+                    {@const isNow = j === liveSteps.length - 1 && toolSince !== null}
+                    <li class:bad={st.failed && !isNow} class:now={isNow}><span class="g">{#if isNow}<i class="pulse"></i>{:else}{st.failed ? '!' : '✓'}{/if}</span><span class="lt">{st.label}{" "}<span class="ld">{st.detail}{#if st.failed && !isNow}{" · didn’t work"}{/if}</span></span><span class="st">{st.t}</span></li>
+                  {/each}
+                  {#if !liveSteps.length}<li class="now"><span class="g"><i class="pulse"></i></span><span class="lt">{status}</span></li>{/if}
+                </ol>
+                {#each subs as h (h.id)}
+                  {@const k = kids[h.id]}
+                  {@const done = k ? k.done : !h.busy}
+                  {@const last = k?.steps[k.steps.length - 1]}
+                  <div class="sarow" class:on={app.view === 'subagent' && app.subagent === h.id && (split || app.screen === 'view')}>
+                    <button class="lrow sa" class:done aria-expanded={!!hOpen[h.id]} onclick={() => (hOpen[h.id] = !hOpen[h.id])}>
+                      {#if done}<span class="g">✓</span>{:else}<span class="orb xs busy" style="--a:{who.a}; --b:{who.b}"></span>{/if}
+                      <span class="lt"><b>{subName(h)}</b>{" "}<span class="ld">{done ? (k?.result?.split('\n')[0] ?? 'Done') : last ? `${last.label} ${last.detail}…` : (h.task ?? '')}</span></span>
+                      <span class="lm"><span class="role">{h.role ?? h.kind ?? 'subagent'}</span><span class="wide">{" · "}{k?.steps.length ?? 0} steps</span> {hOpen[h.id] ? '▾' : '▸'}</span>
+                    </button>
+                    <button class="sopen" onclick={() => openSub(h.id)} title="Open this subagent's session beside the chat" aria-label="Open {subName(h)}'s session">{@render ico('split')}</button>
+                  </div>
+                  {#if hOpen[h.id] && k}
+                    <ol class="slist sub">{#each k.steps as s, q (q)}<li class:now={!done && q === k.steps.length - 1}><span class="g">{#if !done && q === k.steps.length - 1}<i class="pulse"></i>{:else}✓{/if}</span><span class="lt">{s.label}{" "}<span class="ld">{s.detail}</span></span><span class="st">{s.t}</span></li>{/each}</ol>
+                  {/if}
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
+      </div>
+    {/if}
+  </div>
+
+  <footer class="dock">
+    {#if !pinned && !picker && !(menu.length && hi < 0) && entries.length}
+      <button class="jump" onclick={() => bottom()}>↓ {unseen ? `${unseen} more · jump` : 'Jump to the latest'}</button>
+    {/if}
+    {#if !connected && sid}
+      <div class="conn">Connection lost · reconnecting… <button onclick={() => retry(0)}>Retry now</button></div>
+    {/if}
+    {#each pluginDrafts as d (d)}
+      <section class="pdraft" aria-label="plugin draft">
+        <div class="pk">Draft from {d.plugin}</div>
+        <pre>{d.text}</pre>
+        <div class="pb"><button class="archgo" onclick={() => sendPluginDraft(d)} disabled={ro || creating || uploading || !!mcpFlow || !!ready.length}>Send plugin draft</button>
+          <button class="oc" onclick={() => (pluginDrafts = pluginDrafts.filter((x) => x !== d))}>Dismiss</button></div>
+      </section>
+    {/each}
+    <div class="compose" class:drag={dragging} class:ro>
+      {#if picker}
+        <div class="menu up pop" role="listbox" aria-label={picker.title}>
+          <div class="mg">{picker.title} · ↑↓ enter · esc</div>
+          {#each picker.items as it, i (i)}
+            <button class="mopt item" class:on={i === picker.sel} role="option" aria-selected={i === picker.sel} onclick={() => pick(i)} onpointermove={(e) => { if (picker && (e.movementX || e.movementY)) picker.sel = i; }}>{it.label}</button>
+          {/each}
+        </div>
+      {:else if menu.length && hi < 0}
+        <div class="menu up pop" role="listbox" aria-label="commands">
+          {#each menu as c, i (c.name)}
+            <button class="mopt item cmd" class:on={i === Math.min(menuSel, menu.length - 1)} onclick={() => runMenu(i)} onmouseenter={() => (menuSel = i)}>
+              <b>/{c.name}{#if c.args}<em>{c.args}</em>{/if}</b><span>{c.help}</span>
+            </button>
           {/each}
         </div>
       {/if}
-      {#if !sid && !entries.length}
-        <section class="zc-ideas" aria-label="Ideas for a new session">
-          <h2>What would you like to do?</h2>
-          {#if ideasLoading}<p class="zc-dim" role="status">Finding ideas…</p>
-          {:else if ideas.length}<div class="zc-idea-list">{#each ideas as idea}<button onclick={() => setInput(idea)}>{idea}<span aria-hidden="true">↗</span></button>{/each}</div>{/if}
-        </section>
-      {/if}
-      {#if failed}<div class="zc-line zc-err">couldn't load the session: {failed}</div>{/if}
-      {#each entries as e (e.key)}
-        {#if e.k === 'user'}
-          {#if e.kernel}
-            <div class="zc-kernel">zen › {e.text}</div>
-          {:else}
-            <div class="zc-user"><span>{e.text}</span></div>
-          {/if}
-        {:else if e.k === 'md'}
-          <div class="zc-md" use:markdown={e.text}></div>
-        {:else if e.k === 'work'}
-          <Work steps={e.steps} open={e.open ?? expandAll} ontoggle={() => (e.open = !(e.open ?? expandAll))} />
-        {:else if e.k === 'result'}
-          <div class="zc-result" class:zc-err={e.result.error}>{#each e.result.lines.slice(0, 3) as l, i}<div><span class="zc-dim">{i ? '  ' : '└ '}</span>{l}</div>{/each}{#if e.result.lines.length > 3}<div class="zc-dim">  … {e.result.lines.length - 3} more lines</div>{/if}</div>
-        {:else if e.k === 'line'}
-          <div class="zc-line zc-{e.sty}">{e.text}</div>
-        {:else if e.k === 'mono'}
-          <div class="zc-mono">{#if e.title}<div class="zc-dim">{e.title}</div>{/if}<pre>{e.text}</pre></div>
-        {:else if e.k === 'link'}
-          <div class="zc-line"><a href={e.url} target="_blank" rel="noopener noreferrer">{e.text}</a></div>
-        {:else if e.k === 'questions'}
-          <div class="zc-qs">
-            <div class="zc-dim">── Questions ──</div>
-            {#each e.questions as q, qi}
-              <div class="zc-q">{qi + 1}. {q.question}</div>
-              {#each q.options as o, oi}
-                <button class="zc-opt" onclick={() => answer(e.questions, qi, o)} title="put this answer in the composer">
-                  {String.fromCharCode(97 + oi)}) {o}{#if oi === 0}<span class="zc-dim zc-rec">(recommended)</span>{/if}
-                </button>
+      {#if attachments.length || pluginContext.length}
+        <div class="atts" aria-label="attachments">
+          {#each attachments as a (a.id)}
+            <span class="att" class:bad={a.error} title={a.path ? `Saved to ${tilde(a.path)}` : a.error ?? 'sending…'}>
+              <button class="atn" onclick={() => a.path && showFile(a.path)}>{@render ico('clip')}{a.name}</button>
+              <span class="ap">{a.error ? a.error : a.path ? `${sizeText(a.size)} ✓` : `${Math.round(a.progress * 100)}%`}</span>
+              <button aria-label="Remove {a.name}" title="Remove" onclick={() => unattach(a.id)}>×</button>
+            </span>
+          {/each}
+          {#each pluginContext as [name, c] (name)}
+            <span class="att ctx" title={c.text} aria-label={`context from ${name}`}>
+              {#each c.images as im (im.name)}
+                <img class="cimg" class:bad={im.error} src={im.thumb} alt={`image from ${name}`} title={im.error ?? (im.path ? tilde(im.path) : 'saving…')} />
               {/each}
-            {/each}
-          </div>
-        {:else if e.k === 'help'}
-          <div class="zc-help">
-            <b>Commands</b>
-            {#each e.rows as [k, h]}<div class="zc-hrow"><button class="zc-acc" onclick={() => setInput(k + ' ')}>{k}</button><span>{h}</span></div>{/each}
-            <b>Keys</b>
-            {#each e.keys as [k, h]}<div class="zc-hrow"><span class="zc-acc">{k}</span><span>{h}</span></div>{/each}
+              <span class="atn">{name}: {c.text.split('\n')[0] || `${c.images.length} image${c.images.length === 1 ? '' : 's'}`}</span>
+              {#if c.images.some((im) => !im.path && !im.error)}<span class="ap">saving…</span>{/if}
+              <button onclick={() => dropContext(sid ?? 'new', name)} aria-label={`remove context from ${name}`} title="Don't send this">×</button>
+            </span>
+          {/each}
+        </div>
+      {/if}
+      <textarea rows="1" {placeholder} bind:value={input} bind:this={ta} oninput={onInput} onpaste={onPaste} disabled={ro || creating} aria-label="message" spellcheck="true"></textarea>
+      <div class="bar">
+        {#if !ro}
+          <input bind:this={filePick} type="file" multiple hidden onchange={(e) => { attach((e.currentTarget as HTMLInputElement).files); (e.currentTarget as HTMLInputElement).value = ''; }} />
+          <button class="icon" title="Attach a file (or paste, or drop it here)" aria-label="attach files" onclick={() => filePick?.click()}>{@render ico('clip')}</button>
+        {/if}
+        <div class="menu-wrap">
+          <button class="mode" class:open={pop === 'model'} aria-haspopup="menu" aria-expanded={pop === 'model'} title="Model" disabled={ro}
+            onclick={() => (pop = pop === 'model' ? null : 'model')}>{info.name || '…'} <span class="car">▾</span></button>
+          {#if pop === 'model'}
+            <div class="menu up mmenu" role="menu">
+              {#each groups as g (g)}
+                <div class="mg">{g}</div>
+                {#each models.list.filter((m) => m.group === g && (!m.more || moreModels || m.id === curModel)) as m (m.id)}
+                  <button class="mopt" role="menuitemradio" aria-checked={m.id === curModel} class:sel={m.id === curModel} onclick={() => { pop = null; void setModel(m.id).catch((e) => notice(String(e.message ?? e))); }}>
+                    <b>{m.name}{#if m.id === models.default}<em>default</em>{/if}</b>{#if m.hint}<span>{m.hint}</span>{/if}
+                  </button>
+                {/each}
+              {/each}
+              {#if !moreModels && models.list.some((m) => m.more)}<button class="mopt more" onclick={() => (moreModels = true)}>More models…</button>{/if}
+            </div>
+          {/if}
+        </div>
+        {#if levels.length && shownEffort}
+          <div class="menu-wrap">
+            <button class="mode" class:open={pop === 'effort'} aria-haspopup="menu" aria-expanded={pop === 'effort'} title="Effort: how hard it thinks" disabled={ro}
+              onclick={() => (pop = pop === 'effort' ? null : 'effort')}>
+              <span class="bars" aria-hidden="true">{#each [0, 1, 2] as i (i)}<i class:on={levels.indexOf(shownEffort) >= i * 2}></i>{/each}</span>
+              {effortName(shownEffort)} <span class="car">▾</span></button>
+            {#if pop === 'effort'}
+              <div class="menu up eff" role="menu">
+                <div class="mg">Effort · how hard it thinks</div>
+                <button class="mopt" role="menuitemradio" aria-checked={effort === null} class:sel={effort === null} onclick={() => { pop = null; void setEffort('default'); }}>
+                  <b>Default<em>{effortName(info.def)}</em></b><span>What {info.name} uses unless told</span>
+                </button>
+                {#each levels as l (l)}
+                  <button class="mopt" role="menuitemradio" aria-checked={effort === l} class:sel={effort === l} onclick={() => { pop = null; void setEffort(l); }}>
+                    <b>{effortName(l)}</b><span>{EFFORT[l]?.[1] ?? ''}</span>
+                  </button>
+                {/each}
+              </div>
+            {/if}
           </div>
         {/if}
-      {/each}
-      {#if streamShown}<div class="zc-md" use:markdown={streamShown}></div>{/if}
+        <span class="sp"></span>
+        {#if suggestion && !input && !busy && !ro}<button class="hint" onclick={takeSuggestion}>{app.narrow ? 'Use suggestion' : 'Tab: use suggestion'}</button>{/if}
+        {#if busy && !input.trim() && !ro}<button class="send stop" title="Stop (esc)" aria-label="interrupt" onclick={abort}>{@render ico('stop')}</button>
+        {:else if !ro}<button class="send" disabled={(!input.trim() && !ready.length) || uploading || creating} title="Send (enter)" aria-label="send" onclick={submit}>↑</button>{/if}
+      </div>
     </div>
-  </div>
-
-  <div class="zc-dock">
-    {#if !pinned && !picker && !(menu.length && hi < 0)}
-      <button class="zc-jump" onclick={() => bottom()}>↓ {unseen ? `${unseen} more · jump` : 'jump to the latest'}</button>
-    {/if}
-    {#if picker}
-      <div class="zc-pop" role="listbox" aria-label={picker.title}>
-        <div class="zc-dim zc-pophead">{picker.title} <span>· ↑↓ enter · esc</span></div>
-        {#each picker.items as it, i}
-          <button class="zc-item" class:zc-on={i === picker.sel} role="option" aria-selected={i === picker.sel} onclick={() => pick(i)} onpointermove={(e) => { if (picker && (e.movementX || e.movementY)) picker.sel = i; }}>{it.label}</button>
-        {/each}
-      </div>
-    {:else if menu.length && hi < 0}
-      <div class="zc-pop" role="listbox" aria-label="commands">
-        {#each menu as c, i}
-          <button class="zc-item zc-cmd" class:zc-on={i === Math.min(menuSel, menu.length - 1)} onclick={() => runMenu(i)} onmouseenter={() => (menuSel = i)}>
-            <span class="zc-acc">/{c.name}</span>{#if c.args}<span class="zc-dim"> {c.args}</span>{/if}<span class="zc-dim zc-help1">{c.help}</span>
-          </button>
-        {/each}
-      </div>
-    {/if}
-
-    {#if !connected && sid}
-      <div class="zc-status zc-warn">connection lost · reconnecting… <button class="zc-link" onclick={() => retry(0)}>retry now</button></div>
-    {:else if busy}
-      <div class="zc-status">
-        <span class="zc-acc">{SPINNER[spin % SPINNER.length]}</span>
-        <span class="zc-st">{status}</span>
-        <span class="zc-dim zc-tail">{toolSince && secs(toolSince) > 0 ? ` (${secs(toolSince)}s)` : ''} · turn {secs(turnStarted)}s{turnTools ? ` · ${turnTools} tool${turnTools === 1 ? '' : 's'}` : ''}{turnFiles.length ? ` · ${turnFiles.length} file${turnFiles.length === 1 ? '' : 's'} edited` : ''} ·</span>
-        {#if ro}<button class="zc-dim zc-link" onclick={() => board()}>esc: back to the board</button>{:else}<button class="zc-dim zc-link" onclick={abort}>esc to interrupt</button>{/if}
-      </div>
-    {/if}
-
-    {#if attachments.length}
-      <div class="zc-atts" aria-label="attachments">
-        {#each attachments as a (a.id)}
-          <span class="zc-att" class:zc-att-err={a.error} title={a.path ? tilde(a.path) : a.error ?? 'sending…'}>
-            <span class="zc-att-name">{a.name}</span>
-            <span class="zc-dim">{a.error ? a.error : a.path ? `${sizeText(a.size)} ✓` : `${Math.round(a.progress * 100)}%`}</span>
-            <button class="zc-att-x" onclick={() => unattach(a.id)} aria-label={`remove ${a.name}`} title="remove">×</button>
-          </span>
-        {/each}
-      </div>
-    {/if}
-
-    {#if pluginContext.length}
-      <div class="zc-atts" aria-label="plugin context">
-        {#each pluginContext as [name, c] (name)}
-          <span class="zc-att zc-ctx" title={c.text} aria-label={`context from ${name}`}>
-            {#each c.images as im (im.name)}
-              <img class="zc-ctx-img" class:zc-att-err={im.error} src={im.thumb} alt={`image from ${name}`} title={im.error ?? (im.path ? tilde(im.path) : 'saving…')} />
-            {/each}
-            <span class="zc-att-name">{name}: {c.text.split('\n')[0] || `${c.images.length} image${c.images.length === 1 ? '' : 's'}`}</span>
-            {#if c.images.some((im) => !im.path && !im.error)}<span class="zc-dim">saving…</span>{/if}
-            <button class="zc-att-x" onclick={() => dropContext(sid ?? 'new', name)} aria-label={`remove context from ${name}`} title="don't send this">×</button>
-          </span>
-        {/each}
-      </div>
-    {/if}
-
-    {#each pluginDrafts as draft}
-      <section aria-label="plugin draft">
-        <strong>DRAFT · plugin: {draft.plugin}</strong>
-        <pre style="white-space: pre-wrap; overflow-wrap: anywhere">{draft.text}</pre>
-        <button onclick={() => sendPluginDraft(draft)} disabled={ro || creating || uploading || !!mcpFlow || !!ready.length}>Send plugin draft</button>
-        <button onclick={() => (pluginDrafts = pluginDrafts.filter((d) => d !== draft))}>Dismiss</button>
-      </section>
-    {/each}
-
-    <div class="zc-compose" class:zc-ro={ro} class:zc-drag={dragging}>
-      {#if !ro}
-        <input bind:this={picker_} type="file" multiple hidden onchange={(e) => { attach((e.currentTarget as HTMLInputElement).files); (e.currentTarget as HTMLInputElement).value = ''; }} />
-        <button class="zc-clip" onclick={() => picker_?.click()} title="attach files (or paste, or drop them here)" aria-label="attach files">📎</button>
-      {/if}
-      <textarea
-        onpaste={onPaste}
-        bind:this={ta}
-        bind:value={input}
-        oninput={onInput}
-        rows="1"
-        {placeholder}
-        disabled={ro || creating}
-        aria-label="message"
-        spellcheck="true"
-      ></textarea>
-      {#if busy && !input.trim() && !ro}
-        <button class="zc-send" onclick={abort} title="interrupt (esc)" aria-label="interrupt">■</button>
-      {:else if !ro}
-        <button class="zc-send" onclick={submit} disabled={(!input.trim() && !ready.length) || uploading} title="send (enter)" aria-label="send">↑</button>
-      {/if}
-    </div>
-    {#if suggestion && !input && !busy && !ro}
-      <button class="zc-hint" onclick={takeSuggestion}>tab: use suggestion</button>
-    {/if}
-
-    <div class="zc-foot">
-      {#if !sid}<button class="zc-agent" onclick={agentPicker} title="choose who this session is (/new @agent)">@{agent}</button> ·
-      {:else if agentTag(agent)}<span class="zc-agent">@{agent}</span> ·{/if}
-      <button onclick={modelPicker} title="choose a model (/model)">{shortModel(model) || '…'}</button>
-      {#if shownEffort}· <button onclick={effortPicker} title="choose a thinking level (/effort)">{shownEffort}</button>{/if}
-      · <span class="zc-ttl">{title || 'new session'}{sid ? ` (${short(sid)})` : ''}</span>
-      {#if ro}· read-only{/if}
-      {#if sessionTokens}· {M.fmtTokens(sessionTokens)} tokens{/if}
-      <span class="zc-grow"></span>
-      <button onclick={() => push({ k: 'help', rows: cmds.map((c) => [`/${c.name}`, `${c.help}${c.args ? `: /${c.name} ${c.args}` : ''}`]), keys: M.KEYS })} title="/help">?</button>
-      <button class="zc-dim" onclick={() => settings()}>Settings</button>
-      {#if !wide}<button class="zc-panel" onclick={() => toggleSide()} title="side panel (ctrl+b)" aria-label="side panel">▤</button>{/if}
-    </div>
-  </div>
+  </footer>
 </div>
 
 <style>
-  .zc { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
-  .zc-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
-  .zc-body { max-width: 860px; margin: 0 auto; padding: 14px 20px 18px; font-size: 15px; line-height: 1.55; }
-  .zc-title { color: var(--dim); text-align: center; font-size: 13px; margin: 2px 0 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .zc-ideas { margin: 70px auto 28px; max-width: 650px; }
-  .zc-ideas h2 { font-size: 22px; font-weight: 550; letter-spacing: -0.02em; }
-  .zc-idea-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
-  .zc-idea-list button { display: flex; justify-content: space-between; gap: 10px; text-align: left; padding: 14px; border: 1px solid var(--faint); border-radius: 12px; color: var(--ink); }
-  .zc-idea-list button:hover { border-color: var(--accent); }
-  .zc-idea-list button span { color: var(--dim); }
-  @media (max-width: 600px) { .zc-ideas { margin-top: 32px; } .zc-idea-list { grid-template-columns: 1fr; } }
-  .zc-earlier { display: block; margin: 0 auto 8px; color: var(--accent); font-size: 13px; }
-  .zc-user { white-space: pre-wrap; overflow-wrap: anywhere; font-weight: 560; margin: 14px 0 10px; }
-  .zc-kernel { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--dim); font-size: 13px; margin: 10px 0; }
-  .zc-acc { color: var(--accent); }
-  .zc-as { display: flex; flex-wrap: wrap; justify-content: center; align-items: baseline; gap: 6px; margin: -6px 0 14px; font-size: 13px; }
-  .zc-as button { color: var(--dim); border: 1px solid var(--faint); border-radius: 6px; padding: 2px 8px; }
-  .zc-as button:hover { color: var(--ink); }
-  .zc-as button.zc-on { color: var(--accent); border-color: var(--accent); }
-  .zc-agent { color: var(--accent); }
-  .zc-dim { color: var(--dim); }
-  .zc-line { font-size: 13px; margin: 2px 0 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
-  .zc-line.zc-dim { color: var(--dim); font-family: var(--mono); font-size: 12px; }
-  .zc-warn { color: var(--warn); }
-  .zc-err { color: var(--err); }
-  .zc-accent { color: var(--accent); }
-  .zc-line a { color: var(--accent); word-break: break-all; }
-  .zc-mono { margin: 4px 0 12px; font-size: 12px; }
-  .zc-mono pre { font-family: var(--mono); margin: 2px 0 0; padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--faint) 30%, transparent); white-space: pre-wrap; overflow-wrap: anywhere; }
-  .zc-qs { margin: 6px 0 12px; }
-  .zc-q { margin-top: 4px; }
-  .zc-opt { display: block; text-align: left; padding: 2px 8px 2px 18px; border-radius: 5px; }
-  .zc-opt:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
-  .zc-rec { margin-left: 0.6em; }
-  .zc-result { font-family: var(--mono); font-size: 12.5px; color: var(--dim); white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 10px 14px; }
-  .zc-result.zc-err { color: var(--err); }
-  .zc-help { font-size: 13px; margin: 6px 0 14px; }
-  .zc-hrow { display: grid; grid-template-columns: 10em 1fr; gap: 10px; }
-  .zc-hrow > :first-child { text-align: left; font-family: var(--mono); font-size: 12px; }
-  .zc-jump { position: absolute; left: 50%; transform: translateX(-50%); bottom: calc(100% + 8px); z-index: 5; font-size: 12px; padding: 4px 12px; border-radius: 14px; background: var(--paper); border: 1px solid var(--faint); color: var(--accent); box-shadow: 0 2px 10px rgb(0 0 0 / 0.08); }
-  .zc-dock { flex: none; max-width: 860px; width: 100%; margin: 0 auto; padding: 0 20px 8px; box-sizing: border-box; position: relative; }
-  .zc-pop { position: absolute; bottom: 100%; left: 20px; right: 20px; max-height: 40vh; overflow: auto; background: var(--paper); border: 1px solid var(--faint); border-radius: 8px; padding: 4px; box-shadow: 0 -4px 18px rgb(0 0 0 / 0.07); z-index: 6; font-size: 13px; }
-  .zc-pophead { padding: 4px 8px; font-size: 12px; }
-  .zc-item { display: flex; gap: 0; width: 100%; text-align: left; padding: 4px 8px; border-radius: 5px; white-space: pre; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); font-size: 12.5px; }
-  .zc-item.zc-on { background: color-mix(in srgb, var(--accent) 12%, transparent); }
-  .zc-cmd .zc-help1 { margin-left: auto; padding-left: 16px; font-family: var(--sans); overflow: hidden; text-overflow: ellipsis; }
-  .zc-status { display: flex; gap: 6px; align-items: baseline; font-size: 13px; padding: 4px 2px; min-width: 0; }
-  .zc-st { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 0 1 auto; }
-  .zc-tail { white-space: nowrap; flex: none; }
-  .zc-link { text-decoration: underline dotted; white-space: nowrap; }
-  .zc-link:hover { color: var(--ink); }
-  .zc-compose { display: flex; align-items: flex-end; gap: 8px; border: 1px solid var(--faint); border-radius: 10px; padding: 8px 8px 8px 12px; background: var(--paper); }
-  .zc-compose:focus-within { border-color: color-mix(in srgb, var(--accent) 55%, var(--faint)); }
-  .zc-compose textarea { flex: 1; resize: none; border: 0; outline: none; background: transparent; color: var(--ink); font: inherit; font-size: 15px; line-height: 1.45; padding: 0; min-height: 1.45em; overflow-y: auto; }
-  .zc-compose textarea::placeholder { color: var(--dim); opacity: 0.8; }
-  .zc-ro { opacity: 0.7; }
-  .zc-drag { border-color: var(--accent); border-style: dashed; }
-  .zc-clip { flex: none; width: 28px; height: 28px; border-radius: 50%; font-size: 15px; line-height: 28px; text-align: center; opacity: 0.7; }
-  .zc-clip:hover { opacity: 1; background: color-mix(in srgb, var(--accent) 10%, transparent); }
-  .zc-atts { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 2px 6px; }
-  .zc-att { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; font-size: 12.5px; border: 1px solid var(--faint); border-radius: 14px; padding: 2px 4px 2px 10px; background: var(--paper); }
-  .zc-att-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
-  .zc-att-err { border-color: var(--err); color: var(--err); }
-  .zc-ctx { border-style: dashed; }
-  .zc-ctx-img { width: 22px; height: 22px; object-fit: cover; border-radius: 4px; border: 1px solid var(--faint); }
-  .zc-att-x { width: 20px; height: 20px; border-radius: 50%; line-height: 18px; text-align: center; }
-  .zc-att-x:hover { background: color-mix(in srgb, var(--ink) 10%, transparent); }
-  .zc-send { flex: none; width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: var(--paper); font-size: 14px; line-height: 28px; text-align: center; }
-  .zc-send:disabled { background: var(--faint); cursor: default; }
-  .zc-hint { font-size: 12px; color: var(--dim); padding: 2px 4px; }
-  .zc-foot { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px; font-size: 12px; color: var(--dim); padding: 6px 2px 0; }
-  .zc-foot button:hover { color: var(--ink); }
-  .zc-ttl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 50%; }
-  .zc-grow { flex: 1; }
-  .zc-panel { padding: 0 4px; }
+  .chatroot { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
+  .ico { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  .sp { flex: 1; }
+  .icon { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; color: var(--dim); font-size: 16px; }
+  .icon:hover { background: var(--soft); color: var(--ink); }
+  .orb { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; flex: none; font-weight: 700; font-size: 16px; color: #fbfaf6;
+    background: radial-gradient(circle at 32% 28%, var(--b), var(--a) 70%); box-shadow: 0 0 0 3px color-mix(in srgb, var(--a) 18%, transparent); }
+  .orb.xs { width: 14px; height: 14px; box-shadow: none; }
+  .orb.busy { animation: breathe 1.8s ease-in-out infinite; }
+  @keyframes breathe { 50% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--a) 8%, transparent); transform: scale(0.96); } }
 
-  /* Markdown in the chat (md.ts builds div.md). */
-  .zc-md { margin: 4px 0 12px; overflow-wrap: anywhere; }
-  .zc-md :global(.md > :first-child) { margin-top: 0; }
-  .zc-md :global(.md > :last-child) { margin-bottom: 0; }
-  .zc-md :global(p), .zc-md :global(ul), .zc-md :global(ol), .zc-md :global(blockquote), .zc-md :global(table), .zc-md :global(pre) { margin: 0.5em 0; }
-  .zc-md :global(ul), .zc-md :global(ol) { padding-left: 1.4em; }
-  .zc-md :global(h1), .zc-md :global(h2), .zc-md :global(h3), .zc-md :global(h4) { font-size: 1.05em; margin: 0.9em 0 0.4em; font-weight: 650; }
-  .zc-md :global(h1) { font-size: 1.2em; }
-  .zc-md :global(code) { font-family: var(--mono); font-size: 0.88em; background: color-mix(in srgb, var(--faint) 40%, transparent); padding: 0.05em 0.3em; border-radius: 4px; cursor: pointer; }
-  .zc-md :global(pre) { background: color-mix(in srgb, var(--faint) 30%, transparent); padding: 8px 10px; border-radius: 6px; overflow-x: auto; }
-  .zc-md :global(pre code) { background: none; padding: 0; cursor: text; }
-  .zc-md :global(table) { border-collapse: collapse; display: block; overflow-x: auto; font-size: 0.93em; }
-  .zc-md :global(th), .zc-md :global(td) { border: 1px solid var(--faint); padding: 3px 9px; text-align: left; }
-  .zc-md :global(blockquote) { border-left: 3px solid var(--faint); padding-left: 10px; color: var(--dim); }
-  .zc-md :global(a) { color: var(--accent); text-decoration: none; cursor: pointer; }
-  .zc-md :global(a:hover) { text-decoration: underline; }
-  .zc-md :global(hr) { border: 0; border-top: 1px solid var(--faint); }
-  .zc-md :global(img) { max-width: 100%; }
-  .zc-md :global(.md-display) { overflow-x: auto; }
+  /* chat */
+  .hd { display: flex; align-items: center; gap: 10px; padding: 14px 18px 10px 22px; }
+  .hd h1 { font-size: 16px; font-weight: 650; margin: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .scroll { flex: 1; overflow: auto; overflow-x: hidden; }
+  .body { max-width: 44rem; margin: 0 auto; padding: 14px 26px 12px; display: flex; flex-direction: column; gap: 18px; }
+  .u { display: flex; justify-content: flex-end; }
+  .bubble { max-width: 82%; background: var(--soft); padding: 10px 15px; border-radius: 18px 18px 5px 18px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .prose { line-height: 1.65; overflow-wrap: anywhere; }
+  .prose :global(p) { margin: 0 0 10px; }
+  .prose :global(p:last-child) { margin-bottom: 0; }
+  .prose :global(.md > :first-child) { margin-top: 0; }
+  .prose :global(.md > :last-child) { margin-bottom: 0; }
+  .prose :global(ul), .prose :global(ol), .prose :global(blockquote), .prose :global(table), .prose :global(pre) { margin: 0.5em 0; }
+  .prose :global(ul), .prose :global(ol) { padding-left: 1.4em; }
+  .prose :global(h1), .prose :global(h2), .prose :global(h3), .prose :global(h4) { font-size: 1.05em; margin: 0.9em 0 0.4em; font-weight: 650; }
+  .prose :global(h1) { font-size: 1.2em; }
+  .prose :global(code) { font-family: var(--mono); font-size: 0.88em; background: var(--soft); padding: 0.05em 0.3em; border-radius: 4px; cursor: pointer; }
+  .prose :global(pre) { background: var(--soft); padding: 8px 10px; border-radius: 8px; overflow-x: auto; }
+  .prose :global(pre code) { background: none; padding: 0; cursor: text; }
+  .prose :global(table) { border-collapse: collapse; display: block; overflow-x: auto; font-size: 0.93em; }
+  .prose :global(th), .prose :global(td) { border: 1px solid var(--faint); padding: 3px 9px; text-align: left; }
+  .prose :global(blockquote) { border-left: 3px solid var(--faint); padding-left: 10px; color: var(--dim); }
+  .prose :global(a) { color: var(--accent); text-decoration: none; cursor: pointer; }
+  .prose :global(a:hover) { text-decoration: underline; }
+  .prose :global(hr) { border: 0; border-top: 1px solid var(--faint); }
+  .prose :global(img) { max-width: 100%; }
+  .prose :global(.md-display) { overflow-x: auto; }
+  .livew { border: 1px solid var(--faint); border-radius: 14px; background: color-mix(in srgb, var(--soft) 40%, var(--paper)); padding: 4px; }
+  .lrow { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 7px 10px; border-radius: 10px; font-size: 14px; }
+  .lrow:hover { background: var(--soft); }
+  .lt { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .lt b { font-weight: 550; }
+  .ld { color: var(--dim); }
+  .lm { font-size: 12px; color: var(--dim); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  @media (max-width: 900px) { .lm .wide { display: none; } }
+  .role { display: inline-block; padding: 1px 7px; border-radius: 999px; background: var(--soft); color: var(--ink); font-size: 11.5px; }
+  .sarow { display: flex; align-items: center; border-radius: 10px; }
+  .sarow .sa { flex: 1; min-width: 0; }
+  .sarow.on { background: var(--soft); }
+  .sopen { flex: none; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; color: var(--dim); }
+  .sopen:hover, .sarow.on .sopen { color: var(--accent); background: var(--soft); }
+  .sopen .ico { width: 16px; height: 16px; }
+  .sa { font-size: 13.5px; }
+  .sa.done { opacity: 0.7; }
+  .g { width: 14px; flex: none; text-align: center; font-size: 11px; font-weight: 700; color: var(--accent); }
+  .lbody { border-top: 1px solid var(--faint); margin: 2px 6px 0; padding-top: 4px; }
+  .pulse { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: 0.3; transform: scale(0.75); } }
+  .slist li.now { font-weight: 550; }
+  .slist { list-style: none; margin: 4px 0; padding: 0 10px; }
+  .slist li { display: flex; align-items: center; gap: 10px; padding: 3px 0; font-size: 13px; animation: rise 0.25s both; }
+  .slist li.bad .g, .slist li.bad .ld { color: var(--err); }
+  .slist.sub { padding-left: 34px; }
+  .st { font-size: 11.5px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .w { min-width: 0; }
+  .wline { text-align: left; max-width: 100%; display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--dim); padding: 5px 11px 5px 6px; border-radius: 99px; border: 1px solid var(--faint); }
+  .wline:hover { color: var(--ink); border-color: var(--dim); }
+  .ws { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .n { white-space: nowrap; }
+  .chk { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); flex: none; }
+  .chk.bad { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+  .car { font-size: 10px; opacity: 0.7; }
+  .steps { margin: 8px 0 0; padding: 0 0 0 26px; font-size: 13px; color: var(--dim); display: flex; flex-direction: column; gap: 4px; }
+  .steps b { color: var(--ink); font-weight: 500; }
+  .steps .bad, .steps .bad b { color: var(--err); }
+  .sline { text-align: left; overflow-wrap: anywhere; color: inherit; }
+  .sline:hover b { text-decoration: underline; }
+  .out { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--dim); background: var(--soft); border-radius: 8px; padding: 6px 9px; margin: 4px 0 2px; max-height: 18rem; overflow: auto; }
+  .out.bad { color: var(--err); }
+  .askq { border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--faint)); background: color-mix(in srgb, var(--warn) 6%, var(--paper)); border-radius: 16px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .q { font-weight: 600; }
+  .opts { display: flex; flex-wrap: wrap; gap: 8px; }
+  .opts button { padding: 8px 14px; border-radius: 99px; border: 1px solid var(--faint); background: var(--paper); font-size: 14px; text-align: left; }
+  .opts button:hover { border-color: var(--dim); }
+  .opts .primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .askq.done { flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 10px 14px; background: transparent; border-color: var(--faint); }
+  .askq.done .q { font-weight: 500; color: var(--dim); flex: 1; min-width: 12rem; }
+  .ans { font-size: 14px; font-weight: 600; color: var(--accent); overflow-wrap: anywhere; }
+  .or { font-size: 12px; color: var(--dim); }
+  .hello { max-width: 44rem; margin: 10vh auto 0; padding: 0 24px; text-align: center; }
+  .hello h2 { font-family: var(--serif); font-size: 30px; font-weight: 600; margin: 0 0 6px; }
+  .hello p { color: var(--dim); margin: 0 0 24px; }
+  .who { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-bottom: 34px; }
+  .pick { display: flex; align-items: center; gap: 10px; padding: 8px 16px 8px 8px; border-radius: 99px; border: 1px solid var(--faint); text-align: left; transition: border-color 0.15s, background 0.15s; }
+  .pick:hover { border-color: var(--dim); }
+  .pick.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, var(--paper)); }
+  .pick .orb { width: 32px; height: 32px; font-size: 14px; }
+  .pn { display: flex; flex-direction: column; line-height: 1.2; }
+  .pn b { font-size: 14px; font-weight: 600; }
+  .pn span { font-size: 12px; color: var(--dim); }
+  .sgh { display: flex; align-items: center; justify-content: center; gap: 10px; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 650; margin-bottom: 12px; min-height: 18px; }
+  .think { text-transform: none; letter-spacing: 0; font-weight: 400; display: inline-flex; align-items: center; gap: 3px; }
+  .think i { width: 4px; height: 4px; border-radius: 50%; background: var(--accent); animation: blink 1.2s infinite; }
+  .think i:nth-child(2) { animation-delay: 0.2s; } .think i:nth-child(3) { animation-delay: 0.4s; margin-right: 4px; }
+  @keyframes blink { 50% { opacity: 0.2; } }
+  .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; text-align: left; }
+  .idea { display: flex; flex-direction: column; gap: 6px; padding: 14px; min-height: 92px; border-radius: 14px; border: 1px solid var(--faint); background: color-mix(in srgb, var(--soft) 45%, var(--paper)); text-align: left; animation: rise 0.3s both; }
+  button.idea:hover { border-color: var(--accent); }
+  .idea b { font-size: 14px; font-weight: 600; line-height: 1.3; }
+  .idea span { font-size: 12.5px; color: var(--dim); line-height: 1.35; }
+  @keyframes rise { from { opacity: 0; transform: translateY(6px); } }
+  .idea.skel i { display: block; height: 11px; border-radius: 6px; background: linear-gradient(90deg, var(--soft), var(--faint), var(--soft)); background-size: 200% 100%; animation: shimmer 1.4s infinite linear; }
+  .idea.skel i:first-child { width: 80%; height: 13px; } .idea.skel i:last-child { width: 55%; margin-top: 4px; }
+  @keyframes shimmer { to { background-position: -200% 0; } }
+  @media (max-width: 900px) { .cards { grid-template-columns: minmax(0, 1fr); } .idea { min-height: 0; } .hello { margin-top: 4vh; } }
+  .dock { padding: 6px 16px 16px; position: relative; }
+  .compose { max-width: 44rem; margin: 0 auto; border: 1px solid var(--faint); border-radius: 20px; background: var(--paper); padding: 10px 10px 8px 16px; box-shadow: 0 4px 16px var(--shadow); position: relative; }
+  .compose:has(textarea:focus-visible) { border-color: var(--accent); }
+  .compose.drag { border-color: var(--accent); border-style: dashed; }
+  .compose.ro { opacity: 0.7; }
+  .compose textarea { width: 100%; border: 0; outline: none; background: transparent; resize: none; font: inherit; color: inherit; padding: 4px 0 8px; field-sizing: content; max-height: 40vh; }
+  .compose textarea::placeholder { color: var(--dim); }
+  .bar { display: flex; align-items: center; gap: 4px; margin-left: -8px; }
+  .mode { font-size: 13px; color: var(--dim); padding: 5px 10px; border-radius: 99px; }
+  .mode:hover { background: var(--soft); color: var(--ink); }
+  .send { width: 34px; height: 34px; border-radius: 50%; background: var(--accent); color: var(--on-accent); font-size: 17px; font-weight: 700; display: grid; place-items: center; flex: none; }
+  .send:disabled { background: var(--soft); color: var(--dim); cursor: default; }
+  .send.stop { background: var(--soft); color: var(--ink); border: 1px solid var(--faint); }
+  .send.stop .ico { width: 14px; height: 14px; }
+  .hint { font-size: 12px; color: var(--dim); padding: 4px 8px; border-radius: 99px; }
+  .hint:hover { color: var(--ink); background: var(--soft); }
 
-  /* The conversation stays quiet: user bubbles on the right, responses in the flow. */
-  .zc-body { max-width: 704px; padding-top: 28px; }
-  .zc-title { margin-bottom: 28px; }
-  .zc-user { display: flex; justify-content: flex-end; margin: 22px 0; font-weight: 400; }
-  .zc-user > span { max-width: 82%; padding: 10px 15px; border-radius: 18px 18px 5px 18px; background: color-mix(in srgb, var(--ink) 7%, var(--paper)); }
-  .zc-md { margin: 18px 0 22px; line-height: 1.65; }
-  .zc-dock { max-width: 744px; padding-bottom: 14px; }
-  .zc-compose { display: grid; grid-template-columns: 1fr auto; border-radius: 20px; padding: 14px 12px 9px 16px; box-shadow: 0 4px 16px rgb(0 0 0 / 0.06); }
-  .zc-compose textarea { grid-column: 1 / -1; grid-row: 1; min-height: 40px; }
-  .zc-clip { grid-column: 1; grid-row: 2; }
-  .zc-send { grid-column: 2; grid-row: 2; width: 34px; height: 34px; line-height: 34px; }
-  .zc-status { padding: 8px 4px; color: var(--dim); }
-  .zc-qs { padding: 16px; border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--faint)); border-radius: 16px; background: color-mix(in srgb, var(--warn) 6%, var(--paper)); }
-  .zc-opt { display: inline-block; margin: 8px 6px 0 0; padding: 8px 14px; border: 1px solid var(--faint); border-radius: 99px; }
-  .zc-as button { border-radius: 99px; padding: 7px 14px; }
-  .zc-ideas { text-align: center; }
-  .zc-ideas h2 { font-family: var(--serif, var(--sans)); font-size: 30px; }
-  .zc-idea-list button { min-height: 90px; background: color-mix(in srgb, var(--ink) 3%, var(--paper)); }
-  @media (max-width: 600px) {
-    .zc-body { padding: 10px 12px 14px; }
-    .zc-dock { padding: 0 10px 6px; }
-    .zc-pop { left: 10px; right: 10px; }
-    .zc-hrow { grid-template-columns: 7.5em 1fr; }
-    .zc-cmd .zc-help1 { display: none; }
+  /* menus */
+  .menu-wrap { position: relative; }
+  .menu { position: absolute; z-index: 12; min-width: 240px; background: var(--paper); border: 1px solid var(--faint); border-radius: 14px; padding: 6px; box-shadow: 0 14px 40px var(--shadow); display: flex; flex-direction: column; }
+  .menu.right { right: 0; top: 38px; }
+  .menu.up { bottom: 40px; left: 0; }
+  .rename { flex: 0 1 26rem; min-width: 8rem; font: inherit; font-size: 16px; font-weight: 650; color: inherit; background: var(--paper); border: 1px solid var(--accent); border-radius: 8px; padding: 3px 8px; outline: none; }
+  .hd .close { font-size: 20px; }
+  .archrow { display: flex; align-items: center; gap: 6px; padding: 4px 4px 4px 10px; font-size: 14px; }
+  .archrow > span { flex: 1; }
+  .oc { padding: 4px 10px; border-radius: 8px; border: 1px solid var(--faint); font-size: 13px; background: var(--paper); }
+  .oc:hover { border-color: var(--dim); }
+  .archgo { padding: 4px 12px; border-radius: 8px; font-size: 13px; font-weight: 600; color: var(--on-accent); background: var(--accent); }
+  .archgo:disabled { opacity: 0.5; }
+  .ocs { display: flex; flex-direction: column; padding: 4px 0 2px; }
+  .ocs .mopt { text-align: left; padding: 6px 10px 6px 18px; border-radius: 8px; }
+  .ocs .mopt:hover { background: var(--soft); }
+  .menu.right { min-width: 280px; }
+  .menu .row { display: flex; justify-content: space-between; gap: 16px; padding: 6px 10px; font-size: 13px; color: var(--dim); }
+  .menu .row b { color: var(--ink); font-weight: 500; font-family: var(--mono); font-size: 12px; }
+  .menu hr { border: 0; border-top: 1px solid var(--faint); margin: 6px 0; width: 100%; }
+  .menu > button { text-align: left; padding: 7px 10px; border-radius: 8px; font-size: 14px; }
+  .menu > button:hover { background: var(--soft); }
+  .mopt { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; }
+  .mopt span { font-size: 12px; color: var(--dim); }
+  .mopt.sel b { color: var(--accent); }
+  .mopt b { display: flex; align-items: center; gap: 6px; }
+  .mopt em { font-style: normal; font-size: 10.5px; font-weight: 600; color: var(--dim); border: 1px solid var(--faint); border-radius: 99px; padding: 0 6px; }
+  .mopt.more { font-size: 13px; color: var(--accent); font-weight: 600; }
+  .mg { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 650; padding: 8px 12px 4px; white-space: nowrap; }
+  .menu.up { min-width: 250px; }
+  @media (max-width: 900px) { .menu.up.eff { left: auto; right: -60px; } }
+  .mmenu { max-height: min(60vh, 460px); overflow: auto; }
+  .mode { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .mode.open { background: var(--soft); color: var(--ink); }
+  .bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 11px; }
+  .bars i { width: 3px; border-radius: 1px; background: var(--faint); }
+  .bars i:nth-child(1) { height: 5px; } .bars i:nth-child(2) { height: 8px; } .bars i:nth-child(3) { height: 11px; }
+  .bars i.on { background: var(--accent); }
+  /* the / menu and the command pickers, over the message box */
+  .menu.pop { left: 0; right: 0; bottom: calc(100% + 6px); max-height: 40vh; overflow: auto; }
+  .pop .item { padding: 6px 10px; border-radius: 8px; white-space: pre; overflow: hidden; text-overflow: ellipsis; font-size: 13px; max-width: 100%; }
+  .pop .item.cmd { white-space: normal; }
+  .pop .item.on { background: var(--soft); }
+  .pop .item b { font-family: var(--mono); font-weight: 550; font-size: 12.5px; }
+  .pop .item em { border: 0; padding: 0; font-weight: 400; }
+
+  .tag { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; padding: 2px 9px 2px 7px; border-radius: 99px; white-space: nowrap; }
+  .tag.work { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .tag.wait { color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent); }
+  .tag.ro { color: var(--dim); background: var(--soft); }
+  .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+  .dot.work { background: var(--accent); animation: blink 1.2s ease-in-out infinite; }
+  .dot.wait { background: var(--warn); }
+
+  .atts { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 0 8px; }
+  .att { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; padding: 3px 4px 3px 9px; border-radius: 99px; background: var(--soft); border: 1px solid var(--faint); max-width: 100%; }
+  .att.bad { border-color: var(--err); color: var(--err); }
+  .att.ctx { border-style: dashed; }
+  .att .ico { width: 13px; height: 13px; }
+  .att .atn { display: inline-flex; align-items: center; gap: 5px; width: auto; height: auto; border-radius: 0; color: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+  .att .atn:hover { background: none; text-decoration: underline; }
+  .att .ap { color: var(--dim); font-size: 11.5px; white-space: nowrap; }
+  .att button:not(.atn) { width: 18px; height: 18px; border-radius: 50%; color: var(--dim); flex: none; }
+  .att button:not(.atn):hover { background: var(--faint); color: var(--ink); }
+  .cimg { width: 20px; height: 20px; object-fit: cover; border-radius: 4px; border: 1px solid var(--faint); }
+
+  .note { font-size: 13px; color: var(--dim); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .note.err { color: var(--err); }
+  .note.warn { color: var(--warn); }
+  .note.accent { color: var(--accent); }
+  .note.plain { color: var(--ink); }
+  .note a { color: var(--accent); word-break: break-all; }
+  .kline { font-size: 12.5px; }
+  .mono { font-size: 12px; }
+  .mono .mt { color: var(--dim); margin-bottom: 2px; font-family: var(--mono); }
+  .mono pre { font-family: var(--mono); margin: 0; padding: 8px 10px; border-radius: 10px; background: var(--soft); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .help { font-size: 13px; display: flex; flex-direction: column; gap: 2px; }
+  .hrow { display: grid; grid-template-columns: 10em 1fr; gap: 10px; }
+  .hrow > :first-child { text-align: left; font-family: var(--mono); font-size: 12px; }
+  .acc { color: var(--accent); }
+  .earlier { align-self: center; color: var(--accent); font-size: 13px; }
+  .jump { position: absolute; left: 50%; transform: translateX(-50%); bottom: calc(100% + 4px); z-index: 5; font-size: 12px; padding: 4px 12px; border-radius: 99px; background: var(--paper); border: 1px solid var(--faint); color: var(--accent); box-shadow: 0 2px 10px var(--shadow); }
+  .conn { max-width: 44rem; margin: 0 auto 6px; font-size: 13px; color: var(--warn); }
+  .conn button { text-decoration: underline dotted; }
+  .pdraft { max-width: 44rem; margin: 0 auto 8px; border: 1px dashed var(--faint); border-radius: 14px; padding: 10px 12px; font-size: 13px; }
+  .pdraft .pk { font-size: 11.5px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.04em; }
+  .pdraft pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; margin: 6px 0; max-height: 10rem; overflow: auto; }
+  .pdraft .pb { display: flex; gap: 6px; }
+
+  @media (max-width: 900px) {
+    .back { font-size: 26px; margin-left: -10px; color: var(--ink); }
+    .body { padding: 10px 14px; }
+    .dock { padding: 6px 8px 8px; }
+    .hrow { grid-template-columns: 7.5em 1fr; }
   }
 </style>

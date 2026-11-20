@@ -1,35 +1,32 @@
-:root {
-  --canvas: #eeeee8;
-  --paper: #fbfaf7;
-  --ink: #1f1d1a;
-  --dim: #8d877d;
-  --faint: #d9d4ca;
-  --accent: #667e70;
-  --ai: #9a5bd6;
-  --warn: #b7791f;
-  --err: #c0392b;
-  --ok: #2f855a;
+:root, :root[data-theme='light'] {
+  /* Palette "stone & moss" (the redesign mock's), plus --bg: the table the panels sit on. */
+  --bg: #e9e5dc; --paper: #f7f5f0; --side: #efece5; --soft: #ece8e0; --faint: #dfdad0;
+  --ink: #2e2d2a; --dim: #736e67; --accent: #4f7d67; --on-accent: #f6f4ef;
+  --warn: #a8762c; --err: #b0533c; --ok: #4f7d67; --shadow: rgb(60 50 30 / 0.10); --glass: rgb(247 245 240 / 0.78);
+  --canvas: var(--bg); --ai: #7a6a9b;
   --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
   --serif: ui-serif, 'Iowan Old Style', 'Charter', 'Georgia', serif;
   --sans: ui-sans-serif, -apple-system, 'Inter', 'Segoe UI', system-ui, sans-serif;
-  color-scheme: light dark;
+  color-scheme: light;
+}
+:root[data-theme='dark'] {
+  --bg: #151716; --paper: #1e2120; --side: #1a1c1b; --soft: #282c2a; --faint: #323734;
+  --ink: #cdc9c0; --dim: #868b85; --accent: #8fb39f; --on-accent: #1a1c1b;
+  --warn: #cfa660; --err: #d4836d; --ok: #8fb39f; --shadow: rgb(0 0 0 / 0.35); --glass: rgb(36 40 38 / 0.8);
+  --ai: #b3a3cf;
+  color-scheme: dark;
 }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]):not([data-theme="dark"]) {
-    --canvas: #232824;
-    --paper: #2d332f;
-    --ink: #e9e5dd;
-    --dim: #8a847a;
-    --faint: #3a3732;
-    --accent: #9db7a5;
-    --ai: #c79bf2;
-    --warn: #e0b050;
-    --err: #ff7b72;
-    --ok: #6fcf97;
+  :root:not([data-theme='light']) {
+    --bg: #151716; --paper: #1e2120; --side: #1a1c1b; --soft: #282c2a; --faint: #323734;
+    --ink: #cdc9c0; --dim: #868b85; --accent: #8fb39f; --on-accent: #1a1c1b;
+    --warn: #cfa660; --err: #d4836d; --ok: #8fb39f; --shadow: rgb(0 0 0 / 0.35); --glass: rgb(36 40 38 / 0.8);
+    --ai: #b3a3cf;
+    color-scheme: dark;
   }
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; background: var(--paper); color: var(--ink); }
+html, body { margin: 0; background: var(--bg); color: var(--ink); }
 body { font-family: var(--sans); -webkit-font-smoothing: antialiased; }
 button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
 input { font: inherit; color: inherit; }
@@ -44,5 +41,3 @@ kbd { font-family: var(--sans); font-size: 0.85em; border: 1px solid var(--faint
 .ask .h1 input { font-weight: 650; }
 .ask p { font-size: 13px; margin: 0; }
 
-:root[data-theme="dark"] { color-scheme: dark; --canvas:#232824; --paper:#2d332f; --ink:#e9e5dd; --dim:#aaa99f; --faint:#505a51; --accent:#9db7a5; --ai:#c79bf2; --warn:#e0b050; --err:#ff8b80; --ok:#6fcf97; }
-:root[data-theme="light"] { color-scheme: light; }

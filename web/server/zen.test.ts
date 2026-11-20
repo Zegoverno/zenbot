@@ -84,8 +84,10 @@ describe('home folder', async () => {
   await fs.symlink('/etc', path.join(home, 'etc'));
 
   it('never shows a secret, by name, folder or symlink', async () => {
-    for (const p of ['~/.zenbot/token', '~/.ssh/id_ed25519', '~/.ssh', '~/.env', '~/innocent.txt', '~/etc/hostname', '/etc/passwd', '~/../x'])
+    for (const p of ['~/.zenbot/token', '~/.ssh/id_ed25519', '~/.ssh', '~/.env', '~/innocent.txt', '/etc/shadow', '~/../x'])
       await expect(h.read(p), p).rejects.toThrow(/not shown|not found/);
+    // Files reads from / down: a symlink out of home reads like the path it points to.
+    await expect(h.read('~/etc/hostname')).resolves.toBeTruthy();
     const names = (await h.list('~')).entries.map((e) => e.name);
     expect(names).toContain('notes.txt');
     expect(names).not.toContain('.ssh');

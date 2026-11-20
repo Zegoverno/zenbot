@@ -6,7 +6,7 @@
 // plugin sees vault-relative paths and openers apply only to vault files.
 
 import { pluginApi, upload, type OpenerDefaults, type Plugin, type PluginGame, type PluginOpener, type PluginView, type ToolResult } from './api.ts';
-import { app, tilde } from './app.svelte.ts';
+import { app, openTab, tilde } from './app.svelte.ts';
 
 export const plugins = $state({
   list: [] as Plugin[],
@@ -268,6 +268,5 @@ export const panel = $state({
 let shown = 0;
 export function showPanel(plugin: string, ui: string, title: string, input: Record<string, unknown>, result: ToolResult) {
   panel.current = { plugin, ui, title, input, result, n: ++shown };
-  app.side.open = true;
-  app.side.view = 'panel';
+  openTab('panel');
 }

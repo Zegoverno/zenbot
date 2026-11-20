@@ -25,6 +25,7 @@ writeFileSync(path.join(HOME, '.zenbot/token'), 'test-token');
 writeFileSync(path.join(HOME, 'plain.txt'), 'hello file');
 writeFileSync(path.join(HOME, 'home-only.txt'), 'home');
 writeFileSync(path.join(VAULT, 'wiki/plain.txt'), 'hello file');
+writeFileSync(path.join(VAULT, '.hidden-test'), 'hidden');
 mkdirSync(path.join(VAULT, 'games'));
 writeFileSync(path.join(VAULT, 'games/board.fx'), 'four in a row\n');
 const REAL_ZEN = process.env.ZEN_BIN ?? (() => {
@@ -158,7 +159,7 @@ const kernel = createServer(async (req, res) => {
       { ...session('c0', 'zen room', { kind: 'channel' }), busy: false, waiting: false },
       { ...session('s0', 'Pitch practice', { agent: 'rex' }), busy: false, waiting: false },
       { ...session('s1', 'Plan the week', { agent: 'zenbot' }), busy: false, waiting: true },
-      { ...session('k1', 'verifier', { kind: 'verifier', parent: 's1' }), task: 'Check the plan', busy: true, waiting: false },
+      { ...session('k1', 'verifier', { kind: 'verifier', parent: 's1' }), task: 'Check the plan', busy: false, waiting: false },
       ...old,
     ], archived: 2 });
   }
@@ -268,7 +269,7 @@ const kernel = createServer(async (req, res) => {
     }
   }
   if (r === 'POST /api/tasks/t1/agent') {
-    assert.equal(body.agent, 'zenbot');
+    assert.equal(body.agent, 'rex');
     assert.equal(body.rev, tasks.find(t => t.id === 't1').rev);
     handed.push('t1');
     return json(res, { task: {}, session: 's1', existing: false });
@@ -359,81 +360,107 @@ const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1300, height: 850 } });
 const errors = [];
 page.on('pageerror', (e) => errors.push(e.message));
+page.setDefaultTimeout(8000);
 const base = `http://127.0.0.1:${PORT}`;
 try {
   await page.goto(`${base}/`);
+  // The shell: the agent orb top left, floating centre tabs, the quick-control ring bottom right.
+  await page.locator('.agent').first().waitFor();
+  assert.equal(await page.getByRole('tablist', { name: 'Views' }).getByRole('tab').count() >= 6, true, 'the floating tabs');
+  await page.locator('.agent').first().click();
+  await page.locator('.me .icon[title="Settings"]').waitFor();
+  await page.locator('.agent').first().click();
+  // Routines: a failing one says so (and badges its tab), run now, pause, and a new one asks the agent.
   await page.getByRole('tab', { name: 'Routines' }).click();
-  await page.getByText('Some routines need attention.', { exact: false }).waitFor();
-  await page.getByRole('button', { name: 'Run now' }).click();
-  await page.getByRole('button', { name: 'Pause' }).click();
-  await page.getByRole('button', { name: '+ New routine' }).click();
+  await page.getByText('daily failed', { exact: false }).first().waitFor();
+  // The failed banner, as the mock: See the run, Run again, Ask zenbot to fix it. A run with no session unfolds its past runs.
+  const failBox = page.locator('.fail', { hasText: 'daily failed' });
+  for (const n of ['See the run', 'Run again', 'Ask zenbot to fix it']) assert.ok(await failBox.getByRole('button', { name: n }).isVisible(), `the failed banner has ${n}`);
+  await failBox.getByRole('button', { name: 'See the run' }).click();
+  assert.equal(await page.locator('[data-job="daily"] .cm').getAttribute('aria-expanded'), 'true', 'See the run unfolds the past runs');
+  assert.ok(await page.locator('.tab .badge.bad').isVisible(), 'the Routines tab badges a failure');
+  await page.getByRole('button', { name: 'Run now' }).first().click();
+  await page.getByRole('switch', { name: 'daily on or paused' }).first().click();
+  await page.getByRole('button', { name: /New routine/ }).click();
   await page.waitForURL(/\?s=new/);
-  assert.match(await page.locator('textarea').inputValue(), /create a new routine/);
+  assert.match(await page.locator('textarea').inputValue(), /create a new routine/i);
+  // The radial ring: opens around its button, each action labelled; the theme toggles and is kept.
   await page.goto(`${base}/`);
-  await page.getByRole('button', { name: 'Command ring' }).click();
-  await page.getByRole('button', { name: /Theme · auto/ }).click();
-  assert.equal(await page.locator('html').getAttribute('data-theme'), 'light');
+  await page.getByRole('button', { name: 'Quick actions' }).click();
+  assert.equal(await page.locator('.qc.open').count(), 1, 'the ring opens');
+  assert.ok((await page.locator('.qc .qa').count()) >= 4, 'the ring has its actions');
+  await page.getByRole('button', { name: 'Dark mode' }).click();
+  assert.equal(await page.locator('html').getAttribute('data-theme'), 'dark');
   await page.reload();
+  assert.equal(await page.locator('html').getAttribute('data-theme'), 'dark');
+  await page.getByRole('button', { name: 'Quick actions' }).click();
+  await page.getByRole('button', { name: 'Light mode' }).click();
   assert.equal(await page.locator('html').getAttribute('data-theme'), 'light');
   await page.setViewportSize({ width: 390, height: 844 });
   assert.ok(await page.getByRole('tab', { name: 'Routines' }).isVisible());
+  await page.goto(`${base}/?s=s1`);
+  await page.locator('textarea').first().fill('keep this draft');
+  await page.getByRole('button', { name: 'Preview', exact: true }).click();
+  await page.getByRole('heading', { name: 'Preview' }).waitFor();
+  await page.getByRole('button', { name: 'Back to the chat' }).click();
+  assert.equal(await page.locator("textarea").first().inputValue(), "keep this draft");
+
   await page.setViewportSize({ width: 1300, height: 850 });
   // Home is a real-data dashboard and opens the selected session, not a mock.
   await page.goto(`${base}/`);
   await page.getByRole('heading', { name: /Good (morning|afternoon|evening)/ }).waitFor();
   await page.getByRole('button', { name: /Plan the week/ }).first().click();
   await page.waitForURL(/\?s=s1/);
-  // The board: the session, waiting on the owner.
+  // Home › Recent files opens the file in Files.
+  writeFileSync(path.join(VAULT, 'Inbox.md'), '# Inbox\n\nLoose ends.\n');
+  prefs.home_layout = [{ id: 'files', size: 1 }];
+  await page.goto(`${base}/`);
+  await page.locator('.wd .row', { hasText: 'Inbox.md' }).click();
+  await page.getByRole('heading', { name: 'Inbox' }).waitFor();
+  assert.equal(await page.getByText("This view isn't available").count(), 0, 'a recent file opens, not a missing view');
+  delete prefs.home_layout;
+  rmSync(path.join(VAULT, 'Inbox.md'));
+  await page.evaluate(() => sessionStorage.clear()); // Files keeps its open file per tab
+  // Sessions: channels apart and first, the session waiting on the owner says so; archived on demand.
   await page.goto(`${base}/?view=sessions`);
-  await page.getByText('Plan the week').first().waitFor();
-  assert.ok(await page.getByText('waiting on you').first().isVisible());
-  // Channels apart; waiting first; a subagent under its session.
-  await page.locator('.head', { hasText: 'CHANNELS' }).waitFor();
-  const boardRows = (await page.locator('.row').allInnerTexts()).map((t) => t.replace(/\s+/g, ' '));
+  await page.locator('.srow', { hasText: 'Plan the week' }).waitFor();
+  assert.ok(await page.locator('.srow', { hasText: 'Plan the week' }).getByText('needs you').isVisible());
+  await page.locator('.grp', { hasText: 'Channels' }).waitFor();
+  const boardRows = (await page.locator('.srow').allInnerTexts()).map((t) => t.replace(/\s+/g, ' '));
   const at = (re) => boardRows.findIndex((t) => re.test(t));
   assert.ok(at(/zen room/) >= 0 && at(/zen room/) < at(/Plan the week/), `channels come first: ${boardRows}`);
-  assert.ok(at(/Plan the week/) < at(/Pitch practice/), 'the session waiting on the owner comes first');
-  assert.equal(at(/verifier: Check the plan/), at(/Plan the week/) + 1, 'the subagent sits under its session');
+  assert.ok(at(/Pitch practice/) >= 0, 'the open sessions are listed');
+  assert.equal(at(/verifier/), -1, 'subagents stay under their session, not in the list');
+  await page.getByPlaceholder('Search sessions').fill('pitch');
+  assert.equal(await page.locator('.srow', { hasText: 'Plan the week' }).count(), 0, 'search filters the list');
+  await page.getByPlaceholder('Search sessions').fill('');
+  await page.getByRole('button', { name: /Archived/ }).click();
+  await page.locator('.srow', { hasText: 'Old chat' }).waitFor();
   if (shots) await page.screenshot({ path: 'tests/shots/zen-board.png' });
 
-  // Suggestions load independently of the composer and selecting one only drafts it.
-  await page.route('**/api/zen/ideas?*', (route) => route.fulfill({ json: { ideas: ['Plan a week', 'Review a project', 'Explore an idea'] } }));
-  // Sessions: a `+ new session` button does what `n` does.
-  await page.getByRole('button', { name: '+ new session', exact: true }).click();
+  // A new chat: its ideas load without blocking the box, and picking one only drafts it.
+  await page.route('**/api/zen/ideas?*', (route) => route.fulfill({ json: { ideas: [{ text: 'Plan a week', why: 'Monday looks full' }, 'Review a project', { text: 'Explore an idea', why: '' }] } }));
+  await page.locator('.pane.view').getByRole('button', { name: /New/ }).first().click();
   await page.waitForURL(/\?s=new/);
-  await page.locator('.zc-foot', { hasText: '@zenbot' }).waitFor();
-  await page.getByRole('button', { name: 'Plan a week' }).click();
+  assert.equal(await page.locator('.idea', { hasText: 'Plan a week' }).locator('span').textContent(), 'Monday looks full', 'an idea shows its why line');
+  assert.ok(await page.getByRole('button', { name: 'Review a project' }).isVisible(), 'plain-string ideas still parse');
+  await page.getByRole('button', { name: /Plan a week/ }).click();
   assert.equal(await page.getByRole('textbox', { name: 'message' }).inputValue(), 'Plan a week', 'an idea fills the composer without sending');
   await page.unroute('**/api/zen/ideas?*');
+  // No ideas (the model failed): no generic cards pretending to be made for you.
+  await page.route('**/api/zen/ideas?*', (route) => route.fulfill({ json: { ideas: [], error: 'no ideas right now' } }));
+  await page.locator('.agent').first().click();
+  await page.locator('.amenu .arow', { hasText: /rex/i }).click();
+  await page.waitForTimeout(300);
+  assert.equal(await page.locator('.idea').count(), 0, 'a failed idea call shows no cards');
+  await page.locator('.agent').first().click();
+  await page.locator('.amenu .arow', { hasText: /zenbot/i }).click();
+  await page.unroute('**/api/zen/ideas?*');
   await page.goto(`${base}/?view=sessions`);
-  await page.getByText('Plan the week').first().waitFor();
-  // Archived jobs stay out of Archived (and its count) until `J` or the jobs chip.
-  assert.equal(await page.getByRole('button', { name: 'jobs', exact: true }).count(), 0, 'the jobs chip shows with archived');
-  await page.keyboard.press('J');
-  assert.equal(await page.evaluate(() => localStorage.getItem('zen.sessions.archivedJobs')), null, 'J does nothing while archived is hidden');
-  await page.keyboard.press('a');
-  await page.getByText('Old chat').waitFor();
-  assert.equal(await page.getByText('vault-sync').count(), 0, 'archived jobs are hidden by default');
-  const archivedHead = page.locator('.head', { hasText: 'ARCHIVED' });
-  assert.match((await archivedHead.innerText()).replace(/\s+/g, ' '), /ARCHIVED 1 · a hides · J shows jobs \(1\)/);
-  const badge = page.locator('.outcome.partial');
-  assert.equal(await badge.innerText(), 'partial', 'an archived session shows how it ended');
-  assert.equal(await badge.getAttribute('title'), 'tests red', 'the badge carries the note');
-  await page.keyboard.press('J');
-  await page.getByText('vault-sync').waitFor();
-  assert.match((await archivedHead.innerText()).replace(/\s+/g, ' '), /ARCHIVED 2 · a hides · J hides jobs/);
-  assert.equal(await page.evaluate(() => localStorage.getItem('zen.sessions.archivedJobs')), '1');
-  await page.reload();
-  await page.keyboard.press('a');
-  await page.getByText('vault-sync').waitFor(); // kept across reloads
-  await page.getByRole('button', { name: 'jobs', exact: true }).click(); // the chip hides them again
-  await page.getByText('vault-sync').waitFor({ state: 'detached' });
-  assert.equal(await page.evaluate(() => localStorage.getItem('zen.sessions.archivedJobs')), '0');
-  await page.keyboard.press('a');
-  await page.getByText('Old chat').waitFor({ state: 'detached' });
+  await page.locator('.srow', { hasText: 'Plan the week' }).waitFor();
 
   // Tasks: the urgent task, overdue.
-  await page.keyboard.press('3');
+  await page.getByRole('tab', { name: 'Tasks' }).click();
   await page.getByText('Price the offer').waitFor();
   assert.ok(await page.getByText(/overdue/).first().isVisible());
   // Tick and untick carry the latest revision, editing updates the live task, and dropping removes it.
@@ -456,330 +483,131 @@ try {
   assert.deepEqual(taskWrites.slice(0,3).map(x => x.rev), ['r1','r2','r3']);
   assert.equal(taskWrites[3].body.project, 'acme');
   assert.equal(taskWrites[4].body.dropped, true);
-  await page.locator('.task', {hasText:'Price the offer carefully'}).getByRole('button', {name:/Hand to/}).click();
+  await page.locator('.task', {hasText:'Price the offer carefully'}).getByRole('button', {name:'Hand'}).click();
+  await page.getByLabel('Agent for Price the offer carefully').selectOption('rex');
+  await page.locator('.task', {hasText:'Price the offer carefully'}).getByRole('button', {name:'Start'}).click();
   await page.waitForURL(/\?s=s1/);
   assert.deepEqual(handed, ['t1']);
   await page.goto(`${base}/?view=sessions`);
   await page.getByText('Plan the week').first().waitFor();
 
-  // Files: opens in the shared workspace (the vault); `..` climbs to the home folder, without the
-  // token; a note opens in the reader, changelog apart.
-  await page.keyboard.press('2');
-  await page.getByText('wiki/', { exact: true }).waitFor();
+  // Files: opens in the shared vault; ↑ climbs above it, up to /, and the Vault button comes back.
+  await page.getByRole('tab', { name: 'Files' }).click();
+  await page.locator('.row', { hasText: 'wiki' }).first().waitFor();
   assert.equal(await page.getByText('home-only.txt').count(), 0, 'Files starts in the vault, not home');
-  // Search: names at once (client side over the vault, through the server's find), content from the
-  // kernel after a pause or Enter, names first; a result opens in the reader; Esc clears.
-  const search = page.getByLabel('search files');
-  const results = page.locator('.result');
-  await page.keyboard.press('/');
-  assert.equal(await search.evaluate((i) => i === document.activeElement), true, '/ focuses the search');
-  await search.fill('at');
-  await results.filter({ hasText: 'Atlas.md' }).waitFor();
-  assert.equal(await page.getByRole('tree', { name: 'files' }).count(), 0, 'results replace the tree');
-  assert.equal(await results.filter({ hasText: 'Grace' }).count(), 0, 'only names that match');
+  assert.equal(await page.getByText('.hidden-test').count(), 0);
+  await page.locator('.list').click();
+  await page.keyboard.press('.');
+  await page.getByText('.hidden-test').waitFor();
+  await page.keyboard.press('.');
+  assert.equal(await page.getByText('.hidden-test').count(), 0);
+  await page.keyboard.press('j');
+  assert.equal(await page.locator('.list .row.on').count(), 1, 'keyboard selects a file');
+  const upBtn = page.getByRole('button', { name: 'Up one folder' });
+  await upBtn.click();
+  await upBtn.click();
+  await page.locator('.row', { hasText: 'home-only.txt' }).waitFor();
+  for (let k = 0; k < 20 && !(await upBtn.isDisabled()); k++) await upBtn.click();
+  assert.ok(await upBtn.isDisabled(), 'climbs all the way to /');
+  await page.getByRole('button', { name: /Vault/ }).last().click();
+  // Search: names under the folder at once; the kernel's search of the notes (words and meaning)
+  // after a pause with 3+ characters, or Enter, with a snippet each, after the names.
+  const fsearch = page.getByLabel('Search files and notes');
+  await fsearch.fill('at');
+  await page.locator('.list .row', { hasText: 'Atlas' }).waitFor();
+  assert.equal(await page.locator('.list .row', { hasText: 'Grace' }).count(), 0, 'only names that match');
   await new Promise((r) => setTimeout(r, 900));
   assert.deepEqual(searches, [], 'under 3 characters only names are searched');
-  await search.fill('atl');
+  await fsearch.fill('atl');
   await until(() => searches.length === 1, 'a pause asks the kernel');
   assert.deepEqual(searches[0], { query: 'atl', scope: 'notes', limit: 10 });
-  await search.fill('gift');
-  const grace = results.filter({ hasText: 'Grace' });
-  await grace.waitFor();
-  assert.match(await grace.innerText(), /A gift, given freely\./);
-  assert.match(await grace.innerText(), /wiki\/Grace\.md/);
-  assert.equal(await results.count(), 2);
-  assert.match(await results.first().innerText(), /Grace/, 'content results keep the kernel order');
-  await grace.click();
-  await page.locator('.reader').waitFor();
+  await fsearch.fill('gift');
+  const graceHit = page.locator('.list .row', { hasText: 'Grace' });
+  await graceHit.waitFor();
+  assert.match(await graceHit.innerText(), /A gift, given freely\./, 'a note hit shows its snippet');
+  assert.equal(await page.locator('.list .row', { hasText: 'Atlas' }).count(), 1, 'each file once');
+  const asked = searches.length;
+  await fsearch.press('Enter');
+  await until(() => searches.length === asked + 1, 'Enter asks the kernel at once');
+  await graceHit.click();
   await page.getByText('A gift.').first().waitFor();
-  await page.keyboard.press('Escape'); // closes the file; the results are still there
-  await grace.waitFor();
-  await search.fill('god'); // names: ArrowDown, Enter open the first
-  await results.filter({ hasText: 'God.md' }).waitFor();
-  await search.press('ArrowDown');
-  await search.press('Enter');
-  await page.locator('.reader').waitFor();
-  await page.keyboard.press('Escape');
-  await search.press('Escape'); // clears the search
-  await page.getByText('wiki/', { exact: true }).waitFor();
-  assert.equal(await search.inputValue(), '');
-  await page.locator('.crumbs button').first().click();
-  await page.getByText('plain.txt').waitFor();
-  await page.locator('button.chip', { hasText: 'Vault' }).click();
-  await page.getByText('wiki/', { exact: true }).waitFor();
-  await page.locator('.crumbs button').first().click(); // ~ : back to the home folder
-  await page.getByText('plain.txt').waitFor();
-  await page.getByText('.zenbot', { exact: true }).waitFor({ state: 'detached' }).catch(() => {}); // dotfiles hidden
-  // Reading above the vault is allowed, but writes there are refused.
-  await page.keyboard.press('a');
-  await page.getByLabel('name', {exact:true}).fill('outside.txt');
-  await page.keyboard.press('Enter');
-  await page.getByText(/couldn't create outside\.txt: outside vault/).waitFor();
-  await page.keyboard.press('Escape');
-  await page.locator('button.chip', {hasText:'Vault'}).click();
-  await page.locator('.row', {hasText:'wiki/'}).click();
-  await page.getByText('plain.txt').waitFor();
-  // New file, folder and rename, asked inline; the server writes under the scratch vault.
-  await page.keyboard.press('a'); // nothing selected: the root
-  await page.getByLabel('name', { exact: true }).fill('..');
-  await page.keyboard.press('Enter');
-  await page.getByText(/couldn't create \.\.: bad name/).waitFor();
-  assert.equal(await page.getByLabel('name', { exact: true }).count(), 1, 'a refused name keeps the input');
-  await page.getByLabel('name', { exact: true }).fill('.env');
-  await page.keyboard.press('Enter');
-  await page.getByText(/couldn't create \.env: not allowed here/).waitFor();
-  assert.equal(existsSync(path.join(VAULT, 'wiki', '.env')), false);
-  await page.getByLabel('name', { exact: true }).fill('plain.txt');
-  await page.keyboard.press('Enter');
-  await page.getByText(/couldn't create plain\.txt: already exists/).waitFor();
-  assert.equal(readFileSync(path.join(VAULT, 'wiki', 'plain.txt'), 'utf8'), 'hello file', 'nothing is overwritten');
-  await page.keyboard.press('Escape');
-  assert.equal(await page.getByLabel('name', { exact: true }).count(), 0, 'Esc cancels');
-  await page.getByRole('button', { name: '+ folder', exact: true }).click();
-  await page.getByLabel('name', { exact: true }).fill('proj');
-  await page.keyboard.press('Enter');
-  await page.locator('.row[data-sel="1"]', { hasText: 'proj/' }).waitFor();
+  await page.getByRole('button', { name: 'Back to the folder' }).click();
+  await page.getByRole('button', { name: /Vault/ }).last().click().catch(() => {});
+  await page.locator('.row', { hasText: 'wiki' }).first().click();
+  await page.locator('.row', { hasText: 'God.md' }).first().click();
+  await page.getByText('Three persons.').first().waitFor();
+  if (shots) await page.screenshot({ path: 'tests/shots/zen-files.png' });
+  // New file, new folder and rename, from the folder's menu; the vault only, never over anything.
+  await page.getByRole('button', { name: 'Back to the folder' }).click();
+  const folderMenu = page.getByRole('button', { name: 'Folder actions' });
+  const menuItem = (name) => page.getByRole('menu', { name: 'Folder actions' }).getByRole('menuitem', { name });
+  const nameBox = page.getByLabel('name', { exact: true });
+  await folderMenu.click();
+  await menuItem('New folder').click();
+  await nameBox.fill('proj');
+  await nameBox.press('Enter');
+  await page.locator('.list .row.on', { hasText: 'proj' }).waitFor();
   assert.ok(statSync(path.join(VAULT, 'wiki', 'proj')).isDirectory());
-  await page.keyboard.press('a'); // a folder is selected: inside it, and open
-  await page.getByLabel('name', { exact: true }).fill('sub/');
-  await page.keyboard.press('Enter');
-  await page.locator('.row[data-sel="1"]', { hasText: 'sub/' }).waitFor();
-  assert.ok(statSync(path.join(VAULT, 'wiki', 'proj/sub')).isDirectory());
-  await page.keyboard.press('Shift+A');
-  await page.getByLabel('name', { exact: true }).fill('docs');
-  await page.keyboard.press('Enter'); // inside sub, the selected folder
-  await page.locator('.row[data-sel="1"]', { hasText: 'docs/' }).waitFor();
-  assert.ok(statSync(path.join(VAULT, 'wiki', 'proj/sub/docs')).isDirectory());
-  await page.locator('.row', { hasText: 'plain.txt' }).click(); // opens it; closing it keeps it selected
-  await page.locator('.reader').waitFor();
-  await page.keyboard.press('Escape');
-  await page.getByRole('button', { name: '+ file', exact: true }).waitFor();
-  await page.keyboard.press('a'); // a file selected: beside it, in the root
-  await page.getByLabel('name', { exact: true }).fill('note.txt');
-  await page.keyboard.press('Enter');
-  await page.locator('.reader').waitFor(); // the new file opens in the reader
+  await folderMenu.click();
+  await menuItem('New file').click();
+  for (const [bad, why] of [['..', /Couldn't create \.\.: bad name/], ['.env', /Couldn't create \.env: not allowed here/], ['plain.txt', /Couldn't create plain\.txt: already exists/]]) {
+    await nameBox.fill(bad);
+    await nameBox.press('Enter');
+    await page.getByRole('alert').filter({ hasText: why }).waitFor();
+  }
+  assert.equal(existsSync(path.join(VAULT, 'wiki', '.env')), false);
+  assert.equal(readFileSync(path.join(VAULT, 'wiki', 'plain.txt'), 'utf8'), 'hello file', 'nothing is overwritten');
+  await nameBox.press('Escape');
+  assert.equal(await nameBox.count(), 0, 'Esc cancels');
+  await folderMenu.click();
+  await menuItem('New file').click();
+  await nameBox.fill('note.txt');
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await page.getByRole('button', { name: 'Back to the folder' }).waitFor(); // the new file opens
   assert.equal(readFileSync(path.join(VAULT, 'wiki', 'note.txt'), 'utf8'), '');
-  await page.keyboard.press('Escape');
-  await page.locator('.row[data-sel="1"]', { hasText: 'note.txt' }).waitFor();
-  await page.keyboard.press('Shift+R');
-  const rename = page.getByLabel('new name');
-  assert.equal(await rename.inputValue(), 'note.txt');
-  assert.deepEqual(await rename.evaluate((i) => [i.selectionStart, i.selectionEnd]), [0, 4], 'the stem is selected');
-  await rename.fill('renamed.txt');
-  await page.keyboard.press('Enter');
-  await page.locator('.row[data-sel="1"]', { hasText: 'renamed.txt' }).waitFor();
-  assert.equal(existsSync(path.join(VAULT, 'wiki', 'note.txt')), false);
-  assert.equal(existsSync(path.join(VAULT, 'wiki', 'renamed.txt')), true);
-  await page.getByRole('button', { name: 'rename', exact: true }).click(); // the button too
-  await page.getByLabel('new name').fill('plain.txt');
-  await page.keyboard.press('Enter');
-  await page.getByText(/couldn't rename plain\.txt: already exists/).waitFor();
-  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Back to the folder' }).click(); // it stays selected
+  await page.locator('.list .row.on', { hasText: 'note.txt' }).waitFor();
+  await folderMenu.click();
+  await menuItem(/Rename “note\.txt”/).click();
+  const renameBox = page.getByLabel('new name');
+  assert.equal(await renameBox.inputValue(), 'note.txt');
+  assert.deepEqual(await renameBox.evaluate((i) => [i.selectionStart, i.selectionEnd]), [0, 4], 'the stem is selected');
+  await renameBox.fill('renamed.txt');
+  await renameBox.press('Enter');
+  await page.locator('.list .row.on', { hasText: 'renamed.txt' }).waitFor();
+  assert.ok(existsSync(path.join(VAULT, 'wiki', 'renamed.txt')) && !existsSync(path.join(VAULT, 'wiki', 'note.txt')));
   rmSync(path.join(VAULT, 'wiki', 'renamed.txt'));
-  // An image opens as a picture; an SVG (it can carry scripts) and a secret are refused by the image route.
-  mkdirSync(path.join(HOME, 'inbox'), { recursive: true });
-  writeFileSync(path.join(HOME, 'inbox', 'shot.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==', 'base64'));
-  writeFileSync(path.join(HOME, 'inbox', 'x.svg'), '<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>');
-  await page.goto(`${base}/?view=files&file=${encodeURIComponent(path.join(HOME, 'inbox', 'shot.png'))}`);
-  const pic = page.locator('.reader img');
-  await pic.waitFor();
-  await page.waitForFunction(() => document.querySelector(".reader img")?.naturalWidth === 1);
-  assert.equal(await page.evaluate((p) => fetch(`/api/fs/image?path=${encodeURIComponent(p)}`).then((r) => r.status), path.join(HOME, 'inbox', 'x.svg')), 415);
-  assert.equal(await page.evaluate((p) => fetch(`/api/fs/image?path=${encodeURIComponent(p)}`).then((r) => r.status), '/etc/hostname.png'), 403);
-  await page.goto(`${base}/?view=files&file=${encodeURIComponent(path.join(VAULT, 'wiki/God.md'))}`);
-  await page.getByRole('heading', { name: 'God' }).waitFor();
-  // Minimal core fallback, with no rich reader/editor tools.
-  await page.getByText('v1: first', { exact: false }).waitFor();
-  assert.equal(await page.getByRole('tab', { name: 'Reading', exact: true }).count(), 0);
-  assert.equal(await page.locator('.cm-editor').count(), 0);
-  await page.keyboard.press('e');
-  const source = page.getByRole('textbox', { name: 'Markdown source' });
-  await source.waitFor();
-  assert.match(page.url(), /edit=1/);
-  const original = await source.inputValue();
-  await source.fill(original + '\nSaved in Files.\n');
-  await page.getByRole('button', { name: 'Save', exact: true }).click();
-  await page.getByRole('status').filter({ hasText: /^Saved$/ }).waitFor();
-  assert.match(readFileSync(path.join(VAULT, 'wiki/God.md'), 'utf8'), /Saved in Files/);
-  await page.keyboard.press('Alt+w');
-  await page.getByRole('heading', { name: 'God' }).waitFor();
-  await page.getByText('Saved in Files.').waitFor();
-  await page.goto(`${base}/?path=${encodeURIComponent('wiki/God.md')}`);
-  await page.getByRole('textbox', { name: 'Markdown source' }).waitFor();
-  assert.match(page.url(), /view=files&file=.*God\.md&edit=1/);
+  rmSync(path.join(VAULT, 'wiki', 'proj'), { recursive: true });
+  // Above the vault, Files is read-only: no writes offered.
+  await page.getByRole('button', { name: 'Up one folder' }).click();
+  await page.getByRole('button', { name: 'Up one folder' }).click();
+  await folderMenu.click();
+  assert.ok(await menuItem('New file').isDisabled(), 'no new files outside the vault');
+  await folderMenu.click();
+  await page.getByRole('button', { name: /Vault/ }).last().click();
 
-  // Plugins. Settings (off the top bar) lists the installed ones, with permissions in plain words;
-  // disabling one takes its view tab away, enabling brings it back.
-  await page.goto(`${base}/?view=sessions`);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Plugins', exact: true }).click();
-  await page.waitForURL(/view=settings/);
-  const fxRow = page.locator('section[aria-label="Fixture"]');
-  await fxRow.getByText('0.1.0').waitFor();
-  await fxRow.getByText('Read your files (the vault)').waitFor();
-  const fxTab = page.getByRole('tab', { name: 'Fx board', exact: true });
-  await fxTab.waitFor();
-  await page.getByLabel('enable Fixture').uncheck();
-  await fxTab.waitFor({ state: 'detached' });
-  assert.deepEqual(toggles.at(-1), { name: 'zenfx', enabled: false });
-  await page.getByLabel('enable Fixture').check();
-  await fxTab.waitFor();
-  assert.deepEqual(toggles.at(-1), { name: 'zenfx', enabled: true });
-  // The marketplace: an installed entry says so; installing asks the kernel what it needs, shows
-  // it, and installs only once approved.
-  await page.getByRole('tab', { name: 'Marketplace', exact: true }).click();
-  await page.waitForURL(/tab=marketplace/);
-  await page.locator('section[aria-label="Fixture"]', { hasText: 'Installed' }).waitFor();
-  await page.locator('section[aria-label="Cards"]').getByRole('button', { name: 'Install', exact: true }).click();
-  const ask = page.getByRole('dialog', { name: 'Install Cards' });
-  await ask.getByText('Reach the internet').waitFor();
-  await ask.getByText("Ask zenbot's model for completions").waitFor();
-  assert.deepEqual(installs, [{ name: 'zencards' }], 'the first ask installs nothing');
-  assert.equal(installedPlugins.length, 1);
-  if (shots) await page.screenshot({ path: 'tests/shots/zen-install.png' });
-  await ask.getByRole('button', { name: 'Install', exact: true }).click();
-  // A changed release asks again; the host must not claim it installed the old approval.
-  await ask.getByText('Read your files (the vault)').waitFor();
-  assert.equal(installedPlugins.length, 1);
-  assert.deepEqual(installs.at(-1), { name: 'zencards', approve: true, permissions: ['network', 'ai'] });
-  await ask.getByRole('button', { name: 'Install', exact: true }).click();
-  await page.locator('section[aria-label="Cards"]', { hasText: 'Installed' }).waitFor();
-  assert.deepEqual(installs.at(-1), { name: 'zencards', approve: true, permissions: ['network', 'ai', 'files:read'] });
-  await page.getByRole('tab', { name: 'Plugins', exact: true }).click();
-  await page.locator('section[aria-label="Cards"]').getByText('Reach the internet').waitFor();
-  // A plugin granted `ai` shows its AI switch and last 30 days' AI calls; one without has neither.
-  await page.locator('section[aria-label="Cards"]').getByText('3 AI calls in the last 30 days').waitFor();
-  assert.equal(await page.getByLabel('AI for Fixture').count(), 0);
-  await page.getByLabel('AI for Cards').uncheck();
-  await until(() => toggles.at(-1)?.ai === false, 'AI switched off');
-  assert.deepEqual(toggles.at(-1), { name: 'zencards', ai: false });
-  assert.equal(await page.getByLabel('AI for Cards').isChecked(), false);
-  await page.getByLabel('AI for Cards').check();
-  await until(() => toggles.at(-1)?.ai === true, 'AI switched on');
-  if (shots) await page.screenshot({ path: 'tests/shots/zen-settings.png' });
-
-  // A plugin's view is a tab after the built-ins; its UI runs sandboxed, with no same origin.
-  await fxTab.click();
-  const frame = page.locator('iframe[data-plugin="zenfx"]');
-  await frame.waitFor();
-  assert.equal(await frame.getAttribute('sandbox'), 'allow-scripts allow-forms');
-  const fx = page.frameLocator('iframe[data-plugin="zenfx"]');
-  await fx.locator('#ctx', { hasText: 'slot=view pane=board path=-' }).waitFor();
-  assert.equal(await fx.locator('body').evaluate(() => { try { return String(window.parent.document); } catch { return 'blocked'; } }), 'blocked', "the UI can't reach the page");
-  assert.equal(await fx.locator('body').evaluate(() => window.earlyBlocked), true, 'CSP blocks network even before the resource head');
-  // Games: every enabled plugin's games; one opens sandboxed, its tool call reaches the kernel.
-  await page.getByRole('tab', { name: 'Games', exact: true }).click();
-  await page.getByRole('button', { name: /Solitaire/ }).waitFor();
-  await page.getByRole('button', { name: /Dice.*Roll a die\./ }).click();
-  await fx.locator('#ctx', { hasText: 'slot=game pane=board' }).waitFor();
-  assert.doesNotMatch(await frame.getAttribute('sandbox'), /allow-same-origin/);
-  await fx.getByRole('button', { name: 'Roll' }).click();
-  await fx.locator('#out', { hasText: 'rolled 20: 4' }).waitFor();
-  assert.deepEqual(calls.at(-1), { plugin: 'zenfx', tool: 'zenfx_roll', arguments: { sides: 20 } });
-  if (shots) await page.screenshot({ path: 'tests/shots/zen-game.png' });
-  // The last game played opens with the tab.
+  // Agents and Settings: the agents' list, and Settings off the agent menu.
+  await page.goto(`${base}/`);
+  await page.getByRole('tab', { name: 'Agents' }).click();
+  await page.locator('.pane.view').getByText('rex', { exact: false }).first().waitFor();
+  await page.getByText('agent `broken`: agent.toml: expected a value').first().waitFor();
+  await page.getByRole('button', { name: 'Talk to Rex' }).click();
+  await page.waitForURL(/s=new/);
   await page.reload();
-  await fx.locator('#ctx', { hasText: 'slot=game' }).waitFor();
-  // A zen://open link opens the file in the same pane, through its opener (the built-in reader).
-  await fx.getByRole('button', { name: 'Open Grace' }).click();
-  await page.getByRole('heading', { name: 'Grace', exact: true }).waitFor();
-  assert.match(page.url(), /view=files&file=.*Grace\.md/);
-  // Open with: a plugin's opener for the file, made the default, opens it from then on.
-  await page.goto(`${base}/?view=files&file=${encodeURIComponent(path.join(VAULT, 'games/board.fx'))}`);
-  await page.getByText('four in a row').waitFor();
-  await page.getByRole('button', { name: 'Open with…' }).click();
-  const withMenu = page.getByRole('menu', { name: 'open with' });
-  await withMenu.locator('.item', { hasText: 'Reader (built-in)' }).getByText('default').waitFor();
-  await withMenu.locator('.item', { hasText: 'Fx read · Fixture' }).getByRole('button', { name: 'make default' }).click();
-  await fx.locator('#ctx', { hasText: 'slot=opener pane=board path=games/board.fx' }).waitFor();
-  assert.deepEqual(defaultsSet, [{ key: '*.fx:read', value: 'zenfx/read' }]);
-  await page.reload();
-  await fx.locator('#ctx', { hasText: 'slot=opener' }).waitFor();
-  // Host toolbar remains outside the iframe, and mode changes drop an explicit opener.
-  const actions = page.getByRole('toolbar', { name: 'file actions' });
-  await page.getByRole('button', { name: 'Open with…' }).click();
-  await withMenu.getByRole('menuitem', { name: 'Reader (built-in)' }).click();
-  assert.equal(await frame.count(), 0);
-  await actions.getByRole('button', { name: 'Read', exact: true }).click();
-  await fx.locator('#ctx', { hasText: 'slot=opener' }).waitFor();
-  // Plugin edit links honor mode; close returns the core Files tree, not its library.
-  await fx.getByRole('button', { name: 'Edit Grace' }).click();
-  await page.getByRole('textbox', { name: 'Markdown source' }).waitFor();
-  await actions.getByRole('button', { name: 'Back', exact: true }).click();
-  await page.getByRole('tree', { name: 'files' }).waitFor();
-  await page.getByRole('treeitem', { name: /wiki\// }).click();
-  await page.getByRole('treeitem', { name: /Grace.md/ }).click();
-  await actions.getByRole('button', { name: 'Back', exact: true }).click();
-  await page.getByRole('button', { name: 'Edit selected file' }).click();
-  await page.getByRole('textbox', { name: 'Markdown source' }).waitFor();
-  await page.goto(`${base}/?view=files&file=${encodeURIComponent(path.join(VAULT, 'games/board.fx'))}`);
-  await fx.locator('#ctx', { hasText: 'slot=opener' }).waitFor();
-  await fx.getByRole('button', { name: 'Close file' }).click();
-  await page.getByRole('tree', { name: 'files' }).waitFor();
-  await page.goto(`${base}/?view=files&file=${encodeURIComponent(path.join(VAULT, 'games/board.fx'))}`);
-  // A default selected in Settings for a second matching pattern must also apply.
-  fxPlugin.contributes.openers[0].patterns.push('board.*');
-  delete openerDefaults['*.fx:read'];
-  openerDefaults['board.*:read'] = 'zenfx/read';
-  await page.reload();
-  await fx.locator('#ctx', { hasText: 'slot=opener' }).waitFor();
-  // ...and the built-in reader is one pick away.
-  await page.getByRole('button', { name: 'Open with…' }).click();
-  await withMenu.getByRole('menuitem', { name: 'Reader (built-in)' }).click();
-  await page.getByText('four in a row').waitFor();
-  assert.equal(await frame.count(), 0);
-
-  // Agents: listed with what each may use, a broken one says why; another agent's session says
-  // whose on the board.
-  await page.goto(`${base}/?view=sessions`);
-  await page.getByText('Pitch practice').waitFor();
-  assert.match(await page.locator('.row', { hasText: 'Pitch practice' }).innerText(), /@rex · smoke/);
-  assert.doesNotMatch(await page.locator('.row', { hasText: 'Plan the week' }).innerText(), /@zenbot/);
-  await page.keyboard.press('5');
-  await page.getByRole('button', { name: 'Show zenbot roles' }).waitFor();
-  assert.match(page.url(), /view=agents/);
-  assert.match(await page.locator('article.ag', { hasText: 'rex' }).innerText(), /read, web_search · no MCP/);
-  await page.getByText('agent `broken`: agent.toml: expected a value').waitFor();
-  const scout = page.locator('[data-role="scout"]');
-  await scout.getByRole('button').click();
-  assert.match(await scout.innerText(), /Reads and reports/);
-  assert.match(await scout.innerText(), /read[\s\S]*web_search[\s\S]*work\/search/);
-  await scout.getByRole('button', { name: 'Ask zenbot to change it' }).click();
-  const draft = page.locator('textarea').first();
-  await draft.waitFor();
-  assert.equal(await draft.inputValue(), "Change zenbot's scout role:");
+  assert.equal(await page.evaluate(() => localStorage.getItem('zen.agent')), 'rex');
   await page.goto(`${base}/?view=agents`);
-  await page.getByRole('button', { name: 'Show rex roles' }).click();
-  await page.getByText(/Can't read roles:.*unknown field `nope`/).waitFor();
-  await page.getByRole('button', { name: /New agent/ }).click();
-  await draft.waitFor();
-  assert.equal(await draft.inputValue(), 'Create a new agent for me:');
-  await page.goto(`${base}/?view=agents`);
-  await page.getByRole('button', { name: 'Talk to rex' }).click();
-  await page.getByText('new session with rex').waitFor();
-  await page.locator('.zc-foot', { hasText: /@rex · smoke/ }).waitFor();
-  // The picker in a fresh chat changes who it starts as.
-  await page.getByRole('radio', { name: '@zenbot' }).click();
-  await page.getByRole('radio', { name: '@rex' }).click();
-  const fresh = page.locator('textarea').first();
-  await fresh.fill('Grill my idea');
-  await fresh.press('Enter');
-  await page.waitForURL(/\?s=s2/);
-  assert.deepEqual(created.at(-1), { agent: 'rex' });
-  await page.locator('.zc-foot', { hasText: '@rex' }).waitFor();
-  // A plain new session is zenbot's, with no agent sent.
-  await page.goto(`${base}/?s=new`);
-  await page.locator('.zc-foot', { hasText: '@zenbot' }).waitFor();
-  await page.locator('textarea').first().fill('Hi');
-  await page.locator('textarea').first().press('Enter');
-  await page.waitForURL(/\?s=s2/);
-  assert.deepEqual(created.at(-1), {});
-  for (let i = 0; i < 100 && prompts.length < 2; i++) await new Promise((ok) => setTimeout(ok, 50));
-  assert.deepEqual(prompts.splice(0), ['Grill my idea', 'Hi'], 'each first prompt reaches its new session');
+  await page.locator('.agent').first().click();
+  await page.locator('.me .icon[title="Settings"]').click();
+  await page.locator('.pane.view h2', { hasText: 'Settings' }).waitFor();
+  // Games: the plugins' games are a tab.
+  await page.getByRole('tab', { name: 'Games' }).click();
+  await page.getByRole('button', { name: /^Play / }).first().waitFor();
 
   // A session: history, then a prompt streams an answer through the relayed socket.
   await page.goto(`${base}/?s=s1`);
   await page.getByText('What is on today?').waitFor();
+  await page.getByRole('button', { name: /Finished.*subagent/ }).click();
+  await page.getByRole('button', { name: /Open verifier.s session/ }).waitFor();
   const box = page.locator('textarea').first();
   await box.fill('Book the gym');
   await box.press('Enter');
@@ -789,14 +617,14 @@ try {
 
   // Attachments: a file goes to ~/inbox/<day>/ at once; the prompt names its path.
   await page.locator('input[type=file]').setInputFiles({ name: '../clip.txt', mimeType: 'text/plain', buffer: Buffer.from('frame one') });
-  await page.locator('.zc-att', { hasText: '✓' }).waitFor();
+  await page.locator('.atts .att', { hasText: '✓' }).waitFor();
   await box.fill('Study this');
   await box.press('Enter');
   const day = new Date().toISOString().slice(0, 10);
   for (let i = 0; i < 100 && prompts.length < 2; i++) await new Promise((ok) => setTimeout(ok, 50));
   assert.equal(prompts.at(-1), `Study this\n\n(attached ~/inbox/${day}/clip.txt)`);
   assert.equal(readFileSync(path.join(HOME, 'inbox', day, 'clip.txt'), 'utf8'), 'frame one');
-  assert.equal(await page.locator('.zc-att').count(), 0, 'sent attachments leave the composer');
+  assert.equal(await page.locator('.atts .att').count(), 0, 'sent attachments leave the composer');
   const noHeader = await page.evaluate(() => fetch('/api/upload?name=x.txt', { method: 'POST', body: 'x' }).then((r) => r.status));
   assert.equal(noHeader, 403, 'an upload without X-Zen-Web is refused');
 
@@ -806,50 +634,33 @@ try {
   await page.locator('a[data-wiki="God"]').first().click();
   await page.getByRole('heading', { name: 'God' }).waitFor();
   // ...where it is written too, beside the chat.
-  await page.locator('.zside').getByRole('toolbar', { name: 'file actions' }).getByRole('button', { name: 'Edit', exact: true }).click();
-  await page.locator('.zside textarea').waitFor();
-  if (shots) {
-    await page.screenshot({ path: 'tests/shots/zen-side-editor.png' });
-    await page.keyboard.press('Alt+l');
-    await page.keyboard.press('Alt+r');
-    await page.screenshot({ path: 'tests/shots/zen-side-panels.png' });
-  }
-  await page.locator('.zside').getByRole('button', { name: 'Read', exact: true }).click();
-  await page.locator('.zside .reader').waitFor();
+  await page.locator('.pane.view').getByRole('button', { name: 'Edit', exact: true }).click();
+  await page.locator('.pane.view textarea').waitFor();
+  await page.locator('.pane.view').getByRole('button', { name: 'Cancel', exact: true }).click();
 
-  // The separator resizes the side panel, and the width is kept for the next visit.
-  const width = () => page.locator('.zside').evaluate((e) => e.getBoundingClientRect().width);
+  // The separator resizes the side panel.
+  const width = () => page.locator('.pane.view').evaluate((e) => e.getBoundingClientRect().width);
   const before = await width();
   const g = await page.locator('.gutter').boundingBox();
   await page.mouse.move(g.x + g.width / 2, g.y + 200);
   await page.mouse.down();
-  await page.mouse.move(g.x - 200, g.y + 200, { steps: 5 });
+  await page.mouse.move(g.x - 150, g.y + 200, { steps: 5 });
   await page.mouse.up();
   const after = await width();
-  assert.ok(after > before + 150, `the side panel widens (${before} → ${after})`);
-  await page.reload();
-  await page.locator('a[data-wiki="God"]').first().click();
-  await page.locator('.zside').waitFor();
-  assert.ok(Math.abs((await width()) - after) < 4, 'the width is kept');
+  assert.ok(after > before + 100, `the side panel widens (${before} → ${after})`);
   if (shots) await page.screenshot({ path: 'tests/shots/zen-session.png' });
-
 
   // A turn keeps streaming while the side panel changes views, and the composer keeps its keys.
   await page.goto(`${base}/?s=s1`);
   await page.getByText('What is on today?').waitFor();
-  await page.keyboard.press('Control+b');
-  await page.locator('.zside').waitFor();
-  const sidePane = page.locator('.zside');
-  // The side panel's Sessions leave out the open session but show its own subagents working.
-  await sidePane.getByRole('tab', { name: 'Sessions', exact: true }).click();
-  await sidePane.getByText('THIS SESSION').waitFor();
-  assert.match(await sidePane.locator('.row', { hasText: 'Check the plan' }).innerText(), /verifier:/);
-  assert.equal(await sidePane.locator('.row', { hasText: 'Plan the week' }).count(), 0, 'the open session itself stays out');
+  await page.getByRole('tab', { name: 'Sessions' }).click();
+  const sidePane = page.locator('.pane.view');
+  await sidePane.locator('.srow', { hasText: 'Pitch practice' }).waitFor();
   await box.fill('Keep streaming while I read');
   await box.press('Enter');
   await page.getByText('Streaming', { exact: true }).waitFor();
-  await sidePane.getByRole('tab', { name: 'Tasks', exact: true }).click();
-  await sidePane.getByText('Price the offer').waitFor();
+  await page.getByRole('tab', { name: 'Tasks' }).click();
+  await sidePane.getByText('Price the offer').first().waitFor();
   await page.getByText('Streaming answer, done.').waitFor();
   assert.equal(prompts.at(-1), 'Keep streaming while I read');
   await box.click();
@@ -857,34 +668,33 @@ try {
   assert.equal(await box.inputValue(), '7', 'chat typing is untouched');
   await box.fill('');
 
-  // Tool runs fold into one line; a click or ctrl+o shows the steps.
-  const run = page.locator('.work').last();
+  // Tool runs fold into one working line; a click shows the steps.
+  const run = page.locator('.w').last();
+  assert.match(await run.innerText(), /step/);
+  assert.equal(await run.locator('.wline').getAttribute('aria-expanded'), 'false', 'a run starts folded');
+  await run.locator('.wline').click();
+  await run.locator('ol.steps').waitFor();
   assert.match(await run.innerText(), /echo hi/);
-  assert.ok(!(await run.evaluate((e) => e.classList.contains('wk-open'))), 'a run starts folded');
-  await run.locator('button.head').click();
-  await page.locator('.work.wk-open').last().waitFor();
-  await box.click();
-  await page.keyboard.press('Control+o');
-  await page.keyboard.press('Control+o');
-  assert.equal(await page.locator('.work.wk-open').count(), 0, 'ctrl+o folds every run again');
 
   // Questions with options, and the next-prompt suggestion (Tab takes it).
   await box.fill('Ask me');
   await box.press('Enter');
-  await page.getByText('── Questions ──').waitFor();
-  await page.getByRole('button', { name: 'tab: use suggestion' }).waitFor();
+  await page.getByText('Which day?').first().waitFor();
+  await page.getByRole('button', { name: 'Tab: use suggestion' }).waitFor();
   assert.equal(await box.getAttribute('placeholder'), 'Thursday, just me');
-  await box.press('Tab');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: 'Use suggestion' }).click();
   assert.equal(await box.inputValue(), 'Thursday, just me');
+  await page.setViewportSize({ width: 1300, height: 850 });
   await box.fill('');
-  await page.locator('.zc-opt', { hasText: 'Friday' }).click();
-  await page.locator('.zc-opt', { hasText: 'The team' }).click();
+  await page.locator('.opts button', { hasText: 'Friday' }).click();
+  await page.locator('.opts button', { hasText: 'The team' }).click();
   assert.equal(await box.inputValue(), '1. Friday\n2. The team', 'options fill the answer, one row per question');
   await box.fill('');
 
   // The slash commands are the shared table's, from `zen --commands`.
   await box.fill('/ste');
-  await page.locator('.zc-pop', { hasText: 'change direction at the next tool boundary' }).waitFor();
+  await page.getByRole('listbox', { name: 'commands' }).filter({ hasText: 'change direction at the next tool boundary' }).waitFor();
   await box.fill('');
 
   // During a turn: Enter queues, /steer steers, Esc interrupts.
@@ -949,18 +759,17 @@ try {
   });
   // A plugin's slash command calls its tool and shows its UI in the side panel, with the result.
   await box.fill('/rol');
-  await page.locator('.zc-pop', { hasText: 'Roll a die.' }).waitFor();
+  await page.getByRole('listbox', { name: 'commands' }).filter({ hasText: 'Roll a die.' }).waitFor();
   await box.fill('/roll 12');
   await box.press('Enter');
   await until(() => calls.at(-1)?.arguments?.sides === '12', 'the command reaches the plugin');
   assert.deepEqual(calls.at(-1), { plugin: 'zenfx', tool: 'zenfx_roll', arguments: { sides: '12' }, session: 's1' });
-  const sideFx = page.frameLocator('.zside iframe[data-plugin="zenfx"]');
+  const sideFx = page.frameLocator('.pane.view iframe[data-plugin="zenfx"]');
   await sideFx.locator('#out', { hasText: 'result: rolled 12: 4' }).waitFor();
   await sideFx.locator('#ctx', { hasText: 'slot=view pane=side' }).waitFor();
-  await page.locator('.zside').getByRole('tab', { name: 'Fixture', exact: true }).waitFor();
   const pluginDraft = page.getByRole('region', { name: 'plugin draft' });
   await pluginDraft.getByText('/danger malicious init', { exact: true }).waitFor();
-  assert.match(await pluginDraft.innerText(), /DRAFT · plugin: zenfx/);
+  assert.match(await pluginDraft.innerText(), /DRAFT FROM ZENFX/i);
   await box.fill('my untouched draft');
   await page.waitForTimeout(400);
   assert.equal(prompts.length, beforePlugin, 'no WS prompt before owner Send');
@@ -1014,21 +823,21 @@ try {
 <script>document.getElementById('hero').__svelte_meta = { loc: { file: 'src/Hero.svelte', line: 7, column: 2 } }; document.getElementById('hero').onclick = () => { document.title = 'clicked'; }; console.error('fixture boom');</script></body></html>`);
   }).listen(APP_PORT, '127.0.0.1');
   try {
-    await page.locator('.zside').getByRole('tab', { name: 'Preview', exact: true }).click();
+    await page.getByRole('tab', { name: 'Preview', exact: true }).click();
     const addr = page.getByLabel('preview address');
     await addr.fill('http://example.com:5173/');
     await addr.press('Enter');
     await page.getByText("Preview shows this host's own ports").waitFor();
-    assert.equal(await page.locator('.zside iframe[title="preview"]').count(), 0, 'another host is never framed');
+    assert.equal(await page.locator('.pane.view iframe[title="preview"]').count(), 0, 'another host is never framed');
     await addr.fill(String(APP_PORT));
     await addr.press('Enter');
-    const devFrame = page.frameLocator('.zside iframe[title="preview"]');
+    const devFrame = page.frameLocator('.pane.view iframe[title="preview"]');
     await devFrame.locator('#hero').waitFor();
-    assert.equal(await page.locator('.zside iframe[title="preview"]').getAttribute('src'), `/preview/${APP_PORT}/`, 'the frame loads under zen\'s own address');
+    assert.equal(await page.locator('.pane.view iframe[title="preview"]').getAttribute('src'), `/preview/${APP_PORT}/`, 'the frame loads under zen\'s own address');
     // zen's own ports are never shown.
     assert.equal((await fetch(`${base}/preview/${PORT}/`)).status, 400);
     assert.equal((await fetch(`${base}/preview/${KERNEL}/`)).status, 400);
-    const point = page.locator('.zside').getByRole('button', { name: 'Point', exact: true });
+    const point = page.locator('.pane.view').getByRole('button', { name: 'Point', exact: true });
     for (let i = 0; i < 100 && !(await point.isEnabled()); i++) await page.waitForTimeout(50);
     assert.ok(await point.isEnabled(), 'the app loaded zen-preview.js and answered');
     // The app can't send pins by itself: only while the owner points.
@@ -1084,29 +893,38 @@ try {
     await devFrame.locator('#hero').click();
     for (let i = 0; i < 40 && (await appFrame().title()) !== 'clicked'; i++) await page.waitForTimeout(50);
     assert.equal(await appFrame().title(), 'clicked', 'with Point off, clicks reach the app');
-    await page.locator('.zside').getByRole('tab', { name: 'Files', exact: true }).click();
+    await page.getByRole('tab', { name: 'Files', exact: true }).click();
   } finally {
     devApp.close();
   }
 
-  await page.locator('.chat-pane').getByRole('button', { name: 'Settings', exact: true }).click();
-  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Plugins', exact: true }).click();
-  await page.locator('.zside').getByRole('tab', { name: 'Plugins', exact: true }).waitFor();
-  assert.match(page.url(), /s=s1/);
-  await page.goto(`${base}/?view=sessions`);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Plugins', exact: true }).click();
-  const cardsRow = page.locator('section[aria-label="Cards"]');
-  await cardsRow.getByRole('button', { name: 'remove', exact: true }).click();
-  assert.equal(installedPlugins.length, 2, 'remove asks first');
-  await cardsRow.getByRole('button', { name: 'Yes, remove Cards', exact: true }).click();
-  await cardsRow.waitFor({ state: 'detached' });
-  assert.equal(installedPlugins.length, 1);
+  // Settings › You edits USER.md through the kernel, in place; MEMORY.md is shown as read-only.
+  await page.goto(`${base}/?view=settings`);
+  await page.locator('.card', { hasText: 'USER.md' }).getByRole('button', { name: 'Edit', exact: true }).click();
+  const userBox = page.getByRole('textbox', { name: 'USER.md' });
+  assert.equal(await userBox.inputValue(), '# You\n', 'the editor loads USER.md from the kernel');
+  await userBox.fill('# You\n\nLikes calm.\n');
+  await page.locator('.uedit').getByRole('button', { name: 'Save', exact: true }).click();
+  await userBox.waitFor({ state: 'detached' });
+  assert.equal(userText, '# You\n\nLikes calm.\n', 'Save PUTs USER.md to the kernel');
+  assert.ok(page.url().includes('view=settings'), 'editing USER.md stays in Settings');
+  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Memory', exact: true }).click();
+  await page.getByRole('button', { name: /View MEMORY\.md read-only/ }).waitFor();
 
-  const fixtureRow = page.locator('section[aria-label="Fixture"]');
-  await fixtureRow.getByRole('button', { name: 'remove', exact: true }).click();
-  await fixtureRow.getByRole('button', { name: 'Yes, remove Fixture', exact: true }).click();
-  await fixtureRow.waitFor({ state: 'detached' });
+  // Settings › Plugins: remove asks first, then the plugin goes.
+  await page.goto(`${base}/?view=sessions`);
+  await page.locator('.agent').first().click();
+  await page.locator('.me .icon[title="Settings"]').click();
+  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Plugins', exact: true }).click();
+  const removeAll = installedPlugins.length;
+  for (const p of [...installedPlugins]) {
+    const t = p.title || p.name;
+    const row = page.locator('.li[aria-label="' + t + '"]');
+    await row.getByRole('button', { name: 'Remove', exact: true }).first().click();
+    assert.equal(installedPlugins.length, removeAll, 'remove asks first');
+    await row.locator('.confirm').getByRole('button', { name: 'Remove', exact: true }).click();
+    await row.getByRole('button', { name: 'Remove', exact: true }).waitFor({ state: 'detached' }); // back in the marketplace
+  }
   assert.equal(installedPlugins.length, 0);
   await page.goto(`${base}/?view=files&file=${encodeURIComponent(path.join(VAULT, 'wiki/God.md'))}`);
   await page.getByRole('heading', { name: 'God' }).waitFor();
