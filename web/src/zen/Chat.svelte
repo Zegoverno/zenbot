@@ -92,7 +92,7 @@
   let retries = 0;
   let alive = true;
   let upgrading = false;
-  let mcpFlow: { server: string; flow: string } | null = null;
+  let mcpFlow = $state<{ server: string; flow: string } | null>(null);
 
   // ---- the header's menus ----
   let details = $state(false);

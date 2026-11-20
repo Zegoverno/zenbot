@@ -381,24 +381,20 @@
   .seg button { padding: 4px 12px; border-radius: 99px; font-size: 13px; color: var(--dim); }
   .seg button.on { background: var(--paper); color: var(--ink); font-weight: 600; box-shadow: 0 1px 3px var(--shadow); }
   .dd { appearance: none; font: inherit; font-size: 13.5px; color: var(--ink); background: var(--paper) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M7 10l5 5 5-5'/%3E%3C/svg%3E") no-repeat right 8px center / 14px; border: 1px solid var(--faint); border-radius: 9px; padding: 6px 30px 6px 10px; justify-self: start; min-width: 14rem; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
   .card { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--faint); border-radius: 14px; background: var(--paper); }
   .card.big { align-items: flex-start; }
   .cm { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .cm b { font-size: 14px; font-weight: 600; }
   .cm b small { font-weight: 400; color: var(--dim); font-size: 12px; margin-left: 4px; }
   .cm > span { font-size: 12.5px; color: var(--dim); }
-  .cm em { color: var(--bad, #b5543c); font-style: normal; font-weight: 600; }
   .rows { border: 1px solid var(--faint); border-radius: 14px; background: var(--paper); overflow: hidden; }
   .li { display: flex; align-items: center; gap: 12px; padding: 11px 14px; width: 100%; text-align: left; }
   .li + .li { border-top: 1px solid var(--faint); }
   .li.off .cm { opacity: 0.55; }
   .li.add:hover { background: var(--soft); }
   .li.add .plus { width: 10px; color: var(--accent); font-size: 18px; text-align: center; }
-  .dimlist .cm { opacity: 0.8; }
   .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--faint); }
   .dot.ok { background: var(--accent); }
-  .dot.silent { background: color-mix(in srgb, var(--accent) 45%, var(--faint)); }
   .dot.error { background: var(--bad, #b5543c); }
   .tag { font-size: 12px; font-weight: 600; color: var(--accent); }
   .perms { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
@@ -412,15 +408,12 @@
   .sw i { position: absolute; top: 2.5px; left: 2.5px; width: 16px; height: 16px; border-radius: 50%; background: var(--paper); box-shadow: 0 1px 2px var(--shadow); transition: transform 0.15s; }
   .sw.on { background: var(--accent); }
   .sw.on i { transform: translateX(15px); }
-  .more { align-self: flex-start; font-size: 13px; color: var(--dim); }
-  .more:hover { color: var(--ink); }
   .meter { height: 8px; border-radius: 99px; background: var(--soft); overflow: hidden; }
   .meter div { height: 100%; background: var(--accent); border-radius: 99px; }
   .mrow { display: flex; align-items: baseline; gap: 10px; font-size: 13.5px; flex-wrap: wrap; }
   .sp { flex: 1; }
   .acts { display: flex; gap: 8px; }
   code { font-size: 12px; background: var(--soft); padding: 1px 5px; border-radius: 5px; }
-  .dot.none { background: var(--faint); }
   .err { color: var(--err); }
   .key { font: inherit; font-size: 13px; padding: 4px 10px; border: 1px solid var(--faint); border-radius: 9px; background: var(--paper); color: var(--ink); width: 12rem; }
   .aisw { font-size: 11.5px; padding: 1px 8px; border-radius: 99px; border: 1px solid var(--faint); color: var(--accent); }

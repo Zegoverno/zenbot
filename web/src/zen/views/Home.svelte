@@ -290,11 +290,8 @@
   .t { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .d { font-size: 12.5px; color: var(--dim); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .when { font-size: 12px; color: var(--dim); white-space: nowrap; margin-left: auto; }
-  .task input { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; }
-  .task.done .t { text-decoration: line-through; color: var(--dim); }
 
   .orb { width: 12px; height: 12px; border-radius: 50%; flex: none; background: radial-gradient(circle at 32% 28%, #8fb39f, #4f7d67 70%); }
-  .orb.g { background: radial-gradient(circle at 32% 28%, #b3a3cf, #7a6a9b 70%); }
   .orb.busy { animation: breathe 1.8s ease-in-out infinite; }
   @keyframes breathe { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, #4f7d67 18%, transparent); } }
 

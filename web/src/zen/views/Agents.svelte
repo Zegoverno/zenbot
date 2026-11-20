@@ -138,8 +138,6 @@
   .pill.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
   .pill.sel2 { border-color: var(--ink); }
   .seg { display: flex; background: var(--soft); border-radius: 99px; padding: 2px; }
-  .seg button { padding: 3px 11px; border-radius: 99px; font-size: 12.5px; color: var(--dim); }
-  .seg button.on { background: var(--paper); color: var(--ink); font-weight: 600; box-shadow: 0 1px 3px var(--shadow); }
   .rlist { border: 1px solid var(--faint); border-radius: 16px; overflow: hidden; background: var(--paper); }
   .role + .role { border-top: 1px solid var(--faint); }
   .rh { width: 100%; display: grid; grid-template-columns: 110px 1fr auto 56px; align-items: center; gap: 12px; padding: 11px 14px; text-align: left; }

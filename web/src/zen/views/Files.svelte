@@ -582,10 +582,8 @@
   .fc { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; padding: 3px 10px; border-radius: 99px; border: 1px solid var(--faint); background: var(--paper); }
   .fc:hover { border-color: var(--dim); }
   .fc.tag { color: var(--accent); }
-  .fc small { font-size: 11px; color: var(--dim); }
   .fc em { font-style: normal; opacity: 0.75; margin-right: 2px; }
   .fc.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
-  .fc.on small { color: inherit; opacity: 0.8; }
   .clr { align-self: flex-start; font-size: 13px; color: var(--accent); font-weight: 600; padding: 2px 4px; }
   .mode { font-size: 12px; color: var(--dim); }
   .rc { font-size: 12px; color: var(--dim); padding: 4px 12px 2px; }
