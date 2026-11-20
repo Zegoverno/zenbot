@@ -9,7 +9,7 @@
   // changes; Ask zenbot puts it in a chat. Above the vault it's read-only. (The redesign mock's
   // Files, on the web server's /api/fs.)
   import { onMount, tick, untrack } from 'svelte';
-  import { files, type Entry, type FileRead } from '../api.ts';
+  import { files, zen, type Entry, type FileRead, type SearchHit } from '../api.ts';
   import { api, Conflict } from '../../lib/api.ts';
   import { render } from '../md.ts';
   import { app } from '../app.svelte.ts';
@@ -102,21 +102,50 @@
     return [{ label: '/', path: '/' }, ...ps.map((x, i) => ({ label: x, path: '/' + ps.slice(0, i + 1).join('/') }))];
   }
 
-  /** Search: names under the current folder (the server's bounded find), with where they are; or the notes the filters pick. */
-  let hits = $state<{ path: string; node: FsNode }[]>([]);
+  /** Search: names under the current folder (the server's bounded find), with where they are, at
+   * once; then, after a pause (3+ characters) or Enter, the kernel's search of the vault's notes
+   * (words and meaning) with a snippet each, after the names, each file once. Or the notes the
+   * filters pick. */
+  type Hit = { path: string; node: FsNode; snippet?: string };
+  let hits = $state<Hit[]>([]);
+  let noteHits = $state<SearchHit[]>([]);
+  let noteBusy = $state(false);
+  let noteErr = $state('');
   let findTimer: ReturnType<typeof setTimeout> | undefined;
+  let noteTimer: ReturnType<typeof setTimeout> | undefined;
+  let noteSeq = 0;
   $effect(() => {
     const t = q.trim(), p = cwd;
-    clearTimeout(findTimer);
-    if (!t) { hits = []; return; }
+    clearTimeout(findTimer); clearTimeout(noteTimer);
+    if (!t) { hits = []; noteSeq++; noteHits = []; noteBusy = false; noteErr = ''; return; }
     findTimer = setTimeout(() => {
       files.find(p, t).then((r) => { if (q.trim() === t && cwd === p) hits = r.results.map((x) => ({ path: x.path, node: { name: x.name, kids: x.dir ? [] : undefined, dir: x.dir } })); }).catch(() => (hits = []));
     }, 180);
+    if (t.length >= 3) noteTimer = setTimeout(() => untrack(() => void searchNotes(t)), 600);
+    else { noteSeq++; noteHits = []; noteBusy = false; noteErr = ''; }
   });
-  const found = $derived.by(() => {
+  async function searchNotes(t: string) {
+    const s = ++noteSeq;
+    noteBusy = true; noteErr = '';
+    try { const r = await zen.search(t, 'notes', 10); if (s === noteSeq) noteHits = r.results; }
+    catch (e) { if (s === noteSeq) { noteHits = []; noteErr = (e as Error).message; } }
+    finally { if (s === noteSeq) noteBusy = false; }
+  }
+  /** Enter in the search: the kernel's search now, without the pause. */
+  function searchNow() { const t = q.trim(); if (!t) return; clearTimeout(noteTimer); void searchNotes(t); }
+  const found = $derived.by((): Hit[] => {
     const t = q.trim().toLowerCase();
     if (!t && !active) return [];
-    if (!active) return hits.slice(0, 40);
+    if (!active) {
+      const out: Hit[] = hits.slice(0, 40);
+      const seen = new Set(out.map((h) => h.path));
+      for (const h of noteHits) {
+        if (!h.path || seen.has(h.path)) continue;
+        seen.add(h.path);
+        out.push({ path: h.path, node: { name: h.path.split('/').pop()! }, snippet: h.snippet });
+      }
+      return out;
+    }
     return notes.filter((n) => matches(n.path) && (!t || n.path.split('/').pop()!.toLowerCase().includes(t)))
       .map((n) => ({ path: n.path, node: { name: n.path.split('/').pop()! } as FsNode })).slice(0, 40);
   });
@@ -316,7 +345,7 @@
     if (f && editing) u.searchParams.set('edit', '1'); else u.searchParams.delete('edit');
     if (u.href !== location.href) history.replaceState(null, '', u);
   });
-  onMount(() => () => clearTimeout(findTimer));
+  onMount(() => () => { clearTimeout(findTimer); clearTimeout(noteTimer); });
   const count = (n: FsNode) => { const c = n.kids?.length ?? 0; return c === 0 ? '' : `${c} item${c === 1 ? '' : 's'}`; };
   const kind = (n: FsNode) => (n.kids ? 'dir' : /\.(png|jpe?g|gif|webp|avif|bmp)$/i.test(n.name) ? 'img' : /\.md$/i.test(n.name) ? 'note' : 'file');
   const ICON: Record<string, string> = {
@@ -433,7 +462,7 @@
     </div>
   </div>
 {:else}
-<div class="fsearch">{@render ic('search')}<input placeholder={`Search in ${crumbs[crumbs.length - 1].label === '/' ? 'everything' : crumbs[crumbs.length - 1].label}`} bind:value={q} />
+<div class="fsearch">{@render ic('search')}<input placeholder={`Search in ${crumbs[crumbs.length - 1].label === '/' ? 'everything' : crumbs[crumbs.length - 1].label}`} bind:value={q} aria-label="Search files and notes" onkeydown={(e) => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); searchNow(); } else if (e.key === 'Escape' && q) { e.preventDefault(); e.stopPropagation(); q = ''; } }} />
   <button class="fb" class:on={fltOpen || active > 0} aria-expanded={fltOpen} title="Filter by properties" onclick={() => (fltOpen = !fltOpen)}>{@render ic('filter')}<span class="hl">Filter</span>{#if active}<b>{active}</b>{/if}</button>
 </div>
 {#if fltOpen}
@@ -491,12 +520,14 @@
       {@const pr = active ? propsOf(r.path) : {}}
       <button class="row" class:on={sel === r.path} onclick={() => openNode(r.path, r.node)}>
         <span class="k {kind(r.node)}">{@render ic(kind(r.node))}</span>
-        <span class="nm"><span>{r.node.name.replace(/\.md$/, '')}</span><small>{shortPath(parent(r.path))}</small></span>
+        <span class="nm"><span>{r.node.name.replace(/\.md$/, '')}</span><small>{shortPath(parent(r.path))}</small>{#if r.snippet}<small class="snip">{r.snippet}</small>{/if}</span>
         {#if active}<span class="pc">{#if pr.status}<span class="chip">{pr.status[0]}</span>{/if}{#each (pr.tags ?? []).slice(0, 2) as t}<span class="chip tag">#{t}</span>{/each}</span>{/if}
       </button>
     {:else}
-      <div class="none">{q.trim() ? `Nothing called “${q.trim()}”` : 'No notes'}{active ? ' with these filters' : ''} here.</div>
+      {#if !noteBusy || active}<div class="none">{q.trim() ? `Nothing called “${q.trim()}”` : 'No notes'}{active ? ' with these filters' : ''} here.</div>{/if}
     {/each}
+    {#if !active && noteBusy}<div class="rc" role="status">Searching your notes…</div>{/if}
+    {#if !active && noteErr}<div class="rc" role="alert">Couldn't search your notes: {noteErr}</div>{/if}
   {:else}
     {#each entries as n (n.name)}
       {@const p = join(cwd, n.name)}
@@ -549,6 +580,7 @@
   .nm { flex: 1; min-width: 0; display: flex; flex-direction: column; }
   .nm > span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .nm small { font-size: 12px; color: var(--dim); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .nm small.snip { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.4; }
   .when { font-size: 12px; color: var(--dim); white-space: nowrap; }
   @media (max-width: 900px) { .fb .hl { display: none; } .pc { display: none; } .fk { width: 100%; } .home { padding: 6px; } .home .hl { display: none; } .bl small { display: none; } .rscroll { padding: 16px 16px 120px; } }
   .fb { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; margin: -3px -6px -3px 0; border-radius: 99px; font-size: 13px; color: var(--dim); }

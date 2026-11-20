@@ -492,6 +492,29 @@ try {
   for (let k = 0; k < 20 && !(await upBtn.isDisabled()); k++) await upBtn.click();
   assert.ok(await upBtn.isDisabled(), 'climbs all the way to /');
   await page.getByRole('button', { name: /Vault/ }).last().click();
+  // Search: names under the folder at once; the kernel's search of the notes (words and meaning)
+  // after a pause with 3+ characters, or Enter, with a snippet each, after the names.
+  const fsearch = page.getByLabel('Search files and notes');
+  await fsearch.fill('at');
+  await page.locator('.list .row', { hasText: 'Atlas' }).waitFor();
+  assert.equal(await page.locator('.list .row', { hasText: 'Grace' }).count(), 0, 'only names that match');
+  await new Promise((r) => setTimeout(r, 900));
+  assert.deepEqual(searches, [], 'under 3 characters only names are searched');
+  await fsearch.fill('atl');
+  await until(() => searches.length === 1, 'a pause asks the kernel');
+  assert.deepEqual(searches[0], { query: 'atl', scope: 'notes', limit: 10 });
+  await fsearch.fill('gift');
+  const graceHit = page.locator('.list .row', { hasText: 'Grace' });
+  await graceHit.waitFor();
+  assert.match(await graceHit.innerText(), /A gift, given freely\./, 'a note hit shows its snippet');
+  assert.equal(await page.locator('.list .row', { hasText: 'Atlas' }).count(), 1, 'each file once');
+  const asked = searches.length;
+  await fsearch.press('Enter');
+  await until(() => searches.length === asked + 1, 'Enter asks the kernel at once');
+  await graceHit.click();
+  await page.getByText('A gift.').first().waitFor();
+  await page.getByRole('button', { name: 'Back to the folder' }).click();
+  await page.getByRole('button', { name: /Vault/ }).last().click().catch(() => {});
   await page.locator('.row', { hasText: 'wiki' }).first().click();
   await page.locator('.row', { hasText: 'God.md' }).first().click();
   await page.getByText('Three persons.').first().waitFor();
