@@ -15,12 +15,12 @@ backlinks, fallback editor drafts/leave guard, and MCP host theme/dimensions/tas
 Plugin releases: zenread 0.2.0, zenwrite 0.3.0, zensudoku 0.2.0, zenvault 0.2.0.
 
 Deliberate limits versus the mock:
-- Files remains confined to the owner's home for reads, with credential exclusions; only vault
-  writes are allowed. Root filesystem browsing is not shipped (the security boundary is retained).
+- Files reads from / down (shipped), still refusing secrets (tokens, keys, credentials); writes
+  stay inside the vault.
 - Plugin Home widgets are deferred: there is no installed provider after removing the Gospel card.
 - Claude login requires its interactive terminal flow; Codex offers device login in Settings.
 - A newly saved OpenRouter key takes effect after the managed kernel upgrade/restart.
-- The command centre uses a compact action menu, not the mock's radial geometry.
+- The radial quick-control ring is shipped as in the mock.
 - Task mutations reject stale revisions. Project moves span two files: an interrupted second write
   explicitly reports possible duplicates, rather than claiming cross-file transactional guarantees.
 
