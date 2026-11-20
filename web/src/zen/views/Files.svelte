@@ -171,7 +171,8 @@
       }
     } catch (e) { if (g === gen) readError = (e as Error).message; }
   }
-  $effect(() => { const f = file; if (f) untrack(() => void readFile(f)); else doc = null; });
+  // Re-read once the vault is known too: a note opened by address before then needs its hash to save.
+  $effect(() => { const f = file; void VAULT; if (f) untrack(() => void readFile(f)); else doc = null; });
   $effect(() => { app.viewing = file; return () => { app.viewing = null; }; });
   const rendered = $derived(isNote && doc ? render(text) : null);
   const fprops = $derived((rendered?.front ?? '').split('\n').map((l) => /^(\w+):\s*(.+)$/.exec(l)).filter((m): m is RegExpExecArray => !!m)
@@ -383,7 +384,7 @@
         <button class="rb" onclick={() => (editing = false)}>Done</button>
       {:else if editing}
         <button class="rb" onclick={cancelEdit}>Cancel</button>
-        <button class="rb pri" disabled={saving} onclick={saveAndClose}>Save</button>
+        <button class="rb pri" disabled={saving} onclick={() => void save()}>Save</button>
       {:else}
         {#if isNote && vaultRel}<button class="rb" onclick={edit} title="Edit the text (E)">Edit</button>{/if}
         {#if ask}<button class="rb pri" onclick={() => ask?.(shortPath(file!))} title="Ask zenbot about this note">Ask zenbot</button>{/if}
