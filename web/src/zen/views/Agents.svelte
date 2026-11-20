@@ -1,96 +1,104 @@
 <script lang="ts">
-  // Agents and their subagent roles. Changes are requested in a new zenbot chat.
-  import { onMount } from 'svelte';
-  import { app, openSession } from '../app.svelte.ts';
-  import type { Pane } from '../app.svelte.ts';
-  import { zen, type Agent, type Role } from '../api.ts';
+  // Agents tab: two sections. Agents: who you can talk to (each its own soul, memory and limits;
+  // agents/<name>/). Roles: the helpers an agent hands parts of a job to (subagents), from its
+  // roles.toml: a kind of work, a model, an effort, a narrower tool list and attached skills. Roles
+  // are the agent's to tune; here you read them, and ask the agent to change one. (The redesign
+  // mock's Agents, on GET /api/agents.)
+  import { models, modelOf, type A } from '../live.svelte.ts';
+  let { agents, current, pick, ask }: { agents: A[]; current: A; pick: (a: A) => void; ask: (text: string) => void } = $props();
 
-  let { pane, active }: { pane: Pane; active: boolean } = $props();
-  type LiveAgent = Agent & { chats?: number; busy?: { id: string; title: string }[] };
-  type LiveRole = Role & { uses_30d?: number };
-  let agents = $state<LiveAgent[] | null>(null);
-  let error = $state('');
-  let selected = $state('');
+  const short = (id: string | null | undefined) => (id ? modelOf(id).name : '');
+  const infoOf = (a: A) => {
+    const n = (a.info.busy ?? []).length;
+    return {
+      about: a.info.description || (a.id === 'zenbot' ? 'Your chief of staff: carries jobs end to end, keeps your vault, tasks and routines.' : ''),
+      model: short(a.info.model) || short(models.default) || 'Default',
+      state: n ? `Working on ${n} job${n > 1 ? 's' : ''}` : 'Idle',
+      busy: n > 0,
+      chats: a.info.chats ?? 0,
+      limits: a.info.can_use ?? (a.info.all_tools ? 'All tools' : (a.info.tools ?? []).join(', ') || 'Its own tools'),
+    };
+  };
+  type Role = { name: string; about: string; model: string; vendor: 'claude' | 'openai'; effort?: string; tools: string[] | null; skills: string[]; used: number; note?: string };
+  const rolesOf = (a: A): { fallback: string; roles: Role[] } => {
+    const r = a.info.roles;
+    return {
+      fallback: short(r?.default_model) || 'its own model',
+      roles: (r?.roles ?? []).map((x) => ({
+        name: x.name, about: x.description, model: short(x.model) || short(r?.default_model) || 'Default',
+        vendor: (x.model ?? '').startsWith('codex/') ? 'openai' : 'claude', effort: x.effort ?? undefined,
+        tools: x.tools, skills: x.skills ?? [], used: (x as { uses_30d?: number }).uses_30d ?? 0,
+      })),
+    };
+  };
+  // Roles follow the agent picked at the top (the one you're talking to): no switch here.
   let open = $state<string | null>(null);
-  const owner = $derived(agents?.find(a => a.name === selected));
-  const roles = $derived((owner?.roles?.roles ?? []) as LiveRole[]);
-  async function load() {
-    try {
-      agents = await zen.agents();
-      selected = agents.some(a => a.name === app.agent) ? app.agent : agents[0]?.name ?? '';
-      error = '';
-    } catch (e) { error = (e as Error).message; }
-  }
-  onMount(load);
-  function ask(text: string) { app.chatDraft = text; openSession('new'); }
-  function select(name: string) { selected = name; open = null; }
-  function uses(a: Agent) {
-    const parts = [a.all_tools ? 'all tools' : a.tools?.length ? a.tools.join(', ') : 'no tools'];
-    if (Array.isArray(a.mcp)) parts.push(a.mcp.length ? `MCP: ${a.mcp.join(', ')}` : 'no MCP');
-    return parts.join(' · ');
-  }
+  const rs = $derived(rolesOf(current));
+  const owner = $derived(current);
 </script>
 
 <div class="awrap">
   <section>
     <div class="sh"><h3>Agents</h3><span class="sd">Who you talk to. Each has its own character, memory and limits.</span></div>
-    {#if error}<p role="alert">Can't read the agents: {error} <button class="link" onclick={load}>Retry</button></p>
-    {:else if !agents}<p class="dim">Loading…</p>{/if}
     <div class="agrid">
-      {#each agents ?? [] as a (a.name)}
-        {@const n = a.roles?.roles?.length ?? 0}
-        <article class="ag" class:sel={a.name === selected}>
-          <button class="top" onclick={() => select(a.name)} aria-pressed={a.name === selected} aria-label={`Show ${a.name} roles`}>
-            <span class="orb" class:busy={!!a.busy?.length} style="--a:var(--accent); --b:var(--accent)">{a.name[0].toUpperCase()}</span>
-            <div class="nm"><b>{a.name}</b></div>
-            {#if a.name === selected}<span class="cur">Talking to</span>{/if}
-          </button>
-          {#if a.error}<p role="alert">{a.error}</p>{:else if a.description}<p>{a.description}</p>{/if}
+      {#each agents as a (a.id)}
+        {@const i = infoOf(a)}
+        {@const n = a.info.roles?.roles?.length ?? 0}
+        <article class="ag" class:sel={a.id === current.id}>
+          <div class="top">
+            <span class="orb" class:busy={i.busy} style="--a:{a.a}; --b:{a.b}">{a.name[0].toUpperCase()}</span>
+            <div class="nm"><b>{a.name}</b><span>{a.role}</span></div>
+            {#if a.id === current.id}<span class="cur">Talking to</span>{/if}
+          </div>
+          <p>{i.about}</p>
           <dl>
-            <div><dt>Now</dt><dd class:live={!!a.busy?.length}>{a.busy ? (a.busy.length ? `Working on ${a.busy.length} job${a.busy.length === 1 ? '' : 's'}` : 'Idle') : 'Unavailable'}</dd></div>
-            <div><dt>Model</dt><dd>{a.model ?? 'Default'}</dd></div>
-            <div><dt>Can use</dt><dd>{uses(a)}</dd></div>
-            <div><dt>Chats</dt><dd>{a.chats ?? 'Unavailable'}</dd></div>
+            <div><dt>Now</dt><dd class:live={i.busy}>{i.state}</dd></div>
+            <div><dt>Model</dt><dd>{i.model}</dd></div>
+            <div><dt>Can use</dt><dd>{i.limits}</dd></div>
+            <div><dt>Chats</dt><dd>{i.chats}</dd></div>
           </dl>
           <div class="acts">
-            <button class="pill on" onclick={() => openSession('new', a.name)}>Talk to {a.name}</button>
-            <span class="tag" class:none={!n} title="Helpers {a.name} can hand work to">{a.roles?.error ? 'Roles unavailable' : n ? `${n} role${n === 1 ? '' : 's'}` : 'No roles'}</span>
+            {#if a.id !== current.id}<button class="pill on" onclick={() => pick(a)}>Talk to {a.name}</button>{/if}
+            <span class="tag" class:none={!n} title="Helpers {a.name} can hand work to">{n ? `${n} role${n > 1 ? 's' : ''}` : 'No roles'}</span>
           </div>
         </article>
       {/each}
-      <button class="ag new" onclick={() => ask('Create a new agent for me:')}><span class="plus">+</span><b>New agent</b><span>Opens a chat with zenbot: tell it who you need and it sets the agent up.</span></button>
+      <button class="ag new" onclick={() => ask('Create a new agent for me: ')}><span class="plus">+</span><b>New agent</b><span>Opens a chat with zenbot: tell it who you need and it sets the agent up.</span></button>
     </div>
   </section>
-  {#if owner}
-    <section>
-      <div class="sh"><h3>{owner.name}'s roles <span class="n">{roles.length}</span></h3><span class="sd">Helpers {owner.name} hands parts of a job to. {owner.name} tunes them as it learns.</span></div>
-      {#if owner.roles?.error}<div class="empty" role="alert">Can't read roles: {owner.roles.error}</div>
-      {:else if roles.length}
-        <div class="rlist">
-          {#each roles as r (r.name)}
-            <article class="role" class:open={open === r.name} data-role={r.name}>
-              <button class="rh" aria-expanded={open === r.name} onclick={() => (open = open === r.name ? null : r.name)}>
-                <span class="rn">{r.name}</span><span class="ra">{r.description}</span>
-                <span class="chip">{r.model ?? 'Default model'}{r.effort ? ` · ${r.effort}` : ''}</span>
-                <span class="used" title="Times {owner.name} used this role in the last 30 days">{r.uses_30d === undefined ? 'Unavailable' : `${r.uses_30d} ${r.uses_30d === 1 ? 'use' : 'uses'}`}</span>
-              </button>
-              {#if open === r.name}
-                <div class="rb">
-                  <div class="kv"><span class="k">Tools</span><span>{#if r.tools === null}Same as {owner.name}'s{:else if r.tools.length}{#each r.tools as t}<code>{t}</code>{/each}{:else}None{/if}</span></div>
-                  <div class="kv"><span class="k">Skills</span><span>{#if r.skills.length}{#each r.skills as skill}<code>{skill}</code>{/each}{:else}None attached{/if}</span></div>
-                  <div class="kv"><span class="sp"></span><button class="pill" onclick={() => ask(`Change ${owner.name}'s ${r.name} role:`)}>Ask zenbot to change it</button></div>
-                </div>
-              {/if}
-            </article>
-          {/each}
-          <button class="newr" onclick={() => ask(`Create a new role for ${owner.name}:`)}><span class="plus">+</span> New role <span class="dim">· opens a chat with zenbot to set it up</span></button>
-        </div>
-        <p class="foot">Uses are counted over the last 30 days. Without a role, a helper uses <b>{owner.roles?.default_model ?? 'the default model'}</b>. Roles live in <code>agents/{owner.name}/roles.toml</code>.</p>
-      {:else}
-        <div class="empty">{owner.name} has no roles yet: it does everything itself. <button class="link" onclick={() => ask(`Create a new role for ${owner.name}:`)}>+ New role</button></div>
-      {/if}
-    </section>
-  {/if}
+
+  <section>
+    <div class="sh">
+      <h3>{owner.name}'s roles <span class="n">{rs.roles.length}</span></h3>
+      <span class="sd">Helpers {owner.name} hands parts of a job to. {owner.name} tunes them as it learns.</span>
+    </div>
+    {#if rs.roles.length}
+      <div class="rlist">
+        {#each rs.roles as r (r.name)}
+          <article class="role" class:open={open === r.name}>
+            <button class="rh" aria-expanded={open === r.name} onclick={() => (open = open === r.name ? null : r.name)}>
+              <span class="rn">{r.name}</span>
+              <span class="ra">{r.about}</span>
+              <span class="chip {r.vendor}">{r.model}{#if r.effort}{' · '}{r.effort}{/if}</span>
+              <span class="used" title="Times {owner.name} used this role in the last 30 days">{r.used} {r.used === 1 ? 'use' : 'uses'}</span>
+            </button>
+            {#if open === r.name}
+              <div class="rb">
+                <div class="kv"><span class="k">Tools</span><span>{#if r.tools}{#each r.tools as t}<code>{t}</code>{/each}{:else}Same as {owner.name}'s{/if}</span></div>
+                <div class="kv"><span class="k">Skills</span><span>{#if r.skills.length}{#each r.skills as s}<code>{s}</code>{/each}{:else}None attached{/if}</span></div>
+                {#if r.note}<div class="kv"><span class="k">Note</span><span class="dim">{r.note}</span></div>{/if}
+                <div class="kv end"><span class="sp"></span><button class="pill" onclick={() => ask(`Change ${owner.name}'s ${r.name} role: `)}>Ask zenbot to change it</button></div>
+              </div>
+            {/if}
+          </article>
+        {/each}
+        <button class="role newr" onclick={() => ask(`Create a new role for ${owner.name}: `)}><span class="plus">+</span> New role <span class="dim">· opens a chat with zenbot to set it up</span></button>
+      </div>
+      <p class="foot">Uses are counted over the last 30 days. Without a role, a helper uses <b>{rs.fallback}</b>. Roles live in <code>agents/{owner.id}/roles.toml</code>.</p>
+    {:else}
+      <div class="empty">{owner.name} has no roles yet: it does everything itself. <button class="link" onclick={() => ask(`Create a new role for ${owner.name}: `)}>+ New role</button></div>
+    {/if}
+  </section>
 </div>
 
 <style>
@@ -107,10 +115,12 @@
     background: radial-gradient(circle at 32% 28%, var(--b), var(--a) 70%); box-shadow: 0 0 0 3px color-mix(in srgb, var(--a) 18%, transparent); }
   .orb.busy { animation: breathe 1.8s ease-in-out infinite; }
   @keyframes breathe { 50% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--a) 10%, transparent); } }
-  .top { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; }
+  .top { display: flex; align-items: center; gap: 10px; }
   .nm { display: flex; flex-direction: column; flex: 1; }
   .nm b { font-size: 15px; }
+  .nm span { font-size: 12.5px; color: var(--dim); }
   .cur { font-size: 11px; font-weight: 650; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); padding: 2px 8px; border-radius: 99px; }
+  .ag p { margin: 0; font-size: 13.5px; line-height: 1.45; }
   dl { margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; }
   dt { font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 650; }
   dd { margin: 0; font-size: 13px; }
@@ -126,6 +136,10 @@
   .pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 11px; border-radius: 99px; border: 1px solid var(--faint); font-size: 12.5px; background: var(--paper); color: var(--ink); }
   .pill:hover { border-color: var(--dim); }
   .pill.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+  .pill.sel2 { border-color: var(--ink); }
+  .seg { display: flex; background: var(--soft); border-radius: 99px; padding: 2px; }
+  .seg button { padding: 3px 11px; border-radius: 99px; font-size: 12.5px; color: var(--dim); }
+  .seg button.on { background: var(--paper); color: var(--ink); font-weight: 600; box-shadow: 0 1px 3px var(--shadow); }
   .rlist { border: 1px solid var(--faint); border-radius: 16px; overflow: hidden; background: var(--paper); }
   .role + .role { border-top: 1px solid var(--faint); }
   .rh { width: 100%; display: grid; grid-template-columns: 110px 1fr auto 56px; align-items: center; gap: 12px; padding: 11px 14px; text-align: left; }
@@ -134,6 +148,7 @@
   .ra { font-size: 13px; color: var(--dim); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .role.open .ra { white-space: normal; color: var(--ink); }
   .chip { font-size: 12px; padding: 2px 9px; border-radius: 99px; background: var(--soft); white-space: nowrap; border: 1px solid var(--faint); }
+  .chip.openai { border-color: color-mix(in srgb, var(--ink) 25%, var(--faint)); }
   .used { font-size: 12px; color: var(--dim); text-align: right; }
   .rb { padding: 4px 14px 12px 136px; display: flex; flex-direction: column; gap: 7px; background: var(--soft); }
   .kv { display: flex; gap: 10px; align-items: baseline; font-size: 13px; }

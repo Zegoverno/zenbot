@@ -1,82 +1,242 @@
 <script lang="ts">
+  // Home: the board you land on, one panel, no chat on it. A grid of widgets the owner arranges:
+  // "Customize" lets you drag to reorder, size each one (S/M/L: 1–3 columns), hide it, or add one
+  // back from the catalog; the layout is kept in the kernel's prefs (`home_layout`). A widget's rows
+  // open the chat they belong to (onopen); nothing is answered here. (The redesign mock's Home, on
+  // live data: the board, tasks, routines, agents and the vault.)
   import { onMount } from 'svelte';
-  import { zen, routines, files, ago, type BoardSession, type Agent, type Routine, type RoutineRun, type Entry } from '../api.ts';
-  import { openSession, setView, openFile } from '../app.svelte.ts';
-  import { catalog, defaults, layoutOf, selectTasks, slot, type Kind, type Slot, type LiveTask } from './home.ts';
-  type Board = BoardSession & { question?: string | null };
-  let sessions = $state<Board[]>([]), tasks = $state<LiveTask[]>([]), agents = $state<Agent[]>([]), jobs = $state<Routine[]>([]), runs = $state<RoutineRun[]>([]), recentFiles = $state<Entry[]>([]);
-  let today = $state(''), name = $state(''), error = $state(''), taskError = $state(''), layoutError = $state(''), loaded = $state(false), edit = $state(false), cfg = $state(''), drag = $state('');
-  let layout = $state<Slot[]>(defaults());
-  let now = $state(new Date());
+  import { failing, routines } from './routinestore.svelte.ts';
+  import { me, board, agents, getPrefs, patchPrefs, when as ago } from '../live.svelte.ts';
+  import { files } from '../api.ts';
+  import { app } from '../app.svelte.ts';
+  type Size = 1 | 2 | 3;
+  // A slot's `kind` is its catalog entry (default: its id). Task widgets can be added more than
+  // once, each with its own view (`tasks`: what to show, in what order), set in Customize.
+  type Slot = { id: string; size: Size; kind?: string; tasks?: TaskView };
+  let { narrow, onopen, ontab }: { narrow: boolean; onopen: (session: string) => void; ontab?: (tab: string) => void } = $props();
+  import { box, flag, facts } from './TaskBits.svelte';
+  import { store, toggle, viewTasks, viewTitle, TASK_VIEW, meta, PRI, days, type TaskView } from './taskstore.svelte.ts';
+  const PROJECTS = $derived(meta.projects);
+  const GOALS = $derived(meta.goals);
+  const kind = (s: Slot) => s.kind ?? s.id;
+  const tv = (s: Slot) => s.tasks as TaskView; // set by load(), add() and reset()
+  let cfg = $state<string | null>(null);
+  const PRI_OPTS = [['urgent', 'Urgent'], ['important', 'Important'], ['not_urgent', 'Not urgent'], ['none', 'No priority'], ['parking_lot', 'Parking lot']];
+  const todayN = $derived(store.tasks.filter((t) => !t.done && !t.dropped && t.due && days(t.due) <= 0).length);
+
+  const CATALOG: Record<string, { title: string; hint: string; size: Size }> = {
+    needs: { title: 'Needs you', hint: 'Questions waiting for your answer', size: 2 },
+    working: { title: 'Working now', hint: 'What your agents are doing', size: 1 },
+    today: { title: 'Tasks', hint: 'A list of your tasks: today, a project, a goal… add as many as you like', size: 1 },
+    recent: { title: 'Recent chats', hint: 'Pick up where you left off', size: 1 },
+    reports: { title: 'From your routines', hint: 'Results of scheduled jobs', size: 1 },
+    agents: { title: 'Agents', hint: 'Who is on duty', size: 1 },
+    files: { title: 'Recent files', hint: 'Notes and files touched lately', size: 1 },
+  };
+  const DEFAULT: Slot[] = [
+    { id: 'needs', size: 2 }, { id: 'working', size: 1 }, { id: 'today', size: 1 },
+    { id: 'recent', size: 1 }, { id: 'reports', size: 1 },
+  ];
+  const withViews = (l: Slot[]) => l.map((s) => ((s.kind ?? s.id) === 'today' && !s.tasks ? { ...s, tasks: { ...TASK_VIEW, pri: [] } } : s));
+  /** A kept layout, checked: anything unknown falls back to the default. */
+  function layoutOf(v: unknown): Slot[] {
+    if (Array.isArray(v) && v.every((s) => s && typeof s.id === 'string' && CATALOG[s.kind ?? s.id] && [1, 2, 3].includes(s.size))) return withViews(v as Slot[]);
+    return withViews(DEFAULT.map((s) => ({ ...s })));
+  }
+  let layout = $state<Slot[]>(withViews(DEFAULT.map((s) => ({ ...s }))));
   let saving = Promise.resolve();
-  const top = $derived(sessions.filter(s => !s.parent));
-  const waiting = $derived(top.filter(s => s.waiting));
-  const working = $derived(top.filter(s => s.busy));
-  const recent = $derived([...top].sort((a,b) => b.updated_at.localeCompare(a.updated_at)).slice(0,5));
-  const projects = $derived([...new Set(tasks.map(t => t.project))].sort());
-  const goals = $derived([...new Set(tasks.flatMap(t => t.goals))].sort());
-  const hidden = $derived((Object.keys(catalog) as Kind[]).filter(k => k === 'today' || !layout.some(s => s.kind === k)));
-  const due = $derived(tasks.filter(t => !t.done && t.due && t.due <= today).length);
-  const date = $derived(now.toLocaleDateString(undefined,{weekday:'long',day:'numeric',month:'long'}));
-  const greeting = $derived(now.getHours() < 12 ? 'morning' : now.getHours() < 18 ? 'afternoon' : 'evening');
-  async function request<T>(url: string, method = 'GET', body?: unknown): Promise<T> {
-    const res = await fetch(url,{method,headers:method === 'GET' ? {} : {'content-type':'application/json','x-zen-web':'1'},body:body === undefined ? undefined : JSON.stringify(body)});
-    const data = await res.json().catch(() => ({})); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`); return data as T;
+  const keep = () => {
+    const snap = $state.snapshot(layout);
+    saving = saving.then(() => patchPrefs({ home_layout: snap }).then(() => {}, () => {}));
+  };
+  let edit = $state(false);
+  let dragId = $state<string | null>(null);
+  const hidden = $derived(Object.keys(CATALOG).filter((id) => id === 'today' || !layout.some((s) => kind(s) === id)));
+
+  function moveTo(id: string, to: number) {
+    const from = layout.findIndex((s) => s.id === id);
+    if (from < 0 || to < 0 || to >= layout.length || from === to) return;
+    const [s] = layout.splice(from, 1);
+    layout.splice(to, 0, s);
+    keep();
   }
-  function keep() {
-    const snapshot = JSON.parse(JSON.stringify(layout));
-    saving = saving.catch(() => {}).then(async () => { try { await request('/api/zen/prefs','PATCH',{home_layout:snapshot}); layoutError = ''; } catch (e) { layoutError = `Could not save layout: ${(e as Error).message}`; } });
+  function over(e: DragEvent, id: string) {
+    if (!dragId || dragId === id) return;
+    e.preventDefault();
+    moveTo(dragId, layout.findIndex((s) => s.id === id));
   }
-  function move(id:string, offset:number) { const i=layout.findIndex(s=>s.id===id), j=i+offset; if(i<0||j<0||j>=layout.length)return; const a=[...layout]; const [s]=a.splice(i,1); a.splice(j,0,s); layout=a; keep(); }
-  function add(k:Kind) { const id = k === 'today' && layout.some(s=>s.kind===k) ? `today-${crypto.randomUUID()}` : k; const s=slot(k,id); if(k==='today' && layout.some(x=>x.kind===k)) s.filter.show='all'; layout=[...layout,s]; cfg=k==='today'?id:''; keep(); }
-  async function toggle(t:LiveTask) { if(!t.id || !t.rev) { taskError='Task cannot be updated without an id and revision.'; return; } try { await request(`/api/zen/tasks/${encodeURIComponent(t.id)}`,'PATCH',{done:!t.done,rev:t.rev}); await loadTasks(); } catch(e) { taskError=`Could not update task: ${(e as Error).message}`; await loadTasks(false); } }
-  async function loadTasks(clear = true) { try { const t=await zen.tasks(); tasks=t.projects.flatMap(p=>p.tasks) as LiveTask[]; today=t.today; if(clear) taskError=''; } catch { taskError='Could not load tasks.'; } }
+  const resize = (s: Slot, size: Size) => { s.size = size; keep(); };
+  const remove = (id: string) => { layout = layout.filter((s) => s.id !== id); keep(); };
+  const add = (id: string) => {
+    const n = layout.filter((s) => kind(s) === id).length;
+    const slot: Slot = n ? { id: `${id}-${Date.now().toString(36)}`, kind: id, size: CATALOG[id].size } : { id, size: CATALOG[id].size };
+    if (id === 'today') { slot.tasks = { ...TASK_VIEW, pri: [], show: n ? 'all' : 'today' }; cfg = slot.id; }
+    layout.push(slot); keep();
+  };
+  const reset = () => { layout = withViews(DEFAULT.map((s) => ({ ...s }))); keep(); };
+
+  // The live rows: questions waiting (the board's open question), what is working, recent chats,
+  // the routines' latest results, the agents, and the vault's latest files.
+  const NEEDS = $derived(board.sessions.filter((s) => s.state === 'waiting').map((s) => ({ id: s.id, title: s.title, q: s.question ?? 'Waiting for your answer', when: s.when })));
+  const WORKING = $derived(board.sessions.filter((s) => s.state === 'working').map((s) => ({ id: s.id, title: s.title, step: s.sub ? `Working · ${s.sub} subagent${s.sub > 1 ? 's' : ''}` : 'Working…', since: s.when })));
+  const RECENT = $derived(board.sessions.filter((s) => s.state === 'idle').slice(0, 4).map((s) => ({ id: s.id, t: s.title, w: s.when })));
+  const REPORTS = $derived(routines.runs.filter((r) => r.session && r.status !== 'running' && routines.jobs.some((j) => j.name === r.job && j.kind === 'agent')).slice(0, 3).map((r) => ({ id: r.session!, t: r.job, d: r.note, w: r.at })));
+  let recentFiles = $state<{ name: string; path: string; w: string }[]>([]);
+  async function loadFiles() {
+    if (!app.vault) return;
+    try {
+      const l = await files.list(app.vault);
+      recentFiles = l.entries.filter((e) => !e.dir && !e.hidden).sort((a, b) => (b.mtime ?? 0) - (a.mtime ?? 0)).slice(0, 4).map((e) => ({ name: e.name, path: e.path, w: ago(new Date(e.mtime ?? 0).toISOString()) }));
+    } catch {}
+  }
+  $effect(() => { if (app.vault && layout.some((s) => kind(s) === 'files')) void loadFiles(); });
+  const running = $derived(board.sessions.filter((s) => s.state === 'working').length);
+  const now = new Date();
+  const date = now.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' });
+  const hello = now.getHours() < 12 ? 'Good morning' : now.getHours() < 18 ? 'Good afternoon' : 'Good evening';
+
   onMount(() => {
-    let alive=true;
-    void request<{name?:string;home_layout?:unknown}>('/api/zen/prefs').then(p=>{ if(alive){name=p.name||'';layout=layoutOf(p.home_layout);} }).catch(()=>{layoutError='Could not load Home preferences.'});
-    const refresh=async()=>{
-      now=new Date();
-      const results=await Promise.allSettled([zen.board(),zen.agents(),routines.list(),routines.runs(),files.home().then(h=>files.list(h.vault))]);
-      if(!alive)return;
-      if(results[0].status==='fulfilled'){sessions=results[0].value.sessions;error='';}else error='Could not load your sessions.';
-      if(results[1].status==='fulfilled')agents=results[1].value;
-      if(results[2].status==='fulfilled')jobs=results[2].value.jobs;
-      if(results[3].status==='fulfilled')runs=results[3].value;
-      if(results[4].status==='fulfilled')recentFiles=results[4].value.entries.filter(e=>!e.dir&&!e.hidden).sort((a,b)=>b.mtime-a.mtime).slice(0,5);
-      loaded=true; void loadTasks();
-    };
-    void refresh(); const timer=setInterval(refresh,5000); return ()=>{alive=false;clearInterval(timer)};
+    getPrefs().then((p) => { if (p.home_layout !== undefined && p.home_layout !== null) layout = layoutOf(p.home_layout); }).catch(() => {});
   });
 </script>
+
 <div class="home">
-  <header class="hh"><div><div class="date">{date}</div><h1>Good {greeting}{name ? `, ${name}` : ''}</h1><p class="sum"><b class="w">{waiting.length} things need you</b> · {working.length} jobs running · {due} tasks due today{#if jobs.some(j=>j.failures>0)} · <button class="link" onclick={()=>setView('home','routines')}>{jobs.filter(j=>j.failures>0).length} routine failed</button>{/if}</p></div><span class="sp"></span>{#if edit}<button class="ghost" onclick={()=>{layout=defaults();keep()}}>Reset</button><button class="solid" onclick={()=>edit=false}>Done</button>{:else}<button class="ghost" onclick={()=>edit=true}>Customize</button><button class="solid" onclick={()=>openSession('new')}>＋ New chat</button>{/if}</header>
-  {#if error}<p role="alert">{error}</p>{/if}{#if taskError}<p role="alert">{taskError}</p>{/if}{#if layoutError}<p role="alert">{layoutError}</p>{/if}{#if !loaded}<p class="dim">Loading your board…</p>{/if}
-  <div class:edit class="grid">
+  <header class="hh">
+    <div>
+      <div class="date">{date}</div>
+      <h1>{hello}{me.name ? `, ${me.name}` : ''}</h1>
+      <p class="sum">{#if NEEDS.length}<b class="w">{NEEDS.length} thing{NEEDS.length === 1 ? '' : 's'} need{NEEDS.length === 1 ? 's' : ''} you</b> · {/if}{running} job{running === 1 ? '' : 's'} running · {todayN} task{todayN === 1 ? '' : 's'} due today{#if failing().length}{' · '}<button class="fl" onclick={() => ontab?.('routines')}>{failing().length} routine failed</button>{/if}</p>
+    </div>
+    <span class="sp"></span>
+    {#if edit}
+      <button class="ghost" onclick={reset}>Reset</button>
+      <button class="solid" onclick={() => (edit = false)}>Done</button>
+    {:else}
+      <button class="ghost" onclick={() => (edit = true)}>Customize</button>
+    {/if}
+  </header>
+
+  <div class="grid" class:edit>
     {#each layout as s, i (s.id)}
-      <article class="wd" style={`--span:${s.size}`} draggable={edit} ondragstart={()=>drag=s.id} ondragend={()=>drag=''} ondragover={(e)=>{if(edit && drag && drag!==s.id)e.preventDefault()}} ondrop={(e)=>{e.preventDefault();const from=layout.findIndex(x=>x.id===drag); if(from>=0)move(drag,i-from);drag=''}}>
-        <header class="wh">{#if edit}<span class="grip">⠿</span>{/if}<h2>{catalog[s.kind].title}</h2>{#if s.kind==='needs' && waiting.length}<span class="count">{waiting.length}</span>{/if}<span class="sp"></span>{#if edit}<div class="ctl"><button aria-label="Move left" disabled={i===0} onclick={()=>move(s.id,-1)}>←</button><button aria-label="Move right" disabled={i===layout.length-1} onclick={()=>move(s.id,1)}>→</button><span class="sizes">{#each [1,2,3] as n}<button class:on={s.size===n} aria-label={`Size ${n}`} onclick={()=>{s.size=n as 1|2|3;keep()}}>{['S','M','L'][n-1]}</button>{/each}</span>{#if s.kind==='today'}<button aria-label="Configure tasks" onclick={()=>cfg=cfg===s.id?'':s.id}>⚙</button>{/if}<button aria-label="Remove widget" onclick={()=>{layout=layout.filter(x=>x.id!==s.id);keep()}}>×</button></div>{/if}</header>
-        {#if edit && cfg===s.id && s.kind==='today'}<div class="cfg">
-          <label>Show <select bind:value={s.filter.show} onchange={keep}><option value="today">Overdue & today</option><option value="week">Next 7 days</option><option value="all">All open</option></select></label>
-          <label>Order <select bind:value={s.filter.order} onchange={keep}><option value="when">By due date</option><option value="priority">By priority</option></select></label>
-          <label>Project <select bind:value={s.filter.project} onchange={keep}><option value="">All projects</option>{#each projects as p}<option value={p}>{p}</option>{/each}</select></label>
-          <label>Goal <select bind:value={s.filter.goal} onchange={keep}><option value="">Any goal</option><option value="-">No goal</option>{#each goals as g}<option value={g}>{g}</option>{/each}</select></label>
-          <label>Priority <select bind:value={s.filter.priority} onchange={keep}><option value="">All priorities</option>{#each ['urgent','important','medium','not_urgent','parking_lot','none'] as p}<option value={p}>{p.replaceAll('_',' ')}</option>{/each}</select></label>
-          <label>Rows <select bind:value={s.filter.limit} onchange={keep}>{#each [5,8,12] as n}<option value={n}>{n}</option>{/each}</select></label></div>{/if}
+      {@const w = CATALOG[kind(s)]}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <article class="wd" style="grid-column: span {narrow ? 1 : s.size}" class:dragging={dragId === s.id}
+        draggable={edit} ondragstart={(e) => { dragId = s.id; e.dataTransfer?.setData('text/plain', s.id); }}
+        ondragover={(e) => over(e, s.id)} ondrop={(e) => e.preventDefault()} ondragend={() => (dragId = null)}>
+        <header class="wh">
+          {#if edit}<span class="grip" title="Drag to move">⠿</span>{/if}
+          <h2>{kind(s) === 'today' ? viewTitle(tv(s)) : w.title}</h2>
+          {#if s.id === 'needs' && !edit}<span class="count">{NEEDS.length}</span>{/if}
+          <span class="sp"></span>
+          {#if edit}
+            <div class="ctl">
+              <button title="Move earlier" disabled={i === 0} onclick={() => moveTo(s.id, i - 1)}>‹</button>
+              <button title="Move later" disabled={i === layout.length - 1} onclick={() => moveTo(s.id, i + 1)}>›</button>
+              {#if !narrow}
+                <span class="sizes">{#each [1, 2, 3] as n}<button class:on={s.size === n} onclick={() => resize(s, n as Size)}>{['S', 'M', 'L'][n - 1]}</button>{/each}</span>
+              {/if}
+              {#if kind(s) === 'today'}<button class:on={cfg === s.id} title="Choose what this list shows" onclick={() => (cfg = cfg === s.id ? null : s.id)}>⚙</button>{/if}
+              <button class="x" title="Hide this widget" onclick={() => remove(s.id)}>×</button>
+            </div>
+          {/if}
+        </header>
+
+        {#if edit && cfg === s.id && kind(s) === 'today'}
+          {@const v = tv(s)}
+          <div class="cfg">
+            <div class="cr"><span class="cl">Show</span>{#each [['today', 'Overdue & today'], ['week', 'Next 7 days'], ['all', 'All open']] as [k, l]}<button class="pill" class:on={v.show === k} onclick={() => { v.show = k as TaskView['show']; keep(); }}>{l}</button>{/each}</div>
+            <div class="cr"><span class="cl">Order</span>{#each [['when', 'By due date'], ['priority', 'By priority']] as [k, l]}<button class="pill" class:on={v.order === k} onclick={() => { v.order = k as TaskView['order']; keep(); }}>{l}</button>{/each}</div>
+            <div class="cr"><span class="cl">Project</span>
+              <select class="pill" value={v.project ?? ''} onchange={(e) => { v.project = (e.target as HTMLSelectElement).value || null; keep(); }}><option value="">All projects</option>{#each PROJECTS as p}<option value={p}>{p}</option>{/each}</select></div>
+            <div class="cr"><span class="cl">Goal</span>
+              <select class="pill" value={v.goal ?? ''} onchange={(e) => { v.goal = (e.target as HTMLSelectElement).value || null; keep(); }}><option value="">Any goal</option><option value="-">No goal</option>{#each GOALS as g}<option value={g}>{g}</option>{/each}</select></div>
+            <div class="cr"><span class="cl">Priority</span>{#each PRI_OPTS as [k, l]}<button class="pill" class:on={v.pri.includes(k)} onclick={() => { v.pri = v.pri.includes(k) ? v.pri.filter((x) => x !== k) : [...v.pri, k]; keep(); }}>{#if PRI[k]}<i class="pd" style="background:{PRI[k].c}"></i>{/if}{l}</button>{/each}{#if !v.pri.length}<span class="ch">all</span>{/if}</div>
+            <div class="cr"><span class="cl">Rows</span>{#each [5, 8, 12] as n}<button class="pill" class:on={v.limit === n} onclick={() => { v.limit = n; keep(); }}>{n}</button>{/each}</div>
+          </div>
+        {/if}
         <div class="wb" inert={edit}>
-        {#if s.kind==='needs'}<div class:wide={s.size>1} class="needs">{#each waiting as x}<button class="ncard" onclick={()=>openSession(x.id)}><span class="nt">{x.title||'Untitled chat'}<span class="when">{ago(x.updated_at)}</span></span><span class="nq">{x.question || 'Waiting for your answer'}</span><span class="go">Open chat →</span></button>{:else}<p class="dim">Nothing waiting on you.</p>{/each}</div>
-        {:else if s.kind==='working'}{#each working as x}<button class="row" onclick={()=>openSession(x.id)}><span class="orb busy"></span><span class="col"><span class="t">{x.title||'Untitled chat'}</span><span class="d">{x.agent||'zenbot'} is working</span></span><span class="when">{ago(x.updated_at)}</span></button>{:else}<p class="dim">All quiet for now.</p>{/each}
-        {:else if s.kind==='today'}{@const list=selectTasks(tasks,s.filter,today)}{#each list.slice(0,s.filter.limit) as t (t.id)}<div class="row task"><input type="checkbox" checked={t.done} aria-label={`Complete ${t.text}`} onchange={()=>toggle(t)} /><button class="col" onclick={()=>setView('home','tasks')}><span class="t">{t.text}</span><span class="d">{t.project}{t.due?` · ${t.due}`:''}</span></button></div>{:else}<p class="dim">{s.filter.show==='today'?'Nothing due today.':'Nothing here.'}</p>{/each}<button class="link" onclick={()=>setView('home','tasks')}>{list.length>s.filter.limit?`${list.length-s.filter.limit} more in Tasks →`:'All tasks →'}</button>
-        {:else if s.kind==='recent'}{#each recent as x}<button class="row" onclick={()=>openSession(x.id)}><span class="t">{x.title||'Untitled chat'}</span><span class="when">{ago(x.updated_at)}</span></button>{:else}<p class="dim">No chats yet.</p>{/each}
-        {:else if s.kind==='reports'}{#each runs.slice(0,5) as r}<button class="row" onclick={()=>r.session?openSession(r.session):setView('home','routines')}><span class="col"><span class="t">{r.job}</span><span class="d">{r.error || r.status}</span></span><span class="when">{ago(r.started_at)}</span></button>{:else}<p class="dim">No routine runs yet.</p>{/each}
-        {:else if s.kind==='agents'}{#each agents as a}<button class="row" onclick={()=>setView('home','agents')}><span class="orb" class:busy={working.some(x=>x.agent===a.name)}></span><span class="col"><span class="t">{a.name}</span><span class="d">{a.error || (working.some(x=>x.agent===a.name)?'Working':'Idle')}</span></span></button>{:else}<p class="dim">No agents found.</p>{/each}
-        {:else}<p class="d">Recently changed in the vault root</p>{#each recentFiles as f}<button class="row" onclick={()=>openFile(f.path)}><span class="t">{f.name}</span><span class="when">{ago(new Date(f.mtime).toISOString())}</span></button>{:else}<p class="dim">No recent files in the vault root.</p>{/each}{/if}
+          {#if s.id === 'needs'}
+            <div class="needs" class:wide={s.size > 1 && !narrow}>
+              {#each NEEDS as n}
+                <button class="ncard" onclick={() => onopen(n.id)}>
+                  <span class="nt">{n.title}<span class="when">{n.when}</span></span>
+                  <span class="nq">{n.q}</span>
+                  <span class="go">Open chat →</span>
+                </button>
+              {/each}
+            {#if !NEEDS.length}<div class="dim">Nothing waiting on you.</div>{/if}
+            </div>
+          {:else if s.id === 'working'}
+            {#each WORKING as r}
+              <button class="row" onclick={() => onopen(r.id)}>
+                <span class="orb busy"></span>
+                <span class="col"><span class="t">{r.title}</span><span class="d">{r.step}</span></span>
+                <span class="when">{r.since}</span>
+              </button>
+            {:else}<div class="dim">Nobody is working right now.</div>
+            {/each}
+          {:else if kind(s) === 'today'}
+            {@const v = tv(s)}
+            {@const r = viewTasks(v)}
+            {#each r.open.slice(0, v.limit) as t (t.id)}
+              <div class="trow">
+                {@render box(t, () => toggle(t))}
+                <button class="tcol" title="Open in Tasks" onclick={() => ontab?.('tasks')}>
+                  <span class="t">{@render flag(t)}{t.text}</span>
+                  <span class="tm">{@render facts(t, { project: !v.project && s.size > 1, goal: false })}{#if !v.project && s.size === 1}<span class="tb-f">{t.project}</span>{/if}</span>
+                </button>
+              </div>
+            {/each}
+            {#each r.doneToday as t (t.id)}
+              <div class="trow done">{@render box(t, () => toggle(t))}<span class="tcol"><span class="t">{t.text}</span></span></div>
+            {/each}
+            {#if !r.open.length && !r.doneToday.length}<div class="dim">{v.show === 'today' ? 'Nothing due today.' : 'Nothing here.'}</div>{/if}
+            <button class="link more" onclick={() => ontab?.('tasks')}>{r.open.length > v.limit ? `${r.open.length - v.limit} more in Tasks →` : 'All tasks →'}</button>
+          {:else if s.id === 'recent'}
+            {#each RECENT as r}
+              <button class="row" onclick={() => onopen(r.id)}><span class="t">{r.t}</span><span class="when">{r.w}</span></button>
+            {:else}<div class="dim">No chats yet.</div>
+            {/each}
+          {:else if s.id === 'reports'}
+            {#each REPORTS as r}
+              <button class="row" onclick={() => onopen(r.id)}><span class="col"><span class="t">{r.t}</span><span class="d">{r.d}</span></span><span class="when">{r.w}</span></button>
+            {:else}<div class="dim">No results yet.</div>
+            {/each}
+          {:else if s.id === 'agents'}
+            {#each agents.list as a (a.id)}
+              {@const n = (a.info.busy ?? []).length}
+              <div class="row"><span class="orb" class:busy={n > 0} style="background: radial-gradient(circle at 32% 28%, {a.b}, {a.a} 70%)"></span><span class="col"><span class="t">{a.name}</span><span class="d">{n ? `Working on ${n} job${n > 1 ? 's' : ''}` : 'Idle'}</span></span></div>
+            {/each}
+          {:else if s.id === 'files'}
+            {#each recentFiles as f (f.path)}
+              <button class="row" onclick={() => ontab?.(`file:${f.path}`)}><span class="t">{f.name}</span><span class="when">{f.w}</span></button>
+            {:else}<div class="dim">No files yet.</div>
+            {/each}
+          {/if}
         </div>
       </article>
     {/each}
-    {#if edit}<div class="add"><div class="addh">Add a widget</div><div class="addl">{#each hidden as k}<button onclick={()=>add(k)}><b>＋ {catalog[k].title}</b><span>{catalog[k].hint}</span></button>{/each}</div></div>{/if}
+
+    {#if edit}
+      <div class="add" style="grid-column: span {narrow ? 1 : 3}">
+        <div class="addh">Add a widget</div>
+        {#if hidden.length}
+          <div class="addl">
+            {#each hidden as id}
+              <button onclick={() => add(id)}><b>＋ {CATALOG[id].title}</b><span>{CATALOG[id].hint}</span></button>
+            {/each}
+          </div>
+        {:else}
+          <div class="dim">Every widget is on the board. Plugins can add more.</div>
+        {/if}
+      </div>
+    {/if}
   </div>
 </div>
+
 <style>
+  .fl { color: var(--bad, #b5543c); font-weight: 600; font: inherit; font-weight: 600; padding: 0; }
+  .fl:hover { text-decoration: underline; }
   .home { flex: 1; overflow: auto; padding: 28px 32px 96px; }
   .hh { display: flex; align-items: flex-end; gap: 8px; max-width: 72rem; margin: 0 auto 22px; }
   .date { font-size: 13px; color: var(--dim); margin-bottom: 4px; }
@@ -84,7 +244,22 @@
   .sum { margin: 6px 0 0; color: var(--dim); font-size: 14px; }
   .sum .w { color: var(--warn); font-weight: 600; }
   .sp { flex: 1; }
+  .trow { display: flex; align-items: flex-start; gap: 10px; padding: 7px 6px; border-radius: 10px; }
+  .trow:hover { background: var(--soft); }
+  .tcol { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; text-align: left; font-size: 14px; }
+  .tcol .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tm { display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: 12px; color: var(--dim); }
+  .tm:empty { display: none; }
+  .trow.done .t { text-decoration: line-through; color: var(--dim); }
+  .more { margin-top: 6px; font-size: 13px; }
   .cfg { display: flex; flex-direction: column; gap: 7px; margin: 0 0 10px; padding: 10px 12px; border: 1px solid var(--faint); border-radius: 12px; background: var(--paper); }
+  .cr { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+  .cl { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 650; width: 64px; }
+  .ch { font-size: 12px; color: var(--dim); }
+  .pill { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 99px; border: 1px solid var(--faint); font-size: 12.5px; background: var(--paper); color: var(--ink); max-width: 15rem; font-family: inherit; }
+  .pill:hover { border-color: var(--dim); }
+  .pill.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .pd { width: 8px; height: 8px; border-radius: 50%; }
   .ghost, .solid { font-size: 13px; padding: 7px 14px; border-radius: 99px; border: 1px solid var(--faint); }
   .ghost:hover { border-color: var(--dim); }
   .solid { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
@@ -93,6 +268,7 @@
   .wd { background: color-mix(in srgb, var(--soft) 55%, var(--paper)); border: 1px solid var(--faint); border-radius: 18px; padding: 14px 14px 10px; min-width: 0; transition: box-shadow 0.15s, opacity 0.15s; }
   .edit .wd { border-style: dashed; cursor: grab; }
   .edit .wd:hover { box-shadow: 0 8px 24px var(--shadow); }
+  .wd.dragging { opacity: 0.4; }
   .wh { display: flex; align-items: center; gap: 8px; padding: 0 4px 8px; min-height: 30px; }
   .wh h2 { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 0; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 650; }
   .grip { color: var(--dim); font-size: 14px; }
@@ -105,6 +281,7 @@
   .sizes { display: inline-flex; border: 1px solid var(--faint); border-radius: 8px; padding: 1px; margin: 0 4px; }
   .sizes button { font-size: 11px; font-weight: 650; min-width: 22px; height: 20px; }
   .sizes button.on { background: var(--accent); color: var(--on-accent); }
+  .x { font-size: 16px !important; }
   .edit .wb { opacity: 0.6; }
 
   .row { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 8px 6px; border-radius: 10px; font-size: 14px; }
@@ -114,8 +291,10 @@
   .d { font-size: 12.5px; color: var(--dim); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .when { font-size: 12px; color: var(--dim); white-space: nowrap; margin-left: auto; }
   .task input { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; }
+  .task.done .t { text-decoration: line-through; color: var(--dim); }
 
   .orb { width: 12px; height: 12px; border-radius: 50%; flex: none; background: radial-gradient(circle at 32% 28%, #8fb39f, #4f7d67 70%); }
+  .orb.g { background: radial-gradient(circle at 32% 28%, #b3a3cf, #7a6a9b 70%); }
   .orb.busy { animation: breathe 1.8s ease-in-out infinite; }
   @keyframes breathe { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, #4f7d67 18%, transparent); } }
 
@@ -144,12 +323,4 @@
     .grid { grid-template-columns: minmax(0, 1fr); }
     .hh { flex-wrap: wrap; }
   }
-
-  button { font: inherit; color: inherit; cursor: pointer; border: 0; background: transparent; }
-  .wd { grid-column: span var(--span); }
-  .add { grid-column: 1 / -1; }
-  .cfg label { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--dim); font-size: 12px; }
-  .cfg select { max-width: 65%; font: inherit; color: var(--ink); background: var(--paper); border: 1px solid var(--faint); border-radius: 8px; padding: 4px; }
-  .task .col { text-align: left; }
-  @media (max-width: 900px) { .wd { grid-column: auto; } .needs.wide { grid-template-columns: 1fr; } }
 </style>

@@ -1,72 +1,85 @@
-// Where the page is, as the terminal app's: the board (home screen) with its Sessions · Files ·
-// Tasks · Agents · Games views and the plugins' views after them, or a session's chat with the side
-// panel holding the same views (and a plugin command's panel). Settings is a board page off the top
-// bar. Each pane (the board's, the side panel's) has its own open file; the file viewer is not a
-// tab, it opens in place of the Files tree, with the file's opener (the built-in reader and writer,
-// or a plugin's).
+// Where the page is, as the redesign lays it out (web/mock/ChatMock2.svelte): no sidebar; Home and
+// the views stand alone (one panel, `screen: 'home' | 'view'`); a chat opens full width
+// (`screen: 'chat'`) and a tab picked while in a chat opens beside it (two panels, desktop only).
+// On a phone, one thing at a time: a chat takes the whole screen, with a back arrow.
 //
-// The address follows: `/?s=<id>` a session (`/?s=new` a fresh chat), `/?view=files&file=<path>` the
-// board (`&edit=1`: writing it; `&with=<plugin>/<opener>` opened with that opener),
-// `/?view=settings&tab=marketplace`. `?path=<note>` (a vault note, as the terminal app's `e` opens it)
-// lands on the board writing that note; `?notes` on the board's Files at the vault. Back and
-// forward work.
+// The address follows: `/?s=<id>` a chat (`/?s=new` a fresh one), `&view=<tab>` the view beside it;
+// `/?view=<tab>` a view on its own (`files&file=<path>` with that file open, `&edit=1` writing it,
+// `settings&tab=marketplace`). The editor's old addresses still land: `?path=<note>` writing that
+// vault note in Files, `?notes` Files at the vault. Back and forward work.
 
 import { files } from './api.ts';
 
-/** The built-in views, Games, Settings (the board's), Preview and a plugin command's panel (the side's) and plugin views. */
-export type View = 'home' | 'sessions' | 'files' | 'tasks' | 'routines' | 'agents' | 'games' | 'settings' | 'panel' | 'preview' | `plugin:${string}`;
+/** A tab key: a built-in view, Settings, the subagent panel, Preview, a plugin command's panel or a plugin view. */
+export type View = 'home' | 'sessions' | 'files' | 'tasks' | 'routines' | 'agents' | 'games' | 'settings' | 'subagent' | 'panel' | 'preview' | `plugin:${string}`;
+/** Kept for the plugin host's context: 'home' a view on its own, 'side' beside a chat. */
 export type Pane = 'home' | 'side';
-/** The built-in tabs, in order; plugin views come after them. */
+/** The built-in tabs, in order (Home first); plugin views come after them. */
 export const VIEWS: View[] = ['sessions', 'files', 'tasks', 'routines', 'agents', 'games'];
-const isView = (v: string | null): v is View => !!v && (VIEWS.includes(v as View) || v === 'home' || v === 'settings' || /^plugin:[a-z0-9-]{2,40}\/[A-Za-z0-9._-]+$/.test(v));
+const isView = (v: string | null): v is View =>
+  !!v && (VIEWS.includes(v as View) || ['settings', 'preview', 'panel', 'subagent'].includes(v) || /^plugin:[a-z0-9-]{2,40}\/[A-Za-z0-9._-]+$/.test(v));
+
+export type Reveal = { path: string; n: number; open?: boolean; edit?: boolean };
 
 export const app = $state({
-  /** The open session; 'new' a chat whose session starts with its first prompt; null the board. */
+  screen: 'home' as 'home' | 'chat' | 'view',
+  /** The view picked in the tab bar: the right panel beside a chat, or the page on its own. */
+  view: null as View | null,
+  /** Where a chat's back arrow (phone) goes. */
+  back: 'home' as 'home' | 'view',
+  /** The open chat's session; 'new' a chat whose session starts with its first prompt. */
   session: null as string | null,
-  /** The agent a fresh chat ('new') starts its session as. */
+  /** The agent picked at the top (the orb); a new chat starts with it. */
   agent: 'zenbot',
+  /** A new chat's first words, put in its message box when it opens. */
   chatDraft: '',
+  /** Open the file picker when the next chat opens (the ring's Attach). */
   attachOnOpen: false,
-  view: 'home' as View,
-  side: { open: false, view: 'files' as View },
-  /** Which pane has the keys in a session: the chat or the side panel. */
-  focus: 'chat' as 'chat' | 'side',
-  file: { home: null as string | null, side: null as string | null },
-  /** Whether each pane's file (a vault note) is open for writing (the writer) rather than reading. */
-  write: { home: false, side: false },
-  /** The opener the owner picked for each pane's file ("Open with"): `<plugin>/<id>`, 'builtin', or null for the default. */
-  opener: { home: null as string | null, side: null as string | null },
+  /** A phone-sized screen (≤900px): one panel at a time. */
+  narrow: false,
+  /** The subagent session shown in the right panel. */
+  subagent: null as string | null,
+  /** A file for Files to show (attachments, Settings' USER.md, plugin links). */
+  reveal: { path: '', n: 0 } as Reveal,
+  /** Where Files was opened from, for its "‹ Settings" button. */
+  filesFrom: null as string | null,
   /** Settings' page. */
-  settings: 'plugins' as 'plugins' | 'marketplace',
+  settings: 'you' as string,
   /** A new note not yet on disk (vault path and its first text), for the editor to start from. */
   draft: null as { path: string; text: string } | null,
-  /** Each pane's Files tree root. */
-  root: { home: '', side: '' },
   home: '',
   vault: '',
-  /** A one-line note at the bottom (cleared after a while). */
+  /** A one-line note at the bottom (cleared after a while), with an optional Undo. */
   notice: '',
+  undo: null as null | (() => void),
   /** Sessions waiting on the owner, for the tab title. */
   waiting: 0,
+  /** The open chat is working (the orb breathes). */
+  working: false,
+  /** Text for the open chat's message box (Files' Ask zenbot beside it); `n` counts the asks. */
+  chatInsert: { text: '', n: 0 },
+  /** The file open in Files (it goes with the next prompt when Files is beside the chat). */
+  viewing: null as string | null,
 });
 
 let noticeTimer: ReturnType<typeof setTimeout> | undefined;
-export function notice(text: string, ms = 6000) {
+export function notice(text: string, ms = 6000, undo: (() => void) | null = null) {
   app.notice = text;
+  app.undo = undo;
   clearTimeout(noticeTimer);
-  if (text) noticeTimer = setTimeout(() => (app.notice = ''), ms);
+  if (text) noticeTimer = setTimeout(() => ((app.notice = ''), (app.undo = null)), ms);
 }
+
+/** Two panels: a chat with a view beside it (desktop only). */
+export const split = () => app.screen === 'chat' && !app.narrow && app.view !== null;
+/** Whether a tab is the one showing. */
+export const tabOn = (k: string) => (k === 'home' ? app.screen === 'home' : app.screen !== 'home' && app.view === k);
 
 function url(): string {
   const p = new URLSearchParams();
-  if (app.session) p.set('s', app.session);
-  else {
-    if (app.view !== 'home') p.set('view', app.view);
-    if (app.view === 'files' && app.file.home) p.set('file', app.file.home);
-    if (app.view === 'files' && app.file.home && app.write.home) p.set('edit', '1');
-    if (app.view === 'files' && app.file.home && app.opener.home) p.set('with', app.opener.home);
-    if (app.view === 'settings' && app.settings !== 'plugins') p.set('tab', app.settings);
-  }
+  if (app.screen === 'chat' && app.session) p.set('s', app.session);
+  if (app.screen !== 'home' && app.view && app.view !== 'subagent' && app.view !== 'panel') p.set('view', app.view);
+  if (app.screen === 'view' && app.view === 'settings' && app.settings === 'marketplace') p.set('tab', 'marketplace');
   const q = p.toString();
   return q ? `/?${q}` : '/';
 }
@@ -81,16 +94,14 @@ function push(replace = false) {
 /** Reads the address into the state (on load, back and forward). */
 export function fromUrl() {
   const p = new URLSearchParams(location.search);
-  app.session = p.get('s');
+  const s = p.get('s');
   const v = p.get('view');
-  app.view = isView(v) ? v : app.session ? app.view : 'home';
-  if (!app.session) {
-    app.file.home = p.get('file');
-    app.write.home = p.has('edit');
-    app.opener.home = p.get('with');
-    app.settings = p.get('tab') === 'marketplace' ? 'marketplace' : 'plugins';
-  }
-  app.focus = 'chat';
+  app.session = s;
+  app.view = isView(v) && v !== 'home' ? v : null;
+  app.screen = s ? 'chat' : app.view ? 'view' : 'home';
+  if (app.view === 'settings' && p.get('tab') === 'marketplace') app.settings = 'marketplace';
+  const file = p.get('file');
+  if (file && app.view === 'files') app.reveal = { path: file, n: app.reveal.n + 1, open: true, edit: p.has('edit') };
 }
 
 /** `?path=<note>` and `?notes`, the editor's old addresses, once the vault is known. */
@@ -99,17 +110,17 @@ function landing() {
   const note = p.get('path');
   if (note !== null && app.vault) {
     app.session = null;
+    app.screen = 'view';
     app.view = 'files';
-    app.file.home = `${app.vault}/${note.replace(/^\/+/, '')}`;
-    app.write.home = true;
+    app.reveal = { path: `${app.vault}/${note.replace(/^\/+/, '')}`, n: app.reveal.n + 1, open: true, edit: true };
     push(true);
   } else if (p.has('notes') && app.vault) {
     app.session = null;
+    app.screen = 'view';
     app.view = 'files';
-    app.root.home = app.vault;
-    app.file.home = null;
+    app.reveal = { path: `${app.vault}/`, n: app.reveal.n + 1 };
     push(true);
-  }
+  } else if (p.has('file')) push(true);
 }
 
 export async function start() {
@@ -119,18 +130,37 @@ export async function start() {
     const h = await files.home();
     app.home = h.home;
     app.vault = h.vault;
-    // Files opens in the shared workspace (the vault, ~/.zenbot/global); `..` climbs to home.
-    app.root.home ||= h.vault || h.home;
-    app.root.side ||= h.vault || h.home;
     landing();
   } catch {}
 }
 
-/** Opens a session's chat (`'new'`: a fresh one, as `agent`, zenbot by default). */
-export function openSession(id: string, agent = 'zenbot') {
-  if (id === 'new') app.agent = agent;
+/** A tab picked in the tab bar: Home alone; beside an open chat (desktop) it toggles the right panel. */
+export function pickTab(k: string) {
+  app.filesFrom = null;
+  if (k === 'home') {
+    app.screen = 'home';
+    app.view = null;
+  } else if (app.screen === 'chat' && !app.narrow) app.view = app.view === k ? null : (k as View);
+  else {
+    app.screen = 'view';
+    app.view = k as View;
+  }
+  push();
+}
+
+/** Open a tab, never toggling it shut (menu and ring shortcuts). */
+export function openTab(k: string) {
+  if (!tabOn(k)) pickTab(k);
+}
+
+/** Open a chat ('new': a fresh one, as `agent`). */
+export function openSession(id: string, agent?: string) {
+  if (id === 'new' && agent) app.agent = agent;
+  if (app.screen !== 'chat') app.back = app.screen === 'view' ? 'view' : 'home';
   app.session = id;
-  app.focus = 'chat';
+  app.screen = 'chat';
+  if (app.back === 'home' || app.narrow) app.view = null;
+  if (app.view === 'subagent') app.view = null;
   push();
 }
 
@@ -140,82 +170,85 @@ export function sessionStarted(id: string) {
   push(true);
 }
 
-export function board(view?: View) {
-  app.session = null;
-  if (view) app.view = view;
+/** A subagent's session in the right panel (phone: full screen); again on the open one keeps it. */
+export function openSub(id: string) {
+  app.subagent = id;
+  if (app.narrow) {
+    app.screen = 'view';
+    app.view = 'subagent';
+  } else app.view = 'subagent';
+}
+
+/** The chat's back arrow (phone). */
+export function goBack() {
+  app.screen = app.back;
+  if (app.back === 'home') app.view = null;
+  else if (!app.view || app.view === 'subagent') app.view = 'sessions';
   push();
 }
 
-export function setView(pane: Pane, view: View) {
-  if (pane === 'home') {
-    app.view = view;
-    push();
-  } else {
-    app.side.view = view;
-    app.side.open = true;
+/** Close the chat (×): a side view (Tasks, Files…) takes the page; otherwise (a subagent panel closes with its chat) Sessions. */
+export function closeChat() {
+  if (split() && app.view !== 'subagent') app.screen = 'view';
+  else {
+    app.screen = 'view';
+    app.view = 'sessions';
   }
+  push();
 }
 
-/** Opens a file in a pane's file viewer (the side panel opens on Files); `opener` as "Open with" picks. */
-export function openFile(path: string, pane: Pane = app.session ? 'side' : 'home', write = false, opener: string | null = null) {
-  app.file[pane] = path;
-  app.write[pane] = write;
-  app.opener[pane] = opener;
-  if (pane === 'side') {
-    app.side.open = true;
-    app.side.view = 'files';
+/** The kept views' API (plugin host, chat commands): `pane` no longer matters. */
+export function setView(_pane: Pane, view: View) {
+  openTab(view);
+}
+
+export function board(view?: View) {
+  if (view) {
+    app.screen = view === 'home' ? 'home' : 'view';
+    app.view = view === 'home' ? null : view;
   } else {
-    app.view = 'files';
-    push();
+    app.screen = 'home';
+    app.view = null;
   }
+  push();
 }
 
-export function closeFile(pane: Pane) {
-  app.file[pane] = null;
-  app.write[pane] = false;
-  app.opener[pane] = null;
-  if (pane === 'home') push();
+/** Show a file in Files (beside the chat when one is open): its folder with it picked, `open` it, or `edit` it. */
+export function showFile(path: string, how: { open?: boolean; edit?: boolean } = {}) {
+  const from = tabOn('settings') ? 'settings' : null;
+  if (!tabOn('files')) pickTab('files');
+  app.filesFrom = from;
+  app.reveal = { path, n: app.reveal.n + 1, ...how };
 }
 
-/** Re-roots a pane's Files tree at `dir`. */
-export function openDir(dir: string, pane: Pane = app.session ? 'side' : 'home') {
-  app.root[pane] = dir;
-  app.file[pane] = null;
-  app.write[pane] = false;
-  app.opener[pane] = null;
-  setView(pane, 'files');
+/** Open a file (plugin links, chat links); `write` opens it for writing. */
+export function openFile(path: string, _pane?: Pane, write = false) {
+  showFile(path, { open: true, edit: write });
 }
 
-export function toggleSide(view?: View) {
-  if (view && (!app.side.open || app.side.view !== view)) {
-    app.side.open = true;
-    app.side.view = view;
-  } else app.side.open = !app.side.open;
-  if (!app.side.open) app.focus = 'chat';
+/** Back to the file's folder. */
+export function closeFile(_pane?: Pane) {
+  const p = app.reveal.path;
+  app.reveal = { path: p, n: app.reveal.n + 1 };
 }
 
-/** Writes a vault note (`wiki/Note.md`) in a pane: the writer in place of the reader. */
-export function editNote(vaultPath: string, pane: Pane = app.session ? 'side' : 'home') {
-  openFile(`${app.vault}/${vaultPath}`, pane, true);
+/** Re-roots Files at `dir`. */
+export function openDir(dir: string) {
+  showFile(dir.replace(/\/+$/, '') + '/');
 }
 
-/** Settings on the board or, while chatting, in the side panel (`tab`: its page). */
-export function settings(tab: 'plugins' | 'marketplace' = 'plugins') {
+/** Toggle a view beside the chat (`/files`, `/tasks`). */
+export function toggleSide(view: View = 'files') {
+  pickTab(view);
+}
+
+/** Settings (`tab`: its page). */
+export function settings(tab = 'you') {
   app.settings = tab;
-  if (app.session) {
-    app.side.open = true;
-    setView('side', 'settings');
-  } else board('settings');
+  openTab('settings');
 }
 
-/** Back from writing to reading the same file. */
-export function readNote(pane: Pane) {
-  app.write[pane] = false;
-  app.opener[pane] = null;
-  if (pane === 'home') push();
-}
-
-/** A pane's file as a vault note path (`wiki/Note.md`), or null when it isn't a vault note. */
+/** A vault path (`wiki/Note.md`) for a full path, or null when it isn't a vault note. */
 export function vaultNote(path: string | null): string | null {
   if (!path || !app.vault || !path.startsWith(app.vault + '/') || !/\.md$/i.test(path)) return null;
   return path.slice(app.vault.length + 1);
