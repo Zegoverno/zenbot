@@ -28,7 +28,9 @@
   $effect(() => { if (!cwd && app.vault) cwd = app.vault; });
   // The open file, if any: it replaces the list; ↑ or its folder's crumb goes back.
   let file = $state<string | null>(saved?.file ?? null);
-  $effect(() => sessionStorage.setItem(KEY, JSON.stringify({ cwd, file, flt, tagsAll })));
+  // Dotfiles stay out of the list until `.` (or the folder menu) shows them.
+  let showHidden = $state<boolean>(saved?.showHidden ?? false);
+  $effect(() => sessionStorage.setItem(KEY, JSON.stringify({ cwd, file, flt, tagsAll, showHidden })));
   let q = $state('');
   // Filters by the notes' properties (type, status, tags): OR within one, AND across them.
   type Flt = Record<string, string[]>;
@@ -86,7 +88,7 @@
     if (!p || !v) return;
     fetch(`/api/fs/facets?path=${encodeURIComponent(p)}`).then((r) => (r.ok ? r.json() : null)).then((d) => { if (d && p === cwd) notes = d.notes ?? []; }).catch(() => {});
   });
-  const entries = $derived(sorted(listing[cwd] ?? []));
+  const entries = $derived(sorted((listing[cwd] ?? []).filter((n) => showHidden || !n.hidden)));
 
   /** Breadcrumbs: inside the vault they start at "Vault"; outside, at "/". */
   const crumbs = $derived.by(() => {
@@ -118,6 +120,7 @@
     const t = q.trim(), p = cwd;
     clearTimeout(findTimer); clearTimeout(noteTimer);
     if (!t) { hits = []; noteSeq++; noteHits = []; noteBusy = false; noteErr = ''; return; }
+    untrack(() => { sel = null; });
     findTimer = setTimeout(() => {
       files.find(p, t).then((r) => { if (q.trim() === t && cwd === p) hits = r.results.map((x) => ({ path: x.path, node: { name: x.name, kids: x.dir ? [] : undefined, dir: x.dir } })); }).catch(() => (hits = []));
     }, 180);
@@ -260,10 +263,45 @@
     const p = siblings[(at + d + siblings.length) % siblings.length];
     openNode(p, { name: p.split('/').pop()! }); sibOpen = false;
   }
+  /** The rows shown (the folder, or the search's results) for j/k and Enter. */
+  const rows = $derived(q.trim() || active ? found.map((r) => ({ path: r.path, node: r.node })) : entries.map((n) => ({ path: join(cwd, n.name), node: n })));
+  function move(d: number) {
+    if (!rows.length) return;
+    const i = rows.findIndex((r) => r.path === sel);
+    sel = rows[i < 0 ? (d > 0 ? 0 : rows.length - 1) : Math.min(rows.length - 1, Math.max(0, i + d))].path;
+    tick().then(() => listEl?.querySelector('.row.on')?.scrollIntoView({ block: 'nearest' }));
+  }
+  function openSel(): boolean {
+    const r = rows.find((x) => x.path === sel);
+    if (r) openNode(r.path, r.node);
+    return !!r;
+  }
+  let listEl = $state<HTMLElement>();
+  let searchEl = $state<HTMLInputElement>();
+  /** The list's keys: j/k or ↓/↑ move, Enter opens, `.` shows dotfiles, `/` searches, a/A/R new file, folder, rename. */
+  function listKeys(e: KeyboardEvent) {
+    if (!listEl?.isConnected || askFor) return;
+    const act: Record<string, () => void> = {
+      j: () => move(1), ArrowDown: () => move(1), k: () => move(-1), ArrowUp: () => move(-1),
+      Home: () => { sel = null; move(1); }, End: () => { sel = null; move(-1); },
+      Enter: () => void openSel(),
+      '.': () => { showHidden = !showHidden; },
+      '/': () => searchEl?.focus(),
+      a: () => begin('file'), A: () => begin('folder'), R: () => begin('rename'),
+    };
+    if (act[e.key]) { e.preventDefault(); act[e.key](); }
+  }
+  function searchKeys(e: KeyboardEvent) {
+    if (e.isComposing) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); move(e.key === 'ArrowDown' ? 1 : -1); }
+    else if (e.key === 'Enter') { e.preventDefault(); if (!openSel()) searchNow(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (q) q = ''; else searchEl?.blur(); }
+  }
   function keys(e: KeyboardEvent) {
-    if (!file || editing || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (editing || e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
     const t = e.target as HTMLElement;
-    if (t.closest('input, textarea, [contenteditable]')) return;
+    if (t.closest('input, textarea, select, [contenteditable]')) return;
+    if (!file) return listKeys(e);
     if (!host?.isConnected) return;
     if (e.key === 'ArrowLeft') { e.preventDefault(); step(-1); }
     else if (e.key === 'ArrowRight') { e.preventDefault(); step(1); }
@@ -382,12 +420,14 @@
       if (a.kind === 'rename') {
         if (name === nameOf(a.from!)) { askFor = null; return; }
         const { path } = await files.rename(a.from!, name);
+        if (name.startsWith('.')) showHidden = true;
         await list(a.dir);
         sel = path; askFor = null;
       } else {
         const folder = a.kind === 'folder' || name.endsWith('/');
         name = name.replace(/\/+$/, '');
         const { path } = folder ? await files.mkdir(a.dir, name) : await files.create(a.dir, name);
+        if (name.startsWith('.')) showHidden = true;
         await list(a.dir);
         sel = path; askFor = null;
         if (!folder) openNode(path, { name: nameOf(path) });
@@ -415,6 +455,7 @@
     more: '<circle cx="6" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="18" cy="12" r="1.2"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     rename: '<path d="M4 20h4L19 9l-4-4L4 16z"/>',
+    eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
   };
 </script>
 
@@ -519,7 +560,7 @@
     </div>
   </div>
 {:else}
-<div class="fsearch">{@render ic('search')}<input placeholder={`Search in ${crumbs[crumbs.length - 1].label === '/' ? 'everything' : crumbs[crumbs.length - 1].label}`} bind:value={q} aria-label="Search files and notes" onkeydown={(e) => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); searchNow(); } else if (e.key === 'Escape' && q) { e.preventDefault(); e.stopPropagation(); q = ''; } }} />
+<div class="fsearch">{@render ic('search')}<input placeholder={`Search in ${crumbs[crumbs.length - 1].label === '/' ? 'everything' : crumbs[crumbs.length - 1].label}`} bind:value={q} bind:this={searchEl} aria-label="Search files and notes" onkeydown={searchKeys} />
   <button class="fb" class:on={fltOpen || active > 0} aria-expanded={fltOpen} title="Filter by properties" onclick={() => (fltOpen = !fltOpen)}>{@render ic('filter')}<span class="hl">Filter</span>{#if active}<b>{active}</b>{/if}</button>
   <div class="sib more">
     <button class="fb" class:on={menu} aria-haspopup="menu" aria-expanded={menu} title="New file, new folder, rename" aria-label="Folder actions" onclick={() => (menu = !menu)}>{@render ic('more')}</button>
@@ -528,6 +569,7 @@
         <button role="menuitem" disabled={!inVault} title={inVault ? 'A name ending in / makes a folder (A)' : 'Writes stay inside the vault'} onclick={() => begin('file')}>{@render ic('plus')}<span>New file</span></button>
         <button role="menuitem" disabled={!inVault} title={inVault ? 'New folder (Shift+A)' : 'Writes stay inside the vault'} onclick={() => begin('folder')}>{@render ic('dir')}<span>New folder</span></button>
         <button role="menuitem" disabled={!inVault || !chosen} title={!inVault ? 'Writes stay inside the vault' : chosen ? 'Rename (Shift+R)' : 'Select a file or folder first'} onclick={() => begin('rename')}>{@render ic('rename')}<span>Rename{chosen ? ` “${chosen.name}”` : '…'}</span></button>
+        <button role="menuitemcheckbox" aria-checked={showHidden} class:on={showHidden} title="Show or hide dotfiles (.)" onclick={() => { showHidden = !showHidden; menu = false; }}>{@render ic('eye')}<span>{showHidden ? 'Hide hidden files' : 'Show hidden files'}</span></button>
       </div>
     {/if}
   </div>
@@ -589,7 +631,7 @@
   </div>
 {/if}
 
-<div class="list">
+<div class="list" bind:this={listEl}>
   {#if failed}<div class="none">Can't open this folder: {failed}</div>{/if}
   {#if q.trim() || active}
     {#if active}<div class="rc">{found.length} note{found.length === 1 ? '' : 's'}</div>{/if}
@@ -614,7 +656,7 @@
         <span class="when">{n.kids ? (n.when || count(n)) : n.when}</span>
       </button>
     {:else}
-      {#if listing[cwd] && !failed}<div class="none">This folder is empty.</div>{/if}
+      {#if listing[cwd] && !failed}<div class="none">This folder is empty{!showHidden && listing[cwd].some((n) => n.hidden) ? ' · . shows hidden files' : ''}.</div>{/if}
     {/each}
   {/if}
 </div>
