@@ -183,3 +183,10 @@ or archive can be added too, for development.
   context with that session's next prompt.
 - Slash commands from plugins call the tool and show its UI in the side panel (or the result text
   when it has none). In Matrix they return the result text.
+- Keys and commands: zenbot is driven by keyboard alone (ring, Ctrl+K command list, `?`, one focused
+  panel at a time), and a plugin UI takes part through the `zen/commands`, `zen/key`, `zen/command`
+  and `zen/focus` notifications over the same channel. The host validates each strictly, shows the
+  text only as text, dispatches a forwarded key through the same handler as a real one (only while
+  its pane is focused) and never lets a plugin's default key take one zenbot already uses. The
+  contract is PLUGINS.md's "Keys and commands"; the host side is `web/src/zen/keys.svelte.ts`,
+  `frame.ts` (validation) and `PluginFrame.svelte`.

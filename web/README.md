@@ -10,13 +10,27 @@ The same screens as the terminal app, with its keys, and a mouse and a phone way
 
 - **The board** (`/`): Sessions (channels, sessions, jobs, archived; waiting first; subagents
   under their session; another agent's session shows `@name`), Files (the vault, with the home folder one step up: read, and
-  `a` new file, `A` new folder, `R` rename, asked inline, never over anything), Tasks (the vault's open tasks by project, most pressing first; hand one to an agent
+  `n` new file, `Shift+N` new folder, `r` rename, asked inline, never over anything), Tasks (the vault's open tasks by project, most pressing first; hand one to an agent
   with `a a`) and Agents (each agent with what it may use, a broken `agent.toml` with its error;
   Enter opens its `SOUL.md`, `IDENTITY.md` and `agent.toml` to edit, save (`ctrl+s`; a refused
   change shows the kernel's reason and writes nothing), delete (asked first; never zenbot) or
   start a session with; `+` makes one, `n` starts a session with the chosen one). `1 2 3 4` or Tab
   switch views, `n` starts a session (or the `+ new session` button), `/` filters, `a` shows archived, `J`
   shows archived jobs too (hidden by default; kept in this browser).
+- **Keyboard only.** Everything has a key. One panel is always focused (thin accent outline; a
+  click, `Ctrl+\` or opening a view moves it; `Ctrl+Shift+\` closes the side panel or brings back
+  the last one). `Ctrl+.` opens the ring bottom right: its button shows the focused panel's icon and
+  it fans out that panel's commands (up to six, plus Focus ⟷ when split); then a letter or `1`–`6`
+  runs one (arrows and Enter too). `Ctrl+K` is the command list: fuzzy search over the panel's
+  commands, the global ones, plugin commands, sessions and files, each with its shortcut;
+  `Ctrl+E` on a row changes its key (a clash asks "Take it from …?"; kept in this browser as
+  `zen.keys`). `?` lists the shortcuts that work now. `g` then `h s f t r a m p` goes to Home,
+  Sessions, Files, Tasks, Routines, Agents, Games, Preview; `1`–`9` pick a tab; `c` a new chat; `@`
+  the agent menu. Single letters work when you are not typing: in a chat `Esc` on an empty box
+  leaves it (then `j`/`k` walk the steps, `r` renames, `x` archives, `i` or Enter writes), and `/`
+  filter or search, `n` new, `e` edit, `r` rename or run, `x` archive, `a` ask zenbot, `j`/`k` or
+  ↑↓ move, Enter open, Esc back are the same wherever they fit. Plugin UIs add their own commands
+  (PLUGINS.md, "Keys and commands").
 - **A session** (`/?s=<id>`): a new one starts as zenbot or the agent picked at its top
   or footer (or `/new @rex`); the chat streams the reply, folds tool calls into runs (`ctrl+o`),
   shows questions with clickable options and the next-prompt suggestion (Tab takes it). Files
