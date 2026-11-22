@@ -294,10 +294,16 @@ export const routines = {
   enable: (name: string, enabled: boolean) => call('PATCH', `/api/zen/jobs/${enc(name)}`, { enabled }),
 };
 
+/** A dev server listening on this machine (server/servers.ts). */
+export interface DevServer { port: number; name: string; command: string; cwd: string; unit: string | null; pid: number }
 export const files = {
   home: () => call<{ home: string; vault: string }>('GET', '/api/fs/home'),
   /** A Preview pin's screenshot, taken on the server (server/shot.ts). */
   previewShot: (b: { url: string; selector: string; width: number; height: number }) => call<{ path: string; data: string }>('POST', '/api/preview/shot', b),
+  /** The dev servers on this machine (server/servers.ts), named by app; stop or restart one by its port. */
+  previewServers: () => call<{ servers: DevServer[] }>('GET', '/api/preview/servers'),
+  previewStop: (port: number) => call<{ ok: boolean }>('POST', '/api/preview/servers/stop', { port }),
+  previewRestart: (port: number) => call<{ server: DevServer }>('POST', '/api/preview/servers/restart', { port }),
   list: (path: string) => call<{ path: string; entries: Entry[] }>('GET', `/api/fs/list?path=${enc(path)}`),
   read: (path: string) => call<FileRead>('GET', `/api/fs/read?path=${enc(path)}`),
   stat: (path: string) => call<{ mtime: number; size: number }>('GET', `/api/fs/stat?path=${enc(path)}`),

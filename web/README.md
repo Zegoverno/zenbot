@@ -49,7 +49,14 @@ The same screens as the terminal app, with its keys, and a mouse and a phone way
   every other vault note) with a snippet each, listed after the names. ↑↓ and Enter pick a result,
   a click opens it through the normal opener (plugins included), Esc clears. Without the kernel's
   answer the name matches still show.
-- **Preview** (side panel): any dev server on this machine (a port, 3000–9999), at a screen size,
+- **Preview** (side panel): any dev server on this machine, at a screen size. The tab lists what
+  listens on ports 3000–9999 (`GET /api/preview/servers`, `server/servers.ts`: read from `/proc`,
+  only the owner's own processes, never system services or zen's own ports), named by app (its
+  package.json name, git folder, user unit or folder, not the port), with ↻ restart and ✕ stop for
+  each (`POST /api/preview/servers/{stop,restart}`: the port is looked up again, never a pid from the
+  page; a service unit goes through `systemctl --user`, any other process is stopped by signal and
+  started again as a transient `zen-preview-<port>-…` user unit, so it outlives zen web's own restarts).
+  `a` opens the list; a port can still be typed. It shows the app, at a screen size,
   under zen's own address: `/preview/<port>/…` (`server/preview.ts`) forwards to `localhost:<port>`
   (hot reload included), adds `/zen-preview.js` to its pages and drops frame-blocking headers, so it
   works wherever zen does (one port, no other sign-in, nothing a firewall drops). An app started with
@@ -138,7 +145,8 @@ Settings (environment): `ZEN_WEB_ROOT` (the vault, default `~/.zenbot/global`), 
 (the Files view's home, default `$HOME`), `ZEN_BIN` (default `~/.zenbot/bin/zen`), `ZEN_WEB_PORT`
 (4400), `ZEN_URL`, `ZEN_TOKEN_FILE`, `ZEN_WEB_AUTH_HEADER` (the proxy's login header, default exe.dev's
 `X-ExeDev-UserID`), `ZEN_WEB_AUTH` (`off` drops the login-header check; local tests only),
-`ZEN_WEB_DEV_HOSTS` (host names Vite's dev server accepts besides localhost).
+`ZEN_WEB_DEV_HOSTS` (host names Vite's dev server accepts besides localhost), `ZEN_WEB_PREVIEW_SYSTEM`
+(`1` also lists processes in `/system.slice/`; tests only).
 
 Security: loopback only; every request needs the proxy's login header; writes need `X-Zen-Web: 1`
 (no cross-site writes); paths stay inside the root (Markdown only, no dot folders, no symlinks out);
@@ -150,3 +158,6 @@ writes (`POST /api/fs/create`, `mkdir`, `rename`) take one plain name (no `/`, `
 (a taken name is a 409), a rename stays in its folder, and home, `~/.zenbot` and what is within two levels of
 it (`~/.zenbot/global`, `~/.zenbot/agents/zenbot`) can't be renamed. nginx in
 front must allow the size on that route (`client_max_body_size 1g`, request buffering off).
+Any signed-in user can stop or restart the owner's own dev servers from Preview (processes of the
+server's user on ports 3000–9999); system services (cgroup `/system.slice/`), zen's own ports and
+the web server's own unit are never listed, and a port that isn't listed is a 404.
