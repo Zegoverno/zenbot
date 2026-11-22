@@ -1104,8 +1104,10 @@
   function key(e: KeyboardEvent) {
     const inTa = e.target === ta;
     if (e.defaultPrevented || e.isComposing) return;
-    // Keys belong to the chat from its box, or from anywhere that isn't another field or the right panel.
+    // Keys belong to the chat only while it is the focused panel (a key in the other panel, or on the
+    // body after the cursor left a list, is that panel's), and not from another field.
     const t = e.target as HTMLElement | null;
+    if (focused() !== 'chat') return;
     const mine = inTa || !t || t === document.body || !!root?.contains(t);
     if (!mine || (!inTa && typing(e))) return;
     const ctrl = e.ctrlKey && !e.altKey && !e.metaKey;

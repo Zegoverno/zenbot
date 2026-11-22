@@ -988,6 +988,29 @@ try {
   await until(() => aborts.length >= 1, 'Esc sends an abort');
   assert.equal(aborts.length, 1, 'Esc sends one abort');
 
+  // Esc (and Ctrl+C) in the side panel is not the chat's: only the focused chat is stopped by them.
+  await box.fill('Take your time');
+  await box.press('Enter');
+  await until(() => prompts.at(-1) === 'Take your time' && prompts.filter((p) => p === 'Take your time').length === 2, 'the second long turn starts');
+  if (await page.locator('.pane.view').count()) {
+    await page.keyboard.press('Control+Shift+\\');
+    await page.locator('.pane.view').waitFor({ state: 'detached' });
+  }
+  await page.keyboard.press('Control+Shift+\\');
+  await page.locator('.pane.view').waitFor();
+  assert.equal(await page.locator('.pane.view.focused').count(), 1, 'the side panel has the focus');
+  await page.evaluate(() => (document.activeElement instanceof HTMLElement ? document.activeElement.blur() : 0));
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Control+c');
+  await new Promise((ok) => setTimeout(ok, 300));
+  assert.equal(aborts.length, 1, 'Esc and Ctrl+C in another panel do not stop the chat');
+  await page.keyboard.press('Control+\\');
+  await page.evaluate(() => (document.activeElement instanceof HTMLElement ? document.activeElement.blur() : 0));
+  await page.keyboard.press('Escape');
+  await until(() => aborts.length === 2, 'Esc in the focused chat stops it');
+  await page.keyboard.press('Control+Shift+\\');
+  await page.locator('.pane.view').waitFor({ state: 'detached' });
+
   // A plugin command with declared choices: with no argument it opens a picker; a choice runs the
   // tool with that value, one with `then` goes to the composer and calls nothing; with an argument
   // typed, the picker stays out of the way.
