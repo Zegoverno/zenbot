@@ -14,6 +14,7 @@
   const items = $derived.by(() => { void ui.ring; return ringItems(); });
   const icon = $derived(kindIcon(focused()));
   const at = (i: number, n: number) => {
+    if (n < 1) return 'translate(0px, 0px)';
     const R = n > 6 ? 188 : 156;
     const a = Math.PI + (n < 2 ? Math.PI / 4 : (i * (Math.PI / 2)) / (n - 1));
     return `translate(${Math.cos(a) * R}px, ${Math.sin(a) * R}px)`;
@@ -53,6 +54,6 @@
   .qa:hover, .qa:focus-visible, .qa.cur { color: var(--on-accent); background: var(--accent); border-color: var(--accent); outline: none; }
   .qn { position: absolute; right: -3px; top: -3px; min-width: 17px; height: 17px; padding: 0 4px; border-radius: 99px; display: grid; place-items: center; font-size: 10.5px; font-weight: 700;
     background: var(--ink); color: var(--paper); }
-  .qlabel { position: absolute; right: 200px; bottom: 14px; white-space: nowrap; font-size: 13px; font-weight: 600; padding: 5px 12px; border-radius: 99px; background: var(--ink); color: var(--paper); pointer-events: none; }
-  @media (max-width: 900px) { .qc { right: 16px; bottom: 96px; } .qlabel { right: 180px; } }
+  .qlabel { position: absolute; right: 200px; bottom: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: calc(100vw - 234px); font-size: 13px; font-weight: 600; padding: 5px 12px; border-radius: 99px; background: var(--ink); color: var(--paper); pointer-events: none; }
+  @media (max-width: 900px) { .qc { right: 16px; bottom: 96px; } .qlabel { right: 180px; max-width: calc(100vw - 204px); } }
 </style>

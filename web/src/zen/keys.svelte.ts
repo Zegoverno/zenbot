@@ -16,13 +16,13 @@
 // The handler. One capture-phase listener on the window (`install`) so it runs before anything in
 // the page; a plugin UI's forwarded `zen/key` goes through the same `dispatch`, as if pressed in
 // its pane. Mod chords always fire; every other key only when not typing (`typing` in
-// app.svelte.ts). Enter is left to a focused button. While the ring is open it takes the keys
+// app.svelte.ts). Enter and Space are left to a focused button or checkbox. While the ring is open it takes the keys
 // (a letter or 1–6 runs an action, arrows and Enter too); `g` then a letter goes to a view; `?`
 // lists the shortcuts. Lists are walked with a cursor (`data-cur`, `moveCursor`) rather than DOM
 // focus, so Enter and Space stay commands.
 
 import { untrack } from 'svelte';
-import { app, split as isSplit, pickTab, openTab, notice, type View } from './app.svelte.ts';
+import { app, split as isSplit, pickTab, openTab, notice, textField, type View } from './app.svelte.ts';
 import { chordOf, validKey, RESERVED, FIXED, type KeyLike } from './keys.ts';
 
 export type PanelKind =
@@ -164,8 +164,11 @@ export function findClash(c: Registered, chord: string): Registered | null {
   return null;
 }
 export const isReserved = (chord: string) => FIXED.includes(chord);
+/** Whether `chord` is one of `c`'s extra keys (arrows beside j/k): those can't be rebound, so nobody takes them. */
+export const heldAsAlt = (c: Cmd, chord: string) => (c.alt ?? []).includes(chord);
 
 export function rebind(c: Cmd, chord: string, takeFrom?: Cmd) {
+  if (takeFrom && heldAsAlt(takeFrom, chord)) return;
   if (takeFrom) bound.map[takeFrom.id] = '';
   bound.map[c.id] = chord;
   keep();
@@ -285,6 +288,7 @@ function ringKey(chord: string): boolean {
   const items = ringItems();
   if (chord === 'Escape') { ui.ring = false; return true; }
   if (/^[1-9]$/.test(chord)) { if (Number(chord) <= items.length) runRing(Number(chord) - 1); return true; }
+  if (!items.length) return true;
   if (chord === 'ArrowDown' || chord === 'ArrowRight' || chord === 'Tab') ui.ringAt = (ui.ringAt + 1) % items.length;
   else if (chord === 'ArrowUp' || chord === 'ArrowLeft' || chord === 'Shift+Tab') ui.ringAt = (ui.ringAt - 1 + items.length) % items.length;
   else if (chord === 'Enter' || chord === 'Space') runRing(ui.ringAt);
@@ -322,10 +326,13 @@ export function dispatch(k: KeyIn): boolean {
   if (ui.goto) {
     ui.goto = false;
     clearTimeout(gotoTimer);
-    goTo(chord);
-    return true;
+    // A chord (Ctrl+L, Alt+1…) is not a place to go to: it goes on as itself.
+    if (!/^(Mod\+|Alt\+)/.test(chord)) {
+      goTo(chord);
+      return true;
+    }
   }
-  if (chord === 'Enter' && k.interactive) return false;
+  if ((chord === 'Enter' || chord === 'Space') && k.interactive) return false;
   if (chord === '?') { ui.help = true; return true; }
   if (chord === 'g') { armGoto(); return true; }
   for (const c of active()) {
@@ -337,21 +344,26 @@ export function dispatch(k: KeyIn): boolean {
   return false;
 }
 
-const interactive = (t: EventTarget | null) => t instanceof HTMLElement && !!t.closest('button, a[href], summary, [role=button], select');
+const interactive = (t: EventTarget | null) =>
+  t instanceof HTMLElement && !!t.closest('button, a[href], summary, [role=button], select, input[type=checkbox], input[type=radio], input[type=button], input[type=submit], input[type=reset], input[type=range], input[type=color], input[type=file]');
 
 /** The window's key handler: a capture-phase listener, so it runs first. Returns what removes it. */
 export function install(): () => void {
   const on = (e: KeyboardEvent) => {
     if (e.defaultPrevented || e.isComposing) return;
     const t = e.target as HTMLElement | null;
-    const typing = !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+    const typing = textField(t);
     if (dispatch({ key: e.key, code: e.code, ctrlKey: e.ctrlKey, metaKey: e.metaKey, altKey: e.altKey, shiftKey: e.shiftKey, typing, interactive: interactive(t) })) {
       e.preventDefault();
       e.stopPropagation();
     }
   };
   window.addEventListener('keydown', on, true);
-  return () => window.removeEventListener('keydown', on, true);
+  return () => {
+    window.removeEventListener('keydown', on, true);
+    clearTimeout(gotoTimer);
+    ui.goto = false;
+  };
 }
 
 // ---- walking a list with the cursor ----

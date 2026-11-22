@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chordOf, fuzzy, keyLabel, validKey, RESERVED } from './keys.ts';
-import { clashed, dispatch, findClash, focused, keyOf, rebind, register as put, resetKey, ringItems, setPanes, ui, unbind, unregister, type Cmd, type Scope } from './keys.svelte.ts';
+import { browserOwned, chordOf, fuzzy, keyLabel, validKey, RESERVED } from './keys.ts';
+import { clashed, dispatch, findClash, focused, heldAsAlt, install, keyOf, rebind, register as put, resetKey, ringItems, setPanes, ui, unbind, unregister, type Cmd, type Scope } from './keys.svelte.ts';
 
 const ev = (key: string, o: Partial<{ code: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean }> = {}) => ({ key, ...o });
 
@@ -23,6 +23,14 @@ describe('the key form', () => {
   });
   it('reads Alt+letter from the physical key (a Mac types other letters)', () => {
     expect(chordOf(ev('å', { altKey: true, code: 'KeyA' }))).toBe('Alt+a');
+  });
+  it('reads the ABNT2 keys beside the Shifts as their symbols', () => {
+    expect(chordOf(ev('|', { ctrlKey: true, shiftKey: true, code: 'IntlBackslash' }))).toBe('Mod+Shift+\\');
+    expect(chordOf(ev('?', { ctrlKey: true, shiftKey: true, code: 'IntlRo' }))).toBe('Mod+Shift+/');
+  });
+  it('knows the chords the browser keeps', () => {
+    for (const k of ['Mod+1', 'Mod+9', 'Mod+t', 'Mod+w', 'Mod+n', 'Mod+l', 'Mod+f', 'Mod+p', 'Mod+r', 'Mod+Tab', 'Mod+Shift+t', 'Mod+Shift+n', 'Mod+Shift+w']) expect(browserOwned(k), k).toBe(true);
+    for (const k of ['Mod+s', 'Mod+Shift+s', 'n', '1', 'Mod+Enter', 'Alt+1']) expect(browserOwned(k), k).toBe(false);
   });
   it('ignores a modifier on its own', () => {
     for (const k of ['Control', 'Shift', 'Alt', 'Meta', 'Dead']) expect(chordOf(ev(k))).toBeNull();
@@ -95,6 +103,14 @@ describe('the registry and the key handler', () => {
     expect(open).toHaveBeenCalledTimes(1);
   });
 
+  it('leaves Space to a focused button or checkbox', () => {
+    const run = vi.fn();
+    register('tasks', [cmd('sp', { key: 'Space', run })], 909);
+    expect(dispatch({ key: ' ', interactive: true })).toBe(false);
+    expect(dispatch({ key: ' ' })).toBe(true);
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
   it('skips a disabled command and takes the next holder of the key', () => {
     const second = vi.fn();
     register('tasks', [cmd('x1', { key: 'x', enabled: () => false }), cmd('x2', { key: 'x', run: second })], 903);
@@ -141,6 +157,46 @@ describe('the registry and the key handler', () => {
     expect(ui.goto).toBe(false);
   });
 
+  it('lets a chord through during the go-to window instead of swallowing it', () => {
+    const run = vi.fn();
+    register('tasks', [cmd('fnd', { key: 'Mod+s', run }), cmd('alt1', { key: 'Alt+x', run })], 910);
+    dispatch(ev('g'));
+    expect(ui.goto).toBe(true);
+    expect(dispatch({ key: 's', ctrlKey: true })).toBe(true);
+    expect(ui.goto).toBe(false);
+    expect(run).toHaveBeenCalledTimes(1);
+    dispatch(ev('g'));
+    // Not ours at all: the key isn't consumed (the browser keeps Ctrl+L), and the go-to is over.
+    expect(dispatch({ key: 'l', ctrlKey: true })).toBe(false);
+    expect(ui.goto).toBe(false);
+    dispatch(ev('g'));
+    expect(dispatch({ key: '1', altKey: true, code: 'Digit1' })).toBe(false);
+    expect(ui.goto).toBe(false);
+  });
+
+  it('forgets the go-to when the handler is removed', () => {
+    vi.stubGlobal('window', { addEventListener: () => {}, removeEventListener: () => {} });
+    const off = install();
+    dispatch(ev('g'));
+    expect(ui.goto).toBe(true);
+    off();
+    vi.unstubAllGlobals();
+    expect(ui.goto).toBe(false);
+  });
+
+  it('does not go round a ring with nothing in it', () => {
+    ui.panes = ['chat'];
+    ui.focus = 0;
+    ui.ringAt = 0;
+    dispatch({ key: '.', ctrlKey: true });
+    expect(ui.ring).toBe(true);
+    expect(dispatch(ev('ArrowDown'))).toBe(true);
+    expect(dispatch(ev('Tab'))).toBe(true);
+    expect(ui.ringAt).toBe(0);
+    dispatch(ev('Escape'));
+    expect(ui.ring).toBe(false);
+  });
+
   it('opens the shortcuts list on ? and the command list on Ctrl+K, not while typing', () => {
     expect(dispatch({ key: '?', typing: true })).toBe(false);
     expect(dispatch({ key: '?' })).toBe(true);
@@ -167,6 +223,21 @@ describe('the registry and the key handler', () => {
     expect(clashed(reg('free', 'y'))).toBe(false);
     // Keys zenbot keeps for itself clash too.
     for (const k of RESERVED) expect(clashed({ ...cmd('plugin:fx/r', { key: k, plugin: 'fx' }), scope: 'plugin' }), k).toBe(true);
+  });
+
+  it('never takes a key held as another command\'s extra key', () => {
+    register('tasks', [cmd('walk', { key: 'j', alt: ['ArrowDown'] }), cmd('want', { key: 'w' })], 911);
+    const walk = { ...cmd('walk', { key: 'j', alt: ['ArrowDown'] }), scope: 'tasks' as const };
+    const want = { ...cmd('want', { key: 'w' }), scope: 'tasks' as const };
+    const holder = findClash(want, 'ArrowDown');
+    expect(holder?.id).toBe('walk');
+    expect(heldAsAlt(holder!, 'ArrowDown')).toBe(true);
+    expect(heldAsAlt(holder!, 'j')).toBe(false);
+    rebind(want, 'ArrowDown', walk);
+    expect(keyOf(walk)).toBe('j');
+    expect(keyOf(want)).toBe('w');
+    resetKey(walk);
+    resetKey(want);
   });
 
   it('finds the command holding a key, and takes it over on request', () => {

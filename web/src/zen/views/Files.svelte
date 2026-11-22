@@ -557,7 +557,12 @@
         {#key `${writer.key}:${vaultRel}`}<div class="frame"><PluginFrame plugin={writer.plugin} ui={writer.ui} pane={app.screen === 'chat' ? 'side' : 'home'} path={vaultRel} mode="edit" slot="opener" title={writer.title} /></div>{/key}
       {:else if editing}
         <!-- svelte-ignore a11y_autofocus -->
-        <textarea class="raw" bind:value={draft} autofocus spellcheck="true" aria-label="Markdown source" onkeydown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); cancelEdit(); } }}></textarea>
+        <textarea class="raw" bind:value={draft} autofocus spellcheck="true" aria-label="Markdown source" onkeydown={(e) => {
+          if (e.key === 'Escape') { e.stopPropagation(); cancelEdit(); }
+          // The window's handler runs first and swallows this when the pane is the focused one; if it
+          // isn't, Ctrl+S must still never reach the browser's save dialog.
+          else if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 's') { e.preventDefault(); void save(); }
+        }}></textarea>
       {:else if !doc && !readError}
         <div class="none">Opening…</div>
       {:else if isNote && reader && vaultRel}

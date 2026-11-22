@@ -9,8 +9,8 @@
   // same flow rebinds it. Overrides live in keys.svelte.ts (localStorage `zen.keys`).
   import { tick } from 'svelte';
   import Icon from './Icon.svelte';
-  import { ui, active, focused, kindName, keyOf, clashed, findClash, isReserved, rebind, unbind, resetKey, changed, type Registered } from './keys.svelte.ts';
-  import { chordOf, fuzzy, keyLabel } from './keys.ts';
+  import { ui, active, focused, kindName, keyOf, clashed, findClash, isReserved, heldAsAlt, rebind, unbind, resetKey, changed, type Registered } from './keys.svelte.ts';
+  import { chordOf, browserOwned, fuzzy, keyLabel } from './keys.ts';
   import { app, openSession, showFile, openDir, notice } from './app.svelte.ts';
   import { board } from './live.svelte.ts';
   import { chat, plugins } from './plugins.svelte.ts';
@@ -116,7 +116,9 @@
     const chord = chordOf(e);
     if (!chord) return;
     if (isReserved(chord)) { say = `${keyLabel(chord)} is zenbot's own: pick another`; return; }
+    if (browserOwned(chord)) { say = `${keyLabel(chord)} belongs to the browser: pick another`; return; }
     const other = findClash(cap.cmd, chord);
+    if (other && heldAsAlt(other, chord)) { say = `${keyLabel(chord)} is fixed for ${other.title}: pick another`; return; }
     if (other) { capture = { cmd: cap.cmd, chord, other }; return; }
     rebind(cap.cmd, chord);
     say = `${cap.cmd.title}: ${keyLabel(chord)}`;

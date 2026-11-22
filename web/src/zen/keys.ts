@@ -17,6 +17,8 @@ const MODIFIERS = new Set(['Control', 'Meta', 'Alt', 'Shift', 'AltGraph', 'CapsL
 const CODE_CHAR: Record<string, string> = {
   Backslash: '\\', Period: '.', Comma: ',', Slash: '/', Semicolon: ';', Quote: "'", BracketLeft: '[', BracketRight: ']',
   Minus: '-', Equal: '=', Backquote: '`',
+  // Brazilian ABNT2: the extra key left of the right Shift (/ and ?) and the one beside the left Shift (\ and |).
+  IntlBackslash: '\\', IntlRo: '/',
 };
 
 const isLetter = (k: string) => k.length === 1 && k.toLowerCase() !== k.toUpperCase();
@@ -61,6 +63,11 @@ export function validKey(s: unknown): s is string {
 export const RESERVED = ['Mod+k', 'Mod+.', 'Mod+\\', 'Mod+Shift+\\', '?', 'Escape', 'g'];
 /** Keys the shell handles before any command: the tab digits (the go-to's `g` is in RESERVED). */
 export const FIXED = [...RESERVED, '1', '2', '3', '4', '5', '6', '7', '8', '9'];
+
+/** Chords the browser keeps for itself (tabs, address bar, find, print, reload): a page can't reliably take them. */
+export function browserOwned(chord: string): boolean {
+  return /^Mod\+[1-9]$/.test(chord) || /^Mod\+[twnlfpr]$/.test(chord) || chord === 'Mod+Tab' || /^Mod\+Shift\+[tnw]$/.test(chord);
+}
 
 const MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || '');
 const GLYPH: Record<string, string> = { ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→', Escape: 'Esc', Space: 'Space' };
