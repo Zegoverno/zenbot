@@ -473,6 +473,8 @@ try {
   await page.route('**/api/zen/ideas?*', (route) => route.fulfill({ json: { ideas: [{ text: 'Plan a week', why: 'Monday looks full' }, 'Review a project', { text: 'Explore an idea', why: '' }] } }));
   await page.locator('.pane.view').getByRole('button', { name: /New/ }).first().click();
   await page.waitForURL(/\?s=new/);
+  await untilAsync(() => page.evaluate(() => document.activeElement?.matches('.pane.chat textarea') ?? false), 'a new chat takes the keyboard: the box is focused');
+  assert.equal(await page.evaluate(() => document.activeElement?.matches('.pane.chat textarea')), true, 'a new chat focuses its box');
   assert.equal(await page.locator('.idea', { hasText: 'Plan a week' }).locator('span').textContent(), 'Monday looks full', 'an idea shows its why line');
   assert.ok(await page.getByRole('button', { name: 'Review a project' }).isVisible(), 'plain-string ideas still parse');
   await page.getByRole('button', { name: /Plan a week/ }).click();
@@ -655,6 +657,15 @@ try {
   await page.keyboard.press('g');
   await page.keyboard.press('h');
   await page.waitForURL((u) => !u.search);
+
+  // `c` from Tasks (a side panel focused) starts a new chat and the box has the keyboard.
+  await page.goto(`${base}/?s=s1&view=tasks`);
+  await page.locator('.pane.view .twrap').waitFor();
+  await page.locator('.pane.view').click({ position: { x: 5, y: 5 } });
+  await page.keyboard.press('c');
+  await page.waitForURL(/\?s=new/);
+  await untilAsync(() => page.evaluate(() => document.activeElement?.matches('.pane.chat textarea') ?? false), 'c focuses the new chat box');
+  assert.equal(await page.locator('.pane.chat.focused').count(), 1, 'the new chat is the focused panel');
 
   // A chat with Files beside it: two panels, one focused; Ctrl+\ switches; the ring bears the other's icon.
   await page.goto(`${base}/?s=s1&view=files`);

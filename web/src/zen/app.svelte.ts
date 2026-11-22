@@ -35,6 +35,8 @@ export const app = $state({
   chatDraft: '',
   /** Open the file picker when the next chat opens (the ring's Attach). */
   attachOnOpen: false,
+  /** Counts chats opened by the owner (openSession): the shell gives the chat the keyboard on each. */
+  opened: 0,
   /** A phone-sized screen (≤900px): one panel at a time. */
   narrow: false,
   /** The subagent session shown in the right panel. */
@@ -165,6 +167,7 @@ export function openSession(id: string, agent?: string) {
   if (app.screen !== 'chat') app.back = app.screen === 'view' ? 'view' : 'home';
   app.session = id;
   app.screen = 'chat';
+  app.opened++;
   if (app.back === 'home' || app.narrow) app.view = null;
   if (app.view === 'subagent') app.view = null;
   push();
