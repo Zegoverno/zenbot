@@ -315,7 +315,12 @@
     { id: 'files-parent', title: 'Up one folder', icon: 'up', key: 'ArrowLeft', quiet: true, enabled: () => cwd !== '/', run: up },
     { id: 'files-back', title: 'Clear the search, or go up', icon: 'prev', key: 'Escape', quiet: true, enabled: () => !!(q || active) || cwd !== VAULT, run: () => { if (q) q = ''; else if (active) flt = {}; else up(); } },
   ]);
-  registerCommands('files-reader', () => [
+  // A plugin reader (zenread) brings its own commands (edit, ask, next note, scrolling): the built-in
+  // ones would show twice and take its keys, so only the folder and Esc stay zenbot's.
+  registerCommands('files-reader', () => plugRead ? [
+    { id: 'reader-folder', title: 'Show in folder', icon: 'files', ring: 5, run: up },
+    { id: 'reader-back', title: 'Back to the folder', icon: 'prev', key: 'Escape', quiet: true, enabled: () => !pendingLeave, run: up },
+  ] : [
     { id: 'reader-edit', title: 'Edit', icon: 'write', key: 'e', ring: 0, enabled: () => isNote && !!vaultRel && !editing, run: edit },
     { id: 'reader-ask', title: 'Ask zenbot about this note', icon: 'ask', key: 'a', ring: 1, enabled: () => !!ask && !!file, run: () => ask?.(shortPath(file!)) },
     { id: 'reader-prev', title: 'Previous', icon: 'prev', key: 'ArrowLeft', ring: 2, enabled: () => siblings.length > 1, run: () => step(-1) },
@@ -332,7 +337,8 @@
       { id: 'writer-cancel', title: 'Cancel', icon: 'close', key: 'Escape', ring: 1, run: cancelEdit },
       { id: 'writer-done', title: 'Save and close', icon: 'check', key: 'Mod+Enter', run: () => void saveAndClose() },
     ]
-    : [{ id: 'writer-cancel', title: 'Done', icon: 'close', key: 'Escape', ring: 0, run: () => (editing = false) }]));
+    // A plugin writer (zenwrite) keeps Esc: leaving here would skip its own unsaved-changes question.
+    : [{ id: 'writer-cancel', title: 'Done', icon: 'close', ring: 0, run: () => (editing = false) }]));
   let host = $state<HTMLElement>();
   const nameOf = (p: string) => p.split('/').pop()!;
 
@@ -348,6 +354,8 @@
   let drafts = $state<Record<string, { text: string; hash: string | null }>>((() => { try { return JSON.parse(sessionStorage.getItem(DRAFTS) ?? '{}'); } catch { return {}; } })());
   $effect(() => { try { sessionStorage.setItem(DRAFTS, JSON.stringify(drafts)); } catch {} });
   const builtin = $derived(editing && !writer);
+  /** A note shown by a plugin reader (its commands replace the built-in reader's, above). */
+  const plugRead = $derived(!editing && isNote && !!reader && !!vaultRel);
   const dirty = $derived(builtin && (draft !== text || hash === null));
   $effect(() => { if (file && builtin) { if (draft !== text || hash === null) drafts[file] = { text: draft, hash }; else delete drafts[file]; } });
   let pendingLeave = $state<(() => void) | null>(null);

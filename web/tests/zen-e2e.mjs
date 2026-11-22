@@ -28,6 +28,7 @@ writeFileSync(path.join(VAULT, 'wiki/plain.txt'), 'hello file');
 writeFileSync(path.join(VAULT, '.hidden-test'), 'hidden');
 mkdirSync(path.join(VAULT, 'games'));
 writeFileSync(path.join(VAULT, 'games/board.fx'), 'four in a row\n');
+writeFileSync(path.join(VAULT, 'games/fxnote-a.md'), '# A note the fixture plugin reads\n');
 const REAL_ZEN = process.env.ZEN_BIN ?? (() => {
   const root = path.resolve(import.meta.dirname, '../..');
   execFileSync('cargo', ['build', '-q', '-p', 'zen'], { cwd: root, stdio: 'inherit' });
@@ -119,7 +120,7 @@ const fxPlugin = {
   name: 'zenfx', version: '0.1.0', title: 'Fixture', description: 'A test plugin.', permissions: ['files:read'], enabled: true,
   contributes: {
     views: [{ id: 'board', title: 'Fx board', ui: 'ui://zenfx/app' }],
-    openers: [{ id: 'read', title: 'Fx read', ui: 'ui://zenfx/app', patterns: ['*.fx'], mode: 'read' }],
+    openers: [{ id: 'read', title: 'Fx read', ui: 'ui://zenfx/app', patterns: ['*.fx', 'fxnote-*.md'], mode: 'read' }],
     games: [{ id: 'dice', title: 'Dice', description: 'Roll a die.', ui: 'ui://zenfx/app' }],
     commands: [{ name: 'roll', tool: 'zenfx_roll', args: '<sides>', description: 'Roll a die.' },
       { name: 'desk', tool: 'zenfx_desk', args: '<action> [rest]', description: 'Work on the desk.', choices: [{ value: 'lint', description: 'Check the desk.' }, { value: 'find', description: 'Search the desk.', then: '<words>' }] }],
@@ -805,6 +806,17 @@ try {
   await page.keyboard.press('Escape');
   assert.deepEqual(JSON.parse(await page.evaluate(() => localStorage.getItem('zen.keys'))), { 'tasks-group': 'y', 'tasks-drop': '', 'tasks-hand': 'd' });
   await page.evaluate(() => localStorage.removeItem('zen.keys'));
+
+  // A note shown by a plugin reader: the built-in reader's commands (Edit, Ask…) step aside for the plugin's.
+  openerDefaults['fxnote-*.md:read'] = 'zenfx/read';
+  await page.goto(`${base}/?view=files&file=${encodeURIComponent(path.join(VAULT, 'games/fxnote-a.md'))}`);
+  await page.locator('.rscroll.plug iframe').waitFor();
+  await page.keyboard.press('Control+.');
+  await page.locator('.qc.open').waitFor();
+  const plugRing = await page.locator('.qc .qa').evaluateAll((l) => l.map((b) => b.getAttribute('aria-label')));
+  assert.ok(plugRing.includes('Show in folder') && !plugRing.includes('Edit') && !plugRing.includes('Ask zenbot about this note'), `a plugin reader keeps only zenbot's folder command (${plugRing})`);
+  await page.keyboard.press('Escape');
+  delete openerDefaults['fxnote-*.md:read'];
 
   // A plugin UI's commands: in Ctrl+K and the ring (invalid ones dropped, markup shown as text), run by
   // zen/command; its forwarded keys reach zenbot; its default key clashing with a core key shows "clash".
