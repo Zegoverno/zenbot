@@ -666,6 +666,13 @@ try {
   assert.equal(await ringIcon(), 'chat', 'the ring button shows the focused panel');
   await page.keyboard.press('Control+\\');
   assert.equal(await ringIcon(), 'files');
+  // Ctrl+Shift+\ closes the side panel, and brings back the last one.
+  await page.keyboard.press('Control+Shift+\\');
+  await page.locator('.pane.view').waitFor({ state: 'detached' });
+  assert.equal(await ringIcon(), 'chat', 'with the side panel closed the chat is the one panel');
+  await page.keyboard.press('Control+Shift+\\');
+  await page.locator('.pane.view .list').waitFor();
+  assert.equal(await page.locator('.pane.view.focused').count(), 1, 'the reopened panel has the focus');
   await page.locator('.pane.chat .scroll').click({ position: { x: 5, y: 5 } });
   assert.equal(await page.locator('.pane.chat.focused').count(), 1, 'clicking a panel focuses it');
   await page.locator('.pane.view .list').click({ position: { x: 5, y: 300 } });
