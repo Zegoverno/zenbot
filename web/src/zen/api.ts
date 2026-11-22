@@ -32,6 +32,8 @@ export interface Session {
   /** How it ended, the owner's call when archiving: 'done', 'partial', 'not-done' or null. */
   outcome?: Outcome | null;
   outcome_note?: string | null;
+  /** The owner's 1–10 score given when archiving, or null. */
+  rating?: number | null;
   /** The partial session this one continues. */
   continues?: string | null;
   created_at: string;
@@ -233,7 +235,7 @@ export const zen = {
   sessions: (archived = false) => call<Session[]>('GET', `/api/zen/sessions?archived=${archived}`),
   session: (id: string, last = 40) => call<SessionDetail>('GET', `/api/zen/sessions/${enc(id)}?last=${last}`),
   create: (b: { title?: string; model?: string; effort?: string; agent?: string } = {}) => call<Session>('POST', '/api/zen/sessions', b),
-  update: (id: string, b: { title?: string; model?: string; effort?: string; archived?: boolean; outcome?: Outcome; note?: string }) => call<Session & { continued_by?: string }>('PATCH', `/api/zen/sessions/${enc(id)}`, b),
+  update: (id: string, b: { title?: string; model?: string; effort?: string; archived?: boolean; outcome?: Outcome; note?: string; rating?: number }) => call<Session & { continued_by?: string }>('PATCH', `/api/zen/sessions/${enc(id)}`, b),
   models: () => call<Models>('GET', '/api/zen/models'),
   agents: () => call<Agent[]>('GET', '/api/zen/agents'),
   agent: (name: string) => call<AgentDetail>('GET', `/api/zen/agents/${enc(name)}`),

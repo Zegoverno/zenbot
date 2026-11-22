@@ -158,13 +158,43 @@ export function takeHandoff(id: string): Handoff | null {
   return h;
 }
 
-/** How a session can end (`/archive <outcome> [note]`); `-` archives without saying. */
+/** How a session can end (`/archive [outcome] [1-10] [note]`); `-` archives without saying. */
 export const OUTCOMES: [string, string][] = [
   ['done', 'the job is done'],
   ['partial', 'part done: continue in a new session with a handoff'],
   ['not-done', 'not done: stop here'],
   ['-', 'just archive'],
 ];
+
+/**
+ * `/archive`'s arguments as the shared command table reads them (zen-client commands.rs): `[outcome]
+ * [1-10] [note]`, where a bare whole number right after the outcome (or first) is the rating. Null
+ * when the shape is wrong: an unknown word first, 0 or 11+ as the number, a note with neither.
+ */
+export function parseArchive(arg: string): { outcome: string | null; rating: number | null; note: string } | null {
+  let rest = arg.trim();
+  const take = () => {
+    const m = /^(\S*)\s*([\s\S]*)$/.exec(rest)!;
+    return [m[1], m[2]] as const;
+  };
+  let outcome: string | null = null;
+  const [first, afterFirst] = take();
+  if (OUTCOMES.some(([v]) => v === first.toLowerCase() && v !== '-')) {
+    outcome = first.toLowerCase();
+    rest = afterFirst;
+  }
+  let rating: number | null = null;
+  const [next, afterNext] = take();
+  if (/^[0-9]+$/.test(next)) {
+    const n = Number(next);
+    if (n < 1 || n > 10) return null;
+    rating = n;
+    rest = afterNext;
+  }
+  const note = rest.trim();
+  if (!outcome && rating === null && note) return null;
+  return { outcome, rating, note };
+}
 
 export const KEYS: [string, string][] = [
   ['enter', 'send'],

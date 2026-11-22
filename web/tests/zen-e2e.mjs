@@ -45,6 +45,9 @@ writeFileSync(ZEN_BIN, `#!/bin/sh\nif [ "$1" = --commands ]; then cat '${path.jo
 const PORT = Number(process.env.ZEN_E2E_PORT ?? 4412);
 const KERNEL = Number(process.env.ZEN_E2E_KERNEL_PORT ?? 4413);
 const shots = process.argv.includes('--shots');
+/** Screenshots of the slash menu and the rating step (with --shots). */
+const shotDir = process.env.ZEN_SHOT_DIR ?? '/tmp/zen-shots';
+if (shots) mkdirSync(shotDir, { recursive: true });
 const now = new Date().toISOString();
 const session = (id, title, extra = {}) => ({ id, title, model: 'faux/smoke', effort: null, archived: false, kind: null, parent: null, created_at: now, updated_at: now, ...extra });
 const prompts = [];
@@ -768,6 +771,72 @@ try {
   await page.goto(`${base}/?s=s1`);
   await page.locator('textarea').first().waitFor();
 
+  // Archiving asks how well it went after the outcome: keys 1-9 and 0 (10), Enter or Skip leaves it
+  // unsaid, Esc cancels; the rating is sent with the PATCH. Typed in full, /archive doesn't ask.
+  const archivesOf = () => patched.filter((p) => p.archived === true && p.id === 's1');
+  const rateGroup = page.getByRole('group', { name: 'Rate this session' });
+  const openChatS1 = async () => {
+    await page.goto(`${base}/?s=s1`);
+    await page.getByRole('textbox', { name: 'message' }).waitFor();
+  };
+  const sinceRate = archivesOf().length;
+  await openChatS1();
+  await page.getByRole('button', { name: 'Details' }).click();
+  await page.locator('.archrow .oc').click();
+  await page.getByRole('option', { name: /Not done/ }).click();
+  await page.locator('.archrow .archgo').click();
+  await rateGroup.waitFor();
+  assert.equal(await rateGroup.getByRole('button', { name: /^Rate \d+ out of 10$/ }).count(), 10, 'the picker offers 1 to 10');
+  assert.equal(archivesOf().length, sinceRate, 'nothing is archived before the rating step ends');
+  assert.equal(await page.evaluate(() => document.activeElement?.matches('.pane.chat textarea')), true, 'the box keeps the keyboard for the number keys');
+  if (shots) await page.screenshot({ path: `${shotDir}/rating-desktop.png` });
+  await page.keyboard.press('0');
+  await until(() => archivesOf().length === sinceRate + 1, '0 rates 10 and archives');
+  assert.deepEqual(archivesOf().at(-1), { id: 's1', archived: true, outcome: 'not-done', rating: 10 });
+  assert.equal(await rateGroup.count(), 0, 'the rating step closes');
+  await openChatS1();
+  await page.getByRole('textbox', { name: 'message' }).fill('/archive');
+  await page.getByRole('textbox', { name: 'message' }).press('Enter');
+  await page.getByRole('listbox', { name: 'How did it end?' }).waitFor();
+  await page.keyboard.press('Enter');
+  await rateGroup.waitFor();
+  await page.keyboard.press('Enter');
+  await until(() => archivesOf().length === sinceRate + 2, 'Enter skips the rating and archives');
+  assert.deepEqual(archivesOf().at(-1), { id: 's1', archived: true, outcome: 'done' }, 'a skipped rating is not sent');
+  await openChatS1();
+  await page.getByRole('textbox', { name: 'message' }).fill('/archive partial 4 tests red');
+  await page.getByRole('textbox', { name: 'message' }).press('Enter');
+  await until(() => archivesOf().length === sinceRate + 3, 'a typed /archive with a rating archives at once');
+  assert.deepEqual(archivesOf().at(-1), { id: 's1', archived: true, outcome: 'partial', rating: 4, note: 'tests red' });
+  assert.equal(await rateGroup.count(), 0, 'a typed /archive does not ask again');
+  await openChatS1();
+  await page.getByRole('textbox', { name: 'message' }).fill('/archive done 11');
+  await page.getByRole('textbox', { name: 'message' }).press('Enter');
+  await page.getByText('usage: /archive [done|partial|not-done] [1-10] [note]').waitFor();
+  await page.getByRole('textbox', { name: 'message' }).fill('/archive');
+  await page.getByRole('textbox', { name: 'message' }).press('Enter');
+  await page.keyboard.press('Enter');
+  await rateGroup.waitFor();
+  await page.keyboard.press('Escape');
+  await rateGroup.waitFor({ state: 'detached' });
+  assert.equal(archivesOf().length, sinceRate + 3, 'Esc cancels the archive');
+  // On a phone: tap a number.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('textbox', { name: 'message' }).fill('/archive');
+  await page.getByRole('textbox', { name: 'message' }).press('Enter');
+  await page.keyboard.press('Enter');
+  await rateGroup.waitFor();
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'phone: the rating step fits');
+  const numBox = await rateGroup.getByRole('button', { name: 'Rate 10 out of 10' }).boundingBox();
+  assert.ok(numBox && numBox.x + numBox.width <= 390 && numBox.height >= 30, `phone: all ten numbers fit (${JSON.stringify(numBox)})`);
+  if (shots) await page.screenshot({ path: `${shotDir}/rating-phone.png` });
+  await rateGroup.getByRole('button', { name: 'Rate 8 out of 10' }).click();
+  await until(() => archivesOf().length === sinceRate + 4, 'tapping a number rates');
+  assert.deepEqual(archivesOf().at(-1), { id: 's1', archived: true, outcome: 'done', rating: 8 });
+  await page.setViewportSize({ width: 1300, height: 850 });
+  await page.goto(`${base}/?s=s1`);
+  await page.locator('textarea').first().waitFor();
+
   // Sessions: the cursor and r (rename) work from the keyboard.
   await page.goto(`${base}/?view=sessions`);
   await page.locator('.pane.view .srow').first().waitFor();
@@ -1002,8 +1071,6 @@ try {
 
   // Typing `/` lists every command in a bounded popup: its height is capped, it scrolls inside, the
   // rows keep their size, and the arrows keep the highlighted row in view; on desktop and on a phone.
-  const shotDir = process.env.ZEN_SHOT_DIR ?? '/tmp/zen-shots';
-  if (shots) mkdirSync(shotDir, { recursive: true });
   const slashMenu = page.getByRole('listbox', { name: 'commands' });
   for (const [label, vp] of [['desktop', { width: 1280, height: 800 }], ['phone', { width: 390, height: 844 }]]) {
     await page.setViewportSize(vp);
@@ -1019,14 +1086,14 @@ try {
     if (shots) await page.screenshot({ path: `${shotDir}/slash-menu-${label}.png` });
     for (let i = 0; i < count + 3; i++) {
       await box.press('ArrowDown');
-      const seen = await slashMenu.evaluate((el) => {
+      const inView = () => slashMenu.evaluate((el) => {
         const on = el.querySelector('.item.on'), a = el.getBoundingClientRect(), b = on?.getBoundingClientRect();
         return !!b && b.top >= a.top - 1 && b.bottom <= a.bottom + 1;
       });
-      assert.ok(seen, `${label}: the highlighted command stays in view (after ${i + 1} ArrowDowns)`);
+      await untilAsync(inView, `${label}: the highlighted command stays in view (after ${i + 1} ArrowDowns)`);
     }
     await box.press('ArrowUp');
-    assert.ok(await slashMenu.evaluate((el) => { const b = el.querySelector('.item.on').getBoundingClientRect(), a = el.getBoundingClientRect(); return b.top >= a.top - 1 && b.bottom <= a.bottom + 1; }), `${label}: ArrowUp keeps it in view`);
+    await untilAsync(() => slashMenu.evaluate((el) => { const b = el.querySelector('.item.on').getBoundingClientRect(), a = el.getBoundingClientRect(); return b.top >= a.top - 1 && b.bottom <= a.bottom + 1; }), `${label}: ArrowUp keeps it in view`);
     await box.fill('/ste');
     assert.ok((await slashMenu.getByRole('button').count()) < count, `${label}: typing still filters`);
     await box.fill('');
