@@ -104,7 +104,7 @@ pub enum Cmd {
     Model(Option<String>),
     Effort(Option<String>),
     Rename(String),
-    /// How the session ended (`done`, `partial`, `not-done`), if said, and a note.
+    /// How the session ended (`done`, `partial`, `not-done`), if said; how well it went, 1 to 10, if said; and a note.
     Archive { outcome: Option<String>, rating: Option<u8>, note: Option<String> },
     Steer(String),
     Tasks,
