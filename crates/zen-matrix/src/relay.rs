@@ -316,6 +316,7 @@ mod tests {
         assert_eq!(parse(" !Skills "), Input::Command("Skills".into()));
         assert_eq!(parse("!model codex/gpt-6-sol"), Input::Command("model codex/gpt-6-sol".into()));
         assert_eq!(parse("!archive done"), Input::Command("archive done".into()));
+        assert_eq!(parse("!archive done 8 shipped"), Input::Command("archive done 8 shipped".into()), "the rating rides the shared command");
         assert_eq!(parse("!jobs run"), Input::Command("jobs run".into()), "the usage comes back from the command");
         for gone in ["!queue", "!approve 12", "!deny", "!trust add docs.rs", "!allow yes"] {
             assert_eq!(parse(gone), Input::Help, "{gone} is gone");
