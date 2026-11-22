@@ -22,7 +22,7 @@
   import { AppBridge, PostMessageTransport, type McpUiHostContext } from '@modelcontextprotocol/ext-apps/app-bridge';
   import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
   import { pluginApi, type ToolResult } from './api.ts';
-  import { app, openFile, closeFile, setView, openSession, notice, type Pane } from './app.svelte.ts';
+  import { app, openFile, closeFile, setView, openSession, notice, textField, type Pane } from './app.svelte.ts';
   import { chat, contextImages, keepContextSaving, resultText } from './plugins.svelte.ts';
   import { SANDBOX, validCommands, validKeyEvent, webLink, withCsp, zenNavigation } from './frame.ts';
   import { dispatch, focused, focusPane, register, ui as keys, unregister, type PanelKind } from './keys.svelte.ts';
@@ -126,11 +126,13 @@
   function forwardKey(params: unknown) {
     const k = validKeyEvent(params);
     if (!k) return;
-    // A click inside the frame never reaches the page: the frame having the keyboard is what focuses its pane.
+    // Only the frame that really has the keyboard may press keys: a click inside it never reaches the
+    // page, so the frame having it is what focuses its pane. A frame in the background, or in a window
+    // that lost the focus, is dropped (it could otherwise drive the app unseen).
     const i = keys.panes.indexOf(where);
-    if (document.activeElement === frame && i >= 0) focusPane(i);
-    else if (focused() !== where) return;
-    dispatch(k);
+    if (document.activeElement !== frame || !document.hasFocus() || i < 0) return;
+    focusPane(i);
+    dispatch(textField(document.activeElement) ? { ...k, typing: true } : k);
   }
 
   // The pane gained or lost the keyboard: tell the app, and put the keyboard in the frame.

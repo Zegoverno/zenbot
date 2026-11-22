@@ -99,6 +99,9 @@ describe('plugin commands (zen/commands)', () => {
   });
   it('keeps markup as text: the title is returned as it came, never parsed', () => {
     expect(validCommands({ commands: [{ id: 'x', title: '<img src=x onerror=alert(1)>' }] })[0].title).toBe('<img src=x onerror=alert(1)>');
+    // Bidi controls would reorder what is drawn around the title: they are dropped.
+    expect(validCommands({ commands: [{ id: 'x', title: 'Save\u202Egpj.exe\u2066\u200f' }] })[0].title).toBe('Savegpj.exe');
+    expect(validCommands({ commands: [{ id: 'x', title: '\u202e\u2069' }] })).toEqual([]);
   });
 });
 

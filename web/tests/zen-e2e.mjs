@@ -853,6 +853,11 @@ try {
   await page.keyboard.press('Control+.');
   assert.ok((await page.locator('.qc .qa').evaluateAll((l) => l.map((b) => b.getAttribute('aria-label')))).includes('New game'), 'the ring shows ring:true plugin commands');
   await page.keyboard.press('Escape');
+  // A frame that doesn't hold the keyboard can't press keys (here a synthetic Ctrl+K from inside it).
+  await page.evaluate(() => (document.activeElement instanceof HTMLElement ? document.activeElement.blur() : 0));
+  await fxFrame.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true })));
+  await new Promise((ok) => setTimeout(ok, 300));
+  assert.equal(await pal.count(), 0, 'a forwarded key from a frame without the keyboard is dropped');
   // Keys pressed inside the frame: the shortcut is forwarded, zenbot resolves it and answers with zen/command.
   await fxFrame.evaluate(() => window.focus());
   await page.locator('iframe[data-plugin="zenfx"]').focus();

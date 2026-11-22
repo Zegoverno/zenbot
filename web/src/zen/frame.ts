@@ -83,6 +83,8 @@ export const MAX_COMMANDS = 30;
 const COMMAND_ID = /^[a-z0-9-]{1,32}$/;
 const plain = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const printable = (s: string) => !/[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(s);
+/** Bidi controls (they reorder what's drawn around them): dropped from plugin titles. */
+const BIDI = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 
 /** The valid commands of a `zen/commands` message, in order, at most 30; an unknown icon falls back to the plugin's. */
 export function validCommands(params: unknown): PluginCommand[] {
@@ -91,12 +93,13 @@ export function validCommands(params: unknown): PluginCommand[] {
   const out: PluginCommand[] = [];
   for (const c of list) {
     if (!plain(c) || typeof c.id !== 'string' || !COMMAND_ID.test(c.id) || seen.has(c.id)) continue;
-    if (typeof c.title !== 'string' || !printable(c.title) || !c.title.trim() || [...c.title].length > 60) continue;
+    const title = typeof c.title === 'string' ? c.title.replace(BIDI, '').trim() : '';
+    if (!title || !printable(title) || [...title].length > 60) continue;
     if (c.key !== undefined && !validKey(c.key)) continue;
     if (c.ring !== undefined && typeof c.ring !== 'boolean') continue;
     if (c.icon !== undefined && typeof c.icon !== 'string') continue;
     seen.add(c.id);
-    out.push({ id: c.id, title: c.title.trim(), ...(c.key !== undefined ? { key: c.key } : {}), ring: c.ring === true, ...(hasIcon(c.icon) ? { icon: c.icon } : {}) });
+    out.push({ id: c.id, title, ...(c.key !== undefined ? { key: c.key } : {}), ring: c.ring === true, ...(hasIcon(c.icon) ? { icon: c.icon } : {}) });
   }
   return out;
 }
