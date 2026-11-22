@@ -103,7 +103,7 @@ async fn deliver(db: &SqlitePool, session: Uuid, text: &str) -> Result<()> {
 
 /// What the kernel knows about how `session` went.
 pub(crate) async fn facts(db: &SqlitePool, session: Uuid) -> Result<Value> {
-    let s = sqlx::query("SELECT title, agent, model, outcome, outcome_note, created_at, ended_at, CAST((julianday(COALESCE(ended_at, updated_at)) - julianday(created_at)) * 86400 AS INTEGER) AS secs FROM sessions WHERE id = $1")
+    let s = sqlx::query("SELECT title, agent, model, outcome, outcome_note, rating, created_at, ended_at, CAST((julianday(COALESCE(ended_at, updated_at)) - julianday(created_at)) * 86400 AS INTEGER) AS secs FROM sessions WHERE id = $1")
         .bind(session)
         .fetch_one(db)
         .await?;
@@ -161,6 +161,7 @@ pub(crate) async fn facts(db: &SqlitePool, session: Uuid) -> Result<Value> {
         "model": s.get::<String, _>("model"),
         "outcome": s.get::<Option<String>, _>("outcome"),
         "note": s.get::<Option<String>, _>("outcome_note"),
+        "rating": s.get::<Option<i64>, _>("rating"),
         "duration_secs": s.get::<Option<i64>, _>("secs"),
         "turns": t.get::<i64, _>("turns"),
         "owner_messages": owner_messages,
