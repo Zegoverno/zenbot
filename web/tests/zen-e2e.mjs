@@ -686,6 +686,8 @@ try {
   assert.equal(labels.at(-1), 'Focus ⟷', 'a split page ends the ring with Focus ⟷');
   assert.ok(labels.length <= 7);
   assert.ok((await page.locator('.qc .qa .qn').allTextContents()).includes('1'), 'each action shows its number or letter');
+  const zs = await page.locator('.qc .qa').evaluateAll((l) => l.map((b) => Number(getComputedStyle(b).zIndex)));
+  assert.ok(zs.every((z, i) => i === 0 || z < zs[i - 1]), 'each ring button stacks over the next, so its badge stays readable');
   await page.keyboard.press('1');
   await page.locator('.qc.open').waitFor({ state: 'detached' });
   assert.equal(await page.evaluate(() => document.activeElement?.closest('.fsearch') !== null), true, 'Ctrl+. then 1 ran Search');

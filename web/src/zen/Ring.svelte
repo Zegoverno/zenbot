@@ -27,7 +27,7 @@
 {#if ui.ring}<button class="scrim" aria-label="Close" onclick={() => (ui.ring = false)}></button>{/if}
 <div class="qc" class:open={ui.ring} class:hide={app.narrow && app.screen === 'chat' && !ui.ring} data-ring>
   {#each ui.ring ? items : [] as a, i (a.id)}
-    <button class="qa" class:cur={i === ui.ringAt} style="--to: {at(i, items.length)}; animation-delay: {i * 18}ms"
+    <button class="qa" class:cur={i === ui.ringAt} style="--to: {at(i, items.length)}; animation-delay: {i * 18}ms; z-index: {items.length - i}"
       title="{a.title}{a.key ? ` (${keyLabel(a.key)})` : ''}" aria-label={a.title} data-ring-item={a.id}
       onmouseenter={() => (hover = a.title)} onmouseleave={() => (hover = '')} onclick={() => { ui.ring = false; hover = ''; a.run(); }}>
       <Icon name={a.icon} size={20} />
@@ -54,6 +54,9 @@
   .qa:hover, .qa:focus-visible, .qa.cur { color: var(--on-accent); background: var(--accent); border-color: var(--accent); outline: none; }
   .qn { position: absolute; right: -3px; top: -3px; min-width: 17px; height: 17px; padding: 0 4px; border-radius: 99px; display: grid; place-items: center; font-size: 10.5px; font-weight: 700;
     background: var(--ink); color: var(--paper); }
-  .qlabel { position: absolute; right: 200px; bottom: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: calc(100vw - 234px); font-size: 13px; font-weight: 600; padding: 5px 12px; border-radius: 99px; background: var(--ink); color: var(--paper); pointer-events: none; }
-  @media (max-width: 900px) { .qc { right: 16px; bottom: 96px; } .qlabel { right: 180px; max-width: calc(100vw - 204px); } }
+  /* Each badge sits over the next button up the arc; no keys on a touch screen, so no badges. */
+  @media (hover: none) { .qn { display: none; } }
+  .qlabel { position: absolute; right: 200px; bottom: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: calc(100vw - 234px); font-size: 13px; font-weight: 600; padding: 5px 12px; border-radius: 99px; background: var(--ink); color: var(--paper); pointer-events: none; z-index: 20; }
+  /* On a phone the arc fills the width beside the button, so the label goes above it. */
+  @media (max-width: 900px) { .qc { right: 16px; bottom: 96px; } .qlabel { right: 0; bottom: 224px; max-width: calc(100vw - 32px); } }
 </style>
