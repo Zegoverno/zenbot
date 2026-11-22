@@ -148,6 +148,12 @@ export function pickTab(k: string) {
   push();
 }
 
+/** The agent a new chat starts with (the orb at the top, Agents' "Switch agent"). */
+export function setAgent(id: string) {
+  app.agent = id;
+  try { localStorage.setItem('zen.agent', id); } catch {}
+}
+
 /** Open a tab, never toggling it shut (menu and ring shortcuts). */
 export function openTab(k: string) {
   if (!tabOn(k)) pickTab(k);
@@ -258,7 +264,12 @@ export function vaultNote(path: string | null): string | null {
 export const tilde = (p: string) => (app.home && (p === app.home || p.startsWith(app.home + '/')) ? '~' + p.slice(app.home.length) : p);
 
 /** Whether a key event belongs to a text field (views leave those keys alone). */
-export const typing = (e: KeyboardEvent) => {
-  const t = e.target as HTMLElement | null;
-  return !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
-};
+export const typing = (e: KeyboardEvent) => textField(e.target as HTMLElement | null);
+
+/** Inputs that take no typed text (a checkbox, a button, a slider): keys such as Space stay shortcuts there. */
+const NON_TEXT = new Set(['checkbox', 'radio', 'button', 'submit', 'reset', 'range', 'color', 'file', 'image']);
+/** Whether an element takes typed text: a text-like input, a textarea, a select or an editable area. */
+export const textField = (t: EventTarget | null) =>
+  t instanceof HTMLElement && (
+    (t instanceof HTMLInputElement && !NON_TEXT.has(t.type)) || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable
+  );

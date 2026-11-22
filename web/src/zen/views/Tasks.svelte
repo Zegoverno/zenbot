@@ -2,12 +2,17 @@
   // Tasks tab: the vault's tasks (Projects/<p>/tasks.md, through the kernel), ticked, added and
   // edited here; every write carries the line's revision. Grouped by when (default), by priority,
   // by project or by goal. One user per zenbot: no owners. (The redesign mock's Tasks, live.)
-  let { hand, open: openChat, agent = 'zenbot', agents = [] }: { hand?: (t: T, agent: string) => Promise<string | null>; open?: (session: string) => void; agent?: string; agents?: { id: string; name: string }[] } = $props();
+  // Keys (keys.svelte.ts registers them for the focused Tasks panel; the ring, Ctrl+K and `?` list
+  // them): j/k walk the rows (the cursor), Space ticks, e edits, d drops, h hands it to the agent,
+  // o opens its chat, a asks zenbot about it, b cycles Group by, n goes to the add box.
+  let { hand, open: openChat, ask, agent = 'zenbot', agents = [] }: { hand?: (t: T, agent: string) => Promise<string | null>; open?: (session: string) => void; ask?: (text: string) => void; agent?: string; agents?: { id: string; name: string }[] } = $props();
   let handAgent = $state<Record<string, string>>({});
   let choosing = $state<string | null>(null);
 
   import { onMount } from 'svelte';
+  import { commands as registerCommands, cursorRow, moveCursor } from '../keys.svelte.ts';
   import { box, flag, facts } from './TaskBits.svelte';
+  import { notice } from '../app.svelte.ts';
   import { store, toggle, load, loadMeta, meta, day, plus, patch, remove, add, PRI, OFFER, days, sort, type T, type Pri } from './taskstore.svelte.ts';
   const PROJECTS = $derived(meta.projects);
   const GOALS = $derived(meta.goals);
@@ -121,6 +126,24 @@
     const s = await hand?.(t, chosen);
     if (s) { t.agent = 'working'; t.by = chosen; t.session = s; }
   }
+
+  // ---- commands ----
+  const ROWS = '.twrap .task';
+  const curTask = () => { const id = cursorRow(ROWS)?.dataset.id; return store.tasks.find((t) => t.id === id) ?? null; };
+  const BYS = ['when', 'priority', 'project', 'goal'] as const;
+  const pickTask = (f: (t: T) => void) => { const t = curTask(); if (t) f(t); else notice('Pick a task first (j / k)'); };
+  registerCommands('tasks', () => [
+    { id: 'tasks-add', title: 'Add', icon: 'plus', key: 'n', ring: 0, run: () => addEl?.focus() },
+    { id: 'tasks-hand', title: 'Hand to agent', icon: 'hand', key: 'h', ring: 1, enabled: () => !!hand, run: () => pickTask((t) => { if (t.done || t.agent || t.session) notice('That task is done or already with an agent'); else void handTo(t); }) },
+    { id: 'tasks-chat', title: 'Open its chat', icon: 'chat', key: 'o', ring: 2, enabled: () => !!openChat, run: () => pickTask((t) => { if (t.session) openChat?.(t.session); else notice('No agent works on this task yet'); }) },
+    { id: 'tasks-done', title: 'Done', icon: 'check', key: 'Space', ring: 3, run: () => pickTask((t) => void tick(t)) },
+    { id: 'tasks-drop', title: 'Drop', icon: 'trash', key: 'd', ring: 4, run: () => pickTask((t) => void run(() => patch(t, { dropped: true }))) },
+    { id: 'tasks-group', title: 'Group by', icon: 'group', key: 'b', ring: 5, run: () => (by = BYS[(BYS.indexOf(by) + 1) % BYS.length]) },
+    { id: 'tasks-edit', title: 'Edit', icon: 'rename', key: 'e', alt: ['Enter'], run: () => pickTask(startEdit) },
+    { id: 'tasks-ask', title: 'Ask zenbot about it', icon: 'ask', key: 'a', enabled: () => !!ask, run: () => pickTask((t) => ask?.(`About my task “${t.text}”: `)) },
+    { id: 'tasks-down', title: 'Next task', icon: 'down', key: 'j', alt: ['ArrowDown'], quiet: true, run: () => void moveCursor(ROWS, 1) },
+    { id: 'tasks-up', title: 'Previous task', icon: 'up', key: 'k', alt: ['ArrowUp'], quiet: true, run: () => void moveCursor(ROWS, -1) },
+  ]);
 </script>
 
 {#snippet fields(t: T)}
@@ -151,7 +174,7 @@
 {/snippet}
 
 {#snippet row(t: T)}
-  <div class="task" class:done={t.done} class:ed={editing === t.id}>
+  <div class="task" class:done={t.done} class:ed={editing === t.id} data-id={t.id}>
     {@render box(t, () => tick(t))}
     <button class="main" onclick={() => startEdit(t)}>
       <span class="tx">{@render flag(t)}{t.text}</span>

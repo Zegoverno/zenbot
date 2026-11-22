@@ -3,7 +3,12 @@
   // (GET /api/jobs; POST /jobs/{name}/run, PATCH /jobs/{name} to pause). Past runs come from
   // GET /api/jobs/runs, each opening its session. A new routine is made in a chat with zenbot.
   // (The redesign mock's Routines, live.)
+  // Keys (registered for the focused Routines panel, keys.svelte.ts): j/k walk the routines (the
+  // cursor), Enter or p its past runs, r runs it now, Space pauses or resumes it, n a new routine
+  // and a a change to this one (both ask zenbot).
   import { onMount } from 'svelte';
+  import { commands as registerCommands, cursorRow, moveCursor } from '../keys.svelte.ts';
+  import { notice } from '../app.svelte.ts';
   import { routines, failing, runsOf, loadRuns, load, runNow as start, setOn } from './routinestore.svelte.ts';
   let { ask, openRun }: { ask: (text: string) => void; openRun?: (session: string) => void } = $props();
   let sel = $state<string | null>(null);
@@ -29,6 +34,24 @@
     if (jobs.some((j) => j.name === name)) { sel = name; void loadRuns(name); } else showUpkeep = true;
     setTimeout(() => document.querySelector(`[data-job="${CSS.escape(name)}"]`)?.scrollIntoView({ block: 'nearest' }), 30);
   }
+  const ROWS = '.rwrap .li[data-job]';
+  const curJob = () => { const n = cursorRow(ROWS)?.dataset.job; return jobs.find((j) => j.name === n) ?? null; };
+  const withJob = (f: (j: (typeof jobs)[number]) => void) => { const j = curJob(); if (j) f(j); else notice('Pick a routine first (j / k)'); };
+  const seePast = (n: string) => { sel = sel === n ? null : n; if (sel) void loadRuns(n); };
+  registerCommands('routines', () => {
+    // The title follows the row under the cursor, read when the list is drawn (the ring, Ctrl+K).
+    const on = () => curJob()?.on !== false;
+    return [
+      { id: 'routines-run', title: 'Run now', icon: 'play', key: 'r', ring: 0, run: () => withJob((x) => void runNow(x.name)) },
+      { id: 'routines-runs', title: 'Past runs', icon: 'list', key: 'p', alt: ['Enter'], ring: 1, run: () => withJob((x) => seePast(x.name)) },
+      { id: 'routines-pause', get title() { return on() ? 'Pause' : 'Resume'; }, get icon() { return on() ? 'pause' : 'play'; }, key: 'Space', ring: 2, run: () => withJob((x) => void flip(x.name, !x.on)) },
+      { id: 'routines-new', title: 'New routine', icon: 'plus', key: 'n', ring: 3, run: () => ask('Create a new routine: ') },
+      { id: 'routines-ask', title: 'Ask to change', icon: 'ask', key: 'a', ring: 4, run: () => withJob((x) => ask(`Change the ${x.name} routine: `)) },
+      { id: 'routines-failing', title: 'Show failing', icon: 'bell', ring: 5, enabled: () => failing().length > 0, run: () => seeRun(failing()[0].name) },
+      { id: 'routines-down', title: 'Next routine', icon: 'down', key: 'j', alt: ['ArrowDown'], quiet: true, run: () => void moveCursor(ROWS, 1) },
+      { id: 'routines-up', title: 'Previous routine', icon: 'up', key: 'k', alt: ['ArrowUp'], quiet: true, run: () => void moveCursor(ROWS, -1) },
+    ];
+  });
   onMount(() => { void load(); const t = setInterval(load, 10000); return () => clearInterval(t); });
 </script>
 

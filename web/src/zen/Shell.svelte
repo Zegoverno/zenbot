@@ -12,7 +12,15 @@
   // picking it in Sessions; the chat then takes the whole screen, with a back arrow.
   // Live data: the board, agents, models and the owner come from live.svelte.ts; where the page is
   // lives in app.svelte.ts (and the address).
-  import { onMount, tick } from 'svelte';
+  // Keyboard only: everything here has a key (keys.svelte.ts holds the registry, the handler and
+  // the focus). One panel is always focused (the chat on the left or the view on the right; click
+  // it, Ctrl+\ switches, Ctrl+Shift+\ closes or reopens the side panel) and has a thin accent
+  // outline. Each view registers its own commands (the ring, Ctrl+K and `?` show the focused
+  // panel's): Sessions' and the subagent's and Games' are registered here, the rest in their views.
+  // Ctrl+K command list (Palette.svelte), Ctrl+. ring (Ring.svelte), `?` shortcuts (KeyHelp.svelte),
+  // `g` then h/s/f/t/r/a/m/p goes to a view, 1–9 pick a tab, `c` a new chat, `@` the agent menu
+  // (arrows, Enter), Esc backs out one level.
+  import { onMount, tick, untrack } from 'svelte';
   import Files from './views/Files.svelte';
   import Tasks from './views/Tasks.svelte';
   import Agents from './views/Agents.svelte';
@@ -24,16 +32,19 @@
   import PluginFrame from './PluginFrame.svelte';
   import { hand as handToAgent, type T as TaskT } from './views/taskstore.svelte.ts';
   import { failing, load as loadRoutines } from './views/routinestore.svelte.ts';
-  import { app, start, pickTab, openTab, openSession, closeChat, showFile, split as isSplit, tabOn, notice, typing } from './app.svelte.ts';
+  import Ring from './Ring.svelte';
+  import Palette from './Palette.svelte';
+  import KeyHelp from './KeyHelp.svelte';
+  import Icon from './Icon.svelte';
+  import { ICONS } from './icons.ts';
+  import { commands as registerCommands, ui, install, setPanes, focusPane, focused, toggleFocus, toggleSide, filesPanel, cursorRow, moveCursor, pressCursor, findCursor, GOTO, type PanelKind } from './keys.svelte.ts';
+  import { app, start, pickTab, openTab, openSession, closeChat, showFile, split as isSplit, tabOn, notice, setAgent } from './app.svelte.ts';
   import { me, board, agents, agentOf, kids, loadKid, loadMe, loadBoard, loadArchived, loadAgents, loadModels, waitingCount, findSession, type Session } from './live.svelte.ts';
-  import { findView, games, loadPlugins, panel, plugins, views as pluginViews } from './plugins.svelte.ts';
+  import { chat, findView, games, loadPlugins, panel, plugins, views as pluginViews } from './plugins.svelte.ts';
   import { render as mdRender } from './md.ts';
   import { zen } from './api.ts';
 
   let theme = $state<'auto' | 'light' | 'dark'>((['auto', 'light', 'dark'].includes(localStorage.getItem('zen.theme') ?? '') ? localStorage.getItem('zen.theme') : 'auto') as 'auto' | 'light' | 'dark');
-  let agentMenu = $state(false);
-  let ring = $state(false);
-  let hover = $state('');
   let showArchived = $state(false);
   let archivedShown = $state(30);
   let sq = $state('');
@@ -85,33 +96,6 @@
   // Read and Write aren't tabs: zenread and zenwrite open a note from Files (their openers).
   const waiting = $derived(waitingCount());
 
-  // Line icons, 24×24, stroked with currentColor.
-  const ICONS: Record<string, string> = {
-    chat: '<path d="M4 5h16v11H9l-5 4z"/>',
-    home: '<path d="M4 11l8-6 8 6v8a1 1 0 0 1-1 1h-4v-5h-6v5H5a1 1 0 0 1-1-1z"/>',
-    sessions: '<rect x="4" y="4" width="16" height="6" rx="2"/><rect x="4" y="14" width="16" height="6" rx="2"/>',
-    files: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
-    tasks: '<path d="M9 11l2 2 4-4"/><rect x="4" y="4" width="16" height="16" rx="3"/>',
-    agents: '<circle cx="9" cy="9" r="3"/><circle cx="17" cy="10" r="2.2"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0M14.5 19a3.5 3.5 0 0 1 6 0"/>',
-    routines: '<circle cx="12" cy="12" r="8"/><path d="M12 8v4l2.5 2.5"/><path d="M4 4l2 2M20 4l-2 2"/>',
-    games: '<rect x="3" y="7" width="18" height="11" rx="4"/><path d="M8 11v3M6.5 12.5h3"/><circle cx="15.5" cy="12" r=".6"/><circle cx="17.5" cy="14" r=".6"/>',
-    read: '<path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H11v16H5.5A1.5 1.5 0 0 1 4 18.5zM20 5.5A1.5 1.5 0 0 0 18.5 4H13v16h5.5a1.5 1.5 0 0 0 1.5-1.5z"/>',
-    write: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>',
-    settings: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
-    plus: '<path d="M12 5v14M5 12h14"/>',
-    task: '<path d="M9 11l2 2 4-4"/><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M18 2v4M16 4h4"/>',
-    sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
-    search: '<circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/>',
-    split: '<rect x="3" y="5" width="18" height="14" rx="3"/><path d="M12 5v14"/>',
-    focus: '<rect x="3" y="5" width="18" height="14" rx="3"/>',
-    theme: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',
-    clip: '<path d="M20 11.5l-8 8a5 5 0 0 1-7-7l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7L9.7 17.2a1.7 1.7 0 0 1-2.4-2.4l7.7-7.7"/>',
-    stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
-    ring: '<circle cx="12" cy="12" r="2.5"/><circle cx="12" cy="4.5" r="1.3"/><circle cx="19.5" cy="12" r="1.3"/><circle cx="12" cy="19.5" r="1.3"/><circle cx="4.5" cy="12" r="1.3"/>',
-    preview: '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 20h8M12 17v3"/>',
-    plugin: '<rect x="4" y="4" width="7" height="7" rx="2"/><rect x="13" y="4" width="7" height="7" rx="2"/><rect x="4" y="13" width="7" height="7" rx="2"/><rect x="13" y="13" width="7" height="7" rx="2"/>',
-  };
-
   const split = $derived(isSplit());
   const showView = $derived(app.screen === 'view' || split);
   /** The tabs: Home, the built-ins, each enabled plugin's views; beside a chat, Preview and a plugin command's panel too. */
@@ -127,15 +111,6 @@
   let sysDark = $state(matchMedia('(prefers-color-scheme: dark)').matches);
   const dark = $derived(theme === 'dark' || (theme === 'auto' && sysDark));
 
-  /** The quick-control ring's actions, fanned out on a quarter circle up and to the left. */
-  const actions = $derived([
-    { key: 'plus', label: 'New chat', run: () => newChat() },
-    { key: 'search', label: 'Search files', run: () => openAndFocus('files', '.fsearch input') },
-    { key: 'clip', label: 'Attach a file', run: () => attach() },
-    { key: 'task', label: 'Add a task', run: () => openAndFocus('tasks', '.add input') },
-    { key: dark ? 'sun' : 'theme', label: dark ? 'Light mode' : 'Dark mode', run: () => (theme = dark ? 'light' : 'dark') },
-    { key: 'settings', label: 'Settings', run: () => openTab('settings') },
-  ]);
   function openAndFocus(tab: string, sel: string) {
     openTab(tab);
     tick().then(() => setTimeout(() => (document.querySelector(sel) as HTMLElement | null)?.focus(), 30));
@@ -148,27 +123,27 @@
       openSession('new', app.agent);
     }
   }
-  const R = 156;
-  const at = (i: number, n: number) => {
-    const a = Math.PI + (i * (Math.PI / 2)) / (n - 1);
-    return `translate(${Math.cos(a) * R}px, ${Math.sin(a) * R}px)`;
-  };
-
   function newChat() {
     openSession('new', app.agent);
   }
+  /** Opens a chat and gives it the focus (it is the left panel). */
+  function openChat(id: string) {
+    openSession(id);
+    focusPane(0);
+  }
   function pick(s: Session) {
-    openSession(s.id);
+    openChat(s.id);
   }
   /** From Home: a widget's row opens its chat. */
   function openById(id: string) {
-    openSession(id);
+    openChat(id);
   }
   /** Files' "Ask zenbot": beside a chat, the note goes into its message box; else a new chat starts with it. */
   function askAbout(path: string) {
     const text = `About \`${path}\`: `;
     if (app.screen === 'chat' && !app.narrow && app.session) {
       app.chatInsert = { text, n: app.chatInsert.n + 1 };
+      focusPane(0);
       return;
     }
     app.chatDraft = text;
@@ -181,12 +156,12 @@
   }
   /** Tasks' "Hand to <agent>" made (or found) its session: open that chat, Tasks stays beside it. */
   function openTaskChat(id: string) {
-    openSession(id);
+    openChat(id);
   }
   /** Hand a task to the agent at the top: a chat starts on it, and opens. */
   async function handTask(t: TaskT, agentId: string) {
     const r = await handToAgent(t, agentId);
-    if (r?.session) openSession(r.session);
+    if (r?.session) openChat(r.session);
     return r?.session ?? null;
   }
 
@@ -232,19 +207,134 @@
   const match = (s: Session) => !sq.trim() || s.title.toLowerCase().includes(sq.trim().toLowerCase());
   $effect(() => { if (showArchived) void loadArchived(); });
 
-  function key(e: KeyboardEvent) {
-    if (e.key === 'Escape') { ring = false; agentMenu = false; }
-    // Hold-free shortcut for the ring, as the mouse button would be on a Logitech mouse.
-    if (e.key === '.' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); ring = !ring; return; }
-    if (e.defaultPrevented || e.isComposing || typing(e) || e.ctrlKey || e.metaKey || e.altKey || app.screen === 'chat') return;
-    // Away from a chat, 1–9 pick a tab.
-    const keys = tabs.map((t) => t.key);
-    const i = /^[1-9]$/.test(e.key) ? Number(e.key) - 1 : -1;
-    if (i >= 0 && i < keys.length) {
-      e.preventDefault();
-      openTab(keys[i]);
-    }
+  // The agent menu (`@`, or the orb): ↑↓ move over the agents, Enter picks, Esc closes.
+  function menuOpen(node: HTMLElement) {
+    void tick().then(() => (node.querySelector<HTMLElement>('.arow.sel') ?? node.querySelector<HTMLElement>('.arow:not(:disabled)'))?.focus());
+    return { destroy() { if (node.contains(document.activeElement)) (document.activeElement as HTMLElement).blur(); } };
   }
+  function menuKeys(e: KeyboardEvent) {
+    const rows = [...(e.currentTarget as HTMLElement).querySelectorAll<HTMLElement>('.arow:not(:disabled)')];
+    const i = rows.indexOf(document.activeElement as HTMLElement);
+    const to = e.key === 'ArrowDown' ? i + 1 : e.key === 'ArrowUp' ? i - 1 : e.key === 'Home' ? 0 : e.key === 'End' ? rows.length - 1 : null;
+    if (to === null || !rows.length) return;
+    e.preventDefault();
+    rows[(to + rows.length) % rows.length].focus();
+  }
+
+  // ---- the panels, their kinds, and the focus ----
+  const viewKind = $derived.by((): PanelKind | null => {
+    const v = app.view;
+    if (!v) return null;
+    if (v === 'files') return filesPanel.kind;
+    if (v === 'panel' || v.startsWith('plugin:')) return 'plugin';
+    return (['sessions', 'subagent', 'tasks', 'routines', 'agents', 'games', 'preview', 'settings'] as string[]).includes(v) ? (v as PanelKind) : 'plugin';
+  });
+  const kinds = $derived.by((): PanelKind[] => {
+    if (app.screen === 'home') return ['home'];
+    if (app.screen === 'chat') return split && viewKind ? ['chat', viewKind] : ['chat'];
+    return [viewKind ?? 'home'];
+  });
+  $effect(() => setPanes(kinds));
+  $effect(() => { if (split && app.view) ui.side = app.view; });
+  /** The panel's index on screen: the chat or Home on the left; a view on the right only beside a chat. */
+  const viewAt = $derived(split ? 1 : 0);
+  let pointed = false;
+  /** A click or Tab inside a panel focuses it (the keyboard stays where the click put it). */
+  function touch(i: number) {
+    if (ui.focus === i) return;
+    pointed = true;
+    focusPane(i);
+  }
+  // Keys moved the focus: put the keyboard in the panel (the chat's box; a plugin frame does its own).
+  $effect(() => {
+    const i = ui.focus, k = focused();
+    void ui.panes.length;
+    if (pointed) { pointed = false; return; }
+    untrack(() => void tick().then(() => {
+      const sec = document.querySelector<HTMLElement>(`[data-pane="${i}"]`);
+      if (!sec || (sec.contains(document.activeElement) && document.activeElement !== sec)) return;
+      if (k === 'chat') chat.focus?.();
+      else if (k !== 'plugin' && k !== 'games' && k !== 'files-reader' && k !== 'files-writer') sec.focus({ preventScroll: true });
+      else if (!sec.querySelector('iframe')) sec.focus({ preventScroll: true });
+    }));
+  });
+
+  // ---- the global commands ----
+  const letterOf = (tab: string) => Object.entries(GOTO).find(([, g]) => g[0] === tab)?.[0];
+  registerCommands('global', () => [
+    { id: 'new-chat', title: 'New chat', icon: 'plus', key: 'c', ring: 0, run: () => { newChat(); focusPane(0); } },
+    { id: 'search-files', title: 'Search files', icon: 'search', ring: 1, run: () => openAndFocus('files', '.fsearch input') },
+    { id: 'attach', title: 'Attach a file', icon: 'clip', ring: 2, run: () => attach() },
+    { id: 'add-task', title: 'Add a task', icon: 'task', ring: 3, run: () => openAndFocus('tasks', '.add input') },
+    { id: 'theme', title: dark ? 'Light mode' : 'Dark mode', icon: dark ? 'sun' : 'theme', ring: 4, run: () => (theme = dark ? 'light' : 'dark') },
+    { id: 'settings', title: 'Settings', icon: 'settings', ring: 5, run: () => openTab('settings') },
+    { id: 'agent', title: 'Switch agent', icon: 'agents', key: '@', run: () => (ui.agentMenu = true) },
+    { id: 'help', title: 'Show shortcuts', icon: 'keyboard', key: '?', reserved: true, run: () => (ui.help = true) },
+    { id: 'focus', title: 'Switch focus between panels', icon: 'swap', key: 'Mod+\\', reserved: true, enabled: () => ui.panes.length > 1, run: toggleFocus },
+    { id: 'side', title: 'Close the side panel, or reopen it', icon: 'split', key: 'Mod+Shift+\\', reserved: true, enabled: () => app.screen === 'chat' && !app.narrow, run: toggleSide },
+    ...tabs.map((t, i) => ({
+      id: `go-${t.key}`, title: `Go to ${t.label}`, icon: t.icon, key: i < 9 ? String(i + 1) : undefined,
+      hint: letterOf(t.key) ? `g ${letterOf(t.key)}` : undefined, run: () => (t.key === 'home' ? pickTab('home') : openTab(t.key)),
+    })),
+  ]);
+
+  // ---- Sessions: the row under the cursor (j / k) ----
+  let rn = $state<{ id: string; value: string } | null>(null);
+  const curSession = () => { const id = cursorRow('.srow')?.dataset.id; return id ? findSession(id) : null; };
+  function renameStart() {
+    const s = curSession();
+    if (!s) return void notice('Pick a session first (j / k)');
+    rn = { id: s.id, value: s.title };
+    void tick().then(() => document.querySelector<HTMLInputElement>('[data-pane] input.rename')?.select());
+  }
+  /** Closes the rename box; the row is a new element then, so the cursor goes back onto it. */
+  async function endRename(id: string) {
+    rn = null;
+    await tick();
+    findCursor('.srow', (r) => r.dataset.id === id);
+  }
+  async function renameSave() {
+    const r = rn;
+    if (!r) return;
+    const t = r.value.trim();
+    await endRename(r.id);
+    if (!t || t === findSession(r.id)?.title) return;
+    try { await zen.update(r.id, { title: t }); await loadBoard(); await tick(); findCursor('.srow', (x) => x.dataset.id === r.id); } catch (e) { notice(String((e as Error).message ?? e)); }
+  }
+  async function archiveRow() {
+    const s = curSession();
+    if (!s) return void notice('Pick a session first (j / k)');
+    try {
+      await zen.update(s.id, { archived: true });
+      await loadBoard();
+      if (showArchived) void loadArchived();
+      notice(`Archived “${s.title}”`, 6000, () => { void zen.update(s.id, { archived: false }).then(() => loadBoard()).catch((e) => notice(String((e as Error).message ?? e))); });
+    } catch (e) { notice(String((e as Error).message ?? e)); }
+  }
+  const searchSessions = () => document.querySelector<HTMLInputElement>('[data-pane] .vsearch input')?.focus();
+  registerCommands('sessions', () => [
+    { id: 'sessions-new', title: 'New chat', icon: 'plus', key: 'n', ring: 0, run: () => { newChat(); focusPane(0); } },
+    { id: 'sessions-search', title: 'Search', icon: 'search', key: '/', ring: 1, run: searchSessions },
+    { id: 'sessions-waiting', title: "Next 'needs you'", icon: 'bell', key: 'w', ring: 2, enabled: () => board.sessions.some((x) => x.state === 'waiting'), run: () => void findCursor('.srow', (r) => r.dataset.state === 'waiting') },
+    { id: 'sessions-rename', title: 'Rename', icon: 'rename', key: 'r', ring: 3, run: renameStart },
+    { id: 'sessions-archive', title: 'Archive', icon: 'archive', key: 'x', ring: 4, run: archiveRow },
+    { id: 'sessions-archived', title: showArchived ? 'Hide archived' : 'Show archived', icon: 'eye', key: 'u', ring: 5, run: () => (showArchived = !showArchived) },
+    { id: 'sessions-down', title: 'Next session', icon: 'down', key: 'j', alt: ['ArrowDown'], quiet: true, run: () => void moveCursor('.srow', 1) },
+    { id: 'sessions-up', title: 'Previous session', icon: 'up', key: 'k', alt: ['ArrowUp'], quiet: true, run: () => void moveCursor('.srow', -1) },
+    { id: 'sessions-open', title: 'Open the session', icon: 'chat', key: 'Enter', quiet: true, run: () => { const s = curSession(); if (s) openChat(s.id); else moveCursor('.srow', 'first'); } },
+    { id: 'sessions-close', title: 'Close the panel', icon: 'close', key: 'Escape', quiet: true, enabled: () => split, run: () => pickTab(app.view!) },
+  ]);
+  registerCommands('subagent', () => [
+    { id: 'sub-stop', title: 'Stop', icon: 'stop', ring: 0, enabled: () => !!kid && !kid.done, run: () => app.subagent && void stopSub(app.subagent) },
+    { id: 'sub-close', title: 'Close the panel', icon: 'close', key: 'Escape', ring: 1, run: closeSub },
+  ]);
+  registerCommands('games', () => (game
+    ? [{ id: 'games-switch', title: 'Switch game', icon: 'games', key: 'Escape', ring: 0, run: () => (playing = null) }]
+    : [
+      { id: 'games-play', title: 'Play', icon: 'play', key: 'Enter', ring: 0, run: () => void (pressCursor('.card.game', '.play') || moveCursor('.card.game', 'first')) },
+      { id: 'games-down', title: 'Next game', icon: 'down', key: 'j', alt: ['ArrowDown'], quiet: true, run: () => void moveCursor('.card.game', 1) },
+      { id: 'games-up', title: 'Previous game', icon: 'up', key: 'k', alt: ['ArrowUp'], quiet: true, run: () => void moveCursor('.card.game', -1) },
+    ]));
 
   onMount(() => {
     void start();
@@ -267,7 +357,9 @@
     addEventListener('zen-theme', sync);
     const last = localStorage.getItem(GAME_KEY);
     if (last) playing = last;
+    const uninstall = install();
     return () => {
+      uninstall();
       clearInterval(poll);
       mq.removeEventListener('change', fit);
       sys.removeEventListener('change', sysFit);
@@ -287,7 +379,6 @@
   });
 </script>
 
-<svelte:window onkeydown={key} />
 
 {#snippet ico(name: string)}
   <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">{@html ICONS[name] ?? ICONS.plugin}</svg>
@@ -298,26 +389,35 @@
 {/snippet}
 
 {#snippet row(s: Session)}
-  <button class="srow" class:on={app.screen === 'chat' && app.session === s.id} onclick={() => pick(s)}>
-    <span class="t">{s.title}</span>
-    {#if s.state === 'working'}<span class="tag work"><span class="dot work"></span>working</span>
-    {:else if s.state === 'waiting'}<span class="tag wait"><span class="dot wait"></span>needs you</span>
-    {:else}<span class="when">{s.when}</span>{/if}
-  </button>
+  {#if rn?.id === s.id}
+    <div class="srow" data-id={s.id} data-state={s.state}>
+      <!-- svelte-ignore a11y_autofocus -->
+      <input class="rename" bind:value={rn.value} autofocus aria-label="Session name" onblur={renameSave}
+        onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void renameSave(); } else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); void endRename(s.id); } }} />
+    </div>
+  {:else}
+    <button class="srow" class:on={app.screen === 'chat' && app.session === s.id} data-id={s.id} data-state={s.state} onclick={() => pick(s)}>
+      <span class="t">{s.title}</span>
+      {#if s.state === 'working'}<span class="tag work"><span class="dot work"></span>working</span>
+      {:else if s.state === 'waiting'}<span class="tag wait"><span class="dot wait"></span>needs you</span>
+      {:else}<span class="when">{s.when}</span>{/if}
+    </button>
+  {/if}
 {/snippet}
 
 <!-- top: the agent, the tabs -->
 <div class="top" class:hide={app.narrow && app.screen === 'chat'}>
   <div class="agent-wrap">
-    <button class="agent" onclick={() => (agentMenu = !agentMenu)} aria-expanded={agentMenu} title="Switch agent">
+    <button class="agent" onclick={() => (ui.agentMenu = !ui.agentMenu)} aria-expanded={ui.agentMenu} title="Switch agent (@)">
       <span class="orb" class:busy={app.working} style="--a:{agent.a}; --b:{agent.b}">{agent.name[0].toUpperCase()}</span>
       <span class="aname">{agent.name}<span class="chev">▾</span></span>
     </button>
-    {#if agentMenu}
-      <div class="menu amenu">
+    {#if ui.agentMenu}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="menu amenu" onkeydown={menuKeys} use:menuOpen>
         <div class="mlabel">Agents</div>
         {#each agents.list as a}
-          <button class="arow" disabled={!!a.info.error} class:sel={a.id === agent.id} onclick={() => { app.agent = a.id; localStorage.setItem('zen.agent', a.id); agentMenu = false; }}>
+          <button class="arow" disabled={!!a.info.error} class:sel={a.id === agent.id} onclick={() => { setAgent(a.id); ui.agentMenu = false; }}>
             <span class="orb sm" style="--a:{a.a}; --b:{a.b}">{a.name[0].toUpperCase()}</span>
             <span class="ameta"><b>{a.name}</b><span>{a.role}</span></span>
             {#if a.id === agent.id}<span class="tick">✓</span>{/if}
@@ -325,7 +425,7 @@
         {/each}
         <hr />
         <div class="me"><span class="av">{(me.name || '·')[0]?.toUpperCase()}</span><span class="name">{me.name || 'You'}</span>
-          <button class="icon" title="Settings" onclick={() => { openTab('settings'); agentMenu = false; }}>{@render ico('settings')}</button>
+          <button class="icon" title="Settings" onclick={() => { openTab('settings'); ui.agentMenu = false; }}>{@render ico('settings')}</button>
         </div>
       </div>
     {/if}
@@ -345,11 +445,13 @@
 <div class="stage" class:split class:dragging bind:this={stage} style={split ? `grid-template-columns: minmax(0, ${1 - side}fr) 14px minmax(0, ${side}fr)` : undefined}>
   <!-- left: Home, or the chat -->
   {#if app.screen === 'home'}
-    <section class="pane"><Home narrow={app.narrow} onopen={openById} ontab={(t) => openTab(t)} onfile={(p) => showFile(p, { open: true })} /></section>
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions, a11y_no_static_element_interactions -->
+    <section class="pane" class:focused={ui.focus === 0} data-pane="0" tabindex="-1" onpointerdown={() => touch(0)} onfocusin={() => touch(0)}><Home narrow={app.narrow} onopen={openById} ontab={(t) => openTab(t)} onfile={(p) => showFile(p, { open: true })} /></section>
   {/if}
 
   {#if app.session && (app.screen === 'chat' || (app.narrow && app.screen === 'view'))}
-    <section class="pane chat" hidden={app.screen !== 'chat'}>
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions, a11y_no_static_element_interactions -->
+    <section class="pane chat" class:focused={ui.focus === 0} hidden={app.screen !== 'chat'} data-pane={app.screen === 'chat' ? 0 : undefined} tabindex="-1" onpointerdown={() => touch(0)} onfocusin={() => touch(0)}>
       {#key app.session}
         <Chat id={app.session} {split} />
       {/key}
@@ -357,7 +459,7 @@
   {/if}
 
   {#if split}
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions, a11y_no_static_element_interactions -->
     <div class="gutter" role="separator" aria-orientation="vertical" aria-label="Resize the panels"
       aria-valuenow={Math.round((1 - side) * 100)} aria-valuemin={25} aria-valuemax={75} tabindex="0"
       onpointerdown={grab} onkeydown={nudge} ondblclick={() => { side = 0.45; keepSide(); }}><span></span></div>
@@ -365,11 +467,13 @@
 
   <!-- right: the view picked in the tab bar -->
   {#if showView}
-    <section class="pane view">
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions, a11y_no_static_element_interactions -->
+    <section class="pane view" class:focused={ui.focus === viewAt} data-pane={viewAt} tabindex="-1" onpointerdown={() => touch(viewAt)} onfocusin={() => touch(viewAt)}>
       {#if app.view === 'sessions'}
         <header class="vh"><h2>Sessions</h2><span class="sp"></span>
           <button class="ghost" onclick={newChat}>{@render ico('plus')} New</button>{@render vclose()}</header>
-        <div class="vsearch">{@render ico('search')}<input placeholder="Search sessions" bind:value={sq} aria-label="Search sessions" /></div>
+        <div class="vsearch">{@render ico('search')}<input placeholder="Search sessions (/)" bind:value={sq} aria-label="Search sessions"
+          onkeydown={(e) => { if (e.key === 'Enter' || e.key === 'ArrowDown') { e.preventDefault(); (e.currentTarget as HTMLInputElement).blur(); moveCursor('.srow', 'first'); } else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (sq) sq = ''; else (e.currentTarget as HTMLInputElement).blur(); } }} /></div>
         <div class="vscroll">
           {#if board.channels.length}
             <div class="grp">Channels <span class="cnt">{board.channels.length}</span></div>
@@ -418,10 +522,10 @@
         <Files ask={askAbout} reveal={app.reveal} back={app.filesFrom ? { label: 'Settings', run: () => pickTab('settings') } : null} />
       {:else if app.view === 'tasks'}
         <header class="vh"><h2>Tasks</h2><span class="sp"></span>{@render vclose()}</header>
-        <Tasks open={openTaskChat} agent={agent.id} agents={agents.list.filter((a) => !a.info.error)} hand={handTask} />
+        <Tasks open={openTaskChat} ask={askAgent} agent={agent.id} agents={agents.list.filter((a) => !a.info.error)} hand={handTask} />
       {:else if app.view === 'agents'}
         <header class="vh"><h2>Agents</h2><span class="sp"></span>{@render vclose()}</header>
-        <Agents agents={agents.list} current={agent} pick={(a) => { app.agent = a.id; localStorage.setItem('zen.agent', a.id); openSession('new', a.id); }} ask={askAgent} />
+        <Agents agents={agents.list} current={agent} pick={(a) => { setAgent(a.id); openChat('new'); }} ask={askAgent} />
       {:else if app.view === 'games'}
         {#if game}
           <header class="vh"><button class="icon back" title="Back to Games" aria-label="Back to Games" onclick={() => (playing = null)}>‹</button><h2>{game.title}</h2><span class="sp"></span>{@render vclose()}</header>
@@ -460,18 +564,13 @@
   {/if}
 </div>
 
-<!-- bottom right: the quick-control ring -->
-{#if ring}<button class="scrim" aria-label="Close" onclick={() => (ring = false)}></button>{/if}
-<div class="qc" class:open={ring} class:hide={app.narrow && app.screen === 'chat'}>
-  {#each actions as a, i}
-    <button class="qa" style="transform: {ring ? at(i, actions.length) : 'translate(0,0)'}; transition-delay: {ring ? i * 18 : 0}ms"
-      tabindex={ring ? 0 : -1} title={a.label} aria-label={a.label}
-      onmouseenter={() => (hover = a.label)} onmouseleave={() => (hover = '')} onfocus={() => (hover = a.label)}
-      onclick={() => { a.run(); ring = false; hover = ''; }}>{@render ico(a.key)}</button>
-  {/each}
-  {#if ring && hover}<span class="qlabel">{hover}</span>{/if}
-  <button class="qbtn" onclick={() => (ring = !ring)} aria-expanded={ring} title="Quick actions (Ctrl+.)" aria-label="Quick actions">{@render ico('ring')}</button>
-</div>
+<!-- bottom right: the quick-control ring; Ctrl+K's command list and `?`'s shortcuts float above -->
+<Ring />
+<Palette />
+<KeyHelp />
+{#if ui.goto}
+  <div class="gohint" role="status">g · {#each Object.entries(GOTO) as [k, g]}<span><kbd>{k}</kbd> {g[1]}</span>{/each}</div>
+{/if}
 
 {#if app.notice}
   <div class="toast" role="status">{app.notice}{#if app.undo}<button onclick={() => { app.undo?.(); notice(''); }}>Undo</button>{/if}</div>
@@ -567,7 +666,6 @@
   .me { display: flex; align-items: center; gap: 10px; padding: 4px 4px 2px 10px; font-size: 14px; }
   .me .name { flex: 1; font-weight: 550; }
   .av { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-size: 13px; font-weight: 650; background: var(--soft); }
-  .qc.hide { display: none; }
 
   /* the right panel's views */
   .vh { display: flex; align-items: center; gap: 8px; padding: 16px 16px 8px 22px; }
@@ -610,19 +708,13 @@
   .dot.wait { background: var(--warn); }
   @keyframes blink { 50% { opacity: 0.3; } }
 
-  /* quick-control ring */
-  .scrim { position: fixed; inset: 0; z-index: 14; background: color-mix(in srgb, var(--bg) 35%, transparent); backdrop-filter: blur(2px); cursor: default; }
-  .qc { position: fixed; right: 26px; bottom: 26px; width: 56px; height: 56px; z-index: 15; }
-  .qbtn { position: absolute; inset: 0; border-radius: 50%; display: grid; place-items: center; color: var(--on-accent); background: radial-gradient(circle at 32% 28%, color-mix(in srgb, var(--accent) 70%, white), var(--accent) 72%);
-    box-shadow: 0 8px 24px var(--shadow), 0 0 0 4px color-mix(in srgb, var(--accent) 16%, transparent); transition: transform 0.2s; }
-  .qbtn .ico { width: 22px; height: 22px; }
-  .qc.open .qbtn { transform: rotate(45deg); }
-  .qa { position: absolute; left: 4px; top: 4px; width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; color: var(--ink);
-    background: var(--paper); border: 1px solid var(--faint); box-shadow: 0 6px 18px var(--shadow); opacity: 0; pointer-events: none;
-    transition: transform 0.22s cubic-bezier(.2,.9,.3,1.2), opacity 0.15s; }
-  .qc.open .qa { opacity: 1; pointer-events: auto; }
-  .qa:hover, .qa:focus-visible { color: var(--on-accent); background: var(--accent); border-color: var(--accent); outline: none; }
-  .qlabel { position: absolute; right: 200px; bottom: 14px; white-space: nowrap; font-size: 13px; font-weight: 600; padding: 5px 12px; border-radius: 99px; background: var(--ink); color: var(--paper); pointer-events: none; }
+  /* the focused panel: a thin accent outline; a list's cursor row; the go-to's hint */
+  .pane.focused { border-color: color-mix(in srgb, var(--accent) 70%, var(--faint)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent), 0 1px 2px var(--shadow); }
+  .pane { outline: none; }
+  :global([data-cur]) { background: color-mix(in srgb, var(--accent) 14%, var(--paper)) !important; box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 60%, transparent); }
+  .gohint { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 30; display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; padding: 9px 16px; border-radius: 12px; background: var(--ink); color: var(--paper); font-size: 13px; max-width: calc(100vw - 32px); box-shadow: 0 10px 30px var(--shadow); }
+  .gohint kbd { border-color: color-mix(in srgb, var(--paper) 40%, transparent); color: var(--paper); }
+  .srow input.rename { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; font-size: 14px; font-family: inherit; }
 
   /* Calm scrolling everywhere: a thin, ink-tinted bar that only darkens on hover, and content
      that fades in and out at the edges instead of being cut. */
@@ -652,6 +744,5 @@
     .stage { padding: 60px 8px 8px; }
     .top.hide + .stage { padding-top: 8px; }
     .back { font-size: 26px; margin-left: -10px; color: var(--ink); }
-    .qc { right: 16px; bottom: 96px; }
   }
 </style>

@@ -8,9 +8,9 @@
       "author": "Zegoverno",
       "repository": "https://github.com/Zegoverno/zenread",
       "license": "MIT",
-      "version": "0.2.0",
-      "archive": "https://github.com/Zegoverno/zenread/releases/download/v0.2.0/zenread-0.2.0.tgz",
-      "sha256": "5f32fe596f92bdbeb9624e9dae957f719a604d594092cf7645e554b30281b482",
+      "version": "0.3.0",
+      "archive": "https://github.com/Zegoverno/zenread/releases/download/v0.3.0/zenread-0.3.0.tgz",
+      "sha256": "481e7d71f432c827b662e780a59c5a6daf38e76eee8b87893cc7f3c69afdcfe8",
       "kernel": [
         "files:read"
       ],
@@ -29,9 +29,9 @@
       "author": "Zegoverno",
       "repository": "https://github.com/Zegoverno/zensudoku",
       "license": "MIT",
-      "version": "0.2.0",
-      "archive": "https://github.com/Zegoverno/zensudoku/releases/download/v0.2.0/zensudoku-0.2.0.tgz",
-      "sha256": "5983edd5d7aa1098fc2cf0b71797fc5fddaaf6a6b09222ed81852a51f5c32bd1",
+      "version": "0.3.0",
+      "archive": "https://github.com/Zegoverno/zensudoku/releases/download/v0.3.0/zensudoku-0.3.0.tgz",
+      "sha256": "cab6d0e42f5dbf49c69d8d2bb0379db11100bfc869f674e9627830181ad2a75a",
       "kernel": [],
       "contributes": [
         "games",
@@ -69,9 +69,9 @@
       "author": "Zegoverno",
       "repository": "https://github.com/Zegoverno/zenwrite",
       "license": "MIT",
-      "version": "0.3.0",
-      "archive": "https://github.com/Zegoverno/zenwrite/releases/download/v0.3.0/zenwrite-0.3.0.tgz",
-      "sha256": "160ede59db48104e69fa98069a06af3cbf30a6f1807035eaee1fdfef7721b932",
+      "version": "0.4.0",
+      "archive": "https://github.com/Zegoverno/zenwrite/releases/download/v0.4.0/zenwrite-0.4.0.tgz",
+      "sha256": "d425c840a5d2b86c6a3092ba15f129e5d37fc047e225a7d1569b5bdef3b541d3",
       "kernel": [
         "files:read",
         "files:write",

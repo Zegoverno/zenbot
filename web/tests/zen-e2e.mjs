@@ -49,12 +49,22 @@ const session = (id, title, extra = {}) => ({ id, title, model: 'faux/smoke', ef
 const prompts = [];
 /** What else the page sent on the socket: steers, aborts; and tasks handed to an agent. */
 const steers = [];
+/** What the page changed on sessions (title, archived). */
+const patched = [];
 const aborts = [];
 const handed = [];
 /** Waits until the stand-in kernel has seen what the page sent. */
 const until = async (ok, what) => {
   for (let i = 0; i < 100 && !ok(); i++) await new Promise((r) => setTimeout(r, 50));
   assert.ok(ok(), what);
+};
+/** The same for a check that is asynchronous (reads the page). */
+const untilAsync = async (ok, what) => {
+  for (let i = 0; i < 100; i++) {
+    if (await ok().catch(() => false)) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.fail(what);
 };
 /** What the page asked the stand-in kernel to do: new sessions' bodies, agent saves. */
 const created = [];
@@ -77,6 +87,10 @@ const $ = (id) => document.getElementById(id);
 const show = () => { const c = app.getHostContext() ?? {}; $('ctx').textContent = 'slot=' + c.zen?.slot + ' pane=' + c.zen?.pane + ' path=' + (c.zen?.path ?? '-') + ' theme=' + c.theme; };
 app.onhostcontextchanged = show;
 app.ontoolresult = (r) => { $('out').textContent = 'result: ' + (r.content?.[0]?.text ?? ''); };
+app.fallbackNotificationHandler = async (n) => {
+  if (n.method === 'zen/command') $('out').textContent = 'command:' + n.params.id;
+  if (n.method === 'zen/focus') window.__focused = n.params.focused;
+};
 await app.connect();
 show();
 $('roll').onclick = async () => { const r = await app.callServerTool({ name: 'zenfx_roll', arguments: { sides: 20 } }); $('out').textContent = r.content[0].text; };
@@ -85,6 +99,20 @@ $('edit').onclick = () => app.openLink({ url: 'zen://open?path=wiki%2FGrace.md&m
 $('close').onclick = () => app.openLink({ url: 'zen://close' });
 $('say').onclick = async () => { await app.updateModelContext({ content: [{ type: 'text', text: 'Board shows 4' }] }); $('out').textContent = 'told'; };
 $('pin').onclick = async () => { await app.updateModelContext({ content: [{ type: 'text', text: '#1 button.hero' }, { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==' }, { type: 'image', mimeType: 'text/html', data: 'PGI+' }] }); $('out').textContent = 'pinned'; };
+// Keys and commands (PLUGINS.md): the command list, and every key not used here forwarded to zenbot.
+app.notification({ method: 'zen/commands', params: { commands: [
+  { id: 'new-game', title: 'New game', key: 'n', ring: true, icon: 'plus' },
+  { id: 'clash-me', title: 'Clash me', key: 'c' },
+  { id: 'zed', title: 'Zed', key: 'Mod+j', icon: 'rocket' },
+  { id: 'markup', title: '<img src=x onerror=window.parent.hacked=1>' },
+  { id: 'too-long', title: 'x'.repeat(61) },
+  { id: 'Bad Id', title: 'Bad id' },
+] } });
+document.addEventListener('keydown', (e) => {
+  if (e.defaultPrevented) return;
+  const t = e.target;
+  app.notification({ method: 'zen/key', params: { key: e.key, code: e.code, ctrl: e.ctrlKey, meta: e.metaKey, alt: e.altKey, shift: e.shiftKey, typing: !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) } });
+});
 </script></body></html>`;
 let maliciousInit = false;
 const fxPlugin = {
@@ -167,6 +195,8 @@ const kernel = createServer(async (req, res) => {
     created.push(body);
     return json(res, session('s2', null, { agent: body.agent ?? 'zenbot' }));
   }
+  const sp = /^PATCH \/api\/sessions\/([^/]+)$/.exec(r);
+  if (sp) { patched.push({ id: sp[1], ...body }); return json(res, { ...session(sp[1], body.title ?? 'Renamed'), ...body }); }
   if (r === 'GET /api/sessions/s2') return json(res, { ...session('s2', null, { agent: created.at(-1)?.agent ?? 'zenbot' }), busy: false, tokens: 0, message_count: 0, messages: [] });
   if (r === 'GET /api/agents') return json(res, [...agents.keys()].map(agentSummary));
   if (r === 'POST /api/agents') {
@@ -389,12 +419,12 @@ try {
   await page.getByRole('button', { name: 'Quick actions' }).click();
   assert.equal(await page.locator('.qc.open').count(), 1, 'the ring opens');
   assert.ok((await page.locator('.qc .qa').count()) >= 4, 'the ring has its actions');
-  await page.getByRole('button', { name: 'Dark mode' }).click();
+  await page.getByRole('button', { name: 'Theme' }).click();
   assert.equal(await page.locator('html').getAttribute('data-theme'), 'dark');
   await page.reload();
   assert.equal(await page.locator('html').getAttribute('data-theme'), 'dark');
   await page.getByRole('button', { name: 'Quick actions' }).click();
-  await page.getByRole('button', { name: 'Light mode' }).click();
+  await page.getByRole('button', { name: 'Theme' }).click();
   assert.equal(await page.locator('html').getAttribute('data-theme'), 'light');
   await page.setViewportSize({ width: 390, height: 844 });
   assert.ok(await page.getByRole('tab', { name: 'Routines' }).isVisible());
@@ -603,6 +633,256 @@ try {
   await page.getByRole('tab', { name: 'Games' }).click();
   await page.getByRole('button', { name: /^Play / }).first().waitFor();
 
+
+  // ---- Keyboard only: the focus, the ring, Ctrl+K, `?`, the go-to, panel keys, rebinding ----
+  const ringIcon = () => page.locator('.qbtn').getAttribute('data-ring-icon');
+  await page.goto(`${base}/`);
+  await page.locator('.pane.focused').waitFor();
+  assert.equal(await ringIcon(), 'home', 'on Home the ring button shows Home');
+  await page.keyboard.press('g');
+  await page.keyboard.press('t');
+  await page.waitForURL(/view=tasks/);
+  assert.equal(await ringIcon(), 'tasks', 'g t goes to Tasks and the ring button follows');
+  await page.keyboard.press('n');
+  await untilAsync(() => page.evaluate(() => document.activeElement?.closest('.add') !== null), 'n in Tasks focuses the add box');
+  assert.equal(await page.evaluate(() => document.activeElement?.closest('.add') !== null), true, 'n in Tasks focuses the add box');
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('g');
+  await page.keyboard.press('f');
+  await page.waitForURL(/view=files/);
+  assert.equal(await ringIcon(), 'files', 'g f goes to Files');
+  await page.keyboard.press('g');
+  await page.keyboard.press('h');
+  await page.waitForURL((u) => !u.search);
+
+  // A chat with Files beside it: two panels, one focused; Ctrl+\ switches; the ring bears the other's icon.
+  await page.goto(`${base}/?s=s1&view=files`);
+  await page.locator('.pane.view .list').waitFor();
+  assert.equal(await page.locator('.pane.focused').count(), 1, 'exactly one panel is focused');
+  assert.equal(await page.locator('.pane.view.focused').count(), 1, 'the new right panel takes the focus');
+  assert.equal(await ringIcon(), 'files');
+  await page.keyboard.press('Control+\\');
+  assert.equal(await page.locator('.pane.chat.focused').count(), 1, 'Ctrl+\\ moves the focus to the chat');
+  assert.equal(await ringIcon(), 'chat', 'the ring button shows the focused panel');
+  await page.keyboard.press('Control+\\');
+  assert.equal(await ringIcon(), 'files');
+  // Ctrl+Shift+\ closes the side panel, and brings back the last one.
+  await page.keyboard.press('Control+Shift+\\');
+  await page.locator('.pane.view').waitFor({ state: 'detached' });
+  assert.equal(await ringIcon(), 'chat', 'with the side panel closed the chat is the one panel');
+  await page.keyboard.press('Control+Shift+\\');
+  await page.locator('.pane.view .list').waitFor();
+  assert.equal(await page.locator('.pane.view.focused').count(), 1, 'the reopened panel has the focus');
+  await page.locator('.pane.chat .scroll').click({ position: { x: 5, y: 5 } });
+  assert.equal(await page.locator('.pane.chat.focused').count(), 1, 'clicking a panel focuses it');
+  await page.locator('.pane.view .list').click({ position: { x: 5, y: 300 } });
+  assert.equal(await page.locator('.pane.view.focused').count(), 1);
+  // The ring: Files' own commands, a last slot "Focus ⟷" with the chat's icon; Ctrl+. then 1 runs the first.
+  await page.keyboard.press('Control+.');
+  await page.locator('.qc.open').waitFor();
+  const labels = await page.locator('.qc .qa').evaluateAll((l) => l.map((b) => b.getAttribute('aria-label')));
+  if (shots) await page.screenshot({ path: 'tests/shots/zen-ring.png' });
+  assert.deepEqual(labels.slice(0, 2), ['Search', 'New file'], 'the ring shows the focused panel\'s commands');
+  assert.equal(labels.at(-1), 'Focus ⟷', 'a split page ends the ring with Focus ⟷');
+  assert.ok(labels.length <= 7);
+  assert.ok((await page.locator('.qc .qa .qn').allTextContents()).includes('1'), 'each action shows its number or letter');
+  const zs = await page.locator('.qc .qa').evaluateAll((l) => l.map((b) => Number(getComputedStyle(b).zIndex)));
+  assert.ok(zs.every((z, i) => i === 0 || z < zs[i - 1]), 'each ring button stacks over the next, so its badge stays readable');
+  await page.keyboard.press('1');
+  await page.locator('.qc.open').waitFor({ state: 'detached' });
+  assert.equal(await page.evaluate(() => document.activeElement?.closest('.fsearch') !== null), true, 'Ctrl+. then 1 ran Search');
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Control+.');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('.qc.open').count(), 0, 'Esc closes the ring');
+
+  // Ctrl+K: the command list filters and runs; shortcuts show on each row.
+  await page.keyboard.press('Control+k');
+  const pal = page.getByRole('dialog', { name: 'Command list' });
+  await pal.waitFor();
+  await page.keyboard.type('new fol');
+  const folderRow = pal.getByRole('option', { name: /New folder/ });
+  await folderRow.waitFor();
+  if (shots) await page.screenshot({ path: 'tests/shots/zen-palette.png' });
+  assert.match(await folderRow.innerText(), /Shift\+N/, 'a row shows its shortcut');
+  assert.equal(await pal.getByRole('option', { name: /Light mode|Dark mode/ }).count(), 0, 'the list filters');
+  await page.keyboard.press('Enter');
+  await pal.waitFor({ state: 'detached' });
+  await page.locator('.pane.view .fsearch input[aria-label="new name"], .pane.view .fsearch input[placeholder="Folder name"]').waitFor();
+  await page.keyboard.press('Escape');
+  const theme0 = await page.locator('html').getAttribute('data-theme');
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('mode');
+  await pal.getByRole('option', { name: /(Light|Dark) mode/ }).click();
+  await page.waitForFunction((t) => document.documentElement.getAttribute('data-theme') !== t, theme0);
+  // Sessions and files are in it too.
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('plan the');
+  await pal.getByRole('option', { name: /Plan the week/ }).waitFor();
+  await page.keyboard.press('Control+k');
+  await pal.waitFor({ state: 'detached' });
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('grace');
+  await pal.getByRole('option', { name: /Grace/ }).first().waitFor();
+  await page.keyboard.press('Escape');
+
+  // `?` lists the focused panel's shortcuts and the global ones; not while typing.
+  await page.locator('.pane.view .list').click({ position: { x: 5, y: 300 } });
+  await page.keyboard.press('?');
+  const help = page.getByRole('dialog', { name: 'Keyboard shortcuts' });
+  await help.waitFor();
+  if (shots) await page.screenshot({ path: 'tests/shots/zen-keys.png' });
+  assert.match(await help.innerText(), /New folder[\s\S]*Shift\+N/);
+  assert.match(await help.innerText(), /Command list|Ctrl\+K/);
+  await page.keyboard.press('Escape');
+  await help.waitFor({ state: 'detached' });
+
+  // In a chat Esc on an empty box leaves it, so single keys are shortcuts; `i` or Enter comes back.
+  await page.keyboard.press('Control+\\');
+  const chatBox = page.locator('.pane.chat textarea');
+  await chatBox.focus();
+  await page.keyboard.type('?');
+  assert.equal(await chatBox.inputValue(), '?', 'typing in the box types');
+  assert.equal(await page.getByRole('dialog', { name: 'Keyboard shortcuts' }).count(), 0, '? does nothing while typing');
+  await chatBox.fill('');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.evaluate(() => document.activeElement === document.body), true, 'Esc on an empty box leaves it');
+  await page.keyboard.press('i');
+  assert.equal(await page.evaluate(() => document.activeElement?.tagName), 'TEXTAREA', 'i comes back to the box');
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('x');
+  await until(() => patched.some((p) => p.id === 's1' && p.archived === true), 'x archives the chat');
+  await page.goto(`${base}/?s=s1`);
+  await page.locator('textarea').first().waitFor();
+
+  // Sessions: the cursor and r (rename) work from the keyboard.
+  await page.goto(`${base}/?view=sessions`);
+  await page.locator('.pane.view .srow').first().waitFor();
+  await page.keyboard.press('j');
+  assert.equal(await page.locator('.pane.view .srow[data-cur]').count(), 1, 'j puts the cursor on a session');
+  await page.keyboard.press('r');
+  const rename = page.locator('.pane.view .srow input.rename');
+  await rename.waitFor();
+  await rename.fill('Renamed by keys');
+  await rename.press('Enter');
+  await until(() => patched.some((p) => p.title === 'Renamed by keys'), 'r renames the session under the cursor');
+  await page.keyboard.press('x');
+  await until(() => patched.some((p) => p.archived === true && p.id !== 's1'), 'x archives the session under the cursor');
+
+  // Rebinding: Ctrl+E on a row captures a key; a clash asks first; the choice is kept across reloads.
+  await page.goto(`${base}/?view=tasks`);
+  await page.locator('.twrap').waitFor();
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('group by');
+  await pal.getByRole('option', { name: /Group by/ }).waitFor();
+  await page.keyboard.press('Control+e');
+  await page.keyboard.press('d');
+  await page.getByText(/Take D from/).waitFor();
+  assert.match((await page.locator('.pal .foot').innerText()).replace(/\s+/g, ' '), /Take D from Drop\? Enter \/ Esc/, 'a clash asks inline');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.evaluate(() => localStorage.getItem('zen.keys')), null, 'Esc leaves the key as it was');
+  await page.keyboard.press('Control+e');
+  await page.keyboard.press('y');
+  await page.getByText(/Group by: Y/).waitFor();
+  await page.keyboard.press('Escape');
+  assert.deepEqual(JSON.parse(await page.evaluate(() => localStorage.getItem('zen.keys'))), { 'tasks-group': 'y' });
+  await page.reload();
+  await page.locator('.twrap').waitFor();
+  assert.equal(await page.locator('.seg [aria-selected=true]').innerText(), 'When');
+  await page.keyboard.press('y');
+  assert.equal(await page.locator('.seg [aria-selected=true]').innerText(), 'Priority', 'the new key runs it after a reload');
+  await page.keyboard.press('b');
+  assert.equal(await page.locator('.seg [aria-selected=true]').innerText(), 'Priority', 'the old key no longer does');
+  // Taking a key from another command unbinds it.
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('hand to');
+  await pal.getByRole('option', { name: /Hand to agent/ }).waitFor();
+  await page.keyboard.press('Control+e');
+  await page.keyboard.press('d');
+  await page.getByText(/Take D from Drop/).waitFor();
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Escape');
+  assert.deepEqual(JSON.parse(await page.evaluate(() => localStorage.getItem('zen.keys'))), { 'tasks-group': 'y', 'tasks-drop': '', 'tasks-hand': 'd' });
+  await page.evaluate(() => localStorage.removeItem('zen.keys'));
+
+  // A plugin UI's commands: in Ctrl+K and the ring (invalid ones dropped, markup shown as text), run by
+  // zen/command; its forwarded keys reach zenbot; its default key clashing with a core key shows "clash".
+  await page.goto(`${base}/?s=s1&view=plugin:zenfx/board`);
+  const fx = page.frameLocator('iframe[data-plugin="zenfx"]');
+  await fx.locator('#ctx').waitFor();
+  await untilAsync(async () => (await page.locator('.qbtn').getAttribute('data-ring-icon')) === 'plugin', 'the plugin panel is focused');
+  assert.equal(await ringIcon(), 'plugin');
+  const frameHandle = await page.locator('iframe[data-plugin="zenfx"]').elementHandle();
+  const fxFrame = await frameHandle.contentFrame();
+  await untilAsync(() => fxFrame.evaluate(() => window.__focused === true), 'zen/focus tells the plugin it has the keyboard');
+  await page.keyboard.press('Control+k');
+  await pal.waitFor();
+  await page.keyboard.type('game');
+  const newGame = pal.getByRole('option', { name: /New game/ });
+  await newGame.waitFor();
+  assert.match(await newGame.innerText(), /Fixture/, 'a plugin command names its plugin');
+  assert.match(await newGame.innerText(), /N/, 'and shows its key');
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('clash');
+  const clash = pal.getByRole('option', { name: /Clash me/ });
+  await clash.waitFor();
+  assert.match(await clash.innerText(), /clash/, 'a plugin key that a core key holds is badged');
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('zed');
+  assert.match(await pal.getByRole('option', { name: /Zed/ }).innerText(), /J/);
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('img');
+  assert.equal(await pal.locator('img').count(), 0, 'plugin text is never HTML');
+  await page.keyboard.press('Control+a');
+  await page.keyboard.type('too');
+  assert.equal(await pal.getByRole('option', { name: /xxxxxxxx/ }).count(), 0, 'an overlong title is dropped');
+  await page.keyboard.press('Control+a');
+  await page.keyboard.type('bad id');
+  assert.equal(await pal.getByRole('option', { name: /Bad id/ }).count(), 0, 'a bad id is dropped');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.evaluate(() => window.hacked === undefined), true);
+  // Running from the list sends zen/command.
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('new game');
+  await page.keyboard.press('Enter');
+  await untilAsync(() => fxFrame.evaluate(() => document.getElementById('out').textContent === 'command:new-game'), 'zen/command reaches the plugin');
+  // The ring: the plugin's ring commands.
+  await fxFrame.evaluate(() => (document.getElementById('out').textContent = ''));
+  await page.keyboard.press('Control+.');
+  assert.ok((await page.locator('.qc .qa').evaluateAll((l) => l.map((b) => b.getAttribute('aria-label')))).includes('New game'), 'the ring shows ring:true plugin commands');
+  await page.keyboard.press('Escape');
+  // A frame that doesn't hold the keyboard can't press keys (here a synthetic Ctrl+K from inside it).
+  await page.evaluate(() => (document.activeElement instanceof HTMLElement ? document.activeElement.blur() : 0));
+  await fxFrame.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true })));
+  await new Promise((ok) => setTimeout(ok, 300));
+  assert.equal(await pal.count(), 0, 'a forwarded key from a frame without the keyboard is dropped');
+  // Keys pressed inside the frame: the shortcut is forwarded, zenbot resolves it and answers with zen/command.
+  await fxFrame.evaluate(() => window.focus());
+  await page.locator('iframe[data-plugin="zenfx"]').focus();
+  await page.keyboard.press('n');
+  await untilAsync(() => fxFrame.evaluate(() => document.getElementById('out').textContent === 'command:new-game'), 'a forwarded shortcut runs its command via zen/command');
+  await page.keyboard.press('Control+k');
+  await pal.waitFor();
+  await page.keyboard.press('Escape');
+  await page.locator('iframe[data-plugin="zenfx"]').focus();
+  await page.keyboard.press('Control+\\');
+  await untilAsync(() => fxFrame.evaluate(() => window.__focused === false), 'Ctrl+\\ forwarded from the frame moves the focus away');
+  assert.equal(await page.locator('.pane.chat.focused').count(), 1);
+  // A forwarded key can't do what a real one couldn't: with the chat focused, the frame's `n` is not heard.
+  await page.evaluate(() => (document.querySelector('iframe[data-plugin="zenfx"]').contentWindow.postMessage('x', '*')));
+
+  // The static manifest's slash commands are in the list too, and run as the chat's /command does.
+  await page.goto(`${base}/?s=s1`);
+  await page.locator('textarea').first().waitFor();
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('roll');
+  await pal.getByRole('option', { name: /\/roll/ }).click();
+  await untilAsync(async () => (await page.locator('.pane.chat textarea').inputValue()) === '/roll ', 'a slash command needing text is typed into the box');
+
   // A session: history, then a prompt streams an answer through the relayed socket.
   await page.goto(`${base}/?s=s1`);
   await page.getByText('What is on today?').waitFor();
@@ -715,6 +995,29 @@ try {
   await until(() => aborts.length >= 1, 'Esc sends an abort');
   assert.equal(aborts.length, 1, 'Esc sends one abort');
 
+  // Esc (and Ctrl+C) in the side panel is not the chat's: only the focused chat is stopped by them.
+  await box.fill('Take your time');
+  await box.press('Enter');
+  await until(() => prompts.at(-1) === 'Take your time' && prompts.filter((p) => p === 'Take your time').length === 2, 'the second long turn starts');
+  if (await page.locator('.pane.view').count()) {
+    await page.keyboard.press('Control+Shift+\\');
+    await page.locator('.pane.view').waitFor({ state: 'detached' });
+  }
+  await page.keyboard.press('Control+Shift+\\');
+  await page.locator('.pane.view').waitFor();
+  assert.equal(await page.locator('.pane.view.focused').count(), 1, 'the side panel has the focus');
+  await page.evaluate(() => (document.activeElement instanceof HTMLElement ? document.activeElement.blur() : 0));
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Control+c');
+  await new Promise((ok) => setTimeout(ok, 300));
+  assert.equal(aborts.length, 1, 'Esc and Ctrl+C in another panel do not stop the chat');
+  await page.keyboard.press('Control+\\');
+  await page.evaluate(() => (document.activeElement instanceof HTMLElement ? document.activeElement.blur() : 0));
+  await page.keyboard.press('Escape');
+  await until(() => aborts.length === 2, 'Esc in the focused chat stops it');
+  await page.keyboard.press('Control+Shift+\\');
+  await page.locator('.pane.view').waitFor({ state: 'detached' });
+
   // A plugin command with declared choices: with no argument it opens a picker; a choice runs the
   // tool with that value, one with `then` goes to the composer and calls nothing; with an argument
   // typed, the picker stays out of the way.
@@ -739,7 +1042,7 @@ try {
   await box.press('ArrowDown');
   await box.press('Enter');
   await choicePick.waitFor({ state: 'detached' });
-  await until(async () => (await box.inputValue()) === '/desk find ', 'a choice with `then` fills the composer');
+  await untilAsync(async () => (await box.inputValue()) === '/desk find ', 'a choice with `then` fills the composer');
   assert.equal(await box.evaluate((el) => document.activeElement === el), true, 'the composer has focus');
   await page.waitForTimeout(300);
   assert.equal(deskCalls().length, 1, `a choice that needs more input calls nothing: ${JSON.stringify(deskCalls())}`);

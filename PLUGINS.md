@@ -163,6 +163,49 @@ off for this plugin".
   a screenshot of what the user pointed at reaches it. `app.sendMessage(...)` posts into the chat
   when the user asks for help.
 
+### Keys and commands
+
+zenbot can be driven by keyboard alone: a quick-control ring and a command list (Ctrl+K) show the
+commands of the focused panel. An iframe swallows the keys pressed inside it, so a plugin UI takes
+part through three `zen/` notifications (JSON-RPC notifications over the same `App` channel; send
+them with `app.notification(...)`, receive them with `app.setNotificationHandler(...)` or
+`app.fallbackNotificationHandler`). Without a zen host (standalone, Claude, ChatGPT) none of this
+happens: keep handling your keys yourself there.
+
+**Declare your commands**: `zen/commands`, `{ "commands": [Command, …] }`, up to 30. Each send
+replaces your previous list, so send it again whenever what makes sense changes (a game finished, a
+note became editable). A command:
+
+- `id`: `[a-z0-9-]{1,32}`, stable across sends;
+- `title`: up to 60 characters, shown in the ring and the command list ("New game");
+- `key` (optional): its default shortcut, in zen's key form (below);
+- `ring` (optional, `true`): ask for a place in the ring; zenbot shows at most four per plugin,
+  in the order sent;
+- `icon` (optional): one of zenbot's icon names; otherwise your plugin's icon.
+
+**Forward the keys you don't use**: `zen/key`,
+`{ "key", "code", "ctrl", "meta", "alt", "shift", "typing" }` (the `KeyboardEvent`'s fields;
+`typing` is true when focus is in a text field or editable area). Forward every `keydown` you did
+not handle yourself (`defaultPrevented` is false), and while typing forward only those with Ctrl or
+Meta. zenbot handles them as if pressed in its own window: Ctrl+K, Ctrl+., Ctrl+\\ and its letter
+shortcuts work inside your panel.
+
+**Run a command**: zenbot sends `zen/command`, `{ "id" }`, when the owner picks one of your
+commands in the ring or the command list, or presses its shortcut. Inside zenbot, **don't act on
+your declared shortcuts yourself**: forward them and wait for `zen/command`, because the owner can
+rebind them and zenbot resolves clashes. Keys that are not commands (arrows and digits on a board,
+typing in an editor) stay yours.
+
+zenbot also sends `zen/focus`, `{ "focused": true | false }`, when your panel gains or loses the
+keyboard focus; on `true`, put the focus where the user expects it (the board, the editor).
+
+**Key form**: modifiers then the key, joined by `+`: `Mod` (Ctrl, or Cmd on a Mac), `Alt`, `Shift`,
+in that order, then `KeyboardEvent.key` with letters in lower case and `Space` for the space bar
+(`n`, `Shift+n`, `Mod+Enter`, `Alt+ArrowUp`). Shift is only written with letters and named keys:
+`?` is `?`. zenbot keeps for itself `Mod+k`, `Mod+.`, `Mod+\`, `Mod+Shift+\`, `?`, `Escape` and
+`g` (the go-to prefix); a command asking for a key zenbot already uses gets no shortcut until the
+owner chooses (the command list shows the clash and lets them rebind either side).
+
 ## Releasing
 
 A release is a **GitHub release** tagged `v<version>` with one asset,

@@ -41,7 +41,10 @@ through the `zen` command line (`commands.ts`). It trusts a signing-in proxy in 
 request needs the proxy's login header and every write `X-Zen-Web: 1`. `upgrade.sh` builds it
 with the binaries and `scripts/web-install.sh` runs it as the user unit `zen-web`
 (`~/.local/share/zen-web/current`, settings in `~/.config/zen-web.env`). `web/README.md` has its
-features, settings and security rules; `web/AGENTS.md` how to work on it.
+features, settings and security rules; `web/AGENTS.md` how to work on it. It is driven by keyboard alone:
+each view registers its commands for its panel (`src/zen/keys.svelte.ts`: one registry, one key handler,
+one focused panel), and the ring, the Ctrl+K list and `?` all read it; plugin UIs add theirs through
+the `zen/commands` and `zen/key` notifications (PLUGINS.md, "Keys and commands").
 
 ## A turn
 
