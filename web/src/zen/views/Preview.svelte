@@ -14,12 +14,14 @@
   // The frame loads `/preview/<port>/…` on zen's own address (web/server/preview.ts): zen's web
   // server forwards it to the dev server and adds public/zen-preview.js to its pages, so any app
   // can be pointed at, and it works wherever zen does (no other port to sign in to or be blocked).
+  // The apps to show come from the server's list of dev servers on this machine (web/server/servers.ts),
+  // named by app, each with restart and stop; no port to type (the address box stays as a fallback).
   // Keys (keys.svelte.ts, for the focused Preview panel): r reloads, s cycles the screen size, o
-  // opens it in a tab, l goes to the address box, p turns Point on.
+  // opens it in a tab, l goes to the address box, a opens the list of apps, p turns Point on.
   import { onMount } from 'svelte';
   import { commands as registerCommands } from '../keys.svelte.ts';
   import { app, notice } from '../app.svelte.ts';
-  import { files, upload } from '../api.ts';
+  import { files, upload, type DevServer } from '../api.ts';
   import { chat, contexts, dropContext, keepContext } from '../plugins.svelte.ts';
   import { pinsText, previewTarget, readPin, where } from '../preview.ts';
 
@@ -33,7 +35,8 @@
   type Size = keyof typeof SIZES;
 
   const last = localStorage.getItem(KEY) ?? '';
-  let address = $state(last);
+  /** What the owner types as a fallback; picking an app leaves it empty (the bar shows the app's name). */
+  let address = $state('');
   let target = $state<URL | null>(previewTarget(last, location));
   let size = $state<Size>('fit');
   let point = $state(false);
@@ -47,14 +50,42 @@
   const frameSrc = $derived(target ? `/preview/${target.port}${target.pathname}${target.search}${target.hash}` : '');
   const frameOrigin = location.origin;
   const label = $derived(target ? `localhost:${target.port}` : '');
+  // The apps on this machine: null until the first answer.
+  let servers = $state<DevServer[] | null>(null);
+  let listOpen = $state(false);
+  let listing = $state(false);
+  let listError = $state('');
+  /** Ports being restarted or stopped. */
+  let busy = $state<Record<number, string>>({});
+  const shown = $derived(target ? (servers?.find((s) => s.port === Number(target!.port)) ?? null) : null);
+  const shownName = $derived(target ? (shown?.name ?? label) : '');
 
   const dims = $derived(SIZES[size]);
   const scale = $derived(dims && boxWidth ? Math.min(1, boxWidth / dims[0]) : 1);
 
+  async function refresh() {
+    listing = true;
+    try {
+      servers = (await files.previewServers()).servers;
+      listError = '';
+    } catch (e) {
+      listError = (e as Error).message;
+    } finally {
+      listing = false;
+    }
+  }
+
   function go() {
     const t = previewTarget(address, location);
     if (!t) return notice(`Preview shows this host's own ports ${location.hostname}:3000–9999, e.g. 5173`);
-    localStorage.setItem(KEY, address.trim());
+    show(t, address.trim());
+    address = '';
+  }
+
+  /** Shows an app (what was typed, or a listed one's port); the choice is kept for the next visit. */
+  function show(t: URL, remember: string) {
+    localStorage.setItem(KEY, remember);
+    listOpen = false;
     // Pins name the app they came from: another app starts again.
     const sid = app.session;
     if (sid && pinned.get(sid)?.origin !== `localhost:${t.port}` && contexts[sid]?.[NAME]) {
@@ -65,6 +96,46 @@
     linked = false;
     loadedOnce = false;
     n++;
+  }
+
+  const pick = (s: DevServer) => show(previewTarget(String(s.port), location)!, String(s.port));
+
+  async function restartApp(s: DevServer) {
+    busy[s.port] = 'restarting…';
+    try {
+      const r = await files.previewRestart(s.port);
+      if (target && Number(target.port) === s.port) reload();
+      if (servers) servers = servers.map((x) => (x.port === s.port ? r.server : x));
+    } catch (e) {
+      notice(`restart failed: ${(e as Error).message}`);
+    } finally {
+      delete busy[s.port];
+      void refresh();
+    }
+  }
+
+  async function stopApp(s: DevServer) {
+    if (!confirm(`Stop ${s.name} (:${s.port})?`)) return;
+    busy[s.port] = 'stopping…';
+    try {
+      await files.previewStop(s.port);
+      if (target && Number(target.port) === s.port) {
+        target = null;
+        linked = false;
+        loadedOnce = false;
+        localStorage.removeItem(KEY);
+      }
+    } catch (e) {
+      notice(`stop failed: ${(e as Error).message}`);
+    } finally {
+      delete busy[s.port];
+      void refresh();
+    }
+  }
+
+  function openList() {
+    listOpen = true;
+    void refresh().then(() => document.querySelector<HTMLElement>('.pv-pick')?.focus());
   }
 
   function reload() {
@@ -139,10 +210,12 @@
     { id: 'preview-size', title: 'Screen size', icon: 'size', key: 's', ring: 1, run: () => { size = SIZE_ORDER[(SIZE_ORDER.indexOf(size) + 1) % SIZE_ORDER.length]; notice(`Screen size: ${size}`, 2000); } },
     { id: 'preview-tab', title: 'Open in a tab', icon: 'external', key: 'o', ring: 2, enabled: () => !!target, run: () => window.open(frameSrc, '_blank', 'noopener,noreferrer') },
     { id: 'preview-address', title: 'Change address', icon: 'search', key: 'l', ring: 3, run: () => { addr?.focus(); addr?.select(); } },
+    { id: 'preview-apps', title: 'Apps on this machine', icon: 'preview', key: 'a', ring: 4, run: openList },
     { id: 'preview-point', title: point ? 'Stop pointing' : 'Point at an element', icon: 'hand', key: 'p', enabled: () => linked, run: togglePoint },
   ]);
 
   onMount(() => {
+    void refresh();
     const onMessage = (e: MessageEvent) => {
       // Only the framed app, at the address shown, is heard.
       if (!target || !frame || e.source !== frame.contentWindow || e.origin !== frameOrigin) return;
@@ -161,9 +234,34 @@
   });
 </script>
 
-<div class="pv">
+{#snippet apps()}
+  {#if servers === null}
+    <p class="dim pv-note">{listError ? `Couldn't list the dev servers: ${listError}` : 'Looking for dev servers…'}</p>
+  {:else if !servers.length}
+    <p class="dim pv-note">No dev servers running on this machine (ports 3000–9999).</p>
+  {:else}
+    <ul class="pv-apps" aria-label="dev servers">
+      {#each servers as s (s.port)}
+        <li class="pv-row" class:cur={target && Number(target.port) === s.port} title={s.cwd}>
+          <button type="button" class="pv-pick" onclick={() => pick(s)} disabled={!!busy[s.port]}>
+            <span class="pv-name">{s.name}</span><span class="dim pv-port">:{s.port}</span>
+            <span class="dim pv-cmd">{busy[s.port] ?? s.command}</span>
+          </button>
+          <button type="button" class="dim pv-act" onclick={() => restartApp(s)} disabled={!!busy[s.port]} title="restart" aria-label="restart {s.name}">↻</button>
+          <button type="button" class="dim pv-act" onclick={() => stopApp(s)} disabled={!!busy[s.port]} title="stop" aria-label="stop {s.name}">✕</button>
+        </li>
+      {/each}
+    </ul>
+    {#if listError}<p class="dim pv-note">{listError}</p>{/if}
+  {/if}
+{/snippet}
+
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="pv" onkeydown={(e) => { if (e.key === 'Escape' && listOpen) { listOpen = false; e.stopPropagation(); } }}>
   <form class="pv-bar" onsubmit={(e) => { e.preventDefault(); go(); }}>
-    <input class="pv-addr" bind:this={addr} onkeydown={(e) => { if (e.key === 'Escape') (e.currentTarget as HTMLInputElement).blur(); }} bind:value={address} placeholder="port, e.g. 5173" aria-label="preview address" spellcheck="false" />
+    <button type="button" class="pv-apps-btn" class:on={listOpen} onclick={() => (listOpen ? (listOpen = false) : openList())} aria-expanded={listOpen} aria-label="dev servers" title="the apps running on this machine (a)">{target ? shownName : 'Apps'} ▾</button>
+    <button type="button" class="dim" onclick={refresh} disabled={listing} title="refresh the list" aria-label="refresh dev servers">⟳</button>
+    <input class="pv-addr" bind:this={addr} onkeydown={(e) => { if (e.key === 'Escape') (e.currentTarget as HTMLInputElement).blur(); }} bind:value={address} placeholder="or a port, e.g. 5173" aria-label="preview address" spellcheck="false" />
     <button type="submit" class="dim">Go</button>
     <button type="button" class="dim" onclick={reload} disabled={!target} title="reload" aria-label="reload">↻</button>
     <select bind:value={size} aria-label="screen size">
@@ -179,6 +277,9 @@
     <p class="pv-hint dim">Point works on the app's pages (HTML). A blank or broken page? Start the dev server with the base <code>/preview/{target.port}/</code> (Vite: <code>--base /preview/{target.port}/</code>).</p>
   {/if}
   <div class="pv-box" bind:clientWidth={boxWidth}>
+    {#if listOpen && target}
+      <div class="pv-drop" role="region" aria-label="apps on this machine">{@render apps()}</div>
+    {/if}
     {#if target}
       {#key n}
         <div class="pv-stage" style:width={dims ? `${dims[0] * scale}px` : '100%'} style:height={dims ? `${dims[1] * scale}px` : '100%'}>
@@ -195,7 +296,7 @@
         </div>
       {/key}
     {:else}
-      <p class="dim pv-empty">Show a dev server running on this machine: type its port (3000–9999) and press Go.</p>
+      <div class="pv-empty"><p class="dim pv-note">Pick a dev server running on this machine:</p>{@render apps()}</div>
     {/if}
   </div>
 </div>
@@ -212,5 +313,19 @@
   .pv-box { flex: 1; min-height: 0; overflow: auto; display: flex; justify-content: center; background: color-mix(in srgb, var(--faint) 25%, transparent); }
   .pv-stage { flex: none; overflow: hidden; }
   .pv-stage iframe { border: 0; background: white; transform-origin: 0 0; display: block; }
-  .pv-empty { padding: 16px; margin: 0; }
+  .pv-empty { padding: 8px 10px; margin: 0; width: 100%; align-self: flex-start; }
+  .pv-box { position: relative; }
+  .pv-drop { position: absolute; z-index: 5; left: 8px; right: 8px; top: 0; max-height: 70%; overflow: auto; background: var(--paper); border: 1px solid var(--faint); border-radius: 8px; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12); padding: 4px; }
+  .pv-note { margin: 0; padding: 6px 8px; font-size: 13px; }
+  .pv-apps { list-style: none; margin: 0; padding: 0; }
+  .pv-row { display: flex; align-items: center; gap: 2px; border-radius: 6px; }
+  .pv-row:hover, .pv-row.cur { background: color-mix(in srgb, var(--faint) 45%, transparent); }
+  .pv-pick { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 6px; padding: 6px 8px; text-align: left; font-size: 13px; }
+  .pv-name { font-weight: 600; flex: none; }
+  .pv-port { flex: none; font-family: var(--mono); font-size: 12px; }
+  .pv-cmd { font-family: var(--mono); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .pv-act { padding: 4px 8px; border-radius: 6px; }
+  .pv-act:hover:not(:disabled) { color: var(--ink); }
+  .pv-apps-btn { padding: 2px 10px; border-radius: 6px; border: 1px solid var(--faint); font-weight: 600; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: none; }
+  .pv-apps-btn.on { background: color-mix(in srgb, var(--faint) 45%, transparent); }
 </style>

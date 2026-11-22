@@ -1,7 +1,8 @@
 // The Preview tab's rules (views/Preview.svelte): which addresses it may show, and what a pin from
 // the app inside may say.
 //
-// The owner names a dev server on this machine by its port (3000–9999); the tab shows it under
+// The owner picks a dev server on this machine from the list of what runs there, by app name
+// (web/server/servers.ts), or types its port (3000–9999) as a fallback; the tab shows it under
 // zen's own address, `/preview/<port>/…` (web/server/preview.ts forwards it), so it works wherever
 // zen does. The frame is drawn here, not in a plugin's sandbox: a dev server can't run in an
 // opaque-origin frame. The previewed app runs on zen's origin, by the owner's choice: its code can

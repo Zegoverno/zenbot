@@ -6,6 +6,7 @@
 // `node tests/zen-e2e.mjs [--shots]`.
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
+import net from 'node:net';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -377,7 +378,7 @@ kernel.on('upgrade', (req, socket) => {
 kernel.listen(KERNEL, '127.0.0.1');
 
 const server = spawn(process.execPath, ['server/main.ts', '--dev'], {
-  env: { ...process.env, ZEN_WEB_HOME: HOME, ZEN_WEB_ROOT: VAULT, ZEN_WEB_PORT: String(PORT), ZEN_WEB_AUTH: 'off', ZEN_URL: `http://127.0.0.1:${KERNEL}`, ZEN_TOKEN_FILE: path.join(HOME, '.zenbot/token'), ZEN_BIN },
+  env: { ...process.env, ZEN_WEB_HOME: HOME, ZEN_WEB_ROOT: VAULT, ZEN_WEB_PORT: String(PORT), ZEN_WEB_AUTH: 'off', ZEN_WEB_PREVIEW_SYSTEM: '1', ZEN_URL: `http://127.0.0.1:${KERNEL}`, ZEN_TOKEN_FILE: path.join(HOME, '.zenbot/token'), ZEN_BIN },
   stdio: ['ignore', 'pipe', 'inherit'],
 });
 await new Promise((ok, fail) => {
@@ -1144,9 +1145,21 @@ try {
     await addr.press('Enter');
     await page.getByText("Preview shows this host's own ports").waitFor();
     assert.equal(await page.locator('.pane.view iframe[title="preview"]').count(), 0, 'another host is never framed');
+    // The tab lists the dev servers on this machine, named by app: the stand-in dev server runs in this
+    // test's process, whose folder is the web app, so it shows under the web package's name.
+    const appName = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')).name;
+    const apps = page.getByRole('list', { name: 'dev servers' });
+    const row = (port) => apps.getByRole('listitem').filter({ hasText: `:${port}` });
+    await row(APP_PORT).waitFor();
+    assert.equal(await row(APP_PORT).locator('.pv-name').innerText(), appName, 'listed by its app name, not its port');
+    assert.equal(await row(PORT).count() + (await row(KERNEL).count()), 0, "zen's own ports are not listed");
+    await row(APP_PORT).getByRole('button', { name: new RegExp(`^${appName}`) }).click();
+    const devFrame = page.frameLocator('.pane.view iframe[title="preview"]');
+    await devFrame.locator('#hero').waitFor();
+    assert.equal(await page.getByRole('button', { name: 'dev servers', exact: true }).innerText(), `${appName} ▾`, 'the bar names the app');
+    // A port typed in the box still works.
     await addr.fill(String(APP_PORT));
     await addr.press('Enter');
-    const devFrame = page.frameLocator('.pane.view iframe[title="preview"]');
     await devFrame.locator('#hero').waitFor();
     assert.equal(await page.locator('.pane.view iframe[title="preview"]').getAttribute('src'), `/preview/${APP_PORT}/`, 'the frame loads under zen\'s own address');
     // zen's own ports are never shown.
@@ -1208,6 +1221,30 @@ try {
     await devFrame.locator('#hero').click();
     for (let i = 0; i < 40 && (await appFrame().title()) !== 'clicked'; i++) await page.waitForTimeout(50);
     assert.equal(await appFrame().title(), 'clicked', 'with Point off, clicks reach the app');
+    // Stop: a throwaway dev server started here appears in the list by its folder, and ✕ (after a
+    // confirm) frees its port. A port that isn't listed can't be touched.
+    const throwaway = path.join(mkdtempSync(path.join(tmpdir(), 'zen-e2e-throw-')), 'throwaway-app');
+    mkdirSync(throwaway);
+    const TPORT = APP_PORT + 3;
+    const child = spawn(process.execPath, ['-e', `require('http').createServer((q, r) => r.end('x')).listen(${TPORT}, '127.0.0.1')`], { cwd: throwaway, stdio: 'ignore' });
+    try {
+      const listening = (port) => new Promise((ok) => { const c = net.connect(port, '127.0.0.1', () => (c.destroy(), ok(true))); c.on('error', () => ok(false)); });
+      for (let i = 0; i < 100 && !(await listening(TPORT)); i++) await page.waitForTimeout(50);
+      await page.getByRole('button', { name: 'dev servers', exact: true }).click();
+      await page.getByRole('button', { name: 'refresh dev servers' }).click();
+      await row(TPORT).waitFor();
+      assert.equal(await row(TPORT).locator('.pv-name').innerText(), 'throwaway-app');
+      page.once('dialog', (d) => d.accept());
+      await page.getByRole('button', { name: 'stop throwaway-app' }).click();
+      await row(TPORT).waitFor({ state: 'detached' });
+      assert.equal(await listening(TPORT), false, 'stop frees the port');
+      assert.equal((await fetch(`${base}/api/preview/servers/stop`, { method: 'POST', headers: { 'x-zen-web': '1', 'content-type': 'application/json' }, body: JSON.stringify({ port: TPORT }) })).status, 404, 'a port nobody listens on is not stoppable');
+      assert.equal((await fetch(`${base}/api/preview/servers/stop`, { method: 'POST', headers: { 'x-zen-web': '1', 'content-type': 'application/json' }, body: JSON.stringify({ port: PORT }) })).status, 400, "zen's own port is not stoppable");
+      assert.equal((await fetch(`${base}/api/preview/servers/stop`, { method: 'POST', body: JSON.stringify({ port: TPORT }) })).status, 403, 'writes need X-Zen-Web');
+    } finally {
+      child.kill('SIGKILL');
+      rmSync(path.dirname(throwaway), { recursive: true, force: true });
+    }
     await page.getByRole('tab', { name: 'Files', exact: true }).click();
   } finally {
     devApp.close();

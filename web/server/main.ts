@@ -3,7 +3,8 @@
 // in the vault, never over anything),
 // relays the zen kernel (`zen.ts`), runs zen's kernel commands (`commands.ts`) and takes chat
 // attachments into `~/inbox` (`uploads.ts`), and shows dev servers under `/preview/<port>/` for the
-// Preview tab (`preview.ts`), with its pins' screenshots taken here (`shot.ts`).
+// Preview tab (`preview.ts`), with its pins' screenshots taken here (`shot.ts`) and its list of
+// dev servers, which can be stopped and restarted (`servers.ts`).
 //
 // Security, in layers:
 // - It listens on loopback only; a signing-in proxy in front is the way in.
@@ -16,6 +17,10 @@
 // - Files (`/api/fs`) reads from `/` down but never secrets (zen's token, env, matrix and
 //   database, sign-ins, keys, `/proc`, `/etc/shadow`, other homes: `home.ts`), and writes only
 //   inside the vault.
+// - Preview's server list (`servers.ts`) lets any signed-in user stop or restart the owner's own dev
+//   servers (processes of this server's user on ports 3000–9999). System services (cgroup
+//   `/system.slice/`), zen's own ports and this server's own unit are never listed or touched:
+//   a port that isn't listed answers 404, and a pid never comes from the client.
 // - The kernel token is read here for authenticated relays and never sent to the page.
 //
 // Run with Node's own type stripping: `node server/main.ts` (`--dev` serves the page from Vite;
@@ -32,6 +37,7 @@ import * as commands from './commands.ts';
 import * as uploads from './uploads.ts';
 import * as preview from './preview.ts';
 import * as shot from './shot.ts';
+import * as servers from './servers.ts';
 
 const HOME = os.homedir();
 const ROOT = path.resolve(process.env.ZEN_WEB_ROOT ?? path.join(HOME, '.zenbot/global'));
@@ -42,6 +48,9 @@ const DEV_HOSTS = (process.env.ZEN_WEB_DEV_HOSTS ?? '').split(',').map((h) => h.
 const DEV = process.argv.includes('--dev');
 const DIST = path.resolve(import.meta.dirname, '../dist');
 const MAX_BODY = 5 * 1024 * 1024;
+/** Ports Preview never shows or touches: zen's own. `ZEN_WEB_PREVIEW_SYSTEM=1` (tests) also lists system.slice processes. */
+const BLOCKED = [PORT, zen.KERNEL_PORT];
+const SERVERS = { blocked: BLOCKED, includeSystem: process.env.ZEN_WEB_PREVIEW_SYSTEM === '1' };
 const resolvePath = (rel: unknown) => inRoot(ROOT, rel);
 
 async function readBody(req: IncomingMessage): Promise<unknown> {
@@ -112,6 +121,17 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
       const file = path.join(dir, `preview-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.png`);
       await fs.writeFile(file, png, { flag: 'wx' });
       return send(res, 200, { path: file, data: png.toString('base64') });
+    }
+    case 'GET /api/preview/servers':
+      return send(res, 200, { servers: await servers.list(SERVERS) });
+    case 'POST /api/preview/servers/stop': {
+      const b = (await readBody(req)) as { port?: unknown } | null;
+      await servers.stop(b?.port, SERVERS);
+      return send(res, 200, { ok: true });
+    }
+    case 'POST /api/preview/servers/restart': {
+      const b = (await readBody(req)) as { port?: unknown } | null;
+      return send(res, 200, { server: await servers.restart(b?.port, SERVERS) });
     }
     case 'POST /api/upload':
       return send(res, 200, await uploads.save(path.join(home.HOME, 'inbox'), q('name'), req));
@@ -185,7 +205,7 @@ const SECURITY_HEADERS = {
 async function main() {
   await fs.mkdir(ROOT, { recursive: true });
   let vite: { middlewares: (req: IncomingMessage, res: ServerResponse, next: () => void) => void } | null = null;
-  const previewOptions = { authHeader: AUTH_HEADER, blocked: [PORT, zen.KERNEL_PORT] };
+  const previewOptions = { authHeader: AUTH_HEADER, blocked: BLOCKED };
   const server = createServer(async (req, res) => {
     for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
     try {
