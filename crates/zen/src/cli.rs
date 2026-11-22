@@ -111,9 +111,10 @@ pub(crate) enum Cmd {
         #[arg(short, long)]
         session: String,
     },
-    /// Archive a session, optionally saying how it ended: done, partial (continues in a new session with a handoff) or not-done, with a note
+    /// Archive a session, optionally saying how it ended: done, partial (continues in a new session with a handoff) or not-done, then how well it went (a number, 1-10) and a note: `archive done 8 shipped it`
     Archive {
         outcome: Option<String>,
+        /// A rating from 1 to 10 right after the outcome, then the note
         note: Vec<String>,
         #[arg(short, long)]
         session: String,

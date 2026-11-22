@@ -50,7 +50,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("model", "[model]", "this session's model (no argument: list them)", Session),
     cmd("effort", "[level]", "this session's thinking level (no argument: the model's levels)", Session),
     cmd("rename", "<title>", "rename this session", Session),
-    cmd("archive", "[done|partial|not-done [note]]", "archive this session, saying how it ended (partial: continue in a new session with a handoff)", Session),
+    cmd("archive", "[done|partial|not-done] [1-10] [note]", "archive this session, saying how it ended and how well it went, 1-10 (partial: continue in a new session with a handoff)", Session),
     cmd("steer", "<message>", "change direction at the next tool boundary", Session),
     cmd("files", "[dir]", "the side panel's Files view: the folder tree (ctrl+b)", Screen),
     cmd("open", "[path]", "show a file next to the chat", Screen),
@@ -104,8 +104,8 @@ pub enum Cmd {
     Model(Option<String>),
     Effort(Option<String>),
     Rename(String),
-    /// How the session ended (`done`, `partial`, `not-done`), if said, and a note.
-    Archive { outcome: Option<String>, note: Option<String> },
+    /// How the session ended (`done`, `partial`, `not-done`), if said; how well it went, 1 to 10, if said; and a note.
+    Archive { outcome: Option<String>, rating: Option<u8>, note: Option<String> },
     Steer(String),
     Tasks,
     Jobs,
@@ -138,6 +138,15 @@ impl Cmd {
 
 /// The kernel or session command in `text` (without the client's prefix), or None when its first
 /// word isn't one. `Some(Err(usage))` when the word is ours but the rest doesn't fit.
+/// The first whitespace-delimited word of `s` and the rest after it (both trimmed at the front).
+fn split_word(s: &str) -> (&str, &str) {
+    let s = s.trim_start();
+    match s.split_once(char::is_whitespace) {
+        Some((w, r)) => (w, r.trim_start()),
+        None => (s, ""),
+    }
+}
+
 pub fn parse(text: &str) -> Option<Result<Cmd, String>> {
     let text = text.trim();
     let (word, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
@@ -177,14 +186,29 @@ pub fn parse(text: &str) -> Option<Result<Cmd, String>> {
             _ => usage(),
         },
         "rename" if !rest.is_empty() => Ok(Cmd::Rename(rest.to_string())),
-        "archive" => match words.first().map(|w| w.to_ascii_lowercase()) {
-            None => Ok(Cmd::Archive { outcome: None, note: None }),
-            Some(o) if ["done", "partial", "not-done"].contains(&o.as_str()) => {
-                let note = rest.split_once(char::is_whitespace).map(|(_, n)| n.trim().to_string()).filter(|n| !n.is_empty());
-                Ok(Cmd::Archive { outcome: Some(o), note })
+        "archive" => {
+            // [outcome] [rating] [note]: a bare whole number right after the outcome (or first) is the 1-10 rating.
+            let (first, after) = split_word(rest);
+            let (outcome, after) = match first.to_ascii_lowercase() {
+                o if ["done", "partial", "not-done"].contains(&o.as_str()) => (Some(o), after),
+                _ => (None, rest),
+            };
+            let (next, after_rating) = split_word(after);
+            let (rating, after) = if !next.is_empty() && next.bytes().all(|b| b.is_ascii_digit()) {
+                match next.parse::<u8>() {
+                    Ok(n) if (1..=10).contains(&n) => (Some(n), after_rating),
+                    _ => return Some(usage()),
+                }
+            } else {
+                (None, after)
+            };
+            let note = Some(after.trim().to_string()).filter(|n| !n.is_empty());
+            // A note needs an outcome or a rating before it; anything else is a wrong shape.
+            if outcome.is_none() && rating.is_none() && note.is_some() {
+                return Some(usage());
             }
-            _ => usage(),
-        },
+            Ok(Cmd::Archive { outcome, rating, note })
+        }
         "steer" if !rest.is_empty() => Ok(Cmd::Steer(rest.to_string())),
         "jobs" => match (words.first().map(|w| w.to_ascii_lowercase()).as_deref(), &words[words.len().min(1)..]) {
             (None | Some("list"), []) => Ok(Cmd::Jobs),
@@ -291,13 +315,14 @@ pub async fn run(c: &Client, cmd: &Cmd, session: Option<&str>) -> Result<Reply> 
             let s = c.patch(&format!("/api/sessions/{}", enc(&sid()?)), json!({ "title": title })).await?;
             reply(format!("Renamed: {title}."), s)
         }
-        Cmd::Archive { outcome, note } => {
+        Cmd::Archive { outcome, rating, note } => {
             let id = sid()?;
-            let s = c.patch(&format!("/api/sessions/{}", enc(&id)), json!({ "archived": true, "outcome": outcome, "note": note })).await?;
+            let s = c.patch(&format!("/api/sessions/{}", enc(&id)), json!({ "archived": true, "outcome": outcome, "rating": rating, "note": note })).await?;
+            let stars = rating.map(|r| format!(", rated {r}/10")).unwrap_or_default();
             let text = match (outcome.as_deref(), s["continued_by"].as_str()) {
-                (Some(o), Some(next)) => format!("Archived {} as {o}; continue in session {} (its handoff is offered as the first prompt).", short(&id), short(next)),
-                (Some(o), None) => format!("Archived {} as {o}.", short(&id)),
-                _ => format!("Archived {}.", short(&id)),
+                (Some(o), Some(next)) => format!("Archived {} as {o}{stars}; continue in session {} (its handoff is offered as the first prompt).", short(&id), short(next)),
+                (Some(o), None) => format!("Archived {} as {o}{stars}.", short(&id)),
+                _ => format!("Archived {}{stars}.", short(&id)),
             };
             reply(text, s)
         }
@@ -870,9 +895,19 @@ mod tests {
         assert_eq!(parse("jobs runs"), Some(Ok(Cmd::JobRuns(None))));
         assert_eq!(parse("model"), Some(Ok(Cmd::Model(None))));
         assert_eq!(parse("model codex/gpt-6-sol"), Some(Ok(Cmd::Model(Some("codex/gpt-6-sol".into())))));
-        assert_eq!(parse("archive"), Some(Ok(Cmd::Archive { outcome: None, note: None })));
-        assert_eq!(parse("archive Partial tests still red"), Some(Ok(Cmd::Archive { outcome: Some("partial".into()), note: Some("tests still red".into()) })));
-        assert_eq!(parse("archive not-done"), Some(Ok(Cmd::Archive { outcome: Some("not-done".into()), note: None })));
+        let archive = |o: Option<&str>, rating: Option<u8>, note: Option<&str>| Some(Ok(Cmd::Archive { outcome: o.map(Into::into), rating, note: note.map(Into::into) }));
+        assert_eq!(parse("archive"), archive(None, None, None));
+        assert_eq!(parse("archive Partial tests still red"), archive(Some("partial"), None, Some("tests still red")));
+        assert_eq!(parse("archive not-done"), archive(Some("not-done"), None, None));
+        // A bare whole number from 1 to 10 right after the outcome is the rating.
+        assert_eq!(parse("archive done 8"), archive(Some("done"), Some(8), None));
+        assert_eq!(parse("archive done 10 shipped it"), archive(Some("done"), Some(10), Some("shipped it")));
+        assert_eq!(parse("archive partial 3  tests  red"), archive(Some("partial"), Some(3), Some("tests  red")));
+        assert_eq!(parse("archive not-done 1"), archive(Some("not-done"), Some(1), None));
+        assert_eq!(parse("archive 7"), archive(None, Some(7), None), "a rating alone");
+        assert_eq!(parse("archive done 5 files changed"), archive(Some("done"), Some(5), Some("files changed")), "the number right after the outcome is the rating");
+        assert_eq!(parse("archive done tests 7 pass"), archive(Some("done"), None, Some("tests 7 pass")), "a number later is part of the note");
+        assert_eq!(parse("archive done 7.5"), archive(Some("done"), None, Some("7.5")));
         assert_eq!(parse("rename A new title"), Some(Ok(Cmd::Rename("A new title".into()))));
         assert_eq!(parse("steer stop, use the other file"), Some(Ok(Cmd::Steer("stop, use the other file".into()))));
         assert_eq!(parse("memory sleep"), Some(Ok(Cmd::Sleep)));
@@ -913,6 +948,9 @@ mod tests {
         assert!(matches!(parse("archive maybe"), Some(Err(_))));
         assert!(matches!(parse("rename"), Some(Err(_))));
         assert!(matches!(parse("archive now"), Some(Err(_))));
+        for bad in ["archive done 0", "archive done 11", "archive 99 note", "archive 0", "archive done 300", "archive a note without outcome"] {
+            assert!(matches!(parse(bad), Some(Err(u)) if u.starts_with("usage: archive")), "{bad}");
+        }
         assert!(matches!(parse("memory forever"), Some(Err(_))));
         assert!(matches!(parse("tasks all"), Some(Err(u)) if u == "usage: tasks"));
     }

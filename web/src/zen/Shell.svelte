@@ -245,6 +245,15 @@
     pointed = true;
     focusPane(i);
   }
+  // Opening a chat (new chat button, shortcut, command, a session in a list) makes it the focused panel,
+  // even when the click that opened it was in the side panel; the chat's box then takes the keyboard.
+  let openedSeen = app.opened;
+  $effect(() => {
+    const n = app.opened;
+    if (n === openedSeen) return;
+    openedSeen = n;
+    untrack(() => focusPane(0));
+  });
   // Keys moved the focus: put the keyboard in the panel (the chat's box; a plugin frame does its own).
   $effect(() => {
     const i = ui.focus, k = focused();

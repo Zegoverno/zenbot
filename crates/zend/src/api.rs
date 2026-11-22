@@ -328,7 +328,7 @@ pub(crate) async fn board(State(app): State<AppState>, Query(q): Query<BoardQuer
 
 /// The columns `session_json` reads, without the cost (each query computes it its own way).
 const SESSION_COLUMNS: &str =
-    "id, title, model, effort, archived, created_at, updated_at, kind, parent, agent, role, outcome, outcome_note, ended_at, continues";
+    "id, title, model, effort, archived, created_at, updated_at, kind, parent, agent, role, outcome, outcome_note, rating, ended_at, continues";
 
 pub(crate) fn session_json(r: &sqlx::sqlite::SqliteRow) -> Value {
     json!({
@@ -347,6 +347,8 @@ pub(crate) fn session_json(r: &sqlx::sqlite::SqliteRow) -> Value {
         // How it ended, the owner's call when archiving (`archive done|partial|not-done`); None if unsaid.
         "outcome": r.try_get::<Option<String>, _>("outcome").ok().flatten(),
         "outcome_note": r.try_get::<Option<String>, _>("outcome_note").ok().flatten(),
+        // The owner's 1–10 score given when archiving; None if unsaid.
+        "rating": r.try_get::<Option<i64>, _>("rating").ok().flatten(),
         "ended_at": r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("ended_at").ok().flatten(),
         // The partial session this one continues (handoff.rs).
         "continues": r.try_get::<Option<Uuid>, _>("continues").ok().flatten(),
@@ -565,10 +567,14 @@ pub(crate) struct UpdateSession {
     /// With `archived: true`: how the session ended (`done`, `partial`, `not-done`) and a note.
     outcome: Option<String>,
     note: Option<String>,
+    /// With `archived: true`: how well it went, 1 to 10 (optional, with or without an outcome).
+    rating: Option<i64>,
 }
 
 /// How a session can end (`sessions.outcome`), the owner's verdict when archiving it.
 pub(crate) const OUTCOMES: [&str; 3] = ["done", "partial", "not-done"];
+/// The owner's score when archiving (`sessions.rating`): 1 to 10.
+pub(crate) const RATINGS: std::ops::RangeInclusive<i64> = 1..=10;
 
 pub(crate) async fn update_session(State(app): State<AppState>, Path(id): Path<Uuid>, Json(body): Json<UpdateSession>) -> ApiResult<Json<Value>> {
     let current = sqlx::query("SELECT model, effort FROM sessions WHERE id = $1").bind(id).fetch_optional(&app.db).await?.ok_or_else(not_found)?;
@@ -591,6 +597,14 @@ pub(crate) async fn update_session(State(app): State<AppState>, Path(id): Path<U
             return Err(ApiError(StatusCode::BAD_REQUEST, "an outcome is given when archiving (archived: true)".into()));
         }
     }
+    if let Some(r) = body.rating {
+        if !RATINGS.contains(&r) {
+            return Err(ApiError(StatusCode::BAD_REQUEST, "rating must be a whole number from 1 to 10".into()));
+        }
+        if body.archived != Some(true) {
+            return Err(ApiError(StatusCode::BAD_REQUEST, "a rating is given when archiving (archived: true)".into()));
+        }
+    }
     let note = body.note.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);
     let row = sqlx::query(&format!(
         "UPDATE sessions SET title = COALESCE($2, title), title_source = CASE WHEN $2 IS NULL THEN title_source ELSE 'owner' END, model = COALESCE($3, model), effort = $5,
@@ -598,6 +612,7 @@ pub(crate) async fn update_session(State(app): State<AppState>, Path(id): Path<U
                 archived = COALESCE($4, archived), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),
                 outcome = CASE WHEN $4 = 1 THEN COALESCE($6, outcome) WHEN $4 = 0 THEN NULL ELSE outcome END,
                 outcome_note = CASE WHEN $4 = 1 THEN COALESCE($7, outcome_note) WHEN $4 = 0 THEN NULL ELSE outcome_note END,
+                rating = CASE WHEN $4 = 1 THEN COALESCE($8, rating) WHEN $4 = 0 THEN NULL ELSE rating END,
                 ended_at = CASE WHEN $4 = 1 THEN COALESCE(ended_at, strftime('%Y-%m-%dT%H:%M:%f+00:00','now')) WHEN $4 = 0 THEN NULL ELSE ended_at END
          WHERE id = $1
          RETURNING {SESSION_COLUMNS}, {} AS cost",
@@ -610,6 +625,7 @@ pub(crate) async fn update_session(State(app): State<AppState>, Path(id): Path<U
     .bind(effort)
     .bind(&body.outcome)
     .bind(&note)
+    .bind(body.rating)
     .fetch_optional(&app.db)
     .await?
     .ok_or_else(not_found)?;
@@ -871,6 +887,35 @@ mod tests {
         assert!(s["outcome"].is_null() && s["ended_at"].is_null());
         let s = patch(json!({ "archived": true })).await.ok().unwrap().0;
         assert!(s["outcome"].is_null() && s["ended_at"].is_string(), "plain archive leaves the outcome unset");
+        db.close().await;
+    }
+
+    /// The optional 1–10 rating is stored when archiving, read back, cleared on restore, and bad values are refused.
+    #[tokio::test]
+    async fn archive_records_the_rating() {
+        let (_db_dir, db) = crate::test_util::database().await;
+        let app = crate::test_util::app(db.clone());
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO sessions(id,model) VALUES($1,'faux/smoke')").bind(id).execute(&db).await.unwrap();
+        let patch = |v: Value| update_session(State(app.clone()), Path(id), Json(serde_json::from_value(v).unwrap()));
+        let status = |r: ApiResult<Json<Value>>| r.err().map(|e| e.0);
+        for bad in [0, 11, -3, 100] {
+            assert_eq!(status(patch(json!({ "archived": true, "outcome": "done", "rating": bad })).await), Some(StatusCode::BAD_REQUEST), "rating {bad}");
+        }
+        assert_eq!(status(patch(json!({ "rating": 7 })).await), Some(StatusCode::BAD_REQUEST), "a rating needs archiving");
+        let s = patch(json!({ "archived": false })).await.ok().unwrap().0;
+        assert!(s["rating"].is_null(), "refused values leave nothing behind");
+        let s = patch(json!({ "archived": true, "outcome": "done", "rating": 10, "note": "great" })).await.ok().unwrap().0;
+        assert_eq!((s["rating"].as_i64(), s["outcome"].as_str(), s["outcome_note"].as_str()), (Some(10), Some("done"), Some("great")));
+        let stored: Option<i64> = sqlx::query_scalar("SELECT rating FROM sessions WHERE id = $1").bind(id).fetch_one(&db).await.unwrap();
+        assert_eq!(stored, Some(10));
+        let s = patch(json!({ "archived": false })).await.ok().unwrap().0;
+        assert!(s["rating"].is_null(), "restoring clears the rating");
+        let s = patch(json!({ "archived": true, "rating": 1 })).await.ok().unwrap().0;
+        assert_eq!((s["rating"].as_i64(), s["outcome"].is_null()), (Some(1), true), "a rating without an outcome");
+        let s = patch(json!({ "archived": true })).await.ok().unwrap().0;
+        assert_eq!(s["rating"].as_i64(), Some(1), "archiving again without one keeps it");
+        assert!(sqlx::query("UPDATE sessions SET rating = 11 WHERE id = $1").bind(id).execute(&db).await.is_err(), "the database refuses it too");
         db.close().await;
     }
 }

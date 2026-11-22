@@ -2,7 +2,7 @@
   // A session's chat, as the redesign draws it (web/mock/ChatMock2.svelte's chat pane) on the
   // terminal's logic (crates/zen/src/tui: events.rs, transcript.rs, input.rs, pickers.rs).
   // The header: the title (double-click or ⋯ › Rename), working / needs-you, the ⋯ details (model,
-  // effort, context, session; rename; archive with how it ended) and × to close. The conversation:
+  // effort, context, session; rename; archive with how it ended, then a 1–10 rating that Enter skips) and × to close. The conversation:
   // prompts as bubbles, Markdown replies streamed as they come, each run of tool calls folded into
   // one "N steps" line, questions as a card with their options (one click answers), and while the
   // agent works one live line that opens into every step of the turn and its subagents (each with
@@ -107,6 +107,9 @@
   ];
   let outcome = $state('done');
   let outcomeOpen = $state(false);
+  // After the outcome is picked, archiving asks how well it went: keys 1–9 and 0 (10), Enter or Skip leaves it unsaid.
+  let rate = $state<{ outcome: string; note: string } | null>(null);
+  let rateEl = $state<HTMLElement>();
   let pop = $state<'model' | 'effort' | null>(null);
   let moreModels = $state(false);
 
@@ -660,10 +663,10 @@
           return notice('renamed');
         case 'archive': {
           if (!sid) return notice('nothing to archive yet');
-          const [o, ...note] = arg.split(' ');
-          if (!o) return void (picker = { title: 'How did it end?', kind: 'outcome', sel: 0, items: M.OUTCOMES.map(([v, h]) => ({ label: `${v.padEnd(9)} ${h}`, value: v })) });
-          if (!M.OUTCOMES.some(([v]) => v === o)) return notice('usage: /archive [done|partial|not-done [note]]');
-          return await archive(o, note.join(' ').trim());
+          if (!arg.trim()) return void (picker = { title: 'How did it end?', kind: 'outcome', sel: 0, items: M.OUTCOMES.map(([v, h]) => ({ label: `${v.padEnd(9)} ${h}`, value: v })) });
+          const a = M.parseArchive(arg);
+          if (!a) return notice('usage: /archive [done|partial|not-done] [1-10] [note]');
+          return await archive(a.outcome ?? '-', a.note, a.rating ?? undefined);
         }
         case 'steer':
           return notice('usage: /steer <message>');
@@ -894,7 +897,7 @@
       else if (p.kind === 'model') await setModel(v);
       else if (p.kind === 'effort') await setEffort(v);
       else if (p.kind === 'agent') agent = v;
-      else await archive(v, '');
+      else askRating(v);
     } catch (e) {
       notice(String((e as Error).message ?? e));
     }
@@ -928,32 +931,51 @@
     } else effort = value === 'default' ? null : value;
   }
 
-  /** Archive the session with how it ended (`-`: unsaid); after partial, open the session that continues it. Undo brings it back. */
-  async function archive(o: string, note: string) {
+  /** Archive the session with how it ended (`-`: unsaid) and an optional 1–10 rating; after partial, open the session that continues it. Undo brings it back. */
+  async function archive(o: string, note: string, rating?: number) {
     if (!sid) return notice('nothing to archive yet');
     const out = o === '-' ? undefined : (o as Outcome);
-    const s = await zen.update(sid, { archived: true, ...(out ? { outcome: out } : {}), ...(note ? { note } : {}) });
+    const s = await zen.update(sid, { archived: true, ...(out ? { outcome: out } : {}), ...(note ? { note } : {}), ...(rating ? { rating } : {}) });
     const me_ = sid;
     const undo = () => { void zen.update(me_, { archived: false }).then(() => openSession(me_)).catch((e) => notice(String((e as Error).message ?? e))); };
     const label = OUTCOMES.find((x) => x.v === o)?.l.toLowerCase();
+    const stars = rating ? ` · ${rating}/10` : '';
     if (o === 'partial') {
       openSession(s.continued_by ?? 'new');
-      notice('Archived as part done · a new chat continues it', 6000, undo);
+      notice(`Archived as part done${stars} · a new chat continues it`, 6000, undo);
     } else {
       closeChat();
-      notice(o === '-' ? 'Archived' : `Archived as ${label}`, 6000, undo);
+      notice(o === '-' ? `Archived${stars}` : `Archived as ${label}${stars}`, 6000, undo);
     }
+  }
+  /** The outcome is picked (menu or picker): ask for the rating before archiving. */
+  async function askRating(o: string, note = '') {
+    details = false;
+    outcomeOpen = false;
+    rate = { outcome: o, note };
+    await tick();
+    // The keys 1–9 and 0 reach the chat from the box; on a phone nothing opens the keyboard unasked.
+    if (matchMedia('(pointer: fine)').matches && ta && !ta.disabled) ta.focus();
+    else rateEl?.focus();
+  }
+  /** A rating (1–10), or none (Skip, Enter): archive with it. */
+  async function rateWith(r?: number) {
+    const x = rate;
+    if (!x) return;
+    rate = null;
+    try {
+      await archive(x.outcome, x.note, r);
+    } catch (e) {
+      notice(String((e as Error).message ?? e));
+    }
+    ta?.focus();
   }
   async function archiveChat() {
     details = false;
     outcomeOpen = false;
     const o = outcome;
     outcome = 'done';
-    try {
-      await archive(o, '');
-    } catch (e) {
-      notice(String((e as Error).message ?? e));
-    }
+    await askRating(o);
   }
 
   // ---- rename ----
@@ -1062,7 +1084,7 @@
   // then j/k walk the steps (cursor), Enter opens one or goes back to the box, o puts a subagent
   // beside the chat, r renames, x archives, i or Enter focus the box.
   const STEPS = '.chatroot .wline, .chatroot .lhead, .chatroot .sa, .chatroot .sline';
-  const idle = () => !picker && !details && !pop && !outcomeOpen;
+  const idle = () => !picker && !rate && !details && !pop && !outcomeOpen;
   async function archiveNow() {
     try { await archive('-', ''); } catch (e) { notice(String((e as Error).message ?? e)); }
   }
@@ -1113,6 +1135,14 @@
     const ctrl = e.ctrlKey && !e.altKey && !e.metaKey;
     const plain = !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey;
 
+    if (rate && plain) {
+      if (/^[0-9]$/.test(e.key)) void rateWith(e.key === '0' ? 10 : Number(e.key));
+      else if (e.key === 'Enter') void rateWith();
+      else if (e.key === 'Escape') rate = null;
+      else return;
+      e.preventDefault();
+      return;
+    }
     if (picker && plain) {
       const n = picker.items.length;
       if (e.key === 'ArrowUp') picker.sel = (picker.sel - 1 + n) % n;
@@ -1120,6 +1150,7 @@
       else if (e.key === 'Enter') pick();
       else if (e.key === 'Escape') picker = null;
       else return;
+      if (e.key.startsWith('Arrow')) reveal();
       e.preventDefault();
       return;
     }
@@ -1158,6 +1189,7 @@
       if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
         e.preventDefault();
         menuSel = (sel + (e.key === 'ArrowUp' ? menu.length - 1 : 1)) % menu.length;
+        reveal();
         return;
       }
       if (e.key === 'Tab') {
@@ -1210,6 +1242,11 @@
         setInput(draft);
       } else setInput(hist[hi]);
     }
+  }
+
+  /** The arrows moved the highlight in the / menu or a picker: scroll it into view (the list is bounded). */
+  function reveal() {
+    void tick().then(() => root?.querySelector('.compose .pop .item.on')?.scrollIntoView({ block: 'nearest' }));
   }
 
   function runMenu(i: number) {
@@ -1563,7 +1600,18 @@
       </section>
     {/each}
     <div class="compose" class:drag={dragging} class:ro>
-      {#if picker}
+      {#if rate}
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+        <div class="menu up pop rate" role="group" aria-label="Rate this session" tabindex="-1" bind:this={rateEl}>
+          <div class="mg">How did it go? · 1–9, 0 is 10 · enter skips · esc cancels</div>
+          <div class="nums">
+            {#each [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as n (n)}
+              <button class="num" aria-label={`Rate ${n} out of 10`} onclick={() => rateWith(n)}>{n}</button>
+            {/each}
+          </div>
+          <div class="rfoot"><span>1 poor</span><span>10 excellent</span><button class="oc skip" onclick={() => rateWith()}>Skip</button></div>
+        </div>
+      {:else if picker}
         <div class="menu up pop" role="listbox" aria-label={picker.title}>
           <div class="mg">{picker.title} · ↑↓ enter · esc</div>
           {#each picker.items as it, i (i)}
@@ -1826,8 +1874,18 @@
   .bars i:nth-child(1) { height: 5px; } .bars i:nth-child(2) { height: 8px; } .bars i:nth-child(3) { height: 11px; }
   .bars i.on { background: var(--accent); }
   /* the / menu and the command pickers, over the message box */
-  .menu.pop { left: 0; right: 0; bottom: calc(100% + 6px); max-height: 40vh; overflow: auto; }
-  .pop .item { padding: 6px 10px; border-radius: 8px; white-space: pre; overflow: hidden; text-overflow: ellipsis; font-size: 13px; max-width: 100%; }
+  /* Bounded: about 8 two-line rows, then it scrolls inside (the rows keep their height, they never squeeze). */
+  .menu.pop { left: 0; right: 0; bottom: calc(100% + 6px); max-height: min(48vh, 420px); overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; }
+  .pop .mg { flex: none; }
+  .rate .mg { white-space: normal; }
+  .rate .nums { display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 4px; padding: 4px 6px 2px; }
+  .rate .num { height: 36px; border-radius: 8px; border: 1px solid var(--faint); background: var(--paper); font-size: 14px; font-variant-numeric: tabular-nums; }
+  .rate .num:hover, .rate .num:focus-visible { background: var(--soft); border-color: var(--accent); color: var(--accent); }
+  .rate .rfoot { display: flex; align-items: center; gap: 12px; padding: 6px 10px 4px; font-size: 12px; color: var(--dim); }
+  .rate .rfoot .skip { margin-left: auto; }
+  .rate:focus { outline: none; }
+  .pop .item span { overflow-wrap: anywhere; }
+  .pop .item { flex: none; padding: 6px 10px; border-radius: 8px; white-space: pre; overflow: hidden; text-overflow: ellipsis; font-size: 13px; max-width: 100%; }
   .pop .item.cmd { white-space: normal; }
   .pop .item.on { background: var(--soft); }
   .pop .item b { font-family: var(--mono); font-weight: 550; font-size: 12.5px; }
