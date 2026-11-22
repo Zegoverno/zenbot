@@ -148,6 +148,12 @@ export function pickTab(k: string) {
   push();
 }
 
+/** The agent a new chat starts with (the orb at the top, Agents' "Switch agent"). */
+export function setAgent(id: string) {
+  app.agent = id;
+  try { localStorage.setItem('zen.agent', id); } catch {}
+}
+
 /** Open a tab, never toggling it shut (menu and ring shortcuts). */
 export function openTab(k: string) {
   if (!tabOn(k)) pickTab(k);

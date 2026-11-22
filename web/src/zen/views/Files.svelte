@@ -8,11 +8,16 @@
   // files; Edit writes a vault note (the built-in editor or the plugin's), guarding unsaved
   // changes; Ask zenbot puts it in a chat. Above the vault it's read-only. (The redesign mock's
   // Files, on the web server's /api/fs.)
+  // Keys: Files is three panels to the key handler (keys.svelte.ts): the tree (the folder), the
+  // reader and the writer; it says which through `filesPanel` and registers each one's commands
+  // (the ring, Ctrl+K and `?` show the focused one's). Tree: / j k ↑ ↓ Enter → ← n Shift+n r v i f .
+  // Reader: e a ← → j k o Esc. Writer: Mod+s Esc Mod+Enter.
   import { onMount, tick, untrack } from 'svelte';
   import { files, zen, type Entry, type FileRead, type SearchHit } from '../api.ts';
   import { api, Conflict } from '../../lib/api.ts';
   import { render } from '../md.ts';
   import { app } from '../app.svelte.ts';
+  import { commands as registerCommands, filesPanel } from '../keys.svelte.ts';
   import { defaultOpener } from '../plugins.svelte.ts';
   import PluginFrame from '../PluginFrame.svelte';
   import { when as ago } from '../live.svelte.ts';
@@ -278,36 +283,56 @@
   }
   let listEl = $state<HTMLElement>();
   let searchEl = $state<HTMLInputElement>();
-  /** The list's keys: j/k or ↓/↑ move, Enter opens, `.` shows dotfiles, `/` searches, a/A/R new file, folder, rename. */
-  function listKeys(e: KeyboardEvent) {
-    if (!listEl?.isConnected || askFor) return;
-    const act: Record<string, () => void> = {
-      j: () => move(1), ArrowDown: () => move(1), k: () => move(-1), ArrowUp: () => move(-1),
-      Home: () => { sel = null; move(1); }, End: () => { sel = null; move(-1); },
-      Enter: () => void openSel(),
-      '.': () => { showHidden = !showHidden; },
-      '/': () => searchEl?.focus(),
-      a: () => begin('file'), A: () => begin('folder'), R: () => begin('rename'),
-    };
-    if (act[e.key]) { e.preventDefault(); act[e.key](); }
-  }
   function searchKeys(e: KeyboardEvent) {
     if (e.isComposing) return;
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); move(e.key === 'ArrowDown' ? 1 : -1); }
     else if (e.key === 'Enter') { e.preventDefault(); if (!openSel()) searchNow(); }
     else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (q) q = ''; else searchEl?.blur(); }
   }
-  function keys(e: KeyboardEvent) {
-    if (editing || e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
-    const t = e.target as HTMLElement;
-    if (t.closest('input, textarea, select, [contenteditable]')) return;
-    if (!file) return listKeys(e);
-    if (!host?.isConnected) return;
-    if (e.key === 'ArrowLeft') { e.preventDefault(); step(-1); }
-    else if (e.key === 'ArrowRight') { e.preventDefault(); step(1); }
-    else if (e.key === 'Escape' && sibOpen) { e.stopPropagation(); sibOpen = false; }
-    else if (e.key === 'e' && isNote && vaultRel) { e.preventDefault(); edit(); }
-  }
+  const nameOf0 = (p: string) => p.split('/').pop()!;
+  /** The reader's scroll: j and k. */
+  const scrollNote = (d: number) => host?.querySelector<HTMLElement>('.rscroll')?.scrollBy({ top: d * 90 });
+  const imageSrc = $derived(file && doc && /\.(png|jpe?g|gif|webp|avif|bmp)$/i.test(file) ? `/api/fs/image?path=${encodeURIComponent(file)}&v=${doc.mtime}` : null);
+  $effect(() => {
+    filesPanel.kind = editing ? 'files-writer' : file ? 'files-reader' : 'files-tree';
+    return () => { filesPanel.kind = 'files-tree'; };
+  });
+  const free = () => !askFor && !pendingLeave;
+  registerCommands('files-tree', () => [
+    { id: 'files-search', title: 'Search', icon: 'search', key: '/', ring: 0, run: () => searchEl?.focus() },
+    { id: 'files-new-file', title: 'New file', icon: 'file-plus', key: 'n', ring: 1, enabled: () => inVault && free(), run: () => begin('file') },
+    { id: 'files-new-folder', title: 'New folder', icon: 'folder-plus', key: 'Shift+n', ring: 2, enabled: () => inVault && free(), run: () => begin('folder') },
+    { id: 'files-rename', title: 'Rename', icon: 'rename', key: 'r', ring: 3, enabled: () => inVault && !!chosen && free(), run: () => begin('rename') },
+    { id: 'files-vault', title: 'Back to vault', icon: 'vault', key: 'v', ring: 4, enabled: () => cwd !== VAULT, run: () => go(VAULT) },
+    { id: 'files-inbox', title: 'Inbox', icon: 'inbox', key: 'i', ring: 5, enabled: () => !cwd.startsWith(INBOX), run: () => go(INBOX) },
+    { id: 'files-filter', title: 'Filter by properties', icon: 'filter', key: 'f', enabled: () => inVault, run: () => (fltOpen = !fltOpen) },
+    { id: 'files-dotfiles', title: showHidden ? 'Hide dotfiles' : 'Show dotfiles', icon: 'eye', key: '.', run: () => (showHidden = !showHidden) },
+    { id: 'files-down', title: 'Next row', icon: 'down', key: 'j', alt: ['ArrowDown'], quiet: true, run: () => move(1) },
+    { id: 'files-up', title: 'Previous row', icon: 'up', key: 'k', alt: ['ArrowUp'], quiet: true, run: () => move(-1) },
+    { id: 'files-first', title: 'First row', icon: 'up', key: 'Home', quiet: true, run: () => { sel = null; move(1); } },
+    { id: 'files-last', title: 'Last row', icon: 'down', key: 'End', quiet: true, run: () => { sel = null; move(-1); } },
+    { id: 'files-open', title: 'Open', icon: 'files', key: 'Enter', alt: ['ArrowRight'], quiet: true, run: () => void openSel() },
+    { id: 'files-parent', title: 'Up one folder', icon: 'up', key: 'ArrowLeft', quiet: true, enabled: () => cwd !== '/', run: up },
+    { id: 'files-back', title: 'Clear the search, or go up', icon: 'prev', key: 'Escape', quiet: true, enabled: () => !!(q || active) || cwd !== VAULT, run: () => { if (q) q = ''; else if (active) flt = {}; else up(); } },
+  ]);
+  registerCommands('files-reader', () => [
+    { id: 'reader-edit', title: 'Edit', icon: 'write', key: 'e', ring: 0, enabled: () => isNote && !!vaultRel && !editing, run: edit },
+    { id: 'reader-ask', title: 'Ask zenbot about this note', icon: 'ask', key: 'a', ring: 1, enabled: () => !!ask && !!file, run: () => ask?.(shortPath(file!)) },
+    { id: 'reader-prev', title: 'Previous', icon: 'prev', key: 'ArrowLeft', ring: 2, enabled: () => siblings.length > 1, run: () => step(-1) },
+    { id: 'reader-next', title: 'Next', icon: 'next', key: 'ArrowRight', ring: 3, enabled: () => siblings.length > 1, run: () => step(1) },
+    { id: 'reader-full', title: 'Open full size', icon: 'external', key: 'o', ring: 4, enabled: () => !!imageSrc, run: () => { if (imageSrc) window.open(imageSrc, '_blank', 'noopener'); } },
+    { id: 'reader-folder', title: 'Show in folder', icon: 'files', ring: 5, run: up },
+    { id: 'reader-down', title: 'Scroll down', icon: 'down', key: 'j', alt: ['ArrowDown'], quiet: true, run: () => scrollNote(1) },
+    { id: 'reader-up', title: 'Scroll up', icon: 'up', key: 'k', alt: ['ArrowUp'], quiet: true, run: () => scrollNote(-1) },
+    { id: 'reader-back', title: 'Back to the folder', icon: 'prev', key: 'Escape', quiet: true, enabled: () => !pendingLeave, run: () => { if (sibOpen) sibOpen = false; else up(); } },
+  ]);
+  registerCommands('files-writer', () => (builtin
+    ? [
+      { id: 'writer-save', title: 'Save', icon: 'save', key: 'Mod+s', ring: 0, run: () => void save() },
+      { id: 'writer-cancel', title: 'Cancel', icon: 'close', key: 'Escape', ring: 1, run: cancelEdit },
+      { id: 'writer-done', title: 'Save and close', icon: 'check', key: 'Mod+Enter', run: () => void saveAndClose() },
+    ]
+    : [{ id: 'writer-cancel', title: 'Done', icon: 'close', key: 'Escape', ring: 0, run: () => (editing = false) }]));
   let host = $state<HTMLElement>();
   const nameOf = (p: string) => p.split('/').pop()!;
 
@@ -459,7 +484,6 @@
   };
 </script>
 
-<svelte:window onkeydown={keys} />
 
 {#snippet ic(name: string)}<svg class="fi" viewBox="0 0 24 24" aria-hidden="true">{@html ICON[name]}</svg>{/snippet}
 
@@ -533,7 +557,7 @@
         {#key `${writer.key}:${vaultRel}`}<div class="frame"><PluginFrame plugin={writer.plugin} ui={writer.ui} pane={app.screen === 'chat' ? 'side' : 'home'} path={vaultRel} mode="edit" slot="opener" title={writer.title} /></div>{/key}
       {:else if editing}
         <!-- svelte-ignore a11y_autofocus -->
-        <textarea class="raw" bind:value={draft} autofocus spellcheck="true" aria-label="Markdown source" onkeydown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); void save(); } if (e.key === 'Escape') { e.stopPropagation(); cancelEdit(); } }}></textarea>
+        <textarea class="raw" bind:value={draft} autofocus spellcheck="true" aria-label="Markdown source" onkeydown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); cancelEdit(); } }}></textarea>
       {:else if !doc && !readError}
         <div class="none">Opening…</div>
       {:else if isNote && reader && vaultRel}
@@ -566,9 +590,9 @@
     <button class="fb" class:on={menu} aria-haspopup="menu" aria-expanded={menu} title="New file, new folder, rename" aria-label="Folder actions" onclick={() => (menu = !menu)}>{@render ic('more')}</button>
     {#if menu}
       <div class="sibs" role="menu" aria-label="Folder actions">
-        <button role="menuitem" disabled={!inVault} title={inVault ? 'A name ending in / makes a folder (A)' : 'Writes stay inside the vault'} onclick={() => begin('file')}>{@render ic('plus')}<span>New file</span></button>
-        <button role="menuitem" disabled={!inVault} title={inVault ? 'New folder (Shift+A)' : 'Writes stay inside the vault'} onclick={() => begin('folder')}>{@render ic('dir')}<span>New folder</span></button>
-        <button role="menuitem" disabled={!inVault || !chosen} title={!inVault ? 'Writes stay inside the vault' : chosen ? 'Rename (Shift+R)' : 'Select a file or folder first'} onclick={() => begin('rename')}>{@render ic('rename')}<span>Rename{chosen ? ` “${chosen.name}”` : '…'}</span></button>
+        <button role="menuitem" disabled={!inVault} title={inVault ? 'A name ending in / makes a folder (N)' : 'Writes stay inside the vault'} onclick={() => begin('file')}>{@render ic('plus')}<span>New file</span></button>
+        <button role="menuitem" disabled={!inVault} title={inVault ? 'New folder (Shift+N)' : 'Writes stay inside the vault'} onclick={() => begin('folder')}>{@render ic('dir')}<span>New folder</span></button>
+        <button role="menuitem" disabled={!inVault || !chosen} title={!inVault ? 'Writes stay inside the vault' : chosen ? 'Rename (R)' : 'Select a file or folder first'} onclick={() => begin('rename')}>{@render ic('rename')}<span>Rename{chosen ? ` “${chosen.name}”` : '…'}</span></button>
         <button role="menuitemcheckbox" aria-checked={showHidden} class:on={showHidden} title="Show or hide dotfiles (.)" onclick={() => { showHidden = !showHidden; menu = false; }}>{@render ic('eye')}<span>{showHidden ? 'Hide hidden files' : 'Show hidden files'}</span></button>
       </div>
     {/if}

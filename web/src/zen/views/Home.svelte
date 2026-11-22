@@ -4,11 +4,15 @@
   // back from the catalog; the layout is kept in the kernel's prefs (`home_layout`). A widget's rows
   // open the chat they belong to (onopen); nothing is answered here. (The redesign mock's Home, on
   // live data: the board, tasks, routines, agents and the vault.)
+  // Keys (keys.svelte.ts, for the focused Home): Tab / Shift+Tab pick the next or previous widget,
+  // j/k walk its rows (the cursor), Enter opens a row; m is arrange mode: ← and → move the widget
+  // earlier or later, h hides it, Esc leaves. The ring borrows the global actions (New chat…).
   import { onMount } from 'svelte';
   import { failing, routines } from './routinestore.svelte.ts';
   import { me, board, agents, getPrefs, patchPrefs, when as ago } from '../live.svelte.ts';
   import { files } from '../api.ts';
   import { app } from '../app.svelte.ts';
+  import { commands as registerCommands, runCommand, moveCursor, pressCursor, clearCursor } from '../keys.svelte.ts';
   type Size = 1 | 2 | 3;
   // A slot's `kind` is its catalog entry (default: its id). Task widgets can be added more than
   // once, each with its own view (`tasks`: what to show, in what order), set in Customize.
@@ -98,6 +102,48 @@
   onMount(() => {
     getPrefs().then((p) => { if (p.home_layout !== undefined && p.home_layout !== null) layout = layoutOf(p.home_layout); }).catch(() => {});
   });
+
+  // ---- commands ----
+  /** The widget the keys are on (Tab moves it); a widget's own rows are what j/k walk. */
+  let at = $state(0);
+  let navigated = $state(false);
+  const widgets = () => Math.max(1, layout.length);
+  const ROWS = () => ['.row', '.ncard', '.tcol', '.link'].map((c) => `.home .wd[data-w="${at}"] .wb ${c}`).join(', ');
+  function nextWidget(d: number) {
+    at = (Math.min(at, widgets() - 1) + d + widgets()) % widgets();
+    navigated = true;
+    clearCursor();
+    document.querySelector(`.home .wd[data-w="${at}"]`)?.scrollIntoView({ block: 'nearest' });
+  }
+  function shift(d: number) {
+    const s = layout[at];
+    if (!s || at + d < 0 || at + d >= layout.length) return;
+    moveTo(s.id, at + d);
+    at += d;
+  }
+  function hideCurrent() {
+    const s = layout[at];
+    if (!s) return;
+    remove(s.id);
+    at = Math.max(0, Math.min(at, layout.length - 1));
+  }
+  registerCommands('home', () => [
+    { id: 'home-new', title: 'New chat', icon: 'plus', ring: 0, run: () => void runCommand('new-chat') },
+    { id: 'home-attach', title: 'Attach', icon: 'clip', ring: 1, run: () => void runCommand('attach') },
+    { id: 'home-task', title: 'Add task', icon: 'task', ring: 2, run: () => void runCommand('add-task') },
+    { id: 'home-files', title: 'Search files', icon: 'search', ring: 3, run: () => void runCommand('search-files') },
+    { id: 'home-arrange', title: edit ? 'Done arranging' : 'Arrange board', icon: 'arrange', key: 'm', ring: 4, run: () => { edit = !edit; navigated = edit; } },
+    { id: 'home-theme', title: 'Theme', icon: 'theme', ring: 5, run: () => void runCommand('theme') },
+    { id: 'home-down', title: 'Next row', icon: 'down', key: 'j', alt: ['ArrowDown'], quiet: true, enabled: () => !edit, run: () => { navigated = true; moveCursor(ROWS(), 1); } },
+    { id: 'home-up', title: 'Previous row', icon: 'up', key: 'k', alt: ['ArrowUp'], quiet: true, enabled: () => !edit, run: () => { navigated = true; moveCursor(ROWS(), -1); } },
+    { id: 'home-open', title: 'Open the row', icon: 'chat', key: 'Enter', quiet: true, enabled: () => !edit, run: () => void pressCursor(ROWS()) },
+    { id: 'home-next', title: 'Next widget', icon: 'next', key: 'Tab', quiet: true, run: () => nextWidget(1) },
+    { id: 'home-prev', title: 'Previous widget', icon: 'prev', key: 'Shift+Tab', quiet: true, run: () => nextWidget(-1) },
+    { id: 'home-earlier', title: 'Move the widget earlier', icon: 'prev', key: 'ArrowLeft', quiet: true, enabled: () => edit, run: () => shift(-1) },
+    { id: 'home-later', title: 'Move the widget later', icon: 'next', key: 'ArrowRight', quiet: true, enabled: () => edit, run: () => shift(1) },
+    { id: 'home-hide', title: 'Hide the widget', icon: 'trash', key: 'h', quiet: true, enabled: () => edit, run: hideCurrent },
+    { id: 'home-leave', title: 'Leave arranging', icon: 'close', key: 'Escape', quiet: true, enabled: () => edit, run: () => { edit = false; } },
+  ]);
 </script>
 
 <div class="home">
@@ -120,7 +166,7 @@
     {#each layout as s, i (s.id)}
       {@const w = CATALOG[kind(s)]}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <article class="wd" style="grid-column: span {narrow ? 1 : s.size}" class:dragging={dragId === s.id}
+      <article class="wd" data-w={i} class:cur={i === at && (edit || navigated)} style="grid-column: span {narrow ? 1 : s.size}" class:dragging={dragId === s.id}
         draggable={edit} ondragstart={(e) => { dragId = s.id; e.dataTransfer?.setData('text/plain', s.id); }}
         ondragover={(e) => over(e, s.id)} ondrop={(e) => e.preventDefault()} ondragend={() => (dragId = null)}>
         <header class="wh">
@@ -269,6 +315,7 @@
   .edit .wd { border-style: dashed; cursor: grab; }
   .edit .wd:hover { box-shadow: 0 8px 24px var(--shadow); }
   .wd.dragging { opacity: 0.4; }
+  .wd.cur { border-color: color-mix(in srgb, var(--accent) 65%, var(--faint)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent); }
   .wh { display: flex; align-items: center; gap: 8px; padding: 0 4px 8px; min-height: 30px; }
   .wh h2 { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 0; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 650; }
   .grip { color: var(--dim); font-size: 14px; }

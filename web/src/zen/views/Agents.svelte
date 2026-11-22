@@ -4,7 +4,12 @@
   // roles.toml: a kind of work, a model, an effort, a narrower tool list and attached skills. Roles
   // are the agent's to tune; here you read them, and ask the agent to change one. (The redesign
   // mock's Agents, on GET /api/agents.)
+  // Keys (keys.svelte.ts, for the focused Agents panel): j/k walk the agents then the roles (the
+  // cursor), Enter or t talks to the agent (or opens the role), n a new agent, Shift+n a new
+  // role (both ask zenbot), the ring also has Change role and Switch agent.
   import { models, modelOf, type A } from '../live.svelte.ts';
+  import { commands as registerCommands, cursorRow, moveCursor } from '../keys.svelte.ts';
+  import { notice, setAgent } from '../app.svelte.ts';
   let { agents, current, pick, ask }: { agents: A[]; current: A; pick: (a: A) => void; ask: (text: string) => void } = $props();
 
   const short = (id: string | null | undefined) => (id ? modelOf(id).name : '');
@@ -35,6 +40,24 @@
   let open = $state<string | null>(null);
   const rs = $derived(rolesOf(current));
   const owner = $derived(current);
+  const ROWS = '.awrap .ag:not(.new), .awrap .role .rh';
+  const curAgent = () => { const id = cursorRow(ROWS)?.dataset.agent; return agents.find((a) => a.id === id) ?? null; };
+  const curRole = () => cursorRow(ROWS)?.querySelector('.rn')?.textContent ?? null;
+  const withAgent = (f: (a: A) => void) => { const a = curAgent(); if (a) f(a); else notice('Pick an agent first (j / k)'); };
+  registerCommands('agents', () => [
+    { id: 'agents-talk', title: 'Talk to this agent', icon: 'chat', key: 't', ring: 0, run: () => withAgent((a) => { if (a.info.error) notice(`${a.name} can't be reached`); else pick(a); }) },
+    { id: 'agents-new', title: 'New agent', icon: 'plus', key: 'n', ring: 1, run: () => ask('Create a new agent for me: ') },
+    { id: 'agents-new-role', title: 'New role', icon: 'plus', key: 'Shift+n', ring: 2, run: () => ask(`Create a new role for ${owner.name}: `) },
+    { id: 'agents-change-role', title: 'Change role', icon: 'rename', ring: 3, run: () => { const r = curRole(); if (r) ask(`Change ${owner.name}'s ${r} role: `); else notice('Pick a role first (j / k)'); } },
+    { id: 'agents-switch', title: 'Switch agent', icon: 'agents', ring: 4, run: () => withAgent((a) => { setAgent(a.id); notice(`New chats start with ${a.name}`); }) },
+    { id: 'agents-down', title: 'Next', icon: 'down', key: 'j', alt: ['ArrowDown'], quiet: true, run: () => void moveCursor(ROWS, 1) },
+    { id: 'agents-up', title: 'Previous', icon: 'up', key: 'k', alt: ['ArrowUp'], quiet: true, run: () => void moveCursor(ROWS, -1) },
+    { id: 'agents-open', title: 'Talk to the agent, or open the role', icon: 'chat', key: 'Enter', quiet: true, run: () => {
+      const r = cursorRow(ROWS);
+      if (!r) void moveCursor(ROWS, 'first');
+      else if (r.matches('.rh')) r.click();
+      else withAgent((a) => { if (!a.info.error) pick(a); }); } },
+  ]);
 </script>
 
 <div class="awrap">
@@ -44,7 +67,7 @@
       {#each agents as a (a.id)}
         {@const i = infoOf(a)}
         {@const n = a.info.roles?.roles?.length ?? 0}
-        <article class="ag" class:sel={a.id === current.id}>
+        <article class="ag" class:sel={a.id === current.id} data-agent={a.id}>
           <div class="top">
             <span class="orb" class:busy={i.busy} style="--a:{a.a}; --b:{a.b}">{a.name[0].toUpperCase()}</span>
             <div class="nm"><b>{a.name}</b><span>{a.role}</span></div>

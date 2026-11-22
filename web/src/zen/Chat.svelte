@@ -20,6 +20,7 @@
   import { zen, files, commands, upload, short, readOnly, AGENT_NAME, pluginApi, type Command, type Message, type Outcome, type SessionDetail, type ZenEvent } from './api.ts';
   import { chat, contexts, contextSaving, dropContext, plugins, resultText, showPanel, takeContext, toolArgs, uiOf } from './plugins.svelte.ts';
   import { app, board as toBoard, openSession, sessionStarted, openFile, openDir, pickTab, openTab, settings, notice, typing, tilde, closeChat, goBack, openSub, showFile } from './app.svelte.ts';
+  import { commands as registerCommands, cursorRow, focused, moveCursor, pressCursor } from './keys.svelte.ts';
   import { me, board, agents, agentOf, models, modelOf, kids, loadKid, loadIdeas, stepOf, clock, EFFORT, effortName, type Sugg } from './live.svelte.ts';
   import { render as mdRender } from './md.ts';
   import * as M from './chat/model.ts';
@@ -1056,6 +1057,36 @@
 
   // ---- keys ----
 
+  // ---- commands: the ring, Ctrl+K and `?` show these while the chat is the focused panel ----
+  // With the box focused (typing) only Mod chords reach them; Esc on an empty box leaves it, and
+  // then j/k walk the steps (cursor), Enter opens one or goes back to the box, o puts a subagent
+  // beside the chat, r renames, x archives, i or Enter focus the box.
+  const STEPS = '.chatroot .wline, .chatroot .lhead, .chatroot .sa, .chatroot .sline';
+  const idle = () => !picker && !details && !pop && !outcomeOpen;
+  async function archiveNow() {
+    try { await archive('-', ''); } catch (e) { notice(String((e as Error).message ?? e)); }
+  }
+  function openCursorSub() {
+    const open = cursorRow(STEPS)?.closest('.sarow')?.querySelector<HTMLElement>('.sopen');
+    if (open) open.click();
+    else notice('Pick a subagent with j / k first');
+  }
+  registerCommands('chat', () => [
+    { id: 'chat-attach', title: 'Attach', icon: 'clip', ring: 0, enabled: () => !ro, run: () => filePick?.click() },
+    { id: 'chat-model', title: 'Model', icon: 'model', ring: 1, enabled: () => !ro, run: () => { modelPicker(); ta?.focus(); } },
+    { id: 'chat-effort', title: 'Effort', icon: 'effort', ring: 2, enabled: () => !ro, run: () => { effortPicker(); ta?.focus(); } },
+    { id: 'chat-details', title: 'Details', icon: 'more', ring: 3, enabled: () => !!sid, run: () => (details = !details) },
+    { id: 'chat-preview', title: 'Preview', icon: 'preview', ring: 4, run: () => openTab('preview') },
+    { id: 'chat-stop', title: 'Stop', icon: 'stop', ring: 5, enabled: () => busy && !ro, run: abort },
+    { id: 'chat-down', title: 'Next step', icon: 'down', key: 'j', quiet: true, enabled: idle, run: () => void moveCursor(STEPS, 1) },
+    { id: 'chat-up', title: 'Previous step', icon: 'up', key: 'k', quiet: true, enabled: idle, run: () => void moveCursor(STEPS, -1) },
+    { id: 'chat-expand', title: 'Expand the step, or go to the box', icon: 'more', key: 'Enter', quiet: true, enabled: idle, run: () => { if (!pressCursor(STEPS)) ta?.focus(); } },
+    { id: 'chat-sub', title: 'Open the subagent beside the chat', icon: 'split', key: 'o', enabled: () => idle() && !!sid && subs.length > 0, run: openCursorSub },
+    { id: 'chat-rename', title: 'Rename', icon: 'rename', key: 'r', enabled: () => !!sid && idle(), run: startRename },
+    { id: 'chat-archive', title: 'Archive', icon: 'archive', key: 'x', enabled: () => !!sid && idle(), run: () => void archiveNow() },
+    { id: 'chat-compose', title: 'Write a message', icon: 'chat', key: 'i', enabled: () => !ro && idle(), run: () => ta?.focus() },
+  ]);
+
   function caretLine(where: 'first' | 'last') {
     if (!ta) return true;
     const v = ta.value;
@@ -1114,13 +1145,11 @@
       e.preventDefault();
       if (busy && !ro) abort();
       else if (input.startsWith('/')) input = '';
+      else if (!input) ta?.blur(); // nothing to stop or clear: leave the box, so the single keys are shortcuts
       return;
     }
-    if (!inTa) {
-      // Typing anywhere in the chat goes to the composer.
-      if (!ro && ta && ((e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) || (e.key === 'Enter' && plain))) ta.focus();
-      return;
-    }
+    // Away from the box the keys are the panel's commands (below): j/k, Enter, o, r, x, i.
+    if (!inTa) return;
     // The / menu: ↑↓ move, Tab completes, Enter runs (or starts a command that takes text).
     if (menu.length && plain && hi < 0) {
       const sel = Math.min(menuSel, menu.length - 1);
@@ -1230,8 +1259,9 @@
     return () => obs.disconnect();
   });
 
+  // The box takes the keyboard when the chat opens, if the chat is the focused panel (beside another, the focus stays put).
   $effect(() => {
-    if (loaded && matchMedia('(pointer: fine)').matches) ta?.focus();
+    if (loaded && focused() === 'chat' && matchMedia('(pointer: fine)').matches) ta?.focus();
   });
 
   // A new chat's ideas: they load after the page and the box show; changing agent drops an answer in flight.
@@ -1274,9 +1304,16 @@
     chat.queue = queue;
     const focusBox = () => { if (!ro) ta?.focus(); };
     chat.focus = focusBox;
+    // The command list runs a plugin's slash command here as if typed (or only types it, to finish).
+    const run = (text: string, go: boolean) => {
+      if (ro) return;
+      if (go) { input = text; void submit(); } else void setInput(text);
+    };
+    chat.run = run;
     return () => {
       if (chat.queue === queue) chat.queue = null;
       if (chat.focus === focusBox) chat.focus = null;
+      if (chat.run === run) chat.run = null;
       alive = false;
       gen++;
       conn?.close();

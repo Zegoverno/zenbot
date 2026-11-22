@@ -258,6 +258,8 @@ export const chat = {
   queue: null as ((plugin: string, text: string) => boolean) | null,
   /** Puts the cursor in the open chat's box (after the owner pointed at something to comment on). */
   focus: null as (() => void) | null,
+  /** Runs (or, with `submit` false, only types) a slash command in the open chat: the command list's way to a plugin command. */
+  run: null as ((text: string, submit: boolean) => void) | null,
 };
 
 // ---- the side panel a plugin command fills ----

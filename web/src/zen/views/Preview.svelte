@@ -14,7 +14,10 @@
   // The frame loads `/preview/<port>/…` on zen's own address (web/server/preview.ts): zen's web
   // server forwards it to the dev server and adds public/zen-preview.js to its pages, so any app
   // can be pointed at, and it works wherever zen does (no other port to sign in to or be blocked).
+  // Keys (keys.svelte.ts, for the focused Preview panel): r reloads, s cycles the screen size, o
+  // opens it in a tab, l goes to the address box, p turns Point on.
   import { onMount } from 'svelte';
+  import { commands as registerCommands } from '../keys.svelte.ts';
   import { app, notice } from '../app.svelte.ts';
   import { files, upload } from '../api.ts';
   import { chat, contexts, dropContext, keepContext } from '../plugins.svelte.ts';
@@ -129,6 +132,16 @@
     chat.focus?.();
   }
 
+  const SIZE_ORDER = Object.keys(SIZES) as Size[];
+  let addr = $state<HTMLInputElement>();
+  registerCommands('preview', () => [
+    { id: 'preview-reload', title: 'Reload', icon: 'reload', key: 'r', ring: 0, enabled: () => !!target, run: reload },
+    { id: 'preview-size', title: 'Screen size', icon: 'size', key: 's', ring: 1, run: () => { size = SIZE_ORDER[(SIZE_ORDER.indexOf(size) + 1) % SIZE_ORDER.length]; notice(`Screen size: ${size}`, 2000); } },
+    { id: 'preview-tab', title: 'Open in a tab', icon: 'external', key: 'o', ring: 2, enabled: () => !!target, run: () => window.open(frameSrc, '_blank', 'noopener,noreferrer') },
+    { id: 'preview-address', title: 'Change address', icon: 'search', key: 'l', ring: 3, run: () => { addr?.focus(); addr?.select(); } },
+    { id: 'preview-point', title: point ? 'Stop pointing' : 'Point at an element', icon: 'hand', key: 'p', enabled: () => linked, run: togglePoint },
+  ]);
+
   onMount(() => {
     const onMessage = (e: MessageEvent) => {
       // Only the framed app, at the address shown, is heard.
@@ -150,7 +163,7 @@
 
 <div class="pv">
   <form class="pv-bar" onsubmit={(e) => { e.preventDefault(); go(); }}>
-    <input class="pv-addr" bind:value={address} placeholder="port, e.g. 5173" aria-label="preview address" spellcheck="false" />
+    <input class="pv-addr" bind:this={addr} onkeydown={(e) => { if (e.key === 'Escape') (e.currentTarget as HTMLInputElement).blur(); }} bind:value={address} placeholder="port, e.g. 5173" aria-label="preview address" spellcheck="false" />
     <button type="submit" class="dim">Go</button>
     <button type="button" class="dim" onclick={reload} disabled={!target} title="reload" aria-label="reload">↻</button>
     <select bind:value={size} aria-label="screen size">
