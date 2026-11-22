@@ -11,9 +11,9 @@
     ['Ctrl+Shift+\\', 'Close the side panel, or reopen it'], ['?', 'This list'], ['g, then h s f t r a m p', 'Go to Home, Sessions, Files, Tasks, Routines, Agents, Games, Preview'],
     ['1–9', 'Pick a tab'], ['Esc', 'Back one level'],
   ];
-  const keysOfCmd = (c: ReturnType<typeof active>[number]) => [keyOf(c), ...(c.alt ?? [])].filter(Boolean).map((k) => keyLabel(k)).join(' / ') || c.hint || '';
+  const keysOfCmd = (c: ReturnType<typeof active>[number]) => [c.hint, ...[keyOf(c), ...(c.alt ?? [])].filter(Boolean).map((k) => keyLabel(k))].filter(Boolean).join(' · ');
   const own = $derived(active().filter((c) => c.scope !== 'global'));
-  const global = $derived(active().filter((c) => c.scope === 'global'));
+  const global = $derived(active().filter((c) => c.scope === 'global' && !c.reserved));
 </script>
 
 {#if ui.help}

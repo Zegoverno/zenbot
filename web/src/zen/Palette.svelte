@@ -67,7 +67,7 @@
     for (const c of active()) {
       if (c.quiet) continue;
       const s = score(c.title, 2);
-      if (s !== null) out.push({ id: c.id, kind: 'command', title: c.title, sub: c.plugin ? `${plugins.list.find((p) => p.name === c.plugin)?.title ?? c.plugin}` : undefined, icon: c.icon, key: c.hint ?? keyLabel(keyOf(c)), badge: clashed(c) ? 'clash' : undefined, cmd: c, score: s + (c.scope === 'global' ? 0 : 1), run: c.run });
+      if (s !== null) out.push({ id: c.id, kind: 'command', title: c.title, sub: c.plugin ? `${plugins.list.find((p) => p.name === c.plugin)?.title ?? c.plugin}` : undefined, icon: c.icon, key: [c.hint, keyLabel(keyOf(c))].filter(Boolean).join(' · '), badge: clashed(c) ? 'clash' : undefined, cmd: c, score: s + (c.scope === 'global' ? 0 : 1), run: c.run });
     }
     for (const c of slash) {
       const s = score(`/${c.name} ${c.description ?? ''}`, 0.5);
