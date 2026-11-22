@@ -1000,6 +1000,39 @@ try {
   await page.getByRole('listbox', { name: 'commands' }).filter({ hasText: 'change direction at the next tool boundary' }).waitFor();
   await box.fill('');
 
+  // Typing `/` lists every command in a bounded popup: its height is capped, it scrolls inside, the
+  // rows keep their size, and the arrows keep the highlighted row in view; on desktop and on a phone.
+  const shotDir = process.env.ZEN_SHOT_DIR ?? '/tmp/zen-shots';
+  if (shots) mkdirSync(shotDir, { recursive: true });
+  const slashMenu = page.getByRole('listbox', { name: 'commands' });
+  for (const [label, vp] of [['desktop', { width: 1280, height: 800 }], ['phone', { width: 390, height: 844 }]]) {
+    await page.setViewportSize(vp);
+    await box.fill('/');
+    await slashMenu.waitFor();
+    const count = await slashMenu.getByRole('button').count();
+    assert.ok(count >= 15, `/ lists every command (${count})`);
+    const m = await slashMenu.evaluate((el) => ({ h: el.clientHeight, sh: el.scrollHeight, rows: [...el.querySelectorAll('.item')].map((r) => r.getBoundingClientRect().height) }));
+    assert.ok(m.h <= vp.height * 0.5 + 1 && m.h <= 421, `${label}: the / menu is bounded (${m.h}px)`);
+    assert.ok(m.sh > m.h, `${label}: the / menu scrolls inside`);
+    assert.ok(Math.min(...m.rows) >= 28, `${label}: rows keep their height (${Math.min(...m.rows)}px)`);
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${label}: nothing overflows sideways`);
+    if (shots) await page.screenshot({ path: `${shotDir}/slash-menu-${label}.png` });
+    for (let i = 0; i < count + 3; i++) {
+      await box.press('ArrowDown');
+      const seen = await slashMenu.evaluate((el) => {
+        const on = el.querySelector('.item.on'), a = el.getBoundingClientRect(), b = on?.getBoundingClientRect();
+        return !!b && b.top >= a.top - 1 && b.bottom <= a.bottom + 1;
+      });
+      assert.ok(seen, `${label}: the highlighted command stays in view (after ${i + 1} ArrowDowns)`);
+    }
+    await box.press('ArrowUp');
+    assert.ok(await slashMenu.evaluate((el) => { const b = el.querySelector('.item.on').getBoundingClientRect(), a = el.getBoundingClientRect(); return b.top >= a.top - 1 && b.bottom <= a.bottom + 1; }), `${label}: ArrowUp keeps it in view`);
+    await box.fill('/ste');
+    assert.ok((await slashMenu.getByRole('button').count()) < count, `${label}: typing still filters`);
+    await box.fill('');
+  }
+  await page.setViewportSize({ width: 1300, height: 850 });
+
   // During a turn: Enter queues, /steer steers, Esc interrupts.
   await box.fill('Take your time');
   await box.press('Enter');

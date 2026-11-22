@@ -1120,6 +1120,7 @@
       else if (e.key === 'Enter') pick();
       else if (e.key === 'Escape') picker = null;
       else return;
+      if (e.key.startsWith('Arrow')) reveal();
       e.preventDefault();
       return;
     }
@@ -1158,6 +1159,7 @@
       if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
         e.preventDefault();
         menuSel = (sel + (e.key === 'ArrowUp' ? menu.length - 1 : 1)) % menu.length;
+        reveal();
         return;
       }
       if (e.key === 'Tab') {
@@ -1210,6 +1212,11 @@
         setInput(draft);
       } else setInput(hist[hi]);
     }
+  }
+
+  /** The arrows moved the highlight in the / menu or a picker: scroll it into view (the list is bounded). */
+  function reveal() {
+    void tick().then(() => root?.querySelector('.compose .pop .item.on')?.scrollIntoView({ block: 'nearest' }));
   }
 
   function runMenu(i: number) {
@@ -1826,8 +1833,11 @@
   .bars i:nth-child(1) { height: 5px; } .bars i:nth-child(2) { height: 8px; } .bars i:nth-child(3) { height: 11px; }
   .bars i.on { background: var(--accent); }
   /* the / menu and the command pickers, over the message box */
-  .menu.pop { left: 0; right: 0; bottom: calc(100% + 6px); max-height: 40vh; overflow: auto; }
-  .pop .item { padding: 6px 10px; border-radius: 8px; white-space: pre; overflow: hidden; text-overflow: ellipsis; font-size: 13px; max-width: 100%; }
+  /* Bounded: about 8 two-line rows, then it scrolls inside (the rows keep their height, they never squeeze). */
+  .menu.pop { left: 0; right: 0; bottom: calc(100% + 6px); max-height: min(48vh, 420px); overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; }
+  .pop .mg { flex: none; }
+  .pop .item span { overflow-wrap: anywhere; }
+  .pop .item { flex: none; padding: 6px 10px; border-radius: 8px; white-space: pre; overflow: hidden; text-overflow: ellipsis; font-size: 13px; max-width: 100%; }
   .pop .item.cmd { white-space: normal; }
   .pop .item.on { background: var(--soft); }
   .pop .item b { font-family: var(--mono); font-weight: 550; font-size: 12.5px; }
