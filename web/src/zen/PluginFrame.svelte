@@ -12,13 +12,20 @@
   // - `sendMessage` queues a visible, attributed draft; only the owner can send it;
   // - `updateModelContext` is kept for the open session, shown as a chip above the chat box, and
   //   goes with its next prompt; its images are saved to ~/inbox and named by path.
+  // Keys (PLUGINS.md, "Keys and commands"): the iframe swallows the keys pressed in it, so the app
+  // sends `zen/commands` (its command list, registered for this pane in keys.svelte.ts: ring, Ctrl+K,
+  // `?`) and `zen/key` (a key it didn't use, dispatched as if pressed in this pane, and only while
+  // this pane is the focused one); the host sends `zen/command {id}` when one runs and
+  // `zen/focus {focused}` when the pane gains or loses the keyboard (it then focuses the iframe).
+  // All of it is checked in frame.ts and shown as text only.
   import { onMount } from 'svelte';
   import { AppBridge, PostMessageTransport, type McpUiHostContext } from '@modelcontextprotocol/ext-apps/app-bridge';
   import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
   import { pluginApi, type ToolResult } from './api.ts';
   import { app, openFile, closeFile, setView, openSession, notice, type Pane } from './app.svelte.ts';
   import { chat, contextImages, keepContextSaving, resultText } from './plugins.svelte.ts';
-  import { SANDBOX, webLink, withCsp, zenNavigation } from './frame.ts';
+  import { SANDBOX, validCommands, validKeyEvent, webLink, withCsp, zenNavigation } from './frame.ts';
+  import { dispatch, focused, focusPane, register, ui as keys, unregister, type PanelKind } from './keys.svelte.ts';
 
   let {
     plugin,
@@ -30,6 +37,7 @@
     title = plugin,
     input,
     result,
+    scope,
   }: {
     plugin: string;
     ui: string;
@@ -42,7 +50,10 @@
     /** A command's arguments and result, sent to the app once it is ready. */
     input?: Record<string, unknown>;
     result?: ToolResult;
+    /** The panel it sits in, whose commands it adds to (default: by slot). */
+    scope?: PanelKind;
   } = $props();
+  const where = $derived<PanelKind>(scope ?? (slot === 'game' ? 'games' : slot === 'opener' ? (mode === 'edit' ? 'files-writer' : 'files-reader') : 'plugin'));
 
   let frame: HTMLIFrameElement | undefined = $state();
   let error = $state('');
@@ -51,6 +62,9 @@
   let dark = $state(darkQuery.matches);
   let dimensions = $state({ width: 0, height: 0 });
   let phone = $state(false);
+  let ready = $state(false);
+  /** Registry handle for this frame's commands. */
+  let cmds = 0;
 
   /** The host's colours and fonts, under MCP Apps' variable names. */
   function styles() {
@@ -94,6 +108,41 @@
 
   const session = () => (app.session && app.session !== 'new' ? app.session : null);
 
+  /** `zen/commands`: replaces this frame's list in the registry; running one tells the app. */
+  function setCommands(params: unknown) {
+    const list = validCommands(params).map((c, i) => ({
+      id: `plugin:${plugin}/${c.id}`,
+      title: c.title,
+      icon: c.icon ?? 'plugin',
+      key: c.key,
+      ring: c.ring ? 100 + i : undefined,
+      plugin,
+      run: () => void bridge?.notification({ method: 'zen/command', params: { id: c.id } } as never).catch(() => {}),
+    }));
+    cmds = register(where, list, cmds || undefined);
+  }
+
+  /** `zen/key`: a key the app didn't use goes through the window's handler, as if pressed in this pane. */
+  function forwardKey(params: unknown) {
+    const k = validKeyEvent(params);
+    if (!k) return;
+    // A click inside the frame never reaches the page: the frame having the keyboard is what focuses its pane.
+    const i = keys.panes.indexOf(where);
+    if (document.activeElement === frame && i >= 0) focusPane(i);
+    else if (focused() !== where) return;
+    dispatch(k);
+  }
+
+  // The pane gained or lost the keyboard: tell the app, and put the keyboard in the frame.
+  let wasFocused: boolean | null = null;
+  $effect(() => {
+    const on = focused() === where;
+    if (!ready || on === wasFocused) return;
+    wasFocused = on;
+    void bridge?.notification({ method: 'zen/focus', params: { focused: on } } as never).catch(() => {});
+    if (on) frame?.focus();
+  });
+
   onMount(() => {
     let gone = false;
     const theme = () => {
@@ -110,6 +159,9 @@
     const sizes = new ResizeObserver(resize);
     if (frame) sizes.observe(frame);
     window.addEventListener('resize', resize);
+    // Focus moving into the frame (a click in it) makes this pane the focused one.
+    const focusIn = () => setTimeout(() => { const i = keys.panes.indexOf(where); if (document.activeElement === frame && i >= 0) focusPane(i); }, 0);
+    window.addEventListener('blur', focusIn);
     theme(); resize();
     darkQuery.addEventListener('change', theme);
     (async () => {
@@ -178,7 +230,12 @@
           return {};
         };
         b.onloggingmessage = (m) => console.debug(`[${plugin}]`, m.level, m.data);
+        b.fallbackNotificationHandler = async (n) => {
+          if (n.method === 'zen/commands') setCommands(n.params);
+          else if (n.method === 'zen/key') forwardKey(n.params);
+        };
         b.oninitialized = () => {
+          ready = true;
           // Plain copies: postMessage can't clone the page's reactive state.
           if (input) void b.sendToolInput({ arguments: $state.snapshot(input) });
           if (result) void b.sendToolResult($state.snapshot(result) as CallToolResult);
@@ -193,8 +250,10 @@
     })();
     return () => {
       gone = true;
+      if (cmds) unregister(cmds);
       darkQuery.removeEventListener('change', theme);
       window.removeEventListener('resize', resize);
+      window.removeEventListener('blur', focusIn);
       observer.disconnect();
       sizes.disconnect();
       void bridge?.close();

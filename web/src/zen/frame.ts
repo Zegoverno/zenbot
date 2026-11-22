@@ -4,6 +4,8 @@
 // `_meta.ui.csp` (MCP Apps): no network unless it declares the domains, inline code only.
 
 import type { Csp } from './api.ts';
+import { hasIcon } from './icons.ts';
+import { validKey } from './keys.ts';
 
 /** The iframe's sandbox: scripts and forms, never same-origin, popups, or top navigation. */
 export const SANDBOX = 'allow-scripts allow-forms';
@@ -71,3 +73,42 @@ export function zenOpen(url: string): string | null {
 
 /** Whether a link may open in a new tab: http(s) only. */
 export const webLink = (url: string) => /^https?:\/\//i.test(url);
+
+// ---- keys and commands (PLUGINS.md, "Keys and commands") ----
+// What a plugin UI sends over `zen/commands` and `zen/key` is untrusted: checked strictly here, and
+// the page only ever renders it as text. A command that fails any check is dropped.
+
+export type PluginCommand = { id: string; title: string; key?: string; ring: boolean; icon?: string };
+export const MAX_COMMANDS = 30;
+const COMMAND_ID = /^[a-z0-9-]{1,32}$/;
+const plain = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+const printable = (s: string) => !/[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(s);
+
+/** The valid commands of a `zen/commands` message, in order, at most 30; an unknown icon falls back to the plugin's. */
+export function validCommands(params: unknown): PluginCommand[] {
+  const list = plain(params) && Array.isArray(params.commands) ? params.commands.slice(0, MAX_COMMANDS) : [];
+  const seen = new Set<string>();
+  const out: PluginCommand[] = [];
+  for (const c of list) {
+    if (!plain(c) || typeof c.id !== 'string' || !COMMAND_ID.test(c.id) || seen.has(c.id)) continue;
+    if (typeof c.title !== 'string' || !printable(c.title) || !c.title.trim() || [...c.title].length > 60) continue;
+    if (c.key !== undefined && !validKey(c.key)) continue;
+    if (c.ring !== undefined && typeof c.ring !== 'boolean') continue;
+    if (c.icon !== undefined && typeof c.icon !== 'string') continue;
+    seen.add(c.id);
+    out.push({ id: c.id, title: c.title.trim(), ...(c.key !== undefined ? { key: c.key } : {}), ring: c.ring === true, ...(hasIcon(c.icon) ? { icon: c.icon } : {}) });
+  }
+  return out;
+}
+
+export type ForwardedKey = { key: string; code: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean; typing: boolean };
+
+/** A `zen/key` message's fields, or null when any is missing or the wrong type. */
+export function validKeyEvent(params: unknown): ForwardedKey | null {
+  if (!plain(params)) return null;
+  const { key, code, ctrl, meta, alt, shift, typing } = params;
+  if (typeof key !== 'string' || !key || key.length > 20 || !printable(key)) return null;
+  if (code !== undefined && (typeof code !== 'string' || code.length > 24 || !printable(code))) return null;
+  for (const f of [ctrl, meta, alt, shift, typing]) if (f !== undefined && typeof f !== 'boolean') return null;
+  return { key, code: (code as string | undefined) ?? '', ctrlKey: ctrl === true, metaKey: meta === true, altKey: alt === true, shiftKey: shift === true, typing: typing === true };
+}

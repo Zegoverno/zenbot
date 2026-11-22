@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cspFor, withCsp, zenNavigation, zenOpen, webLink, SANDBOX } from './frame.ts';
+import { cspFor, withCsp, zenNavigation, zenOpen, webLink, SANDBOX, validCommands, validKeyEvent, MAX_COMMANDS } from './frame.ts';
 
 describe('plugin frame', () => {
   it('never gives a plugin UI the page origin', () => {
@@ -62,5 +62,56 @@ describe('pane navigation', () => {
     for (const u of ['zen://close?path=a', 'zen://close#x', 'zen://user@close', 'zen://open?path=a&mode=write',
       'zen://open?path=a&mode=read&mode=edit', 'zen://open?path=a&path=b', 'zen://open?path=a&unknown=x',
       'zen://open?path=%2E%2E/token', 'zen://open?path=a%5Cb', 'zen://close/other']) expect(zenNavigation(u)).toBeNull();
+  });
+});
+
+describe('plugin commands (zen/commands)', () => {
+  const ok = { id: 'new-game', title: 'New game', key: 'n', ring: true, icon: 'plus' };
+
+  it('keeps a valid command, in order, as plain data', () => {
+    expect(validCommands({ commands: [ok, { id: 'undo', title: 'Undo', key: 'Mod+z' }] })).toEqual([
+      { id: 'new-game', title: 'New game', key: 'n', ring: true, icon: 'plus' },
+      { id: 'undo', title: 'Undo', key: 'Mod+z', ring: false },
+    ]);
+  });
+  it('drops what is not a list of commands', () => {
+    for (const p of [null, undefined, 'x', 5, [], {}, { commands: 'x' }, { commands: { id: 'a' } }]) expect(validCommands(p)).toEqual([]);
+  });
+  it('drops a command with a bad id, title, key, ring or icon type', () => {
+    const bad = [
+      { ...ok, id: 'New' }, { ...ok, id: '' }, { ...ok, id: 'a'.repeat(33) }, { ...ok, id: 'a b' }, { ...ok, id: 5 },
+      { ...ok, title: '' }, { ...ok, title: '   ' }, { ...ok, title: 'x'.repeat(61) }, { ...ok, title: 5 }, { ...ok, title: 'a\nb' },
+      { ...ok, key: 'N' }, { ...ok, key: 'Ctrl+n' }, { ...ok, key: 5 }, { ...ok, ring: 'yes' }, { ...ok, icon: 5 }, null, 'x', [],
+    ];
+    for (const c of bad) expect(validCommands({ commands: [c] }), JSON.stringify(c)).toEqual([]);
+  });
+  it('takes a 60 character title and a 32 character id', () => {
+    expect(validCommands({ commands: [{ id: 'a'.repeat(32), title: 'x'.repeat(60) }] })).toHaveLength(1);
+  });
+  it('falls back to the plugin\'s icon for an unknown icon name', () => {
+    expect(validCommands({ commands: [{ ...ok, icon: 'rocket' }] })[0].icon).toBeUndefined();
+    expect(validCommands({ commands: [{ ...ok, icon: '<svg onload=x>' }] })[0].icon).toBeUndefined();
+  });
+  it('keeps at most 30, and each id once', () => {
+    const many = Array.from({ length: 40 }, (_, i) => ({ id: `c${i}`, title: `C${i}` }));
+    expect(validCommands({ commands: many })).toHaveLength(MAX_COMMANDS);
+    expect(validCommands({ commands: [ok, ok] })).toHaveLength(1);
+  });
+  it('keeps markup as text: the title is returned as it came, never parsed', () => {
+    expect(validCommands({ commands: [{ id: 'x', title: '<img src=x onerror=alert(1)>' }] })[0].title).toBe('<img src=x onerror=alert(1)>');
+  });
+});
+
+describe('plugin keys (zen/key)', () => {
+  it('reads the KeyboardEvent fields', () => {
+    expect(validKeyEvent({ key: 'k', code: 'KeyK', ctrl: true, meta: false, alt: false, shift: false, typing: true })).toEqual({
+      key: 'k', code: 'KeyK', ctrlKey: true, metaKey: false, altKey: false, shiftKey: false, typing: true,
+    });
+    expect(validKeyEvent({ key: 'j' })).toEqual({ key: 'j', code: '', ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, typing: false });
+  });
+  it('refuses a missing key, a wrong type, or an absurd length', () => {
+    for (const p of [null, 'k', 5, {}, { key: '' }, { key: 5 }, { key: 'x'.repeat(21) }, { key: 'k', ctrl: 'yes' }, { key: 'k', typing: 1 }, { key: 'k', code: 5 }, { key: 'k\n' }]) {
+      expect(validKeyEvent(p), JSON.stringify(p)).toBeNull();
+    }
   });
 });
