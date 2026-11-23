@@ -92,18 +92,28 @@ pub async fn fetch_github(repo: &Path, remote: &str, branch: &str) -> bool {
     matches!(tokio::time::timeout(Duration::from_secs(60), status).await, Ok(Ok(s)) if s.success())
 }
 
-/// Commit everything in `dir` as zenbot, making the folder a git repository first if it isn't one
-/// (the wiki, the skills and the agent's tools are each a repository of their own). Nothing to
-/// commit is not an error; failures are ignored (the files are written either way).
+/// Commit everything in `dir` as zenbot (the wiki, the skills and the agent's tools). A folder
+/// that is a repository's root is committed there. A folder inside another repository (the skills
+/// inside the vault) is committed in that one, never made a nested repository of its own, and
+/// only the paths under it are committed, so the enclosing repository's other changes, staged or
+/// not, stay out of the commit. Anywhere else it is made a repository first. Nothing to commit is
+/// not an error; failures are ignored (the files are written either way).
 pub async fn commit_all(dir: &Path, message: &str) {
     if std::fs::create_dir_all(dir).is_err() {
         return;
     }
-    if !dir.join(".git").exists() {
+    let commit = ["-c", "user.name=zenbot", "-c", "user.email=zenbot@localhost", "commit", "-q", "-m", message];
+    if dir.join(".git").exists() {
+        run(dir, &["add", "-A"]).await;
+        run(dir, &commit).await;
+    } else if git(dir, &["rev-parse", "--show-toplevel"]).await.is_some() {
+        run(dir, &["add", "-A", "--", "."]).await;
+        run(dir, &[commit.as_slice(), &["--", "."]].concat()).await;
+    } else {
         run(dir, &["init", "-q"]).await;
+        run(dir, &["add", "-A"]).await;
+        run(dir, &commit).await;
     }
-    run(dir, &["add", "-A"]).await;
-    run(dir, &["-c", "user.name=zenbot", "-c", "user.email=zenbot@localhost", "commit", "-q", "-m", message]).await;
 }
 
 #[cfg(test)]
@@ -169,5 +179,29 @@ mod tests {
         commit_all(&sub, "nothing new").await;
         assert_eq!(git(&sub, &["rev-list", "--count", "HEAD"]).await.as_deref(), Some("1"), "nothing to commit is no commit");
         assert!(!run(&sub, &["no-such-command"]).await);
+    }
+
+    #[tokio::test]
+    async fn commit_all_in_a_parent_repository_commits_only_its_folder() {
+        let dir = crate::test_util::TestDir::new("git-nested");
+        std::fs::write(dir.join("root.md"), "v1").unwrap();
+        commit_all(&dir, "root").await;
+        let skills = dir.join("skills");
+        std::fs::create_dir_all(skills.join("work")).unwrap();
+        std::fs::write(skills.join("work/a.md"), "a").unwrap();
+        std::fs::write(dir.join("root.md"), "v2").unwrap(); // unrelated change in the parent
+        std::fs::write(dir.join("other.md"), "o").unwrap(); // unrelated, staged
+        assert!(run(&dir, &["add", "other.md"]).await);
+        commit_all(&skills, "skill saved").await;
+        assert!(!skills.join(".git").exists(), "no nested repository");
+        assert_eq!(git(&dir, &["log", "--format=%s"]).await.as_deref(), Some("skill saved\nroot"));
+        assert_eq!(git(&dir, &["show", "--name-only", "--format=", "HEAD"]).await.as_deref(), Some("skills/work/a.md"));
+        let status = git(&dir, &["status", "--porcelain"]).await.unwrap();
+        assert!(status.contains(" M root.md") && status.contains("A  other.md"), "{status}");
+        commit_all(&skills, "nothing new").await;
+        assert_eq!(git(&dir, &["rev-list", "--count", "HEAD"]).await.as_deref(), Some("2"));
+        std::fs::write(skills.join("work/a.md"), "b").unwrap();
+        commit_all(&skills, "edited").await;
+        assert_eq!(git(&dir, &["show", "--name-only", "--format=", "HEAD"]).await.as_deref(), Some("skills/work/a.md"));
     }
 }

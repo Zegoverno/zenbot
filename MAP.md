@@ -90,8 +90,9 @@ One list per session, in a fixed order (`agent.rs::specs`):
   records), `remember` (`memory.rs`), `brain` (`brain/`: record files).
 - Web (`web.rs`): `web_search` (SearXNG, or Brave/Tavily with a key), `web_fetch`.
 - Skills: `find_skills`, `load_skill` (`skills.rs`), `save_skill` (`workshop.rs`: live at once,
-  duplicates refused, each save a commit in the skills folder). Enabled installed plugin skills
-  join the catalog after agent/global skills, without overriding their domain/name (PLUGINS.md).
+  duplicates refused, each save a commit in the skills folder's repository, or in the enclosing
+  repository (the vault) when the folder sits inside one, touching only the skills). Enabled
+  installed plugin skills join the catalog after agent/global skills, without overriding their domain/name (PLUGINS.md).
 - MCP (`mcp.rs`): `find_tools`, `load_tool`, `call_tool` over the servers in `~/.zenbot/mcp.json`
   and the agent's own `agents/<name>/mcp.json`.
 - Work: `ask` (questions to the owner), `verify` (`agent.rs`: the kernel runs the checks, a fresh
