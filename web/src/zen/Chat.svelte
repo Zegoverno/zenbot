@@ -8,8 +8,8 @@
   // agent works one live line that opens into every step of the turn and its subagents (each with
   // its steps, and its session beside the chat). The message box: attachments (sent to ~/inbox at
   // once, named in the prompt), prompts waiting for the running turn as chips above the box (each
-  // with a Steer button that promotes it), the model and effort pickers, send or stop; `/` commands with their
-  // pickers. 'new' is a chat whose session starts with its first prompt: the greeting, who to talk
+  // with a Steer button that promotes it), unsent text kept per session (localStorage
+  // `zen.drafts`), the model and effort pickers, send or stop; `/` commands with their pickers. 'new' is a chat whose session starts with its first prompt: the greeting, who to talk
   // to, and three ideas that load without blocking; that prompt is handed to the chat re-created
   // with the session's id (Shell keys Chat on the session).
   // Plugins: a plugin's slash command calls its tool and shows its UI in the right panel (typed with
@@ -1340,8 +1340,18 @@
     void setInput(ins.text);
   });
 
+  // What the owner typed and didn't send stays with the session (switching tabs or sessions, a
+  // reload); a sign-in code (mcpFlow) and a recalled prompt (↑, hi >= 0) are never kept.
+  let draftReady = false;
+  $effect(() => {
+    const text = input;
+    if (draftReady && !mcpFlow && hi < 0) M.saveDraft(sid ?? 'new', text);
+  });
+
   onMount(() => {
-    if (id === 'new') { input = app.chatDraft; app.chatDraft = ''; }
+    if (id === 'new' && app.chatDraft) { input = app.chatDraft; app.chatDraft = ''; }
+    else input = M.loadDraft(sid ?? 'new');
+    draftReady = true;
     if (app.attachOnOpen) { app.attachOnOpen = false; setTimeout(() => filePick?.click(), 0); }
     if (sid) load();
     else loaded = true;

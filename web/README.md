@@ -15,8 +15,8 @@ The same screens as the terminal app, with its keys, and a mouse and a phone way
   Enter opens its `SOUL.md`, `IDENTITY.md` and `agent.toml` to edit, save (`ctrl+s`; a refused
   change shows the kernel's reason and writes nothing), delete (asked first; never zenbot) or
   start a session with; `+` makes one, `n` starts a session with the chosen one). `1 2 3 4` or Tab
-  switch views, `n` starts a session (or the `+ new session` button), `/` filters, `a` shows archived, `J`
-  shows archived jobs too (hidden by default; kept in this browser).
+  switch views, `n` starts a session (or the `+ new session` button), `/` filters, `u` shows archived (your
+  sessions), `Shift+U` or "Show job runs too" adds the job runs.
 - **Keyboard only.** Everything has a key. One panel is always focused (thin accent outline; a
   click, `Ctrl+\` or opening a view moves it; `Ctrl+Shift+\` closes the side panel or brings back
   the last one). `Ctrl+.` opens the ring bottom right: its button shows the focused panel's icon and
@@ -37,7 +37,8 @@ The same screens as the terminal app, with its keys, and a mouse and a phone way
   attach with 📎, a paste or a drop on the chat: each goes at once to `~/inbox/<YYYY-MM-DD>/`
   (up to 1 GiB, never overwriting: a clash gets `-2`), shows its progress, and the prompt names
   its path as `(attached ~/inbox/…)` so zenbot reads it with its own tools. Enter
-  sends (also during a turn: it queues, shown above the box with a Steer button), Esc interrupts,
+  sends (also during a turn: it queues, shown above the box with a Steer button); unsent text stays
+  with its session (in this browser), Esc interrupts,
   ↑↓ walk your prompts, `/` lists zen's
   commands (zenbot's own table; kernel commands run through the `zen` command line, so they answer
   as everywhere). `ctrl+b` opens the side panel with the same views, `shift+tab` gives it

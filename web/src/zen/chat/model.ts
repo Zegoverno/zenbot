@@ -139,6 +139,38 @@ export function saveHistory(text: string) {
   } catch {}
 }
 
+// ---- unsent text, per session ('new' for a chat not started), kept across tabs, sessions and reloads ----
+
+const DRAFTS = 'zen.drafts';
+/** The most drafts kept: the oldest go first. */
+const DRAFTS_MAX = 50;
+
+function drafts(): Record<string, string> {
+  try {
+    const d = JSON.parse(localStorage.getItem(DRAFTS) ?? '{}');
+    return d && typeof d === 'object' && !Array.isArray(d) ? d : {};
+  } catch {
+    return {};
+  }
+}
+/** The text the owner typed in session `key` and didn't send ('' when none). */
+export function loadDraft(key: string): string {
+  const t = drafts()[key];
+  return typeof t === 'string' ? t : '';
+}
+/** Keep (or, when blank, forget) session `key`'s unsent text; the latest kept moves last. */
+export function saveDraft(key: string, text: string) {
+  const d = drafts();
+  if (d[key] === text || (!text.trim() && !(key in d))) return;
+  delete d[key];
+  if (text.trim()) d[key] = text;
+  const keys = Object.keys(d);
+  for (const k of keys.slice(0, Math.max(0, keys.length - DRAFTS_MAX))) delete d[k];
+  try {
+    localStorage.setItem(DRAFTS, JSON.stringify(d));
+  } catch {}
+}
+
 // ---- the first prompt of a new chat, handed to the chat re-created with the session's id ----
 
 export interface Handoff {
