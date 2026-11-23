@@ -158,6 +158,9 @@ writes (`POST /api/fs/create`, `mkdir`, `rename`) take one plain name (no `/`, `
 (a taken name is a 409), a rename stays in its folder, and home, `~/.zenbot` and what is within two levels of
 it (`~/.zenbot/global`, `~/.zenbot/agents/zenbot`) can't be renamed. nginx in
 front must allow the size on that route (`client_max_body_size 1g`, request buffering off).
+A download (`GET /api/fs/download?path=`, the Download button or `d`) follows the same read rules (no
+secrets, regular files only) and is streamed as `application/octet-stream` with `attachment`,
+`nosniff` and a sandboxing CSP, so nothing downloaded is ever rendered by this origin.
 Any signed-in user can stop or restart the owner's own dev servers from Preview (processes of the
 server's user on ports 3000–9999); system services (cgroup `/system.slice/`), zen's own ports and
 the web server's own unit are never listed, and a port that isn't listed is a 404.

@@ -574,6 +574,18 @@ try {
   await page.locator('.row', { hasText: 'God.md' }).first().click();
   await page.getByText('Three persons.').first().waitFor();
   if (shots) await page.screenshot({ path: 'tests/shots/zen-files.png' });
+  // Download: the open file comes as an attachment with its name; never a secret or a folder.
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('link', { name: 'Download' }).click()]);
+  assert.equal(dl.suggestedFilename(), 'God.md');
+  assert.equal(readFileSync(await dl.path(), 'utf8'), readFileSync(path.join(VAULT, 'wiki', 'God.md'), 'utf8'), 'the download is the file');
+  const dlRes = await fetch(`${base}/api/fs/download?path=${encodeURIComponent(path.join(VAULT, 'wiki', 'God.md'))}`);
+  assert.equal(dlRes.headers.get('content-type'), 'application/octet-stream');
+  assert.match(dlRes.headers.get('content-disposition'), /^attachment; filename="God\.md"/);
+  assert.equal(dlRes.headers.get('x-content-type-options'), 'nosniff');
+  writeFileSync(path.join(HOME, '.env'), 'SECRET=1');
+  assert.equal((await fetch(`${base}/api/fs/download?path=${encodeURIComponent(path.join(HOME, '.env'))}`)).status, 403, 'secrets are never downloaded');
+  rmSync(path.join(HOME, '.env'));
+  assert.equal((await fetch(`${base}/api/fs/download?path=${encodeURIComponent(VAULT)}`)).status, 400, 'a folder is not a download');
   // New file, new folder and rename, from the folder's menu; the vault only, never over anything.
   await page.getByRole('button', { name: 'Back to the folder' }).click();
   const folderMenu = page.getByRole('button', { name: 'Folder actions' });

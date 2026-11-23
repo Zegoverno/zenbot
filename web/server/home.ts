@@ -241,6 +241,14 @@ export async function image(p: unknown): Promise<{ type: string; data: Buffer; m
   return { type, data: await fs.readFile(full), mtime: st.mtimeMs };
 }
 
+/** A regular file to download, under the same rules as read(): its real path, name and size. */
+export async function download(p: unknown): Promise<{ path: string; name: string; size: number }> {
+  const full = await resolve(p);
+  const st = await fs.stat(full);
+  if (!st.isFile()) throw new HttpError(400, 'not a file');
+  return { path: full, name: path.basename(full), size: st.size };
+}
+
 export async function stat(p: unknown) {
   const st = await fs.stat(await resolve(p));
   return { mtime: st.mtimeMs, size: st.size };
