@@ -44,6 +44,7 @@ export const ICONS: Record<string, string> = {
     more: '<circle cx="6" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="18" cy="12" r="1.2"/>',
     prev: '<path d="M15 5l-7 7 7 7"/>',
     next: '<path d="M9 5l7 7-7 7"/>',
+    download: '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
     save: '<path d="M5 4h11l3 3v13H5z"/><path d="M8 4v5h7V4M8 20v-6h8v6"/>',
     close: '<path d="M6 6l12 12M18 6L6 18"/>',
     filter: '<path d="M4 6h16M7 12h10M10 18h4"/>',

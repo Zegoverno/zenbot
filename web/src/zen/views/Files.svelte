@@ -298,6 +298,9 @@
     return () => { filesPanel.kind = 'files-tree'; };
   });
   const free = () => !askFor && !pendingLeave;
+  // Download: the server sends the file as an attachment, so the page stays where it is.
+  const downloadUrl = (p: string) => `/api/fs/download?path=${encodeURIComponent(p)}`;
+  function download(p: string) { const a = document.createElement('a'); a.href = downloadUrl(p); a.download = nameOf(p); document.body.append(a); a.click(); a.remove(); }
   registerCommands('files-tree', () => [
     { id: 'files-search', title: 'Search', icon: 'search', key: '/', ring: 0, run: () => searchEl?.focus() },
     { id: 'files-new-file', title: 'New file', icon: 'file-plus', key: 'n', ring: 1, enabled: () => inVault && free(), run: () => begin('file') },
@@ -305,6 +308,7 @@
     { id: 'files-rename', title: 'Rename', icon: 'rename', key: 'r', ring: 3, enabled: () => inVault && !!chosen && free(), run: () => begin('rename') },
     { id: 'files-vault', title: 'Back to vault', icon: 'vault', key: 'v', ring: 4, enabled: () => cwd !== VAULT, run: () => go(VAULT) },
     { id: 'files-inbox', title: 'Inbox', icon: 'inbox', key: 'i', ring: 5, enabled: () => !cwd.startsWith(INBOX), run: () => go(INBOX) },
+    { id: 'files-download', title: 'Download', icon: 'download', key: 'd', enabled: () => !!chosen && !chosen.kids && !chosen.dir, run: () => { if (chosen) download(join(cwd, chosen.name)); } },
     { id: 'files-filter', title: 'Filter by properties', icon: 'filter', key: 'f', enabled: () => inVault, run: () => (fltOpen = !fltOpen) },
     { id: 'files-dotfiles', title: showHidden ? 'Hide dotfiles' : 'Show dotfiles', icon: 'eye', key: '.', run: () => (showHidden = !showHidden) },
     { id: 'files-down', title: 'Next row', icon: 'down', key: 'j', alt: ['ArrowDown'], quiet: true, run: () => move(1) },
@@ -319,6 +323,7 @@
   // ones would show twice and take its keys, so only the folder and Esc stay zenbot's.
   registerCommands('files-reader', () => plugRead ? [
     { id: 'reader-folder', title: 'Show in folder', icon: 'files', ring: 5, run: up },
+    { id: 'reader-download', title: 'Download', icon: 'download', key: 'Shift+d', enabled: () => !!file, run: () => file && download(file) },
     { id: 'reader-back', title: 'Back to the folder', icon: 'prev', key: 'Escape', quiet: true, enabled: () => !pendingLeave, run: up },
   ] : [
     { id: 'reader-edit', title: 'Edit', icon: 'write', key: 'e', ring: 0, enabled: () => isNote && !!vaultRel && !editing, run: edit },
@@ -327,6 +332,7 @@
     { id: 'reader-next', title: 'Next', icon: 'next', key: 'ArrowRight', ring: 3, enabled: () => siblings.length > 1, run: () => step(1) },
     { id: 'reader-full', title: 'Open full size', icon: 'external', key: 'o', ring: 4, enabled: () => !!imageSrc, run: () => { if (imageSrc) window.open(imageSrc, '_blank', 'noopener'); } },
     { id: 'reader-folder', title: 'Show in folder', icon: 'files', ring: 5, run: up },
+    { id: 'reader-download', title: 'Download', icon: 'download', key: 'd', enabled: () => !!file, run: () => file && download(file) },
     { id: 'reader-down', title: 'Scroll down', icon: 'down', key: 'j', alt: ['ArrowDown'], quiet: true, run: () => scrollNote(1) },
     { id: 'reader-up', title: 'Scroll up', icon: 'up', key: 'k', alt: ['ArrowUp'], quiet: true, run: () => scrollNote(-1) },
     { id: 'reader-back', title: 'Back to the folder', icon: 'prev', key: 'Escape', quiet: true, enabled: () => !pendingLeave, run: () => { if (sibOpen) sibOpen = false; else up(); } },
@@ -545,6 +551,7 @@
         <button class="rb" onclick={cancelEdit}>Cancel</button>
         <button class="rb pri" disabled={saving} onclick={() => void save()}>Save</button>
       {:else}
+        {#if file}<a class="rb" href={downloadUrl(file)} download={fileName} title="Download (D)">Download</a>{/if}
         {#if isNote && vaultRel}<button class="rb" onclick={edit} title="Edit the text (E)">Edit</button>{/if}
         {#if ask}<button class="rb pri" onclick={() => ask?.(shortPath(file!))} title="Ask zenbot about this note">Ask zenbot</button>{/if}
       {/if}

@@ -14,7 +14,7 @@
 // - Every write needs the `X-Zen-Web: 1` header, which a page on another site can't send without
 //   a CORS preflight this server never grants: no cross-site writes.
 // - Paths stay inside the root: relative, Markdown only, no dot folders, no symlinks out.
-// - Files (`/api/fs`) reads from `/` down but never secrets (zen's token, env, matrix and
+// - Files (`/api/fs`, downloads included) reads from `/` down but never secrets (zen's token, env, matrix and
 //   database, sign-ins, keys, `/proc`, `/etc/shadow`, other homes: `home.ts`), and writes only
 //   inside the vault.
 // - Preview's server list (`servers.ts`) lets any signed-in user stop or restart the owner's own dev
@@ -27,7 +27,7 @@
 // `ZEN_WEB_DEV_HOSTS`, comma-separated, are the host names Vite accepts besides localhost).
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { promises as fs } from 'node:fs';
+import { createReadStream, promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { hash, HttpError, locked, readText, resolvePath as inRoot, writeAtomic } from './files.ts';
@@ -88,6 +88,20 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
       const im = await home.image(q('path'));
       res.writeHead(200, { 'content-type': im.type, 'content-length': im.data.length, 'cache-control': 'private, no-cache', 'content-security-policy': "default-src 'none'; sandbox" });
       return void res.end(im.data);
+    }
+    case 'GET /api/fs/download': {
+      // Any readable file, as an attachment: never rendered here (octet-stream, nosniff, sandboxed),
+      // streamed so big files don't sit in memory. The name goes as RFC 5987 UTF-8 plus an ASCII fallback.
+      const f = await home.download(q('path'));
+      const ascii = f.name.replace(/[^\x20-\x7e]|["\\]/g, '_');
+      res.writeHead(200, {
+        'content-type': 'application/octet-stream', 'content-length': f.size, 'cache-control': 'private, no-store',
+        'content-disposition': `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(f.name)}`,
+        'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; sandbox",
+      });
+      const s = createReadStream(f.path);
+      s.on('error', () => res.destroy());
+      return void s.pipe(res);
     }
     case 'GET /api/fs/stat':
       return send(res, 200, await home.stat(q('path')));
