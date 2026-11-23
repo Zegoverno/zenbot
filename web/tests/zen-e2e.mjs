@@ -54,6 +54,10 @@ const session = (id, title, extra = {}) => ({ id, title, model: 'faux/smoke', ef
 const prompts = [];
 /** What else the page sent on the socket: steers, aborts; and tasks handed to an agent. */
 const steers = [];
+/** The queue the stand-in kernel keeps while a turn runs (the kernel's `queue` events), and the steer commands it got. */
+let queue = [];
+let queueId = 0;
+const promoted = [];
 /** What the page changed on sessions (title, archived). */
 const patched = [];
 const aborts = [];
@@ -330,8 +334,16 @@ kernel.on('upgrade', (req, socket) => {
     const mask = buf.subarray(at, at + 4);
     const body = Buffer.from(buf.subarray(at + 4, at + 4 + len).map((b, i) => b ^ mask[i % 4])).toString();
     const m = JSON.parse(body);
+    if (m.type === 'steer') {
+      promoted.push(m);
+      const q = queue.find((i) => i.id === m.id);
+      if (q) q.steer = true;
+      queue.sort((a, b) => Number(b.steer) - Number(a.steer) || a.id - b.id);
+      return send({ type: 'queue', items: queue });
+    }
     if (m.type === 'abort') {
       aborts.push(1);
+      if (queue.length) send({ type: 'queue', items: (queue = []) });
       if (long) {
         clearTimeout(long);
         long = null;
@@ -341,9 +353,17 @@ kernel.on('upgrade', (req, socket) => {
       return;
     }
     if (m.type !== 'prompt') return;
-    if (m.mode === 'steer') return void steers.push(m.text);
+    if (m.mode === 'steer') {
+      steers.push(m.text);
+      queue.push({ id: ++queueId, text: m.text, steer: true });
+      queue.sort((a, b) => Number(b.steer) - Number(a.steer) || a.id - b.id);
+      return send({ type: 'queue', items: queue });
+    }
     prompts.push(m.text);
-    if (long) return; // queued: the kernel runs it after this turn
+    if (long) { // queued: the kernel runs it after this turn
+      queue.push({ id: ++queueId, text: m.text, steer: false });
+      return send({ type: 'queue', items: queue });
+    }
     if (m.text === 'Take your time') {
       send({ type: 'message', message: { role: 'user', content: m.text } });
       send({ type: 'busy', busy: true, model: 'faux/smoke' });
@@ -1121,13 +1141,40 @@ try {
   await box.press('Enter');
   await page.getByText(/queued: zenbot reads it when this turn ends/).waitFor();
   await until(() => prompts.at(-1) === 'And then this', 'the queued prompt reaches the kernel');
+  // The queued prompt shows above the composer; its Steer button (on hover) promotes it.
+  const qchip = page.locator('.queue .qi', { hasText: 'And then this' });
+  await qchip.waitFor();
+  assert.equal((await qchip.locator('.qk').textContent()).trim(), 'queued', 'the chip says queued');
   await box.fill('/steer Shorter, please');
   await box.press('Enter');
   await page.getByText(/steering: zenbot reads it at the next tool boundary/).waitFor();
   await until(() => steers.length === 1, 'the steer reaches the kernel');
   assert.deepEqual(steers, ['Shorter, please']);
+  await page.locator('.queue .qi.steering', { hasText: 'Shorter, please' }).waitFor();
+  if (shots) {
+    for (const [label, vp] of [['desktop', { width: 1300, height: 850 }], ['phone', { width: 390, height: 780 }]]) {
+      await page.setViewportSize(vp);
+      await page.locator('.queue').waitFor();
+      await page.screenshot({ path: `${shotDir}/queued-steer-${label}.png` });
+    }
+    await page.setViewportSize({ width: 1300, height: 850 });
+    await qchip.hover();
+    await page.screenshot({ path: `${shotDir}/queued-steer-hover.png`, clip: { x: 0, y: 560, width: 560, height: 290 } });
+  }
+  await qchip.hover();
+  const steerBtn = qchip.getByRole('button', { name: /^Steer/ });
+  await steerBtn.waitFor();
+  assert.match(await steerBtn.getAttribute('title'), /next tool boundary/);
+  await steerBtn.click();
+  await page.mouse.move(0, 0); // don't leave the pointer where the / menu opens later
+  await until(() => promoted.length === 1, 'the Steer button reaches the kernel');
+  assert.deepEqual(promoted[0], { type: 'steer', id: 1 });
+  await page.locator('.queue .qi.steering', { hasText: 'And then this' }).waitFor();
+  assert.equal((await qchip.locator('.qk').textContent()).trim(), 'steering', 'the chip now says steering');
+  assert.equal(await qchip.getByRole('button', { name: /^Steer/ }).count(), 0, 'a steering chip has no Steer button');
   await box.press('Escape');
   await page.getByText('interrupted', { exact: true }).waitFor();
+  await page.locator('.queue').waitFor({ state: 'detached' });
   await until(() => aborts.length >= 1, 'Esc sends an abort');
   assert.equal(aborts.length, 1, 'Esc sends one abort');
 

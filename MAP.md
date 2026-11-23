@@ -50,7 +50,8 @@ the `zen/commands` and `zen/key` notifications (PLUGINS.md, "Keys and commands")
 
 1. A client sends a prompt on the session's WebSocket. One that arrives during a turn queues
    (`pending_prompts`); a `steer` prompt stops the turn at the next tool boundary and runs as a
-   correction (`turns.rs`).
+   correction (`turns.rs`). Every change of the queue is sent as a `queue` event
+   (`{"items":[{id,text,steer}]}`, in start order); `{"type":"steer","id"}` promotes a queued prompt.
 2. The prompt goes on the **tape** (`tape.rs`): each session's append-only chain of numbered,
    hash-linked blocks, mirrored to `~/.zenbot/sessions/<id>.jsonl`. The tape is the source of truth;
    engine sessions are a disposable cache.
@@ -235,10 +236,10 @@ busy turns, commit) needs no token; the rest are under `/api` (`main.rs`):
 
 | Route | What |
 |---|---|
-| `GET/POST /sessions`, `GET/PATCH /sessions/{id}`, `GET /board` | sessions (`agent` picks who a new one is), their messages, the board; `PATCH` with `archived: true` takes the owner's `outcome` (`done`, `partial`, `not-done`), a `rating` (whole number 1–10, else 400) and a `note` (all optional), and returns `continued_by` (the new session) after `partial`; `GET /sessions/{id}` includes the open `suggestion` |
+| `GET/POST /sessions`, `GET/PATCH /sessions/{id}`, `GET /board` | sessions (`agent` picks who a new one is), their messages, the board; `PATCH` with `archived: true` takes the owner's `outcome` (`done`, `partial`, `not-done`), a `rating` (whole number 1–10, else 400) and a `note` (all optional), and returns `continued_by` (the new session) after `partial`; `GET /sessions/{id}` includes the open `suggestion` and the `queued` prompts |
 | `GET/POST /agents` | the agents and what each may use; make one (`name`, `description`) |
 | `GET/PUT/DELETE /agents/{name}` | an agent's files (`soul`, `identity`, `settings` as text) and session count; replace any of them (settings checked first, old files backed up); remove one (not zenbot; its folder moves to `backups/agents/`) |
-| `GET /sessions/{id}/ws` | the session's events; send `{"type":"prompt","text":…,"mode":"steer"?}` or `{"type":"abort"}` |
+| `GET /sessions/{id}/ws` | the session's events; send `{"type":"prompt","text":…,"mode":"steer"?}`, `{"type":"steer","id":…}` (promote a queued prompt from a `queue` event) or `{"type":"abort"}` |
 | `GET /models`, `GET /version`, `GET/POST /upgrade` | models (`default` is the owner's preferred model, else `ZEN_DEFAULT_MODEL`), update check, self-upgrade |
 | `GET/PATCH /prefs` | the owner's preferences (`prefs.rs`): `name`, `home_layout`, `default_model`, `default_effort`; `PATCH` merges, `null` deletes; new sessions without a model use the preferred model and effort over `ZEN_DEFAULT_MODEL`, no restart |
 | `POST /complete` | one completion without tools (`model`, `system`, `prompt`, `purpose`), for the owner's apps on this machine (including optional writing apps); logged, not on a tape |

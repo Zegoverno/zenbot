@@ -76,11 +76,16 @@ export interface Message {
   usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; totalTokens?: number };
 }
 
+/** A prompt the owner sent during a turn, waiting its turn; `steer` ones go first and stop the turn at the next tool boundary. */
+export interface QueuedPrompt { id: number; text: string; steer: boolean }
+
 export interface SessionDetail extends Session {
   messages: Message[];
   message_count: number;
   tokens: number;
   busy: boolean;
+  /** The owner's prompts waiting for the running turn, in the order they start. */
+  queued?: QueuedPrompt[];
   /** The open suggested prompt (a partial session's handoff brief arrives before anyone watches). */
   suggestion?: { id: number; text: string } | null;
 }
@@ -146,6 +151,7 @@ export type ZenEvent =
   | { type: 'suggestion'; id: number; text: string }
   | { type: 'model'; model: string; effort: string | null }
   | { type: 'status'; text: string }
+  | { type: 'queue'; items: QueuedPrompt[] }
   | { type: 'questions'; questions: { question: string; options: string[] }[] }
   | { type: 'error'; error: string }
   | { type: 'resync'; skipped: number; busy: boolean };

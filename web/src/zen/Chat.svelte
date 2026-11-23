@@ -7,7 +7,8 @@
   // one "N steps" line, questions as a card with their options (one click answers), and while the
   // agent works one live line that opens into every step of the turn and its subagents (each with
   // its steps, and its session beside the chat). The message box: attachments (sent to ~/inbox at
-  // once, named in the prompt), the model and effort pickers, send or stop; `/` commands with their
+  // once, named in the prompt), prompts waiting for the running turn as chips above the box (each
+  // with a Steer button that promotes it), the model and effort pickers, send or stop; `/` commands with their
   // pickers. 'new' is a chat whose session starts with its first prompt: the greeting, who to talk
   // to, and three ideas that load without blocking; that prompt is handed to the chat re-created
   // with the session's id (Shell keys Chat on the session).
@@ -17,7 +18,7 @@
   // owner-reviewed draft here (`chat.queue`), and what plugin UIs put in the model context shows
   // as a removable chip above the box and goes with the next prompt (plugins.svelte.ts).
   import { onMount, tick } from 'svelte';
-  import { zen, files, commands, upload, short, readOnly, AGENT_NAME, pluginApi, type Command, type Message, type Outcome, type SessionDetail, type ZenEvent } from './api.ts';
+  import { zen, files, commands, upload, short, readOnly, AGENT_NAME, pluginApi, type Command, type Message, type Outcome, type QueuedPrompt, type SessionDetail, type ZenEvent } from './api.ts';
   import { chat, contexts, contextSaving, dropContext, plugins, resultText, showPanel, takeContext, toolArgs, uiOf } from './plugins.svelte.ts';
   import { app, board as toBoard, openSession, sessionStarted, openFile, openDir, pickTab, openTab, settings, notice, typing, tilde, closeChat, goBack, openSub, showFile } from './app.svelte.ts';
   import { commands as registerCommands, cursorRow, focused, moveCursor, pressCursor } from './keys.svelte.ts';
@@ -78,6 +79,8 @@
   let aborting = false;
   let sessionTokens = $state(0);
   let suggestion = $state<{ id: number; text: string; taken: boolean } | null>(null);
+  /** The prompts sent during a turn that wait for their turn (kernel `queue` events, in the order they start). */
+  let queued = $state<QueuedPrompt[]>([]);
   let lastFile: string | null = null;
   let now = $state(Date.now());
   /** When each tool call of the turn started (ms into the turn), by call id. */
@@ -251,6 +254,7 @@
       const d = await zen.session(id, last);
       if (!alive) return;
       apply(d);
+      queued = d.queued ?? [];
       sessionTokens = d.tokens;
       entries = M.build(d.messages);
       held = d.messages.length;
@@ -329,6 +333,7 @@
     }
     if (!alive) return;
     apply(d);
+    queued = d.queued ?? [];
     if (missing > 0) {
       if (missing > d.messages.length) line(`${missing - d.messages.length} messages from meanwhile aren't shown; reload the page for them`, 'warn');
       take(d.messages.slice(-missing));
@@ -443,6 +448,9 @@
       case 'status':
         status = M.clean(e.text || 'Working');
         break;
+      case 'queue':
+        queued = e.items;
+        break;
       case 'child_end':
         sessionTokens += M.recordTotal(e.turn);
         break;
@@ -478,6 +486,11 @@
         line(M.clean(e.error), 'err');
         break;
     }
+  }
+
+  /** Promote a queued prompt to a steer: the kernel answers with the new queue. */
+  function steerQueued(q: QueuedPrompt) {
+    if (!conn?.send({ type: 'steer', id: q.id })) notice("couldn't send to zenbot; try again when it reconnects");
   }
 
   function end(error: string | null, turn: Parameters<typeof M.recordTotal>[0], next: boolean) {
@@ -1599,6 +1612,22 @@
           <button class="oc" onclick={() => (pluginDrafts = pluginDrafts.filter((x) => x !== d))}>Dismiss</button></div>
       </section>
     {/each}
+    {#if queued.length}
+      <ul class="queue" aria-label="Queued messages">
+        {#each queued as q (q.id)}
+          <li class="qi" class:steering={q.steer}>
+            <span class="qk">{q.steer ? 'steering' : 'queued'}</span>
+            <span class="qt" title={q.text}>{q.text}</span>
+            {#if !q.steer && !ro}
+              <button class="qs" aria-label={`Steer: ${q.text}`} title="Send now as steer: zenbot reads it at the next tool boundary" onclick={() => steerQueued(q)}>
+                <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12"/><path d="M12 6l6 6-6 6"/><path d="M20 5v14"/></svg>
+                <span>Steer</span>
+              </button>
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    {/if}
     <div class="compose" class:drag={dragging} class:ro>
       {#if rate}
         <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -1899,6 +1928,17 @@
   .dot.work { background: var(--accent); animation: blink 1.2s ease-in-out infinite; }
   .dot.wait { background: var(--warn); }
 
+  .queue { list-style: none; max-width: 44rem; margin: 0 auto 6px; padding: 0 6px; display: flex; flex-direction: column; gap: 4px; max-height: 30vh; overflow: auto; }
+  .qi { display: flex; align-items: flex-start; gap: 8px; padding: 5px 6px 5px 10px; border-radius: 12px; background: color-mix(in srgb, var(--soft) 55%, var(--paper)); border: 1px solid var(--faint); font-size: 13px; color: var(--dim); }
+  .qi:hover, .qi:focus-within { color: var(--ink); border-color: color-mix(in srgb, var(--dim) 45%, var(--faint)); }
+  .qk { flex: none; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--dim); padding-top: 1px; min-width: 4.6em; }
+  .qi.steering .qk { color: var(--accent); }
+  .qt { flex: 1; min-width: 0; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .qs { flex: none; display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px 1px 6px; border-radius: 99px; font-size: 12px; color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--faint)); opacity: 0; }
+  .qs .ico { width: 13px; height: 13px; }
+  .qi:hover .qs, .qi:focus-within .qs, .qs:focus-visible { opacity: 1; }
+  .qs:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  @media (hover: none) { .qs { opacity: 1; } }
   .atts { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 0 8px; }
   .att { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; padding: 3px 4px 3px 9px; border-radius: 99px; background: var(--soft); border: 1px solid var(--faint); max-width: 100%; }
   .att.bad { border-color: var(--err); color: var(--err); }
@@ -1938,6 +1978,7 @@
     .back { font-size: 26px; margin-left: -10px; color: var(--ink); }
     .body { padding: 10px 14px; }
     .dock { padding: 6px 8px 8px; }
+    .queue { padding: 0; }
     .hrow { grid-template-columns: 7.5em 1fr; }
   }
 </style>
