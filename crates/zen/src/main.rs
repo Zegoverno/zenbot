@@ -269,13 +269,13 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Jobs { cmd: Some(cmd) } => match cmd {
-            JobsCmd::Add { name, schedule, prompt, command, tz, context, skills, model, dir, report_file, post_to, agent } => {
-                let body = json!({ "name": name, "schedule": schedule, "prompt": prompt, "command": command, "tz": tz, "context": context, "skills": skills, "model": model, "workspace": dir, "report_file": report_file, "post_to": post_to, "agent": agent });
+            JobsCmd::Add { name, schedule, prompt, command, tz, context, skills, model, dir, report_file, post_to, agent, plugin } => {
+                let body = json!({ "name": name, "schedule": schedule, "prompt": prompt, "command": command, "tz": tz, "context": context, "skills": skills, "model": model, "workspace": dir, "report_file": report_file, "post_to": post_to, "agent": agent, "plugin": plugin });
                 let j = c.post("/api/jobs", body).await?;
                 emit(json, &j, || job_line(&j));
             }
-            JobsCmd::Set { name, schedule, prompt, command, tz, context, skills, model, report_file, post_to } => {
-                let body = json!({ "schedule": schedule, "prompt": prompt, "command": command, "tz": tz, "context": context, "skills": skills, "model": model, "report_file": report_file, "post_to": post_to });
+            JobsCmd::Set { name, schedule, prompt, command, tz, context, skills, model, report_file, post_to, plugin } => {
+                let body = json!({ "schedule": schedule, "prompt": prompt, "command": command, "tz": tz, "context": context, "skills": skills, "model": model, "report_file": report_file, "post_to": post_to, "plugin": plugin });
                 let j = c.patch(&format!("/api/jobs/{}", enc(&name)), body).await?;
                 emit(json, &j, || job_line(&j));
             }

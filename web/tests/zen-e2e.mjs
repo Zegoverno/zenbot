@@ -241,7 +241,7 @@ const kernel = createServer(async (req, res) => {
     const hit = (kind, ref, title, snippet, file) => ({ kind, ref, title, snippet, at: now, exact: false, relevance: null, path: path.join(VAULT, file) });
     return json(res, { query: body.query, scope: body.scope, reranked: false, results: body.query === 'gift' ? [hit('wiki', 'Grace', 'Grace', 'A gift, given freely.', 'wiki/Grace.md'), hit('note', 'Atlas.md', 'Atlas', 'all names matched too', 'wiki/Atlas.md')] : [] });
   }
-  if (r === 'GET /api/jobs') return json(res, { scheduler: true, jobs: [{ name: 'daily', schedule: '0 9 * * *', tz: 'UTC', enabled: true, next_run_at: null, last_status: 'failed', last_error: 'test failure', failures: 1 }] });
+  if (r === 'GET /api/jobs') return json(res, { scheduler: true, jobs: [{ name: 'daily', kind: 'script', plugin: 'vigilia', schedule: '0 9 * * *', tz: 'UTC', enabled: true, next_run_at: null, last_status: 'failed', last_error: 'test failure', failures: 1 }] });
   if (r === 'GET /api/jobs/runs') return json(res, [{ id: 1, job: 'daily', status: 'failed', started_at: '2026-11-19', error: 'test failure', session: null }]);
   if (r === 'POST /api/jobs/daily/run' || r === 'PATCH /api/jobs/daily') return json(res, { ok: true });
   if (r === 'GET /api/prefs') return json(res, prefs);
@@ -428,6 +428,10 @@ try {
   // Routines: a failing one says so (and badges its tab), run now, pause, and a new one asks the agent.
   await page.getByRole('tab', { name: 'Routines' }).click();
   await page.getByText('daily failed', { exact: false }).first().waitFor();
+  const pluginJob = page.locator('[data-job="daily"]');
+  assert.ok(await pluginJob.getByTitle('Plugin: vigilia').isVisible(), 'explicit plugin provenance has its own badge');
+  assert.ok(await pluginJob.getByText(/a script/).isVisible(), 'a plugin badge does not replace the job kind');
+  if (shots) await page.screenshot({ path: 'tests/shots/zen-routines.png' });
   // The failed banner, as the mock: See the run, Run again, Ask zenbot to fix it. A run with no session unfolds its past runs.
   const failBox = page.locator('.fail', { hasText: 'daily failed' });
   for (const n of ['See the run', 'Run again', 'Ask zenbot to fix it']) assert.ok(await failBox.getByRole('button', { name: n }).isVisible(), `the failed banner has ${n}`);
