@@ -50,6 +50,29 @@ const shots = process.argv.includes('--shots');
 const shotDir = process.env.ZEN_SHOT_DIR ?? '/tmp/zen-shots';
 if (shots) mkdirSync(shotDir, { recursive: true });
 const now = new Date().toISOString();
+// Routines: a failing plugin script, two agent routines, a one-off that has run, a paused one with a stale
+// next run, and zenbot's upkeep; and their runs, newest first, from several jobs.
+const ago = (m) => new Date(Date.now() - m * 60000).toISOString();
+const job = (name, o) => ({ name, kind: 'agent', agent: 'zenbot', plugin: null, schedule: '0 9 * * *', tz: 'UTC', enabled: true, next_run_at: null, last_run_at: null, last_status: 'ok', last_error: null, failures: 0, ...o });
+const routineJobs = [
+  job('daily', { kind: 'script', plugin: 'vigilia', next_run_at: ago(-180), last_status: 'failed', last_error: 'test failure', failures: 1 }),
+  job('digest', { schedule: 'every 10m', next_run_at: ago(-10) }),
+  job('weekly-review', { schedule: '0 18 * * 5', next_run_at: ago(-2880), last_status: 'silent' }),
+  job('codex-170-update', { schedule: 'at 2026-11-19T12:27:31Z', last_run_at: '2026-11-19T12:28:03Z' }),
+  job('old-idea', { enabled: false, next_run_at: ago(-60), last_status: null }),
+  job('sleep', { kind: 'system', action: 'sleep', schedule: '0 3 * * *', next_run_at: ago(-600) }),
+  job('backup', { kind: 'system', action: 'backup', schedule: '30 3 * * *', next_run_at: ago(-630) }),
+];
+const run = (id, jobName, o) => ({ id, job: jobName, status: 'ok', trigger: 'schedule', started_at: ago(id * 7), ended_at: ago(id * 7 - 1), error: null, session: null, output: `Output of ${jobName}`, ...o });
+const routineRuns = [
+  run(9, 'digest', { status: 'running', started_at: ago(1), ended_at: null, output: null }),
+  run(1, 'digest', { session: 's1' }),
+  run(2, 'sleep'),
+  run(3, 'daily', { status: 'failed', error: 'test failure' }),
+  run(4, 'weekly-review', { status: 'silent', output: null }),
+  run(5, 'digest', { trigger: 'manual' }),
+  run(6, 'backup'),
+];
 const session = (id, title, extra = {}) => ({ id, title, model: 'faux/smoke', effort: null, archived: false, kind: null, parent: null, created_at: now, updated_at: now, ...extra });
 const prompts = [];
 /** What else the page sent on the socket: steers, aborts; and tasks handed to an agent. */
@@ -242,9 +265,13 @@ const kernel = createServer(async (req, res) => {
     const hit = (kind, ref, title, snippet, file) => ({ kind, ref, title, snippet, at: now, exact: false, relevance: null, path: path.join(VAULT, file) });
     return json(res, { query: body.query, scope: body.scope, reranked: false, results: body.query === 'gift' ? [hit('wiki', 'Grace', 'Grace', 'A gift, given freely.', 'wiki/Grace.md'), hit('note', 'Atlas.md', 'Atlas', 'all names matched too', 'wiki/Atlas.md')] : [] });
   }
-  if (r === 'GET /api/jobs') return json(res, { scheduler: true, jobs: [{ name: 'daily', kind: 'script', plugin: 'vigilia', schedule: '0 9 * * *', tz: 'UTC', enabled: true, next_run_at: null, last_status: 'failed', last_error: 'test failure', failures: 1 }] });
-  if (r === 'GET /api/jobs/runs') return json(res, [{ id: 1, job: 'daily', status: 'failed', started_at: '2026-11-19', error: 'test failure', session: null }]);
-  if (r === 'POST /api/jobs/daily/run' || r === 'PATCH /api/jobs/daily') return json(res, { ok: true });
+  if (r === 'GET /api/jobs') return json(res, { scheduler: true, jobs: routineJobs });
+  if (r === 'GET /api/jobs/runs') return json(res, routineRuns.filter((x) => !u.searchParams.get('job') || x.job === u.searchParams.get('job')).slice(0, Number(u.searchParams.get('limit') ?? 20)));
+  const jobOp = /^(POST|PATCH) \/api\/jobs\/([^/]+?)(\/run)?$/.exec(r);
+  if (jobOp && routineJobs.some((j) => j.name === decodeURIComponent(jobOp[2]))) {
+    if (jobOp[1] === 'PATCH' && typeof body.enabled === 'boolean') routineJobs.find((j) => j.name === decodeURIComponent(jobOp[2])).enabled = body.enabled;
+    return json(res, { ok: true });
+  }
   if (r === 'GET /api/prefs') return json(res, prefs);
   if (r === 'PATCH /api/prefs') { Object.assign(prefs, body); return json(res, prefs); }
   if (r === 'GET /api/prompt-files/USER.md') return json(res, {name:'USER.md', text:userText, limit:20000});
@@ -431,8 +458,8 @@ try {
   await page.getByText('daily failed', { exact: false }).first().waitFor();
   const pluginJob = page.locator('[data-job="daily"]');
   assert.ok(await pluginJob.getByTitle('Plugin: vigilia').isVisible(), 'explicit plugin provenance has its own badge');
-  assert.ok(await pluginJob.getByText(/a script/).isVisible(), 'a plugin badge does not replace the job kind');
-  if (shots) await page.screenshot({ path: 'tests/shots/zen-routines.png' });
+  assert.ok(await pluginJob.getByTitle('Type: script').isVisible(), 'a plugin tag does not replace the job type tag');
+  if (shots) await page.screenshot({ path: `${shotDir}/zen-routines.png` });
   // The failed banner, as the mock: See the run, Run again, Ask zenbot to fix it. A run with no session unfolds its past runs.
   const failBox = page.locator('.fail', { hasText: 'daily failed' });
   for (const n of ['See the run', 'Run again', 'Ask zenbot to fix it']) assert.ok(await failBox.getByRole('button', { name: n }).isVisible(), `the failed banner has ${n}`);
@@ -440,7 +467,88 @@ try {
   assert.equal(await page.locator('[data-job="daily"] .cm').getAttribute('aria-expanded'), 'true', 'See the run unfolds the past runs');
   assert.ok(await page.locator('.tab .badge.bad').isVisible(), 'the Routines tab badges a failure');
   await page.getByRole('button', { name: 'Run now' }).first().click();
+  // The Routines tab is ONE list with filters: Active by default, soonest next run first; zenbot's upkeep
+  // are ordinary rows tagged "upkeep"; a one-off that has run is "Ran once" and counts as inactive.
+  // (See the run showed everything so the routine is visible; back to the default filter.)
+  assert.equal(await page.getByRole('group', { name: 'State' }).getByRole('button', { name: 'All', exact: true }).getAttribute('aria-pressed'), 'true', 'See the run clears the filters');
+  await page.getByRole('group', { name: 'State' }).getByRole('button', { name: 'Active', exact: true }).click();
+  const names = async () => page.locator('.rwrap .li[data-job]').evaluateAll((els) => els.map((e) => e.dataset.job));
+  assert.deepEqual(await names(), ['digest', 'daily', 'sleep', 'backup', 'weekly-review'], 'active routines, soonest next run first');
+  assert.equal(await page.getByText("zenbot's own upkeep (").count(), 0, 'no separate upkeep section');
+  const sleepRow = page.locator('[data-job="sleep"]');
+  assert.ok(await sleepRow.getByTitle("zenbot's own upkeep").isVisible(), 'a system job is tagged upkeep');
+  assert.ok(await sleepRow.getByText(/Sorts memory/).isVisible(), 'a system job says what it does in plain words');
+  assert.ok(await page.locator('[data-job="digest"]').getByTitle('Made by zenbot').isVisible(), 'an agent routine is tagged with its agent');
+  assert.ok(await page.locator('[data-job="digest"]').getByTitle('Type: agent').isVisible());
+  assert.equal(await page.locator('[data-job="codex-170-update"]').count(), 0, 'a finished one-off is hidden under Active');
+  await page.getByRole('group', { name: 'State' }).getByRole('button', { name: 'Inactive' }).click();
+  assert.deepEqual(await names(), ['old-idea', 'codex-170-update'], 'inactive: paused, then finished one-offs');
+  assert.ok(await page.locator('[data-job="codex-170-update"]').getByText('Ran once, Nov 19 at 12:28').isVisible(), 'a finished one-off says when it ran');
+  assert.equal(await page.locator('[data-job="codex-170-update"]').getByRole('switch').count(), 0, 'a finished one-off has no switch');
+  assert.ok(await page.locator('[data-job="codex-170-update"]').getByRole('button', { name: 'Run now' }).isVisible(), 'but can still run now');
+  assert.ok(await page.locator('[data-job="old-idea"]').getByText('Paused').isVisible(), 'enabled=false is paused despite a stale next run');
+  await page.getByRole('group', { name: 'State' }).getByRole('button', { name: 'All', exact: true }).click();
+  assert.equal((await names()).length, 7, 'state All shows every routine');
+  await page.getByRole('group', { name: 'State' }).getByRole('button', { name: 'Active', exact: true }).click();
+  await page.getByRole('group', { name: 'Type' }).getByRole('button', { name: 'Script' }).click();
+  assert.deepEqual(await names(), ['daily'], 'type Script narrows the list');
+  await page.getByRole('group', { name: 'Type' }).getByRole('button', { name: 'Agent' }).click();
+  assert.deepEqual(await names(), ['digest', 'weekly-review'], 'type Agent narrows the list');
+  await page.getByRole('group', { name: 'Type' }).getByRole('button', { name: 'All' }).click();
+  await page.getByLabel('Source').selectOption({ label: 'zenbot upkeep' });
+  assert.deepEqual(await names(), ['sleep', 'backup'], 'source zenbot upkeep lists the system jobs');
+  await page.getByLabel('Source').selectOption({ label: 'vigilia' });
+  assert.deepEqual(await names(), ['daily'], 'source plugin lists its routines');
+  await page.getByLabel('Source').selectOption({ label: 'Made by zenbot' });
+  assert.deepEqual(await names(), ['digest', 'weekly-review'], 'source agent lists the agent-made routines');
+  await page.getByLabel('Source').selectOption({ label: 'All sources' });
+  // Run now and pause work on a system row too.
+  await sleepRow.getByRole('switch', { name: 'sleep on or paused' }).click();
+  await page.locator('[data-job="sleep"]').waitFor({ state: 'detached' });
+  await page.getByRole('group', { name: 'State' }).getByRole('button', { name: 'Inactive' }).click();
+  assert.ok(await page.locator('[data-job="sleep"]').getByText('Paused').isVisible(), 'a paused system job moves to Inactive');
+  await page.locator('[data-job="sleep"]').getByRole('switch').click();
+  await page.locator('[data-job="sleep"]').waitFor({ state: 'detached' });
+  await page.getByRole('group', { name: 'State' }).getByRole('button', { name: 'Active', exact: true }).click();
+  await page.locator('[data-job="sleep"]').getByRole('button', { name: 'Run now' }).click();
+  await page.keyboard.press('j');
+  await page.keyboard.press('j');
+  await page.keyboard.press('j');
+  assert.equal(await page.locator('.rwrap .li[data-cur]').getAttribute('data-job'), 'sleep', 'j walks rows, system ones included');
+  // The Runs tab: up next, then every routine's past runs in time order, a running one first.
+  await page.getByRole('group', { name: 'Routines view' }).getByRole('button', { name: 'Runs' }).click();
+  assert.equal(await page.locator('.rwrap [data-section="next"] [data-next]').count(), 5, 'up next lists each active routine');
+  assert.deepEqual(await page.locator('[data-next]').evaluateAll((els) => els.map((e) => e.dataset.next)), ['digest', 'daily', 'sleep', 'backup', 'weekly-review'], 'up next: soonest first');
+  assert.ok(await page.locator('[data-next="digest"]').getByText('Today').isVisible(), 'up next shows the day and time');
+  assert.ok(await page.locator('[data-next="digest"]').getByTitle('Made by zenbot').isVisible(), 'and the tags');
+  assert.equal(await page.locator('[data-next="old-idea"], [data-next="codex-170-update"]').count(), 0, 'paused and finished routines are not up next');
+  const pastJobs = await page.locator('[data-section="past"] .run').evaluateAll((els) => els.map((e) => e.querySelector('.rj').textContent));
+  assert.deepEqual(pastJobs, ['digest', 'digest', 'sleep', 'daily', 'weekly-review', 'digest', 'backup'], 'past runs: all routines, running first, then newest first');
+  assert.ok(await page.locator('[data-section="past"] .run').first().getByText('Running…').isVisible(), 'a running run shows first');
+  assert.equal(await page.locator('[data-section="past"] .run .open').count(), 1, 'only the run with a session opens');
+  assert.ok(await page.getByRole('button', { name: 'Show more' }).count() === 0, 'no Show more when everything is loaded');
+  if (shots) {
+    // Desktop and phone shots of both tabs.
+    const was = page.viewportSize();
+    for (const [name, size] of [['desktop', { width: 1400, height: 900 }], ['phone', { width: 390, height: 844 }]]) {
+      await page.setViewportSize(size);
+      await page.screenshot({ path: `${shotDir}/routines-runs-${name}.png` });
+      await page.getByRole('group', { name: 'Routines view' }).getByRole('button', { name: 'Routines' }).click();
+      await page.screenshot({ path: `${shotDir}/routines-list-${name}.png` });
+      await page.getByRole('group', { name: 'State' }).getByRole('button', { name: 'All', exact: true }).click();
+      await page.screenshot({ path: `${shotDir}/routines-list-all-${name}.png` });
+      await page.getByRole('group', { name: 'State' }).getByRole('button', { name: 'Active', exact: true }).click();
+      await page.getByRole('group', { name: 'Routines view' }).getByRole('button', { name: 'Runs' }).click();
+    }
+    await page.setViewportSize(was);
+  }
+  await page.keyboard.press('t');
+  assert.ok(await page.locator('[data-job="digest"]').isVisible(), 't switches back to the routines tab');
+  await page.keyboard.press('t');
+  assert.equal(await page.locator('[data-section="next"]').count(), 1, 't switches to the runs tab');
+  await page.getByRole('group', { name: 'Routines view' }).getByRole('button', { name: 'Routines' }).click();
   await page.getByRole('switch', { name: 'daily on or paused' }).first().click();
+  await page.locator('[data-job="daily"]').waitFor({ state: 'detached' });
   await page.getByRole('button', { name: /New routine/ }).click();
   await page.waitForURL(/\?s=new/);
   assert.match(await page.locator('textarea').inputValue(), /create a new routine/i);
