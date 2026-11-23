@@ -242,6 +242,8 @@ pub(crate) async fn list_sessions(State(app): State<AppState>, Query(q): Query<L
 pub(crate) struct BoardQuery {
     /// Include archived sessions (and their children).
     archived: Option<bool>,
+    /// Include job runs (kind `job`); false leaves only the owner's sessions and channels.
+    jobs: Option<bool>,
 }
 
 /// Most top-level sessions on the board (the latest active), and most child sessions under each
@@ -250,7 +252,8 @@ const BOARD_SESSIONS: i64 = 200;
 const BOARD_CHILDREN: i64 = 20;
 
 /// The sessions board (`zen`'s home screen): main and job sessions, the latest `BOARD_SESSIONS`,
-/// archived ones only with `?archived=true` (otherwise `archived` counts them), and under each
+/// archived ones only with `?archived=true` (otherwise `archived` counts them and `archived_jobs`
+/// how many of those are job runs), job runs left out with `?jobs=false`, and under each
 /// its child sessions (subagents, verifiers): the latest `BOARD_CHILDREN` and any running, each
 /// with the task it was given; `children` says how many a session has in all. Each says whether
 /// a turn is running in it right now, and whether it's waiting on the owner: its latest `ask`
@@ -263,7 +266,7 @@ pub(crate) async fn board(State(app): State<AppState>, Query(q): Query<BoardQuer
     let running: Vec<Uuid> = app.turns.lock().await.keys().copied().collect();
     let rows = sqlx::query(&format!(
         "WITH top AS (
-           SELECT id FROM sessions WHERE parent IS NULL AND ($1 OR NOT archived) ORDER BY updated_at DESC LIMIT $3
+           SELECT id FROM sessions WHERE parent IS NULL AND ($1 OR NOT archived) AND ($5 OR kind IS NOT 'job') ORDER BY updated_at DESC LIMIT $3
          ), kids AS (
            SELECT id FROM (
              SELECT c.id, row_number() OVER (PARTITION BY c.parent ORDER BY c.updated_at DESC) AS n
@@ -294,6 +297,7 @@ pub(crate) async fn board(State(app): State<AppState>, Query(q): Query<BoardQuer
     .bind(serde_json::json!(running))
     .bind(BOARD_SESSIONS)
     .bind(BOARD_CHILDREN)
+    .bind(q.jobs.unwrap_or(true))
     .fetch_all(&app.db)
     .await?;
     let running: HashSet<Uuid> = running.into_iter().collect();
@@ -320,8 +324,10 @@ pub(crate) async fn board(State(app): State<AppState>, Query(q): Query<BoardQuer
         .collect();
     let mut out = json!({ "sessions": Value::Array(sessions) });
     if !archived {
-        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE parent IS NULL AND archived").fetch_one(&app.db).await?;
+        let (n, jobs): (i64, i64) = sqlx::query_as("SELECT count(*), count(*) FILTER (WHERE kind IS 'job') FROM sessions WHERE parent IS NULL AND archived")
+            .fetch_one(&app.db).await?;
         out["archived"] = json!(n);
+        out["archived_jobs"] = json!(jobs);
     }
     Ok(Json(out))
 }
@@ -835,13 +841,33 @@ mod tests {
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO sessions (id, title, model) VALUES (?, 'test', 'faux/smoke')").bind(id).execute(&db).await.unwrap();
         crate::tape::append(&db, id, "questions", &json!({"questions": [{"question": "Which?", "options": ["A"]}], "wait": true})).await.unwrap();
-        let read = || board(State(app.clone()), Query(BoardQuery { archived: None }));
+        let read = || board(State(app.clone()), Query(BoardQuery { archived: None, jobs: None }));
         let result = read().await.unwrap().0;
         assert_eq!(result["sessions"][0]["question"], "Which?");
         crate::tape::append(&db, id, "message", &json!({"role": "user", "content": "A"})).await.unwrap();
         let result = read().await.unwrap().0;
         assert_eq!(result["sessions"][0]["waiting"], false);
         assert!(result["sessions"][0].get("question").is_none());
+    }
+
+    /// The archive leaves job runs out on request, so the owner's sessions aren't crowded out.
+    #[tokio::test]
+    async fn board_leaves_job_runs_out_of_the_archive_on_request() {
+        let (_dir, db) = crate::test_util::database().await;
+        let app = crate::test_util::app(db.clone());
+        let (mine, job, open) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        for (id, kind, archived) in [(mine, None, true), (job, Some("job"), true), (open, None, false)] {
+            sqlx::query("INSERT INTO sessions (id, title, model, kind, archived) VALUES (?, 't', 'faux/smoke', ?, ?)")
+                .bind(id).bind(kind).bind(archived).execute(&db).await.unwrap();
+        }
+        let read = |archived, jobs| board(State(app.clone()), Query(BoardQuery { archived, jobs }));
+        let open_board = read(None, None).await.unwrap().0;
+        assert_eq!((open_board["archived"].as_i64(), open_board["archived_jobs"].as_i64()), (Some(2), Some(1)));
+        let ids = |b: &Value| b["sessions"].as_array().unwrap().iter().filter(|s| s["archived"] == true).map(|s| s["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let all = read(Some(true), None).await.unwrap().0;
+        assert_eq!(ids(&all).len(), 2, "job runs by default");
+        let owners = read(Some(true), Some(false)).await.unwrap().0;
+        assert_eq!(ids(&owners), vec![mine.to_string()], "only the owner's with jobs=false");
     }
 
     #[test]

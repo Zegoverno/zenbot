@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseArchive } from './model.ts';
+import * as M from './model.ts';
 
 // The same cases as zen-client's commands.rs: the web reads /archive as the other clients do.
 describe('parseArchive', () => {
@@ -18,5 +19,42 @@ describe('parseArchive', () => {
   });
   it('refuses the wrong shapes', () => {
     for (const bad of ['maybe', 'done 0', 'done 11', '99 note', '0', 'done 300', 'a note without outcome', '-']) expect(parseArchive(bad), bad).toBeNull();
+  });
+});
+
+describe('drafts', () => {
+  const store = new Map<string, string>();
+  beforeEach(() => {
+    store.clear();
+    vi.stubGlobal('localStorage', { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v) });
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('keeps unsent text per session and forgets a blank one', () => {
+    M.saveDraft('s1', 'half a thought');
+    M.saveDraft('new', 'a new chat');
+    expect(M.loadDraft('s1')).toBe('half a thought');
+    expect(M.loadDraft('new')).toBe('a new chat');
+    expect(M.loadDraft('s2')).toBe('');
+    M.saveDraft('s1', '  ');
+    expect(M.loadDraft('s1')).toBe('');
+    expect(JSON.parse(store.get('zen.drafts')!)).toEqual({ new: 'a new chat' });
+  });
+
+  it('keeps the 50 latest', () => {
+    for (let i = 0; i < 55; i++) M.saveDraft(`s${i}`, `t${i}`);
+    M.saveDraft('s5', 'touched');
+    const kept = Object.keys(JSON.parse(store.get('zen.drafts')!));
+    expect(kept.length).toBe(50);
+    expect(kept.at(-1)).toBe('s5');
+    expect(M.loadDraft('s4')).toBe('');
+    expect(M.loadDraft('s54')).toBe('t54');
+  });
+
+  it('survives a broken store', () => {
+    store.set('zen.drafts', '[not json');
+    expect(M.loadDraft('s1')).toBe('');
+    M.saveDraft('s1', 'x');
+    expect(M.loadDraft('s1')).toBe('x');
   });
 });

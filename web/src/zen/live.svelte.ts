@@ -77,6 +77,9 @@ export const board = $state({
   /** Every child (subagent, verifier) by its parent. */
   children: {} as Record<string, (BoardSession & { role?: string | null })[]>,
   archivedCount: 0,
+  /** How many of the archived are job runs (kind `job`). */
+  archivedJobs: 0,
+  /** The archive as last loaded: the owner's sessions, or with job runs too. */
   archived: [] as Session[],
   loaded: false,
   error: '',
@@ -93,6 +96,7 @@ export async function loadBoard() {
     for (const s of all) if (s.parent) (kids[s.parent] ??= []).push(s);
     board.children = kids;
     board.archivedCount = b.archived ?? 0;
+    board.archivedJobs = b.archived_jobs ?? 0;
     board.error = '';
   } catch (e) {
     board.error = (e as Error).message;
@@ -100,9 +104,10 @@ export async function loadBoard() {
   board.loaded = true;
 }
 
-export async function loadArchived() {
+/** The archive: the owner's sessions only, or with `jobs` their runs too. */
+export async function loadArchived(jobs = false) {
   try {
-    const b = await zen.board(true);
+    const b = await zen.board(true, jobs);
     board.archived = b.sessions.filter((s) => s.archived && !s.parent).sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(asSession);
     board.archivedCount = Math.max(board.archivedCount, b.archived ?? 0);
   } catch {}

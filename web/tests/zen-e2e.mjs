@@ -187,18 +187,19 @@ const kernel = createServer(async (req, res) => {
   for await (const c of req) raw += c;
   const body = raw ? JSON.parse(raw) : {};
   if (r === 'GET /api/board') {
-    // Archived sessions (a plain one and a job, like vault-sync) come only when asked for.
+    // Archived sessions (a plain one and a job, like vault-sync) come only when asked for; job runs
+    // are left out with jobs=false.
     const old = u.searchParams.get('archived') === 'true' ? [
       { ...session('a1', 'Old chat', { archived: true, outcome: 'partial', outcome_note: 'tests red' }), busy: false, waiting: false },
       { ...session('a2', 'vault-sync', { archived: true, kind: 'job' }), busy: false, waiting: false },
-    ] : [];
+    ].filter((x) => u.searchParams.get('jobs') !== 'false' || x.kind !== 'job') : [];
     return json(res, { sessions: [
       { ...session('c0', 'zen room', { kind: 'channel' }), busy: false, waiting: false },
       { ...session('s0', 'Pitch practice', { agent: 'rex' }), busy: false, waiting: false },
       { ...session('s1', 'Plan the week', { agent: 'zenbot' }), busy: false, waiting: true },
       { ...session('k1', 'verifier', { kind: 'verifier', parent: 's1' }), task: 'Check the plan', busy: false, waiting: false },
       ...old,
-    ], archived: 2 });
+    ], archived: 2, archived_jobs: 1 });
   }
   if (r === 'POST /api/sessions') {
     created.push(body);
@@ -495,7 +496,15 @@ try {
   await page.getByPlaceholder('Search sessions').fill('');
   await page.getByRole('button', { name: /Archived/ }).click();
   await page.locator('.srow', { hasText: 'Old chat' }).waitFor();
+  // The archive shows the owner's sessions; job runs only on request.
+  assert.equal(await page.locator('.srow', { hasText: 'vault-sync' }).count(), 0, 'job runs are left out of the archive');
+  assert.equal((await page.locator('.grp.toggle .cnt').textContent()).trim(), '1', 'the archive counts the owner\'s sessions');
   if (shots) await page.screenshot({ path: 'tests/shots/zen-board.png' });
+  await page.getByRole('button', { name: 'Show job runs too (1)' }).click();
+  await page.locator('.srow', { hasText: 'vault-sync' }).waitFor();
+  assert.equal((await page.locator('.grp.toggle .cnt').textContent()).trim(), '2', 'with job runs, all are counted');
+  await page.getByRole('button', { name: 'Hide job runs' }).click();
+  await page.locator('.srow', { hasText: 'vault-sync' }).waitFor({ state: 'detached' });
 
   // A new chat: its ideas load without blocking the box, and picking one only drafts it.
   await page.route('**/api/zen/ideas?*', (route) => route.fulfill({ json: { ideas: [{ text: 'Plan a week', why: 'Monday looks full' }, 'Review a project', { text: 'Explore an idea', why: '' }] } }));
@@ -793,6 +802,7 @@ try {
   // In a chat Esc on an empty box leaves it, so single keys are shortcuts; `i` or Enter comes back.
   await page.keyboard.press('Control+\\');
   const chatBox = page.locator('.pane.chat textarea');
+  await chatBox.fill(''); // an earlier step's unsent text is kept as the session's draft
   await chatBox.focus();
   await page.keyboard.type('?');
   assert.equal(await chatBox.inputValue(), '?', 'typing in the box types');
@@ -1011,6 +1021,16 @@ try {
   await page.keyboard.type('roll');
   await pal.getByRole('option', { name: /\/roll/ }).click();
   await untilAsync(async () => (await page.locator('.pane.chat textarea').inputValue()) === '/roll ', 'a slash command needing text is typed into the box');
+
+  // Unsent text stays with its session: another starts blank, and coming back brings it back.
+  const draftBox = page.locator('.pane.chat textarea');
+  await draftBox.fill('half a thought');
+  await page.goto(`${base}/?s=s0`);
+  await draftBox.waitFor();
+  assert.equal(await draftBox.inputValue(), '', 'another session starts blank');
+  await page.goto(`${base}/?s=s1`);
+  await untilAsync(async () => (await draftBox.inputValue()) === 'half a thought', 'the draft comes back with its session');
+  await draftBox.fill('');
 
   // A session: history, then a prompt streams an answer through the relayed socket.
   await page.goto(`${base}/?s=s1`);

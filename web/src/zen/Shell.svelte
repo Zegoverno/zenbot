@@ -46,6 +46,9 @@
 
   let theme = $state<'auto' | 'light' | 'dark'>((['auto', 'light', 'dark'].includes(localStorage.getItem('zen.theme') ?? '') ? localStorage.getItem('zen.theme') : 'auto') as 'auto' | 'light' | 'dark');
   let showArchived = $state(false);
+  /** The archive shows the owner's sessions; job runs (thousands) only when asked for. */
+  let archivedJobs = $state(false);
+  const archivedShownCount = $derived(archivedJobs ? board.archivedCount : Math.max(0, board.archivedCount - board.archivedJobs));
   let archivedShown = $state(30);
   let sq = $state('');
 
@@ -205,7 +208,7 @@
 
   // ---- sessions, filtered by the search field ----
   const match = (s: Session) => !sq.trim() || s.title.toLowerCase().includes(sq.trim().toLowerCase());
-  $effect(() => { if (showArchived) void loadArchived(); });
+  $effect(() => { if (showArchived) void loadArchived(archivedJobs); });
 
   // The agent menu (`@`, or the orb): ↑↓ move over the agents, Enter picks, Esc closes.
   function menuOpen(node: HTMLElement) {
@@ -316,7 +319,7 @@
     try {
       await zen.update(s.id, { archived: true });
       await loadBoard();
-      if (showArchived) void loadArchived();
+      if (showArchived) void loadArchived(archivedJobs);
       notice(`Archived “${s.title}”`, 6000, () => { void zen.update(s.id, { archived: false }).then(() => loadBoard()).catch((e) => notice(String((e as Error).message ?? e))); });
     } catch (e) { notice(String((e as Error).message ?? e)); }
   }
@@ -328,6 +331,7 @@
     { id: 'sessions-rename', title: 'Rename', icon: 'rename', key: 'r', ring: 3, run: renameStart },
     { id: 'sessions-archive', title: 'Archive', icon: 'archive', key: 'x', ring: 4, run: archiveRow },
     { id: 'sessions-archived', title: showArchived ? 'Hide archived' : 'Show archived', icon: 'eye', key: 'u', ring: 5, run: () => (showArchived = !showArchived) },
+    { id: 'sessions-archived-jobs', title: archivedJobs ? 'Hide job runs in the archive' : 'Show job runs in the archive', icon: 'eye', key: 'Shift+u', run: () => { archivedJobs = !archivedJobs; showArchived = true; } },
     { id: 'sessions-down', title: 'Next session', icon: 'down', key: 'j', alt: ['ArrowDown'], quiet: true, run: () => void moveCursor('.srow', 1) },
     { id: 'sessions-up', title: 'Previous session', icon: 'up', key: 'k', alt: ['ArrowUp'], quiet: true, run: () => void moveCursor('.srow', -1) },
     { id: 'sessions-open', title: 'Open the session', icon: 'chat', key: 'Enter', quiet: true, run: () => { const s = curSession(); if (s) openChat(s.id); else moveCursor('.srow', 'first'); } },
@@ -493,11 +497,12 @@
           {#if board.loaded && !board.sessions.length}<div class="empty">No open sessions. <button class="more" onclick={newChat}>Start one</button></div>{/if}
           {#if board.error}<div class="empty">Couldn't reach zenbot: {board.error}</div>{/if}
           <button class="grp toggle" onclick={() => (showArchived = !showArchived)} aria-expanded={showArchived}>
-            <span class="car">{showArchived ? '▾' : '▸'}</span> Archived <span class="cnt">{board.archivedCount.toLocaleString()}</span>
+            <span class="car">{showArchived ? '▾' : '▸'}</span> Archived <span class="cnt">{archivedShownCount.toLocaleString()}</span>
           </button>
           {#if showArchived}
             <div class="arch">{#each board.archived.filter(match).slice(0, archivedShown) as s (s.id)}{@render row(s)}{/each}
-              {#if board.archived.filter(match).length > archivedShown}<button class="more" onclick={() => (archivedShown += 100)}>Show all archived…</button>{/if}</div>
+              {#if board.archived.filter(match).length > archivedShown}<button class="more" onclick={() => (archivedShown += 100)}>Show more archived…</button>{/if}
+              {#if board.archivedJobs}<button class="more jobs" onclick={() => (archivedJobs = !archivedJobs)} aria-pressed={archivedJobs}>{archivedJobs ? 'Hide job runs' : `Show job runs too (${board.archivedJobs.toLocaleString()})`}</button>{/if}</div>
           {/if}
         </div>
       {:else if app.view === 'subagent'}

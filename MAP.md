@@ -236,7 +236,7 @@ busy turns, commit) needs no token; the rest are under `/api` (`main.rs`):
 
 | Route | What |
 |---|---|
-| `GET/POST /sessions`, `GET/PATCH /sessions/{id}`, `GET /board` | sessions (`agent` picks who a new one is), their messages, the board; `PATCH` with `archived: true` takes the owner's `outcome` (`done`, `partial`, `not-done`), a `rating` (whole number 1–10, else 400) and a `note` (all optional), and returns `continued_by` (the new session) after `partial`; `GET /sessions/{id}` includes the open `suggestion` and the `queued` prompts |
+| `GET/POST /sessions`, `GET/PATCH /sessions/{id}`, `GET /board` | sessions (`agent` picks who a new one is), their messages, the board (`?archived=true` with the archived, `&jobs=false` without job runs; otherwise it counts `archived` and `archived_jobs`); `PATCH` with `archived: true` takes the owner's `outcome` (`done`, `partial`, `not-done`), a `rating` (whole number 1–10, else 400) and a `note` (all optional), and returns `continued_by` (the new session) after `partial`; `GET /sessions/{id}` includes the open `suggestion` and the `queued` prompts |
 | `GET/POST /agents` | the agents and what each may use; make one (`name`, `description`) |
 | `GET/PUT/DELETE /agents/{name}` | an agent's files (`soul`, `identity`, `settings` as text) and session count; replace any of them (settings checked first, old files backed up); remove one (not zenbot; its folder moves to `backups/agents/`) |
 | `GET /sessions/{id}/ws` | the session's events; send `{"type":"prompt","text":…,"mode":"steer"?}`, `{"type":"steer","id":…}` (promote a queued prompt from a `queue` event) or `{"type":"abort"}` |
