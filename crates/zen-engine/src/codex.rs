@@ -65,6 +65,9 @@ const REVIEWED: &[&str] = &[
     // retention across compaction and client-supplied untrusted context rendered as tool outputs
     // (zen sends neither), and one shared budget for every image.
     "guardian_include_additional_context", "retain_client_tool_outputs", "untrusted_as_tool_output", "unified_image_budget",
+    // 0.171.0: the TUI workspace (side conversations, document and image previews in Codex's own
+    // terminal UI); zen drives Codex through the app server, never the TUI.
+    "tui_workspace",
 ];
 
 /// Codex's settings for every zen thread: the features in `DISABLED` off, no web search, no MCP
