@@ -5,11 +5,11 @@
 import { routines as api } from '../api.ts';
 
 export type Last = 'ok' | 'silent' | 'error' | 'none';
-export type Job = { name: string; kind: 'agent' | 'script'; when: string; last: Last; on: boolean; error: string | null; next: string | null };
+export type Job = { name: string; kind: 'agent' | 'script'; plugin: string | null; when: string; last: Last; on: boolean; error: string | null; next: string | null };
 export type Upkeep = { name: string; what: string; when: string; last: Last; on: boolean; error: string | null };
 export type Run = { id: number; job: string; day: string; at: string; took: string; status: 'ok' | 'silent' | 'error' | 'running'; manual: boolean; note: string; session: string | null };
 
-type RawJob = { name: string; kind?: string; action?: string | null; command?: string | null; schedule: string; tz: string; enabled: boolean; next_run_at: string | null; last_status: string | null; last_error: string | null };
+type RawJob = { name: string; kind?: string; plugin?: string | null; action?: string | null; command?: string | null; schedule: string; tz: string; enabled: boolean; next_run_at: string | null; last_status: string | null; last_error: string | null };
 type RawRun = { id: number; job: string; status: string; started_at: string; ended_at?: string | null; error: string | null; session: string | null; trigger?: string; output?: string | null };
 
 /** What zenbot's own jobs do, in plain words. */
@@ -80,7 +80,7 @@ export async function load() {
     routines.scheduler = j.scheduler;
     routines.tz = raw.find((x) => x.kind !== 'system')?.tz ?? raw[0]?.tz ?? '';
     routines.jobs = raw.filter((x) => x.kind !== 'system').map((x) => ({
-      name: x.name, kind: x.kind === 'script' || (x.command && x.kind !== 'agent') ? 'script' : 'agent',
+      name: x.name, kind: x.kind === 'script' || (x.command && x.kind !== 'agent') ? 'script' : 'agent', plugin: x.plugin ?? null,
       when: cronWords(x.schedule, x.tz, routines.tz), last: lastOf(x.last_status), on: x.enabled, error: x.last_error, next: x.next_run_at,
     }));
     routines.upkeep = raw.filter((x) => x.kind === 'system').map((x) => ({

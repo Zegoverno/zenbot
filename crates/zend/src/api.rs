@@ -1253,7 +1253,8 @@ pub(crate) async fn update_job(State(app): State<AppState>, Path(name): Path<Str
         || spec.model.is_some()
         || spec.workspace.is_some()
         || spec.report_file.is_some()
-        || spec.post_to.is_some();
+        || spec.post_to.is_some()
+        || spec.plugin.is_some();
     let mut job = if changes { Some(jobs::update(&app, &name, spec, jobs::By::Owner).await.map_err(bad_request)?.0) } else { None };
     if let Some(on) = body["enabled"].as_bool() {
         job = Some(jobs::set_enabled(&app, &name, on, jobs::By::Owner).await.map_err(bad_request)?.0);

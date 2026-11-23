@@ -265,6 +265,9 @@ pub(crate) enum JobsCmd {
         /// The agent it runs as (default zenbot)
         #[arg(long)]
         agent: Option<String>,
+        /// Name of the plugin this routine came from
+        #[arg(long)]
+        plugin: Option<String>,
     },
     /// Change an agent job's schedule, prompt, timezone, context, skills, model, report file or target session
     Set {
@@ -290,6 +293,9 @@ pub(crate) enum JobsCmd {
         /// A session its reports are posted into (`""` goes back to the jobs feed only)
         #[arg(long)]
         post_to: Option<String>,
+        /// Name of the plugin this routine came from (empty clears it)
+        #[arg(long)]
+        plugin: Option<String>,
     },
     /// Pause a job
     Pause { name: String },

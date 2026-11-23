@@ -318,7 +318,13 @@ script_jobs() {
   local ws; ws=$(new_workspace script-jobs)
   start_kernel "$ws" "$(script jobs.json)" ZEN_JOBS=1 ZEN_JOBS_TICK=0.5 ZEN_DEFAULT_MODEL=faux/smoke
   local runs="SELECT group_concat(r.status, ',' ORDER BY r.id) FROM job_runs r JOIN jobs j ON j.id = r.job_id WHERE j.name ="
-  zen jobs add sj-ok --schedule "every 1h" --command 'echo hello from a script; echo line two' >/dev/null
+  zen jobs add sj-ok --schedule "every 1h" --command 'echo hello from a script; echo line two' --plugin vigilia >/dev/null
+  check "plugin provenance is persisted on create" eq "$(zen jobs --json | jq -r '.jobs[] | select(.name == "sj-ok") | .plugin')" vigilia
+  local next_before; next_before=$(q "SELECT next_run_at FROM jobs WHERE name = 'sj-ok'")
+  zen jobs set sj-ok --plugin zenread >/dev/null
+  check "plugin provenance updates without moving the next run" eq "$(q "SELECT plugin || '|' || next_run_at FROM jobs WHERE name = 'sj-ok'")" "zenread|$next_before"
+  zen jobs set sj-ok --plugin '' >/dev/null
+  check "plugin provenance can be cleared" eq "$(zen jobs --json | jq -r '.jobs[] | select(.name == "sj-ok") | .plugin')" null
   zen jobs run sj-ok >/dev/null
   check "an owner's script job runs" poll "$runs 'sj-ok'" ok
   check "its output is the report" grep -q "hello from a script" <<<"$(zen jobs runs sj-ok)"
