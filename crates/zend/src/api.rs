@@ -702,6 +702,7 @@ pub(crate) async fn get_session(State(app): State<AppState>, Path(id): Path<Uuid
     session["message_count"] = json!(totals.get::<i64, _>("messages"));
     session["tokens"] = json!(totals.get::<i64, _>("tokens"));
     session["busy"] = json!(app.is_busy(id).await);
+    session["queued"] = Value::Array(turns::queued_prompts(&app.db, id).await?);
     // The open suggested prompt, for a client that opens the session after it was offered (a
     // partial session's handoff brief arrives before anyone is watching).
     let open: Option<(i64, String)> =
@@ -778,6 +779,14 @@ pub(crate) async fn handle_socket(app: AppState, id: Uuid, socket: WebSocket) {
                 });
             }
             Some("abort") => abort_turn(&app, id).await,
+            // Promote a queued prompt (its `id` from a `queue` event) to a steer.
+            Some("steer") => {
+                if let Some(queued) = cmd["id"].as_i64() {
+                    if let Err(e) = turns::steer_queued(&app, id, queued).await {
+                        app.emit(id, json!({ "type": "error", "error": e.to_string() })).await;
+                    }
+                }
+            }
             _ => {}
         }
     }

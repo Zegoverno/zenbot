@@ -37,7 +37,8 @@ The same screens as the terminal app, with its keys, and a mouse and a phone way
   attach with 📎, a paste or a drop on the chat: each goes at once to `~/inbox/<YYYY-MM-DD>/`
   (up to 1 GiB, never overwriting: a clash gets `-2`), shows its progress, and the prompt names
   its path as `(attached ~/inbox/…)` so zenbot reads it with its own tools. Enter
-  sends (also during a turn: it queues), Esc interrupts, ↑↓ walk your prompts, `/` lists zen's
+  sends (also during a turn: it queues, shown above the box with a Steer button), Esc interrupts,
+  ↑↓ walk your prompts, `/` lists zen's
   commands (zenbot's own table; kernel commands run through the `zen` command line, so they answer
   as everywhere). `ctrl+b` opens the side panel with the same views, `shift+tab` gives it
   the keys. A link or a path in the chat opens there.

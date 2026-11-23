@@ -349,6 +349,7 @@ mod tests {
         assert_eq!(s.on_ev(&json!({ "type": "busy" })), vec![Out::Typing(true)]);
         assert_eq!(s.on_ev(&json!({ "type": "message", "message": { "role": "user", "content": "hi" } })), vec![], "our own prompt isn't echoed");
         assert_eq!(s.on_ev(&json!({ "type": "delta", "delta": "Hel" })), vec![]);
+        assert_eq!(s.on_ev(&json!({ "type": "queue", "items": [{ "id": 1, "text": "next", "steer": true }] })), vec![], "the queue list is for the web app");
         let tool_only = json!({ "type": "message", "message": { "role": "assistant", "content": [{ "type": "toolCall", "name": "bash" }] } });
         assert_eq!(s.on_ev(&tool_only), vec![]);
         let answer = json!({ "type": "message", "message": { "role": "assistant", "content": [{ "type": "text", "text": "Hello **Sam**" }] } });

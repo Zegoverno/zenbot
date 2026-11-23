@@ -367,7 +367,35 @@ pub(crate) async fn submit_prompt(app: &AppState, id: Uuid, text: String, steer:
     let queued: i64 = sqlx::query_scalar("INSERT INTO pending_prompts(session_id,text,steer) VALUES($1,$2,$3) RETURNING id")
         .bind(id).bind(crate::secrets::mask(&text)).bind(steer).fetch_one(&app.db).await?;
     app.emit(id, json!({"type":"status", "text":format!("Prompt #{queued} queued")})).await;
+    emit_queue(app, id).await;
     Ok(())
+}
+
+/// The owner's queued prompts of session `id` in the order `prompt_loop` takes them (steers
+/// first, then oldest first): `[{id, text, steer}]`. A prompt that failed to start is not queued.
+pub(crate) async fn queued_prompts(db: &SqlitePool, id: Uuid) -> Result<Vec<Value>> {
+    let rows = sqlx::query("SELECT id,text,steer FROM pending_prompts WHERE session_id=$1 AND error IS NULL ORDER BY steer DESC,id")
+        .bind(id).fetch_all(db).await?;
+    Ok(rows.iter().map(|r| json!({"id": r.get::<i64, _>("id"), "text": r.get::<String, _>("text"), "steer": r.get::<bool, _>("steer")})).collect())
+}
+
+/// Tell the session's clients what is queued now (`{"type":"queue","items":[…]}`); sent whenever
+/// the queue changes, so a client always shows the whole list.
+pub(crate) async fn emit_queue(app: &AppState, id: Uuid) {
+    match queued_prompts(&app.db, id).await {
+        Ok(items) => app.emit(id, json!({"type":"queue", "items": items})).await,
+        Err(e) => tracing::warn!("listing queued prompts of session {id}: {e:#}"),
+    }
+}
+
+/// Promote the queued prompt `queued` of session `id` to a steer: it goes first and the next tool
+/// call is refused (dispatch.rs) so the turn stops at the boundary. False when there is no such
+/// waiting prompt (it already started, failed, or belongs to another session).
+pub(crate) async fn steer_queued(app: &AppState, id: Uuid, queued: i64) -> Result<bool> {
+    let done = sqlx::query("UPDATE pending_prompts SET steer=1 WHERE id=$1 AND session_id=$2 AND error IS NULL")
+        .bind(queued).bind(id).execute(&app.db).await?.rows_affected() == 1;
+    emit_queue(app, id).await;
+    Ok(done)
 }
 
 /// One dispatcher per kernel; each session's oldest prompt starts only after its previous turn.
@@ -396,6 +424,7 @@ pub(crate) async fn prompt_loop(app: AppState) {
                     let _ = sqlx::query("UPDATE pending_prompts SET error=$2 WHERE id=$1")
                         .bind(queued).bind(e.to_string()).execute(&app.db).await;
                     app.emit(session,json!({"type":"error","error":format!("Queued prompt #{queued} failed: {e}")})).await;
+                    emit_queue(&app, session).await;
                 }
             });
         }
@@ -695,6 +724,7 @@ async fn begin_queued(app: &AppState, id: Uuid, text: String, origin: Origin, qu
             sqlx::query("UPDATE sessions SET title = $2 WHERE id = $1").bind(id).bind(t.trim()).execute(&app.db).await?;
         }
         app.emit(id, json!({ "type": "message", "message": user })).await;
+        if queued.is_some() { emit_queue(app, id).await; }
         if !still_ours(app, id, turn_id).await? {
             return Ok(());
         }
@@ -822,6 +852,63 @@ impl Drop for SessionFlag {
             if finishing { app.finishing.lock().await.remove(&id); }
             else { app.starting_prompts.lock().await.remove(&id); }
         });
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    async fn queue(db: &SqlitePool, id: Uuid, text: &str, steer: bool) -> i64 {
+        sqlx::query_scalar("INSERT INTO pending_prompts(session_id,text,steer) VALUES($1,$2,$3) RETURNING id").bind(id).bind(text).bind(steer).fetch_one(db).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn queue_lists_waiting_prompts_in_the_order_they_start() {
+        let (_dir, db) = crate::test_util::database().await;
+        let app = crate::test_util::app(db.clone());
+        let (id, other) = (Uuid::new_v4(), Uuid::new_v4());
+        for s in [id, other] { sqlx::query("INSERT INTO sessions (id, title, model) VALUES (?, 'test', 'faux/smoke')").bind(s).execute(&db).await.unwrap(); }
+        let (a, b, c) = (queue(&db, id, "first", false).await, queue(&db, id, "second", false).await, queue(&db, id, "failed", false).await);
+        queue(&db, other, "elsewhere", false).await;
+        sqlx::query("UPDATE pending_prompts SET error='boom' WHERE id=$1").bind(c).execute(&db).await.unwrap();
+        let ids = |v: &[Value]| v.iter().map(|i| i["id"].as_i64().unwrap()).collect::<Vec<_>>();
+        let list = queued_prompts(&db, id).await.unwrap();
+        assert_eq!(ids(&list), vec![a, b], "this session's, failed ones left out");
+        assert_eq!(list[0], json!({"id": a, "text": "first", "steer": false}));
+        let mut rx = app.subscribe(id).await;
+        assert!(steer_queued(&app, id, b).await.unwrap());
+        let ev: Value = serde_json::from_str(&rx.recv().await.unwrap()).unwrap();
+        assert_eq!(ev["type"], "queue");
+        assert_eq!(ids(ev["items"].as_array().unwrap()), vec![b, a], "a steer goes first");
+        assert_eq!(ev["items"][0]["steer"], true);
+        assert_eq!(ev["items"][1]["steer"], false);
+        assert!(steer_queued(&app, id, b).await.unwrap(), "promoting a steer again is harmless");
+    }
+
+    #[tokio::test]
+    async fn steer_only_promotes_a_waiting_prompt_of_the_session() {
+        let (_dir, db) = crate::test_util::database().await;
+        let app = crate::test_util::app(db.clone());
+        let (id, other) = (Uuid::new_v4(), Uuid::new_v4());
+        for s in [id, other] { sqlx::query("INSERT INTO sessions (id, title, model) VALUES (?, 'test', 'faux/smoke')").bind(s).execute(&db).await.unwrap(); }
+        let theirs = queue(&db, other, "theirs", false).await;
+        let failed = queue(&db, id, "failed", false).await;
+        sqlx::query("UPDATE pending_prompts SET error='boom' WHERE id=$1").bind(failed).execute(&db).await.unwrap();
+        assert!(!steer_queued(&app, id, theirs).await.unwrap(), "another session's prompt");
+        assert!(!steer_queued(&app, id, failed).await.unwrap(), "a failed prompt");
+        assert!(!steer_queued(&app, id, 9999).await.unwrap(), "no such prompt");
+        assert!(queued_prompts(&db, other).await.unwrap().iter().all(|i| i["steer"] == false));
+    }
+
+    #[tokio::test]
+    async fn queued_prompt_leaves_the_queue_when_it_reaches_the_tape() {
+        let (_dir, db) = crate::test_util::database().await;
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO sessions (id, title, model) VALUES (?, 'test', 'faux/smoke')").bind(id).execute(&db).await.unwrap();
+        let q = queue(&db, id, "hello", true).await;
+        tape::append_owner_queued(&db, id, &json!({"role":"user","content":"hello"}), Some(q)).await.unwrap();
+        assert!(queued_prompts(&db, id).await.unwrap().is_empty());
     }
 }
 
