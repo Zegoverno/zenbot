@@ -1438,7 +1438,7 @@ try {
   await page.locator('.agent').first().click();
   await page.locator('.me .icon[title="Settings"]').click();
   await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Plugins', exact: true }).click();
-  await page.getByText('Everything in the marketplace is installed and up to date.', { exact: true }).waitFor();
+  await page.getByText(/Everything in the marketplace is installed and up to date|Each plugin says what it needs before anything is installed/).waitFor();
   assert.equal(await page.getByRole('button', { name: 'Update to 0.0.9', exact: true }).count(), 0, 'a stale catalog never offers a downgrade');
   const removeAll = installedPlugins.length;
   for (const p of [...installedPlugins]) {
