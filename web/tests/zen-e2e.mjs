@@ -142,7 +142,7 @@ const cardsPlugin = {
 const installedPlugins = [fxPlugin];
 const openerDefaults = {};
 const market = [
-  { name: 'zenfx', title: 'Fixture', description: 'A test plugin.', version: '0.1.0', kernel: ['files:read'], contributes: ['views', 'openers', 'games', 'commands'] },
+  { name: 'zenfx', title: 'Fixture', description: 'A test plugin.', version: '0.0.9', update_available: false, kernel: ['files:read'], contributes: ['views', 'openers', 'games', 'commands'] },
   { name: 'zencards', title: 'Cards', description: 'Card games.', author: 'Someone', version: '0.2.0', kernel: ['network', 'ai'], contributes: ['games'] },
 ];
 /** What the page asked of the plugin host. */
@@ -1438,6 +1438,8 @@ try {
   await page.locator('.agent').first().click();
   await page.locator('.me .icon[title="Settings"]').click();
   await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Plugins', exact: true }).click();
+  await page.getByText('Everything in the marketplace is installed and up to date.', { exact: true }).waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Update to 0.0.9', exact: true }).count(), 0, 'a stale catalog never offers a downgrade');
   const removeAll = installedPlugins.length;
   for (const p of [...installedPlugins]) {
     const t = p.title || p.name;

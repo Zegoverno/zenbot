@@ -151,9 +151,10 @@ or archive can be added too, for development.
 - HTTP (owner token, like the rest of the API):
   - `GET /api/plugins` → `{ plugins: [{ name, version, title, description, contributes, permissions, enabled, ai_enabled, ai_calls_30d }], defaults: { "<pattern>:<mode>": "<plugin>/<opener id>" | "builtin" } }`.
   - `PUT /api/plugins/defaults` `{ key, value }`; `PATCH /api/plugins/{name}` `{ enabled?, ai? }`.
-  - `GET /api/plugins/marketplace` → the entries, each with `installed` (version or null).
+  - `GET /api/plugins/marketplace` → the entries, each with `installed` (version or null) and `update_available` (strictly newer by SemVer).
   - `POST /api/plugins/install` `{ name, approve? }`: without `approve`, `{ needs_approval: true, permissions }`
     (nothing installed); with `approve: true` (and the same permissions), installs and returns the plugin.
+    Marketplace installs cannot replace an installed version with one of equal or lower precedence.
   - `DELETE /api/plugins/{name}`.
   - `GET /api/plugins/{name}/resource?uri=ui://…` → `{ uri, mimeType, text, _meta }` (only `ui://<name>/…`).
   - `POST /api/plugins/{name}/call` `{ tool, arguments, session? }` → the MCP `CallToolResult`.
