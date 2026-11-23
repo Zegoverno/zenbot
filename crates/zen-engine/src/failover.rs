@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn default_failover_targets_are_on_the_other_provider() {
-        assert_eq!(crate::claude::Claude.failover_target().as_deref(), Some("codex/gpt-6.1-sol"));
+        assert_eq!(crate::claude::Claude.failover_target().as_deref(), Some("codex/gpt-6.2-sol"));
         assert_eq!(crate::codex::Codex.failover_target().as_deref(), Some("claude/claude-sonnet-5-5"));
         assert_eq!(crate::faux::Faux.failover_target(), None);
         assert!(!crate::faux::Faux.subscription(), "never a failover target");
