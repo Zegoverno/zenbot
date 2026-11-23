@@ -237,7 +237,8 @@ export const pluginApi = {
 };
 
 export const zen = {
-  board: (archived = false) => call<{ sessions: BoardSession[]; archived?: number }>('GET', `/api/zen/board${archived ? '?archived=true' : ''}`),
+  /** `jobs: false` leaves job runs out (the archive holds thousands of them). */
+  board: (archived = false, jobs = true) => call<{ sessions: BoardSession[]; archived?: number; archived_jobs?: number }>('GET', `/api/zen/board${archived ? `?archived=true${jobs ? '' : '&jobs=false'}` : ''}`),
   sessions: (archived = false) => call<Session[]>('GET', `/api/zen/sessions?archived=${archived}`),
   session: (id: string, last = 40) => call<SessionDetail>('GET', `/api/zen/sessions/${enc(id)}?last=${last}`),
   create: (b: { title?: string; model?: string; effort?: string; agent?: string } = {}) => call<Session>('POST', '/api/zen/sessions', b),
