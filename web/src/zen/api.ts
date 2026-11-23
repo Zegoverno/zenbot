@@ -211,6 +211,8 @@ export interface MarketEntry {
   categories?: string[];
   /** The installed version, or null. */
   installed: string | null;
+  /** The catalog version strictly outranks the installed version by SemVer. */
+  update_available: boolean;
 }
 export type Install = { needs_approval: true; permissions: string[] } | Plugin;
 /** An MCP `CallToolResult`. */

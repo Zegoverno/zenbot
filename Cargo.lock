@@ -3436,6 +3436,7 @@ dependencies = [
  "libc",
  "libsqlite3-sys",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

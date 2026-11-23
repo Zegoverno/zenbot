@@ -3,7 +3,9 @@ plugins_host() {
   local ws; ws=$(new_workspace plugins)
   local files="$TMP/files" fixture="$REPO/tests/fixtures/plugins/hello"
   mkdir -p "$files"; echo vault-note > "$files/note"
-  start_kernel "$ws" "" "ZEN_PLUGIN_FILES=$files" "ZEN_ASSIST_MODEL=faux/smoke"
+  local market="$TMP/plugin-market.json"
+  echo '{"plugins":[{"name":"hello","version":"0.1.0"}]}' > "$market"
+  start_kernel "$ws" "" "ZEN_PLUGIN_FILES=$files" "ZEN_ASSIST_MODEL=faux/smoke" "ZEN_MARKETPLACE=$market"
   plugin_api() { curl -sS -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
   plugin_call() { plugin_api -d "$(jq -nc --arg tool "$1" --argjson args "$2" '{tool:$tool,arguments:$args}')" "$URL/api/plugins/hello/call"; }
   local body r
@@ -58,6 +60,11 @@ plugins_host() {
   check "upgrade preserves chosen builtin" eq "$(plugin_api "$URL/api/plugins" | jq -r '.defaults["*.hello:read"]')" builtin
   plugin_api -X PUT -d '{"key":"*.hello:read","value":"hello/open"}' "$URL/api/plugins/defaults" >/dev/null
   check "approved upgrade" eq "$(jq -r .version <<<"$r")" 0.2.0
+  check "stale marketplace entry is not offered" jq -e '.plugins[0] | .version == "0.1.0" and .installed == "0.2.0" and .update_available == false' <<<"$(plugin_api "$URL/api/plugins/marketplace")"
+  r=$(plugin_api -w '\n%{http_code}' -d '{"name":"hello","approve":true,"permissions":["files:write:Reading"]}' "$URL/api/plugins/install")
+  check "direct marketplace downgrade is refused before archive fetch" eq "$(tail -1 <<<"$r")" 422
+  check "refusal explains version mismatch" jq -e '.error | contains("not newer than installed 0.2.0")' <<<"$(head -1 <<<"$r")"
+  check "refusal leaves the upgraded plugin installed" eq "$(q "SELECT version FROM plugins WHERE name='hello'")" 0.2.0
   r=$(plugin_call hello_peek "$(jq -nc --arg path "$files/Reading/new" '{path:$path,text:"saved"}')")
   check "scoped write allowed" eq "$(jq -r '.content[0].text' <<<"$r")" written
   r=$(plugin_call hello_peek "$(jq -nc --arg path "$files/note" '{path:$path,text:"overwrite"}')")

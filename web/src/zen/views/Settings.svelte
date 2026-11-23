@@ -132,7 +132,7 @@
   let upd = $state<string | null>(null);
   let removing = $state<string | null>(null);
   let asking = $state<{ entry: MarketEntry; permissions: string[] } | null>(null);
-  const nextOf = (p: Plugin) => { const m = market?.find((x) => x.name === p.name); return m && m.version !== p.version ? m.version : null; };
+  const nextOf = (p: Plugin) => { const m = market?.find((x) => x.name === p.name); return m?.update_available && m.installed === p.version ? m.version : null; };
   const fresh = $derived((market ?? []).filter((m) => !m.installed));
   async function loadMarket() {
     try { market = await pluginApi.marketplace(); marketError = ''; } catch (e) { marketError = (e as Error).message; }

@@ -13,7 +13,8 @@
 //! version equal to the entry's), every `ui` a `ui://<name>/…` URI, only the known slots with their
 //! fields (a command's optional `choices`, its first argument's declared values, included), only
 //! the known permissions, `server.command` `node` with a script inside the plugin.
-//! Nothing is run, and `npm` never is.
+//! Nothing is run, and `npm` never is. The marketplace only replaces an installed version with
+//! a strictly newer one; an explicit local archive or folder can still be used to roll back.
 //!
 //! **Permissions are the owner's.** An install shows what the manifest asks for (`kernel`) and goes
 //! ahead only with `approve` naming exactly that list; an upgrade asking for nothing beyond what
@@ -113,15 +114,15 @@ pub fn valid_name(n: &str) -> bool {
 
 /// Whether `v` is a semantic version (`1.2.3`, `1.2.3-beta.1`, `1.2.3+build`).
 pub fn valid_version(v: &str) -> bool {
-    let (v, build) = v.split_once('+').map_or((v, None), |(a, b)| (a, Some(b)));
-    let (core, pre) = v.split_once('-').map_or((v, None), |(a, b)| (a, Some(b)));
-    let ident = |s: &str| !s.is_empty() && s.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
-    let parts: Vec<&str> = core.split('.').collect();
-    v.len() <= 64
-        && parts.len() == 3
-        && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) && (p.len() == 1 || !p.starts_with('0')))
-        && pre.is_none_or(ident)
-        && build.is_none_or(ident)
+    v.split('+').next().is_some_and(|v| v.len() <= 64) && semver::Version::parse(v).is_ok()
+}
+
+/// Strict SemVer precedence: build metadata doesn't make a release newer.
+fn newer_version(candidate: &str, installed: &str) -> bool {
+    match (semver::Version::parse(candidate), semver::Version::parse(installed)) {
+        (Ok(candidate), Ok(installed)) => candidate.cmp_precedence(&installed).is_gt(),
+        _ => false,
+    }
 }
 
 /// A relative path made only of plain names, none hidden: what a subfolder permission and the
@@ -859,6 +860,17 @@ pub async fn install(db: &SqlitePool, source: Source, approve: Option<Vec<String
             let Some(entry) = market["plugins"].as_array().into_iter().flatten().find(|e| e["name"] == name.as_str()).cloned() else {
                 return refuse(format!("`{name}` isn't in the marketplace"));
             };
+            let candidate = entry["version"].as_str().unwrap_or("");
+            if !valid_version(candidate) {
+                return refuse(format!("the marketplace version for `{name}` is not valid SemVer"));
+            }
+            let installed: Option<String> = sqlx::query_scalar("SELECT version FROM plugins WHERE name = $1")
+                .bind(name).fetch_optional(db).await?;
+            if let Some(installed) = installed {
+                if !newer_version(candidate, &installed) {
+                    return refuse(format!("marketplace `{name}` {candidate} is not newer than installed {installed}"));
+                }
+            }
             let (url, sha) = (entry["archive"].as_str().unwrap_or(""), entry["sha256"].as_str().unwrap_or(""));
             if sha.len() != 64 {
                 return refuse(format!("the marketplace entry for `{name}` has no sha256"));
@@ -1219,12 +1231,14 @@ pub(crate) async fn api_patch(State(app): State<AppState>, UrlPath(name): UrlPat
 }
 
 /// `GET /api/plugins/marketplace`: the marketplace file, each entry with `installed` (its
-/// installed version or null).
+/// installed version or null) and `update_available` (strictly newer than the installed version).
 pub(crate) async fn api_marketplace(State(app): State<AppState>) -> ApiResult<Json<Value>> {
     let mut market = marketplace().await.map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
     let installed: HashMap<String, String> = sqlx::query("SELECT name, version FROM plugins").fetch_all(&app.db).await?.iter().map(|r| (r.get("name"), r.get("version"))).collect();
     for e in market["plugins"].as_array_mut().into_iter().flatten() {
         let v = e["name"].as_str().and_then(|n| installed.get(n)).cloned();
+        e["update_available"] = json!(v.as_deref().zip(e["version"].as_str())
+            .is_some_and(|(installed, candidate)| valid_version(candidate) && newer_version(candidate, installed)));
         e["installed"] = json!(v);
     }
     Ok(Json(market))
@@ -1623,6 +1637,24 @@ mod tests {
         }
         for bad in ["", "1", "1.2", "1.2.3.4", "v1.2.3", "1.02.3", "1.2.3-", "1.2.3-a..b", "1.2.x"] {
             assert!(!valid_version(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn marketplace_update_precedence() {
+        for (candidate, installed, newer) in [
+            ("0.3.0", "0.7.0", false),
+            ("0.7.0", "0.3.0", true),
+            ("0.7.0", "0.7.0", false),
+            ("0.7.0+new", "0.7.0+old", false),
+            ("0.7.0-rc.2", "0.7.0", false),
+            ("0.7.0", "0.7.0-rc.2", true),
+            ("0.7.0-rc.10", "0.7.0-rc.2", true),
+            ("0.10.0", "0.9.0", true),
+            ("0.7.0-01", "0.3.0", false),
+            ("0.7.0", "unknown", false),
+        ] {
+            assert_eq!(newer_version(candidate, installed), newer, "{candidate} vs {installed}");
         }
     }
 
