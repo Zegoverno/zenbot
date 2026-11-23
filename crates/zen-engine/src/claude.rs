@@ -161,7 +161,7 @@ impl Engine for Claude {
     }
 
     fn failover_target(&self) -> Option<String> {
-        Some(std::env::var("ZEN_FAILOVER_CLAUDE_TO_CODEX").unwrap_or_else(|_| "codex/gpt-6.1-sol".into()))
+        Some(std::env::var("ZEN_FAILOVER_CLAUDE_TO_CODEX").unwrap_or_else(|_| "codex/gpt-6.2-sol".into()))
     }
 
     /// No API key or token in the environment (the CLI would prefer it), and `claude auth status`

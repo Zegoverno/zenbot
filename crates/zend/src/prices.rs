@@ -4,7 +4,7 @@
 //!
 //! USD per million tokens: uncached input, cached input, output. The defaults are OpenAI's
 //! standard-tier list prices for prompts up to 272K tokens, as published by aipricing.guru
-//! (verified 2026-10-22) and api.foo (copied from OpenAI's page 2026-10-15); openai.com itself
+//! (verified 2026-10-22; 6.2 from OpenAI's launch post, 2026-11-23) and api.foo (copied from OpenAI's page 2026-10-15); openai.com itself
 //! refuses automated reads. `~/.zenbot/prices.toml` overrides them, a table per model id without
 //! its engine prefix (`[gpt-6.1-sol]` with `input`, `cached`, `output`).
 
@@ -12,6 +12,8 @@ use std::collections::HashMap;
 
 /// (model, input, cached input, output), USD per million tokens.
 const DEFAULTS: &[(&str, f64, f64, f64)] = &[
+    ("gpt-6.2-astra", 8.00, 0.40, 40.00),
+    ("gpt-6.2-sol", 2.00, 0.10, 10.00),
     ("gpt-6.1-sol", 2.00, 0.10, 10.00),
     ("gpt-6-astra", 10.00, 1.00, 50.00),
     ("gpt-6-sol", 2.00, 0.20, 10.00),
