@@ -1101,8 +1101,14 @@ try {
     assert.ok(Math.min(...m.rows) >= 28, `${label}: rows keep their height (${Math.min(...m.rows)}px)`);
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${label}: nothing overflows sideways`);
     if (shots) await page.screenshot({ path: `${shotDir}/slash-menu-${label}.png` });
+    // Keep the pointer over the menu while keyboard scrolling moves rows beneath it.
+    // A stationary pointer must not steal selection from the arrows on mouseenter.
+    const hovered = await slashMenu.getByRole('button').first().boundingBox();
+    await page.mouse.move(hovered.x + hovered.width / 2, hovered.y + hovered.height / 2);
+    const startIndex = await slashMenu.evaluate(el => [...el.querySelectorAll('.item')].findIndex(row => row.classList.contains('on')));
     for (let i = 0; i < count + 3; i++) {
       await box.press('ArrowDown');
+      await untilAsync(() => slashMenu.evaluate((el, expected) => [...el.querySelectorAll('.item')].findIndex(row => row.classList.contains('on')) === expected, (startIndex + i + 1) % count), `${label}: a stationary pointer does not override keyboard selection`);
       const inView = () => slashMenu.evaluate((el) => {
         const on = el.querySelector('.item.on'), a = el.getBoundingClientRect(), b = on?.getBoundingClientRect();
         return !!b && b.top >= a.top - 1 && b.bottom <= a.bottom + 1;

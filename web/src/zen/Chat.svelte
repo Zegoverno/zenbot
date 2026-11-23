@@ -1621,7 +1621,7 @@
       {:else if menu.length && hi < 0}
         <div class="menu up pop" role="listbox" aria-label="commands">
           {#each menu as c, i (c.name)}
-            <button class="mopt item cmd" class:on={i === Math.min(menuSel, menu.length - 1)} onclick={() => runMenu(i)} onmouseenter={() => (menuSel = i)}>
+            <button class="mopt item cmd" class:on={i === Math.min(menuSel, menu.length - 1)} onclick={() => runMenu(i)} onpointermove={(e) => { if (e.movementX || e.movementY) menuSel = i; }}>
               <b>/{c.name}{#if c.args}<em>{c.args}</em>{/if}</b><span>{c.help}</span>
             </button>
           {/each}
