@@ -76,7 +76,7 @@
       {#each jobs as j (j.name)}
         <div class="li" class:off={!j.on} data-job={j.name}>
           <span class="dot {j.last}" title="Last run: {j.last}"></span>
-          <button class="cm" aria-expanded={sel === j.name} title="Past runs" onclick={() => { sel = sel === j.name ? null : j.name; if (sel) void loadRuns(j.name); }}><b>{j.name}</b><span>{j.on ? j.when : 'Paused'}{j.kind === 'script' ? ' · a script' : ''}</span></button>
+          <button class="cm" aria-expanded={sel === j.name} title="Past runs" onclick={() => { sel = sel === j.name ? null : j.name; if (sel) void loadRuns(j.name); }}><b>{j.name}{#if j.plugin}<small class="plugin-tag" title="Plugin: {j.plugin}">{j.plugin}</small>{/if}</b><span>{j.on ? j.when : 'Paused'}{j.kind === 'script' ? ' · a script' : ''}</span></button>
           <button class="pill" onclick={() => runNow(j.name)}>{ran === j.name ? 'Started ✓' : 'Run now'}</button>
           {@render toggle(j.on, () => flip(j.name, !j.on), `${j.name} on or paused`)}
         </div>
@@ -120,6 +120,7 @@
   .dimlist .cm { opacity: 0.8; }
   .cm { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .cm b { font-size: 14px; font-weight: 600; }
+  .plugin-tag { display: inline-block; vertical-align: middle; max-width: 100%; overflow-wrap: anywhere; margin-inline-start: 6px; padding: 1px 6px; border: 1px solid var(--faint); border-radius: 99px; color: var(--accent); font-size: 11px; font-weight: 500; }
   .cm > span { font-size: 12.5px; color: var(--dim); }
   .cm em { color: var(--bad, #b5543c); font-style: normal; font-weight: 600; }
   .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--faint); }

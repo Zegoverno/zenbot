@@ -106,10 +106,12 @@ pub struct Job {
     pub failures: i32,
     /// The agent an agent job runs as (agents.rs): the one that scheduled it, or the owner's pick.
     pub agent: String,
+    /// Explicit plugin provenance, not an execution permission or job kind.
+    pub plugin: Option<String>,
 }
 
 const COLUMNS: &str = "id, name, kind, action, prompt, command, context, skills, schedule, tz, model, workspace, report_file, post_to, enabled, paused_reason, created_by, \
-next_run_at, last_run_at, last_status, last_error, failures, agent";
+next_run_at, last_run_at, last_status, last_error, failures, agent, plugin";
 
 fn job_of(r: &sqlx::sqlite::SqliteRow) -> Job {
     Job {
@@ -136,6 +138,7 @@ fn job_of(r: &sqlx::sqlite::SqliteRow) -> Job {
         last_error: r.get("last_error"),
         failures: r.get("failures"),
         agent: r.get("agent"),
+        plugin: r.get("plugin"),
     }
 }
 
@@ -144,7 +147,7 @@ pub fn job_json(j: &Job) -> Value {
         "name": j.name, "kind": j.kind, "action": j.action, "prompt": j.prompt, "command": j.command, "context": j.context, "skills": j.skills,
         "schedule": j.schedule, "tz": j.tz, "model": j.model, "workspace": j.workspace, "report_file": j.report_file, "post_to": j.post_to, "enabled": j.enabled,
         "paused_reason": j.paused_reason, "created_by": j.created_by, "next_run_at": j.next_run_at, "last_run_at": j.last_run_at,
-        "last_status": j.last_status, "last_error": j.last_error, "failures": j.failures, "agent": j.agent,
+        "last_status": j.last_status, "last_error": j.last_error, "failures": j.failures, "agent": j.agent, "plugin": j.plugin,
     })
 }
 
@@ -209,6 +212,8 @@ pub struct Spec {
     /// The agent an owner's new job runs as (zenbot when missing). A job the agent schedules runs
     /// as that agent, always.
     pub agent: Option<String>,
+    /// The plugin this routine came from; empty on update clears it.
+    pub plugin: Option<String>,
 }
 
 fn strings(v: &Value) -> Option<Vec<String>> {
@@ -235,8 +240,15 @@ impl Spec {
             report_file: v["report_file"].as_str().map(|f| f.trim().to_string()),
             post_to: v["post_to"].as_str().map(|f| f.trim().to_string()),
             agent: s("agent"),
+            plugin: v["plugin"].as_str().map(|p| p.trim().to_string()),
         }
     }
+}
+
+fn checked_plugin(plugin: Option<&str>) -> Result<Option<&str>> {
+    let plugin = plugin.filter(|p| !p.is_empty());
+    anyhow::ensure!(plugin.is_none_or(crate::plugins::valid_name), "plugin must be a plugin name (2–40 lowercase letters, digits or hyphens)");
+    Ok(plugin)
 }
 
 fn valid_name(name: &str) -> Result<()> {
@@ -378,8 +390,8 @@ pub async fn create(app: &AppState, spec: Spec, by: By) -> Result<(Job, Option<S
         anyhow::ensure!(app.routes.lock().await.contains_key(m), "no worker serves model `{m}`");
     }
     let row = sqlx::query(&format!(
-        "INSERT INTO jobs (name, kind, prompt, context, skills, schedule, tz, model, workspace, enabled, created_by, created_in, next_run_at, report_file, post_to, command, agent)
-         VALUES ($1, $14, $2, $3, $4, $5, $6, $7, $8, true, $9, $10, $11, $12, $13, $15, $16) RETURNING {COLUMNS}"
+        "INSERT INTO jobs (name, kind, prompt, context, skills, schedule, tz, model, workspace, enabled, created_by, created_in, next_run_at, report_file, post_to, command, agent, plugin)
+         VALUES ($1, $14, $2, $3, $4, $5, $6, $7, $8, true, $9, $10, $11, $12, $13, $15, $16, $17) RETURNING {COLUMNS}"
     ))
     .bind(&name)
     .bind(&prompt)
@@ -397,6 +409,7 @@ pub async fn create(app: &AppState, spec: Spec, by: By) -> Result<(Job, Option<S
     .bind(kind)
     .bind(&command)
     .bind(&who.name)
+    .bind(checked_plugin(spec.plugin.as_deref())?)
     .fetch_one(&app.db)
     .await
     .map_err(|e| match &e {
@@ -429,6 +442,16 @@ pub async fn update(app: &AppState, name: &str, spec: Spec, by: By) -> Result<(J
     anyhow::ensure!(job.kind != "system", "`{}` is a system job: only pause, resume and run apply", job.name);
     anyhow::ensure!(spec.command.is_none() || job.kind == "script", "`{}` runs a prompt; a script job is a new job with a `command`", job.name);
     ensure_own(app, &job, &by).await?;
+    let plugin = checked_plugin(spec.plugin.as_deref().or(job.plugin.as_deref()))?;
+    // Attribution alone must not recalculate the next run or reset failure backoff.
+    if spec.plugin.is_some() && [spec.prompt.is_none(), spec.command.is_none(), spec.schedule.is_none(),
+        spec.tz.is_none(), spec.context.is_none(), spec.skills.is_none(), spec.model.is_none(),
+        spec.workspace.is_none(), spec.report_file.is_none(), spec.post_to.is_none(), spec.agent.is_none()].into_iter().all(|absent| absent) {
+        let row = sqlx::query(&format!(
+            "UPDATE jobs SET plugin = $2, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = $1 RETURNING {COLUMNS}"
+        )).bind(job.id).bind(plugin).fetch_one(&app.db).await?;
+        return Ok((job_of(&row), job.paused_reason));
+    }
     if spec.command.is_some() {
         ensure_shell(app, &by).await?;
     }
@@ -461,7 +484,7 @@ pub async fn update(app: &AppState, name: &str, spec: Spec, by: By) -> Result<(J
     let paused = job.paused_reason.clone().filter(|_| !job.enabled);
     let row = sqlx::query(&format!(
         "UPDATE jobs SET prompt = $2, context = $3, skills = $4, schedule = $5, tz = $6, model = $7, workspace = COALESCE($8, workspace),
-                next_run_at = $9, report_file = $10, post_to = $11, failures = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'), command = $12
+                next_run_at = $9, report_file = $10, post_to = $11, failures = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'), command = $12, plugin = CASE WHEN $13 THEN $14 ELSE plugin END
          WHERE id = $1 RETURNING {COLUMNS}"
     ))
     .bind(job.id)
@@ -476,6 +499,8 @@ pub async fn update(app: &AppState, name: &str, spec: Spec, by: By) -> Result<(J
     .bind(&report_file)
     .bind(post_to)
     .bind(&command)
+    .bind(spec.plugin.is_some())
+    .bind(plugin)
     .fetch_one(&app.db)
     .await?;
     WAKE.notify_one();
@@ -1139,6 +1164,7 @@ pub fn spec() -> Value {
             "skills": { "type": "array", "items": { "type": "string" }, "description": "Optional: skills loaded into its instructions (domain/name)" },
             "dir": { "type": "string", "description": "Optional: the directory it works in (default: the workspace)" },
             "report_file": { "type": "string", "description": "Optional report file (\"\" clears)" },
+            "plugin": { "type": "string", "description": "Optional plugin name when scheduling a routine from a plugin; empty clears it on update" },
             "post_to": { "type": "string", "description": "Optional: `this` or a session id (\"\" clears)" } },
           "required": ["action"] }
     })

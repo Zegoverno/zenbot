@@ -149,7 +149,7 @@ opt-in, none when missing, since they run as the owner; zenbot's default is all)
 filtered (`agent::specs_for`), `dispatch.rs` refuses any other tool, MCP discovery and calls see
 only its servers, skills come from its folder (then the shared one), `save_skill` writes to its
 folder, and `write`/`edit` never change an `agent.toml` or an agent's `mcp.json`. Settings are read when a turn starts; a
-broken file fails the turn. Subagents (unless zenbot names another agent) and verifiers inherit the parent's agent; a job runs as the
+broken file fails the turn. Subagents (unless zenbot names another agent) and verifiers inherit the parent's agent; a job optionally carries explicit `plugin` provenance (`schedule` or `zen jobs add/set --plugin`), displayed as a separate badge in Routines without changing its agent/script kind or permissions. A provenance-only update preserves its next run and failure backoff. A job runs as the
 agent that scheduled it (the owner may pick one), never another, and an agent other than zenbot
 changes, runs or removes only its own jobs and makes a script job only if it has `bash`. With `bash` an agent can still
 Every agent but zenbot is sandboxed (`sandbox.rs`): `Agent::mounts` lists what it reaches, read-write
