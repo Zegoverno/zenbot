@@ -29,9 +29,9 @@
       "author": "Zegoverno",
       "repository": "https://github.com/Zegoverno/zensudoku",
       "license": "MIT",
-      "version": "0.7.0",
-      "archive": "https://github.com/Zegoverno/zensudoku/releases/download/v0.7.0/zensudoku-0.7.0.tgz",
-      "sha256": "02d067383e055e3007e3d36efa2953f4ee2d47bf4753439fb88ccb5119602f85",
+      "version": "0.7.1",
+      "archive": "https://github.com/Zegoverno/zensudoku/releases/download/v0.7.1/zensudoku-0.7.1.tgz",
+      "sha256": "5ebcab40175a065c359b557bd2f2b9aae9fa704e4b83b80e68d9afb02b7524a8",
       "kernel": [],
       "contributes": [
         "games",
