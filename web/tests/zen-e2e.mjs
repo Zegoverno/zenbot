@@ -1091,7 +1091,10 @@ try {
   await page.getByRole('button', { name: 'Use suggestion' }).click();
   assert.equal(await box.inputValue(), 'Thursday, just me');
   await page.setViewportSize({ width: 1300, height: 850 });
-  await box.fill('');
+  // Clear with keyboard input and wait for the bound composer state, not just the DOM value.
+  await box.press('ControlOrMeta+a');
+  await box.press('Backspace');
+  await page.getByRole('button', { name: 'Tab: use suggestion' }).waitFor();
   await page.locator('.opts button', { hasText: 'Friday' }).click();
   await page.locator('.opts button', { hasText: 'The team' }).click();
   assert.equal(await box.inputValue(), '1. Friday\n2. The team', 'options fill the answer, one row per question');
