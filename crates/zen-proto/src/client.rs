@@ -237,6 +237,8 @@ mod tests {
 
     #[test]
     fn unknown_or_misshapen_events_are_kept_not_rejected() {
+        let queue = json!({ "type": "queue", "items": [{ "id": 3, "text": "then this", "steer": false }] });
+        assert_eq!(Event::from_value(queue.clone()), Event::Other(queue), "the web app's queue list: other clients leave it alone");
         let new = json!({ "type": "brief", "text": "x" });
         assert_eq!(Event::from_value(new.clone()), Event::Other(new));
         let bad = json!({ "type": "suggestion", "id": "not a number" });
