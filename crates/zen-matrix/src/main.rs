@@ -3,7 +3,8 @@
 //! Matrix room is one zen session, and job reports go to the main **zen** room. It answers only the
 //! owner's Matrix ID (`MATRIX_OWNER`), only end-to-end encrypted messages from the owner's
 //! cross-signed devices, and only in encrypted rooms it shares with the owner alone (the rules
-//! are in trust.rs). `!` commands are zen's shared commands (zen_client::commands).
+//! are in trust.rs). `!` commands are zen's shared commands (zen_client::commands). Files the
+//! owner sends are saved to `~/inbox` and their path posted (inbox.rs).
 //!
 //!   zen-matrix login         sign in once: a device, cross-signing and key backup (prints where
 //!                            the recovery key was saved), then the rooms
@@ -14,6 +15,7 @@
 //!
 //! Setup: INSTALL.md, "Matrix".
 
+mod inbox;
 mod kernel;
 mod relay;
 mod state;
@@ -557,7 +559,13 @@ impl Bridge {
         if matches!(ev.content.relates_to, Some(Relation::Replacement(_))) {
             return Ok(()); // an edit: the original already went to zen
         }
-        let MessageType::Text(text) = &ev.content.msgtype else { return Ok(()) };
+        let text = match &ev.content.msgtype {
+            MessageType::Text(text) => text,
+            MessageType::Image(_) | MessageType::File(_) | MessageType::Video(_) | MessageType::Audio(_) => {
+                return self.on_file(&room, &ev.content.msgtype).await;
+            }
+            _ => return Ok(()),
+        };
         let rid = room.room_id().to_owned();
         match relay::parse(&text.body) {
             // An unknown `!word` may be an installed plugin's command: it runs (or lists its choices).
@@ -610,6 +618,55 @@ impl Bridge {
                     }
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// A photo, video, voice note or document from the owner: saved to `~/inbox/<day>/` and its
+    /// path posted in the room, for the owner to point any session at. Without a caption nothing
+    /// goes to the session; with one, the caption is a prompt with the file attached.
+    async fn on_file(self: &Arc<Self>, room: &Room, msg: &MessageType) -> Result<()> {
+        let (kind, name, caption, mime, size) = match msg {
+            MessageType::Image(c) => ("image", c.filename(), c.caption(), c.info.as_ref().and_then(|i| i.mimetype.clone()), c.info.as_ref().and_then(|i| i.size)),
+            MessageType::File(c) => ("file", c.filename(), c.caption(), c.info.as_ref().and_then(|i| i.mimetype.clone()), c.info.as_ref().and_then(|i| i.size)),
+            MessageType::Video(c) => ("video", c.filename(), c.caption(), c.info.as_ref().and_then(|i| i.mimetype.clone()), c.info.as_ref().and_then(|i| i.size)),
+            MessageType::Audio(c) => ("audio", c.filename(), c.caption(), c.info.as_ref().and_then(|i| i.mimetype.clone()), c.info.as_ref().and_then(|i| i.size)),
+            _ => return Ok(()),
+        };
+        if size.is_some_and(|s| u64::from(s) > inbox::MAX_FILE) {
+            self.note(room, &format!("⚠️ That {kind} is over {} MB, too large to save from here.", inbox::MAX_FILE / 1024 / 1024)).await;
+            return Ok(());
+        }
+        let fallback = inbox::fallback_name(kind, mime.as_deref());
+        let name = match inbox::clean_name(name) {
+            Some(n) if n.contains('.') => n,
+            Some(n) => format!("{n}{}", fallback.strip_prefix(kind).unwrap_or("")),
+            None => fallback,
+        };
+        let media = self.client.media();
+        let bytes = match msg {
+            MessageType::Image(c) => media.get_file(c, false).await,
+            MessageType::File(c) => media.get_file(c, false).await,
+            MessageType::Video(c) => media.get_file(c, false).await,
+            MessageType::Audio(c) => media.get_file(c, false).await,
+            _ => return Ok(()),
+        }
+        .context("downloading the file")?
+        .context("the message carries no file")?;
+        let saved = inbox::save(&inbox::dir(), &inbox::today(), &name, &bytes)?;
+        let path = inbox::tilde(&saved);
+        log(format!("saved a {kind} from {} to {}", room.room_id(), saved.display()));
+        let rid = room.room_id().to_owned();
+        let caption = caption.map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
+        let Some(caption) = caption else {
+            self.note(room, &format!("📎 Saved `{path}`")).await;
+            return Ok(());
+        };
+        self.note(room, &format!("📎 Saved `{path}`, sent with its caption.")).await;
+        let link = self.link(room).await?;
+        if link.send(Cmd::Prompt { text: inbox::with_attachments(&caption, std::slice::from_ref(&path)), steer: false }).is_err() {
+            self.links.lock().await.remove(&rid);
+            bail!("lost the link to the session; send the caption again");
         }
         Ok(())
     }

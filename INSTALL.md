@@ -86,7 +86,9 @@ of the kernel like `zen`.
 
 Each room is a session; **zen** is always up. Write to prompt; `!new [title]` opens a new room,
 `!steer`, `!stop`, `!session`, and every shared command (`!help` lists them: `!model`, `!jobs`, …).
-Job reports post to **zen**. The bridge answers only `MATRIX_OWNER`'s end-to-end encrypted messages
+Photos, videos, voice notes and files you send are saved to `~/inbox/<day>/` and the room
+replies with the path, for you to point any session at; with a caption, the caption goes to the
+room's session as a prompt with the file attached. Job reports post to **zen**. The bridge answers only `MATRIX_OWNER`'s end-to-end encrypted messages
 from cross-signed devices, in encrypted rooms shared with the owner alone, and pins the owner's
 identity (`zen-matrix repin-owner` after the owner resets it, with the service stopped).
 `scripts/upgrade.sh` rebuilds an enabled bridge when its sources change.
