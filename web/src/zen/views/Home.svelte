@@ -10,6 +10,7 @@
   // j/k walk its rows (the cursor), Enter opens a row; m is arrange mode: ← and → move the widget
   // earlier or later, h hides it, Esc leaves. The ring borrows the global actions (New chat…).
   import { onMount } from 'svelte';
+  import { onTopic } from '../events.svelte.ts';
   import { failing, routines } from './routinestore.svelte.ts';
   import { me, board, agents, getPrefs, patchPrefs, when as ago } from '../live.svelte.ts';
   import { files } from '../api.ts';
@@ -112,12 +113,18 @@
   /** Plugin cards already offered once (put on the board when first seen; hidden ones stay hidden). */
   let seen = $state<string[] | null>(null);
   onMount(() => {
-    getPrefs()
-      .then((p) => {
-        if (p.home_layout !== undefined && p.home_layout !== null) layout = layoutOf(p.home_layout);
-        seen = Array.isArray(p.home_seen) ? p.home_seen.filter((x: unknown): x is string => typeof x === 'string') : [];
-      })
-      .catch(() => {});
+    const prefs = () =>
+      getPrefs()
+        .then((p) => {
+          if (!edit && p.home_layout !== undefined && p.home_layout !== null) layout = layoutOf(p.home_layout);
+          // Plugin cards already offered: read once; later changes are this page's own writes.
+          if (seen === null) seen = Array.isArray(p.home_seen) ? p.home_seen.filter((x: unknown): x is string => typeof x === 'string') : [];
+        })
+        .catch(() => {});
+    void prefs();
+    // Live: the layout (not while it's being edited here) and the vault's latest files.
+    const offs = [onTopic('prefs', prefs), onTopic('files', () => { if (app.vault && layout.some((s) => kind(s) === 'files')) void loadFiles(); })];
+    return () => offs.forEach((off) => off());
   });
   $effect(() => {
     if (seen === null || !plugins.loaded) return;

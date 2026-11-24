@@ -5,7 +5,7 @@
 // a marketplace, installs, and a fixture UI built on the real MCP Apps `App`.
 // `node tests/zen-e2e.mjs [--shots]`.
 import { execFileSync, spawn } from 'node:child_process';
-import { createServer } from 'node:http';
+import http, { createServer } from 'node:http';
 import net from 'node:net';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -205,6 +205,9 @@ const json = (res, body, status = 200) => {
   res.writeHead(status, { 'content-type': 'application/json' });
   res.end(JSON.stringify(body));
 };
+/** The pages' change streams (live.rs's GET /api/events, through the server's events.ts). */
+const eventClients = new Set();
+const pushEvent = (ev) => { for (const c of eventClients) c.write(`data: ${JSON.stringify(ev)}\n\n`); };
 const kernel = createServer(async (req, res) => {
   assert.equal(req.headers.authorization, 'Bearer test-token');
   const u = new URL(req.url, 'http://k');
@@ -212,6 +215,13 @@ const kernel = createServer(async (req, res) => {
   let raw = '';
   for await (const c of req) raw += c;
   const body = raw ? JSON.parse(raw) : {};
+  if (r === 'GET /api/events') {
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' });
+    res.write('data: {"topic":"hello"}\n\n');
+    eventClients.add(res);
+    res.on('close', () => eventClients.delete(res));
+    return;
+  }
   if (r === 'GET /api/board') {
     // Archived sessions (a plain one and a job, like vault-sync) come only when asked for; job runs
     // are left out with jobs=false.
@@ -809,6 +819,54 @@ try {
   assert.ok(await menuItem('New file').isDisabled(), 'no new files outside the vault');
   await folderMenu.click();
   await page.getByRole('button', { name: /Vault/ }).last().click();
+
+  // Live: what the kernel announces on its change stream shows in the open view, no reload
+  // (live.rs → server/events.ts → events.svelte.ts); and the vault's file changes too (`files`).
+  {
+    // The stream through the server: topics only, never the token; another site may not read it.
+    const peek = await new Promise((resolve, reject) => {
+      const rq = http.get(`${base}/api/events`, (rs) => { let t = ''; rs.on('data', (c) => (t += c)); setTimeout(() => { rs.destroy(); resolve({ status: rs.statusCode, type: rs.headers['content-type'], text: t }); }, 400); });
+      rq.on('error', reject);
+    });
+    assert.equal(peek.status, 200);
+    assert.match(peek.type, /text\/event-stream/);
+    assert.match(peek.text, /"topic":"hello"/);
+    assert.ok(!peek.text.includes('test-token'), 'the stream never carries the token');
+    const cross = await new Promise((resolve, reject) => {
+      const rq = http.get(`${base}/api/events`, { headers: { 'sec-fetch-site': 'cross-site', origin: 'https://evil.example' } }, (rs) => { rs.resume(); resolve(rs.statusCode); });
+      rq.on('error', reject);
+    });
+    assert.equal(cross, 403, 'another site may not read the change stream');
+
+    await page.goto(`${base}/?view=agents`);
+    const scout = page.locator('.role .rh', { hasText: 'scout' }).locator('.chip');
+    await scout.waitFor();
+    assert.match(await scout.innerText(), /haiku/i);
+    await page.evaluate(() => (window.__sameLoad = true));
+    const was = agentRoles.zenbot.roles[0].model;
+    agentRoles.zenbot.roles[0].model = 'claude/live-swap-9';
+    // Pushed until it lands: the page's stream may still be connecting.
+    await untilAsync(async () => { pushEvent({ topic: 'agents', id: 'zenbot' }); return /live-swap-9/.test(await scout.innerText()); }, "a role's new model shows when the kernel says agents changed");
+    assert.equal(await page.evaluate(() => window.__sameLoad), true, 'without a reload');
+    agentRoles.zenbot.roles[0].model = was;
+
+    const grace = path.join(VAULT, 'wiki/Grace.md');
+    const graceText = readFileSync(grace, 'utf8');
+    await page.goto(`${base}/?view=files&file=${encodeURIComponent(grace)}`);
+    await page.getByText('A gift.').waitFor();
+    await page.evaluate(() => (window.__sameLoad = true));
+    writeFileSync(grace, graceText.replace('A gift.', 'A gift, freely given.'));
+    await page.getByText('A gift, freely given.').waitFor({ timeout: 10_000 });
+    assert.equal(await page.evaluate(() => window.__sameLoad), true, 'the open note is re-read in place');
+    writeFileSync(grace, graceText);
+    await page.getByText('A gift.', { exact: true }).waitFor({ timeout: 10_000 });
+    await page.goto(`${base}/?view=files`);
+    await page.locator('.pane.view').getByText('wiki', { exact: true }).first().click();
+    await page.locator('.pane.view').getByText('Atlas.md').first().waitFor();
+    writeFileSync(path.join(VAULT, 'wiki/Live.md'), '# Live\n');
+    await page.locator('.pane.view').getByText('Live.md').first().waitFor({ timeout: 10_000 });
+    rmSync(path.join(VAULT, 'wiki/Live.md'));
+  }
 
   // Agents and Settings: the agents' list, and Settings off the agent menu.
   await page.goto(`${base}/`);

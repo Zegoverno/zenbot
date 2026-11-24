@@ -16,14 +16,20 @@ export const plugins = $state({
   error: '',
 });
 
+let lastSeen = '';
 export async function loadPlugins() {
   try {
     const r = await pluginApi.list();
-    plugins.list = r.plugins ?? [];
-    plugins.defaults = r.defaults ?? {};
+    // Refetched on every live event and resync: only a real change re-renders and re-reads commands.
+    const seen = JSON.stringify([r.plugins ?? [], r.defaults ?? {}]);
+    if (seen !== lastSeen || plugins.error) {
+      lastSeen = seen;
+      plugins.list = r.plugins ?? [];
+      plugins.defaults = r.defaults ?? {};
+      plugins.revision++;
+      prefetchUi();
+    }
     plugins.error = '';
-    plugins.revision++;
-    prefetchUi();
   } catch (e) {
     plugins.error = (e as Error).message;
   } finally {

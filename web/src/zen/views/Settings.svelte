@@ -5,7 +5,8 @@
   // plugin needs before anything is installed), Memory and Updates (version, release notes, the
   // upgrade). Adding things (a connection, a routine) opens a chat with zenbot, which knows how.
   // (The redesign mock's Settings, on the kernel's API.)
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
+  import { onTopic } from '../events.svelte.ts';
   import { zen, pluginApi, type MarketEntry, type Plugin } from '../api.ts';
   import { me, setName, patchPrefs, models, modelOf, loadModels, agents, EFFORT } from '../live.svelte.ts';
   import { loadPlugins, permissionWords, plugins as host } from '../plugins.svelte.ts';
@@ -203,6 +204,20 @@
   const at = (iso?: string) => (iso ? new Date(iso).toLocaleTimeString('en-GB', { hour: 'numeric', minute: '2-digit' }) : '');
   const dayOf = (d: string) => { const x = new Date(d + 'T12:00:00'); return isNaN(+x) ? d : x.toLocaleDateString('en', { month: 'short', day: 'numeric' }); };
 
+  function userStat() {
+    fetch(`/api/fs/stat?path=${encodeURIComponent('~/.zenbot/USER.md')}`).then((r) => r.json()).then((s: { mtime?: number }) => { if (s.mtime) userUpdated = new Date(s.mtime).toLocaleDateString('en', { month: 'short', day: 'numeric' }); }).catch(() => {});
+  }
+  // Preferences changed elsewhere (another tab, an agent) show here, unless this field was being
+  // changed: a draft that differs from what was last loaded is kept.
+  let lastFull = me.full;
+  $effect(() => {
+    const f = me.full;
+    untrack(() => { if (nameDraft === lastFull || !nameDraft) nameDraft = f; lastFull = f; });
+  });
+  $effect(() => {
+    const m = me.defaultModel, e = me.defaultEffort;
+    untrack(() => { if (m) defModel = m; defEffort = e ?? ''; });
+  });
   onMount(() => {
     defModel = me.defaultModel || models.default;
     defEffort = me.defaultEffort ?? '';
@@ -211,8 +226,16 @@
     call<typeof mcp>('mcp').then((v) => (mcp = v)).catch(() => {});
     call<typeof mem>('memory').then((v) => (mem = v)).catch(() => {});
     void check();
-    fetch(`/api/fs/stat?path=${encodeURIComponent('~/.zenbot/USER.md')}`).then((r) => r.json()).then((s: { mtime?: number }) => { if (s.mtime) userUpdated = new Date(s.mtime).toLocaleDateString('en', { month: 'short', day: 'numeric' }); }).catch(() => {});
-    return () => { alive = false; clearTimeout(timer); };
+    userStat();
+    // Live: each section refetches when its topic changes (an open USER.md edit is left alone).
+    const offs = [
+      onTopic('models', refreshEngines),
+      onTopic('mcp', () => call<typeof mcp>('mcp').then((v) => (mcp = v)).catch(() => {})),
+      onTopic('memory', () => call<typeof mem>('memory').then((v) => (mem = v)).catch(() => {})),
+      onTopic('version', () => check()),
+      onTopic('prefs', userStat),
+    ];
+    return () => { alive = false; clearTimeout(timer); offs.forEach((off) => off()); };
   });
   $effect(() => { if (!defModel && models.default) defModel = me.defaultModel || models.default; });
 </script>
