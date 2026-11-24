@@ -25,7 +25,7 @@
   import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
   import { pluginApi, type ToolResult } from './api.ts';
   import { app, openFile, closeFile, setView, openSession, notice, textField, type Pane } from './app.svelte.ts';
-  import { chat, contextImages, keepContextSaving, resultText } from './plugins.svelte.ts';
+  import { chat, contextImages, keepContextSaving, resultText, uiResource } from './plugins.svelte.ts';
   import { SANDBOX, validCommands, validKeyEvent, webLink, withCsp, zenNavigation } from './frame.ts';
   import { routines as jobs } from './views/routinestore.svelte.ts';
   import { dispatch, focused, focusPane, register, ui as keys, unregister, type PanelKind } from './keys.svelte.ts';
@@ -175,7 +175,7 @@
     darkQuery.addEventListener('change', theme);
     (async () => {
       try {
-        const res = await pluginApi.resource(plugin, ui);
+        const res = await uiResource(plugin, ui);
         if (gone || !frame?.contentWindow) return;
         const csp = res._meta?.ui?.csp;
         const b = new AppBridge(
