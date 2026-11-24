@@ -582,6 +582,7 @@
       try {
         const s = await zen.create({ ...(modelPinned ? { model } : {}), ...(effort ? { effort } : {}), ...(agent !== 'zenbot' ? { agent } : {}) });
         M.handOver({ id: s.id, text, message });
+        M.saveDraft('new', ''); // sent: the next new chat starts blank
         input = '';
         attachments = attachments.filter((a) => !sent.includes(a.id));
         sessionStarted(s.id);
