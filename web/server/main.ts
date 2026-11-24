@@ -1,7 +1,8 @@
 // zen's web server: serves the page, reads and writes notes in one folder (the vault), shows the
 // file system (`home.ts`: reads from / down without secrets, plus new files and folders and renames
 // in the vault, never over anything),
-// relays the zen kernel (`zen.ts`), runs zen's kernel commands (`commands.ts`) and takes chat
+// relays the zen kernel (`zen.ts`) and its change stream, merged with the vault's file changes
+// (`events.ts`, `/api/events`), runs zen's kernel commands (`commands.ts`) and takes chat
 // attachments into `~/inbox` (`uploads.ts`), and shows dev servers under `/preview/<port>/` for the
 // Preview tab (`preview.ts`), with its pins' screenshots taken here (`shot.ts`) and its list of
 // dev servers, which can be stopped and restarted (`servers.ts`).
@@ -22,6 +23,8 @@
 //   `/system.slice/`), zen's own ports and this server's own unit are never listed or touched:
 //   a port that isn't listed answers 404, and a pid never comes from the client.
 // - The kernel token is read here for authenticated relays and never sent to the page.
+// - The change stream (`events.ts`) carries only topics and vault-relative paths, and refuses
+//   requests another site started (`Sec-Fetch-Site`, `Origin`).
 //
 // Run with Node's own type stripping: `node server/main.ts` (`--dev` serves the page from Vite;
 // `ZEN_WEB_DEV_HOSTS`, comma-separated, are the host names Vite accepts besides localhost).
@@ -32,6 +35,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { hash, HttpError, locked, readText, resolvePath as inRoot, writeAtomic } from './files.ts';
 import * as zen from './zen.ts';
+import * as events from './events.ts';
 import * as home from './home.ts';
 import * as commands from './commands.ts';
 import * as uploads from './uploads.ts';
@@ -78,6 +82,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
   const method = req.method ?? 'GET';
   if (method !== 'GET' && req.headers['x-zen-web'] !== '1') throw new HttpError(403, 'missing X-Zen-Web header');
   if (url.pathname.startsWith('/api/zen/')) return zen.proxy(req, res, url);
+  if (method === 'GET' && url.pathname === '/api/events') return events.handle(req, res, ROOT, zen.kernelEvents);
   const q = (k: string) => url.searchParams.get(k);
   switch (`${method} ${url.pathname}`) {
     case 'GET /api/fs/list':
