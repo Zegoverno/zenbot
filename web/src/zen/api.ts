@@ -193,6 +193,9 @@ export interface Plugin {
   contributes: { views?: PluginView[]; openers?: PluginOpener[]; games?: PluginGame[]; widgets?: PluginWidget[]; commands?: PluginCommand[] };
   permissions: string[];
   enabled: boolean;
+  /** When it was installed and last changed (an install, an update, a switch). */
+  installed_at?: string;
+  updated_at?: string;
   /** The owner's AI switch (only matters with the `ai` permission): off refuses its completions. */
   ai_enabled?: boolean;
   /** Its answered completions (sampling) in the last 30 days. */
@@ -235,7 +238,9 @@ export const pluginApi = {
   },
   install: (name: string, approve?: string[]) =>
     call<Install>('POST', '/api/zen/plugins/install', approve ? { name, approve: true, permissions: approve } : { name }),
-  resource: (name: string, uri: string) => call<UiResource>('GET', `/api/zen/plugins/${enc(name)}/resource?uri=${enc(uri)}`),
+  /** `v` (the plugin's version and change time) makes the answer cacheable by the browser. */
+  resource: (name: string, uri: string, v?: string) =>
+    call<UiResource>('GET', `/api/zen/plugins/${enc(name)}/resource?uri=${enc(uri)}${v ? `&v=${enc(v)}` : ''}`),
   call: (name: string, tool: string, args: Record<string, unknown>, session?: string | null) =>
     call<ToolResult>('POST', `/api/zen/plugins/${enc(name)}/call`, { tool, arguments: args, ...(session ? { session } : {}) }),
 };

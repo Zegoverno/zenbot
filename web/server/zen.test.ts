@@ -3,7 +3,8 @@ import { promises as fs, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { IncomingMessage } from 'node:http';
-import { allowed, sameOrigin } from './zen.ts';
+import { gunzipSync } from 'node:zlib';
+import { allowed, sameOrigin, send } from './zen.ts';
 import { list, run } from './commands.ts';
 
 describe('kernel proxy', () => {
@@ -57,6 +58,23 @@ describe('kernel proxy', () => {
     expect(allowed('DELETE', 'plugins')).toBe(false);
     for (const bad of ['Zen', 'z', '..', 'zen_read', 'zen.read', `a${'b'.repeat(40)}`, 'zenread/../x'])
       expect(allowed('POST', `plugins/${bad}/call`), bad).toBe(false);
+  });
+
+  it('gzips large answers for browsers that accept it, and only those', async () => {
+    const answer = async (accept: string | undefined, body: Buffer) => {
+      const out: { status?: number; headers?: Record<string, string>; body?: Buffer } = {};
+      const res = { writeHead: (s: number, h: Record<string, string>) => { out.status = s; out.headers = h; }, end: (b: Buffer) => { out.body = b; } };
+      await send({ headers: accept ? { 'accept-encoding': accept } : {} } as unknown as IncomingMessage, res as never, 200, { 'cache-control': 'no-store' }, body);
+      return out;
+    };
+    const big = Buffer.from(JSON.stringify({ text: '<script>'.repeat(5000) }));
+    const z = await answer('gzip, deflate, br', big);
+    expect(z.headers?.['content-encoding']).toBe('gzip');
+    expect(z.headers?.vary).toBe('accept-encoding');
+    expect(z.body!.length).toBeLessThan(big.length / 10);
+    expect(gunzipSync(z.body!).equals(big)).toBe(true);
+    expect((await answer(undefined, big)).headers?.['content-encoding']).toBeUndefined();
+    expect((await answer('gzip', Buffer.from('{}'))).headers?.['content-encoding']).toBeUndefined();
   });
 
   it('opens a session socket only for pages of this site', () => {

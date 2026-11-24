@@ -5,7 +5,7 @@
 // Plugins reach the owner's files through the kernel, under the vault (`ZEN_PLUGIN_FILES`), so a
 // plugin sees vault-relative paths and openers apply only to vault files.
 
-import { pluginApi, upload, type OpenerDefaults, type Plugin, type PluginGame, type PluginWidget, type PluginOpener, type PluginView, type ToolResult } from './api.ts';
+import { pluginApi, upload, type UiResource, type OpenerDefaults, type Plugin, type PluginGame, type PluginWidget, type PluginOpener, type PluginView, type ToolResult } from './api.ts';
 import { app, openTab, tilde } from './app.svelte.ts';
 
 export const plugins = $state({
@@ -23,6 +23,7 @@ export async function loadPlugins() {
     plugins.defaults = r.defaults ?? {};
     plugins.error = '';
     plugins.revision++;
+    prefetchUi();
   } catch (e) {
     plugins.error = (e as Error).message;
   } finally {
@@ -31,6 +32,55 @@ export async function loadPlugins() {
 }
 
 const enabled = () => plugins.list.filter((p) => p.enabled);
+
+// ---- UI resources ----
+// A plugin's `ui://` HTML is static for an installed version (MCP Apps: data comes through tool
+// calls), and large (0.5–2 MB). So the page keeps each one in memory, keyed by the plugin's version
+// and change time, and fetches them all in the background once the list loads: a plugin frame then
+// mounts with no network trip, the way core views do. An install, update or switch changes the key.
+
+const uiCache = new Map<string, Promise<UiResource>>();
+/** What makes a plugin's UI current: its version and when it last changed. */
+const stamp = (name: string) => {
+  const p = plugins.list.find((x) => x.name === name);
+  return p ? `${p.version}@${p.updated_at ?? p.installed_at ?? ''}` : '';
+};
+
+/** A plugin's UI resource, from memory when it can be. */
+export function uiResource(plugin: string, uri: string): Promise<UiResource> {
+  const v = stamp(plugin);
+  const key = `${plugin}\n${v}\n${uri}`;
+  let r = uiCache.get(key);
+  if (!r) {
+    r = pluginApi.resource(plugin, uri, v || undefined);
+    r.catch(() => uiCache.delete(key));
+    uiCache.set(key, r);
+  }
+  return r;
+}
+
+/** Every `ui://` resource the enabled plugins contribute. */
+function uiResources(): [string, string][] {
+  const seen = new Set<string>();
+  const out: [string, string][] = [];
+  for (const p of enabled()) {
+    const c = p.contributes;
+    for (const ui of [...(c.widgets ?? []), ...(c.views ?? []), ...(c.games ?? []), ...(c.openers ?? [])].map((x) => x.ui)) {
+      if (ui && !seen.has(`${p.name} ${ui}`)) { seen.add(`${p.name} ${ui}`); out.push([p.name, ui]); }
+    }
+  }
+  return out;
+}
+
+/** Drops the UIs of old versions and fetches the current ones, one at a time, when the page is idle. */
+function prefetchUi() {
+  const current = new Set(uiResources().map(([n, u]) => `${n}\n${stamp(n)}\n${u}`));
+  for (const k of uiCache.keys()) if (!current.has(k)) uiCache.delete(k);
+  const idle = (f: () => void) => ('requestIdleCallback' in window ? requestIdleCallback(f, { timeout: 2000 }) : setTimeout(f, 300));
+  idle(async () => {
+    for (const [n, u] of uiResources()) await uiResource(n, u).catch(() => {});
+  });
+}
 
 /** A plugin view's tab id. */
 export const viewId = (plugin: string, id: string) => `plugin:${plugin}/${id}`;

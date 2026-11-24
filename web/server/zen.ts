@@ -8,6 +8,9 @@
 //   socket, with `Authorization` added to the upgrade request (a browser can't set that header on
 //   a WebSocket). The upgrade must come from this site (`Origin` matches `Host`): without that
 //   check any page could open the socket with the owner's login cookie and drive a session.
+// - Answers of 1 KB or more go gzipped when the browser accepts it: a plugin's UI resource is
+//   0.5–2 MB of HTML, a phone feels every byte. A UI resource asked with `v` (the plugin's version
+//   and change time, set by the page) may stay in the browser's cache: a new install changes `v`.
 
 import net from 'node:net';
 import { promises as fs } from 'node:fs';
@@ -15,6 +18,8 @@ import os from 'node:os';
 import path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Duplex } from 'node:stream';
+import { promisify } from 'node:util';
+import zlib from 'node:zlib';
 import { HttpError } from './files.ts';
 
 const ZEN_URL = new URL(process.env.ZEN_URL ?? 'http://127.0.0.1:8100');
@@ -94,8 +99,26 @@ export async function proxy(req: IncomingMessage, res: ServerResponse, url: URL)
   } catch (e) {
     throw new HttpError(502, `zen kernel unreachable: ${e instanceof Error ? e.message : e}`);
   }
-  res.writeHead(answer.status, { 'content-type': answer.headers.get('content-type') ?? 'application/json', 'cache-control': 'no-store' });
-  res.end(Buffer.from(await answer.arrayBuffer()));
+  const versioned = answer.ok && method === 'GET' && RESOURCE.test(route) && url.searchParams.has('v');
+  await send(req, res, answer.status, {
+    'content-type': answer.headers.get('content-type') ?? 'application/json',
+    'cache-control': versioned ? 'private, max-age=604800' : 'no-store',
+  }, Buffer.from(await answer.arrayBuffer()));
+}
+
+const RESOURCE = new RegExp(`^plugins/${PLUGIN}/resource$`);
+const gzip = promisify(zlib.gzip);
+
+/** Writes an answer, gzipped when it is worth it and the browser accepts it. */
+export async function send(req: IncomingMessage, res: ServerResponse, status: number, headers: Record<string, string>, body: Buffer) {
+  if (body.length >= 1024 && /\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''))) {
+    const z = await gzip(body, { level: 6 });
+    res.writeHead(status, { ...headers, 'content-encoding': 'gzip', vary: 'accept-encoding', 'content-length': String(z.length) });
+    res.end(z);
+    return;
+  }
+  res.writeHead(status, { ...headers, 'content-length': String(body.length) });
+  res.end(body);
 }
 
 const WS_PATH = new RegExp(`^/api/zen/sessions/(${ID})/ws$`);
