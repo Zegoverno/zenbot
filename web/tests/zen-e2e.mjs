@@ -110,13 +110,13 @@ const saves = [];
 const bundle = readFileSync(path.join(ROOT, 'node_modules/@modelcontextprotocol/ext-apps/dist/src/app-with-deps.js'), 'utf8')
   .replace(/export\s*\{([^}]*)\};?\s*$/, (_, list) => `window.__ext={${list.split(',').map((x) => { const [a, b] = x.trim().split(/\s+as\s+/); return `${b ?? a}:${a}`; }).join(',')}};`);
 const FIXTURE = `<!doctype html><script>window.earlyBlocked = false; addEventListener('securitypolicyviolation', (e) => { if (e.blockedURI === 'https://forbidden.example/early.js') window.earlyBlocked = true; });</script><script src="https://forbidden.example/early.js"></script><!-- <head> --><html><head><meta charset="utf-8"><title>fx</title></head><body>
-<p id="ctx">starting</p><p id="out"></p>
+<p id="ctx">starting</p><p id="jobs"></p><p id="out"></p>
 <button id="edit">Edit Grace</button> <button id="close">Close file</button> <button id="roll">Roll</button> <button id="open">Open Grace</button> <button id="say">Say</button> <button id="pin">Pin</button>
 <script type="module">${bundle}
 const { App } = window.__ext;
 const app = new App({ name: 'fx', version: '1.0.0' });
 const $ = (id) => document.getElementById(id);
-const show = () => { const c = app.getHostContext() ?? {}; $('ctx').textContent = 'slot=' + c.zen?.slot + ' pane=' + c.zen?.pane + ' path=' + (c.zen?.path ?? '-') + ' theme=' + c.theme; };
+const show = () => { const c = app.getHostContext() ?? {}; $('ctx').textContent = 'slot=' + c.zen?.slot + ' pane=' + c.zen?.pane + ' path=' + (c.zen?.path ?? '-') + ' theme=' + c.theme; $('jobs').textContent = 'routines=' + (c.zen?.routines ?? []).map((r) => r.name + ':' + r.state).join(','); };
 app.onhostcontextchanged = show;
 app.ontoolresult = (r) => { $('out').textContent = 'result: ' + (r.content?.[0]?.text ?? ''); };
 app.fallbackNotificationHandler = async (n) => {
@@ -153,6 +153,7 @@ const fxPlugin = {
     views: [{ id: 'board', title: 'Fx board', ui: 'ui://zenfx/app' }],
     openers: [{ id: 'read', title: 'Fx read', ui: 'ui://zenfx/app', patterns: ['*.fx', 'fxnote-*.md'], mode: 'read' }],
     games: [{ id: 'dice', title: 'Dice', description: 'Roll a die.', ui: 'ui://zenfx/app' }],
+    widgets: [{ id: 'today', title: 'Fx today', description: 'What the fixture does today.', ui: 'ui://zenfx/app', size: 2 }],
     commands: [{ name: 'roll', tool: 'zenfx_roll', args: '<sides>', description: 'Roll a die.' },
       { name: 'desk', tool: 'zenfx_desk', args: '<action> [rest]', description: 'Work on the desk.', choices: [{ value: 'lint', description: 'Check the desk.' }, { value: 'find', description: 'Search the desk.', then: '<words>' }] }],
   },
@@ -254,6 +255,13 @@ const kernel = createServer(async (req, res) => {
     Object.assign(agents.get(name), body);
     return json(res, agentDetail(name));
   }
+  // A session left waiting on an `ask` (the tool call as the tape stores it, its result after it).
+  if (r === 'GET /api/sessions/s3')
+    return json(res, { ...session('s3', 'Pick a date'), busy: false, tokens: 10, message_count: 3, messages: [
+      { role: 'user', content: 'Book the dinner', seq: 1 },
+      { role: 'assistant', content: [{ type: 'text', text: 'One thing first.' }, { type: 'toolCall', id: 'q1', name: 'mcp__zen__ask', arguments: { questions: [{ question: 'Which evening?', options: ['Friday', 'Saturday'] }] } }], seq: 2 },
+      { role: 'toolResult', toolCallId: 'q1', toolName: 'mcp__zen__ask', content: [{ type: 'text', text: 'The questions are shown to the owner.' }], isError: false, seq: 3 },
+    ] });
   if (r === 'GET /api/sessions/s1')
     return json(res, { ...session('s1', 'Plan the week'), busy: false, tokens: 1200, message_count: 2, messages: [
       { role: 'user', content: 'What is on today?', seq: 1 },
@@ -402,8 +410,11 @@ kernel.on('upgrade', (req, socket) => {
     if (m.text === 'Ask me') {
       send({ type: 'message', message: { role: 'user', content: m.text } });
       send({ type: 'busy', busy: true, model: 'faux/smoke' });
-      send({ type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'Two questions.' }] } });
-      send({ type: 'questions', questions: [{ question: 'Which day?', options: ['Thursday', 'Friday'] }, { question: 'Who comes?', options: ['Just me', 'The team'] }] });
+      // As the kernel sends it: the message with the `ask` call, then the live questions event, then the call's result.
+      const qs = [{ question: 'Which day?', options: ['Thursday', 'Friday'] }, { question: 'Who comes?', options: ['Just me', 'The team'] }];
+      send({ type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'Two questions.' }, { type: 'toolCall', id: 'a1', name: 'ask', arguments: { questions: qs } }] } });
+      send({ type: 'questions', questions: qs });
+      send({ type: 'message', message: { role: 'toolResult', toolCallId: 'a1', toolName: 'ask', content: [{ type: 'text', text: 'The questions are shown to the owner.' }], isError: false } });
       send({ type: 'end', error: null, turn: { input_tokens: 1, output_tokens: 1 }, next: false });
       send({ type: 'idle' });
       send({ type: 'suggestion', id: 'sg1', text: 'Thursday, just me' });
@@ -579,6 +590,26 @@ try {
   await page.getByRole('heading', { name: /Good (morning|afternoon|evening)/ }).waitFor();
   await page.getByRole('button', { name: /Plan the week/ }).first().click();
   await page.waitForURL(/\?s=s1/);
+  // A plugin's Home card: put on the board once by itself, its app told it is a widget and given
+  // only its own plugin's routines; hidden, it stays off.
+  routineJobs.push(job('fx-roll', { plugin: 'zenfx', schedule: '0 7 * * *', next_run_at: ago(-300), last_status: 'ok' }));
+  await page.goto(`${base}/`);
+  const fxCard = page.locator('.wd', { hasText: 'Fx today' });
+  await fxCard.waitFor();
+  const cardFrame = page.frameLocator('.wd iframe[data-plugin="zenfx"]');
+  await cardFrame.locator('#ctx', { hasText: 'slot=widget pane=board' }).waitFor();
+  assert.equal(await cardFrame.locator('#jobs').textContent(), 'routines=fx-roll:active', "the card gets its plugin's routines and no one else's");
+  await until(() => Array.isArray(prefs.home_seen) && prefs.home_seen.includes('plugin:zenfx/today'), 'the card is remembered as offered');
+  assert.ok(prefs.home_layout.some((x) => x.id === 'plugin:zenfx/today' && x.size === 2), 'the card is on the saved board at its asked size');
+  if (shots) await page.screenshot({ path: 'tests/shots/zen-home-plugin-card.png' });
+  await page.getByRole('button', { name: 'Customize' }).click();
+  await fxCard.getByTitle('Hide this widget').click();
+  await page.getByRole('button', { name: /Done/ }).click();
+  await page.reload();
+  await page.getByRole('heading', { name: /Good (morning|afternoon|evening)/ }).waitFor();
+  await new Promise((ok) => setTimeout(ok, 300));
+  assert.equal(await fxCard.count(), 0, 'a hidden plugin card is not put back');
+  routineJobs.pop();
   // Home › Recent files opens the file in Files.
   writeFileSync(path.join(VAULT, 'Inbox.md'), '# Inbox\n\nLoose ends.\n');
   prefs.home_layout = [{ id: 'files', size: 1 }];
@@ -1149,6 +1180,12 @@ try {
   await draftBox.waitFor();
   assert.equal(await draftBox.inputValue(), '', 'a sent first prompt does not come back in the next new chat');
 
+  // A session opened after the question was asked still shows it, with its options.
+  await page.goto(`${base}/?s=s3`);
+  await page.locator('.askq', { hasText: 'Which evening?' }).waitFor();
+  assert.equal(await page.locator('.askq .opts button').count(), 2, 'the reopened question shows its options');
+  assert.equal(await page.locator('pre.out', { hasText: 'shown to the owner' }).count(), 0, "the ask call's result is not shown as output");
+
   // A session: history, then a prompt streams an answer through the relayed socket.
   await page.goto(`${base}/?s=s1`);
   await page.getByText('What is on today?').waitFor();
@@ -1239,7 +1276,14 @@ try {
   await page.locator('.opts button', { hasText: 'Friday' }).click();
   await page.locator('.opts button', { hasText: 'The team' }).click();
   assert.equal(await box.inputValue(), '1. Friday\n2. The team', 'options fill the answer, one row per question');
+  assert.equal(await page.locator('.askq').count(), 1, 'the ask call and its live event make one card');
+  const optClass = (t) => page.locator('.opts button', { hasText: t }).getAttribute('class');
+  assert.match(await optClass('Friday'), /primary/, 'the picked option is highlighted');
+  assert.doesNotMatch(await optClass('Thursday'), /primary/, 'the recommended option is no longer highlighted once another is picked');
+  assert.match(await optClass('The team'), /primary/);
   await box.fill('');
+  assert.match(await optClass('Thursday'), /primary/, 'with nothing picked the recommended option is highlighted again');
+
 
   // The slash commands are the shared table's, from `zen --commands`.
   await box.fill('/ste');

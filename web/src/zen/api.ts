@@ -179,6 +179,8 @@ export interface Command {
 
 export interface PluginView { id: string; title: string; ui: string }
 export interface PluginOpener { id: string; title: string; ui: string; patterns: string[]; mode: 'read' | 'edit' }
+/** A card on Home: its `ui://` resource, `size` columns wide (1 to 3) by default. */
+export interface PluginWidget { id: string; title: string; ui: string; description?: string; size?: 1 | 2 | 3 }
 export interface PluginGame { id: string; title: string; ui: string; description?: string }
 /** A declared value of a plugin command's first argument; `then` (an args hint) means it needs more input. */
 export interface CommandChoice { value: string; description: string; then?: string }
@@ -188,7 +190,7 @@ export interface Plugin {
   version: string;
   title: string;
   description: string;
-  contributes: { views?: PluginView[]; openers?: PluginOpener[]; games?: PluginGame[]; commands?: PluginCommand[] };
+  contributes: { views?: PluginView[]; openers?: PluginOpener[]; games?: PluginGame[]; widgets?: PluginWidget[]; commands?: PluginCommand[] };
   permissions: string[];
   enabled: boolean;
   /** The owner's AI switch (only matters with the `ai` permission): off refuses its completions. */

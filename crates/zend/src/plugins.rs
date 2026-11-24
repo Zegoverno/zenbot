@@ -194,8 +194,8 @@ pub fn validate(v: &Value) -> Result<Manifest, String> {
         Ok(())
     };
     for (slot, items) in slots {
-        if !["views", "openers", "games", "commands"].contains(&slot.as_str()) {
-            return Err(format!("contributes.{slot}: not a slot zenbot knows (views, openers, games, commands)"));
+        if !["views", "openers", "games", "widgets", "commands"].contains(&slot.as_str()) {
+            return Err(format!("contributes.{slot}: not a slot zenbot knows (views, openers, games, widgets, commands)"));
         }
         let Some(items) = items.as_array() else { return Err(format!("contributes.{slot} must be a list")) };
         if items.len() > 50 {
@@ -232,6 +232,14 @@ pub fn validate(v: &Value) -> Result<Manifest, String> {
                 }
                 "games" => {
                     id(x, "id").and(text(x, "title", 80, true)).and(text(x, "description", 300, false)).and_then(|_| ui()).map_err(at)?;
+                    x["id"].clone()
+                }
+                // A card on Home: its `ui://` resource in a frame of the size it asks for (1 to 3 columns).
+                "widgets" => {
+                    id(x, "id").and(text(x, "title", 80, true)).and(text(x, "description", 300, false)).and_then(|_| ui()).map_err(at)?;
+                    if !(x["size"].is_null() || x["size"].as_u64().is_some_and(|n| (1..=3).contains(&n))) {
+                        return Err(at("`size` must be 1, 2 or 3 (columns)".into()));
+                    }
                     x["id"].clone()
                 }
                 "commands" => {
@@ -1499,6 +1507,7 @@ mod tests {
                 "views": [{ "id": "main", "title": "Hello", "ui": "ui://hello/app" }],
                 "openers": [{ "id": "open", "title": "Open", "ui": "ui://hello/app", "patterns": ["*.hello"], "mode": "read" }],
                 "games": [{ "id": "guess", "title": "Guess", "ui": "ui://hello/app", "description": "A game" }],
+                "widgets": [{ "id": "today", "title": "Today", "ui": "ui://hello/app", "size": 2 }],
                 "commands": [{ "name": "hello", "tool": "hello_greet", "args": "<name>", "description": "Greet" }]
             },
             "kernel": ["files:read", "ai", "files:read"]
@@ -1577,7 +1586,9 @@ mod tests {
             ("contributes.views.0.ui", json!("ui://other/app"), "ui://hello/"),
             ("contributes.views.0.ui", json!("https://evil.example/app"), "ui://hello/"),
             ("contributes.views.0.ui", json!("ui://hello/"), "ui://hello/"),
-            ("contributes.widgets", json!([]), "not a slot"),
+            ("contributes.cards", json!([]), "not a slot"),
+            ("contributes.widgets", json!([{ "id": "w", "title": "W", "ui": "ui://hello/app", "size": 4 }]), "size"),
+            ("contributes.widgets", json!([{ "id": "w", "title": "W" }]), "ui://hello/"),
             ("contributes.openers.0.mode", json!("write"), "mode"),
             ("contributes.openers.0.patterns", json!(["a/b.md"]), "patterns"),
             ("contributes.openers.0.patterns", json!([]), "patterns"),

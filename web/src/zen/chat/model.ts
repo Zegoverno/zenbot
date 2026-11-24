@@ -28,8 +28,32 @@ export type Entry =
   | { k: 'line'; key: number; text: string; sty: Sty }
   | { k: 'mono'; key: number; text: string; title?: string }
   | { k: 'link'; key: number; text: string; url: string }
-  | { k: 'questions'; key: number; questions: { question: string; options: string[] }[] }
+  | { k: 'questions'; key: number; questions: Question[]; id?: string }
   | { k: 'help'; key: number; rows: [string, string][]; keys: [string, string][] };
+
+export type Question = { question: string; options: string[] };
+
+/** The questions of an `ask` call (the kernel's tool, `ask` or `<server>__ask`), or null for another call. */
+export function askOf(c: Block): Question[] | null {
+  if ((c.name ?? '').split('__').pop() !== 'ask') return null;
+  const qs = (c.arguments as { questions?: unknown } | undefined)?.questions;
+  if (!Array.isArray(qs)) return null;
+  const out = qs
+    .filter((q): q is { question: string; options?: unknown } => typeof q?.question === 'string')
+    .map((q) => ({ question: clean(q.question), options: Array.isArray(q.options) ? q.options.filter((o): o is string => typeof o === 'string').map(clean) : [] }));
+  return out.length ? out : null;
+}
+
+/** Whether the conversation since the owner's latest prompt already shows these questions (the
+ *  live `questions` event repeats the `ask` call the message carried). */
+export function asked(list: Entry[], qs: Question[]): boolean {
+  for (let i = list.length - 1; i >= 0; i--) {
+    const e = list[i];
+    if (e.k === 'user' && !e.kernel) return false;
+    if (e.k === 'questions' && e.questions[0]?.question === qs[0]?.question) return true;
+  }
+  return false;
+}
 
 /** An entry without its key (the list adds one). */
 export type New = Entry extends infer E ? (E extends { key: number } ? Omit<E, 'key'> : never) : never;
@@ -80,6 +104,15 @@ export function absorb(list: Entry[], e: New) {
     else list.push(keyed(e));
     return;
   }
+  if (e.k === 'result' && e.id) {
+    // An `ask` call's result: its card stands for it, unless the call failed (then the error shows instead).
+    const at = list.findIndex((w) => w.k === 'questions' && w.id === e.id);
+    if (at >= 0) {
+      if (!e.result.error) return;
+      list.splice(at, 1);
+    }
+  }
+  if (e.k === 'questions' && asked(list, e.questions)) return;
   if (e.k === 'result') {
     // The run it belongs to: the latest, past questions or notes shown since (not past text or a prompt).
     for (let i = list.length - 1; i >= 0; i--) {
@@ -106,7 +139,12 @@ export function messageEntries(m: Message, opts: { aborting?: boolean; streamed?
   const full = clean(assistantText(m));
   const text = full.trim() ? full : (opts.streamed ?? '');
   if (text.trim()) out.push({ k: 'md', text });
-  for (const c of toolCalls(m)) out.push({ k: 'work', steps: [{ name: c.name ?? '', args: c.arguments ?? {}, id: c.id }], open: null });
+  for (const c of toolCalls(m)) {
+    // An `ask` call is its question card, so a session opened (or reloaded) after it still shows it.
+    const qs = askOf(c);
+    if (qs) out.push({ k: 'questions', questions: qs, id: c.id });
+    else out.push({ k: 'work', steps: [{ name: c.name ?? '', args: c.arguments ?? {}, id: c.id }], open: null });
+  }
   if (m.stopReason === 'error' && !opts.aborting) out.push({ k: 'line', text: clean(m.errorMessage ?? 'error'), sty: 'err' });
   return out;
 }

@@ -1063,6 +1063,12 @@
     input = rows.sort((x, y) => parseInt(x) - parseInt(y)).join('\n');
     ta?.focus();
   }
+  /** The option already picked for question `qi` (the box's `n. option` row, or its whole text for
+   *  a single question), so the highlight moves from the recommended option to the owner's pick. */
+  function picked(qs: { question: string }[], qi: number, options: string[]): string | null {
+    const text = qs.length <= 1 ? input.trim() : (input.split('\n').find((l) => l.startsWith(`${qi + 1}. `)) ?? '').slice(`${qi + 1}. `.length).trim();
+    return options.includes(text) ? text : null;
+  }
   /** A question card's answer: the prompt sent after it, if any. */
   function answerOf(i: number): string | null {
     for (let j = i + 1; j < entries.length; j++) {
@@ -1548,7 +1554,8 @@
               <div class="askq">
                 {#each e.questions as q, qi (qi)}
                   <div class="q">{e.questions.length > 1 ? `${qi + 1}. ` : ''}{q.question}</div>
-                  <div class="opts">{#each q.options as o, j (j)}<button class:primary={j === 0} disabled={ro} onclick={() => answer(e.questions, qi, o)}>{o}</button>{/each}</div>
+                  {@const pick = picked(e.questions, qi, q.options)}
+                  <div class="opts">{#each q.options as o, j (j)}<button class:primary={pick === null ? j === 0 : pick === o} aria-pressed={pick === o} disabled={ro} onclick={() => answer(e.questions, qi, o)}>{o}</button>{/each}</div>
                 {/each}
                 <div class="or">or type your own answer below</div>
               </div>

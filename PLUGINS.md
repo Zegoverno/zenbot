@@ -32,6 +32,7 @@ and [zensudoku](https://github.com/Zegoverno/zensudoku).
     "views":    [{ "id": "library", "title": "Reading", "ui": "ui://zenread/app" }],
     "openers":  [{ "id": "read", "title": "Read", "ui": "ui://zenread/app", "patterns": ["*.md"], "mode": "read" }],
     "games":    [],
+    "widgets":  [{ "id": "queue", "title": "Reading queue", "ui": "ui://zenread/app", "size": 1 }],
     "commands": [{ "name": "read", "tool": "zenread_open", "args": "<path>", "description": "Open a note in the reader." }]
   },
   "skills": "skills/",
@@ -75,6 +76,7 @@ zenbot draws the shell. A plugin fills these slots:
 | `views` | a tab on the board and in the side panel, after Sessions, Files, Tasks and Agents | `id`, `title`, `ui` |
 | `openers` | "open with" for matching files in Files | `id`, `title`, `ui`, `patterns` (globs on the file name), `mode` (`read` or `edit`) |
 | `games` | an entry in the **Games** tab's game picker | `id`, `title`, `ui`, `description` |
+| `widgets` | a card on **Home**, put on the board once when the plugin is installed (the owner can move, resize or hide it; hidden, it stays off) | `id`, `title`, `ui`, optional `description` (the catalog hint) and `size` (1 to 3 columns) |
 | `commands` | a slash command in the web chat and in Matrix, and `zen <plugin> …` | `name`, `tool`, `args`, `description`, optional `choices` (below) |
 
 #### Command choices
@@ -151,7 +153,11 @@ off for this plugin".
 - Call your own tools with `app.callServerTool(...)`; zenbot routes them through its kernel,
   which checks your permissions and records each call.
 - zenbot adds its own context to the host context under `zen`:
-  `{ "pane": "board" | "side", "path": "<relative path or null>", "mode": "read" | "edit", "slot": "view" | "opener" | "game" }`.
+  `{ "pane": "board" | "side", "path": "<relative path or null>", "mode": "read" | "edit", "slot": "view" | "opener" | "game" | "widget", "routines": [...] }`.
+  `routines` lists your plugin's own scheduled jobs (those created with `--plugin <name>`), never
+  another's: `{ "name", "when" (the schedule in words), "state": "active" | "paused" | "done", "next",
+  "last": "ok" | "silent" | "error" | "none", "last_run_at" }`. A Home card (`slot: "widget"`) is a
+  small frame: keep it compact, and its `zen/commands` are ignored.
   Read it with `app.getHostContext()` / `onhostcontextchanged`, and cope with its absence.
 - Open another file: `app.openLink({ url: "zen://open?path=<urlencoded relative path>" })`. zenbot
   sends it to that file's opener. Plugins never talk to each other directly.

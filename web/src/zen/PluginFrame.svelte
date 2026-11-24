@@ -2,7 +2,9 @@
   // A plugin's `ui://` resource, running as an MCP App (ADR 0001, Host API): its HTML in a
   // sandboxed iframe with an opaque origin and a CSP from its `_meta.ui.csp` (frame.ts), talking to
   // the page only through `AppBridge` (postMessage, JSON-RPC). The host context carries the theme,
-  // the host's colours and fonts, and zen's own `{ pane, path, mode, slot }`.
+  // the host's colours and fonts, and zen's own `{ pane, path, mode, slot, routines }`: `routines`
+  // are this plugin's own scheduled jobs (those created with its tag), never anyone else's, so a
+  // Home card can show what of it is on, when it runs next and how it last went.
   //
   // What the app may ask, and where it goes:
   // - tool calls → `POST /api/plugins/<name>/call` (the kernel runs and records them);
@@ -25,6 +27,7 @@
   import { app, openFile, closeFile, setView, openSession, notice, textField, type Pane } from './app.svelte.ts';
   import { chat, contextImages, keepContextSaving, resultText } from './plugins.svelte.ts';
   import { SANDBOX, validCommands, validKeyEvent, webLink, withCsp, zenNavigation } from './frame.ts';
+  import { routines as jobs } from './views/routinestore.svelte.ts';
   import { dispatch, focused, focusPane, register, ui as keys, unregister, type PanelKind } from './keys.svelte.ts';
 
   let {
@@ -45,7 +48,7 @@
     /** The vault-relative file it shows (openers), or null. */
     path?: string | null;
     mode?: 'read' | 'edit';
-    slot: 'view' | 'opener' | 'game';
+    slot: 'view' | 'opener' | 'game' | 'widget';
     title?: string;
     /** A command's arguments and result, sent to the app once it is ready. */
     input?: Record<string, unknown>;
@@ -53,7 +56,7 @@
     /** The panel it sits in, whose commands it adds to (default: by slot). */
     scope?: PanelKind;
   } = $props();
-  const where = $derived<PanelKind>(scope ?? (slot === 'game' ? 'games' : slot === 'opener' ? (mode === 'edit' ? 'files-writer' : 'files-reader') : 'plugin'));
+  const where = $derived<PanelKind>(scope ?? (slot === 'widget' ? 'home' : slot === 'game' ? 'games' : slot === 'opener' ? (mode === 'edit' ? 'files-writer' : 'files-reader') : 'plugin'));
 
   let frame: HTMLIFrameElement | undefined = $state();
   let error = $state('');
@@ -102,9 +105,13 @@
       platform: 'web',
       locale: navigator.language,
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      zen: { pane: pane === 'home' ? 'board' : 'side', path, mode, slot, phone, headingFont: getComputedStyle(document.documentElement).getPropertyValue('--serif').trim() },
+      zen: { pane: pane === 'home' ? 'board' : 'side', path, mode, slot, phone, headingFont: getComputedStyle(document.documentElement).getPropertyValue('--serif').trim(), routines: ownRoutines() },
     };
   }
+
+  /** This plugin's jobs, plain: name, schedule in words, state (active, paused, done), next and last run. */
+  const ownRoutines = () =>
+    jobs.jobs.filter((j) => j.plugin === plugin).map((j) => ({ name: j.name, when: j.when, state: j.state, next: j.next, last: j.last, last_run_at: j.lastRunAt }));
 
   const session = () => (app.session && app.session !== 'new' ? app.session : null);
 
@@ -233,7 +240,8 @@
         };
         b.onloggingmessage = (m) => console.debug(`[${plugin}]`, m.level, m.data);
         b.fallbackNotificationHandler = async (n) => {
-          if (n.method === 'zen/commands') setCommands(n.params);
+          // A Home card doesn't add to Home's commands (several cards would crowd them).
+          if (n.method === 'zen/commands') { if (slot !== 'widget') setCommands(n.params); }
           else if (n.method === 'zen/key') forwardKey(n.params);
         };
         b.oninitialized = () => {

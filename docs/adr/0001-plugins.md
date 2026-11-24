@@ -48,7 +48,7 @@ zenbot's shell owns the layout. Plugins fill these fixed slots and never draw th
 |---|---|---|
 | `views` | a tab on the board and in the side panel | Files, Tasks, Agents (plain) |
 | `openers` | "open with" for a file type, inside the Files pane | a plain Markdown reader and editor |
-| `widgets` | a tool result inline in chat (plain MCP Apps) | text |
+| `widgets` | a card on Home (amended 2026-11-24; a tool result inline in chat needs no slot: plain MCP Apps) | the built-in cards |
 | `commands` | slash commands in the shared command table (CLI, web chat, Matrix) | core commands |
 
 Policy amended 2026-11-16: installing a new plugin assigns its openers as defaults for their
