@@ -254,6 +254,13 @@ const kernel = createServer(async (req, res) => {
     Object.assign(agents.get(name), body);
     return json(res, agentDetail(name));
   }
+  // A session left waiting on an `ask` (the tool call as the tape stores it, its result after it).
+  if (r === 'GET /api/sessions/s3')
+    return json(res, { ...session('s3', 'Pick a date'), busy: false, tokens: 10, message_count: 3, messages: [
+      { role: 'user', content: 'Book the dinner', seq: 1 },
+      { role: 'assistant', content: [{ type: 'text', text: 'One thing first.' }, { type: 'toolCall', id: 'q1', name: 'mcp__zen__ask', arguments: { questions: [{ question: 'Which evening?', options: ['Friday', 'Saturday'] }] } }], seq: 2 },
+      { role: 'toolResult', toolCallId: 'q1', toolName: 'mcp__zen__ask', content: [{ type: 'text', text: 'The questions are shown to the owner.' }], isError: false, seq: 3 },
+    ] });
   if (r === 'GET /api/sessions/s1')
     return json(res, { ...session('s1', 'Plan the week'), busy: false, tokens: 1200, message_count: 2, messages: [
       { role: 'user', content: 'What is on today?', seq: 1 },
@@ -402,8 +409,11 @@ kernel.on('upgrade', (req, socket) => {
     if (m.text === 'Ask me') {
       send({ type: 'message', message: { role: 'user', content: m.text } });
       send({ type: 'busy', busy: true, model: 'faux/smoke' });
-      send({ type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'Two questions.' }] } });
-      send({ type: 'questions', questions: [{ question: 'Which day?', options: ['Thursday', 'Friday'] }, { question: 'Who comes?', options: ['Just me', 'The team'] }] });
+      // As the kernel sends it: the message with the `ask` call, then the live questions event, then the call's result.
+      const qs = [{ question: 'Which day?', options: ['Thursday', 'Friday'] }, { question: 'Who comes?', options: ['Just me', 'The team'] }];
+      send({ type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'Two questions.' }, { type: 'toolCall', id: 'a1', name: 'ask', arguments: { questions: qs } }] } });
+      send({ type: 'questions', questions: qs });
+      send({ type: 'message', message: { role: 'toolResult', toolCallId: 'a1', toolName: 'ask', content: [{ type: 'text', text: 'The questions are shown to the owner.' }], isError: false } });
       send({ type: 'end', error: null, turn: { input_tokens: 1, output_tokens: 1 }, next: false });
       send({ type: 'idle' });
       send({ type: 'suggestion', id: 'sg1', text: 'Thursday, just me' });
@@ -1140,6 +1150,12 @@ try {
   await untilAsync(async () => (await draftBox.inputValue()) === 'half a thought', 'the draft comes back with its session');
   await draftBox.fill('');
 
+  // A session opened after the question was asked still shows it, with its options.
+  await page.goto(`${base}/?s=s3`);
+  await page.locator('.askq', { hasText: 'Which evening?' }).waitFor();
+  assert.equal(await page.locator('.askq .opts button').count(), 2, 'the reopened question shows its options');
+  assert.equal(await page.locator('pre.out', { hasText: 'shown to the owner' }).count(), 0, "the ask call's result is not shown as output");
+
   // A session: history, then a prompt streams an answer through the relayed socket.
   await page.goto(`${base}/?s=s1`);
   await page.getByText('What is on today?').waitFor();
@@ -1230,7 +1246,14 @@ try {
   await page.locator('.opts button', { hasText: 'Friday' }).click();
   await page.locator('.opts button', { hasText: 'The team' }).click();
   assert.equal(await box.inputValue(), '1. Friday\n2. The team', 'options fill the answer, one row per question');
+  assert.equal(await page.locator('.askq').count(), 1, 'the ask call and its live event make one card');
+  const optClass = (t) => page.locator('.opts button', { hasText: t }).getAttribute('class');
+  assert.match(await optClass('Friday'), /primary/, 'the picked option is highlighted');
+  assert.doesNotMatch(await optClass('Thursday'), /primary/, 'the recommended option is no longer highlighted once another is picked');
+  assert.match(await optClass('The team'), /primary/);
   await box.fill('');
+  assert.match(await optClass('Thursday'), /primary/, 'with nothing picked the recommended option is highlighted again');
+
 
   // The slash commands are the shared table's, from `zen --commands`.
   await box.fill('/ste');
