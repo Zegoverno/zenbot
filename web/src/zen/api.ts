@@ -300,7 +300,7 @@ export interface Routine { name: string; schedule: string; tz: string; enabled: 
 export interface RoutineRun { id: number; job: string; status: string; started_at: string; error: string | null; session: string | null }
 export const routines = {
   list: () => call<{ jobs: Routine[]; scheduler: boolean }>('GET', '/api/zen/jobs'),
-  runs: () => call<RoutineRun[]>('GET', '/api/zen/jobs/runs'),
+  runs: (limit = 20) => call<RoutineRun[]>('GET', `/api/zen/jobs/runs?limit=${limit}`),
   run: (name: string) => call('POST', `/api/zen/jobs/${enc(name)}/run`, {}),
   enable: (name: string, enabled: boolean) => call('PATCH', `/api/zen/jobs/${enc(name)}`, { enabled }),
 };
