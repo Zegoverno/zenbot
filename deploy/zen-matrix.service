@@ -12,11 +12,12 @@ Environment=HOME=__HOME__
 ExecStart=__HOME__/.zenbot/bin/zen-matrix run
 Restart=always
 RestartSec=10
-# It needs its binary, the kernel's token and port, its settings and its own folder: the home
-# folder is an empty tmpfs with exactly those bound in (the folder read-write, the rest read-only).
+# It needs its binary, the kernel's token and port, its settings, its own folder and the inbox
+# where the owner's files land (inbox.rs): the home folder is an empty tmpfs with exactly those
+# bound in (the two folders read-write, the rest read-only).
 ProtectHome=tmpfs
 BindReadOnlyPaths=__HOME__/.zenbot/bin/zen-matrix __HOME__/.zenbot/token -__HOME__/.zenbot/env -__HOME__/.zenbot/matrix.env
-BindPaths=__HOME__/.zenbot/matrix
+BindPaths=__HOME__/.zenbot/matrix __HOME__/inbox
 ProtectSystem=strict
 PrivateTmp=true
 PrivateDevices=true

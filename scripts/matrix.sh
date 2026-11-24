@@ -15,7 +15,7 @@ cargo test --release --locked -q 2>&1 | tail -3
 [ "${1:-}" = "--build" ] && exit 0
 
 echo "== install"
-mkdir -p "$HOME/.zenbot/bin"
+mkdir -p "$HOME/.zenbot/bin" "$HOME/inbox"
 install -m 755 target/release/zen-matrix "$HOME/.zenbot/bin/zen-matrix.new" && mv -f "$HOME/.zenbot/bin/zen-matrix.new" "$HOME/.zenbot/bin/zen-matrix"
 [ -f "$HOME/.zenbot/matrix.env" ] || { echo "Next: write ~/.zenbot/matrix.env (MATRIX_USER, MATRIX_PASSWORD, MATRIX_OWNER; INSTALL.md, Matrix), then run this again."; exit 0; }
 chmod 600 "$HOME/.zenbot/matrix.env"
