@@ -420,7 +420,7 @@ pub(crate) async fn get_prefs(State(app): State<AppState>) -> ApiResult<Json<Val
     Ok(Json(Value::Object(crate::prefs::all(&app.db).await?)))
 }
 
-/// Merge preferences (`name`, `home_layout`, `default_model`, `default_effort`; `null` deletes);
+/// Merge preferences (`name`, `home_layout`, `home_seen`, `default_model`, `default_effort`; `null` deletes);
 /// returns every preference that is set.
 pub(crate) async fn patch_prefs(State(app): State<AppState>, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
     Ok(Json(Value::Object(crate::prefs::patch(&app, &body).await?)))

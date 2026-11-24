@@ -17,7 +17,6 @@ Plugin releases: zenread 0.2.0, zenwrite 0.3.0, zensudoku 0.2.0, zenvault 0.2.0.
 Deliberate limits versus the mock:
 - Files reads from / down (shipped), still refusing secrets (tokens, keys, credentials); writes
   stay inside the vault.
-- Plugin Home widgets are deferred: there is no installed provider after removing the Gospel card.
 - Claude login requires its interactive terminal flow; Codex offers device login in Settings.
 - A newly saved OpenRouter key takes effect after the managed kernel upgrade/restart.
 - The radial quick-control ring is shipped as in the mock.
@@ -57,9 +56,8 @@ items are absent. Integration tests, not checkbox marks, are the completion evid
       the kernel's config. zenbot sets it in the first chat while it fills `USER.md`; the owner can
       change it in Settings. Used by Home's greeting and the agent menu (avatar letter, name).
 - [ ] **Needs you:** each waiting session's open question in one call (verify whether `/board` serves it).
-- [ ] **Home cards from plugins:** a new `widgets` slot (today `contributes` allows only `views`,
-      `openers`, `games`, `commands`; `widgets` is rejected): id, title, `ui://` URI, size
-      (small/wide), refresh. Routines' card reads jobs' last results (have: `/jobs/runs`).
+- [x] **Home cards from plugins** (2026-11-24): `contributes.widgets` (`id`, `title`, `ui`, `size`
+      1–3, `description`); each card gets its plugin's own routines in the host context. First: Vigília.
 - [ ] **New-chat ideas:** a cheap-model (S1) endpoint for the 3 suggestions on an empty chat
       (`/suggestions` today is S1 stats, not this).
 

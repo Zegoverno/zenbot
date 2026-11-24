@@ -16,7 +16,7 @@ async function prefs<T>(method: 'GET' | 'PATCH', body?: unknown): Promise<T> {
   if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);
   return data as T;
 }
-export type Prefs = { name?: string; home_layout?: unknown; default_model?: string; default_effort?: string | null };
+export type Prefs = { name?: string; home_layout?: unknown; home_seen?: string[]; default_model?: string; default_effort?: string | null };
 export const getPrefs = () => prefs<Prefs>('GET');
 export const patchPrefs = (b: Prefs) => prefs<Prefs>('PATCH', b);
 

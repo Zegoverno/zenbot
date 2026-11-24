@@ -3,7 +3,9 @@
   // "Customize" lets you drag to reorder, size each one (S/M/L: 1–3 columns), hide it, or add one
   // back from the catalog; the layout is kept in the kernel's prefs (`home_layout`). A widget's rows
   // open the chat they belong to (onopen); nothing is answered here. (The redesign mock's Home, on
-  // live data: the board, tasks, routines, agents and the vault.)
+  // live data: the board, tasks, routines, agents and the vault.) Plugins add cards of their own
+  // (`contributes.widgets`): each is its `ui://` app in a frame (PluginFrame, slot `widget`); a newly
+  // installed plugin's card is put on the board once (`home_seen` remembers it), and hiding it keeps it off.
   // Keys (keys.svelte.ts, for the focused Home): Tab / Shift+Tab pick the next or previous widget,
   // j/k walk its rows (the cursor), Enter opens a row; m is arrange mode: ← and → move the widget
   // earlier or later, h hides it, Esc leaves. The ring borrows the global actions (New chat…).
@@ -12,6 +14,8 @@
   import { me, board, agents, getPrefs, patchPrefs, when as ago } from '../live.svelte.ts';
   import { files } from '../api.ts';
   import { app } from '../app.svelte.ts';
+  import PluginFrame from '../PluginFrame.svelte';
+  import { plugins, widgets as pluginWidgets } from '../plugins.svelte.ts';
   import { commands as registerCommands, runCommand, moveCursor, pressCursor, clearCursor } from '../keys.svelte.ts';
   type Size = 1 | 2 | 3;
   // A slot's `kind` is its catalog entry (default: its id). Task widgets can be added more than
@@ -37,6 +41,12 @@
     agents: { title: 'Agents', hint: 'Who is on duty', size: 1 },
     files: { title: 'Recent files', hint: 'Notes and files touched lately', size: 1 },
   };
+  /** Every card there is: the built-in ones and the enabled plugins'. */
+  const ALL = $derived<Record<string, { title: string; hint: string; size: Size }>>({
+    ...CATALOG,
+    ...Object.fromEntries(pluginWidgets().map((w) => [w.key, { title: w.title, hint: w.description ?? `From ${w.plugin}`, size: (w.size ?? 1) as Size }])),
+  });
+  const plug = (s: Slot) => pluginWidgets().find((w) => w.key === kind(s)) ?? null;
   const DEFAULT: Slot[] = [
     { id: 'needs', size: 2 }, { id: 'working', size: 1 }, { id: 'today', size: 1 },
     { id: 'recent', size: 1 }, { id: 'reports', size: 1 },
@@ -44,7 +54,7 @@
   const withViews = (l: Slot[]) => l.map((s) => ((s.kind ?? s.id) === 'today' && !s.tasks ? { ...s, tasks: { ...TASK_VIEW, pri: [] } } : s));
   /** A kept layout, checked: anything unknown falls back to the default. */
   function layoutOf(v: unknown): Slot[] {
-    if (Array.isArray(v) && v.every((s) => s && typeof s.id === 'string' && CATALOG[s.kind ?? s.id] && [1, 2, 3].includes(s.size))) return withViews(v as Slot[]);
+    if (Array.isArray(v) && v.every((s) => s && typeof s.id === 'string' && (CATALOG[s.kind ?? s.id] || (s.kind ?? s.id).startsWith('plugin:')) && [1, 2, 3].includes(s.size))) return withViews(v as Slot[]);
     return withViews(DEFAULT.map((s) => ({ ...s })));
   }
   let layout = $state<Slot[]>(withViews(DEFAULT.map((s) => ({ ...s }))));
@@ -55,7 +65,7 @@
   };
   let edit = $state(false);
   let dragId = $state<string | null>(null);
-  const hidden = $derived(Object.keys(CATALOG).filter((id) => id === 'today' || !layout.some((s) => kind(s) === id)));
+  const hidden = $derived(Object.keys(ALL).filter((id) => id === 'today' || !layout.some((s) => kind(s) === id)));
 
   function moveTo(id: string, to: number) {
     const from = layout.findIndex((s) => s.id === id);
@@ -73,7 +83,7 @@
   const remove = (id: string) => { layout = layout.filter((s) => s.id !== id); keep(); };
   const add = (id: string) => {
     const n = layout.filter((s) => kind(s) === id).length;
-    const slot: Slot = n ? { id: `${id}-${Date.now().toString(36)}`, kind: id, size: CATALOG[id].size } : { id, size: CATALOG[id].size };
+    const slot: Slot = n ? { id: `${id}-${Date.now().toString(36)}`, kind: id, size: ALL[id].size } : { id, size: ALL[id].size };
     if (id === 'today') { slot.tasks = { ...TASK_VIEW, pri: [], show: n ? 'all' : 'today' }; cfg = slot.id; }
     layout.push(slot); keep();
   };
@@ -99,8 +109,25 @@
   const date = now.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' });
   const hello = now.getHours() < 12 ? 'Good morning' : now.getHours() < 18 ? 'Good afternoon' : 'Good evening';
 
+  /** Plugin cards already offered once (put on the board when first seen; hidden ones stay hidden). */
+  let seen = $state<string[] | null>(null);
   onMount(() => {
-    getPrefs().then((p) => { if (p.home_layout !== undefined && p.home_layout !== null) layout = layoutOf(p.home_layout); }).catch(() => {});
+    getPrefs()
+      .then((p) => {
+        if (p.home_layout !== undefined && p.home_layout !== null) layout = layoutOf(p.home_layout);
+        seen = Array.isArray(p.home_seen) ? p.home_seen.filter((x: unknown): x is string => typeof x === 'string') : [];
+      })
+      .catch(() => {});
+  });
+  $effect(() => {
+    if (seen === null || !plugins.loaded) return;
+    const fresh = pluginWidgets().filter((w) => !seen!.includes(w.key));
+    if (!fresh.length) return;
+    for (const w of fresh) if (!layout.some((s) => kind(s) === w.key)) layout.push({ id: w.key, size: (w.size ?? 1) as Size });
+    seen = [...seen, ...fresh.map((w) => w.key)];
+    keep();
+    const snap = $state.snapshot(seen);
+    saving = saving.then(() => patchPrefs({ home_seen: snap }).then(() => {}, () => {}));
   });
 
   // ---- commands ----
@@ -164,7 +191,8 @@
 
   <div class="grid" class:edit>
     {#each layout as s, i (s.id)}
-      {@const w = CATALOG[kind(s)]}
+      {@const w = ALL[kind(s)]}
+      {#if w}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <article class="wd" data-w={i} class:cur={i === at && (edit || navigated)} style="grid-column: span {narrow ? 1 : s.size}" class:dragging={dragId === s.id}
         draggable={edit} ondragstart={(e) => { dragId = s.id; e.dataTransfer?.setData('text/plain', s.id); }}
@@ -253,6 +281,9 @@
               {@const n = (a.info.busy ?? []).length}
               <div class="row"><span class="orb" class:busy={n > 0} style="background: radial-gradient(circle at 32% 28%, {a.b}, {a.a} 70%)"></span><span class="col"><span class="t">{a.name}</span><span class="d">{n ? `Working on ${n} job${n > 1 ? 's' : ''}` : 'Idle'}</span></span></div>
             {/each}
+          {:else if plug(s)}
+            {@const p = plug(s)!}
+            <div class="pw"><PluginFrame plugin={p.plugin} ui={p.ui} pane="home" slot="widget" title={p.title} /></div>
           {:else if s.id === 'files'}
             {#each recentFiles as f (f.path)}
               <button class="row" onclick={() => onfile?.(f.path)}><span class="t">{f.name}</span><span class="when">{f.w}</span></button>
@@ -261,6 +292,7 @@
           {/if}
         </div>
       </article>
+      {/if}
     {/each}
 
     {#if edit}
@@ -269,7 +301,7 @@
         {#if hidden.length}
           <div class="addl">
             {#each hidden as id}
-              <button onclick={() => add(id)}><b>＋ {CATALOG[id].title}</b><span>{CATALOG[id].hint}</span></button>
+              <button onclick={() => add(id)}><b>＋ {ALL[id].title}</b><span>{ALL[id].hint}</span></button>
             {/each}
           </div>
         {:else}
@@ -318,6 +350,7 @@
   .wd.cur { border-color: color-mix(in srgb, var(--accent) 65%, var(--faint)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent); }
   .wh { display: flex; align-items: center; gap: 8px; padding: 0 4px 8px; min-height: 30px; }
   .wh h2 { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 0; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 650; }
+  .pw { height: 340px; margin: 0 -6px; border-radius: 12px; overflow: hidden; }
   .grip { color: var(--dim); font-size: 14px; }
   .count { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 99px; font-size: 11px; font-weight: 700; display: grid; place-items: center; background: var(--warn); color: var(--on-accent); }
   .ctl { display: flex; align-items: center; gap: 2px; }

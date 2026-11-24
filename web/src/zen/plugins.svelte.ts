@@ -1,11 +1,11 @@
 // The plugin host's state on the page (ADR 0001, Host API): the installed plugins and the opener
-// defaults from the kernel, what each slot offers (views, openers, games, commands), the chat
+// defaults from the kernel, what each slot offers (views, openers, games, widgets, commands), the chat
 // context plugin UIs keep per session, and the side panel a plugin command fills.
 //
 // Plugins reach the owner's files through the kernel, under the vault (`ZEN_PLUGIN_FILES`), so a
 // plugin sees vault-relative paths and openers apply only to vault files.
 
-import { pluginApi, upload, type OpenerDefaults, type Plugin, type PluginGame, type PluginOpener, type PluginView, type ToolResult } from './api.ts';
+import { pluginApi, upload, type OpenerDefaults, type Plugin, type PluginGame, type PluginWidget, type PluginOpener, type PluginView, type ToolResult } from './api.ts';
 import { app, openTab, tilde } from './app.svelte.ts';
 
 export const plugins = $state({
@@ -44,6 +44,12 @@ export function findView(key: string) {
 export type Game = PluginGame & { plugin: string; key: string };
 export function games(): Game[] {
   return enabled().flatMap((p) => (p.contributes.games ?? []).map((g) => ({ ...g, plugin: p.name, key: `${p.name}/${g.id}` })));
+}
+
+/** Home cards from plugins; `key` is the Home catalog entry (`plugin:<name>/<id>`). */
+export type Widget = PluginWidget & { plugin: string; key: string };
+export function widgets(): Widget[] {
+  return enabled().flatMap((p) => (p.contributes.widgets ?? []).map((w) => ({ ...w, plugin: p.name, key: viewId(p.name, w.id) })));
 }
 
 // ---- openers ----

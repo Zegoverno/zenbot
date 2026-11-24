@@ -5,6 +5,8 @@
 //! - `name`: what the app calls the owner (a string, at most 100 characters).
 //! - `home_layout`: the Home board's layout, opaque JSON to the kernel (an object or array, at
 //!   most 64 KB).
+//! - `home_seen`: the plugin Home cards already put on the board once (a list of at most 200
+//!   strings of at most 200 bytes), so a card the owner hid isn't added back.
 //! - `default_model`: the model new sessions start on, over `ZEN_DEFAULT_MODEL`: one a worker
 //!   serves right now. No restart: each new session reads it (`new_session_defaults`).
 //! - `default_effort`: the thinking level new sessions start with when they get the default
@@ -20,7 +22,7 @@ use crate::api::{ApiError, ApiResult};
 use crate::AppState;
 
 /// The keys a client may set.
-pub const KEYS: [&str; 4] = ["name", "home_layout", "default_model", "default_effort"];
+pub const KEYS: [&str; 5] = ["name", "home_layout", "home_seen", "default_model", "default_effort"];
 
 const NAME_MAX: usize = 100;
 const LAYOUT_MAX: usize = 64 * 1024;
@@ -79,6 +81,13 @@ async fn checked(app: &AppState, key: &str, value: &Value, pending: &Map<String,
             }
             if value.to_string().len() > LAYOUT_MAX {
                 return Err(bad(format!("`home_layout` can be {} KB at most", LAYOUT_MAX / 1024)));
+            }
+            Ok(Some(value.clone()))
+        }
+        "home_seen" => {
+            let ok = value.as_array().is_some_and(|a| a.len() <= 200 && a.iter().all(|x| x.as_str().is_some_and(|x| !x.is_empty() && x.len() <= 200)));
+            if !ok {
+                return Err(bad("`home_seen` must be a list of at most 200 short strings, or null"));
             }
             Ok(Some(value.clone()))
         }
@@ -214,6 +223,8 @@ mod tests {
         let got = patch(&app, &json!({ "name": null })).await.unwrap();
         assert!(!got.contains_key("name") && got.contains_key("home_layout"));
         assert_eq!(patch(&app, &json!({})).await.unwrap().len(), 1);
+        let got = patch(&app, &json!({ "home_seen": ["plugin:vigilia/rotinas"] })).await.unwrap();
+        assert_eq!(got["home_seen"], json!(["plugin:vigilia/rotinas"]));
         app.db.close().await;
     }
 
@@ -227,6 +238,8 @@ mod tests {
             json!({ "name": "x".repeat(101) }),
             json!({ "home_layout": "grid" }),
             json!({ "home_layout": { "x": "y".repeat(70_000) } }),
+            json!({ "home_seen": "plugin:vigilia/rotinas" }),
+            json!({ "home_seen": [3] }),
             json!({ "default_model": "claude/not-served" }),
             json!({ "default_model": 3 }),
             json!({ "default_effort": "turbo" }),
