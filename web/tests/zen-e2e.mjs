@@ -1139,6 +1139,15 @@ try {
   await page.goto(`${base}/?s=s1`);
   await untilAsync(async () => (await draftBox.inputValue()) === 'half a thought', 'the draft comes back with its session');
   await draftBox.fill('');
+  // A new chat's text, once sent, is not the next new chat's draft.
+  await page.goto(`${base}/?s=new`);
+  await draftBox.waitFor();
+  await draftBox.fill('my first prompt');
+  await draftBox.press('Enter');
+  await page.waitForURL(/\?s=s2/);
+  await page.goto(`${base}/?s=new`);
+  await draftBox.waitFor();
+  assert.equal(await draftBox.inputValue(), '', 'a sent first prompt does not come back in the next new chat');
 
   // A session: history, then a prompt streams an answer through the relayed socket.
   await page.goto(`${base}/?s=s1`);
