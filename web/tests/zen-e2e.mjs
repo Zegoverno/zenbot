@@ -1513,9 +1513,11 @@ try {
   // gateway, which adds the pointing script to its pages (the app doesn't load it). Pointing at an
   // element pins it, with its source line, styles, console errors and a screenshot, for the next prompt.
   const APP_PORT = Number(process.env.ZEN_E2E_APP_PORT ?? 4419);
+  let appVersion = 1;
   const devApp = createServer((_, res) => {
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    res.end(`<!doctype html><html><head><title>app</title></head><body style="margin:0"><main><button id="hero" style="font-size:20px;padding:8px 14px;background:#fc0;border:0">Get started</button></main>
+    // It lets the browser keep its page for an hour: the reload button still shows the latest.
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'max-age=3600' });
+    res.end(`<!doctype html><html><head><title>app</title></head><body style="margin:0"><main><i id="ver">v${appVersion}</i><button id="hero" style="font-size:20px;padding:8px 14px;background:#fc0;border:0">Get started</button></main>
 <script>document.getElementById('hero').__svelte_meta = { loc: { file: 'src/Hero.svelte', line: 7, column: 2 } }; document.getElementById('hero').onclick = () => { document.title = 'clicked'; }; console.error('fixture boom');</script></body></html>`);
   }).listen(APP_PORT, '127.0.0.1');
   try {
@@ -1542,6 +1544,9 @@ try {
     await addr.press('Enter');
     await devFrame.locator('#hero').waitFor();
     assert.equal(await page.locator('.pane.view iframe[title="preview"]').getAttribute('src'), `/preview/${APP_PORT}/`, 'the frame loads under zen\'s own address');
+    appVersion = 2;
+    await page.locator('.pane.view').getByRole('button', { name: 'reload', exact: true }).click();
+    await untilAsync(async () => (await devFrame.locator('#ver').innerText().catch(() => '')) === 'v2', 'reload shows the new page, not a kept copy');
     // zen's own ports are never shown.
     assert.equal((await fetch(`${base}/preview/${PORT}/`)).status, 400);
     assert.equal((await fetch(`${base}/preview/${KERNEL}/`)).status, 400);

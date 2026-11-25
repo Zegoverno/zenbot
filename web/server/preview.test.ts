@@ -11,6 +11,10 @@ describe('preview gateway rules', () => {
     expect(previewPath('/preview/5173')).toEqual({ port: '5173', prefix: '/preview/5173', rest: '/' });
     for (const bad of ['/preview/', '/preview/abc/', '/previewx/5173/', '/api/preview/5173/']) expect(previewPath(bad), bad).toBeNull();
   });
+  it('makes the browser check with the dev server unless it set its own caching', () => {
+    expect(framable({ 'last-modified': 'Mon, 01 Jan 2024 00:00:00 GMT' })['cache-control']).toBe('no-cache');
+    expect(framable({ 'cache-control': 'max-age=31536000, immutable' })['cache-control']).toBe('max-age=31536000, immutable');
+  });
   it('puts the pointing script first in <head>, or at the start', () => {
     expect(inject('<!doctype html><html><head lang="x"><title>t</title></head>')).toBe('<!doctype html><html><head lang="x"><script src="/zen-preview.js"></script><title>t</title></head>');
     expect(inject('<!DOCTYPE html><p>hi')).toBe('<!DOCTYPE html><script src="/zen-preview.js"></script><p>hi');

@@ -138,8 +138,11 @@
     void refresh().then(() => document.querySelector<HTMLElement>('.pv-pick')?.focus());
   }
 
-  function reload() {
+  async function reload() {
     linked = false;
+    // A plain reload can bring back a copy the browser kept (a dev server that allows caching, or one
+    // kept before it stopped): fetch the page fresh first, which replaces that copy, then reframe it.
+    if (frameSrc) await fetch(frameSrc, { cache: 'reload' }).then((r) => r.arrayBuffer()).catch(() => {});
     n++;
   }
 
