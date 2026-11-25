@@ -52,6 +52,10 @@ export function inject(html: string): string {
 export function framable(headers: IncomingMessage['headers']): OutgoingHttpHeaders {
   const out: OutgoingHttpHeaders = { ...headers };
   delete out['x-frame-options'];
+  // A dev server that says nothing about caching (python's http.server, many static servers) lets the
+  // browser keep its pages by heuristic for hours, so a reload shows the old page. Ask it to check
+  // with the server every time instead; a server's own cache-control (hashed assets) is kept.
+  if (!out['cache-control']) out['cache-control'] = 'no-cache';
   const csp = out['content-security-policy'];
   if (typeof csp === 'string') {
     const kept = csp.split(';').map((d) => d.trim()).filter((d) => d && !/^frame-ancestors\b/i.test(d)).join('; ');
