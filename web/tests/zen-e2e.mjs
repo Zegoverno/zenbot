@@ -1575,7 +1575,7 @@ try {
   const devApp = createServer((_, res) => {
     // It lets the browser keep its page for an hour: the reload button still shows the latest.
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'max-age=3600' });
-    res.end(`<!doctype html><html><head><title>app</title></head><body style="margin:0"><main><i id="ver">v${appVersion}</i><button id="hero" style="font-size:20px;padding:8px 14px;background:#fc0;border:0">Get started</button></main>
+    res.end(`<!doctype html><html><head><title>app</title></head><body style="margin:0"><main><a href="nested/page?q=one#two">Nested page</a><i id="ver">v${appVersion}</i><button id="hero" style="font-size:20px;padding:8px 14px;background:#fc0;border:0">Get started</button></main>
 <script>document.getElementById('hero').__svelte_meta = { loc: { file: 'src/Hero.svelte', line: 7, column: 2 } }; document.getElementById('hero').onclick = () => { document.title = 'clicked'; }; console.error('fixture boom');</script></body></html>`);
   }).listen(APP_PORT, '127.0.0.1');
   try {
@@ -1602,9 +1602,22 @@ try {
     await addr.press('Enter');
     await devFrame.locator('#hero').waitFor();
     assert.equal(await page.locator('.pane.view iframe[title="preview"]').getAttribute('src'), `/preview/${APP_PORT}/`, 'the frame loads under zen\'s own address');
+    const back = page.getByRole('button', { name: 'Preview back' });
+    const forward = page.getByRole('button', { name: 'Preview forward' });
+    assert.ok(await back.isDisabled());
+    await devFrame.getByText('Nested page').click();
+    const nested = `/preview/${APP_PORT}/nested/page?q=one#two`;
+    const routeIs = (suffix) => untilAsync(async () => page.frames().some(f => f.url() === base + suffix), 'Preview at ' + suffix);
+    await routeIs(nested);
     appVersion = 2;
     await page.locator('.pane.view').getByRole('button', { name: 'reload', exact: true }).click();
     await untilAsync(async () => (await devFrame.locator('#ver').innerText().catch(() => '')) === 'v2', 'reload shows the new page, not a kept copy');
+    await routeIs(nested);
+    await back.click();
+    await routeIs(`/preview/${APP_PORT}/`);
+    await forward.click();
+    await routeIs(nested);
+    assert.ok(await forward.isDisabled());
     // zen's own ports are never shown.
     assert.equal((await fetch(`${base}/preview/${PORT}/`)).status, 400);
     assert.equal((await fetch(`${base}/preview/${KERNEL}/`)).status, 400);
