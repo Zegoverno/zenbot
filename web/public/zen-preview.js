@@ -40,6 +40,17 @@
     } else if (e.data.type === 'pick' && e.origin === host) setPicking(e.data.on === true);
   });
 
+  // Signal same-document routes too. The parent reads the actual framed URL, not message data.
+  for (const method of ['pushState', 'replaceState']) {
+    const original = history[method];
+    history[method] = function (...args) {
+      const result = original.apply(this, args);
+      send({ type: 'location', replace: method === 'replaceState' });
+      return result;
+    };
+  }
+  for (const event of ['hashchange', 'popstate']) addEventListener(event, () => send({ type: 'location' }));
+
   // ---- pointing ----
   const box = document.createElement('div');
   box.setAttribute('data-zen-preview', '');

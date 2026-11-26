@@ -48,6 +48,31 @@
   let boxWidth = $state(0);
   /** The frame's address: zen's own, under /preview/<port>. */
   const frameSrc = $derived(target ? `/preview/${target.port}${target.pathname}${target.search}${target.hash}` : '');
+  // The iframe src changes only on explicit navigation, never when observing an in-app link.
+  let routes = $state<string[]>([]);
+  let cursor = $state(0);
+  const current = $derived(routes[cursor] ?? frameSrc);
+  function observed(replace = false) {
+    if (!target) return;
+    let u: URL;
+    try { u = new URL(frame!.contentWindow!.location.href); } catch { return; }
+    if (u.origin !== location.origin || !u.pathname.startsWith(`/preview/${target.port}/`)) return;
+    const route = u.pathname + u.search + u.hash;
+    if (route === current && routes.length) return;
+    if (replace && routes.length) routes[cursor] = route;
+    else {
+      routes = [...routes.slice(0, cursor + 1), route].slice(-100);
+      cursor = routes.length - 1;
+    }
+    localStorage.setItem(KEY, target.port + route.slice(`/preview/${target.port}`.length));
+  }
+  let requestedSrc = $state(last ? frameSrc : '');
+  function travel(step: number) {
+    cursor += step;
+    requestedSrc = routes[cursor];
+    linked = false;
+    n++;
+  }
   const frameOrigin = location.origin;
   const label = $derived(target ? `localhost:${target.port}` : '');
   // The apps on this machine: null until the first answer.
@@ -92,7 +117,10 @@
       dropContext(sid, NAME);
       pinned.delete(sid);
     }
+    routes = [];
+    cursor = 0;
     target = t;
+    requestedSrc = frameSrc;
     linked = false;
     loadedOnce = false;
     n++;
@@ -142,8 +170,10 @@
     linked = false;
     // A plain reload can bring back a copy the browser kept (a dev server that allows caching, or one
     // kept before it stopped): fetch the page fresh first, which replaces that copy, then reframe it.
-    if (frameSrc) await fetch(frameSrc, { cache: 'reload' }).then((r) => r.arrayBuffer()).catch(() => {});
-    n++;
+    const before = current;
+    const generation = n;
+    if (before) await fetch(before, { cache: 'reload' }).then((r) => r.arrayBuffer()).catch(() => {});
+    if (generation === n && before === current) { requestedSrc = before; n++; }
   }
 
   const post = (msg: Record<string, unknown>) => {
@@ -151,6 +181,7 @@
   };
 
   function loaded() {
+    observed();
     loadedOnce = true;
     linked = false;
     post({ type: 'hello' });
@@ -211,7 +242,7 @@
   registerCommands('preview', () => [
     { id: 'preview-reload', title: 'Reload', icon: 'reload', key: 'r', ring: 0, enabled: () => !!target, run: reload },
     { id: 'preview-size', title: 'Screen size', icon: 'size', key: 's', ring: 1, run: () => { size = SIZE_ORDER[(SIZE_ORDER.indexOf(size) + 1) % SIZE_ORDER.length]; notice(`Screen size: ${size}`, 2000); } },
-    { id: 'preview-tab', title: 'Open in a tab', icon: 'external', key: 'o', ring: 2, enabled: () => !!target, run: () => window.open(frameSrc, '_blank', 'noopener,noreferrer') },
+    { id: 'preview-tab', title: 'Open in a tab', icon: 'external', key: 'o', ring: 2, enabled: () => !!target, run: () => window.open(current, '_blank', 'noopener,noreferrer') },
     { id: 'preview-address', title: 'Change address', icon: 'search', key: 'l', ring: 3, run: () => { addr?.focus(); addr?.select(); } },
     { id: 'preview-apps', title: 'Apps on this machine', icon: 'preview', key: 'a', ring: 4, run: openList },
     { id: 'preview-point', title: point ? 'Stop pointing' : 'Point at an element', icon: 'hand', key: 'p', enabled: () => linked, run: togglePoint },
@@ -222,9 +253,10 @@
     const onMessage = (e: MessageEvent) => {
       // Only the framed app, at the address shown, is heard.
       if (!target || !frame || e.source !== frame.contentWindow || e.origin !== frameOrigin) return;
-      const d = e.data as { zen?: unknown; type?: unknown; on?: unknown } | null;
+      const d = e.data as { zen?: unknown; type?: unknown; on?: unknown; replace?: unknown } | null;
       if (!d || d.zen !== 'preview') return;
       if (d.type === 'ready') linked = true;
+      else if (d.type === 'location') observed(d.replace === true);
       else if (d.type === 'pick') point = d.on === true;
       else if (point) {
         // Only while the owner is pointing: the app can't send pins (or files) on its own.
@@ -266,6 +298,8 @@
     <button type="button" class="dim" onclick={refresh} disabled={listing} title="refresh the list" aria-label="refresh dev servers">⟳</button>
     <input class="pv-addr" bind:this={addr} onkeydown={(e) => { if (e.key === 'Escape') (e.currentTarget as HTMLInputElement).blur(); }} bind:value={address} placeholder="or a port, e.g. 5173" aria-label="preview address" spellcheck="false" />
     <button type="submit" class="dim">Go</button>
+    <button type="button" class="dim" onclick={() => travel(-1)} disabled={!target || cursor === 0} aria-label="Preview back" title="Back">←</button>
+    <button type="button" class="dim" onclick={() => travel(1)} disabled={!target || cursor + 1 >= routes.length} aria-label="Preview forward" title="Forward">→</button>
     <button type="button" class="dim" onclick={reload} disabled={!target} title="reload" aria-label="reload">↻</button>
     <select bind:value={size} aria-label="screen size">
       <option value="fit">Fit</option>
@@ -274,7 +308,7 @@
       <option value="desktop">Desktop</option>
     </select>
     <button type="button" class="pv-point" class:on={point} onclick={togglePoint} disabled={!linked} aria-pressed={point} title={linked ? 'click an element in the app to pin it' : 'waiting for the page'}>Point</button>
-    {#if target}<a class="dim" href={frameSrc} target="_blank" rel="noopener noreferrer" title="open in a tab">↗</a>{/if}
+    {#if target}<a class="dim" href={current} target="_blank" rel="noopener noreferrer" title="open in a tab">↗</a>{/if}
   </form>
   {#if target && loadedOnce && !linked}
     <p class="pv-hint dim">Point works on the app's pages (HTML). A blank or broken page? Start the dev server with the base <code>/preview/{target.port}/</code> (Vite: <code>--base /preview/{target.port}/</code>).</p>
@@ -289,7 +323,7 @@
           <iframe
             bind:this={frame}
             title="preview"
-            src={frameSrc}
+            src={requestedSrc}
             sandbox="allow-scripts allow-same-origin allow-forms allow-modals"
             onload={loaded}
             style:width={dims ? `${dims[0]}px` : '100%'}
