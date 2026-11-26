@@ -1320,7 +1320,8 @@ live_events() {
   curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"name": "Live Owner"}' "$URL/api/prefs" >/dev/null
   check "an API write is its topic's event" until_ok grep -q '"topic":"prefs"' "$out"
   printf '\n# changed by an editor\n' >>"$TMP/home/.zenbot/agents/zenbot/roles.toml"
-  check "a roles file changed by hand is an agents event naming the agent" until_ok grep -q '"topic":"agents","id":"zenbot"' "$out"
+  # Fields, not text: the JSON's key order is the serializer's, not part of the contract.
+  check "a roles file changed by hand is an agents event naming the agent" until_ok bash -c 'sed -n "s/^data: //p" "$1" | jq -se "any(.topic == \"agents\" and .id == \"zenbot\")" >/dev/null' _ "$out"
   zen ask -m faux/smoke "hi" >/dev/null
   check "a turn is a board event" until_ok grep -q '"topic":"board"' "$out"
   kill "$reader" 2>/dev/null || true
