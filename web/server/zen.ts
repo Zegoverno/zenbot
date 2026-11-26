@@ -11,6 +11,8 @@
 // - Answers of 1 KB or more go gzipped when the browser accepts it: a plugin's UI resource is
 //   0.5–2 MB of HTML, a phone feels every byte. A UI resource asked with `v` (the plugin's version
 //   and change time, set by the page) may stay in the browser's cache: a new install changes `v`.
+// - Events: `kernelEvents` opens the kernel's change stream for `events.ts`, which merges it with
+//   file changes into the page's `/api/events`.
 
 import net from 'node:net';
 import { promises as fs } from 'node:fs';
@@ -119,6 +121,11 @@ export async function send(req: IncomingMessage, res: ServerResponse, status: nu
   }
   res.writeHead(status, { ...headers, 'content-length': String(body.length) });
   res.end(body);
+}
+
+/** Opens the kernel's change stream (`/api/events`, live.rs), token added; events.ts relays it. */
+export async function kernelEvents(signal: AbortSignal): Promise<Response> {
+  return fetch(new URL('/api/events', ZEN_URL), { headers: { authorization: `Bearer ${await token()}`, accept: 'text/event-stream' }, signal });
 }
 
 const WS_PATH = new RegExp(`^/api/zen/sessions/(${ID})/ws$`);

@@ -13,6 +13,7 @@
   // (the ring, Ctrl+K and `?` show the focused one's). Tree: / j k ↑ ↓ Enter → ← n Shift+n r v i f .
   // Reader: e a ← → j k o Esc. Writer: Mod+s Esc Mod+Enter.
   import { onMount, tick, untrack } from 'svelte';
+  import { onTopic } from '../events.svelte.ts';
   import { files, zen, type Entry, type FileRead, type SearchHit } from '../api.ts';
   import { api, Conflict } from '../../lib/api.ts';
   import { render } from '../md.ts';
@@ -91,8 +92,11 @@
     const p = cwd, v = inVault;
     notes = [];
     if (!p || !v) return;
-    fetch(`/api/fs/facets?path=${encodeURIComponent(p)}`).then((r) => (r.ok ? r.json() : null)).then((d) => { if (d && p === cwd) notes = d.notes ?? []; }).catch(() => {});
+    facetsOf(p);
   });
+  function facetsOf(p: string) {
+    fetch(`/api/fs/facets?path=${encodeURIComponent(p)}`).then((r) => (r.ok ? r.json() : null)).then((d) => { if (d && p === cwd) notes = d.notes ?? []; }).catch(() => {});
+  }
   const entries = $derived(sorted((listing[cwd] ?? []).filter((n) => showHidden || !n.hidden)));
 
   /** Breadcrumbs: inside the vault they start at "Vault"; outside, at "/". */
@@ -236,7 +240,8 @@
     $effect(() => {
       if (!rendered) return;
       host.replaceChildren(rendered.el);
-      host.parentElement?.scrollTo(0, 0);
+      host.parentElement?.scrollTo(0, stay ?? 0);
+      stay = null;
       host.querySelectorAll<HTMLInputElement>('input[type=checkbox]').forEach((b, i) => {
         b.disabled = !vaultRel;
         b.onchange = () => toggleTask(i, b.checked);
@@ -422,7 +427,35 @@
     if (f && editing) u.searchParams.set('edit', '1'); else u.searchParams.delete('edit');
     if (u.href !== location.href) history.replaceState(null, '', u);
   });
-  onMount(() => () => { clearTimeout(findTimer); clearTimeout(noteTimer); });
+  // Live: a file changed under the vault (`files`), or a resync, relists the folder and re-reads
+  // the open file, quietly and only when it changed; never under an edit or a kept draft.
+  /** The reader's scroll to keep when the open note is re-read in place. */
+  let stay: number | null = null;
+  async function refreshOpen() {
+    const f = file;
+    if (!f || editing || drafts[f] != null) return;
+    const r = rel(f);
+    try {
+      if (r && /\.md$/i.test(f)) {
+        const d = await api.read(r);
+        if (f !== file || editing || d.hash === hash) return;
+        stay = (document.querySelector('article.note')?.parentElement as HTMLElement | null)?.scrollTop ?? null;
+        text = d.text; hash = d.hash;
+        if (doc) { doc.text = d.text; doc.size = d.text.length; }
+      } else {
+        const d = await files.read(f);
+        if (f !== file || (d.text ?? '') === text) return;
+        doc = d; text = d.text ?? '';
+      }
+    } catch {}
+  }
+  onMount(() => {
+    const off = onTopic('files', () => {
+      if (cwd) { void list(cwd); if (inVault) facetsOf(cwd); }
+      void refreshOpen();
+    });
+    return () => { off(); clearTimeout(findTimer); clearTimeout(noteTimer); };
+  });
 
   // ---- new file, new folder, rename (the vault only; the server never overwrites: server/home.ts) ----
   type Ask = { kind: 'file' | 'folder' | 'rename'; dir: string; from?: string; value: string };

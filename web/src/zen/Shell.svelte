@@ -41,6 +41,7 @@
   import { app, start, pickTab, openTab, openSession, closeChat, showFile, split as isSplit, tabOn, notice, setAgent } from './app.svelte.ts';
   import { me, board, agents, agentOf, kids, loadKid, loadMe, loadBoard, loadArchived, loadAgents, loadModels, waitingCount, findSession, type Session } from './live.svelte.ts';
   import { chat, findView, games, loadPlugins, panel, plugins, views as pluginViews } from './plugins.svelte.ts';
+  import { onTopic, startLive } from './events.svelte.ts';
   import { render as mdRender } from './md.ts';
   import { zen } from './api.ts';
 
@@ -176,8 +177,8 @@
     const id = app.subagent;
     if (!id || app.view !== 'subagent') return;
     void loadKid(id);
-    const t = setInterval(() => { if (!kids[id]?.done) void loadKid(id); }, 3000);
-    return () => clearInterval(t);
+    // Its steps arrive as board events (each message of the child's turn).
+    return onTopic('board', () => { if (!kids[id]?.done) void loadKid(id); });
   });
   function closeSub() {
     if (app.narrow || app.screen === 'view') { app.screen = 'chat'; app.view = null; } else app.view = null;
@@ -357,7 +358,18 @@
     void loadModels();
     void loadRoutines();
     void loadBoard();
-    const poll = setInterval(() => void loadBoard(), 4000);
+    // Live: the stores refetch when the kernel says their topic changed (events.svelte.ts).
+    const stopLive = startLive();
+    const offs = [
+      onTopic('board', () => { void loadBoard(); if (showArchived) void loadArchived(archivedJobs); }),
+      // An agent's files (roles.toml, IDENTITY.md, agent.toml), and who of them is busy (board).
+      onTopic('agents', loadAgents),
+      onTopic('board', loadAgents, 1000),
+      onTopic(['models', 'prefs'], loadModels),
+      onTopic('prefs', loadMe),
+      onTopic(['plugins', 'skills'], loadPlugins),
+      onTopic('jobs', loadRoutines),
+    ];
     const mq = matchMedia('(max-width: 900px)');
     const fit = () => (app.narrow = mq.matches);
     fit();
@@ -373,7 +385,8 @@
     const uninstall = install();
     return () => {
       uninstall();
-      clearInterval(poll);
+      offs.forEach((off) => off());
+      stopLive();
       mq.removeEventListener('change', fit);
       sys.removeEventListener('change', sysFit);
       removeEventListener('zen-theme', sync);

@@ -22,6 +22,7 @@
   import { chat, contexts, contextSaving, dropContext, plugins, resultText, showPanel, takeContext, toolArgs, uiOf } from './plugins.svelte.ts';
   import { app, board as toBoard, openSession, sessionStarted, openFile, openDir, pickTab, openTab, settings, notice, typing, tilde, closeChat, goBack, openSub, showFile } from './app.svelte.ts';
   import { commands as registerCommands, cursorRow, focused, moveCursor, pressCursor } from './keys.svelte.ts';
+  import { onTopic } from './events.svelte.ts';
   import { me, board, agents, agentOf, models, modelOf, kids, loadKid, loadIdeas, stepOf, clock, EFFORT, effortName, type Sugg } from './live.svelte.ts';
   import { render as mdRender } from './md.ts';
   import * as M from './chat/model.ts';
@@ -204,8 +205,7 @@
     if (!liveOpen || !subs.length) return;
     const ids = subs.map((s) => s.id);
     for (const k of ids) void loadKid(k);
-    const t = setInterval(() => ids.forEach((k) => void loadKid(k)), 3000);
-    return () => clearInterval(t);
+    return onTopic('board', () => ids.forEach((k) => { if (!kids[k]?.done) void loadKid(k); }));
   });
   const subName = (c: { id: string; title: string | null; role?: string | null }) => kids[c.id]?.name || (c.title ?? '').replace(/^subagent:\s*/i, '') || c.role || 'Subagent';
   /** The question card waiting on an answer (the last thing said, nothing sent since). */

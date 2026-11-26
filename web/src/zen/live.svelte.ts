@@ -2,7 +2,7 @@
 // (web/mock/data.ts, profilestore.svelte.ts and ChatMock2's MODELS and AGENTS), from the kernel:
 // the owner's name (/prefs), the board (/board: sessions, channels, who is working or waiting and on
 // what question, the subagents), the agents (/agents), the models (/models) and new-chat ideas
-// (/ideas). The board is polled while the page is open.
+// (/ideas). Each is refetched when its live topic changes (events.svelte.ts; Shell subscribes).
 
 import { zen, ago, type Agent, type BoardSession, type Models } from './api.ts';
 

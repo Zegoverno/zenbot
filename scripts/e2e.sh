@@ -1306,6 +1306,27 @@ complete_api() {
   check "a session's own scope is refused" eq "$(api -o /dev/null -w '%{http_code}' -d '{"query": "x", "scope": "this_session"}' "$URL/api/search")" 400
 }
 
+# The live change stream (live.rs): an API write, a file changed out of band and a busy session each
+# reach a client of /api/events as their topic, with no polling by the client.
+live_events() {
+  local ws; ws=$(new_workspace live)
+  start_kernel "$ws" ""
+  local out="$TMP/events.txt"
+  check "the stream needs the token" eq "$(curl -s -o /dev/null -w '%{http_code}' "$URL/api/events")" 401
+  curl -sN -H "Authorization: Bearer $TOKEN" "$URL/api/events" >"$out" &
+  local reader=$!
+  until_ok grep -q '"topic":"hello"' "$out"
+  check "the stream says hello first" grep -q '"topic":"hello"' "$out"
+  curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"name": "Live Owner"}' "$URL/api/prefs" >/dev/null
+  check "an API write is its topic's event" until_ok grep -q '"topic":"prefs"' "$out"
+  printf '\n# changed by an editor\n' >>"$TMP/home/.zenbot/agents/zenbot/roles.toml"
+  # Fields, not text: the JSON's key order is the serializer's, not part of the contract.
+  check "a roles file changed by hand is an agents event naming the agent" until_ok bash -c 'sed -n "s/^data: //p" "$1" | jq -se "any(.topic == \"agents\" and .id == \"zenbot\")" >/dev/null' _ "$out"
+  zen ask -m faux/smoke "hi" >/dev/null
+  check "a turn is a board event" until_ok grep -q '"topic":"board"' "$out"
+  kill "$reader" 2>/dev/null || true
+}
+
 # Scenarios that share a setup run as parts of one; `scripts/e2e.sh <filter>` matches the scenario's
 # name or a part's function name. Slowest first, so the parallel run ends sooner.
 . "$REPO/scripts/e2e/plugins.sh"
@@ -1322,6 +1343,7 @@ run file-trust kernel_tools project_files secrets_masked
 run reach mcp_tools web_tools
 run mcp-login mcp_login
 run basics prompt_files open_loop restart_recovery layout_move vault_tasks complete_api
+run live live_events
 run memory memory_across_sessions memory_sleep
 run retired-work retired_work_rejected
 run delegation delegation engine_cap

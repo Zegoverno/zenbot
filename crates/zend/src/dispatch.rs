@@ -455,6 +455,9 @@ async fn run_tool(app: &AppState, id: Uuid, turn: &CallTurn, name: &str, args: &
             tools::execute(workspace, name, args, &[("ZEN_SESSION_ID", session.as_str()), ("ZEN_MODEL", turn.model.as_str())], sandbox.as_ref()).await
         }
     };
+    if !out.is_error {
+        crate::live::after_tool(name);
+    }
     if let Some(note) = prompt_file.as_deref().filter(|_| !out.is_error).and_then(agent::over_cap_note) {
         out.content.push_str(&note);
     }

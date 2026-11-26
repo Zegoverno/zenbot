@@ -17,6 +17,7 @@ mod git;
 mod handoff;
 mod jobs;
 mod layout;
+mod live;
 mod mcp;
 mod mcp_interaction;
 mod measure;
@@ -179,6 +180,7 @@ impl App {
 
     /// Send an event to a session's clients, if any are listening.
     async fn emit(&self, id: Uuid, event: Value) {
+        live::session_event(event["type"].as_str());
         if let Some(hub) = self.hubs.lock().await.get(&id) {
             let _ = hub.send(event.to_string());
         }
@@ -288,6 +290,7 @@ async fn serve() -> Result<()> {
     tokio::spawn(tape::mirror_loop(app.db.clone()));
     tokio::spawn(search::index_loop(app.clone()));
     tokio::spawn(jobs::run_loop(app.clone()));
+    live::start(app.clone());
     if let Err(e) = plugins::init(&app).await {
         tracing::error!("starting the plugins: {e:#}");
     }
@@ -345,6 +348,9 @@ async fn serve() -> Result<()> {
         .route("/prompt-files/{name}", get(get_prompt_file).put(put_prompt_file))
         .route("/version", get(version))
         .route("/upgrade", get(upgrade_status).post(upgrade_start))
+        .route("/events", get(live::events))
+        // Inside `auth`: only an authenticated write touches a topic.
+        .route_layer(middleware::from_fn(live::after_write))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth));
 
     let router = Router::new().route("/health", get(health)).nest("/api", api).with_state(app);

@@ -7,7 +7,8 @@ does, its settings and its security rules; the code wins. The repo's own AGENTS.
 
 - `server/`: the Node server, run with Node's type stripping (`node server/main.ts`). `main.ts`
   serves the page and the vault's notes; `zen.ts` relays the kernel (token added here, never sent
-  to the page); `home.ts` the home folder (reads, and new files and folders and renames);
+  to the page); `events.ts` the live change stream (the kernel's, plus vault file changes);
+  `home.ts` the home folder (reads, and new files and folders and renames);
   `commands.ts` zen's kernel commands; `uploads.ts` chat attachments; `kernel.ts`/`ai.ts`/`check.ts`
   the writer's AI; `versions.ts` note versions. Tests: `*.test.ts`.
 - `src/`: the page. `zen/` the zen app (board, chat, viewer), `editor/` the writer (CodeMirror),

@@ -51,6 +51,12 @@ The same screens as the terminal app, with its keys, and a mouse and a phone way
   every other vault note) with a snippet each, listed after the names. ↑↓ and Enter pick a result,
   a click opens it through the normal opener (plugins included), Esc clears. Without the kernel's
   answer the name matches still show.
+- **Live**: every view updates without a reload. The page holds one `EventSource` on
+  `/api/events` (`server/events.ts`: the kernel's change stream, `live.rs`, relayed with the token
+  added here, merged with `files` events from a watcher on the vault); each store or view refetches
+  its topic (`src/zen/events.svelte.ts`), debounced, and everything resyncs on a reconnect, when the
+  tab comes back into view and every 60 s as a safety net. A form or edit in progress is never
+  overwritten. The stream carries topics and vault-relative paths only, and refuses other sites.
 - **Preview** (side panel): any dev server on this machine, at a screen size. The tab lists what
   listens on ports 3000–9999 (`GET /api/preview/servers`, `server/servers.ts`: read from `/proc`,
   only the owner's own processes, never system services or zen's own ports), named by app (its

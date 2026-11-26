@@ -37,7 +37,10 @@ preview and plain textarea edit/save fallback; rich reader/writer features are o
 Node server (`server/`) that serves it on 127.0.0.1:4400 and relays the kernel with the owner token
 added on the server, so the token never reaches the page. It also shows the home folder
 (`home.ts`), takes chat attachments into `~/inbox` (`uploads.ts`) and runs the shared commands
-through the `zen` command line (`commands.ts`). It trusts a signing-in proxy in front: every
+through the `zen` command line (`commands.ts`). Views update live, no polling: the page's one
+`EventSource` (`src/zen/events.svelte.ts`) reads `/api/events` (`events.ts`: the kernel's change
+stream, `live.rs`, merged with vault file changes) and each store refetches its topic, with a resync
+on reconnect, on tab focus and every 60 s. It trusts a signing-in proxy in front: every
 request needs the proxy's login header and every write `X-Zen-Web: 1`. `upgrade.sh` builds it
 with the binaries and `scripts/web-install.sh` runs it as the user unit `zen-web`
 (`~/.local/share/zen-web/current`, settings in `~/.config/zen-web.env`). `web/README.md` has its
@@ -253,6 +256,7 @@ busy turns, commit) needs no token; the rest are under `/api` (`main.rs`):
 | `POST /tasks/{id}/agent` | hand open task `id` to an agent (`rev` required, `agent?` default zenbot): a new session of that agent briefed with it, linked in `task_agents`; an existing agent comes back |
 | `GET/POST /jobs`, `GET /jobs/runs`, `PATCH/DELETE /jobs/{name}`, `POST /jobs/{name}/run` | jobs |
 | `GET /mcp`, `POST /mcp/login`, `POST /mcp/login/{flow}`, `GET /mcp/pending`, `POST /mcp/pending/{id}` | MCP servers, sign-in, forms |
+| `GET /events` | the live change stream (`live.rs`, Server-Sent Events): `{"topic", "id"?}` when something clients show changes (`board`, `agents`, `models`, `prefs`, `jobs`, `tasks`, `plugins`, `memory`, `skills`, `mcp`, `version`), coalesced per topic; from API writes (middleware), session events, agent tool calls and a 2 s scan of `~/.zenbot` file mtimes and table fingerprints; `hello` first, `resync` when a client fell behind |
 | `GET /s1`, `/s1/check`, `/s1/models`, `POST /s1/replay`, `POST /s1/compare` | System One |
 
 WebSocket events (`crates/zen-proto/src/client.rs`): `message`, `busy`, `delta`, `thinking`,

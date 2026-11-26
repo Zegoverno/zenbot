@@ -10,6 +10,7 @@
   let choosing = $state<string | null>(null);
 
   import { onMount } from 'svelte';
+  import { onTopic } from '../events.svelte.ts';
   import { commands as registerCommands, cursorRow, moveCursor } from '../keys.svelte.ts';
   import { box, flag, facts } from './TaskBits.svelte';
   import { notice } from '../app.svelte.ts';
@@ -21,8 +22,8 @@
   $effect(() => { sessionStorage.setItem(KEY + '.by', by); });
   onMount(() => {
     void load(); void loadMeta();
-    const t = setInterval(() => { if (!editing && !adding) void load(); }, 10000);
-    return () => clearInterval(t);
+    // Live: a task changed anywhere (here, Obsidian, an agent) is a `tasks` event; never under an edit.
+    return onTopic('tasks', () => { if (!editing && !adding) { void load(); void loadMeta(); } });
   });
 
   // ---- groups ----

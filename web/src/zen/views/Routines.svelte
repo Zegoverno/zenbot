@@ -16,6 +16,7 @@
   // now, Space pauses or resumes it, n a new routine and a a change to this one (both ask zenbot);
   // on Runs j/k walk the past runs and Enter opens the one under the cursor.
   import { onMount } from 'svelte';
+  import { onTopic } from '../events.svelte.ts';
   import { commands as registerCommands, cursorRow, moveCursor } from '../keys.svelte.ts';
   import { notice } from '../app.svelte.ts';
   import { routines, view, failing, listed, sources, sourceName, upNext, pastRuns, dayWord, clock, runsOf, loadRuns, load, moreRuns, wantRuns, runNow as start, setOn, type Job, type Run } from './routinestore.svelte.ts';
@@ -79,7 +80,8 @@
     ];
   });
   $effect(() => { if (view.tab === 'runs') wantRuns(50); });
-  onMount(() => { void load(); const t = setInterval(load, 10000); return () => clearInterval(t); });
+  // Live: a job or run that changes is a `jobs` event (the list here, and the open routine's runs).
+  onMount(() => { void load(); return onTopic('jobs', () => { void load(); if (sel) void loadRuns(sel); }); });
   const typeOf = (j: Job) => j.kind;
   const sub = (j: Job) => (j.kind === 'system' && j.what ? `${j.what} · ${j.when}` : j.when);
 </script>
